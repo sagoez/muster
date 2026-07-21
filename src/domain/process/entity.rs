@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{ActivityState, ProcessKind, ProcessState, RestartPolicy},
+    process::{ActivityState, ProcessKind, ProcessState, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -33,6 +33,9 @@ pub struct Process {
     /// Restart policy governing what happens when the child exits.
     #[builder(default)]
     restart: RestartPolicy,
+    /// Optional graceful shutdown policy, valid only for command processes.
+    #[builder(default)]
+    stop: Option<StopPolicy>,
     /// Whether this process launches automatically when its workspace loads.
     #[builder(default = true)]
     autostart: bool,
@@ -55,6 +58,16 @@ impl Process {
     /// Updates the inferred activity of the process.
     pub fn set_activity(&mut self, activity: ActivityState) {
         self.activity = activity;
+    }
+
+    /// The effective graceful shutdown policy. Commands use the domain default
+    /// when their config omits an override; other process kinds have no policy.
+    pub fn effective_stop_policy(&self) -> Option<StopPolicy> {
+        if self.kind == ProcessKind::Command {
+            Some(self.stop.clone().unwrap_or_default())
+        } else {
+            None
+        }
     }
 }
 

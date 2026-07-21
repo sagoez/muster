@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use crossbeam_channel::Sender;
 use crossterm::event::Event as CrosstermEvent;
 
-use super::{completion_generation::CompletionGeneration, spawn_generation::SpawnGeneration};
+use super::{
+    completion_generation::CompletionGeneration, shutdown_generation::ShutdownGeneration,
+    spawn_generation::SpawnGeneration,
+};
 use crate::domain::{port::OutputSink, pty::ProcessOutput, value::PaneId};
 
 /// A message processed by the runtime's event loop.
@@ -29,12 +32,14 @@ pub enum RuntimeEvent {
         generation: SpawnGeneration,
     },
     /// A graceful command-stop deadline elapsed; forcibly stop it if the same
-    /// process generation is still shutting down.
+    /// process and shutdown request are still current.
     ForceStop {
         /// Pane whose command should be forcibly stopped.
         pane: PaneId,
-        /// Generation captured when graceful termination began.
-        generation: SpawnGeneration,
+        /// Spawn generation captured when graceful termination began.
+        spawn_generation: SpawnGeneration,
+        /// Shutdown request generation captured when its deadline began.
+        shutdown_generation: ShutdownGeneration,
     },
     /// Directory-autocomplete candidates computed off the event loop.
     Completions {

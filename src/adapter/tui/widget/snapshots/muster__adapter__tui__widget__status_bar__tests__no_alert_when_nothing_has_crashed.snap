@@ -3,4 +3,4 @@ source: src/adapter/tui/widget/status_bar.rs
 assertion_line: 161
 expression: terminal.backend()
 ---
-"↑↓ move   ⏎ attach   s start/stop   t autostart   ? help    "
+"↑↓ move   s start/stop   r restart   x kill   ? help        "

@@ -13,17 +13,25 @@ cleaned-up cut I opened up, done with help of the AI.
 
 - Runs each process under its own PTY and renders it live. A process that exits
   keeps its last screen.
-- Full lifecycle control: start/stop, restart, pause/resume (SIGSTOP/SIGCONT), and
-  auto-restart on failure.
+- Full lifecycle control: start/stop, restart, force-kill, pause/resume
+  (SIGSTOP/SIGCONT), command-level graceful shutdown, and auto-restart on
+  failure.
 - A projects tree in the sidebar for switching between workspaces.
 - Live config reload: edits are reconciled into the running workspace, adding new
   processes and dropping removed ones while leaving running ones untouched.
-- Every option in the config is also settable from the TUI.
+- Processes can be added and autostart toggled directly from the TUI.
 - A failed process raises an alert visible from any pane.
 
 ## Getting started
 
 Requires a recent Rust toolchain.
+
+```sh
+cargo install muster-workspace
+muster                       # starts the TUI on ./muster.yml
+```
+
+From a source checkout:
 
 ```sh
 cargo run                     # starts the TUI on ./muster.yml
@@ -33,7 +41,7 @@ cargo run -- --config my.yml  # use a different config
 Press `?` in the app for the full keymap:
 
 - `j`/`k` or arrows to move, `Enter`/`l` to open, `h` to go back
-- `s` start/stop, `r` restart, `p` pause, `x` stop, `t` toggle autostart
+- `s` start/stop, `r` restart, `p` pause, `x` force-kill, `t` toggle autostart
 - `a` add a process, `n` new project, `o` switch projects, `d` remove a project
 - `C-a` detaches from a focused pane; the same commands work as `C-a` chords while
   attached
@@ -42,8 +50,8 @@ Press `?` in the app for the full keymap:
 ## Configuration
 
 A workspace is a YAML file with three sections: `agents`, `terminals`, and
-`commands`. They behave identically; the grouping only controls how they appear in
-the sidebar.
+`commands`. The grouping controls how processes appear in the sidebar. Commands
+can additionally opt into graceful shutdown.
 
 ```yaml
 agents:
@@ -61,14 +69,26 @@ commands:
   - name: clock
     command: while true; do date +%T; sleep 1; done
     restart: on_failure
+    stop:
+      signal: terminate
+      grace_period: 5s
     autostart: false
 ```
 
 - `autostart`: `null` uses the default (agents and terminals start with the
   workspace, commands wait for `s`), or set `true`/`false` explicitly. Toggle it
   live with `t`.
-- `restart`: `on_failure`, `always`, or `null` to never restart.
+- `restart`: `never`, `on_failure`, `always`, or `null` to never restart.
 - `working_dir`: launch directory; inherits the workspace directory when `null`.
+- `stop`: optional and valid only on commands. Commands default to `terminate`
+  (SIGTERM) with a `5s` grace period. Set both `signal` (`terminate` or
+  `interrupt`) and a human-readable `grace_period` such as `5s` or `1m` to
+  override that policy.
+
+For commands, `s` and `r` send the effective graceful signal to the whole process
+group, wait for its grace period, then use SIGKILL if it is still alive. `x`
+always force-kills the selected process immediately. Agents, terminals, project
+switches, and quitting always use immediate kill.
 
 ## muster run
 

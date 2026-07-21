@@ -7,6 +7,7 @@ use crate::{
     constants::MUSTER_PROJECT_ENV,
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
+        process::StopSignal,
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     },
 };
@@ -174,24 +175,34 @@ impl ProcessHandle for PtyProcessHandle {
         }
     }
 
-    fn terminate(&mut self, grace: Duration) -> Result<(), PtyError> {
-        // Publish the grace before signalling: if SIGTERM makes the direct shell
+    fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
+        // Publish the grace before signalling: if the signal makes the direct shell
         // exit immediately, its waiter still observes the intended deadline.
         let _ = self.grace_tx.try_send(grace);
         #[cfg(unix)]
         {
-            // A paused command cannot handle SIGTERM until it resumes.
+            // A paused command cannot handle a shutdown signal until it resumes.
             let _ = signal_group(self.pid, libc::SIGCONT);
-            signal_group(self.pid, libc::SIGTERM)
+            signal_group(self.pid, unix_signal(signal))
         }
         #[cfg(not(unix))]
         {
+            let _ = signal;
             self.killer.kill().map_err(system_error)
         }
     }
 
     fn kill(&mut self) -> Result<(), PtyError> {
         terminate_group(self.pid, &mut self.killer)
+    }
+}
+
+/// Maps the domain shutdown signal to its Unix signal number.
+#[cfg(unix)]
+fn unix_signal(signal: StopSignal) -> libc::c_int {
+    match signal {
+        StopSignal::Terminate => libc::SIGTERM,
+        StopSignal::Interrupt => libc::SIGINT,
     }
 }
 
@@ -265,9 +276,9 @@ mod tests {
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Grace used by termination tests, long enough for delayed descendant
     /// cleanup while keeping the suite quick.
-    const TEST_STOP_GRACE: Duration = Duration::from_secs(2);
-    /// Shell fixture whose direct wrapper exits on TERM while its descendant
-    /// takes longer than the ordinary PTY drain bound to print final output.
+    const TEST_STOP_GRACE: Duration = Duration::from_secs(3);
+    /// Shell fixture whose direct wrapper exits on TERM while a signal-resistant
+    /// descendant takes longer than the ordinary PTY drain bound to finish.
     const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean' & trap 'exit 0' TERM; wait"#;
 
     struct ChannelSink(crossbeam_channel::Sender<ProcessOutput>);
@@ -357,7 +368,9 @@ mod tests {
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
             }
         }
-        handle.terminate(TEST_STOP_GRACE).unwrap();
+        handle
+            .terminate(StopSignal::Terminate, TEST_STOP_GRACE)
+            .unwrap();
         while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
             match output {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
@@ -386,7 +399,9 @@ mod tests {
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
             }
         }
-        handle.terminate(TEST_STOP_GRACE).unwrap();
+        handle
+            .terminate(StopSignal::Terminate, TEST_STOP_GRACE)
+            .unwrap();
         while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
             match output {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),

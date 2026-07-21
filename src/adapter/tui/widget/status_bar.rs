@@ -6,23 +6,53 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+/// One compact key/action hint.
+type Hint = (&'static str, &'static str);
+
 /// Leader key chord shown before the terminal-mode hints.
 const LEADER_LABEL: &str = " C-a ";
 /// The always-present hint pointing at the full keymap overlay.
-const HELP_HINT: (&str, &str) = ("?", "help");
+const HELP_HINT: Hint = ("?", "help");
+/// Process navigation hint.
+const MOVE_HINT: Hint = ("↑↓", "move");
+/// Process attachment hint.
+const ATTACH_HINT: Hint = ("⏎", "attach");
+/// Process start or graceful-stop hint.
+const START_STOP_HINT: Hint = ("s", "start/stop");
+/// Process restart hint.
+const RESTART_HINT: Hint = ("r", "restart");
+/// Immediate process kill hint.
+const KILL_HINT: Hint = ("x", "kill");
+/// Process autostart hint.
+const AUTOSTART_HINT: Hint = ("t", "autostart");
+/// Attached terminal detach hint.
+const DETACH_HINT: Hint = ("h", "detach");
 /// Slim hints for a process selected in the active project.
-const PROCESS_HINTS: &[(&str, &str)] = &[
-    ("↑↓", "move"),
-    ("⏎", "attach"),
-    ("s", "start/stop"),
-    ("t", "autostart"),
+const PROCESS_HINTS: &[Hint] = &[
+    MOVE_HINT,
+    ATTACH_HINT,
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    AUTOSTART_HINT,
+];
+/// Process hints in retention order when the status row is narrow.
+const PROCESS_HINT_PRIORITY: &[Hint] = &[
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    MOVE_HINT,
+    ATTACH_HINT,
+    AUTOSTART_HINT,
 ];
 /// Slim hints for a collapsed other-project row.
-const PROJECT_HINTS: &[(&str, &str)] = &[("↑↓", "move"), ("→", "open"), ("d", "remove")];
+const PROJECT_HINTS: &[Hint] = &[("↑↓", "move"), ("→", "open"), ("d", "remove")];
 /// Slim hints for an active project that has no processes yet.
-const EMPTY_HINTS: &[(&str, &str)] = &[("a", "add"), ("n", "new"), ("o", "projects")];
+const EMPTY_HINTS: &[Hint] = &[("a", "add"), ("n", "new"), ("o", "projects")];
 /// Slim hints for an attached terminal; each key follows the leader chord.
-const TERMINAL_HINTS: &[(&str, &str)] = &[("h", "detach"), ("s", "start/stop"), ("r", "restart")];
+const TERMINAL_HINTS: &[Hint] = &[DETACH_HINT, START_STOP_HINT, RESTART_HINT, KILL_HINT];
+/// Terminal hints in retention order when the status row is narrow.
+const TERMINAL_HINT_PRIORITY: &[Hint] = &[START_STOP_HINT, RESTART_HINT, KILL_HINT, DETACH_HINT];
 
 /// The sidebar/terminal context the status bar advertises hints for. The full
 /// keymap lives in the `?` overlay; each context shows only its slim subset.
@@ -39,12 +69,14 @@ pub enum StatusContext {
 
 impl StatusContext {
     /// This context's slim hint set, excluding the always-present help hint.
-    fn hints(&self) -> &'static [(&'static str, &'static str)] {
+    fn hints(&self, available_width: u16) -> Vec<Hint> {
         match self {
-            Self::Process => PROCESS_HINTS,
-            Self::Project => PROJECT_HINTS,
-            Self::Empty => EMPTY_HINTS,
-            Self::Terminal => TERMINAL_HINTS,
+            Self::Process => process_hints(available_width),
+            Self::Project => PROJECT_HINTS.to_vec(),
+            Self::Empty => EMPTY_HINTS.to_vec(),
+            Self::Terminal => {
+                prioritized_hints(TERMINAL_HINTS, TERMINAL_HINT_PRIORITY, available_width)
+            },
         }
     }
 }
@@ -115,7 +147,25 @@ pub fn render(
     if matches!(context, StatusContext::Terminal) {
         spans.push(Span::styled(LEADER_LABEL, Style::default().fg(key_color)));
     }
-    spans.extend(hint_spans(context.hints(), key_color, label_color));
+    let alert_width = if crashed > 0 {
+        alert_label(crashed).chars().count() as u16
+    } else {
+        0
+    };
+    let leader_width = if matches!(context, StatusContext::Terminal) {
+        LEADER_LABEL.chars().count() as u16
+    } else {
+        0
+    };
+    let reserved_width = alert_width
+        .saturating_add(leader_width)
+        .saturating_add(hint_width(HELP_HINT));
+    let available_width = area.width.saturating_sub(reserved_width);
+    spans.extend(hint_spans(
+        &context.hints(available_width),
+        key_color,
+        label_color,
+    ));
     spans.extend(hint_spans(&[HELP_HINT], key_color, label_color));
     let style = if leader_pending {
         Style::default().bg(LEADER_PENDING_BACKGROUND)
@@ -130,7 +180,7 @@ pub fn render(
 
 /// Draws the crashed-process count pinned to the right of the status row.
 fn render_alert(frame: &mut Frame, area: Rect, crashed: usize, leader_pending: bool) {
-    let label = format!("{ALERT_GLYPH} {crashed} crashed ");
+    let label = alert_label(crashed);
     let width = label.chars().count() as u16;
     if area.width <= width {
         return;
@@ -157,8 +207,42 @@ fn render_alert(frame: &mut Frame, area: Rect, crashed: usize, leader_pending: b
     );
 }
 
+/// Builds the crashed-process alert label.
+fn alert_label(crashed: usize) -> String {
+    format!("{ALERT_GLYPH} {crashed} crashed ")
+}
+
+/// Selects process hints that fit, retaining lifecycle actions before secondary
+/// navigation and configuration actions while preserving display order.
+fn process_hints(available_width: u16) -> Vec<Hint> {
+    prioritized_hints(PROCESS_HINTS, PROCESS_HINT_PRIORITY, available_width)
+}
+
+/// Selects hints by retention priority, then restores their canonical order.
+fn prioritized_hints(canonical: &[Hint], priority: &[Hint], available_width: u16) -> Vec<Hint> {
+    let mut remaining = available_width;
+    let mut selected = Vec::new();
+    for hint in priority {
+        let width = hint_width(*hint);
+        if width <= remaining {
+            selected.push(*hint);
+            remaining -= width;
+        }
+    }
+    canonical
+        .iter()
+        .filter(|hint| selected.contains(hint))
+        .copied()
+        .collect()
+}
+
+/// Rendered width of one compact hint, including its trailing separation.
+fn hint_width((key, label): Hint) -> u16 {
+    format!("{key} {label}{HINT_GAP}").chars().count() as u16
+}
+
 /// Builds the styled key/label spans for a set of hints.
-fn hint_spans(hints: &[(&str, &str)], key_color: Color, label_color: Color) -> Vec<Span<'static>> {
+fn hint_spans(hints: &[Hint], key_color: Color, label_color: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (key, label) in hints {
         spans.push(Span::styled(
@@ -178,6 +262,12 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
+
+    /// A wide process row keeps navigation, lifecycle, and configuration hints.
+    #[test]
+    fn a_wide_process_row_keeps_every_hint() {
+        assert_eq!(process_hints(u16::MAX), PROCESS_HINTS);
+    }
 
     #[test]
     fn shows_a_crashed_alert_pinned_right() {

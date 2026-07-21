@@ -33,7 +33,9 @@ pub(crate) fn load_workspace(path: &Path) -> Result<WorkspaceConfig, ConfigError
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(serde_yaml_ng::from_str(&raw)?)
+    let config: WorkspaceConfig = serde_yaml_ng::from_str(&raw)?;
+    config.validate()?;
+    Ok(config)
 }
 
 /// Serializes `value` to YAML and writes it to `path`, creating any missing

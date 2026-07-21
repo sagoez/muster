@@ -149,8 +149,17 @@ fn lock_path_of(dest: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::domain::{config::ProcessSpec, value::ProcessName};
+    use crate::domain::{
+        config::ProcessSpec,
+        process::{StopPolicy, StopSignal},
+        value::{CommandLine, ProcessName},
+    };
+
+    /// Grace period used to verify workspace serialization.
+    const ROUND_TRIP_STOP_GRACE: Duration = Duration::from_secs(5);
 
     #[test]
     fn registry_file_parses_a_projects_list() {
@@ -171,7 +180,18 @@ mod tests {
                     .name(ProcessName::try_new("Shell").unwrap())
                     .build(),
             ])
-            .commands(vec![])
+            .commands(vec![
+                ProcessSpec::builder()
+                    .name(ProcessName::try_new("Server").unwrap())
+                    .command(Some(CommandLine::try_new("serve").unwrap()))
+                    .stop(Some(
+                        StopPolicy::builder()
+                            .signal(StopSignal::Terminate)
+                            .grace_period(ROUND_TRIP_STOP_GRACE)
+                            .build(),
+                    ))
+                    .build(),
+            ])
             .build();
 
         let registry = YamlProjectRegistry;
@@ -183,6 +203,9 @@ mod tests {
 
         let loaded = registry.workspace(&path).unwrap();
         assert_eq!(loaded.terminals()[0].name().as_ref(), "Shell");
+        let stop = loaded.commands()[0].stop().as_ref().unwrap();
+        assert_eq!(*stop.signal(), StopSignal::Terminate);
+        assert_eq!(*stop.grace_period(), ROUND_TRIP_STOP_GRACE);
 
         let leftover_temps = fs::read_dir(path.parent().unwrap())
             .unwrap()

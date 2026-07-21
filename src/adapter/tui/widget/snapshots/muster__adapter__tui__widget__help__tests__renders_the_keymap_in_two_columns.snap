@@ -1,6 +1,5 @@
 ---
 source: src/adapter/tui/widget/help.rs
-assertion_line: 164
 expression: terminal.backend()
 ---
 "                                                                        "
@@ -20,10 +19,10 @@ expression: terminal.backend()
 "     │   t          autostart          x          stop           │      "
 "     │   a          add                a          add            │      "
 "     │ General                         n          new            │      "
+"     │   N          notifications      N          notifications  │      "
 "     │   ?          help               o          switcher       │      "
 "     │   q          quit               ?          help           │      "
 "     │                                 q          quit           │      "
 "     │                                                           │      "
 "     ╰───────────────────────────────────────────────────────────╯      "
-"                                                                        "
 "                                                                        "

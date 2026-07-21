@@ -41,7 +41,11 @@ const LEFT_SECTIONS: &[Section] = &[
         ("t", "autostart"),
         ("a", "add"),
     ]),
-    ("General", &[("?", "help"), ("q", "quit")]),
+    ("General", &[
+        ("N", "notifications"),
+        ("?", "help"),
+        ("q", "quit"),
+    ]),
 ];
 /// The keymap's right column: the sidebar project keys, then every terminal-mode
 /// command, each of which is a chord entered after the `C-a` leader.
@@ -61,6 +65,7 @@ const RIGHT_SECTIONS: &[Section] = &[
         ("x", "stop"),
         ("a", "add"),
         ("n", "new"),
+        ("N", "notifications"),
         ("o", "switcher"),
         ("?", "help"),
         ("q", "quit"),

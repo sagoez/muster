@@ -4,10 +4,11 @@ use clap::{CommandFactory, Parser, Subcommand};
 use muster::{
     adapter::{
         cli::{self, RunArgs},
-        config::{YamlConfigSource, YamlProjectRegistry},
+        config::{YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
+        notifier::DesktopNotifier,
         path::FsPathCompleter,
         pty::PortablePtyRunner,
-        tui::{self, TerminalGuard},
+        tui::{self, Adapters, TerminalGuard},
     },
     application::Workspace,
     constants::APP_NAME,
@@ -74,18 +75,15 @@ fn run_tui(config_path: PathBuf) -> Result<()> {
     let workspace = Workspace::builder()
         .processes(config.load()?.to_processes())
         .build();
-    let runner = Box::new(PortablePtyRunner);
-    let registry = Box::new(YamlProjectRegistry);
-    let completer = Box::new(FsPathCompleter);
+    let adapters = Adapters::builder()
+        .runner(Box::new(PortablePtyRunner))
+        .registry(Box::new(YamlProjectRegistry))
+        .completer(Box::new(FsPathCompleter))
+        .notifier(Box::new(DesktopNotifier::new()))
+        .settings_store(Box::new(YamlSettingsStore))
+        .build();
     let mut guard = TerminalGuard::new()?;
-    tui::run(
-        &mut guard,
-        workspace,
-        runner,
-        registry,
-        completer,
-        config_path,
-    )
+    tui::run(&mut guard, workspace, adapters, config_path)
 }
 
 /// Installs a panic hook that restores the terminal before delegating to the

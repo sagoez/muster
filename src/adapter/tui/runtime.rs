@@ -1,15 +1,34 @@
-use std::{ops::ControlFlow, path::PathBuf, thread, time::Duration};
+use std::{
+    ops::ControlFlow,
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
-use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
+use crossbeam_channel::{Receiver, Sender, after, bounded, never, select, unbounded};
 use crossterm::event;
 use ratatui::layout::{Rect, Size};
+use typed_builder::TypedBuilder;
 
 use super::{TerminalGuard, app::App, event::RuntimeEvent, watch::NotifyConfigWatcher};
 use crate::{
     application::Workspace,
-    domain::port::{PathCompleter, ProcessRunner, ProjectRegistry},
+    domain::port::{Notifier, PathCompleter, ProcessRunner, ProjectRegistry, SettingsStore},
     error::Result,
 };
+
+/// The driven adapters the TUI runs on, bundled so [`run`] takes one wiring
+/// object instead of a long argument list. Built at the composition root and
+/// consumed (moved) into the app. No `Getters`: the fields are `Box<dyn _>` and
+/// are moved out once, not borrowed.
+#[derive(TypedBuilder)]
+pub struct Adapters {
+    runner: Box<dyn ProcessRunner>,
+    registry: Box<dyn ProjectRegistry>,
+    completer: Box<dyn PathCompleter + Send>,
+    notifier: Box<dyn Notifier>,
+    settings_store: Box<dyn SettingsStore>,
+}
 
 /// Poll timeout for the input reader thread.
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -28,11 +47,16 @@ const MAX_BATCH: usize = 512;
 pub fn run(
     guard: &mut TerminalGuard,
     workspace: Workspace,
-    runner: Box<dyn ProcessRunner>,
-    registry: Box<dyn ProjectRegistry>,
-    completer: Box<dyn PathCompleter + Send>,
+    adapters: Adapters,
     current_config: PathBuf,
 ) -> Result<()> {
+    let Adapters {
+        runner,
+        registry,
+        completer,
+        notifier,
+        settings_store,
+    } = adapters;
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(OUTPUT_CAPACITY);
     let watch_tx = output_tx.clone();
@@ -50,6 +74,8 @@ pub fn run(
     );
     app.spawn_completion_worker();
     app.set_config_watcher(Box::new(NotifyConfigWatcher::new(watch_tx)));
+    app.set_notifier(notifier);
+    app.set_settings_store(settings_store);
     app.start();
 
     // Children are running now, so shut them down on every return path,
@@ -71,48 +97,67 @@ fn run_loop(
 ) -> Result<()> {
     guard.terminal_mut().draw(|frame| app.render(frame))?;
     while app.is_running() {
-        if drain(app, control_rx, output_rx).is_break() {
-            break;
-        }
-        if app.is_running() {
-            guard.terminal_mut().draw(|frame| app.render(frame))?;
+        match drain(app, control_rx, output_rx) {
+            ControlFlow::Break(()) => break,
+            ControlFlow::Continue(redraw) if redraw && app.is_running() => {
+                guard.terminal_mut().draw(|frame| app.render(frame))?;
+            },
+            ControlFlow::Continue(_) => {},
         }
     }
     Ok(())
 }
 
-/// Blocks for the next event, then drains all pending input (priority) followed
-/// by a bounded batch of output. Returns `Break` when the loop should stop.
+/// Blocks for the next event or activity deadline, then drains all pending input
+/// (priority) followed by a bounded batch of output. Returns whether to redraw,
+/// or `Break` when the loop should stop.
 fn drain(
     app: &mut App,
     control_rx: &Receiver<RuntimeEvent>,
     output_rx: &Receiver<RuntimeEvent>,
-) -> ControlFlow<()> {
+) -> ControlFlow<(), bool> {
+    let activity_timeout = app
+        .next_activity_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
+    let mut redraw = false;
     select! {
         recv(control_rx) -> msg => match msg {
             Ok(event) => if !apply(app, event) {
                 return ControlFlow::Break(());
+            } else {
+                redraw = true;
             },
             Err(_) => return ControlFlow::Break(()),
         },
         recv(output_rx) -> msg => if let Ok(event) = msg {
-            apply(app, event);
+            if !apply(app, event) {
+                return ControlFlow::Break(());
+            }
+            redraw = true;
+        },
+        recv(activity_timeout) -> now => if let Ok(now) = now {
+            redraw = app.expire_quiet_activity(now);
         },
     }
     while let Ok(event) = control_rx.try_recv() {
         if !apply(app, event) {
             return ControlFlow::Break(());
         }
+        redraw = true;
     }
     for _ in 0..MAX_BATCH {
         match output_rx.try_recv() {
             Ok(event) => {
-                apply(app, event);
+                if !apply(app, event) {
+                    return ControlFlow::Break(());
+                }
+                redraw = true;
             },
             Err(_) => break,
         }
     }
-    ControlFlow::Continue(())
+    ControlFlow::Continue(redraw)
 }
 
 /// Applies one event to the app; returns `false` when the loop should stop.
@@ -125,6 +170,7 @@ fn apply(app: &mut App, event: RuntimeEvent) -> bool {
             output,
         } => app.handle_output(pane, generation, output),
         RuntimeEvent::Respawn { pane, generation } => app.handle_respawn(pane, generation),
+        RuntimeEvent::ForceStop { pane, generation } => app.handle_force_stop(pane, generation),
         RuntimeEvent::Completions {
             generation,
             candidates,

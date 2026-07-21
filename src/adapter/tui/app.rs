@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    mem,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -14,9 +15,13 @@ use ratatui::{
 use vt100::{Parser, Screen};
 
 use super::{
+    activity::ActivityTracker,
+    completion_generation::CompletionGeneration,
     event::{ChannelOutputSink, RuntimeEvent},
     form::{Field, Form, FormOutcome},
     input,
+    signal::{Signal, SignalReader},
+    spawn_generation::SpawnGeneration,
     widget::{
         confirm, empty_state, form, help, sidebar, status_bar, status_bar::StatusContext, switcher,
         terminal_pane,
@@ -28,10 +33,15 @@ use crate::{
     constants::APP_NAME,
     domain::{
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
-        port::{ConfigWatcher, PathCompleter, ProcessHandle, ProcessRunner, ProjectRegistry},
-        process::{Process, ProcessKind, ProcessState, RestartPolicy},
+        notification::{Notification, NotificationId, NotificationScope},
+        port::{
+            ConfigWatcher, Notifier, PathCompleter, ProcessHandle, ProcessRunner, ProjectRegistry,
+            SettingsStore,
+        },
+        process::{ActivityState, ExitIntent, Process, ProcessKind, ProcessState, RestartPolicy},
         project::Project,
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
+        settings::Settings,
         value::{Cols, CommandLine, Description, PaneId, ProcessName, ProjectName, Rows},
     },
 };
@@ -44,6 +54,11 @@ const STATUS_BAR_HEIGHT: u16 = 1;
 const BORDER_THICKNESS: u16 = 1;
 /// Scrollback lines retained per pane.
 const SCROLLBACK_LINES: usize = 1000;
+/// Notice shown for a bare bell notification that carried no text of its own.
+const AWAITING_INPUT_NOTICE: &str = "awaiting input";
+/// Minimum gap between bell notifications from one pane, absorbing a burst (e.g.
+/// shell tab-completion) into a single alert.
+const BELL_THROTTLE: Duration = Duration::from_secs(3);
 /// Leader key (pressed with Control) that begins a command chord.
 const LEADER_KEY: char = 'a';
 /// Minimum PTY dimension. vt100 underflows on some sequences below a couple of
@@ -59,6 +74,9 @@ const RESTART_BACKOFF_MAX_EXP: u32 = 5;
 /// A process that ran at least this long counts as stable; its next restart
 /// resets the backoff so a healthy long-lived process is not penalized.
 const RESTART_STABLE_RUN: Duration = Duration::from_secs(10);
+/// Grace allowed for a manually stopped command to handle SIGTERM, emit final
+/// output, and exit before Muster escalates to a hard kill.
+const COMMAND_STOP_GRACE: Duration = Duration::from_secs(3);
 /// Title of the save-current-project form.
 const SAVE_PROJECT_TITLE: &str = "Save project";
 /// Title of the new-project form.
@@ -90,6 +108,16 @@ const WORKSPACE_SAVE_ERROR: &str = "could not write the project config";
 /// Shown when autostart cannot persist because the process has no config entry
 /// (for example a process left running after its spec was removed).
 const AUTOSTART_UNTRACKED: &str = "autostart unchanged: process is not in the config";
+/// Confirmation shown when desktop notifications are toggled on.
+const DESKTOP_NOTIFICATIONS_ON: &str = "desktop notifications on";
+/// Confirmation shown when desktop notifications are toggled off.
+const DESKTOP_NOTIFICATIONS_OFF: &str = "desktop notifications off";
+/// Shown when the settings file cannot be written.
+const SETTINGS_SAVE_ERROR: &str = "could not save settings";
+/// Shown when settings could not be loaded and must not be overwritten.
+const SETTINGS_LOAD_ERROR: &str = "could not load settings; file left unchanged";
+/// Shown when settings have not yet been wired by the composition root.
+const SETTINGS_UNAVAILABLE: &str = "settings are unavailable";
 /// Shown when removal is asked of the launched project's synthetic row, which
 /// has no registry entry to remove.
 const CANNOT_REMOVE_LAUNCHED: &str = "this project is not saved, so there is nothing to remove";
@@ -97,6 +125,14 @@ const CANNOT_REMOVE_LAUNCHED: &str = "this project is not saved, so there is not
 const REGISTRY_SAVE_ERROR: &str = "could not save the project registry";
 /// Confirmation shown before overwriting an existing config.
 const OVERWRITE_CONFIRM: &str = "A muster.yml already exists in that folder.";
+/// Title of the overwrite confirmation.
+const OVERWRITE_TITLE: &str = "Overwrite?";
+/// Accept-action verb for the overwrite confirmation.
+const OVERWRITE_VERB: &str = "overwrite";
+/// Title of the project-removal confirmation.
+const REMOVE_PROJECT_TITLE: &str = "Remove project?";
+/// Accept-action verb for the project-removal confirmation.
+const REMOVE_PROJECT_VERB: &str = "remove";
 
 /// Which region currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,17 +141,61 @@ enum Focus {
     Sidebar,
     /// A terminal is attached: keys pass through to its PTY.
     Terminal,
+    /// A terminal is attached and the next key completes a leader command.
+    Leader,
+}
+
+/// Whether a pane still belongs to the current config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ConfigMembership {
+    /// The pane is represented by a current process specification.
+    #[default]
+    Tracked,
+    /// The live pane was removed from config and must disappear when it exits.
+    RetireOnExit,
+}
+
+/// Whether the project Muster launched with has a persisted registry entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LaunchedProjectMembership {
+    /// The launched config is represented by a saved project entry.
+    #[default]
+    Registered,
+    /// The launched config appears only as a temporary sidebar row.
+    Synthetic,
 }
 
 /// One managed pane: its VT parser and, while alive, a live process handle. The
 /// parser outlives the handle so a finished process keeps its last screen.
 struct Pane {
     parser: Parser,
+    /// Unique scope for Kitty identifiers emitted by this terminal lifetime.
+    notification_scope: NotificationScope,
+    /// Decodes notification and progress signals from the same output stream the
+    /// vt100 parser renders.
+    signals: SignalReader,
+    /// Evidence governing inferred working, idle, and attention transitions.
+    activity: ActivityTracker,
+    /// Last bell accepted from this terminal lifetime, for burst throttling.
+    last_bell: Option<Instant>,
     handle: Option<Box<dyn ProcessHandle>>,
     started_at: Instant,
-    force_restart: bool,
-    stopping: bool,
-    paused: bool,
+    exit_intent: ExitIntent,
+    config_membership: ConfigMembership,
+}
+
+/// Result of loading cross-workspace settings. A failure remains distinct from
+/// the not-yet-wired state so a toggle never replaces an unreadable file.
+enum SettingsState {
+    /// The composition root has not provided a settings store yet.
+    Unloaded,
+    /// Settings loaded successfully and retain the store required for updates.
+    Loaded {
+        settings: Settings,
+        store: Box<dyn SettingsStore>,
+    },
+    /// An existing settings file could not be read or parsed.
+    LoadFailed(ConfigError),
 }
 
 /// Open state of the project-switcher overlay: the loaded project list, the
@@ -127,6 +207,36 @@ struct Switcher {
     error: Option<String>,
     /// The highlighted project's processes, cached so render does no I/O.
     preview: Vec<(ProcessKind, String)>,
+}
+
+impl Switcher {
+    /// Loads `project`'s processes for a preview, or returns an empty list when
+    /// there is no project or its config cannot be read.
+    fn preview(
+        registry: &dyn ProjectRegistry,
+        project: Option<&Project>,
+    ) -> Vec<(ProcessKind, String)> {
+        project
+            .and_then(|project| registry.workspace(project.config()).ok())
+            .map(|config| Self::config_preview(&config))
+            .unwrap_or_default()
+    }
+
+    /// Converts a project's process sections to the kind/name rows it previews.
+    fn config_preview(config: &WorkspaceConfig) -> Vec<(ProcessKind, String)> {
+        [
+            (ProcessKind::Agent, config.agents()),
+            (ProcessKind::Terminal, config.terminals()),
+            (ProcessKind::Command, config.commands()),
+        ]
+        .into_iter()
+        .flat_map(|(kind, specs)| {
+            specs
+                .iter()
+                .map(move |spec| (kind, spec.name().as_ref().to_string()))
+        })
+        .collect()
+    }
 }
 
 /// A project switch deferred until the current children have exited, so the new
@@ -144,38 +254,113 @@ struct FormModal {
     error: Option<String>,
 }
 
-/// An open yes/no confirmation and what confirming it does.
-struct Confirm {
-    message: String,
-    intent: ConfirmIntent,
+/// An input form and the switcher it should reveal when closed.
+struct FormOverlay {
+    modal: FormModal,
+    switcher: Option<Switcher>,
 }
 
-/// What confirming a dialog does.
-enum ConfirmIntent {
-    /// Overwrite an existing config while creating a project.
-    OverwriteProject {
+/// The one legal modal UI state. Variants retain only the exact background
+/// required by their cancel and failure transitions.
+enum Overlay {
+    Switcher(Switcher),
+    Form(FormOverlay),
+    ConfirmOverwrite {
+        form: FormOverlay,
         name: ProjectName,
         config_path: PathBuf,
     },
-    /// Remove a registered project whose config could not be opened.
-    RemoveProject { config_path: PathBuf },
+    ConfirmRemoval {
+        message: String,
+        config_path: PathBuf,
+    },
+    Help,
 }
 
-impl ConfirmIntent {
-    /// The overlay title for this confirmation.
-    fn title(&self) -> &'static str {
+impl Overlay {
+    /// Returns the switcher in this overlay stack, if present.
+    fn switcher(&self) -> Option<&Switcher> {
         match self {
-            Self::OverwriteProject { .. } => "Overwrite?",
-            Self::RemoveProject { .. } => "Remove project?",
+            Self::Switcher(switcher) => Some(switcher),
+            Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_ref(),
+            Self::ConfirmRemoval { .. } | Self::Help => None,
         }
     }
 
-    /// The accept-action verb shown in the confirmation footer.
-    fn verb(&self) -> &'static str {
+    /// Returns the switcher in this overlay stack mutably, if present.
+    fn switcher_mut(&mut self) -> Option<&mut Switcher> {
         match self {
-            Self::OverwriteProject { .. } => "overwrite",
-            Self::RemoveProject { .. } => "remove",
+            Self::Switcher(switcher) => Some(switcher),
+            Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_mut(),
+            Self::ConfirmRemoval { .. } | Self::Help => None,
         }
+    }
+
+    /// Returns the form in this overlay stack, if present.
+    fn form(&self) -> Option<&FormModal> {
+        match self {
+            Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&form.modal),
+            Self::Switcher(_) | Self::ConfirmRemoval { .. } | Self::Help => None,
+        }
+    }
+
+    /// Returns the form in this overlay stack mutably, if present.
+    fn form_mut(&mut self) -> Option<&mut FormModal> {
+        match self {
+            Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&mut form.modal),
+            Self::Switcher(_) | Self::ConfirmRemoval { .. } | Self::Help => None,
+        }
+    }
+
+    /// Renders this overlay and any explicit background it retains.
+    fn render(&self, frame: &mut Frame) {
+        let area = frame.area();
+        match self {
+            Self::Switcher(switcher) => Self::render_switcher(frame, area, switcher),
+            Self::Form(form_overlay) => {
+                Self::render_form(frame, area, form_overlay);
+            },
+            Self::ConfirmOverwrite { form, .. } => {
+                Self::render_form(frame, area, form);
+                confirm::render(
+                    frame,
+                    area,
+                    OVERWRITE_TITLE,
+                    OVERWRITE_CONFIRM,
+                    OVERWRITE_VERB,
+                );
+            },
+            Self::ConfirmRemoval { message, .. } => confirm::render(
+                frame,
+                area,
+                REMOVE_PROJECT_TITLE,
+                message,
+                REMOVE_PROJECT_VERB,
+            ),
+            Self::Help => help::render(frame, area),
+        }
+    }
+
+    /// Renders a form with its retained switcher background, if any.
+    fn render_form(frame: &mut Frame, area: Rect, form_overlay: &FormOverlay) {
+        if let Some(switcher) = &form_overlay.switcher {
+            Self::render_switcher(frame, area, switcher);
+        }
+        let modal = &form_overlay.modal;
+        form::render(frame, area, &modal.form, modal.error.as_deref());
+    }
+
+    /// Renders a project switcher layer.
+    fn render_switcher(frame: &mut Frame, area: Rect, switcher: &Switcher) {
+        switcher::render(
+            frame,
+            area,
+            &switcher.projects,
+            switcher.selected,
+            switcher.error.as_deref(),
+            switcher.current,
+            &switcher.preview,
+        );
     }
 }
 
@@ -197,36 +382,33 @@ pub struct App {
     events: Sender<RuntimeEvent>,
     panes: HashMap<PaneId, Pane>,
     restart_attempts: HashMap<PaneId, u32>,
-    generations: HashMap<PaneId, u64>,
-    /// Live panes the config no longer lists: kept running, but retired (not
-    /// restarted) once they exit, rather than lingering or restart-looping.
-    orphaned: HashSet<PaneId>,
+    generations: HashMap<PaneId, SpawnGeneration>,
+    /// Monotonic source for terminal-lifetime notification scopes.
+    next_notification_scope: NotificationScope,
     pane_size: PtySize,
-    leader_pending: bool,
     focus: Focus,
     running: bool,
     registry: Box<dyn ProjectRegistry>,
-    completer: Option<Box<dyn PathCompleter + Send>>,
-    completions: Option<Sender<CompletionRequest>>,
-    completion_generation: u64,
+    completion_mode: CompletionMode,
     watcher: Option<Box<dyn ConfigWatcher>>,
     current_config: Option<PathBuf>,
     /// The config muster launched with, kept reachable in the tree even when it
     /// was never saved, so switching away from it is never a dead end.
     launched_config: PathBuf,
-    /// Whether the launched project appears only as a synthetic, unregistered row
-    /// (true until it is saved): such a row has no registry entry to remove.
-    launched_synthetic: bool,
+    /// Registry membership of the config Muster launched with.
+    launched_project_membership: LaunchedProjectMembership,
     projects: Vec<Project>,
     /// When set, the sidebar selection is on the Nth other-project row rather
     /// than on a process in the active project.
     project_cursor: Option<usize>,
-    switcher: Option<Switcher>,
-    form: Option<FormModal>,
-    confirm: Option<Confirm>,
+    overlay: Option<Overlay>,
     pending_switch: Option<PendingSwitch>,
-    /// Whether the full-keymap help overlay is showing; any key dismisses it.
-    help_open: bool,
+    /// Out-of-band notification delivery (desktop), injected by the composition
+    /// root via [`Self::set_notifier`]. `None` until then: notifications stay
+    /// in-app, and the App itself never names a concrete notifier adapter.
+    notifier: Option<Box<dyn Notifier>>,
+    /// Cross-workspace settings and their load result.
+    settings: SettingsState,
     /// A transient one-line message shown in the status bar until the next key,
     /// used for failures that have no open overlay to report into.
     notice: Option<String>,
@@ -235,8 +417,19 @@ pub struct App {
 /// A pending autocomplete request handed to the completion worker: the newest
 /// generation wins, so slow filesystem reads never clobber later edits.
 struct CompletionRequest {
-    generation: u64,
+    generation: CompletionGeneration,
     partial: String,
+}
+
+/// How path completions are currently evaluated.
+enum CompletionMode {
+    /// Complete synchronously until the runtime installs its worker.
+    Inline(Box<dyn PathCompleter + Send>),
+    /// Dispatch generation-tagged requests to the background worker.
+    Worker {
+        requests: Sender<CompletionRequest>,
+        generation: CompletionGeneration,
+    },
 }
 
 impl App {
@@ -257,28 +450,114 @@ impl App {
             panes: HashMap::new(),
             restart_attempts: HashMap::new(),
             generations: HashMap::new(),
-            orphaned: HashSet::new(),
+            next_notification_scope: NotificationScope::new(0),
             pane_size: pane_size_of(area),
-            leader_pending: false,
             focus: Focus::Sidebar,
             running: true,
             registry,
-            completer: Some(completer),
-            completions: None,
-            completion_generation: 0,
+            completion_mode: CompletionMode::Inline(completer),
             watcher: None,
             launched_config: current_config.clone(),
-            launched_synthetic: false,
+            launched_project_membership: LaunchedProjectMembership::Registered,
             current_config: Some(current_config),
             projects: Vec::new(),
             project_cursor: None,
-            switcher: None,
-            form: None,
-            confirm: None,
+            overlay: None,
             pending_switch: None,
-            help_open: false,
+            notifier: None,
+            settings: SettingsState::Unloaded,
             notice: None,
         }
+    }
+
+    /// Wires the notifier used for out-of-band (desktop) notifications. The
+    /// composition root calls this; without it, notifications stay in-app only.
+    pub fn set_notifier(&mut self, notifier: Box<dyn Notifier>) {
+        self.notifier = Some(notifier);
+    }
+
+    /// Wires the settings store and loads the current settings from it. A load
+    /// failure is retained so later toggles cannot overwrite the unreadable file.
+    pub fn set_settings_store(&mut self, store: Box<dyn SettingsStore>) {
+        self.settings = match store.load() {
+            Ok(settings) => SettingsState::Loaded { settings, store },
+            Err(error) => {
+                self.notice = Some(format!("{SETTINGS_LOAD_ERROR}: {error}"));
+                SettingsState::LoadFailed(error)
+            },
+        };
+    }
+
+    /// Whether desktop notifications are currently enabled. Unavailable or
+    /// invalid settings count as off, so nothing leaves the machine unexpectedly.
+    fn desktop_notifications_enabled(&self) -> bool {
+        matches!(
+            &self.settings,
+            SettingsState::Loaded { settings, .. } if *settings.desktop_notifications()
+        )
+    }
+
+    /// Flips the desktop-notifications setting and persists it, applying the
+    /// change only when the write succeeds so the toggle reflects what is saved.
+    fn toggle_desktop_notifications(&mut self) {
+        match &mut self.settings {
+            SettingsState::Loaded { settings, store } => {
+                let enabled = !*settings.desktop_notifications();
+                let updated = settings.clone().with_desktop_notifications(enabled);
+                if store.save(&updated).is_ok() {
+                    *settings = updated;
+                    self.notice = Some(
+                        if enabled {
+                            DESKTOP_NOTIFICATIONS_ON
+                        } else {
+                            DESKTOP_NOTIFICATIONS_OFF
+                        }
+                        .to_string(),
+                    );
+                } else {
+                    self.notice = Some(SETTINGS_SAVE_ERROR.to_string());
+                }
+            },
+            SettingsState::LoadFailed(error) => {
+                self.notice = Some(format!("{SETTINGS_LOAD_ERROR}: {error}"));
+            },
+            SettingsState::Unloaded => {
+                self.notice = Some(SETTINGS_UNAVAILABLE.to_string());
+            },
+        }
+    }
+
+    /// Returns the project switcher in the overlay stack, if present.
+    fn switcher(&self) -> Option<&Switcher> {
+        self.overlay.as_ref().and_then(Overlay::switcher)
+    }
+
+    /// Returns the project switcher in the overlay stack mutably, if present.
+    fn switcher_mut(&mut self) -> Option<&mut Switcher> {
+        self.overlay.as_mut().and_then(Overlay::switcher_mut)
+    }
+
+    /// Returns the open form, including one retained behind confirmation.
+    fn form(&self) -> Option<&FormModal> {
+        self.overlay.as_ref().and_then(Overlay::form)
+    }
+
+    /// Returns the active form mutably. A retained confirmation background is
+    /// included so operation failures can be reported after restoring it.
+    fn form_mut(&mut self) -> Option<&mut FormModal> {
+        self.overlay.as_mut().and_then(Overlay::form_mut)
+    }
+
+    /// Closes the active overlay and restores its explicitly retained background.
+    fn close_overlay(&mut self) {
+        let current = self.overlay.take();
+        self.overlay = match current {
+            Some(Overlay::Form(form)) => form.switcher.map(Overlay::Switcher),
+            Some(Overlay::ConfirmOverwrite { form, .. }) => Some(Overlay::Form(form)),
+            Some(Overlay::Switcher(_) | Overlay::ConfirmRemoval { .. } | Overlay::Help) | None => {
+                None
+            },
+        };
     }
 
     /// Whether the event loop should keep running.
@@ -303,10 +582,10 @@ impl App {
         let registered = projects
             .iter()
             .any(|project| path::normalize(project.config()) == path::normalize(&launched));
-        self.launched_synthetic = false;
+        self.launched_project_membership = LaunchedProjectMembership::Registered;
         if !registered && let Ok(name) = ProjectName::try_new(label_from_config(&launched)) {
             projects.insert(0, Project::builder().name(name).config(launched).build());
-            self.launched_synthetic = true;
+            self.launched_project_membership = LaunchedProjectMembership::Synthetic;
         }
         self.projects = projects;
     }
@@ -315,13 +594,20 @@ impl App {
     /// filesystem read never blocks the event loop. Candidates return as
     /// [`RuntimeEvent::Completions`]; without this the completer runs inline.
     pub fn spawn_completion_worker(&mut self) {
-        let Some(completer) = self.completer.take() else {
-            return;
-        };
         let (requests_tx, requests_rx) = unbounded::<CompletionRequest>();
-        let events = self.events.clone();
-        thread::spawn(move || completion_worker(completer, requests_rx, events));
-        self.completions = Some(requests_tx);
+        let previous = mem::replace(&mut self.completion_mode, CompletionMode::Worker {
+            requests: requests_tx,
+            generation: CompletionGeneration::initial(),
+        });
+        match previous {
+            CompletionMode::Inline(completer) => {
+                let events = self.events.clone();
+                thread::spawn(move || completion_worker(completer, requests_rx, events));
+            },
+            worker @ CompletionMode::Worker { .. } => {
+                self.completion_mode = worker;
+            },
+        }
     }
 
     /// Installs the config watcher and points it at the active project, so an
@@ -417,15 +703,18 @@ impl App {
                 .get(&pane)
                 .is_some_and(|pane| pane.handle.is_some());
             if matched {
-                self.orphaned.remove(&pane);
+                if let Some(target) = self.panes.get_mut(&pane) {
+                    target.config_membership = ConfigMembership::Tracked;
+                }
                 kept.push(process.clone());
             } else if live {
                 // Still running but gone from the config: keep it, and mark it to
                 // be retired once it exits instead of restart-looping.
-                self.orphaned.insert(pane);
+                if let Some(target) = self.panes.get_mut(&pane) {
+                    target.config_membership = ConfigMembership::RetireOnExit;
+                }
                 kept.push(process.clone());
             } else {
-                self.orphaned.remove(&pane);
                 removed.push(pane);
             }
         }
@@ -484,29 +773,193 @@ impl App {
 
     /// Applies a process output event, ignoring output from a superseded spawn
     /// generation (e.g. late chunks from a previous child in a restarted pane).
-    pub fn handle_output(&mut self, pane: PaneId, generation: u64, output: ProcessOutput) {
+    pub fn handle_output(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        output: ProcessOutput,
+    ) {
         if self.generations.get(&pane) != Some(&generation) {
             return;
         }
         match output {
             ProcessOutput::Chunk(bytes) => {
-                if let Some(target) = self.panes.get_mut(&pane) {
-                    target.parser.process(&bytes);
+                let Some(target) = self.panes.get_mut(&pane) else {
+                    return;
+                };
+                let signals = target.signals.read(&bytes);
+                target.parser.process(&bytes);
+                // Apply signals in stream order, so the final activity reflects
+                // the last event in the chunk rather than an assumed one: a bell
+                // followed by more output ends working, not awaiting input.
+                for signal in signals {
+                    self.apply_signal(pane, signal);
                 }
             },
             ProcessOutput::Exited(outcome) => self.handle_exit(pane, outcome),
         }
     }
 
+    /// Applies one decoded terminal signal to `pane`: output or in-progress work
+    /// marks it working; a notification or completed progress marks it awaiting
+    /// input, and a notification also raises an alert.
+    fn apply_signal(&mut self, pane: PaneId, signal: Signal) {
+        match signal {
+            Signal::Output => {
+                let activity = self
+                    .panes
+                    .get_mut(&pane)
+                    .map(|target| target.activity.observe_output(Instant::now()));
+                if let Some(activity) = activity {
+                    self.workspace.set_activity(pane, activity);
+                }
+            },
+            Signal::Progress(active) => {
+                let activity = self
+                    .panes
+                    .get_mut(&pane)
+                    .map(|target| target.activity.observe_progress(active));
+                if let Some(activity) = activity {
+                    self.workspace.set_activity(pane, activity);
+                }
+            },
+            Signal::Notify {
+                identifier,
+                title,
+                body,
+            } => {
+                if let Some(target) = self.panes.get_mut(&pane) {
+                    let activity = target.activity.observe_attention();
+                    self.workspace.set_activity(pane, activity);
+                }
+                self.raise_notification(pane, identifier, title, body);
+            },
+            Signal::Close { identifier } => self.close_notification(pane, &identifier),
+        }
+    }
+
+    /// Returns the nearest time at which ordinary output should become idle.
+    pub(super) fn next_activity_deadline(&self) -> Option<Instant> {
+        self.panes
+            .values()
+            .filter_map(|pane| pane.activity.deadline())
+            .min()
+    }
+
+    /// Returns panes with expired ordinary-output deadlines to idle. Returns
+    /// whether any activity changed, allowing the runtime to avoid idle redraws.
+    pub(super) fn expire_quiet_activity(&mut self, now: Instant) -> bool {
+        let expired = self
+            .panes
+            .iter_mut()
+            .filter_map(|(pane, target)| {
+                target
+                    .activity
+                    .expire(now)
+                    .map(|activity| (*pane, activity))
+            })
+            .collect::<Vec<_>>();
+        for (pane, activity) in &expired {
+            self.workspace.set_activity(*pane, *activity);
+        }
+        !expired.is_empty()
+    }
+
+    /// Raises a notification for `pane`: always an in-app status-bar notice, and
+    /// a desktop notification too, throttling bare bells so a burst is one alert.
+    fn raise_notification(
+        &mut self,
+        pane: PaneId,
+        identifier: Option<NotificationId>,
+        title: Option<String>,
+        body: Option<String>,
+    ) {
+        let is_bell = title.is_none() && body.is_none();
+        let scope = {
+            let Some(target) = self.panes.get_mut(&pane) else {
+                return;
+            };
+            if is_bell {
+                let now = Instant::now();
+                if target
+                    .last_bell
+                    .is_some_and(|last| now.duration_since(last) < BELL_THROTTLE)
+                {
+                    return;
+                }
+                target.last_bell = Some(now);
+            }
+            target.notification_scope
+        };
+        let Some(process) = self.workspace.process(pane) else {
+            return;
+        };
+        let name = process.name().clone();
+        let desktop_body = if is_bell {
+            Some(AWAITING_INPUT_NOTICE.to_string())
+        } else {
+            body.clone()
+        };
+        // Prefer the body, fall back to the title (a title-only notification
+        // still carries its text), then to a generic message for a bare bell.
+        let message = body
+            .or_else(|| title.clone())
+            .unwrap_or_else(|| AWAITING_INPUT_NOTICE.to_string());
+        self.notice = Some(format!("{}: {message}", name.as_ref()));
+        let notification = Notification::builder()
+            .pane(pane)
+            .scope(scope)
+            .source(name)
+            .title(title)
+            .body(desktop_body)
+            .identifier(identifier)
+            .build();
+        if self.desktop_notifications_enabled()
+            && let Some(notifier) = &self.notifier
+        {
+            notifier.notify(&notification);
+        }
+    }
+
+    /// Closes a prior identified desktop notification. This remains active when
+    /// delivery is toggled off so an already-visible notification can be removed.
+    fn close_notification(&self, pane: PaneId, identifier: &NotificationId) {
+        if let Some(scope) = self
+            .panes
+            .get(&pane)
+            .map(|target| target.notification_scope)
+            && let Some(notifier) = &self.notifier
+        {
+            notifier.close(pane, scope, identifier);
+        }
+    }
+
     /// Respawns a pane whose restart backoff has elapsed, but only if its
     /// generation still matches: a manual restart, stop, or newer schedule bumps
     /// the generation and so cancels this now-stale respawn.
-    pub fn handle_respawn(&mut self, pane: PaneId, generation: u64) {
+    pub fn handle_respawn(&mut self, pane: PaneId, generation: SpawnGeneration) {
         if self.generations.get(&pane) != Some(&generation) {
             return;
         }
         if let Some((command, cwd)) = self.command_of(pane) {
             self.spawn(pane, command, cwd);
+        }
+    }
+
+    /// Forcibly stops a command whose graceful manual-stop deadline elapsed,
+    /// provided no exit, restart, or newer spawn superseded that request.
+    pub fn handle_force_stop(&mut self, pane: PaneId, generation: SpawnGeneration) {
+        if self.generations.get(&pane) != Some(&generation) {
+            return;
+        }
+        let Some(target) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        if target.exit_intent.awaits_force_stop()
+            && let Some(handle) = target.handle.as_mut()
+            && handle.kill().is_err()
+        {
+            target.exit_intent = target.exit_intent.stop_delivery_failed();
         }
     }
 
@@ -563,39 +1016,17 @@ impl App {
             self.status_context(),
             crashed,
             self.notice.as_deref(),
+            self.focus == Focus::Leader,
         );
-        if let Some(switcher) = &self.switcher {
-            switcher::render(
-                frame,
-                frame.area(),
-                &switcher.projects,
-                switcher.selected,
-                switcher.error.as_deref(),
-                switcher.current,
-                &switcher.preview,
-            );
-        }
-        if let Some(modal) = &self.form {
-            form::render(frame, frame.area(), &modal.form, modal.error.as_deref());
-        }
-        if let Some(confirm) = &self.confirm {
-            confirm::render(
-                frame,
-                frame.area(),
-                confirm.intent.title(),
-                &confirm.message,
-                confirm.intent.verb(),
-            );
-        }
-        if self.help_open {
-            help::render(frame, frame.area());
+        if let Some(overlay) = &self.overlay {
+            overlay.render(frame);
         }
     }
 
     /// The slim hint set the status bar advertises for the current focus and
     /// sidebar selection. The full keymap lives in the `?` overlay.
     fn status_context(&self) -> StatusContext {
-        if self.focus == Focus::Terminal {
+        if matches!(self.focus, Focus::Terminal | Focus::Leader) {
             return StatusContext::Terminal;
         }
         match self.project_cursor {
@@ -656,6 +1087,7 @@ impl App {
         let sink = ChannelOutputSink::new(pane, generation, self.events.clone());
         match self.runner.spawn(request, Box::new(sink)) {
             Ok(handle) => {
+                let notification_scope = self.allocate_notification_scope();
                 let parser = Parser::new(
                     self.pane_size.rows().into_inner(),
                     self.pane_size.cols().into_inner(),
@@ -663,13 +1095,18 @@ impl App {
                 );
                 self.panes.insert(pane, Pane {
                     parser,
+                    notification_scope,
+                    signals: SignalReader::new(),
+                    activity: ActivityTracker::default(),
+                    last_bell: None,
                     handle: Some(handle),
                     started_at: Instant::now(),
-                    force_restart: false,
-                    stopping: false,
-                    paused: false,
+                    exit_intent: ExitIntent::FollowPolicy,
+                    config_membership: ConfigMembership::Tracked,
                 });
                 self.workspace.set_state(pane, ProcessState::Running);
+                // A fresh child inherits none of the prior generation's activity.
+                self.workspace.set_activity(pane, ActivityState::Idle);
             },
             Err(_) => {
                 self.deactivate(pane);
@@ -687,20 +1124,30 @@ impl App {
 
     /// Bumps and returns a pane's restart generation, invalidating any respawn
     /// scheduled against an older generation.
-    fn bump_generation(&mut self, pane: PaneId) -> u64 {
-        let entry = self.generations.entry(pane).or_insert(0);
-        *entry = entry.wrapping_add(1);
+    fn bump_generation(&mut self, pane: PaneId) -> SpawnGeneration {
+        let entry = self
+            .generations
+            .entry(pane)
+            .or_insert_with(SpawnGeneration::initial);
+        *entry = entry.next();
         *entry
+    }
+
+    /// Allocates an identity that is never reused by another terminal lifetime
+    /// during this application run.
+    fn allocate_notification_scope(&mut self) -> NotificationScope {
+        let scope = self.next_notification_scope;
+        self.next_notification_scope = scope.next();
+        scope
     }
 
     /// Drops a pane's live handle but keeps its parser, so the final screen and
     /// scrollback remain visible after the process exits.
     fn deactivate(&mut self, pane: PaneId) {
         if let Some(target) = self.panes.get_mut(&pane) {
+            target.activity.reset();
             target.handle = None;
-            target.force_restart = false;
-            target.stopping = false;
-            target.paused = false;
+            target.exit_intent = ExitIntent::FollowPolicy;
         }
     }
 
@@ -710,45 +1157,52 @@ impl App {
         self.panes.remove(&pane);
         self.generations.remove(&pane);
         self.restart_attempts.remove(&pane);
-        self.orphaned.remove(&pane);
         self.workspace.remove(pane);
     }
 
     /// Handles a process exit: honor a stop, force-restart, back-off restart per
     /// policy, or record the resting outcome.
     fn handle_exit(&mut self, pane: PaneId, outcome: ExitOutcome) {
-        let Some((force_restart, stopping, started_at)) = self
+        let Some((exit_intent, config_membership, started_at)) = self
             .panes
             .get(&pane)
-            .map(|p| (p.force_restart, p.stopping, p.started_at))
+            .map(|p| (p.exit_intent, p.config_membership, p.started_at))
         else {
             return;
         };
 
         // A process removed from the config while running is retired now that it
         // has exited, rather than restarting a process that no longer exists.
-        if self.orphaned.remove(&pane) {
+        if config_membership == ConfigMembership::RetireOnExit {
             self.retire_pane(pane);
             self.advance_pending_switch(pane);
             return;
         }
 
-        if stopping {
-            self.deactivate(pane);
-            self.workspace.set_state(pane, ProcessState::Exited);
-        } else if force_restart {
-            self.restart_attempts.remove(&pane);
-            self.workspace.set_state(pane, ProcessState::Restarting);
-            if let Some((command, cwd)) = self.command_of(pane) {
-                self.spawn(pane, command, cwd);
-            }
-        } else if self.workspace.should_restart(pane, outcome) {
-            self.workspace.set_state(pane, ProcessState::Restarting);
-            self.deactivate(pane);
-            self.schedule_restart(pane, started_at);
-        } else {
-            self.deactivate(pane);
-            self.workspace.set_state(pane, exit_state(outcome));
+        // The child is gone; drop any attention state so a restart backoff or a
+        // crashed/exited pane never keeps showing the waiting-for-user marker.
+        self.workspace.set_activity(pane, ActivityState::Idle);
+        match exit_intent {
+            ExitIntent::StopRetryable | ExitIntent::StopInFlight => {
+                self.deactivate(pane);
+                self.workspace.set_state(pane, ProcessState::Exited);
+            },
+            ExitIntent::Restart => {
+                self.restart_attempts.remove(&pane);
+                self.workspace.set_state(pane, ProcessState::Restarting);
+                if let Some((command, cwd)) = self.command_of(pane) {
+                    self.spawn(pane, command, cwd);
+                }
+            },
+            ExitIntent::FollowPolicy if self.workspace.should_restart(pane, outcome) => {
+                self.workspace.set_state(pane, ProcessState::Restarting);
+                self.deactivate(pane);
+                self.schedule_restart(pane, started_at);
+            },
+            ExitIntent::FollowPolicy => {
+                self.deactivate(pane);
+                self.workspace.set_state(pane, exit_state(outcome));
+            },
         }
         self.advance_pending_switch(pane);
     }
@@ -773,6 +1227,16 @@ impl App {
         });
     }
 
+    /// Schedules hard-kill escalation for a manually stopped command. The
+    /// generation and exit intent make the event harmless after exit/restart.
+    fn schedule_force_stop(&self, pane: PaneId, generation: SpawnGeneration) {
+        let sender = self.events.clone();
+        thread::spawn(move || {
+            thread::sleep(COMMAND_STOP_GRACE);
+            let _ = sender.send(RuntimeEvent::ForceStop { pane, generation });
+        });
+    }
+
     /// The launch command and cwd of the process owning `pane`.
     fn command_of(&self, pane: PaneId) -> Option<(Option<CommandLine>, Option<PathBuf>)> {
         self.workspace
@@ -787,34 +1251,33 @@ impl App {
         }
         // A key press dismisses any transient notice from the previous action.
         self.notice = None;
-        // The help overlay is a read-only reference; any key closes it.
-        if self.help_open {
-            self.help_open = false;
-            return;
-        }
-        if self.confirm.is_some() {
-            self.handle_confirm_key(key);
-            return;
-        }
-        if self.form.is_some() {
-            self.handle_form_key(key);
-            return;
-        }
-        if self.switcher.is_some() {
-            self.handle_switcher_key(key);
-            return;
+        match &self.overlay {
+            // Help is a read-only reference; any key closes it.
+            Some(Overlay::Help) => {
+                self.overlay = None;
+                return;
+            },
+            Some(Overlay::ConfirmOverwrite { .. } | Overlay::ConfirmRemoval { .. }) => {
+                self.handle_confirm_key(key);
+                return;
+            },
+            Some(Overlay::Form(_)) => {
+                self.handle_form_key(key);
+                return;
+            },
+            Some(Overlay::Switcher(_)) => {
+                self.handle_switcher_key(key);
+                return;
+            },
+            None => {},
         }
         match self.focus {
             Focus::Sidebar => self.handle_sidebar_key(key),
-            Focus::Terminal => {
-                if self.leader_pending {
-                    self.leader_pending = false;
-                    self.handle_leader_command(key);
-                } else if is_leader(key) {
-                    self.leader_pending = true;
-                } else {
-                    self.forward_key(key);
-                }
+            Focus::Terminal if is_leader(key) => self.focus = Focus::Leader,
+            Focus::Terminal => self.forward_key(key),
+            Focus::Leader => {
+                self.focus = Focus::Terminal;
+                self.handle_leader_command(key);
             },
         }
     }
@@ -839,8 +1302,9 @@ impl App {
             KeyCode::Char('x') if self.project_cursor.is_none() => self.stop_selected(),
             KeyCode::Char('a') => self.open_add_process_form(),
             KeyCode::Char('n') => self.open_new_project_form(),
+            KeyCode::Char('N') => self.toggle_desktop_notifications(),
             KeyCode::Char('o') => self.open_switcher(),
-            KeyCode::Char('?') => self.help_open = true,
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
         }
     }
@@ -943,13 +1407,10 @@ impl App {
     /// Opens a confirmation to remove `project` from the registry, closing any
     /// project overlay first. Shared by activation failures and the sidebar `d`.
     fn confirm_remove_project(&mut self, project: &Project, message: String) {
-        self.switcher = None;
         self.project_cursor = None;
-        self.confirm = Some(Confirm {
+        self.overlay = Some(Overlay::ConfirmRemoval {
             message,
-            intent: ConfirmIntent::RemoveProject {
-                config_path: project.config().clone(),
-            },
+            config_path: project.config().clone(),
         });
     }
 
@@ -979,7 +1440,7 @@ impl App {
     /// Whether `project` is the unsaved launched-project row synthesized for the
     /// tree rather than a registered project.
     fn is_synthetic_launched(&self, project: &Project) -> bool {
-        self.launched_synthetic
+        self.launched_project_membership == LaunchedProjectMembership::Synthetic
             && path::normalize(project.config()) == path::normalize(&self.launched_config)
     }
 
@@ -1010,7 +1471,7 @@ impl App {
 
         let mut edited = false;
         let mut apply = |config: WorkspaceConfig| {
-            let (config, found) = set_spec_autostart(config, &target, occurrence, Some(autostart));
+            let (config, found) = target.with_autostart(config, occurrence, Some(autostart));
             edited = found;
             config
         };
@@ -1068,9 +1529,10 @@ impl App {
             KeyCode::Char('p') => self.toggle_pause_selected(),
             KeyCode::Char('a') => self.open_add_process_form(),
             KeyCode::Char('n') => self.open_new_project_form(),
+            KeyCode::Char('N') => self.toggle_desktop_notifications(),
             KeyCode::Char('o') => self.open_switcher(),
             KeyCode::Char('x') => self.stop_selected(),
-            KeyCode::Char('?') => self.help_open = true,
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
         }
     }
@@ -1098,19 +1560,26 @@ impl App {
     }
 
     /// Toggles the selected process between paused and running via SIGSTOP and
-    /// SIGCONT. Only a live process can be suspended or resumed.
+    /// SIGCONT. Ignores absent children and panes already stopping or restarting.
     fn toggle_pause_selected(&mut self) {
         let Some(pane) = self.selected_pane() else {
             return;
         };
+        let is_paused = self
+            .workspace
+            .process(pane)
+            .is_some_and(|process| *process.state() == ProcessState::Paused);
         let now_paused = {
             let Some(target) = self.panes.get_mut(&pane) else {
                 return;
             };
+            if target.exit_intent != ExitIntent::FollowPolicy {
+                return;
+            }
             let Some(handle) = target.handle.as_mut() else {
                 return;
             };
-            let next = !target.paused;
+            let next = !is_paused;
             let signalled = if next {
                 handle.pause()
             } else {
@@ -1121,7 +1590,6 @@ impl App {
             if signalled.is_err() {
                 return;
             }
-            target.paused = next;
             next
         };
         let state = if now_paused {
@@ -1141,23 +1609,30 @@ impl App {
         };
         let current = self.current_project_index(&projects);
         let selected = current.unwrap_or(0);
-        let preview = switcher_preview(self.registry.as_ref(), projects.get(selected));
-        self.switcher = Some(Switcher {
+        let preview = Switcher::preview(self.registry.as_ref(), projects.get(selected));
+        self.overlay = Some(Overlay::Switcher(Switcher {
             projects,
             selected,
             current,
             error,
             preview,
-        });
+        }));
     }
 
-    /// Opens `form` with `intent`, replacing any open form.
+    /// Opens `form` with `intent`, retaining an open switcher for cancellation.
     fn open_form(&mut self, form: Form, intent: FormIntent) {
-        self.form = Some(FormModal {
-            form,
-            intent,
-            error: None,
-        });
+        let switcher = match self.overlay.take() {
+            Some(Overlay::Switcher(switcher)) => Some(switcher),
+            _ => None,
+        };
+        self.overlay = Some(Overlay::Form(FormOverlay {
+            modal: FormModal {
+                form,
+                intent,
+                error: None,
+            },
+            switcher,
+        }));
     }
 
     /// Opens the save-current-project form (one name field).
@@ -1191,7 +1666,7 @@ impl App {
 
     /// Removes the highlighted project from the registry.
     fn remove_selected_project(&mut self) {
-        let Some(switcher) = self.switcher.as_ref() else {
+        let Some(switcher) = self.switcher() else {
             return;
         };
         let selected = switcher.selected;
@@ -1203,14 +1678,14 @@ impl App {
         if self.registry.save(&projects).is_ok() {
             self.refresh_projects();
             self.refresh_switcher();
-        } else if let Some(switcher) = self.switcher.as_mut() {
+        } else if let Some(switcher) = self.switcher_mut() {
             switcher.error = Some(REGISTRY_SAVE_ERROR.to_string());
         }
     }
 
     /// Reloads the open switcher from the registry after a change.
     fn refresh_switcher(&mut self) {
-        if self.switcher.is_none() {
+        if self.switcher().is_none() {
             return;
         }
         let (projects, error) = match self.registry.projects() {
@@ -1219,35 +1694,34 @@ impl App {
         };
         let current = self.current_project_index(&projects);
         let selected = current.unwrap_or(0).min(projects.len().saturating_sub(1));
-        let preview = switcher_preview(self.registry.as_ref(), projects.get(selected));
-        self.switcher = Some(Switcher {
+        let preview = Switcher::preview(self.registry.as_ref(), projects.get(selected));
+        self.overlay = Some(Overlay::Switcher(Switcher {
             projects,
             selected,
             current,
             error,
             preview,
-        });
+        }));
     }
 
     /// Recomputes the open switcher's cached preview for its current selection,
     /// after the highlight moves.
     fn update_switcher_preview(&mut self) {
         let Some(project) = self
-            .switcher
-            .as_ref()
+            .switcher()
             .and_then(|switcher| switcher.projects.get(switcher.selected).cloned())
         else {
             return;
         };
-        let preview = switcher_preview(self.registry.as_ref(), Some(&project));
-        if let Some(switcher) = self.switcher.as_mut() {
+        let preview = Switcher::preview(self.registry.as_ref(), Some(&project));
+        if let Some(switcher) = self.switcher_mut() {
             switcher.preview = preview;
         }
     }
 
     /// Handles a key while a form is open: edit, submit, or cancel.
     fn handle_form_key(&mut self, key: KeyEvent) {
-        let Some(modal) = self.form.as_mut() else {
+        let Some(modal) = self.form_mut() else {
             return;
         };
         let before = (modal.form.active(), modal.form.active_path_value());
@@ -1264,7 +1738,7 @@ impl App {
             // Acceptance closes the dropdown deliberately; leave it closed so the
             // next Enter submits instead of accepting a child of the chosen dir.
             FormOutcome::Accepted => {},
-            FormOutcome::Cancel => self.form = None,
+            FormOutcome::Cancel => self.close_overlay(),
             FormOutcome::Submit => self.submit_form(),
         }
     }
@@ -1274,51 +1748,57 @@ impl App {
     /// no stale suggestion is shown until the matching reply arrives; otherwise
     /// it completes inline.
     fn refresh_completions(&mut self) {
-        let Some(partial) = self
-            .form
-            .as_ref()
-            .and_then(|modal| modal.form.active_path_value())
-        else {
+        let Some(partial) = self.form().and_then(|modal| modal.form.active_path_value()) else {
             return;
         };
-        self.completion_generation += 1;
         // The candidates to show right now: none while an async request is in
         // flight (its reply repopulates them, and until then no navigation or
         // acceptance can act on suggestions that no longer match the edited
         // value), or the inline result otherwise.
-        let candidates = match &self.completions {
-            Some(requests) => {
+        let candidates = match &mut self.completion_mode {
+            CompletionMode::Worker {
+                requests,
+                generation,
+            } => {
+                *generation = generation.next();
                 let _ = requests.send(CompletionRequest {
-                    generation: self.completion_generation,
+                    generation: *generation,
                     partial,
                 });
                 Vec::new()
             },
-            None => self
-                .completer
-                .as_ref()
-                .map(|completer| completer.complete_dir(&partial))
-                .unwrap_or_default(),
+            CompletionMode::Inline(completer) => completer.complete_dir(&partial),
         };
-        if let Some(modal) = self.form.as_mut() {
+        if let Some(modal) = self.form_mut() {
             modal.form.set_active_candidates(candidates);
         }
     }
 
     /// Applies worker-computed completions, ignoring any that a later edit has
     /// already superseded.
-    pub fn handle_completions(&mut self, generation: u64, candidates: Vec<String>) {
-        if generation != self.completion_generation {
+    pub fn handle_completions(
+        &mut self,
+        generation: CompletionGeneration,
+        candidates: Vec<String>,
+    ) {
+        let CompletionMode::Worker {
+            generation: current,
+            ..
+        } = &self.completion_mode
+        else {
+            return;
+        };
+        if generation != *current {
             return;
         }
-        if let Some(modal) = self.form.as_mut() {
+        if let Some(modal) = self.form_mut() {
             modal.form.set_active_candidates(candidates);
         }
     }
 
     /// Executes the open form's intent with its collected values.
     fn submit_form(&mut self) {
-        let Some(modal) = self.form.as_ref() else {
+        let Some(modal) = self.form() else {
             return;
         };
         let values = modal.form.values();
@@ -1340,7 +1820,7 @@ impl App {
             return;
         };
         if self.try_register(Project::builder().name(name).config(config).build()) {
-            self.form = None;
+            self.close_overlay();
             self.refresh_projects();
             self.refresh_switcher();
         }
@@ -1370,9 +1850,13 @@ impl App {
     /// Opens a confirmation over the form before overwriting an existing config.
     /// The form is kept so a failed overwrite can be retried without refilling.
     fn confirm_overwrite(&mut self, name: ProjectName, config_path: PathBuf) {
-        self.confirm = Some(Confirm {
-            message: OVERWRITE_CONFIRM.to_string(),
-            intent: ConfirmIntent::OverwriteProject { name, config_path },
+        let Some(Overlay::Form(form)) = self.overlay.take() else {
+            return;
+        };
+        self.overlay = Some(Overlay::ConfirmOverwrite {
+            form,
+            name,
+            config_path,
         });
     }
 
@@ -1395,8 +1879,7 @@ impl App {
             self.report_error(WORKSPACE_SAVE_ERROR);
             return;
         }
-        self.form = None;
-        self.confirm = None;
+        self.close_overlay();
         self.refresh_projects();
         self.refresh_switcher();
     }
@@ -1405,27 +1888,34 @@ impl App {
     fn handle_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') => {
-                if let Some(confirm) = self.confirm.take() {
-                    match confirm.intent {
-                        ConfirmIntent::OverwriteProject { name, config_path } => {
-                            self.create_project(name, config_path);
-                        },
-                        ConfirmIntent::RemoveProject { config_path } => {
-                            self.remove_project(&config_path);
-                        },
-                    }
+                let overlay = self.overlay.take();
+                match overlay {
+                    Some(Overlay::ConfirmOverwrite {
+                        form,
+                        name,
+                        config_path,
+                    }) => {
+                        self.overlay = Some(Overlay::Form(form));
+                        self.create_project(name, config_path);
+                    },
+                    Some(Overlay::ConfirmRemoval { config_path, .. }) => {
+                        self.remove_project(&config_path);
+                    },
+                    other => self.overlay = other,
                 }
             },
-            KeyCode::Esc | KeyCode::Char('n') => self.confirm = None,
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.close_overlay();
+            },
             _ => {},
         }
     }
 
-    /// Reports an error on whichever overlay is open: the form, else the switcher.
+    /// Reports an error on the active form or project switcher.
     fn report_error(&mut self, message: &str) {
-        if let Some(modal) = self.form.as_mut() {
+        if let Some(modal) = self.form_mut() {
             modal.error = Some(message.to_string());
-        } else if let Some(switcher) = self.switcher.as_mut() {
+        } else if let Some(switcher) = self.switcher_mut() {
             switcher.error = Some(message.to_string());
         }
     }
@@ -1520,23 +2010,22 @@ impl App {
                 return;
             },
         };
-        self.form = None;
-        self.switcher = None;
+        self.overlay = None;
         self.begin_switch(config, config_path);
     }
 
     /// Handles a key while the switcher is open: navigate, jump by number,
     /// confirm the highlighted project, or cancel.
     fn handle_switcher_key(&mut self, key: KeyEvent) {
-        let Some(switcher) = self.switcher.as_ref() else {
+        let Some(switcher) = self.switcher() else {
             return;
         };
         let count = switcher.projects.len();
         let selected = switcher.selected;
         match key.code {
-            KeyCode::Esc => self.switcher = None,
+            KeyCode::Esc => self.overlay = None,
             KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(switcher) = self.switcher.as_mut()
+                if let Some(switcher) = self.switcher_mut()
                     && count > 0
                 {
                     switcher.selected = (selected + 1) % count;
@@ -1544,7 +2033,7 @@ impl App {
                 self.update_switcher_preview();
             },
             KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(switcher) = self.switcher.as_mut()
+                if let Some(switcher) = self.switcher_mut()
                     && count > 0
                 {
                     switcher.selected = if selected == 0 {
@@ -1578,8 +2067,7 @@ impl App {
     /// place, otherwise surfaces the failure and keeps the overlay open.
     fn switch_to(&mut self, index: usize) {
         let Some(project) = self
-            .switcher
-            .as_ref()
+            .switcher()
             .and_then(|switcher| switcher.projects.get(index))
             .cloned()
         else {
@@ -1588,10 +2076,10 @@ impl App {
         match self.registry.workspace(project.config()) {
             Ok(config) => {
                 self.begin_switch(config, project.config().clone());
-                self.switcher = None;
+                self.overlay = None;
             },
             Err(err) if self.registry.workspace_exists(project.config()) => {
-                if let Some(switcher) = self.switcher.as_mut() {
+                if let Some(switcher) = self.switcher_mut() {
                     switcher.selected = index;
                     switcher.error = Some(err.to_string());
                 }
@@ -1605,7 +2093,7 @@ impl App {
     /// Begins switching to `config`: kills the current children and defers the
     /// load until they all report exit, so the replacement processes never race
     /// the old ones for ports or other resources. Loads at once when nothing is
-    /// running. The children are marked stopping so their exits do not restart.
+    /// running. The children receive stop intent so their exits do not restart.
     fn begin_switch(&mut self, config: WorkspaceConfig, config_path: PathBuf) {
         let live: HashSet<PaneId> = self
             .panes
@@ -1618,10 +2106,12 @@ impl App {
             return;
         }
         for pane in &live {
-            if let Some(target) = self.panes.get_mut(pane) {
-                target.stopping = true;
-                if let Some(handle) = target.handle.as_mut() {
-                    let _ = handle.kill();
+            if let Some(target) = self.panes.get_mut(pane)
+                && let Some(handle) = target.handle.as_mut()
+            {
+                target.exit_intent = target.exit_intent.request_stop();
+                if handle.kill().is_ok() {
+                    target.exit_intent = target.exit_intent.stop_delivered();
                 }
             }
         }
@@ -1706,11 +2196,9 @@ impl App {
         let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
         if alive {
             if let Some(target) = self.panes.get_mut(&pane) {
-                target.force_restart = true;
-                // Supersede a still-pending stop so the newer restart wins when
-                // the exit lands: handle_exit checks stopping before force_restart.
-                target.stopping = false;
-                target.paused = false;
+                // Supersede a still-pending stop so the newer restart intent wins
+                // when the exit lands.
+                target.exit_intent = target.exit_intent.request_restart();
                 if let Some(handle) = target.handle.as_mut() {
                     let _ = handle.kill();
                 }
@@ -1720,18 +2208,46 @@ impl App {
         }
     }
 
-    /// Stops the selected process without respawning it.
+    /// Stops the selected process without respawning it. Repeated requests reuse
+    /// a successfully delivered request, while failed delivery remains retryable.
     fn stop_selected(&mut self) {
         let Some(pane) = self.selected_pane() else {
             return;
         };
+        if self.panes.get(&pane).is_some_and(|target| {
+            target.handle.is_some() && !target.exit_intent.accepts_stop_request()
+        }) {
+            return;
+        }
         let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
         if alive {
+            let graceful = self
+                .workspace
+                .process(pane)
+                .is_some_and(|process| *process.kind() == ProcessKind::Command);
+            let generation = self.generations.get(&pane).copied();
+            let mut awaiting_grace = false;
             if let Some(target) = self.panes.get_mut(&pane) {
-                target.stopping = true;
+                target.exit_intent = target.exit_intent.request_stop();
                 if let Some(handle) = target.handle.as_mut() {
-                    let _ = handle.kill();
+                    let stop_requested = if graceful {
+                        match handle.terminate(COMMAND_STOP_GRACE) {
+                            Ok(()) => {
+                                awaiting_grace = true;
+                                true
+                            },
+                            Err(_) => handle.kill().is_ok(),
+                        }
+                    } else {
+                        handle.kill().is_ok()
+                    };
+                    if stop_requested {
+                        target.exit_intent = target.exit_intent.stop_delivered();
+                    }
                 }
+            }
+            if awaiting_grace && let Some(generation) = generation {
+                self.schedule_force_stop(pane, generation);
             }
         } else {
             // No child will exit here; cancel the pending respawn and stop now.
@@ -1788,35 +2304,6 @@ fn completion_worker(
     }
 }
 
-/// Loads `project`'s processes for the switcher preview, or an empty list when
-/// there is no project or its config cannot be read.
-fn switcher_preview(
-    registry: &dyn ProjectRegistry,
-    project: Option<&Project>,
-) -> Vec<(ProcessKind, String)> {
-    project
-        .and_then(|project| registry.workspace(project.config()).ok())
-        .map(|config| config_preview(&config))
-        .unwrap_or_default()
-}
-
-/// A project's processes as (kind, name) pairs, in section order, for the
-/// switcher's preview of the highlighted project.
-fn config_preview(config: &WorkspaceConfig) -> Vec<(ProcessKind, String)> {
-    [
-        (ProcessKind::Agent, config.agents()),
-        (ProcessKind::Terminal, config.terminals()),
-        (ProcessKind::Command, config.commands()),
-    ]
-    .into_iter()
-    .flat_map(|(kind, specs)| {
-        specs
-            .iter()
-            .map(move |spec| (kind, spec.name().as_ref().to_string()))
-    })
-    .collect()
-}
-
 /// Identifies a process's config spec by its full resolved identity: the same
 /// tuple reconciliation matches on, including the effective autostart. Matching
 /// on the resolved autostart is what distinguishes a spec from an otherwise
@@ -1868,53 +2355,50 @@ impl SpecMatch {
             && *process.restart() == self.restart
             && *process.autostart() == self.autostart
     }
-}
 
-/// Returns `config` with the autostart of the `occurrence`-th spec matching
-/// `target` set to `autostart`, and whether such a spec existed. A unique
-/// identity has only occurrence 0; identical specs are numbered so the row the
-/// user selected maps to the same-numbered spec. When the occurrence is absent
-/// (the process has no live config entry) the config is returned unchanged and
-/// the caller must not treat the change as persisted.
-fn set_spec_autostart(
-    config: WorkspaceConfig,
-    target: &SpecMatch,
-    occurrence: usize,
-    autostart: Option<bool>,
-) -> (WorkspaceConfig, bool) {
-    let mut seen = 0;
-    let mut edited = false;
-    let mut apply = |specs: &[ProcessSpec]| -> Vec<ProcessSpec> {
-        specs
-            .iter()
-            .map(|spec| {
-                if target.matches(spec) {
-                    let hit = seen == occurrence;
-                    seen += 1;
-                    if hit {
-                        edited = true;
-                        return spec.clone().with_autostart(autostart);
+    /// Returns `config` with the autostart of the `occurrence`-th matching spec
+    /// set to `autostart`, plus whether that spec existed. Identical specs are
+    /// numbered so the selected live row maps back to the same config row.
+    fn with_autostart(
+        &self,
+        config: WorkspaceConfig,
+        occurrence: usize,
+        autostart: Option<bool>,
+    ) -> (WorkspaceConfig, bool) {
+        let mut seen = 0;
+        let mut edited = false;
+        let mut apply = |specs: &[ProcessSpec]| -> Vec<ProcessSpec> {
+            specs
+                .iter()
+                .map(|spec| {
+                    if self.matches(spec) {
+                        let hit = seen == occurrence;
+                        seen += 1;
+                        if hit {
+                            edited = true;
+                            return spec.clone().with_autostart(autostart);
+                        }
                     }
-                }
-                spec.clone()
-            })
-            .collect()
-    };
-    let config = match target.kind {
-        ProcessKind::Agent => {
-            let specs = apply(config.agents());
-            config.with_agents(specs)
-        },
-        ProcessKind::Terminal => {
-            let specs = apply(config.terminals());
-            config.with_terminals(specs)
-        },
-        ProcessKind::Command => {
-            let specs = apply(config.commands());
-            config.with_commands(specs)
-        },
-    };
-    (config, edited)
+                    spec.clone()
+                })
+                .collect()
+        };
+        let config = match self.kind {
+            ProcessKind::Agent => {
+                let specs = apply(config.agents());
+                config.with_agents(specs)
+            },
+            ProcessKind::Terminal => {
+                let specs = apply(config.terminals());
+                config.with_terminals(specs)
+            },
+            ProcessKind::Command => {
+                let specs = apply(config.commands());
+                config.with_commands(specs)
+            },
+        };
+        (config, edited)
+    }
 }
 
 /// A display name for a project taken from its config path: the parent
@@ -1991,12 +2475,15 @@ mod tests {
     use crossbeam_channel::bounded;
 
     use super::*;
-    use crate::domain::{
-        config::{ConfigError, ProcessSpec},
-        port::OutputSink,
-        process::{Process, ProcessKind, RestartPolicy},
-        pty::PtyError,
-        value::{ProcessName, ProjectName},
+    use crate::{
+        adapter::tui::activity::OUTPUT_IDLE_TIMEOUT,
+        domain::{
+            config::{ConfigError, ProcessSpec},
+            port::OutputSink,
+            process::{Process, ProcessKind, RestartPolicy},
+            pty::PtyError,
+            value::{ProcessName, ProjectName},
+        },
     };
 
     /// A completer that suggests nothing.
@@ -2250,6 +2737,138 @@ mod tests {
         }
     }
 
+    /// Counts graceful termination requests separately from hard kills.
+    #[derive(Default)]
+    struct StopSignals {
+        terminates: AtomicUsize,
+        kills: AtomicUsize,
+    }
+
+    /// A runner whose handles record which stop mechanism the app selected.
+    struct StopSignalRunner {
+        signals: Arc<StopSignals>,
+    }
+
+    impl ProcessRunner for StopSignalRunner {
+        fn spawn(
+            &self,
+            _request: SpawnRequest,
+            _sink: Box<dyn OutputSink>,
+        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+            Ok(Box::new(StopSignalHandle {
+                signals: self.signals.clone(),
+            }))
+        }
+    }
+
+    /// A handle that distinguishes graceful termination from a hard kill.
+    struct StopSignalHandle {
+        signals: Arc<StopSignals>,
+    }
+
+    impl ProcessHandle for StopSignalHandle {
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn pause(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn terminate(&mut self, _grace: Duration) -> Result<(), PtyError> {
+            self.signals.terminates.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn kill(&mut self) -> Result<(), PtyError> {
+            self.signals.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Counts stop attempts for a handle whose first hard kill fails.
+    #[derive(Default)]
+    struct RetryStopSignals {
+        terminates: AtomicUsize,
+        kills: AtomicUsize,
+    }
+
+    /// Configured result of graceful termination in retry tests.
+    #[derive(Clone, Copy)]
+    enum TerminateOutcome {
+        Succeeds,
+        Fails,
+    }
+
+    /// A runner used to verify that failed stop delivery remains retryable.
+    struct RetryStopRunner {
+        signals: Arc<RetryStopSignals>,
+        terminate_outcome: TerminateOutcome,
+    }
+
+    impl ProcessRunner for RetryStopRunner {
+        fn spawn(
+            &self,
+            _request: SpawnRequest,
+            _sink: Box<dyn OutputSink>,
+        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+            Ok(Box::new(RetryStopHandle {
+                signals: self.signals.clone(),
+                terminate_outcome: self.terminate_outcome,
+            }))
+        }
+    }
+
+    /// A handle whose graceful termination always fails and whose hard kill
+    /// succeeds on the second attempt.
+    struct RetryStopHandle {
+        signals: Arc<RetryStopSignals>,
+        terminate_outcome: TerminateOutcome,
+    }
+
+    impl ProcessHandle for RetryStopHandle {
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn pause(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn terminate(&mut self, _grace: Duration) -> Result<(), PtyError> {
+            self.signals.terminates.fetch_add(1, Ordering::SeqCst);
+            match self.terminate_outcome {
+                TerminateOutcome::Succeeds => Ok(()),
+                TerminateOutcome::Fails => Err(PtyError::Unsupported("signal failed".to_string())),
+            }
+        }
+
+        fn kill(&mut self) -> Result<(), PtyError> {
+            let attempt = self.signals.kills.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                Err(PtyError::Unsupported("signal failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     /// A runner whose handles fail every pause and resume, modelling a signal
     /// that cannot be delivered.
     struct PauseFailRunner;
@@ -2316,6 +2935,71 @@ mod tests {
         app
     }
 
+    /// Builds a live app of `kind` whose handle records graceful and hard stops.
+    fn app_with_stop_signals(kind: ProcessKind) -> (App, Arc<StopSignals>) {
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(kind)
+                    .command(Some(CommandLine::try_new("true").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        (app, signals)
+    }
+
+    /// Builds a live app whose first hard-stop delivery fails and second succeeds.
+    fn app_with_retrying_stop_signals(
+        kind: ProcessKind,
+        terminate_outcome: TerminateOutcome,
+        restart: RestartPolicy,
+    ) -> (App, Arc<RetryStopSignals>) {
+        let signals = Arc::new(RetryStopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(kind)
+                    .command(Some(CommandLine::try_new("true").unwrap()))
+                    .restart(restart)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(RetryStopRunner {
+                signals: signals.clone(),
+                terminate_outcome,
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        (app, signals)
+    }
+
     /// Builds and starts an app whose runner always fails to spawn.
     fn failing_app(restart: RestartPolicy) -> App {
         let (sender, _receiver) = bounded(16);
@@ -2347,7 +3031,7 @@ mod tests {
         *app.workspace.process(PaneId::new(PANE)).unwrap().state()
     }
 
-    fn current_gen(app: &App) -> u64 {
+    fn current_gen(app: &App) -> SpawnGeneration {
         *app.generations.get(&PaneId::new(PANE)).unwrap()
     }
 
@@ -2363,6 +3047,384 @@ mod tests {
         let pane = app.panes.get(&PaneId::new(PANE)).expect("parser retained");
         assert!(pane.handle.is_none(), "live handle dropped");
         assert_eq!(state(&app), ProcessState::Crashed);
+    }
+
+    /// A notifier that records delivered and closed notification identifiers.
+    #[derive(Clone, Default)]
+    struct RecordingNotifier {
+        count: Rc<RefCell<usize>>,
+        identifiers: Rc<RefCell<Vec<Option<NotificationId>>>>,
+        scopes: Rc<RefCell<Vec<NotificationScope>>>,
+        bodies: Rc<RefCell<Vec<Option<String>>>>,
+        closed: Rc<RefCell<Vec<(PaneId, NotificationId)>>>,
+    }
+
+    impl RecordingNotifier {
+        /// Number of notifications delivered.
+        fn count(&self) -> usize {
+            *self.count.borrow()
+        }
+
+        /// Identifiers carried by delivered notifications.
+        fn identifiers(&self) -> Vec<Option<NotificationId>> {
+            self.identifiers.borrow().clone()
+        }
+
+        /// Terminal-lifetime scopes carried by delivered notifications.
+        fn scopes(&self) -> Vec<NotificationScope> {
+            self.scopes.borrow().clone()
+        }
+
+        /// Bodies carried by delivered notifications.
+        fn bodies(&self) -> Vec<Option<String>> {
+            self.bodies.borrow().clone()
+        }
+
+        /// Identifiers passed to close requests.
+        fn closed(&self) -> Vec<(PaneId, NotificationId)> {
+            self.closed.borrow().clone()
+        }
+    }
+
+    impl Notifier for RecordingNotifier {
+        fn notify(&self, notification: &Notification) {
+            *self.count.borrow_mut() += 1;
+            self.identifiers
+                .borrow_mut()
+                .push(notification.identifier().clone());
+            self.scopes.borrow_mut().push(*notification.scope());
+            self.bodies.borrow_mut().push(notification.body().clone());
+        }
+
+        fn close(&self, pane: PaneId, _scope: NotificationScope, identifier: &NotificationId) {
+            self.closed.borrow_mut().push((pane, identifier.clone()));
+        }
+    }
+
+    fn activity(app: &App) -> ActivityState {
+        *app.workspace.process(PaneId::new(PANE)).unwrap().activity()
+    }
+
+    /// Whether a confirmation dialog is the active overlay.
+    fn confirmation_open(app: &App) -> bool {
+        matches!(
+            &app.overlay,
+            Some(Overlay::ConfirmOverwrite { .. } | Overlay::ConfirmRemoval { .. })
+        )
+    }
+
+    /// Whether the full-keymap help is the active overlay.
+    fn help_open(app: &App) -> bool {
+        matches!(&app.overlay, Some(Overlay::Help))
+    }
+
+    /// Turns desktop notifications on in-memory, as a loaded settings file would.
+    fn enable_desktop(app: &mut App) {
+        app.set_settings_store(Box::new(FakeSettingsStore::default()));
+    }
+
+    /// A settings store that loads desktop-on and records what it was asked to save.
+    #[derive(Clone, Default)]
+    struct FakeSettingsStore {
+        saved: Rc<RefCell<Option<bool>>>,
+    }
+
+    impl SettingsStore for FakeSettingsStore {
+        fn load(&self) -> Result<Settings, ConfigError> {
+            Ok(Settings::builder().desktop_notifications(true).build())
+        }
+
+        fn save(&self, settings: &Settings) -> Result<(), ConfigError> {
+            *self.saved.borrow_mut() = Some(*settings.desktop_notifications());
+            Ok(())
+        }
+    }
+
+    /// A store that simulates an existing malformed settings file and records
+    /// whether the app tried to replace it.
+    #[derive(Clone, Default)]
+    struct MalformedSettingsStore {
+        save_attempted: Rc<RefCell<bool>>,
+    }
+
+    impl SettingsStore for MalformedSettingsStore {
+        fn load(&self) -> Result<Settings, ConfigError> {
+            let error = serde_yaml_ng::from_str::<Settings>("desktop_notifications: [")
+                .expect_err("fixture must remain malformed");
+            Err(ConfigError::Parse(error))
+        }
+
+        fn save(&self, _settings: &Settings) -> Result<(), ConfigError> {
+            *self.save_attempted.borrow_mut() = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_marks_the_process_working() {
+        let mut app = app_with(RestartPolicy::Never);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"compiling...".to_vec()),
+        );
+        assert_eq!(activity(&app), ActivityState::Working);
+    }
+
+    #[test]
+    fn ordinary_output_returns_to_idle_after_becoming_quiet() {
+        let mut app = app_with(RestartPolicy::Never);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"prompt> ".to_vec()),
+        );
+        let deadline = app
+            .next_activity_deadline()
+            .expect("ordinary output schedules an idle transition");
+
+        assert!(app.expire_quiet_activity(deadline));
+        assert_eq!(activity(&app), ActivityState::Idle);
+        assert!(app.next_activity_deadline().is_none());
+    }
+
+    #[test]
+    fn explicit_progress_stays_working_until_a_protocol_update() {
+        let mut app = app_with(RestartPolicy::Never);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b]9;4;1;40\x07".to_vec()),
+        );
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"still working".to_vec()),
+        );
+
+        assert!(app.next_activity_deadline().is_none());
+        assert!(!app.expire_quiet_activity(Instant::now() + OUTPUT_IDLE_TIMEOUT));
+        assert_eq!(activity(&app), ActivityState::Working);
+    }
+
+    #[test]
+    fn a_bell_marks_the_process_awaiting_input_and_notifies() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+
+        assert_eq!(activity(&app), ActivityState::AwaitingInput);
+        assert!(app.notice.is_some(), "an in-app notice is raised");
+        assert_eq!(notifier.count(), 1, "the desktop notifier is called");
+        assert_eq!(notifier.bodies(), [Some(AWAITING_INPUT_NOTICE.to_string())]);
+    }
+
+    #[test]
+    fn a_title_only_notification_has_no_duplicate_desktop_body() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b]99;;Hello world\x1b\\".to_vec()),
+        );
+
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Hello world"))
+        );
+        assert_eq!(notifier.bodies(), [None]);
+    }
+
+    #[test]
+    fn an_st_terminated_notification_keeps_the_awaiting_marker() {
+        // kitty/other OSC notifications close with ST (`ESC \`); the terminator
+        // must not flip the pane back to working and lose its attention marker.
+        let mut app = app_with(RestartPolicy::Never);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b]777;notify;agent;done\x1b\\".to_vec()),
+        );
+        assert_eq!(activity(&app), ActivityState::AwaitingInput);
+    }
+
+    #[test]
+    fn a_burst_of_bells_is_throttled_to_one_notification() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+
+        for _ in 0..5 {
+            app.handle_output(
+                PaneId::new(PANE),
+                current_gen(&app),
+                ProcessOutput::Chunk(b"\x07".to_vec()),
+            );
+        }
+        assert_eq!(notifier.count(), 1, "a bell burst collapses to one alert");
+    }
+
+    #[test]
+    fn kitty_update_and_close_identifiers_reach_the_notifier() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(
+                b"\x1b]99;i=build;first\x1b\\\x1b]99;i=build;second\x1b\\\x1b]99;i=build:p=close;\x1b\\"
+                    .to_vec(),
+            ),
+        );
+
+        assert_eq!(
+            notifier
+                .identifiers()
+                .into_iter()
+                .flatten()
+                .map(|identifier| identifier.to_string())
+                .collect::<Vec<_>>(),
+            ["build", "build"]
+        );
+        assert_eq!(
+            notifier
+                .closed()
+                .into_iter()
+                .map(|(pane, identifier)| (pane, identifier.to_string()))
+                .collect::<Vec<_>>(),
+            [(PaneId::new(PANE), "build".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_reused_pane_gets_a_new_notification_scope_after_project_switch() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b]99;i=build;old project\x1b\\".to_vec()),
+        );
+        app.load_project(
+            one_agent_config("new project"),
+            PathBuf::from("new-project.yml"),
+        );
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b]99;i=build;new project\x1b\\".to_vec()),
+        );
+
+        let scopes = notifier.scopes();
+        assert_eq!(scopes.len(), 2);
+        assert_ne!(scopes[0], scopes[1]);
+    }
+
+    #[test]
+    fn desktop_off_suppresses_the_notification_but_not_the_notice() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        app.settings = SettingsState::Loaded {
+            settings: Settings::builder().desktop_notifications(false).build(),
+            store: Box::new(FakeSettingsStore::default()),
+        };
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+
+        assert!(app.notice.is_some(), "the in-app notice still shows");
+        assert_eq!(
+            notifier.count(),
+            0,
+            "no desktop notification while the setting is off"
+        );
+    }
+
+    #[test]
+    fn toggling_notifications_flips_and_persists_the_setting() {
+        let mut app = app_with(RestartPolicy::Never);
+        let store = FakeSettingsStore::default();
+        app.set_settings_store(Box::new(store.clone()));
+        assert!(app.desktop_notifications_enabled(), "loads desktop-on");
+
+        press(&mut app, KeyCode::Char('N'));
+
+        assert!(
+            !app.desktop_notifications_enabled(),
+            "the toggle flips the live setting"
+        );
+        assert_eq!(
+            *store.saved.borrow(),
+            Some(false),
+            "the new value is persisted"
+        );
+    }
+
+    #[test]
+    fn a_settings_load_error_blocks_the_toggle_without_saving() {
+        let mut app = app_with(RestartPolicy::Never);
+        let store = MalformedSettingsStore::default();
+        app.set_settings_store(Box::new(store.clone()));
+        assert!(matches!(app.settings, SettingsState::LoadFailed(_)));
+
+        press(&mut app, KeyCode::Char('N'));
+
+        assert!(
+            !*store.save_attempted.borrow(),
+            "the malformed file must not be replaced"
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains(SETTINGS_LOAD_ERROR)),
+            "the load failure is reported when the toggle is refused"
+        );
+    }
+
+    #[test]
+    fn a_restart_clears_the_awaiting_input_marker() {
+        let mut app = app_with(RestartPolicy::Always);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+        assert_eq!(activity(&app), ActivityState::AwaitingInput);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Exited(ExitOutcome::Failed),
+        );
+        assert_eq!(state(&app), ProcessState::Restarting);
+        assert_eq!(
+            activity(&app),
+            ActivityState::Idle,
+            "a process in restart backoff shows no attention marker"
+        );
     }
 
     #[test]
@@ -2453,7 +3515,6 @@ mod tests {
             ProcessState::Running,
             "a failed pause signal must not flip the state"
         );
-        assert!(!app.panes.get(&PaneId::new(PANE)).unwrap().paused);
     }
 
     #[test]
@@ -2468,6 +3529,134 @@ mod tests {
 
         assert_eq!(state(&app), ProcessState::Exited);
         assert!(app.panes.get(&PaneId::new(PANE)).unwrap().handle.is_none());
+    }
+
+    #[test]
+    fn repeated_manual_command_stop_reuses_one_graceful_escalation() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
+        app.stop_selected();
+        app.stop_selected();
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+
+        app.handle_force_stop(PaneId::new(PANE), current_gen(&app));
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_command_stop_can_be_retried_after_both_signals_fail() {
+        let (mut app, signals) = app_with_retrying_stop_signals(
+            ProcessKind::Command,
+            TerminateOutcome::Fails,
+            RestartPolicy::Never,
+        );
+
+        app.stop_selected();
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().exit_intent,
+            ExitIntent::StopRetryable
+        );
+
+        app.stop_selected();
+        app.stop_selected();
+
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().exit_intent,
+            ExitIntent::StopInFlight
+        );
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 2);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_terminal_stop_can_be_retried_after_kill_fails() {
+        let (mut app, signals) = app_with_retrying_stop_signals(
+            ProcessKind::Terminal,
+            TerminateOutcome::Fails,
+            RestartPolicy::Never,
+        );
+
+        app.stop_selected();
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().exit_intent,
+            ExitIntent::StopRetryable
+        );
+
+        app.stop_selected();
+        app.stop_selected();
+
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().exit_intent,
+            ExitIntent::StopInFlight
+        );
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_command_stop_can_be_retried_after_escalation_fails() {
+        let (mut app, signals) = app_with_retrying_stop_signals(
+            ProcessKind::Command,
+            TerminateOutcome::Succeeds,
+            RestartPolicy::Never,
+        );
+        let pane = PaneId::new(PANE);
+
+        app.stop_selected();
+        app.handle_force_stop(pane, current_gen(&app));
+        assert_eq!(
+            app.panes.get(&pane).unwrap().exit_intent,
+            ExitIntent::StopRetryable
+        );
+
+        app.stop_selected();
+        app.handle_force_stop(pane, current_gen(&app));
+
+        assert_eq!(
+            app.panes.get(&pane).unwrap().exit_intent,
+            ExitIntent::StopInFlight
+        );
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 2);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_stop_delivery_still_suppresses_restart_when_the_child_exits() {
+        let (mut app, _signals) = app_with_retrying_stop_signals(
+            ProcessKind::Command,
+            TerminateOutcome::Fails,
+            RestartPolicy::Always,
+        );
+        let pane = PaneId::new(PANE);
+
+        app.stop_selected();
+        app.handle_output(
+            pane,
+            current_gen(&app),
+            ProcessOutput::Exited(ExitOutcome::Failed),
+        );
+
+        assert_eq!(state(&app), ProcessState::Exited);
+        assert!(app.panes.get(&pane).unwrap().handle.is_none());
+    }
+
+    #[test]
+    fn a_manual_terminal_stop_remains_a_hard_kill() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Terminal);
+        app.stop_selected();
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_project_switch_hard_kills_commands() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
+        app.begin_switch(empty_workspace_config(), PathBuf::from("next.yml"));
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3340,8 +4529,9 @@ mod tests {
         assert_eq!(app.project_cursor, Some(0));
 
         press(&mut app, KeyCode::Char('x')); // must not touch the active process
-        assert!(
-            !app.panes.get(&pane).unwrap().stopping,
+        assert_eq!(
+            app.panes.get(&pane).unwrap().exit_intent,
+            ExitIntent::FollowPolicy,
             "x on a project row leaves the active process running"
         );
     }
@@ -3358,7 +4548,7 @@ mod tests {
         assert_eq!(app.project_cursor, Some(0));
 
         press(&mut app, KeyCode::Char('d'));
-        assert!(app.confirm.is_some(), "d asks before removing");
+        assert!(confirmation_open(&app), "d asks before removing");
         assert!(
             recorder.projects.borrow().is_none(),
             "nothing is persisted until the confirmation is accepted"
@@ -3387,14 +4577,18 @@ mod tests {
         // is now a collapsed other-row, synthesized because it was never saved.
         app.current_config = Some(PathBuf::from("/saved/muster.yml"));
         app.refresh_projects();
-        assert!(app.launched_synthetic, "the launched config is unsaved");
+        assert_eq!(
+            app.launched_project_membership,
+            LaunchedProjectMembership::Synthetic,
+            "the launched config is unsaved"
+        );
 
         press(&mut app, KeyCode::Char('j')); // onto the synthetic launched row
         assert_eq!(app.project_cursor, Some(0));
 
         press(&mut app, KeyCode::Char('d'));
         assert!(
-            app.confirm.is_none(),
+            !confirmation_open(&app),
             "no removal is offered for an unsaved project"
         );
         assert!(
@@ -3658,10 +4852,10 @@ mod tests {
         let mut app = app_with(RestartPolicy::Never);
 
         press(&mut app, KeyCode::Char('?'));
-        assert!(app.help_open, "? opens the keymap overlay");
+        assert!(help_open(&app), "? opens the keymap overlay");
 
         press(&mut app, KeyCode::Char('q'));
-        assert!(!app.help_open, "any key closes the overlay");
+        assert!(!help_open(&app), "any key closes the overlay");
         assert!(
             app.is_running(),
             "the dismissing key is swallowed, not acted on"
@@ -3693,7 +4887,7 @@ mod tests {
         type_text(&mut app, "My Setup");
         press(&mut app, KeyCode::Enter);
 
-        assert!(app.form.is_none(), "the form closes on success");
+        assert!(app.form().is_none(), "the form closes on success");
         let saved = recorder
             .projects
             .borrow()
@@ -3702,6 +4896,18 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name().as_ref(), "My Setup");
         assert_eq!(saved[0].config(), &PathBuf::from("/here/muster.yml"));
+    }
+
+    #[test]
+    fn canceling_a_switcher_form_restores_the_switcher() {
+        let (mut app, _) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.open_switcher();
+        press(&mut app, KeyCode::Char('n'));
+        assert!(matches!(&app.overlay, Some(Overlay::Form(_))));
+
+        press(&mut app, KeyCode::Esc);
+
+        assert!(matches!(&app.overlay, Some(Overlay::Switcher(_))));
     }
 
     #[test]
@@ -3818,7 +5024,10 @@ mod tests {
         app.new_project(&["proj".to_string(), "/taken".to_string()]);
 
         // A confirmation is shown; nothing is written yet.
-        assert!(app.confirm.is_some(), "an overwrite asks for confirmation");
+        assert!(
+            confirmation_open(&app),
+            "an overwrite asks for confirmation"
+        );
         assert_eq!(
             recorder.workspaces.borrow().len(),
             1,
@@ -3831,7 +5040,7 @@ mod tests {
 
         // Confirming overwrites the config and registers the project.
         press(&mut app, KeyCode::Enter);
-        assert!(app.confirm.is_none(), "confirming closes the dialog");
+        assert!(!confirmation_open(&app), "confirming closes the dialog");
         assert_eq!(
             recorder.projects.borrow().as_ref().unwrap()[0]
                 .name()
@@ -3861,7 +5070,11 @@ mod tests {
 
         press(&mut app, KeyCode::Char('n'));
 
-        assert!(app.confirm.is_none(), "declining closes the dialog");
+        assert!(!confirmation_open(&app), "declining closes the dialog");
+        assert!(
+            app.form().is_some(),
+            "declining restores the populated form"
+        );
         assert!(
             recorder.projects.borrow().is_none(),
             "nothing is registered"
@@ -3889,15 +5102,14 @@ mod tests {
         app.open_switcher();
         app.open_new_project_form();
         app.new_project(&["proj".to_string(), "/taken".to_string()]);
-        assert!(app.confirm.is_some(), "an overwrite asks first");
+        assert!(confirmation_open(&app), "an overwrite asks first");
 
         // Confirm; the workspace write then fails.
         press(&mut app, KeyCode::Enter);
 
-        assert!(app.confirm.is_none(), "the confirmation closes");
+        assert!(!confirmation_open(&app), "the confirmation closes");
         let form = app
-            .form
-            .as_ref()
+            .form()
             .expect("the form is kept so the user can retry without refilling it");
         assert!(form.error.is_some(), "the failure is shown on the form");
     }
@@ -3936,7 +5148,7 @@ mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
 
-        let folder = &app.form.as_ref().unwrap().form.fields()[1];
+        let folder = &app.form().unwrap().form.fields()[1];
         assert_eq!(
             folder.highlighted(),
             2,
@@ -3980,7 +5192,7 @@ mod tests {
         press(&mut app, KeyCode::Down); // highlight "beta"
         press(&mut app, KeyCode::Enter); // accept it
 
-        let folder = &app.form.as_ref().unwrap().form.fields()[1];
+        let folder = &app.form().unwrap().form.fields()[1];
         assert_eq!(
             folder.value(),
             "beta",
@@ -3994,7 +5206,7 @@ mod tests {
         // With the dropdown closed, Enter now submits and creates the project.
         press(&mut app, KeyCode::Enter);
         assert!(
-            app.form.is_none(),
+            app.form().is_none(),
             "Enter submits instead of accepting a child"
         );
     }
@@ -4033,7 +5245,7 @@ mod tests {
         };
         app.handle_completions(generation, candidates);
 
-        let folder = &app.form.as_ref().unwrap().form.fields()[1];
+        let folder = &app.form().unwrap().form.fields()[1];
         assert_eq!(
             folder.candidates().to_vec(),
             vec!["alpha".to_string(), "beta".to_string()],
@@ -4061,9 +5273,9 @@ mod tests {
         type_text(&mut app, "x"); // an edit bumps to generation 2
 
         // A late reply tagged with the earlier generation must not repopulate.
-        app.handle_completions(1, vec!["stale".to_string()]);
+        app.handle_completions(CompletionGeneration::new(1), vec!["stale".to_string()]);
 
-        let folder = &app.form.as_ref().unwrap().form.fields()[1];
+        let folder = &app.form().unwrap().form.fields()[1];
         assert!(
             !folder
                 .candidates()
@@ -4095,11 +5307,12 @@ mod tests {
         type_text(&mut app, "proj"); // name field
         press(&mut app, KeyCode::Tab); // focus folder -> generation 1
         // Simulate the worker's generation-1 reply populating the dropdown.
-        app.handle_completions(1, vec!["alpha".to_string(), "beta".to_string()]);
+        app.handle_completions(CompletionGeneration::new(1), vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+        ]);
         assert_eq!(
-            app.form.as_ref().unwrap().form.fields()[1]
-                .candidates()
-                .len(),
+            app.form().unwrap().form.fields()[1].candidates().len(),
             2,
             "the dropdown is populated before the edit"
         );
@@ -4107,11 +5320,9 @@ mod tests {
         // Editing the path must immediately drop the now-stale candidates rather
         // than leave them acceptable against a value they no longer match.
         type_text(&mut app, "z");
-        let edited = app.form.as_ref().unwrap().form.fields()[1].value();
+        let edited = app.form().unwrap().form.fields()[1].value();
         assert!(
-            app.form.as_ref().unwrap().form.fields()[1]
-                .candidates()
-                .is_empty(),
+            app.form().unwrap().form.fields()[1].candidates().is_empty(),
             "the stale dropdown closes the instant the value changes"
         );
         assert!(edited.ends_with('z'), "the typed character survives");
@@ -4120,7 +5331,7 @@ mod tests {
         // replacing it with a stale candidate.
         press(&mut app, KeyCode::Enter);
         assert!(
-            app.form.is_none(),
+            app.form().is_none(),
             "Enter submits rather than accepting a stale candidate"
         );
     }
@@ -4161,7 +5372,7 @@ mod tests {
             "an unreadable registry is never overwritten"
         );
         assert!(
-            app.form.as_ref().unwrap().error.is_some(),
+            app.form().unwrap().error.is_some(),
             "the read failure is reported"
         );
     }
@@ -4273,7 +5484,7 @@ mod tests {
             "no config file is written when the write fails"
         );
         assert!(
-            app.form.as_ref().unwrap().error.is_some(),
+            app.form().unwrap().error.is_some(),
             "the write failure is reported"
         );
     }
@@ -4295,7 +5506,7 @@ mod tests {
         ]);
 
         assert!(
-            app.form.as_ref().unwrap().error.is_some(),
+            app.form().unwrap().error.is_some(),
             "the write failure is reported, not silently swallowed"
         );
     }
@@ -4318,7 +5529,7 @@ mod tests {
         app.remove_selected_project();
 
         assert!(
-            app.switcher.as_ref().unwrap().error.is_some(),
+            app.switcher().unwrap().error.is_some(),
             "the removal failure is reported in the switcher"
         );
         assert_eq!(
@@ -4338,7 +5549,7 @@ mod tests {
 
         app.open_switcher();
 
-        let switcher = app.switcher.as_ref().expect("switcher is open");
+        let switcher = app.switcher().expect("switcher is open");
         assert_eq!(switcher.projects.len(), 2);
         assert_eq!(switcher.selected, 1, "the current project is preselected");
     }
@@ -4359,7 +5570,7 @@ mod tests {
 
         app.open_switcher();
 
-        let switcher = app.switcher.as_ref().expect("switcher is open");
+        let switcher = app.switcher().expect("switcher is open");
         assert_eq!(
             switcher.selected, 1,
             "the current project is recognized despite differing path forms"
@@ -4394,7 +5605,7 @@ mod tests {
         // The overlay closes, but the load waits for the old child to exit so the
         // new project never contends for its resources.
         assert!(
-            app.switcher.is_none(),
+            app.switcher().is_none(),
             "a requested switch closes the overlay"
         );
         assert_eq!(
@@ -4451,7 +5662,7 @@ mod tests {
         app.open_switcher();
         app.handle_switcher_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert!(app.switcher.is_none());
+        assert!(app.switcher().is_none());
         assert_eq!(
             app.workspace.processes()[0].name().as_ref(),
             "p",
@@ -4490,10 +5701,7 @@ mod tests {
         app.open_switcher();
         app.handle_switcher_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        let switcher = app
-            .switcher
-            .as_ref()
-            .expect("stays open after a failed switch");
+        let switcher = app.switcher().expect("stays open after a failed switch");
         assert!(switcher.error.is_some());
         assert_eq!(
             app.workspace.processes()[0].name().as_ref(),

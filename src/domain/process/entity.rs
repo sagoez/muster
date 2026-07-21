@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{ProcessKind, ProcessState, RestartPolicy},
+    process::{ActivityState, ProcessKind, ProcessState, RestartPolicy},
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -36,6 +36,9 @@ pub struct Process {
     /// Whether this process launches automatically when its workspace loads.
     #[builder(default = true)]
     autostart: bool,
+    /// What the process appears to be doing, inferred from its terminal signals.
+    #[builder(default)]
+    activity: ActivityState,
 }
 
 impl Process {
@@ -47,6 +50,11 @@ impl Process {
     /// Sets whether this process auto-starts when its workspace loads.
     pub fn set_autostart(&mut self, autostart: bool) {
         self.autostart = autostart;
+    }
+
+    /// Updates the inferred activity of the process.
+    pub fn set_activity(&mut self, activity: ActivityState) {
+        self.activity = activity;
     }
 }
 

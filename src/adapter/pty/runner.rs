@@ -1,6 +1,14 @@
-use std::{io::Read, sync::Arc, thread, time::Duration};
+#[cfg(unix)]
+use std::io;
+use std::{
+    fmt::Display,
+    io::{Read, Write},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use portable_pty::{CommandBuilder, PtySize as PortablePtySize, native_pty_system};
 
 use crate::{
@@ -25,6 +33,9 @@ const DEFAULT_TERM: &str = "xterm-256color";
 /// Grace the waiter gives the reader to drain a child's final output before
 /// reporting exit. Bounded so a lingering descendant never blocks the report.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
+/// Poll interval used while a direct child has exited but its process group is
+/// still completing descendant cleanup.
+const PROCESS_GROUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Reported when suspend/resume is requested on a platform without job-control
 /// signals.
 #[cfg(not(unix))]
@@ -111,7 +122,9 @@ impl ProcessRunner for PortablePtyRunner {
             // only the short drain bound. The completion channel wakes this wait
             // immediately when cleanup finishes instead of delaying the exit event.
             let drain_grace = grace_rx.try_recv().unwrap_or(EXIT_DRAIN_GRACE);
-            if reader_done_rx.recv_timeout(drain_grace).is_err() {
+            if wait_for_drain(&reader_done_rx, drain_grace, || process_group_is_alive(pid))
+                == DrainStatus::TimedOut
+            {
                 let _ = terminate_group(pid, &mut waiter_killer);
                 let _ = reader_done_rx.recv();
             }
@@ -131,10 +144,73 @@ impl ProcessRunner for PortablePtyRunner {
     }
 }
 
+/// Outcome of waiting for both PTY output and descendant cleanup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrainStatus {
+    Complete,
+    TimedOut,
+}
+
+/// Waits until the PTY reader finishes and the process group is empty, bounded
+/// by `grace`. The liveness callback keeps the timing logic directly testable.
+fn wait_for_drain<F>(
+    reader_done_rx: &Receiver<()>,
+    grace: Duration,
+    mut group_is_alive: F,
+) -> DrainStatus
+where
+    F: FnMut() -> bool,
+{
+    let started = Instant::now();
+    let mut reader_done = match reader_done_rx.try_recv() {
+        Ok(()) | Err(TryRecvError::Disconnected) => true,
+        Err(TryRecvError::Empty) => false,
+    };
+    loop {
+        if reader_done && !group_is_alive() {
+            return DrainStatus::Complete;
+        }
+
+        let remaining = grace.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return DrainStatus::TimedOut;
+        }
+        let poll = remaining.min(PROCESS_GROUP_POLL_INTERVAL);
+        if reader_done {
+            thread::sleep(poll);
+            continue;
+        }
+        match reader_done_rx.recv_timeout(poll) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => reader_done = true,
+            Err(RecvTimeoutError::Timeout) => {},
+        }
+    }
+}
+
+/// Reports whether any Unix process still belongs to the spawned process
+/// group. Other platforms rely solely on PTY reader completion.
+fn process_group_is_alive(pid: Option<u32>) -> bool {
+    #[cfg(unix)]
+    {
+        let Some(pid) = pid else {
+            return false;
+        };
+        if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
+            return true;
+        }
+        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Live handle to a PTY-backed process.
 struct PtyProcessHandle {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn std::io::Write + Send>,
+    writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     grace_tx: Sender<Duration>,
     pid: Option<u32>,
@@ -217,7 +293,7 @@ fn to_portable_size(size: PtySize) -> PortablePtySize {
 }
 
 /// Maps a `portable-pty` error (any `Display` error) into a [`PtyError::System`].
-fn system_error<E: std::fmt::Display>(error: E) -> PtyError {
+fn system_error<E: Display>(error: E) -> PtyError {
     PtyError::System(error.to_string())
 }
 
@@ -265,6 +341,7 @@ fn terminate_group(
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         path::PathBuf,
         time::{Duration, Instant},
     };
@@ -277,9 +354,13 @@ mod tests {
     /// Grace used by termination tests, long enough for delayed descendant
     /// cleanup while keeping the suite quick.
     const TEST_STOP_GRACE: Duration = Duration::from_secs(3);
+    /// Minimum time the macOS waiter must preserve for descendant cleanup after
+    /// the PTY reader reports the direct shell's exit.
+    #[cfg(target_os = "macos")]
+    const DESCENDANT_CLEANUP_MIN_WAIT: Duration = Duration::from_millis(750);
     /// Shell fixture whose direct wrapper exits on TERM while a signal-resistant
     /// descendant takes longer than the ordinary PTY drain bound to finish. The
-    /// final sleep keeps the slave open while macOS delivers the cleanup marker.
+    /// final sleep models cleanup that remains active after its last log line.
     const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean; sleep 1' & trap 'exit 0' TERM; wait"#;
 
     struct ChannelSink(crossbeam_channel::Sender<ProcessOutput>);
@@ -300,6 +381,24 @@ mod tests {
                     .build(),
             )
             .build()
+    }
+
+    /// Ensures an early PTY EOF does not bypass a still-live process group.
+    #[test]
+    fn drain_waits_for_the_process_group_after_the_reader_finishes() {
+        let (tx, rx) = bounded(1);
+        tx.send(()).unwrap();
+        drop(tx);
+        let polls = Cell::new(0);
+
+        let status = wait_for_drain(&rx, OUTPUT_TIMEOUT, || {
+            let next = polls.get() + 1;
+            polls.set(next);
+            next < 3
+        });
+
+        assert_eq!(status, DrainStatus::Complete);
+        assert_eq!(polls.get(), 3);
     }
 
     #[test]
@@ -400,16 +499,29 @@ mod tests {
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
             }
         }
+        #[cfg(target_os = "macos")]
+        let termination_started = Instant::now();
         handle
             .terminate(StopSignal::Terminate, TEST_STOP_GRACE)
             .unwrap();
+        let mut exited = false;
         while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
             match output {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
-                ProcessOutput::Exited(_) => break,
+                ProcessOutput::Exited(_) => {
+                    exited = true;
+                    break;
+                },
             }
         }
 
+        assert!(exited, "the runner must report the completed cleanup");
+        #[cfg(target_os = "macos")]
+        assert!(
+            termination_started.elapsed() >= DESCENDANT_CLEANUP_MIN_WAIT,
+            "an early macOS PTY EOF must not bypass descendant cleanup"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(String::from_utf8_lossy(&bytes).contains("descendant-clean"));
     }
 

@@ -1,13 +1,6 @@
-use std::{
-    io::Read,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::Duration,
-};
+use std::{io::Read, sync::Arc, thread, time::Duration};
 
+use crossbeam_channel::{Sender, bounded};
 use portable_pty::{CommandBuilder, PtySize as PortablePtySize, native_pty_system};
 
 use crate::{
@@ -92,11 +85,11 @@ impl ProcessRunner for PortablePtyRunner {
             },
         };
 
-        let reader_finished = Arc::new(AtomicBool::new(false));
         let sink: Arc<dyn OutputSink> = Arc::from(sink);
+        let (reader_done_tx, reader_done_rx) = bounded(1);
+        let (grace_tx, grace_rx) = bounded(1);
 
         let reader_sink = Arc::clone(&sink);
-        let reader_done = Arc::clone(&reader_finished);
         let reader_handle = thread::spawn(move || {
             let mut buffer = [0u8; READ_BUFFER_BYTES];
             loop {
@@ -105,24 +98,24 @@ impl ProcessRunner for PortablePtyRunner {
                     Ok(read) => reader_sink.send(ProcessOutput::Chunk(buffer[..read].to_vec())),
                 }
             }
-            reader_done.store(true, Ordering::Release);
+            let _ = reader_done_tx.send(());
         });
         thread::spawn(move || {
             let outcome = match child.wait() {
                 Ok(status) if status.success() => ExitOutcome::Succeeded,
                 _ => ExitOutcome::Failed,
             };
-            // If the reader is still going after the child exits, a descendant is
-            // holding the PTY open: give it a grace to drain buffered output, then
-            // force EOF by killing the group. Joining the reader before publishing
-            // exit sequences the exit strictly after every chunk it sent, so
-            // nothing is dropped as stale under channel backpressure.
-            if !reader_finished.load(Ordering::Acquire) {
-                thread::sleep(EXIT_DRAIN_GRACE);
-                if !reader_finished.load(Ordering::Acquire) {
-                    terminate_group(pid, &mut waiter_killer);
-                }
+            // A descendant can retain the PTY after the direct shell exits. A
+            // graceful stop supplies its full cleanup window; ordinary exits use
+            // only the short drain bound. The completion channel wakes this wait
+            // immediately when cleanup finishes instead of delaying the exit event.
+            let drain_grace = grace_rx.try_recv().unwrap_or(EXIT_DRAIN_GRACE);
+            if reader_done_rx.recv_timeout(drain_grace).is_err() {
+                let _ = terminate_group(pid, &mut waiter_killer);
+                let _ = reader_done_rx.recv();
             }
+            // Joining before publishing exit sequences the exit strictly after
+            // every chunk sent, so channel backpressure cannot make output stale.
             let _ = reader_handle.join();
             sink.send(ProcessOutput::Exited(outcome));
         });
@@ -131,6 +124,7 @@ impl ProcessRunner for PortablePtyRunner {
             master: pair.master,
             writer,
             killer,
+            grace_tx,
             pid,
         }))
     }
@@ -141,6 +135,7 @@ struct PtyProcessHandle {
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn std::io::Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    grace_tx: Sender<Duration>,
     pid: Option<u32>,
 }
 
@@ -179,9 +174,24 @@ impl ProcessHandle for PtyProcessHandle {
         }
     }
 
+    fn terminate(&mut self, grace: Duration) -> Result<(), PtyError> {
+        // Publish the grace before signalling: if SIGTERM makes the direct shell
+        // exit immediately, its waiter still observes the intended deadline.
+        let _ = self.grace_tx.try_send(grace);
+        #[cfg(unix)]
+        {
+            // A paused command cannot handle SIGTERM until it resumes.
+            let _ = signal_group(self.pid, libc::SIGCONT);
+            signal_group(self.pid, libc::SIGTERM)
+        }
+        #[cfg(not(unix))]
+        {
+            self.killer.kill().map_err(system_error)
+        }
+    }
+
     fn kill(&mut self) -> Result<(), PtyError> {
-        terminate_group(self.pid, &mut self.killer);
-        Ok(())
+        terminate_group(self.pid, &mut self.killer)
     }
 }
 
@@ -216,17 +226,29 @@ fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), PtyError> {
 }
 
 /// Terminates a spawned process: a whole-group SIGKILL on Unix, with the
-/// portable child killer as the fallback and the non-Unix path. Best-effort:
-/// a failed group signal falls through to the killer.
+/// portable child killer as the fallback and the non-Unix path. Returns success
+/// when either mechanism delivers the request.
+///
+/// # Errors
+/// Returns a `PtyError` when neither termination mechanism succeeds.
 fn terminate_group(
     pid: Option<u32>,
     killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
-) {
+) -> Result<(), PtyError> {
     #[cfg(unix)]
-    let _ = signal_group(pid, libc::SIGKILL);
+    {
+        let group_result = signal_group(pid, libc::SIGKILL);
+        let child_result = killer.kill().map_err(system_error);
+        match (group_result, child_result) {
+            (Ok(()), _) | (_, Ok(())) => Ok(()),
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
     #[cfg(not(unix))]
-    let _ = pid;
-    let _ = killer.kill();
+    {
+        let _ = pid;
+        killer.kill().map_err(system_error)
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +263,12 @@ mod tests {
 
     /// Maximum time to wait for a test process's events.
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Grace used by termination tests, long enough for delayed descendant
+    /// cleanup while keeping the suite quick.
+    const TEST_STOP_GRACE: Duration = Duration::from_secs(2);
+    /// Shell fixture whose direct wrapper exits on TERM while its descendant
+    /// takes longer than the ordinary PTY drain bound to print final output.
+    const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean' & trap 'exit 0' TERM; wait"#;
 
     struct ChannelSink(crossbeam_channel::Sender<ProcessOutput>);
 
@@ -307,6 +335,66 @@ mod tests {
             })
             .collect();
         assert!(String::from_utf8_lossy(&output).contains("hello"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graceful_termination_drains_shutdown_output() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut handle = PortablePtyRunner
+            .spawn(
+                request(
+                    "trap 'printf shutdown; exit 0' TERM; printf ready; while :; do sleep 1; done",
+                ),
+                Box::new(ChannelSink(tx)),
+            )
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        while !String::from_utf8_lossy(&bytes).contains("ready") {
+            match rx.recv_timeout(OUTPUT_TIMEOUT).unwrap() {
+                ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
+                ProcessOutput::Exited(_) => panic!("command exited before termination"),
+            }
+        }
+        handle.terminate(TEST_STOP_GRACE).unwrap();
+        while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
+            match output {
+                ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
+                ProcessOutput::Exited(_) => break,
+            }
+        }
+
+        assert!(String::from_utf8_lossy(&bytes).contains("shutdown"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graceful_termination_preserves_descendant_cleanup_after_shell_exit() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut handle = PortablePtyRunner
+            .spawn(
+                request(DESCENDANT_CLEANUP_COMMAND),
+                Box::new(ChannelSink(tx)),
+            )
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        while !String::from_utf8_lossy(&bytes).contains("ready") {
+            match rx.recv_timeout(OUTPUT_TIMEOUT).unwrap() {
+                ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
+                ProcessOutput::Exited(_) => panic!("command exited before termination"),
+            }
+        }
+        handle.terminate(TEST_STOP_GRACE).unwrap();
+        while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
+            match output {
+                ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
+                ProcessOutput::Exited(_) => break,
+            }
+        }
+
+        assert!(String::from_utf8_lossy(&bytes).contains("descendant-clean"));
     }
 
     #[test]

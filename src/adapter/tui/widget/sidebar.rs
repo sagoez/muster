@@ -9,11 +9,19 @@ use ratatui::{
 use super::theme;
 use crate::{
     application::Workspace,
-    domain::process::{Process, ProcessKind},
+    domain::process::{ActivityState, Process, ProcessKind},
 };
 
 /// Accent color of the selection marker.
 const MARKER_COLOR: Color = Color::Blue;
+/// Marker for a running process that is waiting on the user.
+const ATTENTION_MARKER: &str = "● ";
+/// Color of the attention marker (green: done, come look).
+const ATTENTION_COLOR: Color = Color::Green;
+/// Marker for a running process that is actively producing output.
+const WORKING_MARKER: &str = "◆ ";
+/// Color of the working marker.
+const WORKING_COLOR: Color = Color::Yellow;
 /// Glyph marking an expanded project (its processes are shown).
 const EXPANDED_GLYPH: &str = "▾";
 /// Glyph marking a collapsed project.
@@ -197,8 +205,16 @@ fn push_item_lines(
             Style::default().fg(MARKER_COLOR),
         ),
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(process.name().as_ref().to_string(), name_style),
     ];
+    // Keep activity ahead of variable-width text so clipping a long name or
+    // manual suffix can never hide the busy or waiting-for-user indicator.
+    if let Some((marker, color)) = activity_indicator(process) {
+        spans.push(Span::styled(marker.to_string(), Style::default().fg(color)));
+    }
+    spans.push(Span::styled(
+        process.name().as_ref().to_string(),
+        name_style,
+    ));
     if !process.autostart() {
         spans.push(Span::styled(
             MANUAL_MARKER.to_string(),
@@ -211,6 +227,19 @@ fn push_item_lines(
             format!("{indent}{DESCRIPTION_INDENT}{description}"),
             Style::default().fg(theme::DESCRIPTION_COLOR),
         )));
+    }
+}
+
+/// Returns the visible activity marker for a live process, keeping idle
+/// distinct from both current work and a request for user attention.
+fn activity_indicator(process: &Process) -> Option<(&'static str, Color)> {
+    if !process.state().is_active() {
+        return None;
+    }
+    match process.activity() {
+        ActivityState::Idle => None,
+        ActivityState::Working => Some((WORKING_MARKER, WORKING_COLOR)),
+        ActivityState::AwaitingInput => Some((ATTENTION_MARKER, ATTENTION_COLOR)),
     }
 }
 
@@ -296,5 +325,73 @@ mod tests {
             })
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn a_long_process_name_cannot_clip_the_attention_marker() {
+        let mut waiting = process(
+            0,
+            "a process name wider than the sidebar",
+            ProcessKind::Command,
+            ProcessState::Running,
+            None,
+        );
+        waiting.set_activity(ActivityState::AwaitingInput);
+        let workspace = Workspace::builder()
+            .processes(vec![waiting])
+            .selected_index(0)
+            .build();
+        let mut terminal = Terminal::new(TestBackend::new(16, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &workspace,
+                    true,
+                    "project",
+                    &[],
+                    SidebarSelection::Process(0),
+                )
+            })
+            .unwrap();
+
+        let marker = terminal.backend().buffer().cell((6, 2)).unwrap();
+        assert_eq!(marker.symbol(), "●");
+        assert_eq!(marker.fg, ATTENTION_COLOR);
+    }
+
+    #[test]
+    fn working_activity_is_visibly_distinct_from_idle() {
+        let mut working = process(
+            0,
+            "worker",
+            ProcessKind::Command,
+            ProcessState::Running,
+            None,
+        );
+        working.set_activity(ActivityState::Working);
+        let workspace = Workspace::builder()
+            .processes(vec![working])
+            .selected_index(0)
+            .build();
+        let mut terminal = Terminal::new(TestBackend::new(16, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &workspace,
+                    true,
+                    "project",
+                    &[],
+                    SidebarSelection::Process(0),
+                )
+            })
+            .unwrap();
+
+        let marker = terminal.backend().buffer().cell((6, 2)).unwrap();
+        assert_eq!(marker.symbol(), "◆");
+        assert_eq!(marker.fg, WORKING_COLOR);
     }
 }

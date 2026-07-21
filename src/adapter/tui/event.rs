@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crossbeam_channel::Sender;
 use crossterm::event::Event as CrosstermEvent;
 
+use super::{completion_generation::CompletionGeneration, spawn_generation::SpawnGeneration};
 use crate::domain::{port::OutputSink, pty::ProcessOutput, value::PaneId};
 
 /// A message processed by the runtime's event loop.
@@ -15,7 +16,7 @@ pub enum RuntimeEvent {
         pane: PaneId,
         /// Spawn generation that produced it; the runtime ignores output from a
         /// superseded generation.
-        generation: u64,
+        generation: SpawnGeneration,
         /// The output event.
         output: ProcessOutput,
     },
@@ -25,13 +26,21 @@ pub enum RuntimeEvent {
         pane: PaneId,
         /// Generation captured when the restart was scheduled; a mismatch means
         /// a later action superseded it and the respawn must be ignored.
-        generation: u64,
+        generation: SpawnGeneration,
+    },
+    /// A graceful command-stop deadline elapsed; forcibly stop it if the same
+    /// process generation is still shutting down.
+    ForceStop {
+        /// Pane whose command should be forcibly stopped.
+        pane: PaneId,
+        /// Generation captured when graceful termination began.
+        generation: SpawnGeneration,
     },
     /// Directory-autocomplete candidates computed off the event loop.
     Completions {
         /// Request generation; a mismatch means a later edit superseded it and
         /// the candidates must be ignored.
-        generation: u64,
+        generation: CompletionGeneration,
         /// The matching subdirectories to show.
         candidates: Vec<String>,
     },
@@ -50,14 +59,14 @@ pub enum RuntimeEvent {
 /// back-pressures here instead of growing memory without bound.
 pub struct ChannelOutputSink {
     pane: PaneId,
-    generation: u64,
+    generation: SpawnGeneration,
     sender: Sender<RuntimeEvent>,
 }
 
 impl ChannelOutputSink {
     /// Creates a sink that tags output with `pane` and its spawn `generation`
     /// and sends it on `sender`.
-    pub fn new(pane: PaneId, generation: u64, sender: Sender<RuntimeEvent>) -> Self {
+    pub fn new(pane: PaneId, generation: SpawnGeneration, sender: Sender<RuntimeEvent>) -> Self {
         Self {
             pane,
             generation,

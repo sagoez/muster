@@ -2,8 +2,14 @@
 name = "muster"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal workspace for running CLI agents and dev processes side by side"
+license = "MIT"
+repository = "https://github.com/sagoez/muster"
+keywords = ["tui", "terminal", "ratatui", "process-manager", "agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+base64 = "0.22.1"
 clap = { version = "4.6.2", features = ["derive"] }
 clap_complete = { version = "4.6.7", features = ["unstable-dynamic"] }
 crossbeam-channel = "0.5.16"
@@ -12,6 +18,7 @@ directories = "6.0.0"
 getset = "0.1.7"
 libc = "0.2.186"
 notify = "8.2.0"
+notify-rust = "4.11.7"
 nutype = { version = "0.7.0", features = ["serde"] }
 portable-pty = "0.9.0"
 ratatui = "0.30.2"

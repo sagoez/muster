@@ -53,6 +53,10 @@ impl StatusContext {
 const KEY_COLOR: Color = Color::Cyan;
 /// Color of descriptive labels.
 const LABEL_COLOR: Color = Color::DarkGray;
+/// Background of the status row while the terminal leader chord is pending.
+const LEADER_PENDING_BACKGROUND: Color = Color::Cyan;
+/// Foreground of the status row while the terminal leader chord is pending.
+const LEADER_PENDING_FOREGROUND: Color = Color::Black;
 /// Trailing spaces after each hint label for separation.
 const HINT_GAP: &str = "   ";
 /// Color of the crashed-process alert.
@@ -65,40 +69,67 @@ const NOTICE_PREFIX: &str = " ! ";
 
 /// Renders the status bar: a transient notice if one is set, otherwise the slim
 /// hints for `context` (always ending in `? help`) plus a right-aligned alert
-/// when any process has crashed so a failure is visible from any pane.
+/// when any process has crashed. A pending terminal leader fills the row with a
+/// high-contrast background until the next key completes the chord.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     context: StatusContext,
     crashed: usize,
     notice: Option<&str>,
+    leader_pending: bool,
 ) {
+    let leader_pending = leader_pending && matches!(context, StatusContext::Terminal);
     if let Some(notice) = notice {
+        let style = if leader_pending {
+            Style::default()
+                .fg(LEADER_PENDING_FOREGROUND)
+                .bg(LEADER_PENDING_BACKGROUND)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(ALERT_COLOR)
+                .add_modifier(Modifier::BOLD)
+        };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("{NOTICE_PREFIX}{notice}"),
-                Style::default()
-                    .fg(ALERT_COLOR)
-                    .add_modifier(Modifier::BOLD),
-            ))),
+                style,
+            )))
+            .style(style),
             area,
         );
         return;
     }
+    let key_color = if leader_pending {
+        LEADER_PENDING_FOREGROUND
+    } else {
+        KEY_COLOR
+    };
+    let label_color = if leader_pending {
+        LEADER_PENDING_FOREGROUND
+    } else {
+        LABEL_COLOR
+    };
     let mut spans = Vec::new();
     if matches!(context, StatusContext::Terminal) {
-        spans.push(Span::styled(LEADER_LABEL, Style::default().fg(KEY_COLOR)));
+        spans.push(Span::styled(LEADER_LABEL, Style::default().fg(key_color)));
     }
-    spans.extend(hint_spans(context.hints()));
-    spans.extend(hint_spans(&[HELP_HINT]));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    spans.extend(hint_spans(context.hints(), key_color, label_color));
+    spans.extend(hint_spans(&[HELP_HINT], key_color, label_color));
+    let style = if leader_pending {
+        Style::default().bg(LEADER_PENDING_BACKGROUND)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(style), area);
     if crashed > 0 {
-        render_alert(frame, area, crashed);
+        render_alert(frame, area, crashed, leader_pending);
     }
 }
 
 /// Draws the crashed-process count pinned to the right of the status row.
-fn render_alert(frame: &mut Frame, area: Rect, crashed: usize) {
+fn render_alert(frame: &mut Frame, area: Rect, crashed: usize, leader_pending: bool) {
     let label = format!("{ALERT_GLYPH} {crashed} crashed ");
     let width = label.chars().count() as u16;
     if area.width <= width {
@@ -110,28 +141,33 @@ fn render_alert(frame: &mut Frame, area: Rect, crashed: usize) {
         width,
         height: area.height,
     };
+    let style = if leader_pending {
+        Style::default()
+            .fg(LEADER_PENDING_FOREGROUND)
+            .bg(LEADER_PENDING_BACKGROUND)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(ALERT_COLOR)
+            .add_modifier(Modifier::BOLD)
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(ALERT_COLOR)
-                .add_modifier(Modifier::BOLD),
-        ))),
+        Paragraph::new(Line::from(Span::styled(label, style))),
         alert,
     );
 }
 
 /// Builds the styled key/label spans for a set of hints.
-fn hint_spans(hints: &[(&str, &str)]) -> Vec<Span<'static>> {
+fn hint_spans(hints: &[(&str, &str)], key_color: Color, label_color: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (key, label) in hints {
         spans.push(Span::styled(
             format!("{key} "),
-            Style::default().fg(KEY_COLOR),
+            Style::default().fg(key_color),
         ));
         spans.push(Span::styled(
             format!("{label}{HINT_GAP}"),
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(label_color),
         ));
     }
     spans
@@ -147,7 +183,7 @@ mod tests {
     fn shows_a_crashed_alert_pinned_right() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 2, None))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 2, None, false))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -156,7 +192,7 @@ mod tests {
     fn no_alert_when_nothing_has_crashed() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 0, None))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 0, None, false))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -165,7 +201,7 @@ mod tests {
     fn a_project_row_shows_its_own_hints() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Project, 0, None))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Project, 0, None, false))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -181,9 +217,52 @@ mod tests {
                     StatusContext::Process,
                     0,
                     Some("one: no such file"),
+                    false,
                 )
             })
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    /// The pending leader chord fills the status row with its active-mode color.
+    #[test]
+    fn a_pending_leader_chord_highlights_the_status_row() {
+        let width = 60;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), StatusContext::Terminal, 1, None, true))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for x in 0..width {
+            let cell = buffer.cell((x, 0)).unwrap();
+            assert_eq!(cell.bg, LEADER_PENDING_BACKGROUND);
+        }
+    }
+
+    /// An asynchronous notice retains the pending leader chord's full-row cue.
+    #[test]
+    fn a_notice_keeps_the_pending_leader_cue_visible() {
+        let width = 60;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    StatusContext::Terminal,
+                    0,
+                    Some("agent: finished"),
+                    true,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(buffer.content.iter().any(|cell| cell.symbol() == "!"));
+        for x in 0..width {
+            let cell = buffer.cell((x, 0)).unwrap();
+            assert_eq!(cell.bg, LEADER_PENDING_BACKGROUND);
+        }
     }
 }

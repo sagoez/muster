@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::domain::pty::{ProcessOutput, PtyError, PtySize, SpawnRequest};
 
 /// Sink for a single process's output events, supplied by the runtime. The
@@ -34,7 +36,16 @@ pub trait ProcessHandle: Send {
     /// Returns a `PtyError` if the signal cannot be sent.
     fn resume(&mut self) -> Result<(), PtyError>;
 
-    /// Terminates the process.
+    /// Requests graceful process termination with `grace` available for cleanup,
+    /// falling back to [`Self::kill`] for adapters without a distinct mechanism.
+    ///
+    /// # Errors
+    /// Returns a `PtyError` if the termination signal cannot be sent.
+    fn terminate(&mut self, _grace: Duration) -> Result<(), PtyError> {
+        self.kill()
+    }
+
+    /// Forcibly terminates the process.
     ///
     /// # Errors
     /// Returns a `PtyError` if the kill signal cannot be sent.

@@ -2,7 +2,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{Process, ProcessState},
+    process::{ActivityState, Process, ProcessState},
     pty::ExitOutcome,
     value::PaneId,
 };
@@ -94,6 +94,13 @@ impl Workspace {
     pub fn set_autostart(&mut self, pane: PaneId, autostart: bool) {
         if let Some(index) = self.position_of(pane) {
             self.processes[index].set_autostart(autostart);
+        }
+    }
+
+    /// Updates the inferred activity of the process owning `pane`.
+    pub fn set_activity(&mut self, pane: PaneId, activity: ActivityState) {
+        if let Some(index) = self.position_of(pane) {
+            self.processes[index].set_activity(activity);
         }
     }
 

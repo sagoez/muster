@@ -3,10 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use super::yaml::load_workspace;
+use super::yaml::{config_dir_path, load_workspace, write_config};
 use crate::{
     adapter::path::expand_home,
     domain::{
@@ -16,8 +15,6 @@ use crate::{
     },
 };
 
-/// Application directory name used to locate the platform config directory.
-const APP_DIR: &str = "muster";
 /// Registry file name under the muster config directory.
 const REGISTRY_FILE: &str = "projects.yml";
 
@@ -25,47 +22,6 @@ const REGISTRY_FILE: &str = "projects.yml";
 #[derive(Serialize, Deserialize)]
 struct RegistryFile {
     projects: Vec<Project>,
-}
-
-/// Serializes `value` to YAML and writes it to `path`, creating any missing
-/// parent directories first. The write is atomic: it lands in a sibling
-/// temporary file that is then renamed over the destination, so a crash, full
-/// disk, or short write can never truncate an existing valid config.
-///
-/// An existing symlink is followed so its target is rewritten rather than
-/// replaced with a regular file. A parentless relative path (e.g. `muster.yml`)
-/// writes into the current directory.
-fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), ConfigError> {
-    let dest = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if let Some(parent) = dest.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let raw = serde_yaml_ng::to_string(value)?;
-    let temp = temp_path(&dest);
-    fs::write(&temp, raw).map_err(|source| ConfigError::Write {
-        path: temp.clone(),
-        source,
-    })?;
-    fs::rename(&temp, &dest).map_err(|source| {
-        let _ = fs::remove_file(&temp);
-        ConfigError::Write {
-            path: dest.clone(),
-            source,
-        }
-    })
-}
-
-/// A sibling temporary path in the same directory as `path`, so the later rename
-/// stays on one filesystem and is therefore atomic.
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.tmp", std::process::id()));
-    path.with_file_name(name)
 }
 
 /// A [`ProjectRegistry`] backed by `projects.yml` in the user's config directory
@@ -77,7 +33,7 @@ pub struct YamlProjectRegistry;
 impl YamlProjectRegistry {
     /// Path to the registry file, when a config directory can be resolved.
     fn registry_path() -> Option<PathBuf> {
-        ProjectDirs::from("", "", APP_DIR).map(|dirs| dirs.config_dir().join(REGISTRY_FILE))
+        config_dir_path(REGISTRY_FILE)
     }
 }
 

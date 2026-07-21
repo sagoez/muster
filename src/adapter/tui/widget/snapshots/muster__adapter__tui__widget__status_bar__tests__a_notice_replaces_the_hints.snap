@@ -1,0 +1,5 @@
+---
+source: src/adapter/tui/widget/status_bar.rs
+expression: terminal.backend()
+---
+" ! one: no such file                                        "

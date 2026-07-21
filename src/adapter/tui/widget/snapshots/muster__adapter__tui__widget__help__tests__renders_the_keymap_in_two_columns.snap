@@ -1,0 +1,29 @@
+---
+source: src/adapter/tui/widget/help.rs
+assertion_line: 164
+expression: terminal.backend()
+---
+"                                                                        "
+"     ╭ Keybindings ──────────────────────────────────────────────╮      "
+"     │                                                           │      "
+"     │ Navigate                      Project                     │      "
+"     │   ↑ / k      up                 → / ⏎      activate       │      "
+"     │   ↓ / j      down               d          remove         │      "
+"     │   → / l / ⏎  open / into        n          new            │      "
+"     │   ← / h      back               o          switcher       │      "
+"     │ Process                       Terminal (after C-a)        │      "
+"     │   ⏎          attach             h          detach         │      "
+"     │   s          start / stop       ↑↓ / j k   move           │      "
+"     │   r          restart            s          start / stop   │      "
+"     │   p          pause / resume     r          restart        │      "
+"     │   x          stop               p          pause / resume │      "
+"     │   t          autostart          x          stop           │      "
+"     │   a          add                a          add            │      "
+"     │ General                         n          new            │      "
+"     │   ?          help               o          switcher       │      "
+"     │   q          quit               ?          help           │      "
+"     │                                 q          quit           │      "
+"     │                                                           │      "
+"     ╰───────────────────────────────────────────────────────────╯      "
+"                                                                        "
+"                                                                        "

@@ -1,0 +1,14 @@
+---
+source: src/adapter/tui/widget/confirm.rs
+expression: terminal.backend()
+---
+"                                                            "
+"                                                            "
+"      ╭ Overwrite? ──────────────────────────────────╮      "
+"      │                                              │      "
+"      │  A muster.yml already exists in that folder. │      "
+"      │                                              │      "
+"      │ y / ⏎ overwrite    n / esc cancel            │      "
+"      ╰──────────────────────────────────────────────╯      "
+"                                                            "
+"                                                            "

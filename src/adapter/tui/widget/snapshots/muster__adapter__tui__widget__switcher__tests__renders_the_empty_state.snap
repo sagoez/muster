@@ -1,0 +1,16 @@
+---
+source: src/adapter/tui/widget/switcher.rs
+expression: terminal.backend()
+---
+"                                                                "
+"                                                                "
+"   ╭ Switch project  0 ─────────────────────────────────────╮   "
+"   │                                                        │   "
+"   │  No projects yet                                       │   "
+"   │                                                        │   "
+"   │  press n to create one, or s to save the current setup │   "
+"   │                                                        │   "
+"   │ n new   s save   a add   d remove   esc ✕              │   "
+"   ╰────────────────────────────────────────────────────────╯   "
+"                                                                "
+"                                                                "

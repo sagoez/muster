@@ -1,0 +1,21 @@
+agents:
+- name: claude
+  command: claude
+  working_dir: null
+  description: coding agent
+  restart: null
+  autostart: false
+terminals:
+- name: shell
+  command: null
+  working_dir: null
+  description: your login shell
+  restart: null
+  autostart: false
+commands:
+- name: clock
+  command: while true; do date +%T; sleep 1; done
+  working_dir: null
+  description: null
+  restart: on_failure
+  autostart: false

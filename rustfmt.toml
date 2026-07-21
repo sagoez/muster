@@ -1,0 +1,17 @@
+# Formatting runs on nightly rustfmt (`imports_granularity` / `group_imports`
+# are nightly-only options): use `cargo +nightly fmt`.
+unstable_features = true
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+
+# Format code blocks inside `///` doc comments (we doc-comment every fn).
+format_code_in_doc_comments = true
+
+# Tidy-up rules that only ever make code cleaner:
+use_field_init_shorthand = true   # `Foo { x: x }` -> `Foo { x }`
+condense_wildcard_suffixes = true # `(a, _, _, _)` -> `(a, ..)`
+match_block_trailing_comma = true # trailing comma after `} =>` arms
+reorder_impl_items = true         # types/consts before methods in `impl` blocks
+overflow_delimited_expr = true    # nicer trailing array/closure/struct args
+blank_lines_upper_bound = 1       # collapse runs of blank lines to at most one
+hex_literal_case = "Upper"        # `0xff` -> `0xFF`

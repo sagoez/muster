@@ -1,0 +1,24 @@
+# muster.yml - a sample workspace.
+#
+# Every section (agents, terminals, commands) must be present. Use an empty
+# list `[]` for a section with no processes. `restart` is optional and defaults
+# to `never`; valid values are `never`, `on_failure`, `always`.
+
+agents:
+  - name: Claude Code
+    command: claude
+    description: Primary coding agent
+  - name: Codex
+    command: codex
+
+terminals:
+  - name: Blank terminal
+    command: bash
+
+commands:
+  - name: dev server
+    command: npm run dev
+    restart: on_failure
+  - name: worker
+    command: sleep 1000
+    restart: always

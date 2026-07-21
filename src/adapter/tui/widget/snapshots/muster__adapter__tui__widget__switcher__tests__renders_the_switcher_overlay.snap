@@ -1,0 +1,20 @@
+---
+source: src/adapter/tui/widget/switcher.rs
+expression: terminal.backend()
+---
+"                                                            "
+"                                                            "
+"     ╭ Switch project  3 ─────────────────────────────╮     "
+"     │                                                │     "
+"     │ ▎ 1  muster    ~/Projects/muster/muster.yml    │     "
+"     │   2  prism     ~/Work/prism/muster.yml         │     "
+"     │   3  pica    ● ~/Work/starter/pica/muster.yml  │     "
+"     │                                                │     "
+"     │  AGENTS    claude                              │     "
+"     │  COMMANDS  clock                               │     "
+"     │                                                │     "
+"     │ 1-3 jump   ↑↓ move   ⏎ switch                  │     "
+"     │ n new   s save   a add   d remove   esc ✕      │     "
+"     ╰────────────────────────────────────────────────╯     "
+"                                                            "
+"                                                            "

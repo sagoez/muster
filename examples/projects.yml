@@ -1,0 +1,13 @@
+# muster project registry.
+#
+# Copy this to ~/.config/muster/projects.yml, then press `o` in muster (or the
+# leader chord `C-a o` while a terminal is focused) to open the switcher and jump
+# between projects by number or arrow keys.
+#
+# Each project points to its own workspace config (a muster.yml). A `config` path
+# may start with `~`, which expands to your home directory.
+projects:
+  - name: muster
+    config: ~/Projects/muster/muster.yml
+  - name: prism
+    config: ~/Work/prism/muster.yml

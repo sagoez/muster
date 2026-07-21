@@ -1,0 +1,16 @@
+---
+source: src/adapter/tui/widget/form.rs
+expression: terminal.backend()
+---
+"                                                        "
+"      ╭ New project ─────────────────────────────╮      "
+"      │                                          │      "
+"      │  Name                                    │      "
+"      │ ▎                                        │      "
+"      │                                          │      "
+"      │  Folder                                  │      "
+"      │   ~/Projects                             │      "
+"      │                                          │      "
+"      │ ⏎ save   tab next   ←→ edit   esc cancel │      "
+"      ╰──────────────────────────────────────────╯      "
+"                                                        "

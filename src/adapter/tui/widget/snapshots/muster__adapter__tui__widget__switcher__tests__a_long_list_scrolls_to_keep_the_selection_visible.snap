@@ -1,0 +1,16 @@
+---
+source: src/adapter/tui/widget/switcher.rs
+expression: terminal.backend()
+---
+"       ╭ Switch project  12 ───────────────────────╮        "
+"       │                                           │        "
+"       │    6  project-06    ~/p/06/muster.yml     │        "
+"       │    7  project-07    ~/p/07/muster.yml     │        "
+"       │    8  project-08    ~/p/08/muster.yml     │        "
+"       │    9  project-09    ~/p/09/muster.yml     │        "
+"       │   10  project-10    ~/p/10/muster.yml     │        "
+"       │ ▎ 11  project-11    ~/p/11/muster.yml     │        "
+"       │                                           │        "
+"       │ 1-9 jump   ↑↓ move   ⏎ switch             │        "
+"       │ n new   s save   a add   d remove   esc ✕ │        "
+"       ╰───────────────────────────────────────────╯        "

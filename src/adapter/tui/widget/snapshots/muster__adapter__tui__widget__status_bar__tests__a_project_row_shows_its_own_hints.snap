@@ -1,0 +1,6 @@
+---
+source: src/adapter/tui/widget/status_bar.rs
+assertion_line: 170
+expression: terminal.backend()
+---
+"↑↓ move   → open   d remove   ? help                        "

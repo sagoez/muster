@@ -1,0 +1,16 @@
+---
+source: src/adapter/tui/widget/empty_state.rs
+expression: terminal.backend()
+---
+"                                                "
+"                                                "
+"                                                "
+"                                                "
+"                No processes yet                "
+"                                                "
+"            press a to add a process            "
+"           or n to start a new project          "
+"                                                "
+"                                                "
+"                                                "
+"                                                "

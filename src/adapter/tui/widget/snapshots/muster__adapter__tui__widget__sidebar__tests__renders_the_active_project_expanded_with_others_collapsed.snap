@@ -1,0 +1,22 @@
+---
+source: src/adapter/tui/widget/sidebar.rs
+expression: terminal.backend()
+---
+" ▾ web-api                       │"
+"  AGENTS ──────────────────── 2/2│"
+"    ● Claude Code                │"
+"  ▎ ● Codex                      │"
+"      banner display only        │"
+"                                 │"
+"  TERMINALS ───────────────── 0/1│"
+"    ○ Blank terminal             │"
+"                                 │"
+"  COMMANDS ────────────────── 0/1│"
+"    ● worker                     │"
+"                                 │"
+" ▸ web-ui                        │"
+"                                 │"
+" ▸ one  canary                   │"
+"                                 │"
+"                                 │"
+"                                 │"

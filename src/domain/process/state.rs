@@ -12,6 +12,8 @@ pub enum ProcessState {
     Running,
     /// Child process is alive but suspended (SIGSTOP).
     Paused,
+    /// A stop or restart signal was delivered and exit is pending.
+    Stopping,
     /// Exited successfully (status 0).
     Exited,
     /// Exited with a failure status or was killed by a signal.
@@ -23,7 +25,10 @@ pub enum ProcessState {
 impl ProcessState {
     /// Whether the process currently has a live child attached.
     pub fn is_active(self) -> bool {
-        matches!(self, Self::Running | Self::Paused | Self::Restarting)
+        matches!(
+            self,
+            Self::Running | Self::Paused | Self::Stopping | Self::Restarting
+        )
     }
 }
 
@@ -37,9 +42,10 @@ mod tests {
     }
 
     #[test]
-    fn active_only_while_running_or_restarting() {
+    fn active_while_a_child_is_live_or_transitioning() {
         assert!(ProcessState::Running.is_active());
         assert!(ProcessState::Paused.is_active());
+        assert!(ProcessState::Stopping.is_active());
         assert!(ProcessState::Restarting.is_active());
         assert!(!ProcessState::Pending.is_active());
         assert!(!ProcessState::Exited.is_active());

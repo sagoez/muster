@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::ProcessSpec,
+    config::{ConfigError, ProcessSpec},
     process::{Process, ProcessKind},
     value::PaneId,
 };
@@ -23,6 +23,26 @@ pub struct WorkspaceConfig {
 }
 
 impl WorkspaceConfig {
+    /// Validates cross-field rules that Serde cannot express.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidStopPolicy`] when an agent or terminal
+    /// configures the command-only graceful shutdown policy.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for (kind, specs) in [
+            (ProcessKind::Agent, &self.agents),
+            (ProcessKind::Terminal, &self.terminals),
+        ] {
+            if let Some(spec) = specs.iter().find(|spec| spec.stop().is_some()) {
+                return Err(ConfigError::InvalidStopPolicy {
+                    kind,
+                    name: spec.name().clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Flattens every section into ordered `Process` entities, assigning each a
     /// stable `PaneId` and tagging it with its section's kind.
     pub fn to_processes(&self) -> Vec<Process> {
@@ -45,9 +65,13 @@ impl WorkspaceConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::process::{ProcessState, RestartPolicy};
+    use std::time::Duration;
 
+    use super::*;
+    use crate::domain::process::{ProcessState, RestartPolicy, StopSignal};
+
+    /// Grace period configured by the sample command.
+    const SAMPLE_STOP_GRACE: Duration = Duration::from_secs(5);
     const SAMPLE: &str = r#"
 agents:
   - name: Claude Code
@@ -60,6 +84,9 @@ commands:
   - name: npm:dev
     command: npm run dev
     restart: on_failure
+    stop:
+      signal: interrupt
+      grace_period: 5s
 "#;
 
     #[test]
@@ -73,6 +100,9 @@ commands:
         assert_eq!(*processes[2].kind(), ProcessKind::Command);
         assert_eq!(processes[0].name().as_ref(), "Claude Code");
         assert_eq!(*processes[0].state(), ProcessState::Pending);
+        let stop = processes[2].stop().as_ref().unwrap();
+        assert_eq!(*stop.signal(), StopSignal::Interrupt);
+        assert_eq!(*stop.grace_period(), SAMPLE_STOP_GRACE);
     }
 
     #[test]
@@ -95,5 +125,30 @@ commands: []
             config.commands()[0].restart_policy(),
             RestartPolicy::OnFailure
         );
+    }
+
+    /// Agents and terminals cannot opt into command-only shutdown behavior.
+    #[test]
+    fn rejects_a_stop_policy_outside_commands() {
+        let invalid: WorkspaceConfig = serde_yaml_ng::from_str(
+            r#"
+agents:
+  - name: Claude
+    stop:
+      signal: terminate
+      grace_period: 5s
+terminals: []
+commands: []
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            invalid.validate(),
+            Err(ConfigError::InvalidStopPolicy {
+                kind: ProcessKind::Agent,
+                ..
+            })
+        ));
     }
 }

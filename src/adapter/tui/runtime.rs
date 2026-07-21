@@ -170,7 +170,11 @@ fn apply(app: &mut App, event: RuntimeEvent) -> bool {
             output,
         } => app.handle_output(pane, generation, output),
         RuntimeEvent::Respawn { pane, generation } => app.handle_respawn(pane, generation),
-        RuntimeEvent::ForceStop { pane, generation } => app.handle_force_stop(pane, generation),
+        RuntimeEvent::ForceStop {
+            pane,
+            spawn_generation,
+            shutdown_generation,
+        } => app.handle_force_stop(pane, spawn_generation, shutdown_generation),
         RuntimeEvent::Completions {
             generation,
             candidates,

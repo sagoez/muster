@@ -27,12 +27,17 @@ pub const DESCRIPTION_COLOR: Color = Color::DarkGray;
 pub const SELECTED_COLOR: Color = Color::White;
 /// Marker drawn to the left of the selected item.
 pub const SELECTION_MARKER: &str = "▎";
+/// Sidebar glyph shown while a process is exiting.
+const STOPPING_GLYPH: &str = "◌";
+/// Sidebar color shown while a process is exiting.
+const STOPPING_COLOR: Color = Color::Yellow;
 
 /// Status dot glyph and color for a process lifecycle state.
 pub fn status_indicator(state: ProcessState) -> (&'static str, Color) {
     match state {
         ProcessState::Running => ("●", Color::Green),
         ProcessState::Paused => ("‖", Color::Cyan),
+        ProcessState::Stopping => (STOPPING_GLYPH, STOPPING_COLOR),
         ProcessState::Restarting => ("◐", Color::Yellow),
         ProcessState::Crashed => ("●", Color::Red),
         ProcessState::Pending | ProcessState::Exited => ("○", Color::DarkGray),
@@ -45,5 +50,20 @@ pub fn section_title(kind: ProcessKind) -> &'static str {
         ProcessKind::Agent => "AGENTS",
         ProcessKind::Terminal => "TERMINALS",
         ProcessKind::Command => "COMMANDS",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stopping is visibly distinct from both running and resting states.
+    #[test]
+    fn stopping_has_a_transition_indicator() {
+        let stopping = status_indicator(ProcessState::Stopping);
+
+        assert_eq!(stopping, (STOPPING_GLYPH, STOPPING_COLOR));
+        assert_ne!(stopping, status_indicator(ProcessState::Running));
+        assert_ne!(stopping, status_indicator(ProcessState::Exited));
     }
 }

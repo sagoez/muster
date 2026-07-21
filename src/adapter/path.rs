@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     path::{MAIN_SEPARATOR, Path, PathBuf, is_separator},
 };
@@ -16,57 +17,57 @@ const MAX_COMPLETIONS: usize = 8;
 #[derive(Default)]
 pub struct FsPathCompleter;
 
-impl PathCompleter for FsPathCompleter {
-    fn complete_dir(&self, partial: &str) -> Vec<String> {
-        complete_dir(partial)
+impl FsPathCompleter {
+    /// Returns directory completions for `partial` from the local filesystem.
+    fn complete(partial: &str) -> Vec<String> {
+        // When `partial` is itself an existing directory (and not already ending
+        // in a separator), browse inside it; otherwise complete the last segment
+        // within its parent. `is_separator` accepts both `/` and the platform
+        // separator, so Windows-style paths split correctly too.
+        let (typed_dir, prefix): (String, String) =
+            if !partial.ends_with(is_separator) && expand_home(Path::new(partial)).is_dir() {
+                (format!("{partial}{MAIN_SEPARATOR}"), String::new())
+            } else {
+                match partial.rfind(is_separator) {
+                    Some(index) => (
+                        partial[..=index].to_string(),
+                        partial[index + 1..].to_string(),
+                    ),
+                    None => (String::new(), partial.to_string()),
+                }
+            };
+        let read_dir = if typed_dir.is_empty() {
+            PathBuf::from(".")
+        } else {
+            expand_home(Path::new(&typed_dir))
+        };
+        let Ok(entries) = fs::read_dir(&read_dir) else {
+            return Vec::new();
+        };
+        let mut matches: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| Self::candidate(&entry.file_name(), &typed_dir, &prefix))
+            .collect();
+        matches.sort();
+        matches.truncate(MAX_COMPLETIONS);
+        matches
+    }
+
+    /// Converts one directory name to a completion, rejecting non-UTF-8 names
+    /// because a lossy string would identify a different filesystem path.
+    fn candidate(raw: &OsStr, typed_dir: &str, prefix: &str) -> Option<String> {
+        let name = raw.to_str()?;
+        let hidden = name.starts_with('.') && !prefix.starts_with('.');
+        (name.starts_with(prefix) && name != prefix && !hidden)
+            .then(|| format!("{typed_dir}{name}"))
     }
 }
 
-/// Subdirectories of the directory `partial` names (or its parent), matched by
-/// the last path segment and re-joined onto whatever prefix the user typed.
-/// Hidden entries appear only when the segment itself starts with a dot.
-fn complete_dir(partial: &str) -> Vec<String> {
-    // When `partial` is itself an existing directory (and not already ending in
-    // a separator), browse inside it; otherwise complete the last segment within
-    // its parent. This makes a prefilled path with no trailing separator list its
-    // children rather than its siblings. `is_separator` accepts both `/` and the
-    // platform separator, so Windows-style paths split correctly too.
-    let (typed_dir, prefix): (String, String) =
-        if !partial.ends_with(is_separator) && expand_home(Path::new(partial)).is_dir() {
-            (format!("{partial}{MAIN_SEPARATOR}"), String::new())
-        } else {
-            match partial.rfind(is_separator) {
-                Some(index) => (
-                    partial[..=index].to_string(),
-                    partial[index + 1..].to_string(),
-                ),
-                None => (String::new(), partial.to_string()),
-            }
-        };
-    let read_dir = if typed_dir.is_empty() {
-        PathBuf::from(".")
-    } else {
-        expand_home(Path::new(&typed_dir))
-    };
-    let Ok(entries) = fs::read_dir(&read_dir) else {
-        return Vec::new();
-    };
-    let mut matches: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| {
-            let raw = entry.file_name();
-            // A lossy conversion would name a different path than was read, so a
-            // non-UTF-8 entry cannot be a valid completion for this string port.
-            let name = raw.to_str()?;
-            let hidden = name.starts_with('.') && !prefix.starts_with('.');
-            (name.starts_with(prefix.as_str()) && name != prefix && !hidden)
-                .then(|| format!("{typed_dir}{name}"))
-        })
-        .collect();
-    matches.sort();
-    matches.truncate(MAX_COMPLETIONS);
-    matches
+impl PathCompleter for FsPathCompleter {
+    fn complete_dir(&self, partial: &str) -> Vec<String> {
+        Self::complete(partial)
+    }
 }
 
 /// Expands a leading `~` to the user's home directory; any other path is left
@@ -133,7 +134,7 @@ mod tests {
         fs::write(dir.join("prfile"), "").unwrap();
 
         let base = dir.display();
-        let got = complete_dir(&format!("{base}/pr"));
+        let got = FsPathCompleter::complete(&format!("{base}/pr"));
 
         assert_eq!(
             got,
@@ -154,7 +155,7 @@ mod tests {
         // The path is an existing directory with no trailing slash: list its
         // children, not its siblings.
         let base = dir.display();
-        let got = complete_dir(&base.to_string());
+        let got = FsPathCompleter::complete(&base.to_string());
 
         assert_eq!(got, vec![format!("{base}/alpha"), format!("{base}/beta")]);
 
@@ -162,24 +163,13 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Non-UTF-8 names are rejected without asking the filesystem to create one.
     #[test]
-    fn complete_dir_skips_non_utf8_entries() {
+    fn candidate_rejects_non_utf8_names() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-        let dir = std::env::temp_dir().join(format!("muster-nonutf8-{}", std::process::id()));
-        fs::create_dir_all(dir.join("valid")).unwrap();
-        // A directory whose name is not valid UTF-8 but shares the "val" prefix.
-        fs::create_dir_all(dir.join(OsStr::from_bytes(b"val\xffid"))).unwrap();
+        let raw = OsStr::from_bytes(b"val\xffid");
 
-        let base = dir.display();
-        let got = complete_dir(&format!("{base}/val"));
-
-        assert_eq!(
-            got,
-            vec![format!("{base}/valid")],
-            "the non-UTF-8 entry is skipped, not offered lossily"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(FsPathCompleter::candidate(raw, "/tmp/", "val"), None);
     }
 }

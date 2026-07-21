@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{Process, ProcessKind, RestartPolicy},
+    process::{Process, ProcessKind, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -27,6 +27,10 @@ pub struct ProcessSpec {
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     restart: Option<RestartPolicy>,
+    /// Optional graceful shutdown policy. Only command specs may configure it.
+    #[getset(get = "pub", set_with = "pub")]
+    #[builder(default)]
+    stop: Option<StopPolicy>,
     /// Whether to launch this process automatically on load. Absent means the
     /// per-kind default; `true`/`false` overrides it.
     #[getset(get = "pub", set_with = "pub")]
@@ -45,6 +49,11 @@ impl ProcessSpec {
             .working_dir(self.working_dir.clone())
             .description(self.description.clone())
             .restart(self.restart_policy())
+            .stop(if kind == ProcessKind::Command {
+                self.stop.clone()
+            } else {
+                None
+            })
             .autostart(self.should_autostart(kind))
             .build()
     }
@@ -58,5 +67,15 @@ impl ProcessSpec {
     /// wait for an explicit start) and true for agents and terminals.
     pub fn should_autostart(&self, kind: ProcessKind) -> bool {
         self.autostart.unwrap_or(kind != ProcessKind::Command)
+    }
+
+    /// The effective graceful shutdown policy for `kind`. Commands use the
+    /// domain default when the config omits `stop`; other kinds have no policy.
+    pub fn effective_stop_policy(&self, kind: ProcessKind) -> Option<StopPolicy> {
+        if kind == ProcessKind::Command {
+            Some(self.stop.clone().unwrap_or_default())
+        } else {
+            None
+        }
     }
 }

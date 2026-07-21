@@ -4,6 +4,7 @@ mod exit_intent;
 mod kind;
 mod restart;
 mod state;
+mod stop;
 
 pub use activity::*;
 pub use entity::*;
@@ -11,3 +12,4 @@ pub use exit_intent::*;
 pub use kind::*;
 pub use restart::*;
 pub use state::*;
+pub use stop::*;

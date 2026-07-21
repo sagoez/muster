@@ -5,6 +5,7 @@ mod event;
 mod form;
 mod input;
 mod runtime;
+mod shutdown_generation;
 mod signal;
 mod spawn_generation;
 mod terminal;

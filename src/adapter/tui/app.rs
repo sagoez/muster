@@ -20,6 +20,7 @@ use super::{
     event::{ChannelOutputSink, RuntimeEvent},
     form::{Field, Form, FormOutcome},
     input,
+    shutdown_generation::ShutdownGeneration,
     signal::{Signal, SignalReader},
     spawn_generation::SpawnGeneration,
     widget::{
@@ -38,7 +39,10 @@ use crate::{
             ConfigWatcher, Notifier, PathCompleter, ProcessHandle, ProcessRunner, ProjectRegistry,
             SettingsStore,
         },
-        process::{ActivityState, ExitIntent, Process, ProcessKind, ProcessState, RestartPolicy},
+        process::{
+            ActivityState, ExitIntent, Process, ProcessKind, ProcessState, RestartPolicy,
+            StopPolicy,
+        },
         project::Project,
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
         settings::Settings,
@@ -74,9 +78,13 @@ const RESTART_BACKOFF_MAX_EXP: u32 = 5;
 /// A process that ran at least this long counts as stable; its next restart
 /// resets the backoff so a healthy long-lived process is not penalized.
 const RESTART_STABLE_RUN: Duration = Duration::from_secs(10);
-/// Grace allowed for a manually stopped command to handle SIGTERM, emit final
-/// output, and exit before Muster escalates to a hard kill.
-const COMMAND_STOP_GRACE: Duration = Duration::from_secs(3);
+/// Shown when a graceful shutdown deadline expires and Muster force-kills the
+/// selected command's process group.
+const FORCE_STOP_NOTICE: &str = "graceful shutdown timed out; force-killed";
+/// Shown when graceful signal delivery fails and Muster uses an immediate kill.
+const GRACEFUL_STOP_FALLBACK_NOTICE: &str = "graceful shutdown failed; force-killed";
+/// Shown when Muster cannot deliver either the requested signal or a hard kill.
+const STOP_DELIVERY_FAILED_NOTICE: &str = "could not stop the process";
 /// Title of the save-current-project form.
 const SAVE_PROJECT_TITLE: &str = "Save project";
 /// Title of the new-project form.
@@ -181,6 +189,7 @@ struct Pane {
     handle: Option<Box<dyn ProcessHandle>>,
     started_at: Instant,
     exit_intent: ExitIntent,
+    shutdown_generation: ShutdownGeneration,
     config_membership: ConfigMembership,
 }
 
@@ -662,6 +671,7 @@ impl App {
                 spec.working_dir().clone(),
                 spec.description().clone(),
                 spec.restart_policy(),
+                spec.effective_stop_policy(kind),
                 spec.should_autostart(kind),
             )
         };
@@ -690,6 +700,7 @@ impl App {
                 process.working_dir().clone(),
                 process.description().clone(),
                 *process.restart(),
+                process.effective_stop_policy(),
                 *process.autostart(),
             );
             let matched = config_counts
@@ -946,20 +957,35 @@ impl App {
         }
     }
 
-    /// Forcibly stops a command whose graceful manual-stop deadline elapsed,
-    /// provided no exit, restart, or newer spawn superseded that request.
-    pub fn handle_force_stop(&mut self, pane: PaneId, generation: SpawnGeneration) {
-        if self.generations.get(&pane) != Some(&generation) {
+    /// Forcibly stops a command whose graceful stop or restart deadline elapsed,
+    /// provided no exit or newer spawn superseded that request.
+    pub fn handle_force_stop(
+        &mut self,
+        pane: PaneId,
+        spawn_generation: SpawnGeneration,
+        shutdown_generation: ShutdownGeneration,
+    ) {
+        if self.generations.get(&pane) != Some(&spawn_generation) {
             return;
         }
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        if target.exit_intent.awaits_force_stop()
-            && let Some(handle) = target.handle.as_mut()
-            && handle.kill().is_err()
+        if target.shutdown_generation != shutdown_generation
+            || !target.exit_intent.awaits_force_stop()
         {
-            target.exit_intent = target.exit_intent.stop_delivery_failed();
+            return;
+        }
+        target.shutdown_generation = target.shutdown_generation.next();
+        let Some(handle) = target.handle.as_mut() else {
+            return;
+        };
+        if handle.kill().is_ok() {
+            self.workspace.set_state(pane, ProcessState::Stopping);
+            self.notice = Some(FORCE_STOP_NOTICE.to_string());
+        } else {
+            target.exit_intent = target.exit_intent.force_stop_delivery_failed();
+            self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
         }
     }
 
@@ -1102,6 +1128,7 @@ impl App {
                     handle: Some(handle),
                     started_at: Instant::now(),
                     exit_intent: ExitIntent::FollowPolicy,
+                    shutdown_generation: ShutdownGeneration::initial(),
                     config_membership: ConfigMembership::Tracked,
                 });
                 self.workspace.set_state(pane, ProcessState::Running);
@@ -1131,6 +1158,14 @@ impl App {
             .or_insert_with(SpawnGeneration::initial);
         *entry = entry.next();
         *entry
+    }
+
+    /// Advances and returns the graceful shutdown request generation for `pane`,
+    /// invalidating any previously scheduled escalation deadline.
+    fn advance_shutdown_generation(&mut self, pane: PaneId) -> Option<ShutdownGeneration> {
+        let target = self.panes.get_mut(&pane)?;
+        target.shutdown_generation = target.shutdown_generation.next();
+        Some(target.shutdown_generation)
     }
 
     /// Allocates an identity that is never reused by another terminal lifetime
@@ -1187,7 +1222,7 @@ impl App {
                 self.deactivate(pane);
                 self.workspace.set_state(pane, ProcessState::Exited);
             },
-            ExitIntent::Restart => {
+            ExitIntent::RestartRetryable | ExitIntent::RestartInFlight => {
                 self.restart_attempts.remove(&pane);
                 self.workspace.set_state(pane, ProcessState::Restarting);
                 if let Some((command, cwd)) = self.command_of(pane) {
@@ -1227,13 +1262,23 @@ impl App {
         });
     }
 
-    /// Schedules hard-kill escalation for a manually stopped command. The
-    /// generation and exit intent make the event harmless after exit/restart.
-    fn schedule_force_stop(&self, pane: PaneId, generation: SpawnGeneration) {
+    /// Schedules hard-kill escalation for a graceful command stop or restart.
+    /// The generation and exit intent make the event harmless after exit.
+    fn schedule_force_stop(
+        &self,
+        pane: PaneId,
+        spawn_generation: SpawnGeneration,
+        shutdown_generation: ShutdownGeneration,
+        grace_period: Duration,
+    ) {
         let sender = self.events.clone();
         thread::spawn(move || {
-            thread::sleep(COMMAND_STOP_GRACE);
-            let _ = sender.send(RuntimeEvent::ForceStop { pane, generation });
+            thread::sleep(grace_period);
+            let _ = sender.send(RuntimeEvent::ForceStop {
+                pane,
+                spawn_generation,
+                shutdown_generation,
+            });
         });
     }
 
@@ -1299,7 +1344,7 @@ impl App {
             KeyCode::Char('s') if self.project_cursor.is_none() => self.toggle_selected(),
             KeyCode::Char('r') if self.project_cursor.is_none() => self.restart_selected(),
             KeyCode::Char('p') if self.project_cursor.is_none() => self.toggle_pause_selected(),
-            KeyCode::Char('x') if self.project_cursor.is_none() => self.stop_selected(),
+            KeyCode::Char('x') if self.project_cursor.is_none() => self.force_stop_selected(),
             KeyCode::Char('a') => self.open_add_process_form(),
             KeyCode::Char('n') => self.open_new_project_form(),
             KeyCode::Char('N') => self.toggle_desktop_notifications(),
@@ -1531,7 +1576,7 @@ impl App {
             KeyCode::Char('n') => self.open_new_project_form(),
             KeyCode::Char('N') => self.toggle_desktop_notifications(),
             KeyCode::Char('o') => self.open_switcher(),
-            KeyCode::Char('x') => self.stop_selected(),
+            KeyCode::Char('x') => self.force_stop_selected(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
         }
@@ -2187,21 +2232,66 @@ impl App {
         }
     }
 
-    /// Force-restarts the selected process immediately, even under a Never
-    /// policy: kills a live process, or respawns a finished one at once.
+    /// Restarts the selected process regardless of its restart policy. A command
+    /// with a stop policy exits gracefully first; every other live process is
+    /// killed immediately, and a finished process respawns at once.
     fn restart_selected(&mut self) {
         let Some(pane) = self.selected_pane() else {
             return;
         };
         let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
         if alive {
+            if self
+                .panes
+                .get(&pane)
+                .is_some_and(|target| !target.exit_intent.accepts_restart_request())
+            {
+                return;
+            }
+            let policy = self.stop_policy_of(pane);
+            let spawn_generation = self.generations.get(&pane).copied();
+            let shutdown_generation = self.advance_shutdown_generation(pane);
+            let mut awaiting_grace = None;
+            let mut used_fallback = false;
+            let mut delivered = false;
             if let Some(target) = self.panes.get_mut(&pane) {
                 // Supersede a still-pending stop so the newer restart intent wins
                 // when the exit lands.
                 target.exit_intent = target.exit_intent.request_restart();
                 if let Some(handle) = target.handle.as_mut() {
-                    let _ = handle.kill();
+                    delivered = if let Some(policy) = &policy {
+                        match handle.terminate(*policy.signal(), *policy.grace_period()) {
+                            Ok(()) => {
+                                awaiting_grace = Some(*policy.grace_period());
+                                true
+                            },
+                            Err(_) => {
+                                used_fallback = true;
+                                handle.kill().is_ok()
+                            },
+                        }
+                    } else {
+                        handle.kill().is_ok()
+                    };
+                    target.exit_intent = if delivered {
+                        target.exit_intent.restart_delivered()
+                    } else {
+                        target.exit_intent.restart_delivery_failed()
+                    };
                 }
+            }
+            if delivered {
+                self.workspace.set_state(pane, ProcessState::Stopping);
+                if used_fallback {
+                    self.notice = Some(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
+                }
+            } else {
+                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            }
+            if let (Some(grace_period), Some(spawn_generation), Some(shutdown_generation)) =
+                (awaiting_grace, spawn_generation, shutdown_generation)
+            {
+                self.schedule_force_stop(pane, spawn_generation, shutdown_generation, grace_period);
             }
         } else if let Some((command, cwd)) = self.command_of(pane) {
             self.spawn(pane, command, cwd);
@@ -2221,33 +2311,48 @@ impl App {
         }
         let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
         if alive {
-            let graceful = self
-                .workspace
-                .process(pane)
-                .is_some_and(|process| *process.kind() == ProcessKind::Command);
-            let generation = self.generations.get(&pane).copied();
-            let mut awaiting_grace = false;
+            let policy = self.stop_policy_of(pane);
+            let spawn_generation = self.generations.get(&pane).copied();
+            let shutdown_generation = self.advance_shutdown_generation(pane);
+            let mut awaiting_grace = None;
+            let mut used_fallback = false;
+            let mut delivered = false;
             if let Some(target) = self.panes.get_mut(&pane) {
                 target.exit_intent = target.exit_intent.request_stop();
                 if let Some(handle) = target.handle.as_mut() {
-                    let stop_requested = if graceful {
-                        match handle.terminate(COMMAND_STOP_GRACE) {
+                    delivered = if let Some(policy) = &policy {
+                        match handle.terminate(*policy.signal(), *policy.grace_period()) {
                             Ok(()) => {
-                                awaiting_grace = true;
+                                awaiting_grace = Some(*policy.grace_period());
                                 true
                             },
-                            Err(_) => handle.kill().is_ok(),
+                            Err(_) => {
+                                used_fallback = true;
+                                handle.kill().is_ok()
+                            },
                         }
                     } else {
                         handle.kill().is_ok()
                     };
-                    if stop_requested {
+                    if delivered {
                         target.exit_intent = target.exit_intent.stop_delivered();
+                    } else {
+                        target.exit_intent = target.exit_intent.stop_delivery_failed();
                     }
                 }
             }
-            if awaiting_grace && let Some(generation) = generation {
-                self.schedule_force_stop(pane, generation);
+            if delivered {
+                self.workspace.set_state(pane, ProcessState::Stopping);
+                if used_fallback {
+                    self.notice = Some(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
+                }
+            } else {
+                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            }
+            if let (Some(grace_period), Some(spawn_generation), Some(shutdown_generation)) =
+                (awaiting_grace, spawn_generation, shutdown_generation)
+            {
+                self.schedule_force_stop(pane, spawn_generation, shutdown_generation, grace_period);
             }
         } else {
             // No child will exit here; cancel the pending respawn and stop now.
@@ -2255,6 +2360,50 @@ impl App {
             self.deactivate(pane);
             self.workspace.set_state(pane, ProcessState::Exited);
         }
+    }
+
+    /// Immediately force-kills the selected process without consulting its stop
+    /// policy. A finished process remains stopped and any pending respawn is
+    /// cancelled.
+    fn force_stop_selected(&mut self) {
+        let Some(pane) = self.selected_pane() else {
+            return;
+        };
+        let alive = self
+            .panes
+            .get(&pane)
+            .is_some_and(|target| target.handle.is_some());
+        if alive {
+            self.advance_shutdown_generation(pane);
+            let mut delivered = false;
+            if let Some(target) = self.panes.get_mut(&pane) {
+                target.exit_intent = target.exit_intent.request_stop();
+                if let Some(handle) = target.handle.as_mut() {
+                    delivered = handle.kill().is_ok();
+                    target.exit_intent = if delivered {
+                        target.exit_intent.stop_delivered()
+                    } else {
+                        target.exit_intent.stop_delivery_failed()
+                    };
+                }
+            }
+            if delivered {
+                self.workspace.set_state(pane, ProcessState::Stopping);
+            } else {
+                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            }
+        } else {
+            self.bump_generation(pane);
+            self.deactivate(pane);
+            self.workspace.set_state(pane, ProcessState::Exited);
+        }
+    }
+
+    /// Returns the selected command's configured or default shutdown policy.
+    fn stop_policy_of(&self, pane: PaneId) -> Option<StopPolicy> {
+        self.workspace
+            .process(pane)
+            .and_then(Process::effective_stop_policy)
     }
 
     /// The pane id of the currently selected process.
@@ -2316,6 +2465,7 @@ struct SpecMatch {
     working_dir: Option<PathBuf>,
     description: Option<Description>,
     restart: RestartPolicy,
+    stop: Option<StopPolicy>,
     autostart: bool,
 }
 
@@ -2329,6 +2479,7 @@ impl SpecMatch {
             working_dir: process.working_dir().clone(),
             description: process.description().clone(),
             restart: *process.restart(),
+            stop: process.effective_stop_policy(),
             autostart: *process.autostart(),
         }
     }
@@ -2340,6 +2491,7 @@ impl SpecMatch {
             && spec.working_dir() == &self.working_dir
             && spec.description() == &self.description
             && spec.restart_policy() == self.restart
+            && spec.effective_stop_policy(self.kind) == self.stop
             && spec.should_autostart(self.kind) == self.autostart
     }
 
@@ -2353,6 +2505,7 @@ impl SpecMatch {
             && process.working_dir() == &self.working_dir
             && process.description() == &self.description
             && *process.restart() == self.restart
+            && process.effective_stop_policy() == self.stop
             && *process.autostart() == self.autostart
     }
 
@@ -2480,7 +2633,7 @@ mod tests {
         domain::{
             config::{ConfigError, ProcessSpec},
             port::OutputSink,
-            process::{Process, ProcessKind, RestartPolicy},
+            process::{Process, ProcessKind, RestartPolicy, StopSignal},
             pty::PtyError,
             value::{ProcessName, ProjectName},
         },
@@ -2742,6 +2895,7 @@ mod tests {
     struct StopSignals {
         terminates: AtomicUsize,
         kills: AtomicUsize,
+        termination: Mutex<Option<(StopSignal, Duration)>>,
     }
 
     /// A runner whose handles record which stop mechanism the app selected.
@@ -2783,8 +2937,9 @@ mod tests {
             Ok(())
         }
 
-        fn terminate(&mut self, _grace: Duration) -> Result<(), PtyError> {
+        fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
             self.signals.terminates.fetch_add(1, Ordering::SeqCst);
+            *self.signals.termination.lock().unwrap() = Some((signal, grace));
             Ok(())
         }
 
@@ -2851,7 +3006,7 @@ mod tests {
             Ok(())
         }
 
-        fn terminate(&mut self, _grace: Duration) -> Result<(), PtyError> {
+        fn terminate(&mut self, _signal: StopSignal, _grace: Duration) -> Result<(), PtyError> {
             self.signals.terminates.fetch_add(1, Ordering::SeqCst);
             match self.terminate_outcome {
                 TerminateOutcome::Succeeds => Ok(()),
@@ -2908,6 +3063,16 @@ mod tests {
     }
 
     const PANE: u64 = 0;
+    /// Grace period used to verify policy propagation without slowing tests.
+    const TEST_STOP_GRACE: Duration = Duration::from_secs(7);
+
+    /// Builds the opt-in shutdown policy used by command lifecycle tests.
+    fn test_stop_policy() -> StopPolicy {
+        StopPolicy::builder()
+            .signal(StopSignal::Interrupt)
+            .grace_period(TEST_STOP_GRACE)
+            .build()
+    }
 
     fn app_with(restart: RestartPolicy) -> App {
         let (sender, _receiver) = bounded(16);
@@ -2937,6 +3102,15 @@ mod tests {
 
     /// Builds a live app of `kind` whose handle records graceful and hard stops.
     fn app_with_stop_signals(kind: ProcessKind) -> (App, Arc<StopSignals>) {
+        let stop = (kind == ProcessKind::Command).then(test_stop_policy);
+        app_with_stop_signals_and_policy(kind, stop)
+    }
+
+    /// Builds a live app with an explicit optional policy and stop-signal record.
+    fn app_with_stop_signals_and_policy(
+        kind: ProcessKind,
+        stop: Option<StopPolicy>,
+    ) -> (App, Arc<StopSignals>) {
         let signals = Arc::new(StopSignals::default());
         let (sender, _receiver) = bounded(16);
         let workspace = Workspace::builder()
@@ -2947,6 +3121,7 @@ mod tests {
                     .kind(kind)
                     .command(Some(CommandLine::try_new("true").unwrap()))
                     .restart(RestartPolicy::Never)
+                    .stop(stop)
                     .build(),
             ])
             .build();
@@ -2981,6 +3156,7 @@ mod tests {
                     .kind(kind)
                     .command(Some(CommandLine::try_new("true").unwrap()))
                     .restart(restart)
+                    .stop((kind == ProcessKind::Command).then(test_stop_policy))
                     .build(),
             ])
             .build();
@@ -3033,6 +3209,14 @@ mod tests {
 
     fn current_gen(app: &App) -> SpawnGeneration {
         *app.generations.get(&PaneId::new(PANE)).unwrap()
+    }
+
+    /// Current graceful shutdown request generation for the test pane.
+    fn current_shutdown_gen(app: &App) -> ShutdownGeneration {
+        app.panes
+            .get(&PaneId::new(PANE))
+            .unwrap()
+            .shutdown_generation
     }
 
     #[test]
@@ -3531,6 +3715,7 @@ mod tests {
         assert!(app.panes.get(&PaneId::new(PANE)).unwrap().handle.is_none());
     }
 
+    /// A configured stop sends its signal once, enters stopping, and escalates.
     #[test]
     fn repeated_manual_command_stop_reuses_one_graceful_escalation() {
         let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
@@ -3539,8 +3724,98 @@ mod tests {
 
         assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
         assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *signals.termination.lock().unwrap(),
+            Some((StopSignal::Interrupt, TEST_STOP_GRACE))
+        );
+        assert_eq!(state(&app), ProcessState::Stopping);
 
-        app.handle_force_stop(PaneId::new(PANE), current_gen(&app));
+        app.handle_force_stop(
+            PaneId::new(PANE),
+            current_gen(&app),
+            current_shutdown_gen(&app),
+        );
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(app.notice.as_deref(), Some(FORCE_STOP_NOTICE));
+    }
+
+    /// Commands use the default graceful policy when `stop` is absent.
+    #[test]
+    fn a_command_without_a_stop_policy_uses_graceful_defaults() {
+        let (mut app, signals) = app_with_stop_signals_and_policy(ProcessKind::Command, None);
+
+        app.stop_selected();
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        let policy = StopPolicy::default();
+        assert_eq!(
+            *signals.termination.lock().unwrap(),
+            Some((*policy.signal(), *policy.grace_period()))
+        );
+        assert_eq!(state(&app), ProcessState::Stopping);
+    }
+
+    /// Force-stop ignores a command's configured graceful shutdown path.
+    #[test]
+    fn force_stop_bypasses_a_commands_graceful_policy() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
+
+        app.force_stop_selected();
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(state(&app), ProcessState::Stopping);
+    }
+
+    /// Restart waits for configured graceful exit before spawning a new child.
+    #[test]
+    fn restart_uses_a_commands_graceful_policy_then_respawns() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
+        let pane = PaneId::new(PANE);
+
+        app.restart_selected();
+
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(state(&app), ProcessState::Stopping);
+        assert_eq!(
+            app.panes.get(&pane).unwrap().exit_intent,
+            ExitIntent::RestartInFlight
+        );
+
+        app.handle_output(
+            pane,
+            current_gen(&app),
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+
+        assert_eq!(state(&app), ProcessState::Running);
+        assert!(app.panes.get(&pane).unwrap().handle.is_some());
+    }
+
+    /// Superseding a graceful stop gives the replacement restart its full grace
+    /// period by making the earlier escalation event stale.
+    #[test]
+    fn a_new_graceful_action_invalidates_the_previous_deadline() {
+        let (mut app, signals) = app_with_stop_signals(ProcessKind::Command);
+        let pane = PaneId::new(PANE);
+        let spawn_generation = current_gen(&app);
+
+        app.stop_selected();
+        let stale_shutdown = current_shutdown_gen(&app);
+        app.restart_selected();
+        let current_shutdown = current_shutdown_gen(&app);
+
+        assert_ne!(stale_shutdown, current_shutdown);
+        app.handle_force_stop(pane, spawn_generation, stale_shutdown);
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            app.panes.get(&pane).unwrap().exit_intent,
+            ExitIntent::RestartInFlight
+        );
+
+        app.handle_force_stop(pane, spawn_generation, current_shutdown);
         assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
     }
 
@@ -3604,14 +3879,14 @@ mod tests {
         let pane = PaneId::new(PANE);
 
         app.stop_selected();
-        app.handle_force_stop(pane, current_gen(&app));
+        app.handle_force_stop(pane, current_gen(&app), current_shutdown_gen(&app));
         assert_eq!(
             app.panes.get(&pane).unwrap().exit_intent,
             ExitIntent::StopRetryable
         );
 
         app.stop_selected();
-        app.handle_force_stop(pane, current_gen(&app));
+        app.handle_force_stop(pane, current_gen(&app), current_shutdown_gen(&app));
 
         assert_eq!(
             app.panes.get(&pane).unwrap().exit_intent,
@@ -3987,6 +4262,43 @@ mod tests {
         (app, recorder)
     }
 
+    /// Builds an app whose live model omits `stop` while the reloaded config
+    /// writes the equivalent default policy explicitly.
+    fn equivalent_stop_reconciliation_app() -> App {
+        let implicit = ProcessSpec::builder()
+            .name(ProcessName::try_new("server").unwrap())
+            .command(Some(CommandLine::try_new("serve").unwrap()))
+            .build();
+        let explicit = implicit.clone().with_stop(Some(StopPolicy::default()));
+        let loaded = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![])
+            .commands(vec![implicit])
+            .build();
+        let updated = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![])
+            .commands(vec![explicit])
+            .build();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(loaded.to_processes())
+            .build();
+        App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: updated,
+                recorder: Recorder::default(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        )
+    }
+
     #[test]
     fn a_config_change_adds_new_processes_without_touching_running_ones() {
         let config = WorkspaceConfig::builder()
@@ -4228,6 +4540,36 @@ mod tests {
             commands,
             vec!["npm run dev".to_string()],
             "the edited command replaces the old one, leaving no duplicate"
+        );
+    }
+
+    /// Writing the implicit stop defaults explicitly does not replace a stopped
+    /// pane because both configurations have the same effective behavior.
+    #[test]
+    fn reconciliation_normalizes_equivalent_stop_defaults_for_a_stopped_command() {
+        let mut app = equivalent_stop_reconciliation_app();
+        let original_pane = *app.workspace.processes()[0].id();
+
+        app.handle_config_changed(PathBuf::from("/here/muster.yml"));
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(*app.workspace.processes()[0].id(), original_pane);
+    }
+
+    /// Writing the implicit stop defaults explicitly neither retires nor
+    /// duplicates a running command.
+    #[test]
+    fn reconciliation_normalizes_equivalent_stop_defaults_for_a_running_command() {
+        let mut app = equivalent_stop_reconciliation_app();
+        let pane = *app.workspace.processes()[0].id();
+        app.start_selected();
+
+        app.handle_config_changed(PathBuf::from("/here/muster.yml"));
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::Tracked
         );
     }
 
@@ -4610,6 +4952,7 @@ mod tests {
                 ProcessSpec::builder()
                     .name(ProcessName::try_new("cmd").unwrap())
                     .command(Some(CommandLine::try_new("true").unwrap()))
+                    .stop(Some(test_stop_policy()))
                     .build(),
             ])
             .build();
@@ -4651,6 +4994,11 @@ mod tests {
             workspaces[0].1.commands()[0].autostart(),
             &Some(true),
             "the command spec is saved with autostart on"
+        );
+        assert_eq!(
+            workspaces[0].1.commands()[0].stop(),
+            &Some(test_stop_policy()),
+            "changing autostart preserves the independent stop policy"
         );
     }
 

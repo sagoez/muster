@@ -278,8 +278,9 @@ mod tests {
     /// cleanup while keeping the suite quick.
     const TEST_STOP_GRACE: Duration = Duration::from_secs(3);
     /// Shell fixture whose direct wrapper exits on TERM while a signal-resistant
-    /// descendant takes longer than the ordinary PTY drain bound to finish.
-    const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean' & trap 'exit 0' TERM; wait"#;
+    /// descendant takes longer than the ordinary PTY drain bound to finish. The
+    /// final sleep keeps the slave open while macOS delivers the cleanup marker.
+    const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean; sleep 1' & trap 'exit 0' TERM; wait"#;
 
     struct ChannelSink(crossbeam_channel::Sender<ProcessOutput>);
 

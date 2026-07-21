@@ -9,6 +9,10 @@ auto-restart on failure.
 It's been my daily driver for running local work for a while. This is the
 cleaned-up cut I opened up, done with help of the AI.
 
+## Demo
+
+[Watch the demo](docs/muster-demo.mp4).
+
 ## Features
 
 - Runs each process under its own PTY and renders it live. A process that exits

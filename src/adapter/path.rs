@@ -158,7 +158,7 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         assert_eq!(absolutize(&link), link);
-        assert_eq!(normalize(&link), target);
+        assert_eq!(normalize(&link), target.canonicalize().unwrap());
 
         fs::remove_dir_all(dir).unwrap();
     }

@@ -1,6 +1,6 @@
 ---
 source: src/adapter/tui/widget/status_bar.rs
-assertion_line: 161
+assertion_line: 300
 expression: terminal.backend()
 ---
-"↑↓ move   s start/stop   r restart   x kill   ? help        "
+"s start/stop   r restart   x kill   a add   ? help          "

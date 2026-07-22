@@ -25,7 +25,8 @@ cleaned-up cut I opened up, done with help of the AI.
 - A projects tree in the sidebar for switching between workspaces.
 - Live config reload: edits are reconciled into the running workspace, adding new
   processes and dropping removed ones while leaving running ones untouched.
-- Processes can be added and autostart toggled directly from the TUI.
+- Disposable agent sessions can be launched from presets in the TUI. Terminals
+  and commands can be added persistently without leaving the app.
 - A failed process raises an alert visible from any pane.
 
 ## Getting started
@@ -55,7 +56,8 @@ Press `?` in the app for the full keymap:
 
 - `j`/`k` or arrows to move, `Enter`/`l` to open, `h` to go back
 - `s` start/stop, `r` restart, `p` pause, `x` force-kill, `t` toggle autostart
-- `a` add a process, `n` new project, `o` switch projects, `d` remove a project
+- `a` add a process, `n` new project, `o` switch projects
+- `d` closes a disposable agent session or removes the selected saved project
 - `C-a` detaches from a focused pane; the same commands work as `C-a` chords while
   attached
 - `q` to quit
@@ -87,6 +89,21 @@ commands:
       grace_period: 5s
     autostart: false
 ```
+
+Entries under `agents` are pinned workspace processes. They persist in
+`muster.yml` and use the normal start, stop, restart, and autostart controls.
+
+Press `a`, choose `agent`, then select Claude, Codex, Gemini, Amp, OpenCode,
+Copilot, Kimi, or Custom to launch a disposable agent session. A known preset
+uses its standard executable when the command field is blank. A custom agent
+requires a command. The optional name defaults to the preset name. These
+sessions exist only for the current TUI run, never modify `muster.yml`, and can
+be closed and removed with `d` or `C-a d` while attached.
+
+Agent activity detection follows the selected tool. Codex, Gemini, and Amp use
+terminal-title changes; the other presets use visible output. Terminal progress,
+bells, and notification sequences still provide explicit working or waiting
+signals for every preset.
 
 - `autostart`: `null` uses the default (agents and terminals start with the
   workspace, commands wait for `s`), or set `true`/`false` explicitly. Toggle it

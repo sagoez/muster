@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{Process, ProcessKind, RestartPolicy, StopPolicy},
+    process::{AgentTool, Process, ProcessKind, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -45,6 +45,10 @@ impl ProcessSpec {
             .id(id)
             .name(self.name.clone())
             .kind(kind)
+            .agent_tool(
+                (kind == ProcessKind::Agent)
+                    .then(|| AgentTool::from_command(self.command.as_ref())),
+            )
             .command(self.command.clone())
             .working_dir(self.working_dir.clone())
             .description(self.description.clone())

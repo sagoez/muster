@@ -1,69 +1,131 @@
 use std::time::{Duration, Instant};
 
-use crate::domain::process::ActivityState;
+use crate::domain::process::{ActivityState, AgentTool, Process, ProcessKind};
 
-/// Quiet period after ordinary output before a process returns from working to
-/// idle. Explicit progress remains working until its protocol reports completion.
+/// Quiet period after activity evidence before a process returns to idle.
 pub(super) const OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Evidence currently governing inferred process activity. The variants prevent
-/// an ordinary-output deadline and explicit protocol progress from coexisting.
+/// Which terminal evidence indicates that an agent is actively working.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum ActivityTracker {
-    /// No inferred timeout is scheduled. The displayed activity may be idle or
-    /// awaiting input, as owned by the process domain value.
+enum ActivityStrategy {
+    /// Ordinary visible output indicates work.
+    #[default]
+    Output,
+    /// Terminal-title changes indicate work.
+    Title,
+}
+
+impl ActivityStrategy {
+    /// Selects a strategy from the process kind and agent preset.
+    fn for_process(process: &Process) -> Self {
+        if *process.kind() != ProcessKind::Agent {
+            return Self::Output;
+        }
+        match process.agent_tool() {
+            Some(AgentTool::Codex | AgentTool::Gemini | AgentTool::Amp) => Self::Title,
+            Some(
+                AgentTool::Claude
+                | AgentTool::Opencode
+                | AgentTool::Copilot
+                | AgentTool::Kimi
+                | AgentTool::Custom,
+            )
+            | None => Self::Output,
+        }
+    }
+}
+
+/// Evidence currently governing inferred process activity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ActivityEvidence {
+    /// No inferred timeout is scheduled.
     #[default]
     Unscheduled,
-    /// Ordinary output keeps the process working until this observation expires.
-    RecentOutput(Instant),
+    /// Recent provider evidence keeps the process working until it expires.
+    Recent(Instant),
     /// Explicit protocol progress keeps the process working until completion.
     ExplicitProgress,
 }
 
+/// Tracks provider-specific activity evidence for one terminal lifetime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ActivityTracker {
+    strategy: ActivityStrategy,
+    evidence: ActivityEvidence,
+    last_title: Option<String>,
+}
+
 impl ActivityTracker {
-    /// Records ordinary terminal output and returns the resulting activity.
-    pub(super) fn observe_output(&mut self, now: Instant) -> ActivityState {
-        if *self != Self::ExplicitProgress {
-            *self = Self::RecentOutput(now);
+    /// Creates a tracker using the selected process's agent preset.
+    pub(super) fn for_process(process: &Process) -> Self {
+        Self {
+            strategy: ActivityStrategy::for_process(process),
+            evidence: ActivityEvidence::Unscheduled,
+            last_title: None,
         }
-        ActivityState::Working
+    }
+
+    /// Records ordinary terminal output when the provider uses output activity.
+    pub(super) fn observe_output(&mut self, now: Instant) -> Option<ActivityState> {
+        if self.strategy != ActivityStrategy::Output {
+            return None;
+        }
+        if self.evidence != ActivityEvidence::ExplicitProgress {
+            self.evidence = ActivityEvidence::Recent(now);
+        }
+        Some(ActivityState::Working)
+    }
+
+    /// Records a terminal-title change when the provider uses title activity.
+    pub(super) fn observe_title(&mut self, now: Instant, title: String) -> Option<ActivityState> {
+        if self.strategy != ActivityStrategy::Title
+            || self.last_title.as_deref() == Some(title.as_str())
+        {
+            return None;
+        }
+        self.last_title = Some(title);
+        if self.evidence != ActivityEvidence::ExplicitProgress {
+            self.evidence = ActivityEvidence::Recent(now);
+        }
+        Some(ActivityState::Working)
     }
 
     /// Records a protocol progress transition and returns the resulting activity.
     pub(super) fn observe_progress(&mut self, active: bool) -> ActivityState {
         if active {
-            *self = Self::ExplicitProgress;
+            self.evidence = ActivityEvidence::ExplicitProgress;
             ActivityState::Working
         } else {
-            *self = Self::Unscheduled;
+            self.evidence = ActivityEvidence::Unscheduled;
             ActivityState::AwaitingInput
         }
     }
 
     /// Records a notification or bell and returns the resulting activity.
     pub(super) fn observe_attention(&mut self) -> ActivityState {
-        *self = Self::Unscheduled;
+        self.evidence = ActivityEvidence::Unscheduled;
         ActivityState::AwaitingInput
     }
 
     /// Clears all inferred activity for a new or exited child.
     pub(super) fn reset(&mut self) {
-        *self = Self::Unscheduled;
+        self.evidence = ActivityEvidence::Unscheduled;
+        self.last_title = None;
     }
 
-    /// Returns when recent ordinary output should become idle, if scheduled.
-    pub(super) fn deadline(self) -> Option<Instant> {
-        match self {
-            Self::RecentOutput(observed_at) => Some(observed_at + OUTPUT_IDLE_TIMEOUT),
-            Self::Unscheduled | Self::ExplicitProgress => None,
+    /// Returns when recent provider evidence should become idle, if scheduled.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        match self.evidence {
+            ActivityEvidence::Recent(observed_at) => Some(observed_at + OUTPUT_IDLE_TIMEOUT),
+            ActivityEvidence::Unscheduled | ActivityEvidence::ExplicitProgress => None,
         }
     }
 
-    /// Expires recent ordinary output at `now`, returning the new activity only
+    /// Expires recent provider evidence at `now`, returning the new activity only
     /// when a transition to idle occurred.
     pub(super) fn expire(&mut self, now: Instant) -> Option<ActivityState> {
         if self.deadline().is_some_and(|deadline| deadline <= now) {
-            *self = Self::Unscheduled;
+            self.evidence = ActivityEvidence::Unscheduled;
             Some(ActivityState::Idle)
         } else {
             None
@@ -74,37 +136,75 @@ impl ActivityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        process::ProcessOrigin,
+        value::{PaneId, ProcessName},
+    };
 
+    /// Builds an agent session for an activity strategy test.
+    fn agent(tool: AgentTool) -> Process {
+        Process::builder()
+            .id(PaneId::new(1))
+            .name(ProcessName::try_new(tool.label()).unwrap())
+            .kind(ProcessKind::Agent)
+            .agent_tool(Some(tool))
+            .origin(ProcessOrigin::Session)
+            .build()
+    }
+
+    /// Output-based work becomes idle after the quiet timeout.
     #[test]
     fn ordinary_output_expires_to_idle() {
         let observed_at = Instant::now();
         let mut tracker = ActivityTracker::default();
 
-        assert_eq!(tracker.observe_output(observed_at), ActivityState::Working);
+        assert_eq!(
+            tracker.observe_output(observed_at),
+            Some(ActivityState::Working)
+        );
         assert_eq!(
             tracker.expire(observed_at + OUTPUT_IDLE_TIMEOUT),
             Some(ActivityState::Idle)
         );
-        assert_eq!(tracker, ActivityTracker::Unscheduled);
+        assert_eq!(tracker.evidence, ActivityEvidence::Unscheduled);
     }
 
+    /// Title-based providers ignore visible output and deduplicate titles.
     #[test]
-    fn explicit_progress_has_no_ordinary_output_deadline() {
+    fn title_strategy_ignores_output_and_observes_title_changes() {
+        let observed_at = Instant::now();
+        let mut tracker = ActivityTracker::for_process(&agent(AgentTool::Codex));
+
+        assert_eq!(tracker.observe_output(observed_at), None);
+        assert_eq!(
+            tracker.observe_title(observed_at, "working".to_string()),
+            Some(ActivityState::Working)
+        );
+        assert_eq!(
+            tracker.observe_title(observed_at, "working".to_string()),
+            None
+        );
+    }
+
+    /// Explicit progress cannot be expired by ordinary provider evidence.
+    #[test]
+    fn explicit_progress_has_no_provider_deadline() {
         let mut tracker = ActivityTracker::default();
         tracker.observe_progress(true);
         tracker.observe_output(Instant::now());
 
-        assert_eq!(tracker, ActivityTracker::ExplicitProgress);
+        assert_eq!(tracker.evidence, ActivityEvidence::ExplicitProgress);
         assert!(tracker.deadline().is_none());
         assert_eq!(tracker.expire(Instant::now() + OUTPUT_IDLE_TIMEOUT), None);
     }
 
+    /// An attention signal supersedes a pending output timeout.
     #[test]
-    fn attention_clears_an_ordinary_output_deadline() {
+    fn attention_clears_an_output_deadline() {
         let mut tracker = ActivityTracker::default();
         tracker.observe_output(Instant::now());
 
         assert_eq!(tracker.observe_attention(), ActivityState::AwaitingInput);
-        assert_eq!(tracker, ActivityTracker::Unscheduled);
+        assert_eq!(tracker.evidence, ActivityEvidence::Unscheduled);
     }
 }

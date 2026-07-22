@@ -40,8 +40,8 @@ use crate::{
             SettingsStore,
         },
         process::{
-            ActivityState, ExitIntent, Process, ProcessKind, ProcessState, RestartPolicy,
-            StopPolicy,
+            ActivityState, AgentTool, ExitIntent, Process, ProcessKind, ProcessOrigin,
+            ProcessState, RestartPolicy, StopPolicy,
         },
         project::Project,
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
@@ -99,8 +99,16 @@ const PROJECT_CONFIG_FILE: &str = "muster.yml";
 const STARTER_TERMINAL: &str = "Terminal";
 /// Title of the add-process form.
 const ADD_PROCESS_TITLE: &str = "Add process";
+/// Title of the disposable agent-session form.
+const ADD_AGENT_TITLE: &str = "New agent session";
 /// Label of a process-kind field.
 const KIND_FIELD: &str = "Kind";
+/// Label of an agent-tool field.
+const TOOL_FIELD: &str = "Tool";
+/// Label of an optional agent-session display name.
+const SESSION_NAME_FIELD: &str = "Name (optional)";
+/// Label of an optional preset command override.
+const AGENT_COMMAND_FIELD: &str = "Command override";
 /// Label of a command field.
 const COMMAND_FIELD: &str = "Command";
 /// Process-kind option value for an agent.
@@ -111,6 +119,12 @@ const KIND_TERMINAL: &str = "terminal";
 const KIND_COMMAND: &str = "command";
 /// Process-kind options offered when adding a process.
 const KIND_OPTIONS: [&str; 3] = [KIND_AGENT, KIND_TERMINAL, KIND_COMMAND];
+/// Shown when a custom agent session has no launch command.
+const AGENT_COMMAND_REQUIRED: &str = "a custom agent needs a command";
+/// Shown when autostart is requested for a disposable agent session.
+const SESSION_AUTOSTART_UNAVAILABLE: &str = "agent sessions exist only for this TUI run";
+/// Shown when close is requested for a configured process.
+const CONFIGURED_AGENT_CLOSE_UNAVAILABLE: &str = "configured agents stay pinned in muster.yml";
 /// Shown when a project's config file cannot be written.
 const WORKSPACE_SAVE_ERROR: &str = "could not write the project config";
 /// Shown when autostart cannot persist because the process has no config entry
@@ -141,6 +155,10 @@ const OVERWRITE_VERB: &str = "overwrite";
 const REMOVE_PROJECT_TITLE: &str = "Remove project?";
 /// Accept-action verb for the project-removal confirmation.
 const REMOVE_PROJECT_VERB: &str = "remove";
+/// Title of the agent-session close confirmation.
+const CLOSE_AGENT_TITLE: &str = "Close agent?";
+/// Accept-action verb for the agent-session close confirmation.
+const CLOSE_AGENT_VERB: &str = "close";
 
 /// Which region currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +302,10 @@ enum Overlay {
         message: String,
         config_path: PathBuf,
     },
+    ConfirmSessionClose {
+        message: String,
+        pane: PaneId,
+    },
     Help,
 }
 
@@ -293,7 +315,7 @@ impl Overlay {
         match self {
             Self::Switcher(switcher) => Some(switcher),
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_ref(),
-            Self::ConfirmRemoval { .. } | Self::Help => None,
+            Self::ConfirmRemoval { .. } | Self::ConfirmSessionClose { .. } | Self::Help => None,
         }
     }
 
@@ -302,7 +324,7 @@ impl Overlay {
         match self {
             Self::Switcher(switcher) => Some(switcher),
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_mut(),
-            Self::ConfirmRemoval { .. } | Self::Help => None,
+            Self::ConfirmRemoval { .. } | Self::ConfirmSessionClose { .. } | Self::Help => None,
         }
     }
 
@@ -310,7 +332,10 @@ impl Overlay {
     fn form(&self) -> Option<&FormModal> {
         match self {
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&form.modal),
-            Self::Switcher(_) | Self::ConfirmRemoval { .. } | Self::Help => None,
+            Self::Switcher(_)
+            | Self::ConfirmRemoval { .. }
+            | Self::ConfirmSessionClose { .. }
+            | Self::Help => None,
         }
     }
 
@@ -318,7 +343,10 @@ impl Overlay {
     fn form_mut(&mut self) -> Option<&mut FormModal> {
         match self {
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&mut form.modal),
-            Self::Switcher(_) | Self::ConfirmRemoval { .. } | Self::Help => None,
+            Self::Switcher(_)
+            | Self::ConfirmRemoval { .. }
+            | Self::ConfirmSessionClose { .. }
+            | Self::Help => None,
         }
     }
 
@@ -347,6 +375,9 @@ impl Overlay {
                 message,
                 REMOVE_PROJECT_VERB,
             ),
+            Self::ConfirmSessionClose { message, .. } => {
+                confirm::render(frame, area, CLOSE_AGENT_TITLE, message, CLOSE_AGENT_VERB)
+            },
             Self::Help => help::render(frame, area),
         }
     }
@@ -381,8 +412,12 @@ enum FormIntent {
     SaveCurrentProject,
     /// Create a new project: write a starter config at the folder and register it.
     NewProject,
-    /// Add a process to the current workspace and reload it.
-    AddProcess,
+    /// Choose which kind of process to add.
+    ChooseProcessKind,
+    /// Launch a disposable coding-agent session.
+    LaunchAgentSession,
+    /// Persist a terminal or command in the current workspace.
+    AddConfiguredProcess(ProcessKind),
 }
 
 /// The running TUI application: workspace state plus the live panes.
@@ -565,9 +600,13 @@ impl App {
         self.overlay = match current {
             Some(Overlay::Form(form)) => form.switcher.map(Overlay::Switcher),
             Some(Overlay::ConfirmOverwrite { form, .. }) => Some(Overlay::Form(form)),
-            Some(Overlay::Switcher(_) | Overlay::ConfirmRemoval { .. } | Overlay::Help) | None => {
-                None
-            },
+            Some(
+                Overlay::Switcher(_)
+                | Overlay::ConfirmRemoval { .. }
+                | Overlay::ConfirmSessionClose { .. }
+                | Overlay::Help,
+            )
+            | None => None,
         };
     }
 
@@ -695,6 +734,10 @@ impl App {
         let mut next_id = 0;
         for process in self.workspace.processes() {
             next_id = next_id.max((*process.id()).into_inner() + 1);
+            if *process.origin() == ProcessOrigin::Session {
+                kept.push(process.clone());
+                continue;
+            }
             let identity = (
                 *process.kind(),
                 process.name().clone(),
@@ -751,6 +794,8 @@ impl App {
             self.generations.remove(&pane);
             self.restart_attempts.remove(&pane);
         }
+
+        kept.sort_by_key(|process| process.kind().section_index());
 
         // Rebuild the workspace, keeping the selection on the same process when it
         // survives, else clamping to the first.
@@ -822,7 +867,16 @@ impl App {
                 let activity = self
                     .panes
                     .get_mut(&pane)
-                    .map(|target| target.activity.observe_output(Instant::now()));
+                    .and_then(|target| target.activity.observe_output(Instant::now()));
+                if let Some(activity) = activity {
+                    self.workspace.set_activity(pane, activity);
+                }
+            },
+            Signal::Title(title) => {
+                let activity = self
+                    .panes
+                    .get_mut(&pane)
+                    .and_then(|target| target.activity.observe_title(Instant::now(), title));
                 if let Some(activity) = activity {
                     self.workspace.set_activity(pane, activity);
                 }
@@ -1055,13 +1109,25 @@ impl App {
     /// sidebar selection. The full keymap lives in the `?` overlay.
     fn status_context(&self) -> StatusContext {
         if matches!(self.focus, Focus::Terminal | Focus::Leader) {
-            return StatusContext::Terminal;
+            return if self.selected_is_agent_session() {
+                StatusContext::TerminalAgentSession
+            } else {
+                StatusContext::Terminal
+            };
         }
         match self.project_cursor {
             Some(_) => StatusContext::Project,
             None if self.workspace.is_empty() => StatusContext::Empty,
+            None if self.selected_is_agent_session() => StatusContext::AgentSession,
             None => StatusContext::Process,
         }
+    }
+
+    /// Whether the selected row is a disposable agent session.
+    fn selected_is_agent_session(&self) -> bool {
+        self.workspace.selected_process().is_some_and(|process| {
+            *process.kind() == ProcessKind::Agent && *process.origin() == ProcessOrigin::Session
+        })
     }
 
     /// The (title, screen) of the currently focused pane. A finished pane still
@@ -1123,6 +1189,11 @@ impl App {
     /// launches the user's login shell.
     fn spawn(&mut self, pane: PaneId, command: Option<CommandLine>, cwd: Option<PathBuf>) {
         let generation = self.bump_generation(pane);
+        let activity = self
+            .workspace
+            .process(pane)
+            .map(ActivityTracker::for_process)
+            .unwrap_or_default();
         let (project, cwd) = Self::resolve_spawn_paths(self.current_config.as_deref(), cwd);
         let request = SpawnRequest::builder()
             .command(command)
@@ -1143,7 +1214,7 @@ impl App {
                     parser,
                     notification_scope,
                     signals: SignalReader::new(),
-                    activity: ActivityTracker::default(),
+                    activity,
                     last_bell: None,
                     handle: Some(handle),
                     started_at: Instant::now(),
@@ -1322,7 +1393,11 @@ impl App {
                 self.overlay = None;
                 return;
             },
-            Some(Overlay::ConfirmOverwrite { .. } | Overlay::ConfirmRemoval { .. }) => {
+            Some(
+                Overlay::ConfirmOverwrite { .. }
+                | Overlay::ConfirmRemoval { .. }
+                | Overlay::ConfirmSessionClose { .. },
+            ) => {
                 self.handle_confirm_key(key);
                 return;
             },
@@ -1360,6 +1435,7 @@ impl App {
             KeyCode::Char('d') if self.project_cursor.is_some() => {
                 self.confirm_remove_selected_project();
             },
+            KeyCode::Char('d') => self.confirm_close_selected_session(),
             KeyCode::Char('t') if self.project_cursor.is_none() => self.toggle_selected_autostart(),
             KeyCode::Char('s') if self.project_cursor.is_none() => self.toggle_selected(),
             KeyCode::Char('r') if self.project_cursor.is_none() => self.restart_selected(),
@@ -1509,6 +1585,60 @@ impl App {
         self.confirm_remove_project(&project, message);
     }
 
+    /// Confirms closing the selected disposable agent session. A configured
+    /// agent remains pinned because its lifecycle is owned by `muster.yml`.
+    fn confirm_close_selected_session(&mut self) {
+        let Some(process) = self.workspace.selected_process() else {
+            return;
+        };
+        if *process.kind() != ProcessKind::Agent {
+            return;
+        }
+        if *process.origin() != ProcessOrigin::Session {
+            self.notice = Some(CONFIGURED_AGENT_CLOSE_UNAVAILABLE.to_string());
+            return;
+        }
+        let pane = *process.id();
+        let message = format!("Close agent session {}?", process.name().as_ref());
+        if self
+            .panes
+            .get(&pane)
+            .is_some_and(|target| target.handle.is_some())
+        {
+            self.overlay = Some(Overlay::ConfirmSessionClose { message, pane });
+        } else {
+            self.close_agent_session(pane);
+        }
+    }
+
+    /// Force-kills and retires one disposable agent session. Its row disappears
+    /// when the child exit event arrives, or immediately when already stopped.
+    /// Focus returns to the sidebar before selection can move to another row.
+    fn close_agent_session(&mut self, pane: PaneId) {
+        self.focus = Focus::Sidebar;
+        let alive = self
+            .panes
+            .get(&pane)
+            .is_some_and(|target| target.handle.is_some());
+        if !alive {
+            self.retire_pane(pane);
+            return;
+        }
+        let delivered = self
+            .panes
+            .get_mut(&pane)
+            .and_then(|target| target.handle.as_mut().map(|handle| handle.kill().is_ok()))
+            .unwrap_or(false);
+        if delivered {
+            if let Some(target) = self.panes.get_mut(&pane) {
+                target.config_membership = ConfigMembership::RetireOnExit;
+            }
+            self.workspace.set_state(pane, ProcessState::Stopping);
+        } else {
+            self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+        }
+    }
+
     /// Whether `project` is the unsaved launched-project row synthesized for the
     /// tree rather than a registered project.
     fn is_synthetic_launched(&self, project: &Project) -> bool {
@@ -1530,6 +1660,10 @@ impl App {
         let Some(process) = self.workspace.selected_process() else {
             return;
         };
+        if *process.origin() == ProcessOrigin::Session {
+            self.notice = Some(SESSION_AUTOSTART_UNAVAILABLE.to_string());
+            return;
+        }
         let pane = *process.id();
         let autostart = !*process.autostart();
         let target = SpecMatch::of(process);
@@ -1537,6 +1671,7 @@ impl App {
             .workspace
             .processes()
             .iter()
+            .filter(|candidate| *candidate.origin() == ProcessOrigin::Configured)
             .filter(|candidate| target.matches_process(candidate))
             .position(|candidate| *candidate.id() == pane)
             .unwrap_or(0);
@@ -1604,6 +1739,7 @@ impl App {
             KeyCode::Char('N') => self.toggle_desktop_notifications(),
             KeyCode::Char('o') => self.open_switcher(),
             KeyCode::Char('x') => self.force_stop_selected(),
+            KeyCode::Char('d') => self.confirm_close_selected_session(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
         }
@@ -1695,6 +1831,7 @@ impl App {
     fn open_form(&mut self, form: Form, intent: FormIntent) {
         let switcher = match self.overlay.take() {
             Some(Overlay::Switcher(switcher)) => Some(switcher),
+            Some(Overlay::Form(form)) => form.switcher,
             _ => None,
         };
         self.overlay = Some(Overlay::Form(FormOverlay {
@@ -1726,14 +1863,33 @@ impl App {
         self.open_form(form, FormIntent::NewProject);
     }
 
-    /// Opens the add-process form: a kind choice, a name, and a command.
+    /// Opens the first add-process step, where the process kind is selected.
     fn open_add_process_form(&mut self) {
+        let form = Form::new(ADD_PROCESS_TITLE, vec![Field::choice(
+            KIND_FIELD,
+            &KIND_OPTIONS,
+        )]);
+        self.open_form(form, FormIntent::ChooseProcessKind);
+    }
+
+    /// Opens the disposable agent-session form with a tool preset, optional
+    /// display name, and optional command override.
+    fn open_agent_session_form(&mut self) {
+        let form = Form::new(ADD_AGENT_TITLE, vec![
+            Field::choice(TOOL_FIELD, &AgentTool::OPTIONS),
+            Field::text(SESSION_NAME_FIELD),
+            Field::text(AGENT_COMMAND_FIELD),
+        ]);
+        self.open_form(form, FormIntent::LaunchAgentSession);
+    }
+
+    /// Opens the persistent terminal or command form.
+    fn open_configured_process_form(&mut self, kind: ProcessKind) {
         let form = Form::new(ADD_PROCESS_TITLE, vec![
-            Field::choice(KIND_FIELD, &KIND_OPTIONS),
             Field::text(NAME_FIELD),
             Field::text(COMMAND_FIELD),
         ]);
-        self.open_form(form, FormIntent::AddProcess);
+        self.open_form(form, FormIntent::AddConfiguredProcess(kind));
     }
 
     /// Removes the highlighted project from the registry.
@@ -1883,7 +2039,11 @@ impl App {
         match intent {
             FormIntent::SaveCurrentProject => self.save_current_project(&values),
             FormIntent::NewProject => self.new_project(&values),
-            FormIntent::AddProcess => self.add_process(&values),
+            FormIntent::ChooseProcessKind => self.choose_process_kind(&values),
+            FormIntent::LaunchAgentSession => self.launch_agent_session(&values),
+            FormIntent::AddConfiguredProcess(kind) => {
+                self.add_configured_process(kind, &values);
+            },
         }
     }
 
@@ -1978,6 +2138,9 @@ impl App {
                     Some(Overlay::ConfirmRemoval { config_path, .. }) => {
                         self.remove_project(&config_path);
                     },
+                    Some(Overlay::ConfirmSessionClose { pane, .. }) => {
+                        self.close_agent_session(pane);
+                    },
                     other => self.overlay = other,
                 }
             },
@@ -2024,23 +2187,87 @@ impl App {
         }
     }
 
-    /// Adds a process to the current workspace: appends it to the config file
-    /// and reloads the project so it starts. A blank or invalid field leaves the
-    /// form open.
-    fn add_process(&mut self, values: &[String]) {
-        let (Some(kind), Some(name), Some(command)) =
+    /// Advances the add flow to the selected kind's specific form.
+    fn choose_process_kind(&mut self, values: &[String]) {
+        match values.first().map(String::as_str) {
+            Some(KIND_AGENT) => self.open_agent_session_form(),
+            Some(KIND_TERMINAL) => self.open_configured_process_form(ProcessKind::Terminal),
+            Some(KIND_COMMAND) => self.open_configured_process_form(ProcessKind::Command),
+            _ => {},
+        }
+    }
+
+    /// Launches a disposable coding-agent session without modifying `muster.yml`.
+    fn launch_agent_session(&mut self, values: &[String]) {
+        let (Some(tool), Some(name), Some(command)) =
             (values.first(), values.get(1), values.get(2))
         else {
             return;
         };
-        let Some(config_path) = self.current_config.clone() else {
+        let Ok(tool) = tool.parse::<AgentTool>() else {
             return;
         };
-        let kind = match kind.as_str() {
-            KIND_AGENT => ProcessKind::Agent,
-            KIND_TERMINAL => ProcessKind::Terminal,
-            KIND_COMMAND => ProcessKind::Command,
-            _ => return,
+        let name = if name.trim().is_empty() {
+            tool.label()
+        } else {
+            name.trim()
+        };
+        let Ok(name) = ProcessName::try_new(name) else {
+            return;
+        };
+        let command = if command.trim().is_empty() {
+            let Some(command) = tool.default_command() else {
+                self.report_error(AGENT_COMMAND_REQUIRED);
+                return;
+            };
+            command
+        } else {
+            command.trim()
+        };
+        let Ok(command) = CommandLine::try_new(command) else {
+            return;
+        };
+        let pane = self.next_pane_id();
+        let process = Process::builder()
+            .id(pane)
+            .name(name)
+            .kind(ProcessKind::Agent)
+            .agent_tool(Some(tool))
+            .origin(ProcessOrigin::Session)
+            .command(Some(command.clone()))
+            .autostart(false)
+            .build();
+        let selected = self.workspace.insert_in_section(process);
+        self.workspace.select_at(selected);
+        self.project_cursor = None;
+        self.overlay = None;
+        self.spawn(pane, Some(command), None);
+        self.focus = Focus::Terminal;
+    }
+
+    /// Returns a pane id unused by configured and runtime processes.
+    fn next_pane_id(&self) -> PaneId {
+        let next = self
+            .workspace
+            .processes()
+            .iter()
+            .map(|process| process.id().into_inner())
+            .max()
+            .map_or(0, |pane| pane + 1);
+        PaneId::new(next)
+    }
+
+    /// Adds a persistent terminal or command and reconciles it in place without
+    /// interrupting existing configured processes or disposable sessions.
+    fn add_configured_process(&mut self, kind: ProcessKind, values: &[String]) {
+        if kind == ProcessKind::Agent {
+            return;
+        }
+        let (Some(name), Some(command)) = (values.first(), values.get(1)) else {
+            return;
+        };
+        let Some(config_path) = self.current_config.clone() else {
+            return;
         };
         let Ok(name) = ProcessName::try_new(name.trim()) else {
             return;
@@ -2055,45 +2282,79 @@ impl App {
             }
         };
         let spec = ProcessSpec::builder().name(name).command(command).build();
+        let target = SpecMatch::of_spec(kind, &spec);
         // Route through the registry's locked read-modify-write, the same one
         // `muster run` uses, so an overlapping CLI add and this add cannot
         // silently discard each other.
-        let mut append = |config: WorkspaceConfig| match kind {
-            ProcessKind::Agent => {
-                let mut specs = config.agents().clone();
-                specs.push(spec.clone());
-                config.with_agents(specs)
-            },
-            ProcessKind::Terminal => {
-                let mut specs = config.terminals().clone();
-                specs.push(spec.clone());
-                config.with_terminals(specs)
-            },
-            ProcessKind::Command => {
-                let mut specs = config.commands().clone();
-                specs.push(spec.clone());
-                config.with_commands(specs)
-            },
+        let mut updated = None;
+        let mut target_occurrence = None;
+        let update_result = {
+            let mut append = |config: WorkspaceConfig| {
+                let config = match kind {
+                    ProcessKind::Agent => config,
+                    ProcessKind::Terminal => {
+                        let mut specs = config.terminals().clone();
+                        target_occurrence =
+                            Some(specs.iter().filter(|spec| target.matches(spec)).count());
+                        specs.push(spec.clone());
+                        config.with_terminals(specs)
+                    },
+                    ProcessKind::Command => {
+                        let mut specs = config.commands().clone();
+                        target_occurrence =
+                            Some(specs.iter().filter(|spec| target.matches(spec)).count());
+                        specs.push(spec.clone());
+                        config.with_commands(specs)
+                    },
+                };
+                updated = Some(config.clone());
+                config
+            };
+            self.registry.update_workspace(&config_path, &mut append)
         };
-        if self
-            .registry
-            .update_workspace(&config_path, &mut append)
-            .is_err()
-        {
+        if update_result.is_err() {
             self.report_error(WORKSPACE_SAVE_ERROR);
             return;
         }
-        // Reload the now-persisted config (which also picks up any concurrent
-        // additions) to drive the switch.
-        let config = match self.registry.workspace(&config_path) {
-            Ok(config) => config,
-            Err(err) => {
-                self.report_error(&err.to_string());
-                return;
-            },
+        let Some(config) = updated else {
+            self.report_error(WORKSPACE_SAVE_ERROR);
+            return;
         };
         self.overlay = None;
-        self.begin_switch(config, config_path);
+        self.reconcile_config(&config);
+        let launch = target_occurrence
+            .and_then(|occurrence| self.configured_process_for_spec_occurrence(&target, occurrence))
+            .filter(|process| *process.autostart() && !process.state().is_active())
+            .map(|process| {
+                (
+                    *process.id(),
+                    process.command().clone(),
+                    process.working_dir().clone(),
+                )
+            });
+        if let Some((pane, command, cwd)) = launch {
+            self.spawn(pane, command, cwd);
+        }
+    }
+
+    /// Returns the tracked configured process representing one occurrence of a
+    /// spec identity after reconciliation.
+    fn configured_process_for_spec_occurrence(
+        &self,
+        target: &SpecMatch,
+        occurrence: usize,
+    ) -> Option<&Process> {
+        self.workspace
+            .processes()
+            .iter()
+            .filter(|process| *process.origin() == ProcessOrigin::Configured)
+            .filter(|process| target.matches_process(process))
+            .filter(|process| {
+                self.panes
+                    .get(process.id())
+                    .is_none_or(|pane| pane.config_membership == ConfigMembership::Tracked)
+            })
+            .nth(occurrence)
     }
 
     /// Handles a key while the switcher is open: navigate, jump by number,
@@ -2524,6 +2785,20 @@ struct SpecMatch {
 }
 
 impl SpecMatch {
+    /// Builds the resolved identity of `spec` within its config section.
+    fn of_spec(kind: ProcessKind, spec: &ProcessSpec) -> Self {
+        Self {
+            kind,
+            name: spec.name().clone(),
+            command: spec.command().clone(),
+            working_dir: spec.working_dir().clone(),
+            description: spec.description().clone(),
+            restart: spec.restart_policy(),
+            stop: spec.effective_stop_policy(kind),
+            autostart: spec.should_autostart(kind),
+        }
+    }
+
     /// The match key for `process`'s config spec, taken from its current state.
     fn of(process: &Process) -> Self {
         Self {
@@ -4391,6 +4666,30 @@ mod tests {
         (app, recorder)
     }
 
+    /// Builds an app whose in-memory terminal has not yet observed its removal
+    /// from the empty workspace config on disk.
+    fn stale_terminal_app() -> App {
+        let (sender, _receiver) = bounded(16);
+        let stale = ProcessSpec::builder()
+            .name(ProcessName::try_new("stale").unwrap())
+            .command(Some(CommandLine::try_new("stale-command").unwrap()))
+            .build()
+            .to_process(PaneId::new(PANE), ProcessKind::Terminal);
+        App::new(
+            Workspace::builder().processes(vec![stale]).build(),
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: empty_workspace_config(),
+                recorder: Recorder::default(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        )
+    }
+
     /// Builds an app whose live model omits `stop` while the reloaded config
     /// writes the equivalent default policy explicitly.
     fn equivalent_stop_reconciliation_app() -> App {
@@ -5499,8 +5798,7 @@ mod tests {
     fn adding_a_process_writes_it_to_the_config() {
         let (mut app, recorder) =
             flow_app(vec![], one_agent_config("existing"), "/here/muster.yml");
-        app.add_process(&[
-            "terminal".to_string(),
+        app.add_configured_process(ProcessKind::Terminal, &[
             "logs".to_string(),
             "tail -f log".to_string(),
         ]);
@@ -5512,6 +5810,415 @@ mod tests {
         assert_eq!(config.agents().len(), 1, "the existing agent is kept");
         assert_eq!(config.terminals().len(), 1);
         assert_eq!(config.terminals()[0].name().as_ref(), "logs");
+    }
+
+    /// Adding persistent state reconciles in place and leaves a live session
+    /// attached to the same child generation.
+    #[test]
+    fn adding_a_configured_process_preserves_agent_sessions() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.launch_agent_session(&["Codex".to_string(), String::new(), String::new()]);
+        let session = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&session];
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "logs".to_string(),
+            "tail -f log".to_string(),
+        ]);
+
+        let process = app.workspace.process(session).unwrap();
+        assert_eq!(*process.origin(), ProcessOrigin::Session);
+        assert_eq!(app.generations[&session], generation);
+        assert!(app.panes[&session].handle.is_some());
+        assert!(app.pending_switch.is_none());
+        assert_eq!(*app.workspace.selected_process().unwrap().id(), session);
+        let added = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == "logs")
+            .unwrap();
+        assert_eq!(*added.origin(), ProcessOrigin::Configured);
+        assert_eq!(*added.state(), ProcessState::Running);
+    }
+
+    /// A form submission must not autostart an unrelated process that appeared
+    /// on disk before the locked append read the workspace.
+    #[test]
+    fn adding_a_process_does_not_start_an_unreconciled_disk_addition() {
+        let external = ProcessSpec::builder()
+            .name(ProcessName::try_new("external").unwrap())
+            .command(Some(CommandLine::try_new("external-command").unwrap()))
+            .build();
+        let config = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![external])
+            .commands(vec![])
+            .build();
+        let (mut app, _recorder) = flow_app(vec![], config, "/here/muster.yml");
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "form".to_string(),
+            "form-command".to_string(),
+        ]);
+
+        let state_of = |name: &str| {
+            *app.workspace
+                .processes()
+                .iter()
+                .find(|process| process.name().as_ref() == name)
+                .unwrap()
+                .state()
+        };
+        assert_eq!(state_of("external"), ProcessState::Pending);
+        assert_eq!(state_of("form"), ProcessState::Running);
+    }
+
+    /// Identical concurrent additions are separate occurrences, and only the
+    /// occurrence appended by the form is started.
+    #[test]
+    fn adding_a_process_starts_only_its_identical_spec_occurrence() {
+        let external = ProcessSpec::builder()
+            .name(ProcessName::try_new("duplicate").unwrap())
+            .command(Some(CommandLine::try_new("same-command").unwrap()))
+            .build();
+        let config = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![external])
+            .commands(vec![])
+            .build();
+        let (mut app, _recorder) = flow_app(vec![], config, "/here/muster.yml");
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "duplicate".to_string(),
+            "same-command".to_string(),
+        ]);
+
+        let states = app
+            .workspace
+            .processes()
+            .iter()
+            .filter(|process| process.name().as_ref() == "duplicate")
+            .map(|process| *process.state())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec![ProcessState::Pending, ProcessState::Running]);
+    }
+
+    /// An unreconciled modification gets a pending replacement row while the
+    /// form's newly appended process is the only row started.
+    #[test]
+    fn adding_a_process_does_not_start_an_unreconciled_replacement() {
+        let replacement = ProcessSpec::builder()
+            .name(ProcessName::try_new("p").unwrap())
+            .command(Some(CommandLine::try_new("replacement-command").unwrap()))
+            .build();
+        let config = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![replacement])
+            .commands(vec![])
+            .build();
+        let (mut app, _recorder) = flow_app(vec![], config, "/here/muster.yml");
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "form".to_string(),
+            "form-command".to_string(),
+        ]);
+
+        let replacement = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| {
+                process.command().as_ref().map(CommandLine::as_ref) == Some("replacement-command")
+            })
+            .unwrap();
+        let added = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == "form")
+            .unwrap();
+        assert_eq!(*replacement.state(), ProcessState::Pending);
+        assert_eq!(*added.state(), ProcessState::Running);
+    }
+
+    /// Re-adding a disk-removed terminal reuses and starts its stopped pane when
+    /// the watcher has not reconciled the removal yet.
+    #[test]
+    fn readding_a_stale_stopped_terminal_starts_the_reused_pane() {
+        let mut app = stale_terminal_app();
+        app.start();
+        let generation = current_gen(&app);
+        app.handle_output(
+            PaneId::new(PANE),
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+        assert_eq!(state(&app), ProcessState::Exited);
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "stale".to_string(),
+            "stale-command".to_string(),
+        ]);
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(state(&app), ProcessState::Running);
+        assert_ne!(current_gen(&app), generation);
+    }
+
+    /// Re-adding a disk-removed terminal that is still live reuses it without
+    /// spawning a duplicate generation.
+    #[test]
+    fn readding_a_stale_live_terminal_does_not_respawn_it() {
+        let mut app = stale_terminal_app();
+        app.start();
+        let generation = current_gen(&app);
+
+        app.add_configured_process(ProcessKind::Terminal, &[
+            "stale".to_string(),
+            "stale-command".to_string(),
+        ]);
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(state(&app), ProcessState::Running);
+        assert_eq!(current_gen(&app), generation);
+    }
+
+    /// Agent sessions launch live without persisting a process specification.
+    #[test]
+    fn launching_an_agent_session_does_not_write_the_config() {
+        let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+
+        app.launch_agent_session(&["Codex".to_string(), String::new(), String::new()]);
+
+        let session = app.workspace.selected_process().unwrap();
+        assert_eq!(*session.kind(), ProcessKind::Agent);
+        assert_eq!(*session.origin(), ProcessOrigin::Session);
+        assert_eq!(*session.agent_tool(), Some(AgentTool::Codex));
+        assert_eq!(session.name().as_ref(), "Codex");
+        assert_eq!(session.command().as_ref().unwrap().as_ref(), "codex");
+        assert_eq!(app.focus, Focus::Terminal);
+        assert!(recorder.workspaces.borrow().is_empty());
+    }
+
+    /// The `a` flow defaults to the first preset and launches on submission.
+    #[test]
+    fn add_hotkey_launches_the_default_agent_preset() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.form().unwrap().form.title(), ADD_PROCESS_TITLE);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.form().unwrap().form.title(), ADD_AGENT_TITLE);
+        press(&mut app, KeyCode::Enter);
+
+        let session = app.workspace.selected_process().unwrap();
+        assert_eq!(*session.agent_tool(), Some(AgentTool::Claude));
+        assert_eq!(*session.origin(), ProcessOrigin::Session);
+    }
+
+    /// Closing a live session waits for exit before removing its workspace row.
+    #[test]
+    fn closing_a_live_agent_session_retires_it_after_exit() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.launch_agent_session(&["Claude".to_string(), String::new(), String::new()]);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char(LEADER_KEY),
+            KeyModifiers::CONTROL,
+        ));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ConfirmSessionClose { .. })
+        ));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::RetireOnExit
+        );
+
+        app.handle_output(pane, generation, ProcessOutput::Exited(ExitOutcome::Failed));
+        assert!(app.workspace.process(pane).is_none());
+        assert!(!app.panes.contains_key(&pane));
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    /// Delayed retirement of a closing session keeps a later selected process
+    /// selected even though its sidebar index shifts.
+    #[test]
+    fn closing_session_exit_preserves_a_later_process_selection() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        for (id, name) in [(PANE + 1, "q"), (PANE + 2, "r")] {
+            app.workspace.insert_in_section(
+                Process::builder()
+                    .id(PaneId::new(id))
+                    .name(ProcessName::try_new(name).unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .build(),
+            );
+        }
+        app.launch_agent_session(&["Claude".to_string(), String::new(), String::new()]);
+        let session = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&session];
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char(LEADER_KEY),
+            KeyModifiers::CONTROL,
+        ));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.workspace.selected_process().unwrap().name().as_ref(),
+            "q"
+        );
+
+        app.handle_output(
+            session,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Failed),
+        );
+
+        assert_eq!(
+            app.workspace.selected_process().unwrap().name().as_ref(),
+            "q"
+        );
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    /// Closing an attached stopped session detaches before the adjacent process
+    /// becomes selected.
+    #[test]
+    fn closing_a_stopped_attached_session_returns_to_the_sidebar() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.launch_agent_session(&["Claude".to_string(), String::new(), String::new()]);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char(LEADER_KEY),
+            KeyModifiers::CONTROL,
+        ));
+        press(&mut app, KeyCode::Char('d'));
+
+        assert!(app.workspace.process(pane).is_none());
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(
+            app.workspace.selected_process().unwrap().name().as_ref(),
+            "p"
+        );
+    }
+
+    /// Codex activity follows title changes instead of ordinary output.
+    #[test]
+    fn a_codex_session_uses_title_changes_instead_of_plain_output() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.launch_agent_session(&["Codex".to_string(), String::new(), String::new()]);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Chunk(b"ordinary output".to_vec()),
+        );
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().activity(),
+            ActivityState::Idle
+        );
+
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Chunk(b"\x1b]2;Codex working\x07".to_vec()),
+        );
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().activity(),
+            ActivityState::Working
+        );
+    }
+
+    /// Live config reconciliation never treats a runtime session as a spec.
+    #[test]
+    fn config_reconciliation_keeps_runtime_agent_sessions() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.launch_agent_session(&["Gemini".to_string(), String::new(), String::new()]);
+        let pane = *app.workspace.selected_process().unwrap().id();
+
+        app.handle_config_changed(PathBuf::from("/here/muster.yml"));
+
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().origin(),
+            ProcessOrigin::Session
+        );
+    }
+
+    /// Runtime sessions do not consume occurrences when a matching configured
+    /// agent's autostart field is mapped back to YAML.
+    #[test]
+    fn autostart_occurrences_exclude_identical_agent_sessions() {
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("agent").unwrap())
+            .command(Some(CommandLine::try_new("true").unwrap()))
+            .autostart(Some(false))
+            .build();
+        let config = WorkspaceConfig::builder()
+            .agents(vec![spec.clone()])
+            .terminals(vec![])
+            .commands(vec![])
+            .build();
+        let session = Process::builder()
+            .id(PaneId::new(PANE))
+            .name(spec.name().clone())
+            .kind(ProcessKind::Agent)
+            .agent_tool(Some(AgentTool::Custom))
+            .origin(ProcessOrigin::Session)
+            .command(spec.command().clone())
+            .autostart(false)
+            .build();
+        let configured = spec.to_process(PaneId::new(PANE + 1), ProcessKind::Agent);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![session, configured])
+            .selected_index(1)
+            .build();
+        let registry = Box::new(FakeRegistry {
+            projects: vec![],
+            workspace: config,
+            recorder: recorder.clone(),
+        });
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            PathBuf::from("/here/muster.yml"),
+        );
+
+        press(&mut app, KeyCode::Char('t'));
+
+        assert_eq!(
+            recorder.workspaces.borrow()[0].1.agents()[0].autostart(),
+            &Some(true)
+        );
+        assert!(
+            *app.workspace.selected_process().unwrap().autostart(),
+            "the selected configured row reflects the persisted edit"
+        );
+        assert!(app.notice.is_none());
     }
 
     #[test]
@@ -6057,8 +6764,7 @@ mod tests {
         });
 
         app.open_add_process_form();
-        app.add_process(&[
-            "terminal".to_string(),
+        app.add_configured_process(ProcessKind::Terminal, &[
             "logs".to_string(),
             "true".to_string(),
         ]);

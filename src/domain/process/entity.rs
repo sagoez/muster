@@ -4,7 +4,10 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    process::{ActivityState, ProcessKind, ProcessState, RestartPolicy, StopPolicy},
+    process::{
+        ActivityState, AgentTool, ProcessKind, ProcessOrigin, ProcessState, RestartPolicy,
+        StopPolicy,
+    },
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -18,6 +21,12 @@ pub struct Process {
     name: ProcessName,
     /// Section the process belongs to.
     kind: ProcessKind,
+    /// Agent preset used for provider-aware activity detection.
+    #[builder(default)]
+    agent_tool: Option<AgentTool>,
+    /// Whether the process is configured or disposable for this TUI session.
+    #[builder(default)]
+    origin: ProcessOrigin,
     /// Command used to launch it, or the user's login shell when absent.
     #[builder(default)]
     command: Option<CommandLine>,
@@ -85,6 +94,7 @@ mod tests {
             .build();
 
         assert_eq!(*process.kind(), ProcessKind::Agent);
+        assert_eq!(*process.origin(), ProcessOrigin::Configured);
         assert_eq!(*process.state(), ProcessState::Pending);
         assert!(process.working_dir().is_none());
         assert!(process.description().is_none());

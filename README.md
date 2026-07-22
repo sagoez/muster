@@ -6,12 +6,14 @@ muster runs your agents, dev servers, log tails, and build watchers as panes in 
 single terminal and manages their lifecycle: start, stop, restart, and
 auto-restart on failure.
 
+**Status: Beta**
+
 It's been my daily driver for running local work for a while. This is the
 cleaned-up cut I opened up, done with help of the AI.
 
 ## Demo
 
-[![Watch the video](https://images.unsplash.com/photo-1718844054446-afb0ff6f9a09?q=80&w=1228&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D)](docs/muster-demo.mp4)
+![muster demo](docs/muster-demo.gif)
 
 ## Features
 
@@ -32,7 +34,7 @@ Requires a recent Rust toolchain.
 
 ```sh
 cargo install muster-workspace
-muster                       # starts the TUI on ./muster.yml
+muster                       # starts the TUI on a local or registered workspace
 ```
 
 From a source checkout:
@@ -41,6 +43,13 @@ From a source checkout:
 cargo run                     # starts the TUI on ./muster.yml
 cargo run -- --config my.yml  # use a different config
 ```
+
+Without `--config`, muster uses `$MUSTER_PROJECT` when launched from one of its
+panes, then `./muster.yml` when present, then the first project in the global
+registry. This means a registered workspace can be launched from any directory.
+Registry config paths are stored as absolute paths. Legacy relative entries are
+not supported during beta because resolving them from another directory is
+unsafe. Convert or remove them directly in the global `projects.yml` registry.
 
 Press `?` in the app for the full keymap:
 
@@ -107,7 +116,3 @@ muster run --name api --kind terminal -- cargo watch -x run
 The target is `--project` if given, otherwise `$MUSTER_PROJECT` (exported into
 every pane), otherwise `--config`. Shell quoting is preserved and `--project` has
 tab completion.
-
-## Status
-
-Single user, Unix only.

@@ -226,7 +226,8 @@ impl Switcher {
         project: Option<&Project>,
     ) -> Vec<(ProcessKind, String)> {
         project
-            .and_then(|project| registry.workspace(project.config()).ok())
+            .and_then(|project| path::registered_config_path(project).ok())
+            .and_then(|config| registry.workspace(&config).ok())
             .map(|config| Self::config_preview(&config))
             .unwrap_or_default()
     }
@@ -452,6 +453,7 @@ impl App {
         registry: Box<dyn ProjectRegistry>,
         current_config: PathBuf,
     ) -> Self {
+        let current_config = path::absolutize(&current_config);
         Self {
             workspace,
             runner,
@@ -590,7 +592,7 @@ impl App {
         let launched = self.launched_config.clone();
         let registered = projects
             .iter()
-            .any(|project| path::normalize(project.config()) == path::normalize(&launched));
+            .any(|project| Self::same_config_location(project.config(), &launched));
         self.launched_project_membership = LaunchedProjectMembership::Registered;
         if !registered && let Ok(name) = ProjectName::try_new(label_from_config(&launched)) {
             projects.insert(0, Project::builder().name(name).config(launched).build());
@@ -1095,15 +1097,33 @@ impl App {
             .collect()
     }
 
+    /// Resolves the exported project path and effective process directory from
+    /// the active config. Relative and absent directories inherit its folder.
+    fn resolve_spawn_paths(
+        current_config: Option<&Path>,
+        configured_working_dir: Option<PathBuf>,
+    ) -> (Option<PathBuf>, Option<PathBuf>) {
+        let project = current_config.map(path::absolutize);
+        let workspace_dir = project
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let working_dir = match (workspace_dir, configured_working_dir) {
+            (_, Some(directory)) if directory.is_absolute() => Some(directory),
+            (Some(workspace), Some(directory)) => Some(workspace.join(directory)),
+            (None, Some(directory)) => Some(directory),
+            (Some(workspace), None) => Some(workspace),
+            (None, None) => None,
+        };
+        (project, working_dir)
+    }
+
     /// Spawns one process, wiring its parser, handle, and output sink. Any prior
     /// pane for the id is replaced with a fresh session; an absent command
     /// launches the user's login shell.
     fn spawn(&mut self, pane: PaneId, command: Option<CommandLine>, cwd: Option<PathBuf>) {
         let generation = self.bump_generation(pane);
-        let project = self
-            .current_config
-            .as_ref()
-            .map(|config| path::normalize(config));
+        let (project, cwd) = Self::resolve_spawn_paths(self.current_config.as_deref(), cwd);
         let request = SpawnRequest::builder()
             .command(command)
             .working_dir(cwd)
@@ -1427,10 +1447,17 @@ impl App {
         let Some(project) = self.projects.get(index).cloned() else {
             return;
         };
-        match self.registry.workspace(project.config()) {
+        let config_path = match path::registered_config_path(&project) {
+            Ok(config_path) => config_path,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return;
+            },
+        };
+        match self.registry.workspace(&config_path) {
             Ok(config) => {
                 self.project_cursor = None;
-                self.begin_switch(config, project.config().clone());
+                self.begin_switch(config, config_path);
             },
             Err(err) => self.report_project_open_failure(&project, &err),
         }
@@ -1486,7 +1513,7 @@ impl App {
     /// tree rather than a registered project.
     fn is_synthetic_launched(&self, project: &Project) -> bool {
         self.launched_project_membership == LaunchedProjectMembership::Synthetic
-            && path::normalize(project.config()) == path::normalize(&self.launched_config)
+            && Self::same_config_location(project.config(), &self.launched_config)
     }
 
     /// Flips the selected process's autostart on or off. The explicit value is
@@ -1534,13 +1561,13 @@ impl App {
             self.notice = Some(REGISTRY_SAVE_ERROR.to_string());
             return;
         };
-        let target = path::normalize(config_path);
-        projects.retain(|project| path::normalize(project.config()) != target);
-        if self.registry.save(&projects).is_ok() {
-            self.project_cursor = None;
-            self.refresh_projects();
-        } else {
-            self.notice = Some(REGISTRY_SAVE_ERROR.to_string());
+        projects.retain(|project| !Self::same_config_location(project.config(), config_path));
+        match self.registry.save(&projects) {
+            Ok(()) => {
+                self.project_cursor = None;
+                self.refresh_projects();
+            },
+            Err(error) => self.notice = Some(error.to_string()),
         }
     }
 
@@ -1720,11 +1747,16 @@ impl App {
         }
         let mut projects = switcher.projects.clone();
         projects.remove(selected);
-        if self.registry.save(&projects).is_ok() {
-            self.refresh_projects();
-            self.refresh_switcher();
-        } else if let Some(switcher) = self.switcher_mut() {
-            switcher.error = Some(REGISTRY_SAVE_ERROR.to_string());
+        match self.registry.save(&projects) {
+            Ok(()) => {
+                self.refresh_projects();
+                self.refresh_switcher();
+            },
+            Err(error) => {
+                if let Some(switcher) = self.switcher_mut() {
+                    switcher.error = Some(error.to_string());
+                }
+            },
         }
     }
 
@@ -1976,14 +2008,19 @@ impl App {
                 return false;
             },
         };
-        let target = path::normalize(project.config());
-        projects.retain(|existing| path::normalize(existing.config()) != target);
+        let project = Project::builder()
+            .name(project.name().clone())
+            .config(path::absolutize(project.config()))
+            .build();
+        projects
+            .retain(|existing| !Self::same_config_location(existing.config(), project.config()));
         projects.push(project);
-        if self.registry.save(&projects).is_ok() {
-            true
-        } else {
-            self.report_error(REGISTRY_SAVE_ERROR);
-            false
+        match self.registry.save(&projects) {
+            Ok(()) => true,
+            Err(error) => {
+                self.report_error(&error.to_string());
+                false
+            },
         }
     }
 
@@ -2118,12 +2155,22 @@ impl App {
         else {
             return;
         };
-        match self.registry.workspace(project.config()) {
+        let config_path = match path::registered_config_path(&project) {
+            Ok(config_path) => config_path,
+            Err(error) => {
+                if let Some(switcher) = self.switcher_mut() {
+                    switcher.selected = index;
+                    switcher.error = Some(error.to_string());
+                }
+                return;
+            },
+        };
+        match self.registry.workspace(&config_path) {
             Ok(config) => {
-                self.begin_switch(config, project.config().clone());
+                self.begin_switch(config, config_path);
                 self.overlay = None;
             },
-            Err(err) if self.registry.workspace_exists(project.config()) => {
+            Err(err) if self.registry.workspace_exists(&config_path) => {
                 if let Some(switcher) = self.switcher_mut() {
                     switcher.selected = index;
                     switcher.error = Some(err.to_string());
@@ -2203,20 +2250,27 @@ impl App {
         self.workspace = Workspace::builder()
             .processes(config.to_processes())
             .build();
-        self.current_config = Some(config_path);
+        self.current_config = Some(path::absolutize(&config_path));
         self.focus = Focus::Sidebar;
         self.rewatch_config();
         self.start();
     }
 
-    /// Index of the project whose config resolves to the one loaded now. Paths
-    /// are normalized (`~` expanded, made absolute, canonicalized) so a relative
-    /// CLI path matches a `~`-prefixed or absolute registry entry.
+    /// Whether two config paths name the same stored location after home
+    /// expansion, without resolving symlinks or anchoring legacy relative paths.
+    fn same_config_location(left: &Path, right: &Path) -> bool {
+        let left = path::expand_home(left);
+        let right = path::expand_home(right);
+        left.is_absolute() == right.is_absolute() && left == right
+    }
+
+    /// Index of the active project by its stored location. Symlink aliases are
+    /// separate workspaces because their parent directories affect spawning.
     fn current_project_index(&self, projects: &[Project]) -> Option<usize> {
-        let current = path::normalize(self.current_config.as_deref()?);
+        let current = self.current_config.as_deref()?;
         projects
             .iter()
-            .position(|project| path::normalize(project.config()) == current)
+            .position(|project| Self::same_config_location(project.config(), current))
     }
 
     /// Forwards an encoded key to the focused pane's PTY, if it is alive.
@@ -2555,11 +2609,11 @@ impl SpecMatch {
 }
 
 /// A display name for a project taken from its config path: the parent
-/// directory's name, else the app name. The path is normalized first so a
+/// directory's name, else the app name. The path is absolutized first so a
 /// relative default like `muster.yml` resolves to the current directory's name
-/// rather than losing its (empty) parent.
+/// rather than losing its parent, while a symlink retains its workspace alias.
 fn label_from_config(config: &Path) -> String {
-    path::normalize(config)
+    path::absolutize(config)
         .parent()
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
@@ -3065,6 +3119,81 @@ mod tests {
     const PANE: u64 = 0;
     /// Grace period used to verify policy propagation without slowing tests.
     const TEST_STOP_GRACE: Duration = Duration::from_secs(7);
+
+    /// Verifies absent and relative process directories are anchored to the
+    /// workspace while an absolute directory remains unchanged.
+    #[test]
+    fn spawn_paths_are_anchored_to_the_workspace_config() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = workspace.join(PROJECT_CONFIG_FILE);
+
+        let (project, inherited) = App::resolve_spawn_paths(Some(&config), None);
+        assert_eq!(project, Some(config.clone()));
+        assert_eq!(inherited, Some(workspace.clone()));
+
+        let relative = PathBuf::from("services").join("api");
+        let (_, resolved) = App::resolve_spawn_paths(Some(&config), Some(relative.clone()));
+        assert_eq!(resolved, Some(workspace.join(relative)));
+
+        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("absolute-service");
+        let (_, resolved) = App::resolve_spawn_paths(Some(&config), Some(absolute.clone()));
+        assert_eq!(resolved, Some(absolute));
+    }
+
+    #[cfg(unix)]
+    /// Verifies a launch alias remains independently switchable when its target
+    /// is registered, and returning to it restores its workspace directory.
+    #[test]
+    fn symlinked_launch_alias_survives_switching_to_its_registered_target() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let dir = std::env::temp_dir().join(format!("muster-app-link-{}", std::process::id()));
+        let workspace_dir = dir.join("workspace");
+        let shared_dir = dir.join("shared");
+        let target = shared_dir.join(PROJECT_CONFIG_FILE);
+        let link = workspace_dir.join(PROJECT_CONFIG_FILE);
+        fs::create_dir_all(&workspace_dir).unwrap();
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+        let (sender, _receiver) = bounded(16);
+        let registry = Box::new(FakeRegistry {
+            projects: vec![
+                Project::builder()
+                    .name(ProjectName::try_new("target").unwrap())
+                    .config(target.clone())
+                    .build(),
+            ],
+            workspace: empty_workspace_config(),
+            recorder: Recorder::default(),
+        });
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            link.clone(),
+        );
+
+        app.start();
+        assert_eq!(app.projects.len(), 2);
+        assert_eq!(
+            app.launched_project_membership,
+            LaunchedProjectMembership::Synthetic
+        );
+
+        app.activate_other_project(0);
+        assert_eq!(app.current_config, Some(target));
+        app.activate_other_project(0);
+        let (project, working_dir) = App::resolve_spawn_paths(app.current_config.as_deref(), None);
+
+        assert_eq!(app.current_config, Some(link.clone()));
+        assert_eq!(project, Some(link));
+        assert_eq!(working_dir, Some(workspace_dir));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Builds the opt-in shutdown policy used by command lifecycle tests.
     fn test_stop_policy() -> StopPolicy {
@@ -4599,6 +4728,56 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    /// Verifies registering and removing one symlink location does not mutate a
+    /// second registration whose alias happens to share the same target.
+    #[test]
+    fn registry_mutations_preserve_distinct_symlink_locations() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let dir = std::env::temp_dir().join(format!("muster-mutation-link-{}", std::process::id()));
+        let shared_dir = dir.join("shared");
+        let first_dir = dir.join("first");
+        let second_dir = dir.join("second");
+        let target = shared_dir.join(PROJECT_CONFIG_FILE);
+        let first = first_dir.join(PROJECT_CONFIG_FILE);
+        let second = second_dir.join(PROJECT_CONFIG_FILE);
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &first).unwrap();
+        symlink(&target, &second).unwrap();
+        let projects = vec![
+            Project::builder()
+                .name(ProjectName::try_new("first").unwrap())
+                .config(first.clone())
+                .build(),
+            Project::builder()
+                .name(ProjectName::try_new("second").unwrap())
+                .config(second.clone())
+                .build(),
+        ];
+        let (mut app, recorder) =
+            flow_app(projects, empty_workspace_config(), "/unrelated/muster.yml");
+        let renamed = Project::builder()
+            .name(ProjectName::try_new("renamed").unwrap())
+            .config(first.clone())
+            .build();
+
+        assert!(app.try_register(renamed));
+        let saved = recorder.projects.borrow().clone().unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().any(|project| project.config() == &second));
+
+        app.remove_project(&first);
+        let saved = recorder.projects.borrow().clone().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].config(), &second);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_live_process_removed_from_config_is_retired_when_it_exits() {
         let empty = WorkspaceConfig::builder()
@@ -4859,6 +5038,31 @@ mod tests {
                 .any(|project| project.config() == &PathBuf::from("/here/muster.yml")),
             "the launched config is kept in the project list"
         );
+    }
+
+    /// Verifies unsupported relative registry entries report an error rather than
+    /// loading against the TUI process's current directory from either UI path.
+    #[test]
+    fn relative_projects_are_not_opened_from_the_ui() {
+        let projects = vec![project("legacy", PROJECT_CONFIG_FILE)];
+        let (mut app, _recorder) = flow_app(projects, empty_workspace_config(), "/here/muster.yml");
+
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+
+        assert!(app.pending_switch.is_none());
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("unsupported relative"))
+        );
+
+        app.open_switcher();
+        app.handle_switcher_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.pending_switch.is_none());
+        assert!(app.switcher().unwrap().error.is_some());
+        assert_eq!(app.current_config, Some(PathBuf::from("/here/muster.yml")));
     }
 
     #[test]
@@ -5227,9 +5431,11 @@ mod tests {
         }
     }
 
+    /// Verifies saving a relatively launched workspace registers its absolute
+    /// config path and closes the form.
     #[test]
     fn saving_the_current_workspace_registers_it() {
-        let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), PROJECT_CONFIG_FILE);
         app.open_switcher();
         press(&mut app, KeyCode::Char('s'));
         type_text(&mut app, "My Setup");
@@ -5243,7 +5449,11 @@ mod tests {
             .expect("the registry was saved");
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].name().as_ref(), "My Setup");
-        assert_eq!(saved[0].config(), &PathBuf::from("/here/muster.yml"));
+        assert_eq!(
+            saved[0].config(),
+            &path::absolutize(Path::new(PROJECT_CONFIG_FILE))
+        );
+        assert!(saved[0].config().is_absolute());
     }
 
     #[test]
@@ -5900,6 +6110,45 @@ mod tests {
         let switcher = app.switcher().expect("switcher is open");
         assert_eq!(switcher.projects.len(), 2);
         assert_eq!(switcher.selected, 1, "the current project is preselected");
+    }
+
+    #[cfg(unix)]
+    /// Verifies an unregistered symlink alias does not make its registered
+    /// target appear active in the switcher.
+    #[test]
+    fn switcher_keeps_a_symlink_alias_distinct_from_its_target() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let dir = std::env::temp_dir().join(format!("muster-switcher-link-{}", std::process::id()));
+        let workspace_dir = dir.join("workspace");
+        let shared_dir = dir.join("shared");
+        let target = shared_dir.join(PROJECT_CONFIG_FILE);
+        let alias = workspace_dir.join(PROJECT_CONFIG_FILE);
+        fs::create_dir_all(&workspace_dir).unwrap();
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &alias).unwrap();
+        let projects = vec![
+            Project::builder()
+                .name(ProjectName::try_new("target").unwrap())
+                .config(target.clone())
+                .build(),
+        ];
+        let mut app = switcher_app(projects, empty_workspace_config(), alias.to_str().unwrap());
+
+        app.open_switcher();
+
+        let switcher = app.switcher().expect("switcher is open");
+        assert_eq!(switcher.current, None, "the target is not marked current");
+        app.handle_switcher_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.pending_switch
+                .as_ref()
+                .map(|pending| &pending.config_path),
+            Some(&target),
+            "enter explicitly switches from the alias to the target"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -1,10 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use thiserror::Error;
 
 use crate::{
-    adapter::config::YamlProjectRegistry,
+    adapter::{
+        config::YamlProjectRegistry,
+        path::{absolutize, registered_config_path},
+    },
     constants::MUSTER_PROJECT_ENV,
     domain::{
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
@@ -102,7 +109,12 @@ pub fn run(args: RunArgs, config: PathBuf, registry: &dyn ProjectRegistry) -> Re
     if cfg!(not(unix)) {
         return Err(CliError::Unsupported);
     }
-    let config_path = resolve(registry, args.project.as_deref(), env_project(), config)?;
+    let config_path = resolve(
+        registry,
+        args.project.as_deref(),
+        current_project_from_env(),
+        config,
+    )?;
     let command = command_string(&args.command)?;
     let command_line = CommandLine::try_new(command).map_err(|_| CliError::EmptyCommand)?;
     let name = process_name(args.name.as_deref(), &args.command)?;
@@ -117,6 +129,40 @@ pub fn run(args: RunArgs, config: PathBuf, registry: &dyn ProjectRegistry) -> Re
     // Run the stored form verbatim, so the immediate run matches what muster
     // will run later.
     Err(exec(command_line.as_ref()))
+}
+
+/// Resolves an absolute workspace path for a bare TUI launch, preferring
+/// explicit and contextual paths before local and globally registered ones.
+///
+/// # Errors
+/// Returns [`ConfigError`] when the registry cannot be read or its fallback
+/// project has an ambiguous legacy relative path.
+pub fn resolve_tui_config(
+    explicit: Option<&Path>,
+    current_project: Option<&Path>,
+    local_config: &Path,
+    registry: &dyn ProjectRegistry,
+) -> Result<PathBuf, ConfigError> {
+    if let Some(path) = explicit.or(current_project) {
+        return Ok(absolutize(path));
+    }
+    if should_select_local_config(local_config) {
+        return Ok(absolutize(local_config));
+    }
+    let projects = registry.projects()?;
+    match projects.first() {
+        Some(project) => registered_config_path(project),
+        None => Ok(absolutize(local_config)),
+    }
+}
+
+/// Whether local discovery should select this config entry. Errors other than a
+/// missing entry stay local so an unreadable path cannot launch another project.
+fn should_select_local_config(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != ErrorKind::NotFound,
+    }
 }
 
 /// Turns the parsed argument vector into the command string run by `sh -c`.
@@ -145,7 +191,7 @@ fn resolve(
 ) -> Result<PathBuf, CliError> {
     match project {
         Some(name) => resolve_named(registry, name),
-        None => Ok(env.unwrap_or(config)),
+        None => Ok(absolutize(&env.unwrap_or(config))),
     }
 }
 
@@ -153,12 +199,12 @@ fn resolve(
 fn resolve_named(registry: &dyn ProjectRegistry, name: &str) -> Result<PathBuf, CliError> {
     let wanted =
         ProjectName::try_new(name).map_err(|_| CliError::UnknownProject(name.to_string()))?;
-    registry
+    let project = registry
         .projects()?
         .into_iter()
         .find(|project| project.name().as_ref() == wanted.as_ref())
-        .map(|project| project.config().clone())
-        .ok_or_else(|| CliError::UnknownProject(name.to_string()))
+        .ok_or_else(|| CliError::UnknownProject(name.to_string()))?;
+    Ok(registered_config_path(&project)?)
 }
 
 /// Shell-completion candidates for `--project`: the names of registered
@@ -172,8 +218,8 @@ fn project_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
-/// The current-project path from the environment, if muster exported one.
-fn env_project() -> Option<PathBuf> {
+/// Returns the current-project path exported into child panes, if present.
+pub fn current_project_from_env() -> Option<PathBuf> {
     std::env::var_os(MUSTER_PROJECT_ENV)
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
@@ -321,7 +367,7 @@ mod tests {
         ]);
         assert_eq!(
             resolve(&registry, Some("api"), None, PathBuf::from("muster.yml")).unwrap(),
-            PathBuf::from("~/api/muster.yml")
+            absolutize(Path::new("~/api/muster.yml"))
         );
     }
 
@@ -352,6 +398,130 @@ mod tests {
             resolve(&registry, None, None, PathBuf::from("/cfg/muster.yml")).unwrap(),
             PathBuf::from("/cfg/muster.yml"),
             "with no name or environment, the --config path is the target"
+        );
+    }
+
+    /// Verifies explicit and pane-context paths outrank filesystem discovery.
+    #[test]
+    fn tui_config_prefers_explicit_then_current_project() {
+        let registry = registry_with(vec![project("registered", "registered.yml")]);
+        let local = Path::new("missing-local.yml");
+
+        assert_eq!(
+            resolve_tui_config(
+                Some(Path::new("explicit.yml")),
+                Some(Path::new("current.yml")),
+                local,
+                &registry,
+            )
+            .unwrap(),
+            absolutize(Path::new("explicit.yml"))
+        );
+        assert_eq!(
+            resolve_tui_config(None, Some(Path::new("current.yml")), local, &registry).unwrap(),
+            absolutize(Path::new("current.yml"))
+        );
+    }
+
+    #[cfg(unix)]
+    /// Verifies workspace resolution makes a symlink path absolute without
+    /// replacing the selected alias with its target.
+    #[test]
+    fn tui_config_preserves_an_explicit_symlink_path() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let dir = std::env::temp_dir().join(format!("muster-cli-link-{}", std::process::id()));
+        let target = dir.join("shared.yml");
+        let link = dir.join("muster.yml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+        let registry = registry_with(Vec::new());
+
+        let resolved =
+            resolve_tui_config(Some(&link), None, Path::new("unused.yml"), &registry).unwrap();
+
+        assert_eq!(resolved, link);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    /// Verifies a dangling local config alias is selected and left for the
+    /// loader to report instead of falling through to a registered workspace.
+    #[test]
+    fn tui_config_prefers_a_dangling_local_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("muster-cli-dangling-{}", std::process::id()));
+        let local = dir.join("muster.yml");
+        fs::create_dir_all(&dir).unwrap();
+        symlink(dir.join("missing.yml"), &local).unwrap();
+        let registry = registry_with(vec![project("registered", "/other/muster.yml")]);
+
+        let resolved = resolve_tui_config(None, None, &local, &registry).unwrap();
+
+        assert_eq!(resolved, local);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Verifies an existing local workspace preserves the original bare-launch
+    /// behavior even when global projects are registered.
+    #[test]
+    fn tui_config_prefers_an_existing_local_workspace() {
+        let registry = registry_with(vec![project("registered", "registered.yml")]);
+        let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("muster.yml");
+
+        assert_eq!(
+            resolve_tui_config(None, None, &local, &registry).unwrap(),
+            local
+        );
+    }
+
+    /// Verifies a bare launch outside a workspace uses the first global project.
+    #[test]
+    fn tui_config_falls_back_to_the_global_registry() {
+        let first = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("first.yml");
+        let registry = registry_with(vec![
+            Project::builder()
+                .name(ProjectName::try_new("first").unwrap())
+                .config(first.clone())
+                .build(),
+        ]);
+
+        assert_eq!(
+            resolve_tui_config(None, None, Path::new("missing-local.yml"), &registry).unwrap(),
+            first
+        );
+    }
+
+    /// Verifies an ambiguous legacy registry entry fails closed rather than
+    /// resolving against the directory of a later launch.
+    #[test]
+    fn tui_config_rejects_a_legacy_relative_registry_path() {
+        let registry = registry_with(vec![project("legacy", "muster.yml")]);
+
+        let error =
+            resolve_tui_config(None, None, Path::new("missing-local.yml"), &registry).unwrap_err();
+
+        match error {
+            ConfigError::RelativeProjectConfig { name, path } => {
+                assert_eq!(name.as_ref(), "legacy");
+                assert_eq!(path, PathBuf::from("muster.yml"));
+            },
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    /// Verifies an empty registry retains the conventional path so its existing
+    /// load error remains actionable.
+    #[test]
+    fn tui_config_keeps_the_local_path_when_the_registry_is_empty() {
+        let registry = registry_with(vec![]);
+        let local = Path::new("missing-local.yml");
+
+        assert_eq!(
+            resolve_tui_config(None, None, local, &registry).unwrap(),
+            absolutize(local)
         );
     }
 

@@ -6,7 +6,7 @@ use crate::domain::{
 };
 
 /// Driven port: lists the registered projects and loads or writes workspace
-/// files by path. A `config_path` may begin with `~`.
+/// files by path. A registered `config_path` is absolute or begins with `~`.
 pub trait ProjectRegistry {
     /// The registered projects, in file order. A missing registry yields an
     /// empty list rather than an error.

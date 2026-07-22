@@ -6,7 +6,7 @@ use std::{
 
 use directories::BaseDirs;
 
-use crate::domain::port::PathCompleter;
+use crate::domain::{config::ConfigError, port::PathCompleter, project::Project};
 
 /// Leading path component expanded to the user's home directory.
 const HOME_PREFIX: &str = "~";
@@ -82,21 +82,39 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
-/// Normalizes a config path for identity comparison: expands `~`, resolves it
-/// against the current directory when relative, and canonicalizes it when the
-/// file exists (falling back to the absolute lexical path when it does not). Two
-/// paths that name the same file, whether relative, absolute, or `~`-prefixed,
-/// normalize to the same value.
-pub fn normalize(path: &Path) -> PathBuf {
+/// Expands `~` and makes a path absolute without resolving symlinks, preserving
+/// the user-selected filesystem location.
+pub fn absolutize(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
-    let absolute = if expanded.is_absolute() {
+    if expanded.is_absolute() {
         expanded
     } else {
         match std::env::current_dir() {
             Ok(cwd) => cwd.join(&expanded),
             Err(_) => expanded,
         }
-    };
+    }
+}
+
+/// Resolves a registered config only when its stored path is independent of the
+/// caller's directory.
+///
+/// # Errors
+/// Returns [`ConfigError::RelativeProjectConfig`] for ambiguous legacy entries.
+pub fn registered_config_path(project: &Project) -> Result<PathBuf, ConfigError> {
+    if expand_home(project.config()).is_relative() {
+        return Err(ConfigError::RelativeProjectConfig {
+            name: project.name().clone(),
+            path: project.config().clone(),
+        });
+    }
+    Ok(absolutize(project.config()))
+}
+
+/// Normalizes a config path for identity comparison: absolutizes it, then
+/// canonicalizes existing paths so aliases naming the same file compare equal.
+pub fn normalize(path: &Path) -> PathBuf {
+    let absolute = absolutize(path);
     absolute.canonicalize().unwrap_or(absolute)
 }
 
@@ -123,6 +141,26 @@ mod tests {
         // relative name and its absolute form resolve to the same file.
         let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert_eq!(normalize(Path::new("Cargo.toml")), normalize(&absolute));
+    }
+
+    #[cfg(unix)]
+    /// An absolute location retains a symlink alias while identity normalization
+    /// resolves it to its target.
+    #[test]
+    fn absolutize_preserves_a_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("muster-path-link-{}", std::process::id()));
+        let target = dir.join("target.yml");
+        let link = dir.join("muster.yml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert_eq!(absolutize(&link), link);
+        assert_eq!(normalize(&link), target);
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

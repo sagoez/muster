@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::yaml::{config_dir_path, load_workspace, write_config};
 use crate::{
-    adapter::path::expand_home,
+    adapter::path::{expand_home, registered_config_path},
     domain::{
         config::{ConfigError, WorkspaceConfig},
         port::ProjectRegistry,
@@ -26,7 +26,7 @@ struct RegistryFile {
 
 /// A [`ProjectRegistry`] backed by `projects.yml` in the user's config directory
 /// (`~/.config/muster/projects.yml` on Linux). A project's `config` path may
-/// begin with `~`, expanded to the home directory when the workspace is loaded.
+/// begin with `~`; ambiguous legacy relative paths are rejected.
 #[derive(Default)]
 pub struct YamlProjectRegistry;
 
@@ -34,6 +34,39 @@ impl YamlProjectRegistry {
     /// Path to the registry file, when a config directory can be resolved.
     fn registry_path() -> Option<PathBuf> {
         config_dir_path(REGISTRY_FILE)
+    }
+
+    /// Validates that every registry entry has a location-independent config
+    /// path.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::RelativeProjectConfig`] for an unsupported legacy
+    /// relative entry.
+    fn validate_projects(projects: &[Project]) -> Result<(), ConfigError> {
+        // Muster is beta, so rejecting this legacy registry shape is an
+        // intentional compatibility break; guessing paths could launch the
+        // wrong workspace.
+        for project in projects {
+            registered_config_path(project)?;
+        }
+        Ok(())
+    }
+
+    /// Copies projects into their persisted form with absolute config paths.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::RelativeProjectConfig`] rather than guessing the
+    /// original directory of a legacy relative entry.
+    fn persistable_projects(projects: &[Project]) -> Result<Vec<Project>, ConfigError> {
+        projects
+            .iter()
+            .map(|project| {
+                Ok(Project::builder()
+                    .name(project.name().clone())
+                    .config(registered_config_path(project)?)
+                    .build())
+            })
+            .collect()
     }
 }
 
@@ -50,6 +83,7 @@ impl ProjectRegistry for YamlProjectRegistry {
             source,
         })?;
         let file: RegistryFile = serde_yaml_ng::from_str(&raw)?;
+        Self::validate_projects(&file.projects)?;
         Ok(file.projects)
     }
 
@@ -64,7 +98,7 @@ impl ProjectRegistry for YamlProjectRegistry {
     fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
         let path = Self::registry_path().ok_or(ConfigError::NoConfigDir)?;
         let file = RegistryFile {
-            projects: projects.to_vec(),
+            projects: Self::persistable_projects(projects)?,
         };
         write_config(&path, &file)
     }
@@ -152,10 +186,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{
-        config::ProcessSpec,
-        process::{StopPolicy, StopSignal},
-        value::{CommandLine, ProcessName},
+    use crate::{
+        adapter::path::absolutize,
+        domain::{
+            config::ProcessSpec,
+            process::{StopPolicy, StopSignal},
+            value::{CommandLine, ProcessName, ProjectName},
+        },
     };
 
     /// Grace period used to verify workspace serialization.
@@ -167,6 +204,82 @@ mod tests {
         let file: RegistryFile = serde_yaml_ng::from_str(raw).unwrap();
         assert_eq!(file.projects.len(), 1);
         assert_eq!(file.projects[0].name().as_ref(), "muster");
+    }
+
+    /// Verifies one relative entry invalidates the legacy registry rather than
+    /// leaving UI mutations in a partially supported state.
+    #[test]
+    fn registry_validation_rejects_legacy_relative_entries() {
+        let projects = vec![
+            Project::builder()
+                .name(ProjectName::try_new("first").unwrap())
+                .config(PathBuf::from("first.yml"))
+                .build(),
+            Project::builder()
+                .name(ProjectName::try_new("second").unwrap())
+                .config(PathBuf::from("second.yml"))
+                .build(),
+        ];
+
+        let error = YamlProjectRegistry::validate_projects(&projects).unwrap_err();
+
+        assert!(matches!(error, ConfigError::RelativeProjectConfig { .. }));
+    }
+
+    /// Verifies registry serialization expands a home-relative path into its
+    /// stable absolute form.
+    #[test]
+    fn persistable_projects_expand_home_config_paths() {
+        let project = Project::builder()
+            .name(ProjectName::try_new("muster").unwrap())
+            .config(PathBuf::from("~/Projects/muster/muster.yml"))
+            .build();
+
+        let projects = YamlProjectRegistry::persistable_projects(&[project]).unwrap();
+
+        assert_eq!(
+            projects[0].config(),
+            &absolutize(Path::new("~/Projects/muster/muster.yml"))
+        );
+        assert!(projects[0].config().is_absolute());
+    }
+
+    /// Verifies registry serialization refuses to guess the original directory
+    /// of a relative path written by an older version.
+    #[test]
+    fn persistable_projects_reject_legacy_relative_config_paths() {
+        let project = Project::builder()
+            .name(ProjectName::try_new("legacy").unwrap())
+            .config(PathBuf::from("muster.yml"))
+            .build();
+
+        let error = YamlProjectRegistry::persistable_projects(&[project]).unwrap_err();
+
+        assert!(matches!(error, ConfigError::RelativeProjectConfig { .. }));
+    }
+
+    #[cfg(unix)]
+    /// Verifies registry persistence retains an existing symlink alias instead
+    /// of replacing it with the canonical target path.
+    #[test]
+    fn persistable_projects_preserve_symlink_config_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("muster-registry-link-{}", std::process::id()));
+        let target = dir.join("shared.yml");
+        let link = dir.join("muster.yml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&target, "").unwrap();
+        symlink(&target, &link).unwrap();
+        let project = Project::builder()
+            .name(ProjectName::try_new("muster").unwrap())
+            .config(link.clone())
+            .build();
+
+        let projects = YamlProjectRegistry::persistable_projects(&[project]).unwrap();
+
+        assert_eq!(projects[0].config(), &link);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

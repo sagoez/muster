@@ -27,6 +27,8 @@ const KILL_HINT: Hint = ("x", "kill");
 const AUTOSTART_HINT: Hint = ("t", "autostart");
 /// Add-process hint.
 const ADD_HINT: Hint = ("a", "add");
+/// Close disposable agent-session hint.
+const CLOSE_HINT: Hint = ("d", "close");
 /// Attached terminal detach hint.
 const DETACH_HINT: Hint = ("h", "detach");
 /// Slim hints for a process selected in the active project.
@@ -49,6 +51,26 @@ const PROCESS_HINT_PRIORITY: &[Hint] = &[
     ATTACH_HINT,
     AUTOSTART_HINT,
 ];
+/// Slim hints for a disposable agent session selected in the sidebar.
+const AGENT_SESSION_HINTS: &[Hint] = &[
+    MOVE_HINT,
+    ATTACH_HINT,
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    CLOSE_HINT,
+    ADD_HINT,
+];
+/// Agent-session hints in retention order when the status row is narrow.
+const AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
+    CLOSE_HINT,
+    START_STOP_HINT,
+    ADD_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    MOVE_HINT,
+    ATTACH_HINT,
+];
 /// Slim hints for a collapsed other-project row.
 const PROJECT_HINTS: &[Hint] = &[("↑↓", "move"), ("→", "open"), ("d", "remove")];
 /// Slim hints for an active project that has no processes yet.
@@ -57,18 +79,38 @@ const EMPTY_HINTS: &[Hint] = &[ADD_HINT, ("n", "new"), ("o", "projects")];
 const TERMINAL_HINTS: &[Hint] = &[DETACH_HINT, START_STOP_HINT, RESTART_HINT, KILL_HINT];
 /// Terminal hints in retention order when the status row is narrow.
 const TERMINAL_HINT_PRIORITY: &[Hint] = &[START_STOP_HINT, RESTART_HINT, KILL_HINT, DETACH_HINT];
+/// Slim hints while attached to a disposable agent session.
+const TERMINAL_AGENT_SESSION_HINTS: &[Hint] = &[
+    DETACH_HINT,
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    CLOSE_HINT,
+];
+/// Attached agent-session hint retention order for narrow rows.
+const TERMINAL_AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
+    CLOSE_HINT,
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    DETACH_HINT,
+];
 
 /// The sidebar/terminal context the status bar advertises hints for. The full
 /// keymap lives in the `?` overlay; each context shows only its slim subset.
 pub enum StatusContext {
     /// A process in the active project is selected.
     Process,
+    /// A disposable agent session is selected.
+    AgentSession,
     /// A collapsed other-project row is selected.
     Project,
     /// The active project has no processes.
     Empty,
     /// A terminal pane is attached.
     Terminal,
+    /// A disposable agent session's terminal is attached.
+    TerminalAgentSession,
 }
 
 impl StatusContext {
@@ -76,11 +118,21 @@ impl StatusContext {
     fn hints(&self, available_width: u16) -> Vec<Hint> {
         match self {
             Self::Process => process_hints(available_width),
+            Self::AgentSession => prioritized_hints(
+                AGENT_SESSION_HINTS,
+                AGENT_SESSION_HINT_PRIORITY,
+                available_width,
+            ),
             Self::Project => PROJECT_HINTS.to_vec(),
             Self::Empty => EMPTY_HINTS.to_vec(),
             Self::Terminal => {
                 prioritized_hints(TERMINAL_HINTS, TERMINAL_HINT_PRIORITY, available_width)
             },
+            Self::TerminalAgentSession => prioritized_hints(
+                TERMINAL_AGENT_SESSION_HINTS,
+                TERMINAL_AGENT_SESSION_HINT_PRIORITY,
+                available_width,
+            ),
         }
     }
 }
@@ -115,7 +167,11 @@ pub fn render(
     notice: Option<&str>,
     leader_pending: bool,
 ) {
-    let leader_pending = leader_pending && matches!(context, StatusContext::Terminal);
+    let terminal_context = matches!(
+        context,
+        StatusContext::Terminal | StatusContext::TerminalAgentSession
+    );
+    let leader_pending = leader_pending && terminal_context;
     if let Some(notice) = notice {
         let style = if leader_pending {
             Style::default()
@@ -148,7 +204,7 @@ pub fn render(
         LABEL_COLOR
     };
     let mut spans = Vec::new();
-    if matches!(context, StatusContext::Terminal) {
+    if terminal_context {
         spans.push(Span::styled(LEADER_LABEL, Style::default().fg(key_color)));
     }
     let alert_width = if crashed > 0 {
@@ -156,7 +212,7 @@ pub fn render(
     } else {
         0
     };
-    let leader_width = if matches!(context, StatusContext::Terminal) {
+    let leader_width = if terminal_context {
         LEADER_LABEL.chars().count() as u16
     } else {
         0
@@ -280,6 +336,15 @@ mod tests {
         let width = hint_width(START_STOP_HINT) + hint_width(ADD_HINT);
 
         assert_eq!(process_hints(width), vec![START_STOP_HINT, ADD_HINT]);
+    }
+
+    /// Session hints expose close and omit the persistent autostart action.
+    #[test]
+    fn an_agent_session_prioritizes_close_without_autostart() {
+        let hints = StatusContext::AgentSession.hints(u16::MAX);
+
+        assert!(hints.contains(&CLOSE_HINT));
+        assert!(!hints.contains(&AUTOSTART_HINT));
     }
 
     #[test]

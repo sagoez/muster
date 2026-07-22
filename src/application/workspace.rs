@@ -28,19 +28,28 @@ impl Workspace {
         self.processes.is_empty()
     }
 
-    /// Appends a process to the end of the workspace, leaving the selection and
-    /// every existing process untouched.
-    pub fn add_process(&mut self, process: Process) {
-        self.processes.push(process);
+    /// Inserts a process at the end of its sidebar section and returns its index.
+    pub fn insert_in_section(&mut self, process: Process) -> usize {
+        let section = process.kind().section_index();
+        let index = self
+            .processes
+            .iter()
+            .position(|existing| existing.kind().section_index() > section)
+            .unwrap_or(self.processes.len());
+        self.processes.insert(index, process);
+        index
     }
 
-    /// Removes the process owning `pane`, clamping the selection to stay valid.
+    /// Removes the process owning `pane`, preserving the selected process when
+    /// another row is removed and otherwise selecting the adjacent row.
     pub fn remove(&mut self, pane: PaneId) {
         if let Some(index) = self.position_of(pane) {
+            let selected = self.selected_process().map(|process| *process.id());
             self.processes.remove(index);
-            if self.selected_index >= self.processes.len() {
-                self.selected_index = self.processes.len().saturating_sub(1);
-            }
+            self.selected_index = selected
+                .filter(|selected| *selected != pane)
+                .and_then(|selected| self.position_of(selected))
+                .unwrap_or_else(|| index.min(self.processes.len().saturating_sub(1)));
         }
     }
 
@@ -159,10 +168,64 @@ mod tests {
         );
     }
 
+    /// Removing an earlier row keeps selection on the same process identity.
+    #[test]
+    fn removing_an_earlier_process_preserves_selection() {
+        let mut ws = Workspace::builder()
+            .processes(vec![
+                process(0, RestartPolicy::Never),
+                process(1, RestartPolicy::Never),
+                process(2, RestartPolicy::Never),
+            ])
+            .selected_index(2)
+            .build();
+
+        ws.remove(PaneId::new(0));
+
+        assert_eq!(*ws.selected_process().unwrap().id(), PaneId::new(2));
+        assert_eq!(*ws.selected_index(), 1);
+    }
+
+    /// Removing the selected row chooses the row that occupied its position,
+    /// falling back to the preceding row when the last process was removed.
+    #[test]
+    fn removing_the_selected_process_selects_an_adjacent_process() {
+        let mut ws = Workspace::builder()
+            .processes(vec![
+                process(0, RestartPolicy::Never),
+                process(1, RestartPolicy::Never),
+                process(2, RestartPolicy::Never),
+            ])
+            .selected_index(1)
+            .build();
+
+        ws.remove(PaneId::new(1));
+        assert_eq!(*ws.selected_process().unwrap().id(), PaneId::new(2));
+
+        ws.remove(PaneId::new(2));
+        assert_eq!(*ws.selected_process().unwrap().id(), PaneId::new(0));
+    }
+
     #[test]
     fn restart_decision_follows_policy() {
         let ws = workspace();
         assert!(!ws.should_restart(PaneId::new(0), ExitOutcome::Failed));
         assert!(ws.should_restart(PaneId::new(1), ExitOutcome::Failed));
+    }
+
+    /// A runtime process joins its kind's existing sidebar section.
+    #[test]
+    fn inserts_a_process_at_the_end_of_its_section() {
+        let mut ws = workspace();
+        let agent = Process::builder()
+            .id(PaneId::new(2))
+            .name(ProcessName::try_new("agent").unwrap())
+            .kind(ProcessKind::Agent)
+            .build();
+
+        let index = ws.insert_in_section(agent);
+
+        assert_eq!(index, 0);
+        assert_eq!(*ws.processes()[index].kind(), ProcessKind::Agent);
     }
 }

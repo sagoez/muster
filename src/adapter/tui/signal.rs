@@ -18,6 +18,10 @@ const CANCEL: u8 = 0x18;
 const SUBSTITUTE: u8 = 0x1A;
 /// The byte after Escape that introduces an OSC sequence.
 const OSC_INTRODUCER: u8 = b']';
+/// OSC 0 sets both the terminal icon name and title.
+const OSC_ICON_AND_TITLE: &[u8] = b"0";
+/// OSC 2 sets the terminal title.
+const OSC_TITLE: &[u8] = b"2";
 /// OSC 9: iTerm2-style notification, `OSC 9 ; <text>`.
 const OSC_ITERM2: &[u8] = b"9";
 /// OSC 99: kitty-style rich notification with metadata and a chunked payload.
@@ -44,6 +48,8 @@ const MAX_KITTY_PAYLOAD: usize = 4096;
 /// Cap on one raw OSC sequence. Kitty payloads are limited to 4096 encoded bytes;
 /// the larger bound also accommodates long OSC 9 and OSC 777 messages safely.
 const MAX_OSC_BYTES: usize = 64 * 1024;
+/// Cap on terminal titles retained for activity detection.
+const MAX_TITLE_BYTES: usize = 1024;
 /// The String Terminator's final byte (`ESC \`).
 const STRING_TERMINATOR: u8 = b'\\';
 
@@ -53,6 +59,8 @@ pub enum Signal {
     /// Visible terminal output was produced (printing, cursor moves, and so on).
     /// Consecutive output is coalesced into a single signal.
     Output,
+    /// The process changed its terminal title.
+    Title(String),
     /// The process asked for attention: a bell, or an OSC 9/99/777 notification.
     Notify {
         /// Kitty identifier for replacing this notification, when present.
@@ -177,9 +185,8 @@ impl KittyNotification {
     }
 }
 
-/// Decodes notification and progress signals from a single process's PTY stream:
-/// the bell, iTerm2 `OSC 9`, kitty `OSC 99`, rxvt `OSC 777`, and ConEmu `OSC 9;4`
-/// progress. Raw OSC framing is retained across calls so payload text is never
+/// Decodes title, notification, and progress signals from a single process's PTY
+/// stream. Raw OSC framing is retained across calls so payload text is never
 /// constrained by VTE's bounded parameter view. Screen rendering remains with
 /// the separate vt100 parser.
 pub struct SignalReader {
@@ -309,12 +316,21 @@ impl SignalReader {
         let Some((code, payload)) = split_once(raw, b';') else {
             return;
         };
-        if code == OSC_ITERM2 {
+        if matches!(code, OSC_ICON_AND_TITLE | OSC_TITLE) {
+            self.title(payload, signals);
+        } else if code == OSC_ITERM2 {
             self.iterm(payload, signals);
         } else if code == OSC_RXVT {
             self.rxvt(payload, signals);
         } else if code == OSC_KITTY {
             self.kitty(payload, signals);
+        }
+    }
+
+    /// Emits a bounded terminal-title update for provider activity detection.
+    fn title(&self, payload: &[u8], signals: &mut Vec<Signal>) {
+        if payload.len() <= MAX_TITLE_BYTES {
+            signals.push(Signal::Title(decode(payload)));
         }
     }
 
@@ -515,6 +531,16 @@ mod tests {
         assert!(matches!(
             events(&[b"\x1b]9;build finished\x07"]).as_slice(),
             [Signal::Notify { title: None, body: Some(b), .. }] if b == "build finished"
+        ));
+    }
+
+    /// Both standard title-setting OSC codes emit title signals.
+    #[test]
+    fn osc_0_and_2_report_terminal_titles() {
+        assert!(matches!(
+            events(&[b"\x1b]0;Codex working\x07", b"\x1b]2;Codex idle\x1b\\"]).as_slice(),
+            [Signal::Title(first), Signal::Title(second)]
+                if first == "Codex working" && second == "Codex idle"
         ));
     }
 

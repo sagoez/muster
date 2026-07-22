@@ -14,6 +14,17 @@ pub enum ProcessKind {
     Command,
 }
 
+impl ProcessKind {
+    /// Returns this kind's stable sidebar section position.
+    pub(crate) const fn section_index(self) -> usize {
+        match self {
+            Self::Agent => 0,
+            Self::Terminal => 1,
+            Self::Command => 2,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

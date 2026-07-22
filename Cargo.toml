@@ -9,7 +9,14 @@ repository = "https://github.com/sagoez/muster"
 readme = "README.md"
 keywords = ["tui", "terminal", "ratatui", "process-manager", "agents"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["/src/**", "/examples/**", "/Cargo.lock", "/LICENSE", "/README.md"]
+include = [
+    "/src/**",
+    "/examples/**",
+    "/docs/muster-demo.gif",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+]
 
 [lib]
 name = "muster"

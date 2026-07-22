@@ -1,6 +1,6 @@
 ---
 source: src/adapter/tui/widget/status_bar.rs
-assertion_line: 152
+assertion_line: 291
 expression: terminal.backend()
 ---
-"s start/stop   r restart   x kill   ? help      ⚠ 2 crashed "
+"s start/stop   r restart   a add   ? help       ⚠ 2 crashed "

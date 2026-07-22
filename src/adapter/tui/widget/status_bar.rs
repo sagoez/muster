@@ -25,6 +25,8 @@ const RESTART_HINT: Hint = ("r", "restart");
 const KILL_HINT: Hint = ("x", "kill");
 /// Process autostart hint.
 const AUTOSTART_HINT: Hint = ("t", "autostart");
+/// Add-process hint.
+const ADD_HINT: Hint = ("a", "add");
 /// Attached terminal detach hint.
 const DETACH_HINT: Hint = ("h", "detach");
 /// Slim hints for a process selected in the active project.
@@ -35,10 +37,12 @@ const PROCESS_HINTS: &[Hint] = &[
     RESTART_HINT,
     KILL_HINT,
     AUTOSTART_HINT,
+    ADD_HINT,
 ];
 /// Process hints in retention order when the status row is narrow.
 const PROCESS_HINT_PRIORITY: &[Hint] = &[
     START_STOP_HINT,
+    ADD_HINT,
     RESTART_HINT,
     KILL_HINT,
     MOVE_HINT,
@@ -48,7 +52,7 @@ const PROCESS_HINT_PRIORITY: &[Hint] = &[
 /// Slim hints for a collapsed other-project row.
 const PROJECT_HINTS: &[Hint] = &[("↑↓", "move"), ("→", "open"), ("d", "remove")];
 /// Slim hints for an active project that has no processes yet.
-const EMPTY_HINTS: &[Hint] = &[("a", "add"), ("n", "new"), ("o", "projects")];
+const EMPTY_HINTS: &[Hint] = &[ADD_HINT, ("n", "new"), ("o", "projects")];
 /// Slim hints for an attached terminal; each key follows the leader chord.
 const TERMINAL_HINTS: &[Hint] = &[DETACH_HINT, START_STOP_HINT, RESTART_HINT, KILL_HINT];
 /// Terminal hints in retention order when the status row is narrow.
@@ -267,6 +271,15 @@ mod tests {
     #[test]
     fn a_wide_process_row_keeps_every_hint() {
         assert_eq!(process_hints(u16::MAX), PROCESS_HINTS);
+    }
+
+    /// The add action remains visible when only the highest-priority process
+    /// actions fit.
+    #[test]
+    fn a_narrow_process_row_keeps_the_add_hint() {
+        let width = hint_width(START_STOP_HINT) + hint_width(ADD_HINT);
+
+        assert_eq!(process_hints(width), vec![START_STOP_HINT, ADD_HINT]);
     }
 
     #[test]

@@ -6,7 +6,8 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::value::ProjectName;
 
-/// A registered project: a display name and the path to its workspace config.
+/// A registered project: a display name and a location-independent path to its
+/// workspace config.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Project {

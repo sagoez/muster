@@ -16,14 +16,17 @@ use muster::{
     error::Result,
 };
 
+/// Conventional workspace filename used when no explicit path is supplied.
+const DEFAULT_CONFIG_FILE: &str = "muster.yml";
+
 /// Command-line arguments. With no subcommand, muster launches its TUI.
 #[derive(Parser)]
 #[command(about = "A terminal workspace for running CLI agents and dev processes")]
 struct Args {
     /// Path to the workspace config file. Global, so it is recognized before or
     /// after a subcommand rather than being swallowed by `run`'s command args.
-    #[arg(short, long, global = true, default_value = "muster.yml")]
-    config: PathBuf,
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -45,7 +48,11 @@ fn main() -> Result<()> {
     clap_complete::CompleteEnv::with_factory(Args::command).complete();
     let args = Args::parse();
     match args.command {
-        Some(Command::Run(run_args)) => run_capture(run_args, args.config),
+        Some(Command::Run(run_args)) => run_capture(
+            run_args,
+            args.config
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE)),
+        ),
         None => run_tui(args.config),
     }
 }
@@ -62,13 +69,22 @@ fn run_capture(args: RunArgs, config: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Composition root for the TUI: loads the workspace config, wires the PTY
-/// runner into the TUI, and runs it under a restoring terminal guard.
+/// Composition root for the TUI: resolves and loads the workspace config, wires
+/// its adapters, and runs it under a restoring terminal guard.
 ///
 /// # Errors
 /// Returns an error if the config cannot be loaded or the terminal fails.
-fn run_tui(config_path: PathBuf) -> Result<()> {
+fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
     install_panic_hook();
+    let registry = YamlProjectRegistry;
+    let current_project = cli::current_project_from_env();
+    let local_config = PathBuf::from(DEFAULT_CONFIG_FILE);
+    let config_path = cli::resolve_tui_config(
+        explicit_config.as_deref(),
+        current_project.as_deref(),
+        &local_config,
+        &registry,
+    )?;
     let config = YamlConfigSource::builder()
         .path(config_path.clone())
         .build();
@@ -77,7 +93,7 @@ fn run_tui(config_path: PathBuf) -> Result<()> {
         .build();
     let adapters = Adapters::builder()
         .runner(Box::new(PortablePtyRunner))
-        .registry(Box::new(YamlProjectRegistry))
+        .registry(Box::new(registry))
         .completer(Box::new(FsPathCompleter))
         .notifier(Box::new(DesktopNotifier::new()))
         .settings_store(Box::new(YamlSettingsStore))

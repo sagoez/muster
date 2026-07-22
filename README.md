@@ -11,7 +11,7 @@ cleaned-up cut I opened up, done with help of the AI.
 
 ## Demo
 
-![Watch the demo](docs/muster-demo.mp4).
+[![Watch the video](https://images.unsplash.com/photo-1718844054446-afb0ff6f9a09?q=80&w=1228&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D)](docs/muster-demo.mp4)
 
 ## Features
 

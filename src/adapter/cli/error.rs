@@ -26,4 +26,7 @@ pub enum CliError {
     /// The command could not be executed.
     #[error("failed to run the command: {0}")]
     Exec(#[source] std::io::Error),
+    /// The folder name could not become a project name.
+    #[error("cannot derive a project name from '{0}'")]
+    InvalidProjectFolder(std::path::PathBuf),
 }

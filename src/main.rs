@@ -212,6 +212,7 @@ fn main() -> Result<()> {
     clap_complete::CompleteEnv::with_factory(Args::command).complete();
     let args = Args::parse();
     match args.command {
+        Some(Command::Init) => run_init(),
         Some(Command::Run(run_args)) => run_capture(
             run_args,
             args.config
@@ -332,6 +333,28 @@ fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
         drop(gate);
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// Scaffolds a starter workspace in the current directory and registers it.
+/// Prints each report line and exits non-zero on failure.
+///
+/// # Errors
+/// Returns an error if the current directory cannot be determined.
+fn run_init() -> Result<()> {
+    let directory = std::env::current_dir()?;
+    let registry = YamlProjectRegistry;
+    match cli::init(&directory, &registry) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+        },
+        Err(error) => {
+            eprintln!("{APP_NAME}: {error}");
+            std::process::exit(1);
+        },
+    }
+    Ok(())
 }
 
 /// Adds a command to a project and runs it in place, reporting a friendly error

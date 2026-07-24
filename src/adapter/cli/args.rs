@@ -20,6 +20,8 @@ pub struct Args {
 /// Subcommands. Absent, muster runs the TUI.
 #[derive(Subcommand)]
 pub enum Command {
+    /// Create a starter muster.yml here and register this folder as a project.
+    Init,
     /// Register a command in a project, then run it.
     Run(RunArgs),
     /// Install provider integrations used to preserve native agent sessions.

@@ -304,21 +304,35 @@ impl ProviderHooks {
             .collect())
     }
 
-    /// The textual forms setup may have embedded the executable path in:
-    /// raw, shell-quoted, PowerShell-quoted, and their JSON-escaped bodies
-    /// (which also cover TOML basic-string escaping).
+    /// The exactly-terminated forms setup embeds the executable in: complete
+    /// JSON strings (plugins) and each quoted form followed by the hook
+    /// subcommand (shell commands, in raw and JSON-escaped encodings).
+    ///
+    /// Using suffix-terminated tokens (e.g. `<exe> hook`) rather than bare
+    /// path substrings prevents a path that is a strict prefix of the installed
+    /// one (e.g. `/opt/muster-old/mus` vs `/opt/muster-old/muster`) from
+    /// matching as Installed.
     fn executable_candidates(executable: &str) -> Vec<String> {
-        let mut candidates = vec![executable.to_string()];
+        let mut bases = vec![executable.to_string()];
         if let Ok(quoted) = shlex::try_quote(executable) {
-            candidates.push(quoted.to_string());
+            bases.push(quoted.to_string());
         }
-        candidates.push(executable.replace('\'', "''"));
-        for base in candidates.clone() {
-            if let Ok(encoded) = serde_json::to_string(&base) {
-                let body = encoded.trim_matches('"').to_string();
-                candidates.push(body);
-                candidates.push(encoded);
+        bases.push(format!("'{}'", executable.replace('\'', "''")));
+        let mut candidates = Vec::new();
+        // Amp and OpenCode plugins embed the executable as a standalone
+        // JSON string, so a complete JSON-encoded form (with surrounding
+        // double-quotes) is an exactly-terminated token on its own.
+        if let Ok(encoded) = serde_json::to_string(executable) {
+            candidates.push(encoded);
+        }
+        for base in bases {
+            let followed = format!("{base} {HOOK_SUBCOMMAND}");
+            // JSON-escaped form covers TOML basic-string escaping too, and
+            // strips the surrounding quotes so the interior is matched.
+            if let Ok(encoded) = serde_json::to_string(&followed) {
+                candidates.push(encoded.trim_matches('"').to_string());
             }
+            candidates.push(followed);
         }
         candidates.sort();
         candidates.dedup();
@@ -1169,6 +1183,50 @@ mod tests {
         }
         assert!(amp.contains(r#"child.on("error", () => {})"#));
         assert!(amp.contains(r#"child.stdin.on("error", () => {})"#));
+    }
+
+    /// A path that is a strict prefix of the installed executable must not
+    /// match as Installed. Setup with `/opt/muster-old/muster`; checking
+    /// `/opt/muster-old/mus` (a prefix) must report every provider Stale,
+    /// while the exact installed path reports Installed.
+    #[test]
+    fn status_does_not_match_path_prefixes() {
+        let root =
+            std::env::temp_dir().join(format!("muster-prefix-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        let installed_exe = Path::new("/opt/muster-old/muster");
+        let prefix_exe = Path::new("/opt/muster-old/mus");
+
+        ProviderHooks::setup_in_with_codex(installed_exe, &home, &config, &xdg, &codex).unwrap();
+
+        // The strict prefix must not read as Installed.
+        let prefix_statuses =
+            ProviderHooks::status_in(prefix_exe, &home, &config, &xdg, &codex).unwrap();
+        for status in &prefix_statuses {
+            assert_ne!(
+                status.state(),
+                HookState::Installed,
+                "prefix path matched as Installed for provider {}",
+                status.provider()
+            );
+        }
+
+        // The exact installed path must still report Installed.
+        let exact_statuses =
+            ProviderHooks::status_in(installed_exe, &home, &config, &xdg, &codex).unwrap();
+        for status in &exact_statuses {
+            assert_eq!(
+                status.state(),
+                HookState::Installed,
+                "exact path not Installed for provider {}",
+                status.provider()
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Status distinguishes missing, stale, and installed hook files.

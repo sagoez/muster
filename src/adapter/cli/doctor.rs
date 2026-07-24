@@ -50,8 +50,15 @@ const FISH_RC: &str = ".config/fish/config.fish";
 const FISH_COMPLETIONS: &str = ".config/fish/completions/muster.fish";
 /// Elvish shell rc file for sourcing completions.
 const ELVISH_RC: &str = ".elvish/rc.elv";
-/// PowerShell profile for sourcing completions.
+/// PowerShell profile for sourcing completions on Unix.
+#[cfg(not(windows))]
 const POWERSHELL_RC: &str = ".config/powershell/Microsoft.PowerShell_profile.ps1";
+/// PowerShell 7 profile relative to the user's home directory on Windows.
+#[cfg(windows)]
+const POWERSHELL_RC: &str = "Documents/PowerShell/Microsoft.PowerShell_profile.ps1";
+/// Windows PowerShell 5 profile relative to the user's home directory.
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_RC: &str = "Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
 
 /// Severity of a probe result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,7 +197,7 @@ pub fn clipboard_probe() -> Probe {
 /// Best-effort check that the shell's rc file registers completions; warns
 /// with the exact line to add when it does not.
 pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
-    let Some(shell) = shell_path.and_then(shell_from_path) else {
+    let Some(shell) = detect_shell(shell_path) else {
         return probe(
             COMPLETIONS_LABEL,
             ProbeOutcome::Warn,
@@ -219,6 +226,21 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
     }
 }
 
+/// The shell whose completions the probe should check: `$SHELL` when it
+/// names a known shell, else PowerShell on Windows, where `$SHELL` is
+/// normally unset even though a profile may register completions.
+fn detect_shell(shell_env: Option<&str>) -> Option<CompletionShell> {
+    let named = shell_env.and_then(shell_from_path);
+    if named.is_some() {
+        return named;
+    }
+    if cfg!(windows) {
+        Some(CompletionShell::Powershell)
+    } else {
+        None
+    }
+}
+
 /// The completion shell inferred from a `$SHELL` path.
 fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
     let name = Path::new(shell_path).file_name()?.to_str()?;
@@ -241,7 +263,12 @@ fn rc_files(shell: CompletionShell) -> &'static [&'static str] {
         CompletionShell::Zsh => &[ZSH_RC],
         CompletionShell::Fish => &[FISH_RC, FISH_COMPLETIONS],
         CompletionShell::Elvish => &[ELVISH_RC],
+        #[cfg(not(windows))]
         CompletionShell::Powershell => &[POWERSHELL_RC],
+        // Best effort: $PROFILE can point elsewhere (e.g. OneDrive-redirected
+        // Documents), which a spawned-shell query would be needed to resolve.
+        #[cfg(windows)]
+        CompletionShell::Powershell => &[POWERSHELL_RC, WINDOWS_POWERSHELL_RC],
     }
 }
 
@@ -495,6 +522,16 @@ mod tests {
             shell_from_path("/usr/bin/pwsh"),
             Some(CompletionShell::Powershell)
         );
+    }
+
+    /// A named shell always wins; without one, only Windows assumes a shell.
+    #[test]
+    fn detect_shell_prefers_the_environment_then_the_platform() {
+        assert_eq!(detect_shell(Some("/bin/zsh")), Some(CompletionShell::Zsh));
+        #[cfg(windows)]
+        assert_eq!(detect_shell(None), Some(CompletionShell::Powershell));
+        #[cfg(not(windows))]
+        assert_eq!(detect_shell(None), None);
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.

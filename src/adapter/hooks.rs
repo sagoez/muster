@@ -169,30 +169,35 @@ pub struct HookStatus {
     state: HookState,
 }
 
-/// Whether `content` contains `needle` starting at a token boundary: at the
-/// beginning, or after a character that cannot extend a filesystem path. A
-/// marker for `/bin/muster ...` therefore never matches inside a config
-/// invoking `/usr/bin/muster ...`.
+/// String delimiters our writers place before a command: `"` opens JSON and
+/// TOML basic strings, `'` opens the TOML literal strings toml_edit prefers
+/// for backslash-heavy commands.
+const STRING_DELIMITERS: [char; 2] = ['"', '\''];
+
+/// Whether `content` contains `needle` immediately after a delimiter our own
+/// writers produce: the start of the content, a string-opening quote, or -
+/// only for markers that begin with a quote and therefore cannot be a path
+/// suffix - whitespace (the PowerShell `& '...'` form). Boundaries come from
+/// the writers' actual delimiters rather than guessing which characters may
+/// appear in paths (almost all can), so realistic punctuation (colons,
+/// spaces) in another binary's path never reads as installed. Residual: a
+/// path that itself contains a quote directly before a matching suffix would
+/// still be accepted; representing such a path in these formats is already
+/// out of our writers' vocabulary.
 fn contains_token(content: &str, needle: &str) -> bool {
+    let self_delimited = needle.starts_with(STRING_DELIMITERS);
     let mut from = 0;
     while let Some(found) = content[from..].find(needle) {
         let index = from + found;
-        let boundary = content[..index]
-            .chars()
-            .next_back()
-            .is_none_or(|previous| !is_path_char(previous));
+        let boundary = content[..index].chars().next_back().is_none_or(|previous| {
+            STRING_DELIMITERS.contains(&previous) || (self_delimited && previous.is_whitespace())
+        });
         if boundary {
             return true;
         }
         from = index + 1;
     }
     false
-}
-
-/// Characters that can extend a filesystem path leftward; a match preceded by
-/// one is the suffix of a longer path, not the marked executable.
-fn is_path_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '/' | '\\' | '.' | '-' | '_' | '~' | '+')
 }
 
 /// The textual forms one provider's installed hook must carry in a config.
@@ -1284,6 +1289,35 @@ mod tests {
         }
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Suffix matches after valid filename punctuation (colons, spaces) are
+    /// rejected: boundaries come from writer delimiters, not path guessing.
+    #[test]
+    fn status_rejects_suffixes_behind_filename_punctuation() {
+        for prefix in ["/prefix:", "/pre fix"] {
+            let root = std::env::temp_dir().join(format!("muster-punct-{}", uuid::Uuid::new_v4()));
+            let home = root.join("home");
+            let config = root.join("config");
+            let xdg = root.join("xdg");
+            let codex = home.join(CODEX_CONFIG_DIR);
+            fs::create_dir_all(&home).unwrap();
+            let other = format!("{prefix}/bin/muster");
+            ProviderHooks::setup_in_with_codex(Path::new(&other), &home, &config, &xdg, &codex)
+                .unwrap();
+
+            let statuses =
+                ProviderHooks::status_in(Path::new("/bin/muster"), &home, &config, &xdg, &codex)
+                    .unwrap();
+
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status.state() == HookState::Stale),
+                "a suffix behind '{prefix}' must not read installed"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// A marker never matches inside a longer path to another binary.

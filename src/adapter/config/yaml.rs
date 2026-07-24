@@ -154,7 +154,7 @@ fn staging_path(path: &Path) -> PathBuf {
 /// # Errors
 /// Returns a `ConfigError::Write` if a directory, temp file, or rename fails.
 pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), ConfigError> {
-    let dest = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let dest = resolve_destination(path);
     if let Some(parent) = dest.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -165,6 +165,11 @@ pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), C
     }
     let raw = serde_yaml_ng::to_string(value)?;
     let staging = write_staging(&dest, &raw)?;
+    // A user-restricted destination (e.g. chmod 600) keeps its mode across
+    // the staged rename.
+    if let Ok(existing) = fs::metadata(&dest) {
+        let _ = fs::set_permissions(&staging, existing.permissions());
+    }
     fs::rename(&staging, &dest).map_err(|source| {
         let _ = fs::remove_file(&staging);
         ConfigError::Write {
@@ -172,6 +177,30 @@ pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), C
             source,
         }
     })
+}
+
+/// Most symlink links followed before giving up on a destination chain.
+const MAX_CONFIG_SYMLINKS: usize = 40;
+
+/// The final write target behind any chain of symlinks, so replacing a config
+/// rewrites the linked file instead of destroying the link - even when the
+/// chain ends at a target that does not exist yet (a dotfiles-managed config
+/// whose file is first created through the link).
+fn resolve_destination(path: &Path) -> PathBuf {
+    let mut dest = path.to_path_buf();
+    for _ in 0..MAX_CONFIG_SYMLINKS {
+        match fs::read_link(&dest) {
+            Ok(target) if target.is_absolute() => dest = target,
+            Ok(target) => {
+                dest = dest
+                    .parent()
+                    .map(|parent| parent.join(&target))
+                    .unwrap_or(target);
+            },
+            Err(_) => break,
+        }
+    }
+    dest.canonicalize().unwrap_or(dest)
 }
 
 /// Suffix marking a staging file awaiting publication. Staging lives beside
@@ -237,6 +266,57 @@ mod tests {
             !dir.join("missing.yml").exists(),
             "nothing was written through the symlink"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Writing through a dangling symlink creates the link's target instead
+    /// of replacing the link with a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_preserves_a_dangling_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("muster-dangle-{}", std::process::id()));
+        let target = dir.join("dotfiles").join("projects.yml");
+        let link = dir.join("projects.yml");
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        symlink(&target, &link).unwrap();
+
+        write_config(&link, &"content").unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link survives"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap().trim(),
+            "content",
+            "the write landed at the link target"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A restricted destination keeps its permission bits across a rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_preserves_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// The user-only mode that must survive the staged rename.
+        const PRIVATE_MODE: u32 = 0o600;
+        let dir = std::env::temp_dir().join(format!("muster-mode-{}", std::process::id()));
+        let path = dir.join("projects.yml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(PRIVATE_MODE)).unwrap();
+
+        write_config(&path, &"new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, PRIVATE_MODE, "mode survives the rewrite");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

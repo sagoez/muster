@@ -57,10 +57,14 @@ fn is_current(project: &Project, current_dir: &Path) -> bool {
 ///
 /// # Errors
 /// Returns [`CliError::MissingWorkspaceFile`] when the folder has no
-/// `muster.yml`, or a registry error when it cannot be updated.
+/// `muster.yml`, when the path is a directory, or when it is a dangling
+/// symlink - anything other than a readable regular file.
 pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
-    if fs::symlink_metadata(&config_path).is_err() {
+    if !fs::metadata(&config_path)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
+    {
         return Err(CliError::MissingWorkspaceFile(config_path));
     }
     Ok(vec![super::init::register_folder(
@@ -239,6 +243,19 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A directory named muster.yml is not a valid workspace file.
+    #[test]
+    fn add_rejects_a_directory_named_muster_yml() {
+        let dir = temp_dir("dir-as-config");
+        fs::create_dir(dir.join(WORKSPACE_FILE_NAME)).unwrap();
+        let registry = RecordingRegistry::default();
+        assert!(matches!(
+            add(&dir, &registry),
+            Err(CliError::MissingWorkspaceFile(_))
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Adding a folder with a config registers it once.
     #[test]
     fn add_registers_and_readd_is_a_no_op() {
@@ -312,11 +329,7 @@ mod tests {
         // The list is written back unchanged (identical content) but no
         // project is removed.
         assert_eq!(
-            registry
-                .saved_projects
-                .borrow()
-                .as_ref()
-                .map(|v| v.len()),
+            registry.saved_projects.borrow().as_ref().map(|v| v.len()),
             Some(2),
             "both projects remain"
         );

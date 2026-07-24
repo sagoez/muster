@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsStr,
     io::Write,
     process::{Command, Stdio},
 };
@@ -36,12 +37,38 @@ pub fn preferred_tool() -> Option<&'static str> {
         .map(|command| command.program)
 }
 
-/// Returns true when `program` exists as an executable on the current PATH.
+/// Returns true when `program` exists as an executable regular file on PATH.
 fn on_path(program: &str) -> bool {
     let Ok(path_var) = env::var("PATH") else {
         return false;
     };
-    env::split_paths(&path_var).any(|dir| dir.join(program).exists())
+    on_path_in(program, path_var.as_ref())
+}
+
+/// Unix permission bits that indicate at least one executable bit is set.
+#[cfg(unix)]
+const EXECUTABLE_BITS: u32 = 0o111;
+
+/// Returns true when `program` is an executable regular file somewhere in `path`.
+fn on_path_in(program: &str, path: &OsStr) -> bool {
+    env::split_paths(path).any(|dir| {
+        let candidate = dir.join(program);
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & EXECUTABLE_BITS != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
 }
 
 /// The platform clipboard writers worth trying, in herdr's order.
@@ -118,5 +145,33 @@ mod tests {
                 }
             },
         }
+    }
+
+    /// A non-executable file with the right name must not count as a candidate.
+    #[cfg(unix)]
+    #[test]
+    fn on_path_in_rejects_non_executable_files() {
+        use std::{ffi::OsString, fs, os::unix::fs::PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("muster-clipboard-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let program = "fake-clipboard-tool";
+        let path = dir.join(program);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        // Explicitly remove all executable bits.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let path_var: OsString = dir.as_os_str().to_os_string();
+        assert!(
+            !on_path_in(program, &path_var),
+            "non-executable file must not match"
+        );
+
+        // Make it executable - now it should match.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(on_path_in(program, &path_var), "executable file must match");
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }

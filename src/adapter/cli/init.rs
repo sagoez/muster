@@ -29,6 +29,9 @@ const RUN_HINT: &str = "run `muster` here to start";
 pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
     let mut rows = Vec::new();
+    // Use symlink_metadata so a dangling symlink is never overwritten -
+    // intentionally asymmetric with `projects add` and `doctor`, which
+    // require a reachable regular file.
     if fs::symlink_metadata(&config_path).is_ok() {
         rows.push(Row::unlabeled(
             RowKind::Hint,

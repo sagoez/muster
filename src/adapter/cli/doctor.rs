@@ -100,13 +100,18 @@ pub fn config_probe(config_path: PathBuf) -> Probe {
     }
 }
 
-/// Reads the registry and flags projects whose config file is gone.
+/// Reads the registry and flags projects whose config file is not a reachable
+/// regular file - missing, a directory, or a dangling symlink all fail.
 pub fn registry_probe(registry: &dyn ProjectRegistry) -> Probe {
     match registry.projects() {
         Ok(projects) => {
             let dangling: Vec<String> = projects
                 .iter()
-                .filter(|project| std::fs::symlink_metadata(absolutize(project.config())).is_err())
+                .filter(|project| {
+                    !fs::metadata(absolutize(project.config()))
+                        .map(|meta| meta.is_file())
+                        .unwrap_or(false)
+                })
                 .map(|project| project.name().as_ref().to_string())
                 .collect();
             if dangling.is_empty() {
@@ -371,6 +376,34 @@ mod tests {
         let probe = registry_probe(&registry);
         assert_eq!(probe.outcome(), ProbeOutcome::Fail);
         assert!(probe.detail().contains("gone"));
+    }
+
+    /// A project whose config path is a dangling symlink is flagged as missing.
+    #[cfg(unix)]
+    #[test]
+    fn registry_probe_flags_dangling_symlink_project() {
+        use std::os::unix::fs::symlink;
+
+        let dir =
+            std::env::temp_dir().join(format!("muster-probe-dangling-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("muster.yml");
+        // Create a symlink pointing to a target that does not exist.
+        symlink(dir.join("nonexistent.yml"), &config_path).unwrap();
+
+        let registry = RecordingRegistry {
+            projects: vec![project("dangling", config_path.to_str().unwrap())],
+            ..RecordingRegistry::default()
+        };
+        let probe = registry_probe(&registry);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
+        assert!(
+            probe.detail().contains("dangling"),
+            "dangling project named in detail"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Hook statuses aggregate: any missing or stale provider fails the probe.

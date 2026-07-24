@@ -49,6 +49,9 @@ pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>
 /// Registers the folder as a project unless its config path already is one.
 /// `pub(super)` because `muster projects add` reuses it.
 ///
+/// The check-and-insert runs inside `update_projects` so it is atomic with
+/// respect to concurrent `muster init` or `muster projects add` invocations.
+///
 /// # Errors
 /// Returns [`CliError`] when the folder has no usable name or the registry
 /// cannot be updated.
@@ -57,29 +60,44 @@ pub(super) fn register_folder(
     config_path: &Path,
     registry: &dyn ProjectRegistry,
 ) -> Result<Row, CliError> {
-    let mut projects = registry.projects()?;
-    if let Some(existing) = projects
-        .iter()
-        .find(|project| absolutize(project.config()) == config_path)
-    {
-        return Ok(Row::unlabeled(
-            RowKind::Hint,
-            format!("{REGISTERED_NOTE} as '{}'", existing.name().as_ref()),
-        ));
-    }
+    // Derive the name before entering the lock - this may fail early.
     let name = project_name(directory)?;
     let label = name.as_ref().to_string();
-    projects.push(
-        Project::builder()
-            .name(name)
-            .config(config_path.to_path_buf())
-            .build(),
-    );
-    registry.save(&projects)?;
-    Ok(Row::unlabeled(
-        RowKind::Ok,
-        format!("registered project '{label}'"),
-    ))
+
+    // Capture the already-registered project name (if any) inside the closure
+    // so the outcome is observable after the lock releases.
+    let mut existing_name: Option<String> = None;
+
+    registry.update_projects(&mut |projects| {
+        if let Some(existing) = projects
+            .iter()
+            .find(|project| absolutize(project.config()) == config_path)
+        {
+            existing_name = Some(existing.name().as_ref().to_string());
+            // Already registered - return list unchanged.
+            return projects;
+        }
+        let mut updated = projects;
+        updated.push(
+            Project::builder()
+                .name(name.clone())
+                .config(config_path.to_path_buf())
+                .build(),
+        );
+        updated
+    })?;
+
+    if let Some(found) = existing_name {
+        Ok(Row::unlabeled(
+            RowKind::Hint,
+            format!("{REGISTERED_NOTE} as '{found}'"),
+        ))
+    } else {
+        Ok(Row::unlabeled(
+            RowKind::Ok,
+            format!("registered project '{label}'"),
+        ))
+    }
 }
 
 /// The project name derived from the folder's file name.
@@ -207,10 +225,82 @@ mod tests {
 
         let rows = init(&dir, &registry).unwrap();
 
-        assert!(registry.saved_projects.borrow().is_none(), "no re-save");
+        // The list is written back unchanged (identical content) but no new
+        // project is appended.
+        let saved = registry.saved_projects.borrow();
+        assert_eq!(
+            saved.as_ref().map(|v| v.len()),
+            Some(1),
+            "one project remains"
+        );
         assert!(
             rows.iter()
                 .any(|row| row.detail().contains(REGISTERED_NOTE))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `register_folder` routes through `update_projects`, not a bare
+    /// `projects()` + `save()` pair, so the check-and-insert is atomic.
+    #[test]
+    fn register_folder_goes_through_update_projects() {
+        /// Fake that records whether `update_projects` was called.
+        #[derive(Default)]
+        struct TrackingRegistry {
+            update_projects_called: RefCell<bool>,
+            saved_projects: RefCell<Option<Vec<Project>>>,
+        }
+
+        impl ProjectRegistry for TrackingRegistry {
+            fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+                Ok(Vec::new())
+            }
+
+            fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+                unreachable!()
+            }
+
+            fn workspace_exists(&self, _config_path: &Path) -> bool {
+                false
+            }
+
+            fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+                *self.saved_projects.borrow_mut() = Some(projects.to_vec());
+                Ok(())
+            }
+
+            fn save_workspace(
+                &self,
+                _config_path: &Path,
+                _config: &WorkspaceConfig,
+            ) -> Result<(), ConfigError> {
+                unreachable!()
+            }
+
+            fn update_projects(
+                &self,
+                update: &mut dyn FnMut(Vec<Project>) -> Vec<Project>,
+            ) -> Result<(), ConfigError> {
+                *self.update_projects_called.borrow_mut() = true;
+                // Delegate to default logic so the insertion actually runs.
+                let projects = self.projects()?;
+                self.save(&update(projects))
+            }
+        }
+
+        let dir = temp_dir("atomic");
+        let config_path = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
+        let registry = TrackingRegistry::default();
+
+        register_folder(&dir, &config_path, &registry).unwrap();
+
+        assert!(
+            *registry.update_projects_called.borrow(),
+            "register_folder must call update_projects"
+        );
+        assert!(
+            registry.saved_projects.borrow().is_some(),
+            "project was saved"
         );
         fs::remove_dir_all(dir).unwrap();
     }

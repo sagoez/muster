@@ -56,4 +56,18 @@ pub trait ProjectRegistry {
         let config = self.workspace(config_path)?;
         self.save_workspace(config_path, &update(config))
     }
+
+    /// Applies `update` to the project list under the registry's exclusive lock
+    /// where the implementation provides one, so concurrent mutations serialize
+    /// instead of losing writes.
+    ///
+    /// # Errors
+    /// Returns a `ConfigError` if the registry cannot be read, locked, or written.
+    fn update_projects(
+        &self,
+        update: &mut dyn FnMut(Vec<Project>) -> Vec<Project>,
+    ) -> Result<(), ConfigError> {
+        let projects = self.projects()?;
+        self.save(&update(projects))
+    }
 }

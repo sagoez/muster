@@ -111,6 +111,20 @@ impl ProjectRegistry for YamlProjectRegistry {
         write_config(&expand_home(config_path), config)
     }
 
+    fn update_projects(
+        &self,
+        update: &mut dyn FnMut(Vec<Project>) -> Vec<Project>,
+    ) -> Result<(), ConfigError> {
+        // Canonicalize so the same registry file always takes the same lock,
+        // even when the registry does not exist yet (fall back to the raw path
+        // so a missing registry can still be created under the lock).
+        let path = Self::registry_path().ok_or(ConfigError::NoConfigDir)?;
+        let dest = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let _guard = lock_workspace(&dest)?;
+        let projects = self.projects()?;
+        self.save(&update(projects))
+    }
+
     fn update_workspace(
         &self,
         config_path: &Path,

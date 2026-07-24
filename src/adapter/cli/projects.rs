@@ -70,49 +70,75 @@ pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>,
     )?])
 }
 
+/// Outcome captured inside the `update_projects` closure.
+enum RemoveOutcome {
+    Removed,
+    Unknown { known: String },
+    Ambiguous { count: usize, paths: String },
+}
+
 /// Unregisters the named project; files on disk are untouched.
+///
+/// The match-count check and removal run inside `update_projects` so the read
+/// and the write are atomic with respect to concurrent registry mutations.
 ///
 /// # Errors
 /// Returns [`CliError::UnknownProjectAmong`] when no project has that name, or
 /// [`CliError::AmbiguousProject`] when more than one project shares the name.
 pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
-    let projects = registry.projects()?;
-    let matches: Vec<&Project> = projects
-        .iter()
-        .filter(|project| project.name().as_ref() == name)
-        .collect();
-    if matches.is_empty() {
-        return Err(CliError::UnknownProjectAmong {
-            name: name.to_string(),
-            known: projects
-                .iter()
-                .map(|project| project.name().as_ref().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-        });
-    }
-    if matches.len() > 1 {
-        let paths = matches
+    let mut outcome = RemoveOutcome::Removed;
+
+    registry.update_projects(&mut |projects| {
+        let matches: Vec<&Project> = projects
             .iter()
-            .map(|project| project.config().display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(CliError::AmbiguousProject {
+            .filter(|p| p.name().as_ref() == name)
+            .collect();
+
+        if matches.is_empty() {
+            outcome = RemoveOutcome::Unknown {
+                known: projects
+                    .iter()
+                    .map(|p| p.name().as_ref().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            return projects;
+        }
+
+        if matches.len() > 1 {
+            let paths = matches
+                .iter()
+                .map(|p| p.config().display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            outcome = RemoveOutcome::Ambiguous {
+                count: matches.len(),
+                paths,
+            };
+            return projects;
+        }
+
+        projects
+            .into_iter()
+            .filter(|p| p.name().as_ref() != name)
+            .collect()
+    })?;
+
+    match outcome {
+        RemoveOutcome::Removed => Ok(vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("removed '{name}' from the registry"),
+        )]),
+        RemoveOutcome::Unknown { known } => Err(CliError::UnknownProjectAmong {
             name: name.to_string(),
-            count: matches.len(),
+            known,
+        }),
+        RemoveOutcome::Ambiguous { count, paths } => Err(CliError::AmbiguousProject {
+            name: name.to_string(),
+            count,
             paths,
-        });
+        }),
     }
-    let remaining: Vec<Project> = projects
-        .iter()
-        .filter(|project| project.name().as_ref() != name)
-        .cloned()
-        .collect();
-    registry.save(&remaining)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        format!("removed '{name}' from the registry"),
-    )])
 }
 
 #[cfg(test)]
@@ -235,9 +261,12 @@ mod tests {
             ..RecordingRegistry::default()
         };
         let again = add(&dir, &seeded).unwrap();
-        assert!(
-            seeded.saved_projects.borrow().is_none(),
-            "re-add saves nothing"
+        // The list is written back unchanged (identical content); verify
+        // no project was added or removed.
+        assert_eq!(
+            seeded.saved_projects.borrow().as_ref().map(|v| v.len()),
+            Some(1),
+            "re-add keeps exactly one project"
         );
         assert!(again[0].detail().contains("already registered"));
 
@@ -261,7 +290,7 @@ mod tests {
     }
 
     /// Removing a name that matches two projects returns AmbiguousProject and
-    /// saves nothing.
+    /// leaves the list unchanged.
     #[test]
     fn remove_rejects_ambiguous_name() {
         let registry = RecordingRegistry {
@@ -280,9 +309,16 @@ mod tests {
             },
             other => panic!("unexpected: {other:?}"),
         }
-        assert!(
-            registry.saved_projects.borrow().is_none(),
-            "ambiguous remove saves nothing"
+        // The list is written back unchanged (identical content) but no
+        // project is removed.
+        assert_eq!(
+            registry
+                .saved_projects
+                .borrow()
+                .as_ref()
+                .map(|v| v.len()),
+            Some(2),
+            "both projects remain"
         );
     }
 

@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::{
     error::CliError,
@@ -46,11 +49,18 @@ pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<Ro
         .collect())
 }
 
-/// Whether the project's folder contains the current directory.
+/// Whether the project's folder contains the current directory. Both sides
+/// compare by canonical identity: the registry may hold a symlink alias while
+/// the OS reports the resolved working directory.
 fn is_current(project: &Project, current_dir: &Path) -> bool {
     absolutize(project.config())
         .parent()
-        .is_some_and(|folder| current_dir.starts_with(folder))
+        .is_some_and(|folder| resolved_identity(current_dir).starts_with(resolved_identity(folder)))
+}
+
+/// The canonical form of a path when it exists, else the path itself.
+fn resolved_identity(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Registers an existing folder that already contains a workspace file.
@@ -221,6 +231,38 @@ mod tests {
         assert!(rows[1].detail().contains("api") && rows[1].detail().contains("/w/api"));
         // The second column must be the project folder, not the config file path.
         assert!(!rows[1].detail().contains("muster.yml"));
+    }
+
+    /// A project registered through a symlink alias still gets the current
+    /// marker when the working directory is its resolved target.
+    #[cfg(unix)]
+    #[test]
+    fn list_marks_a_symlinked_current_project() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_dir("symlink-current");
+        let real = base.join("real");
+        let link = base.join("link");
+        fs::create_dir_all(real.join("src")).unwrap();
+        symlink(&real, &link).unwrap();
+        let registry = RecordingRegistry {
+            projects: vec![
+                Project::builder()
+                    .name(ProjectName::try_new("here").unwrap())
+                    .config(link.join(WORKSPACE_FILE_NAME))
+                    .build(),
+            ],
+            ..RecordingRegistry::default()
+        };
+
+        let rows = list(&registry, &real.join("src")).unwrap();
+
+        assert!(
+            rows[0].detail().starts_with(CURRENT_MARKER),
+            "resolved cwd matches the aliased registration: {}",
+            rows[0].detail()
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     /// An empty registry says so instead of printing nothing.

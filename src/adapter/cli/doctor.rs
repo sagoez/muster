@@ -38,6 +38,8 @@ const SESSIONS_LABEL: &str = "sessions";
 const HOOKS_LABEL: &str = "agent hooks";
 const CLIPBOARD_LABEL: &str = "clipboard";
 const COMPLETIONS_LABEL: &str = "completions";
+/// Prefix of a commented-out rc line, ignored by every probed shell.
+const COMMENT_PREFIX: &str = "#";
 /// Hint shown when providers need (re)installation.
 const HOOKS_HINT: &str = "run `muster hooks setup`";
 /// Bash shell rc file for sourcing completions.
@@ -208,7 +210,7 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
         let path = home.join(rc);
         fs::read_to_string(&path)
             .ok()
-            .filter(|content| content.contains(registration_line(shell)))
+            .filter(|content| registers_completions(content, shell))
             .map(|_| path)
     });
     if let Some(matched) = matched {
@@ -224,6 +226,15 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
             format!("not registered; add: {}", registration_line(shell)),
         )
     }
+}
+
+/// Whether any active (non-comment) line contains the shell's registration
+/// hook; a commented-out line is never evaluated by the shell.
+fn registers_completions(content: &str, shell: CompletionShell) -> bool {
+    content.lines().any(|line| {
+        let active = line.trim_start();
+        !active.starts_with(COMMENT_PREFIX) && active.contains(registration_line(shell))
+    })
 }
 
 /// The shell whose completions the probe should check: `$SHELL` when it
@@ -522,6 +533,23 @@ mod tests {
             shell_from_path("/usr/bin/pwsh"),
             Some(CompletionShell::Powershell)
         );
+    }
+
+    /// A commented-out registration line does not count as registered.
+    #[test]
+    fn completions_probe_ignores_commented_registrations() {
+        let dir = std::env::temp_dir().join(format!("muster-doc-comment-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".zshrc"),
+            format!("# {}\n", registration_line(CompletionShell::Zsh)),
+        )
+        .unwrap();
+
+        let probe = completions_probe(Some("/bin/zsh"), &dir);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A named shell always wins; without one, only Windows assumes a shell.

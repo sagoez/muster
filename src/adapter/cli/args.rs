@@ -26,6 +26,11 @@ pub enum Command {
     Check,
     /// Register a command in a project, then run it.
     Run(RunArgs),
+    /// List registered projects, or add and remove them.
+    Projects {
+        #[command(subcommand)]
+        command: Option<ProjectsCommand>,
+    },
     /// Install provider integrations used to preserve native agent sessions.
     Hooks {
         #[command(subcommand)]
@@ -36,6 +41,21 @@ pub enum Command {
     Hook {
         #[command(subcommand)]
         command: InternalHookCommand,
+    },
+}
+
+/// Registry management actions under `muster projects`.
+#[derive(Subcommand)]
+pub enum ProjectsCommand {
+    /// Register an existing folder containing a muster.yml.
+    Add {
+        /// Folder to register (defaults to the current directory).
+        path: Option<PathBuf>,
+    },
+    /// Unregister a project by name; files on disk are untouched.
+    Remove {
+        /// Registered project name.
+        name: String,
     },
 }
 

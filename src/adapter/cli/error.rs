@@ -29,4 +29,10 @@ pub enum CliError {
     /// The folder name could not become a project name.
     #[error("cannot derive a project name from '{0}'")]
     InvalidProjectFolder(std::path::PathBuf),
+    /// The folder has no workspace file to register.
+    #[error("{0} not found; run `muster init` there first")]
+    MissingWorkspaceFile(std::path::PathBuf),
+    /// No registered project matched, listing what exists.
+    #[error("unknown project '{name}'; registered: {known}")]
+    UnknownProjectAmong { name: String, known: String },
 }

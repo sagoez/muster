@@ -12,7 +12,10 @@ use std::{path::PathBuf, process::Command as ProcessCommand};
 use clap::{CommandFactory, Parser};
 use muster::{
     adapter::{
-        cli::{self, Args, CheckOutcome, Command, HooksCommand, InternalHookCommand, RunArgs},
+        cli::{
+            self, Args, CheckOutcome, Command, HooksCommand, InternalHookCommand, ProjectsCommand,
+            RunArgs,
+        },
         config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
         hooks::ProviderHooks,
         notifier::DesktopNotifier,
@@ -226,6 +229,7 @@ fn main() -> Result<()> {
             args.config
                 .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
         ),
+        Some(Command::Projects { command }) => run_projects(command),
         Some(Command::Hooks { command }) => run_hooks(command),
         Some(Command::Hook { command }) => run_internal_hook(command),
         None => run_tui(args.config),
@@ -341,6 +345,34 @@ fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
         drop(gate);
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+/// Lists, adds, or removes registered projects. Prints each report line and
+/// exits non-zero on failure.
+///
+/// # Errors
+/// Returns an error if the current directory cannot be determined.
+fn run_projects(command: Option<ProjectsCommand>) -> Result<()> {
+    let registry = YamlProjectRegistry;
+    let result = match command {
+        None => cli::list(&registry, &std::env::current_dir()?),
+        Some(ProjectsCommand::Add { path }) => {
+            cli::add(&path.unwrap_or(PathBuf::from(".")), &registry)
+        },
+        Some(ProjectsCommand::Remove { name }) => cli::remove(&name, &registry),
+    };
+    match result {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+        },
+        Err(error) => {
+            eprintln!("{APP_NAME}: {error}");
+            std::process::exit(1);
+        },
+    }
+    Ok(())
 }
 
 /// Scaffolds a starter workspace in the current directory and registers it.

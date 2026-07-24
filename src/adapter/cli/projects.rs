@@ -77,8 +77,9 @@ pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>,
     {
         return Err(CliError::MissingWorkspaceFile(config_path));
     }
+    let name = super::init::project_name(directory)?;
     Ok(vec![super::init::register_folder(
-        directory,
+        name,
         &config_path,
         registry,
     )?])

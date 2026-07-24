@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -50,11 +50,12 @@ pub(crate) fn load_workspace(path: &Path) -> Result<WorkspaceConfig, ConfigError
 }
 
 /// Writes `value` to `path` only when nothing exists there. The complete
-/// contents land in a sibling temporary file first and are published with a
-/// no-replace hard link, so a concurrent creation is never clobbered, a
-/// dangling symlink is refused, and an interrupted write can never leave a
-/// truncated destination blocking a later attempt. Returns whether the file
-/// was created.
+/// contents land in an exclusively created, unpredictably named staging file
+/// and are published with a no-replace hard link, so a concurrent creation is
+/// never clobbered, a dangling symlink is refused, and an interrupted write
+/// can never leave a truncated destination blocking a later attempt. Where
+/// the filesystem has no hard links, publication falls back to an exclusive
+/// direct write. Returns whether the file was created.
 ///
 /// # Errors
 /// Returns a `ConfigError` when serialization, the write, or the publish
@@ -69,21 +70,76 @@ pub(crate) fn create_config_new<T: Serialize>(path: &Path, value: &T) -> Result<
         })?;
     }
     let raw = serde_yaml_ng::to_string(value)?;
-    let temp = temp_path(path);
-    fs::write(&temp, raw).map_err(|source| ConfigError::Write {
-        path: temp.clone(),
-        source,
-    })?;
-    let published = match fs::hard_link(&temp, path) {
-        Ok(()) => Ok(true),
-        Err(source) if source.kind() == ErrorKind::AlreadyExists => Ok(false),
-        Err(source) => Err(ConfigError::Write {
+    let staging = write_staging(path, &raw)?;
+    let published = publish_new(&staging, path, &raw);
+    let _ = fs::remove_file(&staging);
+    published
+}
+
+/// Publishes `staging` at `path` without ever replacing an existing file: a
+/// hard link where the filesystem supports one, else an exclusive direct
+/// write of `raw`. The fallback removes its partial file when the write
+/// fails; only a hard kill mid-write can leave one behind there.
+fn publish_new(staging: &Path, path: &Path, raw: &str) -> Result<bool, ConfigError> {
+    match fs::hard_link(staging, path) {
+        Ok(()) => return Ok(true),
+        Err(source) if source.kind() == ErrorKind::AlreadyExists => return Ok(false),
+        // Any other failure (e.g. a filesystem without hard links) falls
+        // through to the exclusive direct write.
+        Err(_) => {},
+    }
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == ErrorKind::AlreadyExists => return Ok(false),
+        Err(source) => {
+            return Err(ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        },
+    };
+    file.write_all(raw.as_bytes()).map_err(|source| {
+        let _ = fs::remove_file(path);
+        ConfigError::Write {
             path: path.to_path_buf(),
             source,
-        }),
-    };
-    let _ = fs::remove_file(&temp);
-    published
+        }
+    })?;
+    Ok(true)
+}
+
+/// Creates an exclusive staging file beside `path` and writes `raw` into it.
+/// The exclusive open never follows a pre-planted symlink, and the
+/// unpredictable name defeats guessing the path in shared directories.
+fn write_staging(path: &Path, raw: &str) -> Result<PathBuf, ConfigError> {
+    let staging = staging_path(path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .map_err(|source| ConfigError::Write {
+            path: staging.clone(),
+            source,
+        })?;
+    file.write_all(raw.as_bytes()).map_err(|source| {
+        let _ = fs::remove_file(&staging);
+        ConfigError::Write {
+            path: staging.clone(),
+            source,
+        }
+    })?;
+    Ok(staging)
+}
+
+/// An unpredictable sibling staging path for `path`.
+fn staging_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}{STAGING_SUFFIX}", uuid::Uuid::new_v4()));
+    path.with_file_name(name)
 }
 
 /// Serializes `value` to YAML and writes it to `path`, creating any missing
@@ -108,13 +164,9 @@ pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), C
         })?;
     }
     let raw = serde_yaml_ng::to_string(value)?;
-    let temp = temp_path(&dest);
-    fs::write(&temp, raw).map_err(|source| ConfigError::Write {
-        path: temp.clone(),
-        source,
-    })?;
-    fs::rename(&temp, &dest).map_err(|source| {
-        let _ = fs::remove_file(&temp);
+    let staging = write_staging(&dest, &raw)?;
+    fs::rename(&staging, &dest).map_err(|source| {
+        let _ = fs::remove_file(&staging);
         ConfigError::Write {
             path: dest.clone(),
             source,
@@ -122,13 +174,9 @@ pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), C
     })
 }
 
-/// A sibling temporary path in the same directory as `path`, so the later rename
-/// stays on one filesystem and is therefore atomic.
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.tmp", std::process::id()));
-    path.with_file_name(name)
-}
+/// Suffix marking a staging file awaiting publication. Staging lives beside
+/// its destination so the rename stays on one filesystem and is atomic.
+const STAGING_SUFFIX: &str = ".tmp";
 
 /// A [`ConfigSource`] that loads a `muster.yml`-style file from disk.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
@@ -167,6 +215,28 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(residue, 0, "no temporary files survive either outcome");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A dangling symlink at the destination is refused, not followed.
+    #[cfg(unix)]
+    #[test]
+    fn create_config_new_refuses_a_dangling_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("muster-create-link-{}", std::process::id()));
+        let path = dir.join("muster.yml");
+        std::fs::create_dir_all(&dir).unwrap();
+        symlink(dir.join("missing.yml"), &path).unwrap();
+
+        assert!(
+            !create_config_new(&path, &"content").unwrap(),
+            "an occupied path, even a dangling symlink, is never replaced"
+        );
+        assert!(
+            !dir.join("missing.yml").exists(),
+            "nothing was written through the symlink"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -24,6 +24,9 @@ const RUN_HINT: &str = "run `muster` here to start";
 /// Returns [`CliError`] when the folder name is not a usable project name or
 /// the registry cannot be read or written.
 pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
+    // Validate the name first: a folder that cannot become a project (e.g. a
+    // filesystem root) must fail before anything is written.
+    let name = project_name(directory)?;
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
     let mut rows = Vec::new();
     // An exclusive create keeps the no-overwrite guarantee even against a
@@ -42,27 +45,24 @@ pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>
             format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"),
         ));
     }
-    rows.push(register_folder(directory, &config_path, registry)?);
+    rows.push(register_folder(name, &config_path, registry)?);
     rows.push(Row::unlabeled(RowKind::Dim, RUN_HINT));
     Ok(rows)
 }
 
-/// Registers the folder as a project unless its config path already is one.
-/// `pub(super)` because `muster projects add` reuses it.
+/// Registers `name` at `config_path` unless that config path already is a
+/// project. `pub(super)` because `muster projects add` reuses it.
 ///
 /// The check-and-insert runs inside `update_projects` so it is atomic with
 /// respect to concurrent `muster init` or `muster projects add` invocations.
 ///
 /// # Errors
-/// Returns [`CliError`] when the folder has no usable name or the registry
-/// cannot be updated.
+/// Returns [`CliError`] when the registry cannot be updated.
 pub(super) fn register_folder(
-    directory: &Path,
+    name: ProjectName,
     config_path: &Path,
     registry: &dyn ProjectRegistry,
 ) -> Result<Row, CliError> {
-    // Derive the name before entering the lock - this may fail early.
-    let name = project_name(directory)?;
     let label = name.as_ref().to_string();
 
     // Capture the already-registered project name (if any) inside the closure
@@ -101,11 +101,12 @@ pub(super) fn register_folder(
     }
 }
 
-/// The project name derived from the folder's file name.
+/// The project name derived from the folder's file name. `pub(super)` because
+/// `muster projects add` derives the same way.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidProjectFolder`] when the folder yields no name.
-fn project_name(directory: &Path) -> Result<ProjectName, CliError> {
+pub(super) fn project_name(directory: &Path) -> Result<ProjectName, CliError> {
     let file_name = directory
         .canonicalize()
         .unwrap_or_else(|_| directory.to_path_buf())
@@ -208,6 +209,24 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A directory with no usable name fails before anything is written.
+    #[test]
+    fn init_at_a_root_creates_nothing() {
+        let registry = RecordingRegistry::default();
+
+        let result = init(Path::new("/"), &registry);
+
+        assert!(matches!(result, Err(CliError::InvalidProjectFolder(_))));
+        assert!(
+            registry.saved_workspace.borrow().is_none(),
+            "no workspace file was created"
+        );
+        assert!(
+            registry.saved_projects.borrow().is_none(),
+            "no registration"
+        );
+    }
+
     /// An already registered project is reported, not duplicated.
     #[test]
     fn re_init_is_a_registration_no_op() {
@@ -290,7 +309,7 @@ mod tests {
         let config_path = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
         let registry = TrackingRegistry::default();
 
-        register_folder(&dir, &config_path, &registry).unwrap();
+        register_folder(project_name(&dir).unwrap(), &config_path, &registry).unwrap();
 
         assert!(
             *registry.update_projects_called.borrow(),

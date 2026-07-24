@@ -278,13 +278,13 @@ mod tests {
             ..RecordingRegistry::default()
         };
         let again = add(&dir, &seeded).unwrap();
-        // The list is written back unchanged (identical content); verify
-        // no project was added or removed.
-        assert_eq!(
-            seeded.saved_projects.borrow().as_ref().map(|v| v.len()),
-            Some(1),
-            "re-add keeps exactly one project"
-        );
+        // The list is written back unchanged: still exactly the seeded entry.
+        {
+            let saved = seeded.saved_projects.borrow();
+            let written = saved.as_ref().expect("list written back");
+            assert_eq!(written.len(), 1, "re-add keeps exactly one project");
+            assert_eq!(written[0].name().as_ref(), "here", "the seeded entry kept");
+        }
         assert!(again[0].detail().contains("already registered"));
 
         fs::remove_dir_all(dir).unwrap();
@@ -326,12 +326,19 @@ mod tests {
             },
             other => panic!("unexpected: {other:?}"),
         }
-        // The list is written back unchanged (identical content) but no
-        // project is removed.
-        assert_eq!(
-            registry.saved_projects.borrow().as_ref().map(|v| v.len()),
-            Some(2),
-            "both projects remain"
+        // The list is written back unchanged: both same-named entries survive
+        // with their distinct paths.
+        let saved = registry.saved_projects.borrow();
+        let written = saved.as_ref().expect("list written back");
+        assert_eq!(written.len(), 2, "both projects remain");
+        assert!(
+            written
+                .iter()
+                .any(|project| project.config().ends_with("site/muster.yml"))
+                && written
+                    .iter()
+                    .any(|project| project.config().ends_with("app/muster.yml")),
+            "each original path survives"
         );
     }
 

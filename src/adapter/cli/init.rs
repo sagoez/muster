@@ -228,14 +228,11 @@ mod tests {
 
         let rows = init(&dir, &registry).unwrap();
 
-        // The list is written back unchanged (identical content) but no new
-        // project is appended.
+        // The list is written back unchanged: still exactly the seeded entry.
         let saved = registry.saved_projects.borrow();
-        assert_eq!(
-            saved.as_ref().map(|v| v.len()),
-            Some(1),
-            "one project remains"
-        );
+        let written = saved.as_ref().expect("list written back");
+        assert_eq!(written.len(), 1, "one project remains");
+        assert_eq!(written[0].name().as_ref(), "here", "the seeded entry kept");
         assert!(
             rows.iter()
                 .any(|row| row.detail().contains(REGISTERED_NOTE))

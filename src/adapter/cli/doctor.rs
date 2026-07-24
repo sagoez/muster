@@ -388,7 +388,6 @@ mod tests {
             std::env::temp_dir().join(format!("muster-probe-dangling-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config_path = dir.join("muster.yml");
-        // Create a symlink pointing to a target that does not exist.
         symlink(dir.join("nonexistent.yml"), &config_path).unwrap();
 
         let registry = RecordingRegistry {

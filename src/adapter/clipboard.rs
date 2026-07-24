@@ -133,6 +133,13 @@ fn run_clipboard_command(command: &ClipboardCommand, text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A regular file without any executable bit, for the rejection case.
+    #[cfg(unix)]
+    const NON_EXECUTABLE_MODE: u32 = 0o644;
+    /// A regular executable file, for the acceptance case.
+    #[cfg(unix)]
+    const EXECUTABLE_MODE: u32 = 0o755;
+
     /// `preferred_tool` only reports a tool that is actually on PATH (or None).
     #[test]
     fn preferred_tool_only_reports_a_tool_that_exists_on_path() {
@@ -159,8 +166,7 @@ mod tests {
         let program = "fake-clipboard-tool";
         let path = dir.join(program);
         fs::write(&path, "#!/bin/sh\n").unwrap();
-        // Explicitly remove all executable bits.
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(NON_EXECUTABLE_MODE)).unwrap();
 
         let path_var: OsString = dir.as_os_str().to_os_string();
         assert!(
@@ -169,7 +175,7 @@ mod tests {
         );
 
         // Make it executable - now it should match.
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(EXECUTABLE_MODE)).unwrap();
         assert!(on_path_in(program, &path_var), "executable file must match");
 
         fs::remove_dir_all(dir).unwrap();

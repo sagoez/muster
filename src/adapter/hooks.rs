@@ -1191,8 +1191,7 @@ mod tests {
     /// while the exact installed path reports Installed.
     #[test]
     fn status_does_not_match_path_prefixes() {
-        let root =
-            std::env::temp_dir().join(format!("muster-prefix-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("muster-prefix-{}", uuid::Uuid::new_v4()));
         let home = root.join("home");
         let config = root.join("config");
         let xdg = root.join("xdg");

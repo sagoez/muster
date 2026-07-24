@@ -181,8 +181,9 @@ fn lock_workspace(dest: &Path) -> Result<fs::File, ConfigError> {
     Ok(file)
 }
 
-/// No advisory lock off Unix: the TUI is single-process there and `muster run`
-/// is Unix-only, so there is no cross-process writer to serialize against.
+/// No advisory lock off Unix. Known limitation: concurrent registry mutations
+/// (two `muster init` / `projects add` invocations) can still race there;
+/// closing it would need a dedicated file-locking crate for Windows.
 #[cfg(not(unix))]
 fn lock_workspace(_dest: &Path) -> Result<(), ConfigError> {
     Ok(())

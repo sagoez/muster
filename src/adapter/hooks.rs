@@ -155,9 +155,9 @@ pub enum HookState {
 /// One provider integration's location and state.
 #[derive(Debug, Getters, CopyGetters, TypedBuilder)]
 pub struct HookStatus {
-    /// Short provider label (claude, codex, ...).
-    #[getset(get = "pub")]
-    provider: &'static str,
+    /// The provider this integration belongs to.
+    #[getset(get_copy = "pub")]
+    provider: AgentTool,
     /// The config or plugin file the integration lives in.
     #[getset(get = "pub")]
     path: PathBuf,
@@ -170,11 +170,6 @@ pub struct HookStatus {
 pub struct ProviderHooks;
 
 impl ProviderHooks {
-    /// Provider labels for the hook files, in installation order.
-    const PROVIDER_LABELS: [&'static str; 7] = [
-        "claude", "codex", "gemini", "copilot", "kimi", "amp", "opencode",
-    ];
-
     /// Installs idempotent user-level hooks/plugins for every supported provider.
     /// Returns the paths checked or updated.
     ///
@@ -240,21 +235,21 @@ impl ProviderHooks {
             .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT))
     }
 
-    /// The provider hook/plugin file locations, in installation order.
+    /// The provider hook/plugin file locations paired with their provider, in installation order.
     fn provider_paths(
         home: &Path,
         config: &Path,
         xdg_config: &Path,
         codex_home: &Path,
-    ) -> [PathBuf; 7] {
+    ) -> [(AgentTool, PathBuf); 7] {
         [
-            home.join(CLAUDE_SETTINGS),
-            codex_home.join(CODEX_HOOKS_FILE),
-            home.join(GEMINI_SETTINGS),
-            home.join(COPILOT_HOOK),
-            home.join(KIMI_CONFIG),
-            config.join(AMP_PLUGIN),
-            xdg_config.join(OPENCODE_PLUGIN),
+            (AgentTool::Claude, home.join(CLAUDE_SETTINGS)),
+            (AgentTool::Codex, codex_home.join(CODEX_HOOKS_FILE)),
+            (AgentTool::Gemini, home.join(GEMINI_SETTINGS)),
+            (AgentTool::Copilot, home.join(COPILOT_HOOK)),
+            (AgentTool::Kimi, home.join(KIMI_CONFIG)),
+            (AgentTool::Amp, config.join(AMP_PLUGIN)),
+            (AgentTool::Opencode, xdg_config.join(OPENCODE_PLUGIN)),
         ]
     }
 
@@ -294,10 +289,9 @@ impl ProviderHooks {
         codex_home: &Path,
     ) -> Result<Vec<HookStatus>, HookError> {
         let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
-        let paths = Self::provider_paths(home, config, xdg_config, codex_home);
-        Ok(Self::PROVIDER_LABELS
+        let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
+        Ok(pairs
             .into_iter()
-            .zip(paths)
             .map(|(provider, path)| {
                 let state = Self::file_state(&path, executable);
                 HookStatus::builder()
@@ -358,7 +352,6 @@ impl ProviderHooks {
         codex_home: &Path,
     ) -> Result<Vec<PathBuf>, HookError> {
         let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
-        let grouped_providers = [AgentTool::Claude, AgentTool::Codex, AgentTool::Gemini];
         #[cfg(windows)]
         let kimi_command = Self::powershell_hook_command(executable, AgentTool::Kimi);
         #[cfg(not(windows))]
@@ -367,14 +360,15 @@ impl ProviderHooks {
         let copilot_command = Self::powershell_hook_command(executable, AgentTool::Copilot);
         #[cfg(not(windows))]
         let copilot_command = Self::posix_hook_command(executable, AgentTool::Copilot)?;
-        let paths = Self::provider_paths(home, config, xdg_config, codex_home).to_vec();
+        let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
+        let paths: Vec<PathBuf> = pairs.iter().map(|(_, path)| path.clone()).collect();
         #[cfg(windows)]
-        for (path, provider) in paths[..3].iter().zip(grouped_providers) {
+        for (provider, path) in pairs[..3].iter().map(|(p, path)| (*p, path)) {
             let command = Self::powershell_hook_command(executable, provider);
             Self::install_grouped_json(path, provider, &command)?;
         }
         #[cfg(not(windows))]
-        for (path, provider) in paths[..3].iter().zip(grouped_providers) {
+        for (provider, path) in pairs[..3].iter().map(|(p, path)| (*p, path)) {
             let command = Self::posix_hook_command(executable, provider)?;
             Self::install_grouped_json(path, provider, &command)?;
         }

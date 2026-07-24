@@ -248,7 +248,7 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use super::*;
-    use crate::domain::{config::ConfigError, project::Project, value::ProjectName};
+    use crate::domain::{config::ConfigError, process::AgentTool, project::Project, value::ProjectName};
 
     /// A registry recording saves of projects and workspaces.
     #[derive(Default)]
@@ -294,7 +294,7 @@ mod tests {
             .build()
     }
 
-    fn hook_status(provider: &'static str, state: HookState) -> HookStatus {
+    fn hook_status(provider: AgentTool, state: HookState) -> HookStatus {
         HookStatus::builder()
             .provider(provider)
             .path(PathBuf::from("/dummy/path"))
@@ -325,18 +325,18 @@ mod tests {
     #[test]
     fn hooks_probe_fails_when_any_provider_is_missing() {
         let statuses = vec![
-            hook_status("claude", HookState::Installed),
-            hook_status("codex", HookState::Missing),
+            hook_status(AgentTool::Claude, HookState::Installed),
+            hook_status(AgentTool::Codex, HookState::Missing),
         ];
         let probe = hooks_probe(&statuses);
         assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("codex"));
+        assert!(probe.detail().contains("Codex"));
     }
 
     /// All-installed hooks pass.
     #[test]
     fn hooks_probe_passes_when_everything_is_installed() {
-        let statuses = vec![hook_status("claude", HookState::Installed)];
+        let statuses = vec![hook_status(AgentTool::Claude, HookState::Installed)];
         assert_eq!(hooks_probe(&statuses).outcome(), ProbeOutcome::Ok);
     }
 

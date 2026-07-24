@@ -111,17 +111,23 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => {},
             Component::ParentDir => {
-                let poppable = normalized
+                let last_is_normal = normalized
                     .components()
                     .next_back()
                     .is_some_and(|last| matches!(last, Component::Normal(_)));
-                if poppable {
-                    if let Some(resolved) = resolve_symlink_parent(&normalized) {
-                        normalized = resolved;
-                    } else {
-                        normalized.pop();
+                let last_is_parent = normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::ParentDir));
+                if last_is_normal {
+                    match parent_step(&normalized) {
+                        ParentStep::Lexical => {
+                            normalized.pop();
+                        },
+                        ParentStep::Resolved(parent) => normalized = parent,
+                        ParentStep::Preserved => normalized.push(component.as_os_str()),
                     }
-                } else if !normalized.has_root() {
+                } else if last_is_parent || !normalized.has_root() {
                     normalized.push(component.as_os_str());
                 }
             },
@@ -131,20 +137,35 @@ fn normalize_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
-/// The filesystem parent of `prefix` when `prefix` is a symlink, so `..`
-/// after it lands where the OS would; `None` for every other prefix (missing
-/// paths fall back to lexical popping, the only option left).
-fn resolve_symlink_parent(prefix: &Path) -> Option<PathBuf> {
+/// How a `..` applies to the prefix before it.
+enum ParentStep {
+    /// Not a symlink: popping the prefix is exactly what the OS would do.
+    Lexical,
+    /// A symlink to a directory: `..` lands at the target's parent.
+    Resolved(PathBuf),
+    /// A symlink to anything else (a file, or dangling): the OS rejects the
+    /// traversal, so it is kept intact rather than rewritten to a valid but
+    /// unrelated path.
+    Preserved,
+}
+
+/// Classifies `..` against `prefix`, consulting the filesystem only when the
+/// prefix is a real symlink.
+fn parent_step(prefix: &Path) -> ParentStep {
     let is_symlink = fs::symlink_metadata(prefix)
         .map(|meta| meta.file_type().is_symlink())
         .unwrap_or(false);
     if !is_symlink {
-        return None;
+        return ParentStep::Lexical;
     }
-    prefix
-        .canonicalize()
-        .ok()
-        .and_then(|target| target.parent().map(Path::to_path_buf))
+    match prefix.canonicalize() {
+        Ok(target) if target.is_dir() => match target.parent() {
+            Some(parent) => ParentStep::Resolved(parent.to_path_buf()),
+            // The target is the filesystem root, whose parent is itself.
+            None => ParentStep::Resolved(target),
+        },
+        _ => ParentStep::Preserved,
+    }
 }
 
 /// Resolves a registered config only when its stored path is independent of the

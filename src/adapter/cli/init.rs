@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use super::{
     error::CliError,
@@ -29,19 +26,20 @@ const RUN_HINT: &str = "run `muster` here to start";
 pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
     let mut rows = Vec::new();
-    // Use symlink_metadata so a dangling symlink is never overwritten -
-    // intentionally asymmetric with `projects add` and `doctor`, which
-    // require a reachable regular file.
-    if fs::symlink_metadata(&config_path).is_ok() {
-        rows.push(Row::unlabeled(
-            RowKind::Hint,
-            format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"),
-        ));
-    } else {
-        registry.save_workspace(&config_path, &starter_workspace())?;
+    // An exclusive create keeps the no-overwrite guarantee even against a
+    // concurrent creation. Anything already occupying the path - including a
+    // dangling symlink, which the exclusive open also refuses - is left
+    // untouched, intentionally asymmetric with `projects add` and `doctor`,
+    // which require a reachable regular file.
+    if registry.create_workspace(&config_path, &starter_workspace())? {
         rows.push(Row::unlabeled(
             RowKind::Ok,
             format!("created {WORKSPACE_FILE_NAME}"),
+        ));
+    } else {
+        rows.push(Row::unlabeled(
+            RowKind::Hint,
+            format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"),
         ));
     }
     rows.push(register_folder(directory, &config_path, registry)?);
@@ -146,8 +144,8 @@ mod tests {
             unreachable!("init never loads a workspace")
         }
 
-        fn workspace_exists(&self, _config_path: &Path) -> bool {
-            false
+        fn workspace_exists(&self, config_path: &Path) -> bool {
+            config_path.exists()
         }
 
         fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {

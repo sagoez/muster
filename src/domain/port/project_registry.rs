@@ -57,6 +57,25 @@ pub trait ProjectRegistry {
         self.save_workspace(config_path, &update(config))
     }
 
+    /// Creates the workspace at `config_path` only when nothing exists there.
+    /// Returns whether this call created the file. The default checks then
+    /// writes; a filesystem-backed adapter should override it with an atomic
+    /// exclusive create so a concurrent creation is never overwritten.
+    ///
+    /// # Errors
+    /// Returns a `ConfigError` when the workspace cannot be written.
+    fn create_workspace(
+        &self,
+        config_path: &Path,
+        config: &WorkspaceConfig,
+    ) -> Result<bool, ConfigError> {
+        if self.workspace_exists(config_path) {
+            return Ok(false);
+        }
+        self.save_workspace(config_path, config)?;
+        Ok(true)
+    }
+
     /// Applies `update` to the project list under the registry's exclusive lock
     /// where the implementation provides one, so concurrent mutations serialize
     /// instead of losing writes.

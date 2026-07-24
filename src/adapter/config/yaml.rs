@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -59,6 +60,44 @@ pub(crate) fn load_workspace(path: &Path) -> Result<WorkspaceConfig, ConfigError
 ///
 /// # Errors
 /// Returns a `ConfigError::Write` if a directory, temp file, or rename fails.
+/// Writes `value` to `path` only when nothing exists there, via an exclusive
+/// create so a concurrent creation is never clobbered; the exclusive open
+/// also refuses dangling symlinks. Returns whether the file was created.
+///
+/// # Errors
+/// Returns a `ConfigError` when serialization or the write fails.
+pub(crate) fn create_config_new<T: Serialize>(path: &Path, value: &T) -> Result<bool, ConfigError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let raw = serde_yaml_ng::to_string(value)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == ErrorKind::AlreadyExists => return Ok(false),
+        Err(source) => {
+            return Err(ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        },
+    };
+    file.write_all(raw.as_bytes())
+        .map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(true)
+}
+
 pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), ConfigError> {
     let dest = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(parent) = dest.parent()
@@ -109,6 +148,22 @@ impl ConfigSource for YamlConfigSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exclusive create writes once and never clobbers an existing file.
+    #[test]
+    fn create_config_new_refuses_to_overwrite() {
+        let dir = std::env::temp_dir().join(format!("muster-create-{}", std::process::id()));
+        let path = dir.join("muster.yml");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(create_config_new(&path, &"first").unwrap(), "first create");
+        assert!(
+            !create_config_new(&path, &"second").unwrap(),
+            "existing file wins"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "first");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn example_config() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/muster.yml")

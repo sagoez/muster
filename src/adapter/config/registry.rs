@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::yaml::{config_dir_path, load_workspace, write_config};
+use super::yaml::{config_dir_path, create_config_new, load_workspace, write_config};
 use crate::{
     adapter::path::{expand_home, registered_config_path},
     domain::{
@@ -109,6 +109,14 @@ impl ProjectRegistry for YamlProjectRegistry {
         config: &WorkspaceConfig,
     ) -> Result<(), ConfigError> {
         write_config(&expand_home(config_path), config)
+    }
+
+    fn create_workspace(
+        &self,
+        config_path: &Path,
+        config: &WorkspaceConfig,
+    ) -> Result<bool, ConfigError> {
+        create_config_new(&expand_home(config_path), config)
     }
 
     fn update_projects(

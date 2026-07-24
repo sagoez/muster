@@ -33,6 +33,7 @@ use muster::{
 /// Exit code used when a command finds problems to report but does not itself
 /// fail. Shared by `muster check` and `muster doctor`.
 const FINDINGS_EXIT_CODE: i32 = 1;
+
 /// Codex requires user approval before executing a new hook command.
 const CODEX_HOOK_APPROVAL_NOTICE: &str =
     "Codex: approve the Muster hook with /hooks before sessions can be resumed.";
@@ -371,9 +372,10 @@ fn run_init() -> Result<()> {
 /// This function always exits rather than propagating; it returns `Result<()>`
 /// to match the dispatch signature.
 fn run_check(path: PathBuf) -> Result<()> {
-    match cli::check(path.clone()) {
+    let display = path.display().to_string();
+    match cli::check(path) {
         CheckOutcome::Valid => {
-            println!("{} is valid", path.display());
+            println!("{display} is valid");
             Ok(())
         },
         CheckOutcome::Invalid(report) => {

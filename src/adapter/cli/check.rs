@@ -37,11 +37,11 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use super::*;
 
-    fn temp_config(tag: &str, content: &str) -> std::path::PathBuf {
+    fn temp_config(tag: &str, content: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("muster-check-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("muster.yml");

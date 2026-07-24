@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fs, path::Path};
 
 use super::error::CliError;
 use crate::{
@@ -54,7 +54,7 @@ fn is_current(project: &Project, current_dir: &Path) -> bool {
 /// `muster.yml`, or a registry error when it cannot be updated.
 pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<String>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
-    if std::fs::symlink_metadata(&config_path).is_err() {
+    if fs::symlink_metadata(&config_path).is_err() {
         return Err(CliError::MissingWorkspaceFile(config_path));
     }
     Ok(vec![super::init::register_folder(
@@ -91,7 +91,7 @@ pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<String>,
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::PathBuf};
+    use std::{cell::RefCell, fs, path::PathBuf};
 
     use super::*;
     use crate::domain::{
@@ -144,7 +144,7 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("muster-projects-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -182,20 +182,38 @@ mod tests {
             add(&dir, &registry),
             Err(CliError::MissingWorkspaceFile(_))
         ));
-        std::fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// Adding a folder with a config registers it once.
     #[test]
     fn add_registers_and_readd_is_a_no_op() {
         let dir = temp_dir("add");
-        std::fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
+        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
         let registry = RecordingRegistry::default();
 
         let lines = add(&dir, &registry).unwrap();
         assert!(registry.saved_projects.borrow().is_some());
         assert!(lines[0].contains("registered"));
-        std::fs::remove_dir_all(dir).unwrap();
+
+        let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
+        let seeded = RecordingRegistry {
+            projects: vec![
+                Project::builder()
+                    .name(ProjectName::try_new("here").unwrap())
+                    .config(config)
+                    .build(),
+            ],
+            ..RecordingRegistry::default()
+        };
+        let again = add(&dir, &seeded).unwrap();
+        assert!(
+            seeded.saved_projects.borrow().is_none(),
+            "re-add saves nothing"
+        );
+        assert!(again[0].contains("already registered"));
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// Removing an unknown name lists the known ones.

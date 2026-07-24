@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    path::{MAIN_SEPARATOR, Path, PathBuf, is_separator},
+    path::{Component, MAIN_SEPARATOR, Path, PathBuf, is_separator},
 };
 
 use directories::BaseDirs;
@@ -82,18 +82,47 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
-/// Expands `~` and makes a path absolute without resolving symlinks, preserving
-/// the user-selected filesystem location.
+/// Expands `~` and makes a path absolute without resolving symlinks,
+/// preserving the user-selected filesystem location. `.` and `..` components
+/// are removed lexically so equivalent addressings of one location compare
+/// and store identically.
 pub fn absolutize(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
-    if expanded.is_absolute() {
+    let absolute = if expanded.is_absolute() {
         expanded
     } else {
         match std::env::current_dir() {
             Ok(cwd) => cwd.join(&expanded),
             Err(_) => expanded,
         }
+    };
+    normalize_lexically(&absolute)
+}
+
+/// Lexically removes `.` and drops `..` against its preceding component,
+/// without touching the filesystem, so symlink aliases survive. Leading `..`
+/// components of a relative path are kept; excess `..` at an absolute root is
+/// dropped, matching how the OS resolves it.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {},
+            Component::ParentDir => {
+                let poppable = normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|last| matches!(last, Component::Normal(_)));
+                if poppable {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            },
+            other => normalized.push(other.as_os_str()),
+        }
     }
+    normalized
 }
 
 /// Resolves a registered config only when its stored path is independent of the
@@ -209,5 +238,42 @@ mod tests {
         let raw = OsStr::from_bytes(b"val\xffid");
 
         assert_eq!(FsPathCompleter::candidate(raw, "/tmp/", "val"), None);
+    }
+
+    /// Equivalent dot-component addressings normalize to one stored path.
+    #[test]
+    fn absolutize_normalizes_dot_components() {
+        assert_eq!(
+            absolutize(Path::new("/tmp/proj/sub/../muster.yml")),
+            PathBuf::from("/tmp/proj/muster.yml")
+        );
+        assert_eq!(
+            absolutize(Path::new("/tmp/./proj/./muster.yml")),
+            PathBuf::from("/tmp/proj/muster.yml")
+        );
+        assert_eq!(
+            absolutize(Path::new("/../etc/passwd")),
+            PathBuf::from("/etc/passwd"),
+            "excess parent components at the root are dropped"
+        );
+    }
+
+    /// Component normalization is lexical: a symlink component is popped by
+    /// `..` without consulting the filesystem, keeping the user's alias.
+    #[test]
+    fn lexical_normalization_keeps_symlink_aliases() {
+        assert_eq!(
+            normalize_lexically(Path::new("/a/link/../b")),
+            PathBuf::from("/a/b"),
+            "lexical resolution, by design"
+        );
+        assert_eq!(
+            normalize_lexically(Path::new("../x/./y")),
+            PathBuf::from("../x/y")
+        );
+        assert_eq!(
+            normalize_lexically(Path::new("../../x")),
+            PathBuf::from("../../x")
+        );
     }
 }

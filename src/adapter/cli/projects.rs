@@ -290,6 +290,34 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The same folder addressed through parent components is recognized as
+    /// already registered instead of appended twice.
+    #[test]
+    fn add_normalizes_parent_components() {
+        let dir = temp_dir("dotdot");
+        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
+        let seeded = RecordingRegistry {
+            projects: vec![
+                Project::builder()
+                    .name(ProjectName::try_new("here").unwrap())
+                    .config(config)
+                    .build(),
+            ],
+            ..RecordingRegistry::default()
+        };
+
+        let aliased = dir.join("sub").join("..");
+        let rows = add(&aliased, &seeded).unwrap();
+
+        let saved = seeded.saved_projects.borrow();
+        let written = saved.as_ref().expect("list written back");
+        assert_eq!(written.len(), 1, "no duplicate entry for the same folder");
+        assert!(rows[0].detail().contains("already registered"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Removing an unknown name lists the known ones.
     #[test]
     fn remove_unknown_lists_known_names() {

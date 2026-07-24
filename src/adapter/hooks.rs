@@ -6,9 +6,11 @@ use std::{
 
 use atomic_write_file::AtomicWriteFile;
 use directories::BaseDirs;
+use getset::{CopyGetters, Getters};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
+use typed_builder::TypedBuilder;
 
 use crate::{
     constants::MUSTER_AGENT_SESSION_ENV,
@@ -23,6 +25,8 @@ use crate::{
 const CLAUDE_SETTINGS: &str = ".claude/settings.json";
 /// Default Codex configuration directory relative to the user's home directory.
 const CODEX_CONFIG_DIR: &str = ".codex";
+/// Codex hook configuration file relative to the Codex configuration directory.
+const CODEX_HOOKS_FILE: &str = "hooks.json";
 /// Environment variable overriding Codex's configuration directory.
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// Gemini CLI user settings relative to the user's home directory.
@@ -135,10 +139,40 @@ pub enum HookError {
     SymlinkDepth(PathBuf),
 }
 
+/// Installation state of one provider integration file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookState {
+    /// No muster entry exists in the provider's config.
+    Missing,
+    /// A muster entry exists but references another muster binary.
+    Stale,
+    /// The muster entry references the given executable.
+    Installed,
+}
+
+/// One provider integration's location and state.
+#[derive(Debug, Getters, CopyGetters, TypedBuilder)]
+pub struct HookStatus {
+    /// Short provider label (claude, codex, ...).
+    #[getset(get = "pub")]
+    provider: &'static str,
+    /// The config or plugin file the integration lives in.
+    #[getset(get = "pub")]
+    path: PathBuf,
+    /// Whether the integration is present and current.
+    #[getset(get_copy = "pub")]
+    state: HookState,
+}
+
 /// Installs opt-in provider integrations and receives their session identities.
 pub struct ProviderHooks;
 
 impl ProviderHooks {
+    /// Provider labels for the hook files, in installation order.
+    const PROVIDER_LABELS: [&'static str; 7] = [
+        "claude", "codex", "gemini", "copilot", "kimi", "amp", "opencode",
+    ];
+
     /// Installs idempotent user-level hooks/plugins for every supported provider.
     /// Returns the paths checked or updated.
     ///
@@ -204,6 +238,89 @@ impl ProviderHooks {
             .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT))
     }
 
+    /// The provider hook/plugin file locations, in installation order.
+    fn provider_paths(
+        home: &Path,
+        config: &Path,
+        xdg_config: &Path,
+        codex_home: &Path,
+    ) -> [PathBuf; 7] {
+        [
+            home.join(CLAUDE_SETTINGS),
+            codex_home.join(CODEX_HOOKS_FILE),
+            home.join(GEMINI_SETTINGS),
+            home.join(COPILOT_HOOK),
+            home.join(KIMI_CONFIG),
+            config.join(AMP_PLUGIN),
+            xdg_config.join(OPENCODE_PLUGIN),
+        ]
+    }
+
+    /// Reports each provider integration's state for `executable`, without
+    /// modifying anything. Detection is textual: a file that mentions the
+    /// executable's path is installed; one that mentions the capture
+    /// subcommand without that path was installed by another muster binary.
+    ///
+    /// # Errors
+    /// Returns a [`HookError`] when the user's directories cannot be resolved
+    /// or the executable path is not valid UTF-8.
+    pub fn status(executable: &Path) -> Result<Vec<HookStatus>, HookError> {
+        let dirs = BaseDirs::new().ok_or(HookError::NoUserDirs)?;
+        let xdg_config = Self::xdg_config_dir(dirs.home_dir());
+        let codex_home = env::var_os(CODEX_HOME_ENV)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| dirs.home_dir().join(CODEX_CONFIG_DIR));
+        Self::status_in(
+            executable,
+            dirs.home_dir(),
+            dirs.config_dir(),
+            &xdg_config,
+            &codex_home,
+        )
+    }
+
+    /// Directory-injected form of [`Self::status`], shared with tests.
+    ///
+    /// # Errors
+    /// Returns a [`HookError`] when the executable path is not valid UTF-8.
+    fn status_in(
+        executable: &Path,
+        home: &Path,
+        config: &Path,
+        xdg_config: &Path,
+        codex_home: &Path,
+    ) -> Result<Vec<HookStatus>, HookError> {
+        let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
+        let paths = Self::provider_paths(home, config, xdg_config, codex_home);
+        Ok(Self::PROVIDER_LABELS
+            .into_iter()
+            .zip(paths)
+            .map(|(provider, path)| {
+                let state = Self::file_state(&path, executable);
+                HookStatus::builder()
+                    .provider(provider)
+                    .path(path)
+                    .state(state)
+                    .build()
+            })
+            .collect())
+    }
+
+    /// Textual state of one integration file for the given executable path.
+    fn file_state(path: &Path, executable: &str) -> HookState {
+        let Ok(content) = fs::read_to_string(path) else {
+            return HookState::Missing;
+        };
+        if content.contains(executable) {
+            HookState::Installed
+        } else if content.contains(CAPTURE_SUBCOMMAND) {
+            HookState::Stale
+        } else {
+            HookState::Missing
+        }
+    }
+
     /// Installs every provider integration under explicit testable roots.
     ///
     /// # Errors
@@ -247,15 +364,7 @@ impl ProviderHooks {
         let copilot_command = Self::powershell_hook_command(executable, AgentTool::Copilot);
         #[cfg(not(windows))]
         let copilot_command = Self::posix_hook_command(executable, AgentTool::Copilot)?;
-        let paths = vec![
-            home.join(CLAUDE_SETTINGS),
-            codex_home.join("hooks.json"),
-            home.join(GEMINI_SETTINGS),
-            home.join(COPILOT_HOOK),
-            home.join(KIMI_CONFIG),
-            config.join(AMP_PLUGIN),
-            xdg_config.join(OPENCODE_PLUGIN),
-        ];
+        let paths = Self::provider_paths(home, config, xdg_config, codex_home).to_vec();
         #[cfg(windows)]
         for (path, provider) in paths[..3].iter().zip(grouped_providers) {
             let command = Self::powershell_hook_command(executable, provider);
@@ -1037,6 +1146,46 @@ mod tests {
         }
         assert!(amp.contains(r#"child.on("error", () => {})"#));
         assert!(amp.contains(r#"child.stdin.on("error", () => {})"#));
+    }
+
+    /// Status distinguishes missing, stale, and installed hook files.
+    #[test]
+    fn status_reports_missing_stale_and_installed() {
+        let root = std::env::temp_dir().join(format!("muster-status-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+
+        // Nothing installed yet: everything is missing.
+        let before = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+        assert!(
+            before
+                .iter()
+                .all(|status| status.state() == HookState::Missing)
+        );
+
+        // Install for this executable: everything is installed.
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        let after = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+        assert!(
+            after
+                .iter()
+                .all(|status| status.state() == HookState::Installed)
+        );
+
+        // A different binary path: the same files are now stale.
+        let moved = Path::new("/elsewhere/muster");
+        let stale = ProviderHooks::status_in(moved, &home, &config, &xdg, &codex).unwrap();
+        assert!(
+            stale
+                .iter()
+                .all(|status| status.state() == HookState::Stale)
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Atomic replacement retains restrictive permissions from an existing

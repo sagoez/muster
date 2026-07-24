@@ -6,7 +6,7 @@ use clap::{
 };
 
 use super::{completions::CompletionShell, run::RunArgs};
-use crate::domain::process::AgentTool;
+use crate::{constants::APP_NAME, domain::process::AgentTool};
 
 /// Help styling matching the CLI's report palette: cyan structure, green
 /// literals, yellow placeholders.
@@ -19,6 +19,8 @@ const HELP_STYLES: Styles = Styles::styled()
 /// Command-line arguments. With no subcommand, muster launches its TUI.
 #[derive(Parser)]
 #[command(
+    name = APP_NAME,
+    bin_name = APP_NAME,
     about = "A terminal workspace for running CLI agents and dev processes",
     styles = HELP_STYLES
 )]
@@ -119,6 +121,16 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    /// Completions and usage must register the binary name, not the package
+    /// name muster-workspace, or every emitted shell hook is inert.
+    #[test]
+    fn the_command_is_named_after_the_binary() {
+        use clap::CommandFactory;
+
+        assert_eq!(Args::command().get_name(), APP_NAME);
+        assert_eq!(Args::command().get_bin_name(), Some(APP_NAME));
+    }
 
     /// The global config flag parses before and after a subcommand.
     #[test]

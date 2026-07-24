@@ -17,6 +17,7 @@ use crate::{
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
         port::ProjectRegistry,
         process::ProcessKind,
+        project::Project,
         value::{CommandLine, ProcessName, ProjectName},
     },
 };
@@ -173,10 +174,27 @@ fn resolve(
 fn resolve_named(registry: &dyn ProjectRegistry, name: &str) -> Result<PathBuf, CliError> {
     let wanted =
         ProjectName::try_new(name).map_err(|_| CliError::UnknownProject(name.to_string()))?;
-    let project = registry
+    let matches: Vec<Project> = registry
         .projects()?
         .into_iter()
-        .find(|project| project.name().as_ref() == wanted.as_ref())
+        .filter(|project| project.name().as_ref() == wanted.as_ref())
+        .collect();
+    // Mirror `projects remove`: a duplicated name must never silently pick
+    // one workspace to mutate.
+    if matches.len() > 1 {
+        return Err(CliError::AmbiguousProject {
+            name: name.to_string(),
+            count: matches.len(),
+            paths: matches
+                .iter()
+                .map(|project| project.config().display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        });
+    }
+    let project = matches
+        .into_iter()
+        .next()
         .ok_or_else(|| CliError::UnknownProject(name.to_string()))?;
     Ok(registered_config_path(&project)?)
 }
@@ -342,6 +360,21 @@ mod tests {
         assert_eq!(
             resolve(&registry, Some("api"), None, PathBuf::from("muster.yml")).unwrap(),
             absolutize(Path::new("~/api/muster.yml"))
+        );
+    }
+
+    #[test]
+    fn a_duplicated_project_name_is_ambiguous() {
+        let registry = registry_with(vec![
+            project("web", "~/site/muster.yml"),
+            project("web", "~/app/muster.yml"),
+        ]);
+        assert!(
+            matches!(
+                resolve(&registry, Some("web"), None, PathBuf::from("muster.yml")),
+                Err(CliError::AmbiguousProject { count: 2, .. })
+            ),
+            "run -p must refuse to pick one of two same-named projects"
         );
     }
 

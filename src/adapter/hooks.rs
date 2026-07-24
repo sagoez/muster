@@ -62,6 +62,9 @@ const PROTOCOL_SESSION_STARTED: &str = "session_started";
 const HOOK_SUBCOMMAND: &str = "hook";
 /// Hidden CLI action that records a provider lifecycle event.
 const CAPTURE_SUBCOMMAND: &str = "capture";
+/// Forms the `hook capture` invocation takes in configs: the shell command
+/// pair and the JSON argument-array pair, used to tell Stale from Missing.
+const STALE_MARKERS: [&str; 2] = ["hook capture", "\"hook\",\"capture\""];
 /// CLI argument identifying the provider that emitted a lifecycle event.
 const CAPTURE_PROVIDER_ARGUMENT: &str = "--provider";
 /// CLI argument identifying the provider process that invoked a capture hook.
@@ -372,7 +375,7 @@ impl ProviderHooks {
         };
         if installed {
             HookState::Installed
-        } else if Self::active_content(&content).contains(CAPTURE_SUBCOMMAND) {
+        } else if Self::has_stale_marker(&Self::active_content(&content)) {
             // Some muster capture text survives on evaluated lines but does
             // not match what setup writes: another binary, provider, or shape.
             HookState::Stale
@@ -395,6 +398,14 @@ impl ProviderHooks {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Whether evaluated content still carries a muster capture invocation:
+    /// the `hook capture` subcommand pair as commands write it, or the JSON
+    /// argument-array pair as plugins write it. A lone unrelated word like a
+    /// `capture` permission never counts.
+    fn has_stale_marker(active: &str) -> bool {
+        STALE_MARKERS.iter().any(|marker| active.contains(marker))
     }
 
     /// Whether the grouped `SessionStart` schema holds exactly `command`.
@@ -445,16 +456,40 @@ impl ProviderHooks {
         let Ok(document) = content.parse::<DocumentMut>() else {
             return false;
         };
-        document
+        let matches_hook = |event: Option<&str>, matcher: Option<&str>, cmd: Option<&str>| {
+            event == Some(SESSION_START_EVENT)
+                && matcher == Some(KIMI_SESSION_MATCHER)
+                && cmd == Some(command)
+        };
+        let standard = document
             .get("hooks")
             .and_then(Item::as_array_of_tables)
             .is_some_and(|hooks| {
                 hooks.iter().any(|hook| {
-                    hook.get("event").and_then(Item::as_str) == Some(SESSION_START_EVENT)
-                        && hook.get("matcher").and_then(Item::as_str) == Some(KIMI_SESSION_MATCHER)
-                        && hook.get("command").and_then(Item::as_str) == Some(command)
+                    matches_hook(
+                        hook.get("event").and_then(Item::as_str),
+                        hook.get("matcher").and_then(Item::as_str),
+                        hook.get("command").and_then(Item::as_str),
+                    )
                 })
-            })
+            });
+        // Inline `hooks = [{...}]` arrays are the same hooks spelled the
+        // other valid way; verify them identically.
+        let inline = document
+            .get("hooks")
+            .and_then(Item::as_array)
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.as_inline_table().is_some_and(|table| {
+                        matches_hook(
+                            table.get("event").and_then(toml_edit::Value::as_str),
+                            table.get("matcher").and_then(toml_edit::Value::as_str),
+                            table.get("command").and_then(toml_edit::Value::as_str),
+                        )
+                    })
+                })
+            });
+        standard || inline
     }
 
     /// Installs every provider integration under explicit testable roots.
@@ -674,6 +709,20 @@ impl ProviderHooks {
         };
         if document.get("hooks").is_none() {
             document["hooks"] = Item::ArrayOfTables(ArrayOfTables::new());
+        }
+        // An inline `hooks = [{...}]` array is valid, semantically identical
+        // TOML; normalize it so both spellings install and verify.
+        if let Some(inline) = document["hooks"].as_array().cloned() {
+            let mut tables = ArrayOfTables::new();
+            for value in inline.iter() {
+                let table = value
+                    .as_inline_table()
+                    .cloned()
+                    .map(toml_edit::InlineTable::into_table)
+                    .ok_or_else(|| HookError::Schema(path.to_path_buf()))?;
+                tables.push(table);
+            }
+            document["hooks"] = Item::ArrayOfTables(tables);
         }
         let hooks = document["hooks"]
             .as_array_of_tables_mut()
@@ -1324,6 +1373,71 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Unrelated text containing the word capture is not a muster hook.
+    #[test]
+    fn status_ignores_unrelated_capture_text() {
+        let root = std::env::temp_dir().join(format!("muster-unrel-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(CLAUDE_SETTINGS),
+            "{\"permissions\":{\"allow\":[\"Bash(asciinema capture:*)\"]}}",
+        )
+        .unwrap();
+
+        let statuses = ProviderHooks::status_in(
+            Path::new("/opt/muster/muster"),
+            &home,
+            &root.join("config"),
+            &root.join("xdg"),
+            &home.join(CODEX_CONFIG_DIR),
+        )
+        .unwrap();
+
+        let claude_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Claude)
+            .expect("claude status present");
+        assert_eq!(
+            claude_status.state(),
+            HookState::Missing,
+            "an unrelated capture permission is not a stale muster hook"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Kimi config using the inline hooks spelling installs and verifies.
+    #[test]
+    fn kimi_inline_hook_arrays_install_and_verify() {
+        let root = std::env::temp_dir().join(format!("muster-inline-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        fs::write(
+            home.join(KIMI_CONFIG),
+            "hooks = [{ event = \"Other\", command = \"true\" }]\n",
+        )
+        .unwrap();
+        let exe = Path::new("/opt/muster/muster");
+
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        let kimi_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Kimi)
+            .expect("kimi status present");
+        assert_eq!(kimi_status.state(), HookState::Installed);
+        let rewritten = fs::read_to_string(home.join(KIMI_CONFIG)).unwrap();
+        assert!(
+            rewritten.contains("event = \"Other\""),
+            "the unrelated inline hook survives normalization"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -47,14 +47,16 @@ const BASH_RC: &str = ".bashrc";
 /// Zsh shell rc file for sourcing completions.
 const ZSH_RC: &str = ".zshrc";
 /// Fish shell rc file for sourcing completions.
-const FISH_RC: &str = ".config/fish/config.fish";
+const FISH_RC: &str = "fish/config.fish";
 /// Fish shell completions file for direct drop-in.
-const FISH_COMPLETIONS: &str = ".config/fish/completions/muster.fish";
+const FISH_COMPLETIONS: &str = "fish/completions/muster.fish";
 /// Elvish shell rc file for sourcing completions.
 const ELVISH_RC: &str = ".elvish/rc.elv";
+/// Elvish rc under the XDG config root, the modern location.
+const ELVISH_XDG_RC: &str = "elvish/rc.elv";
 /// PowerShell profile for sourcing completions on Unix.
 #[cfg(not(windows))]
-const POWERSHELL_RC: &str = ".config/powershell/Microsoft.PowerShell_profile.ps1";
+const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
 /// PowerShell 7 profile relative to the user's home directory on Windows.
 #[cfg(windows)]
 const POWERSHELL_RC: &str = "Documents/PowerShell/Microsoft.PowerShell_profile.ps1";
@@ -201,7 +203,7 @@ pub fn clipboard_probe() -> Probe {
 
 /// Best-effort check that the shell's rc file registers completions; warns
 /// with the exact line to add when it does not.
-pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
+pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Path) -> Probe {
     let Some(shell) = detect_shell(shell_path) else {
         return probe(
             COMPLETIONS_LABEL,
@@ -209,12 +211,8 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
             "unknown shell; see `muster completions --help`".to_string(),
         );
     };
-    let matched = rc_files(shell).iter().find_map(|rc| {
-        let path = home.join(rc);
-        fs::read_to_string(&path)
-            .ok()
-            .filter(|content| registers_completions(content, shell))
-            .map(|_| path)
+    let matched = rc_paths(shell, home, xdg_config).into_iter().find(|path| {
+        fs::read_to_string(path).is_ok_and(|content| registers_completions(&content, shell))
     });
     if let Some(matched) = matched {
         probe(
@@ -271,18 +269,20 @@ fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
 /// The rc files probed for each shell, relative to home. Fish returns two
 /// locations so both the sourcing approach and the completions drop-in are
 /// detected.
-fn rc_files(shell: CompletionShell) -> &'static [&'static str] {
+fn rc_paths(shell: CompletionShell, home: &Path, xdg_config: &Path) -> Vec<PathBuf> {
     match shell {
-        CompletionShell::Bash => &[BASH_RC],
-        CompletionShell::Zsh => &[ZSH_RC],
-        CompletionShell::Fish => &[FISH_RC, FISH_COMPLETIONS],
-        CompletionShell::Elvish => &[ELVISH_RC],
+        CompletionShell::Bash => vec![home.join(BASH_RC)],
+        CompletionShell::Zsh => vec![home.join(ZSH_RC)],
+        CompletionShell::Fish => vec![xdg_config.join(FISH_RC), xdg_config.join(FISH_COMPLETIONS)],
+        CompletionShell::Elvish => vec![home.join(ELVISH_RC), xdg_config.join(ELVISH_XDG_RC)],
         #[cfg(not(windows))]
-        CompletionShell::Powershell => &[POWERSHELL_RC],
+        CompletionShell::Powershell => vec![xdg_config.join(POWERSHELL_RC)],
         // Best effort: $PROFILE can point elsewhere (e.g. OneDrive-redirected
         // Documents), which a spawned-shell query would be needed to resolve.
         #[cfg(windows)]
-        CompletionShell::Powershell => &[POWERSHELL_RC, WINDOWS_POWERSHELL_RC],
+        CompletionShell::Powershell => {
+            vec![home.join(POWERSHELL_RC), home.join(WINDOWS_POWERSHELL_RC)]
+        },
     }
 }
 
@@ -478,7 +478,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("muster-doc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".zshrc"), "# nothing here\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir);
+        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
         std::fs::remove_dir_all(dir).unwrap();
@@ -492,7 +492,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Contains both words but not the actual hook line.
         std::fs::write(dir.join(".zshrc"), "# COMPLETE list for muster tasks\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir);
+        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -502,11 +502,11 @@ mod tests {
     #[test]
     fn completions_probe_detects_fish_completions_file() {
         let dir = std::env::temp_dir().join(format!("muster-doc-fish-{}", uuid::Uuid::new_v4()));
-        let completions_path = dir.join(FISH_COMPLETIONS);
+        let completions_path = dir.join(".config").join(FISH_COMPLETIONS);
         std::fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
         // Write only to the completions drop-in, not config.fish.
         std::fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
-        let probe = completions_probe(Some("/usr/bin/fish"), &dir);
+        let probe = completions_probe(Some("/usr/bin/fish"), &dir, &dir.join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
         assert!(probe.detail().contains("completions/muster.fish"));
         std::fs::remove_dir_all(dir).unwrap();
@@ -519,11 +519,11 @@ mod tests {
     fn completions_probe_detects_powershell_registration() {
         let dir = std::env::temp_dir().join(format!("muster-pwsh-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let rc_path = dir.join(POWERSHELL_RC);
+        let rc_path = dir.join(".config").join(POWERSHELL_RC);
         std::fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
         std::fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
 
-        let probe = completions_probe(Some("/usr/bin/pwsh"), &dir);
+        let probe = completions_probe(Some("/usr/bin/pwsh"), &dir, &dir.join(".config"));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
         std::fs::remove_dir_all(dir).unwrap();
@@ -549,7 +549,7 @@ mod tests {
         )
         .unwrap();
 
-        let probe = completions_probe(Some("/bin/zsh"), &dir);
+        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         std::fs::remove_dir_all(dir).unwrap();

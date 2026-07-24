@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
-use crate::{adapter::config::YamlConfigSource, domain::port::ConfigSource};
+use super::error::CliError;
+use crate::{
+    adapter::config::YamlConfigSource,
+    domain::{config::ConfigError, port::ConfigSource},
+};
 
 /// Separator between links of a reported error chain.
 const CHAIN_SEPARATOR: &str = ": ";
@@ -8,6 +12,7 @@ const CHAIN_SEPARATOR: &str = ": ";
 pub const VALID_SUFFIX: &str = "is valid";
 
 /// Result of validating a workspace config.
+#[derive(Debug)]
 pub enum CheckOutcome {
     /// The config loaded and validated without errors.
     Valid,
@@ -15,12 +20,18 @@ pub enum CheckOutcome {
     Invalid(String),
 }
 
-/// Validates the workspace config at `config_path`.
-pub fn check(config_path: PathBuf) -> CheckOutcome {
+/// Validates the workspace config at `config_path`. A config that fails to
+/// parse or validate is a finding; a file that cannot be read at all is an
+/// operational failure of the command itself.
+///
+/// # Errors
+/// Returns [`CliError`] when the config cannot be read.
+pub fn check(config_path: PathBuf) -> Result<CheckOutcome, CliError> {
     let source = YamlConfigSource::builder().path(config_path).build();
     match source.load() {
-        Ok(_) => CheckOutcome::Valid,
-        Err(error) => CheckOutcome::Invalid(error_chain(&error)),
+        Ok(_) => Ok(CheckOutcome::Valid),
+        Err(error @ ConfigError::Read { .. }) => Err(CliError::Config(error)),
+        Err(error) => Ok(CheckOutcome::Invalid(error_chain(&error))),
     }
 }
 
@@ -60,7 +71,7 @@ mod tests {
     #[test]
     fn a_valid_config_passes() {
         let path = temp_config("ok", "agents: []\nterminals: []\ncommands: []\n");
-        assert!(matches!(check(path), CheckOutcome::Valid));
+        assert!(matches!(check(path), Ok(CheckOutcome::Valid)));
     }
 
     /// Broken YAML reports the parse failure.
@@ -68,16 +79,16 @@ mod tests {
     fn broken_yaml_reports_the_error() {
         let path = temp_config("bad", "agents: [unclosed\n");
         match check(path) {
-            CheckOutcome::Invalid(report) => assert!(!report.is_empty()),
-            CheckOutcome::Valid => panic!("must fail"),
+            Ok(CheckOutcome::Invalid(report)) => assert!(!report.is_empty()),
+            other => panic!("must be a finding: {other:?}"),
         }
     }
 
-    /// A missing file reports rather than panics.
+    /// A missing file is an operational failure, not a validation finding.
     #[test]
-    fn a_missing_file_reports() {
+    fn a_missing_file_is_a_command_failure() {
         let path = std::env::temp_dir().join("muster-check-missing/muster.yml");
-        assert!(matches!(check(path), CheckOutcome::Invalid(_)));
+        assert!(matches!(check(path), Err(CliError::Config(_))));
     }
 
     /// An error whose display already embeds its source text.

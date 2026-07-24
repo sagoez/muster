@@ -423,14 +423,15 @@ fn run_init() -> Result<()> {
 fn run_check(path: PathBuf) -> Result<()> {
     let display = path.display().to_string();
     match cli::check(path) {
-        CheckOutcome::Valid => {
+        Err(error) => fail_with(&error),
+        Ok(CheckOutcome::Valid) => {
             cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
                 cli::RowKind::Ok,
                 format!("{display} {VALID_SUFFIX}"),
             )]));
             Ok(())
         },
-        CheckOutcome::Invalid(report) => {
+        Ok(CheckOutcome::Invalid(report)) => {
             cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
                 cli::RowKind::Fail,
                 report,

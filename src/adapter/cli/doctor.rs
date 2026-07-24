@@ -100,12 +100,15 @@ fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
 pub fn config_probe(config_path: PathBuf) -> Probe {
     let display = config_path.display().to_string();
     match check(config_path) {
-        CheckOutcome::Valid => probe(
+        Ok(CheckOutcome::Valid) => probe(
             CONFIG_LABEL,
             ProbeOutcome::Ok,
             format!("{display} {VALID_SUFFIX}"),
         ),
-        CheckOutcome::Invalid(report) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
+        Ok(CheckOutcome::Invalid(report)) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
+        // The doctor is a reporter: even an unreadable config becomes a
+        // failing probe rather than aborting the other probes.
+        Err(error) => probe(CONFIG_LABEL, ProbeOutcome::Fail, error_chain(&error)),
     }
 }
 

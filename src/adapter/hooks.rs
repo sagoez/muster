@@ -169,6 +169,32 @@ pub struct HookStatus {
     state: HookState,
 }
 
+/// Whether `content` contains `needle` starting at a token boundary: at the
+/// beginning, or after a character that cannot extend a filesystem path. A
+/// marker for `/bin/muster ...` therefore never matches inside a config
+/// invoking `/usr/bin/muster ...`.
+fn contains_token(content: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(found) = content[from..].find(needle) {
+        let index = from + found;
+        let boundary = content[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| !is_path_char(previous));
+        if boundary {
+            return true;
+        }
+        from = index + 1;
+    }
+    false
+}
+
+/// Characters that can extend a filesystem path leftward; a match preceded by
+/// one is the suffix of a longer path, not the marked executable.
+fn is_path_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '/' | '\\' | '.' | '-' | '_' | '~' | '+')
+}
+
 /// The textual forms one provider's installed hook must carry in a config.
 struct HookMarkers {
     /// `executable + capture arguments` in raw, shell-quoted, PowerShell, and
@@ -374,11 +400,12 @@ impl ProviderHooks {
         let command_installed = markers
             .commands
             .iter()
-            .any(|command| active.contains(command.as_str()));
+            .any(|command| contains_token(&active, command));
         // A plugin is installed only when both the executable and this
         // provider's argument array are present, so a wrong-provider callback
-        // never reads as healthy.
-        let plugin_installed = active.contains(&markers.plugin_executable)
+        // never reads as healthy. The argument array starts with `[`, which
+        // no path can extend, so a plain contains suffices there.
+        let plugin_installed = contains_token(&active, &markers.plugin_executable)
             && active.contains(&markers.plugin_arguments);
         if command_installed || plugin_installed {
             HookState::Installed
@@ -1256,6 +1283,39 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A marker never matches inside a longer path to another binary.
+    #[test]
+    fn status_rejects_a_path_suffix_of_another_executable() {
+        let root = std::env::temp_dir().join(format!("muster-suffix-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        // Installed for /usr/bin/muster; probed for the suffix /bin/muster.
+        let installed = Path::new("/usr/bin/muster");
+        ProviderHooks::setup_in_with_codex(installed, &home, &config, &xdg, &codex).unwrap();
+
+        let statuses =
+            ProviderHooks::status_in(Path::new("/bin/muster"), &home, &config, &xdg, &codex)
+                .unwrap();
+
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.state() == HookState::Stale),
+            "a suffix of another executable's path is stale, not installed"
+        );
+        let exact = ProviderHooks::status_in(installed, &home, &config, &xdg, &codex).unwrap();
+        assert!(
+            exact
+                .iter()
+                .all(|status| status.state() == HookState::Installed),
+            "the exact executable still reads installed"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

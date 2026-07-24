@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -16,7 +17,6 @@ use crate::{
         hooks::{HookState, HookStatus},
         path::absolutize,
     },
-    constants::APP_NAME,
     domain::port::{AgentSessionStore, ProjectRegistry},
 };
 
@@ -47,8 +47,6 @@ const FISH_COMPLETIONS: &str = ".config/fish/completions/muster.fish";
 const ELVISH_RC: &str = ".elvish/rc.elv";
 /// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = ".config/powershell/Microsoft.PowerShell_profile.ps1";
-/// Needle used to detect any shell's completion registration line.
-const COMPLETION_NEEDLE: &str = "COMPLETE";
 
 /// Severity of a probe result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,18 +187,18 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
             "unknown shell; see `muster completions --help`".to_string(),
         );
     };
-    let registered = rc_files(shell).iter().any(|rc| {
+    let matched = rc_files(shell).iter().find_map(|rc| {
         let path = home.join(rc);
-        std::fs::read_to_string(&path)
-            .map(|content| content.contains(COMPLETION_NEEDLE) && content.contains(APP_NAME))
-            .unwrap_or(false)
+        fs::read_to_string(&path)
+            .ok()
+            .filter(|content| content.contains(registration_line(shell)))
+            .map(|_| path)
     });
-    if registered {
-        let primary_rc = home.join(rc_files(shell)[0]);
+    if let Some(matched) = matched {
         probe(
             COMPLETIONS_LABEL,
             ProbeOutcome::Ok,
-            format!("registered in {}", primary_rc.display()),
+            format!("registered in {}", matched.display()),
         )
     } else {
         probe(
@@ -369,6 +367,34 @@ mod tests {
         let probe = completions_probe(Some("/bin/zsh"), &dir);
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An rc file that mentions COMPLETE and muster in unrelated contexts must
+    /// NOT be reported as registered.
+    #[test]
+    fn completions_probe_ignores_unrelated_complete_mention() {
+        let dir = std::env::temp_dir().join(format!("muster-doc-needle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Contains both words but not the actual hook line.
+        std::fs::write(dir.join(".zshrc"), "# COMPLETE list for muster tasks\n").unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), &dir);
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// When the hook line is in the second fish location (completions file),
+    /// the probe reports Ok and names that file.
+    #[test]
+    fn completions_probe_detects_fish_completions_file() {
+        let dir = std::env::temp_dir().join(format!("muster-doc-fish-{}", uuid::Uuid::new_v4()));
+        let completions_path = dir.join(FISH_COMPLETIONS);
+        std::fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
+        // Write only to the completions drop-in, not config.fish.
+        std::fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
+        let probe = completions_probe(Some("/usr/bin/fish"), &dir);
+        assert_eq!(probe.outcome(), ProbeOutcome::Ok);
+        assert!(probe.detail().contains("completions/muster.fish"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

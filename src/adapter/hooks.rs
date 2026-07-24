@@ -289,11 +289,12 @@ impl ProviderHooks {
         codex_home: &Path,
     ) -> Result<Vec<HookStatus>, HookError> {
         let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
+        let candidates = Self::executable_candidates(executable);
         let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
         Ok(pairs
             .into_iter()
             .map(|(provider, path)| {
-                let state = Self::file_state(&path, executable);
+                let state = Self::file_state(&path, &candidates);
                 HookStatus::builder()
                     .provider(provider)
                     .path(path)
@@ -303,13 +304,35 @@ impl ProviderHooks {
             .collect())
     }
 
+    /// The textual forms setup may have embedded the executable path in:
+    /// raw, shell-quoted, their JSON-escaped bodies, and PowerShell quoting.
+    fn executable_candidates(executable: &str) -> Vec<String> {
+        let mut candidates = vec![executable.to_string()];
+        if let Ok(quoted) = shlex::try_quote(executable) {
+            candidates.push(quoted.to_string());
+        }
+        for base in candidates.clone() {
+            if let Ok(encoded) = serde_json::to_string(&base) {
+                let body = encoded.trim_matches('"').to_string();
+                candidates.push(body);
+                candidates.push(encoded);
+            }
+        }
+        candidates.push(executable.replace('\'', "''"));
+        candidates.dedup();
+        candidates
+    }
+
     /// Textual state of one integration file for the given executable path.
-    fn file_state(path: &Path, executable: &str) -> HookState {
+    fn file_state(path: &Path, candidates: &[String]) -> HookState {
         let Ok(content) = fs::read_to_string(path) else {
             // An unreadable config reads as absent; a later hooks setup surfaces the real error.
             return HookState::Missing;
         };
-        if content.contains(executable) {
+        if candidates
+            .iter()
+            .any(|candidate| content.contains(candidate.as_str()))
+        {
             HookState::Installed
         } else if content.contains(CAPTURE_SUBCOMMAND) {
             HookState::Stale
@@ -1182,6 +1205,39 @@ mod tests {
                 .all(|status| status.state() == HookState::Stale)
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `status_in` reports Installed for every provider when the executable path
+    /// contains characters that JSON-encode differently from their raw form.
+    /// A backslash is a valid POSIX path character that JSON encodes as `\\`,
+    /// so the Amp and OpenCode plugin files embed the escaped form while
+    /// `file_state` would previously search only for the raw path.
+    #[test]
+    fn status_detects_installed_when_executable_has_special_chars() {
+        let root = std::env::temp_dir()
+            .join(format!("muster-status-encoded-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        // Path with a backslash: JSON encodes it as \\, so content.contains(raw)
+        // would miss the Amp and OpenCode plugin files.
+        let exe_path_str = format!("{}/mu\\ster/muster", root.display());
+        let exe_path = Path::new(&exe_path_str);
+
+        ProviderHooks::setup_in_with_codex(exe_path, &home, &config, &xdg, &codex).unwrap();
+        let statuses =
+            ProviderHooks::status_in(exe_path, &home, &config, &xdg, &codex).unwrap();
+
+        for status in &statuses {
+            assert_eq!(
+                status.state(),
+                HookState::Installed,
+                "{} should be Installed",
+                status.provider()
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

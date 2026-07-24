@@ -155,10 +155,17 @@ enum ParentStep {
 /// Classifies `..` against `prefix`. Only directories may be traversed
 /// upward: a missing prefix normalizes lexically (the only resolution left),
 /// an existing non-directory preserves the traversal for the OS to reject,
-/// and a directory symlink resolves through the filesystem.
+/// and a directory symlink resolves through the filesystem. A prefix that
+/// cannot even be inspected (e.g. inside an unsearchable directory) also
+/// preserves its traversal, so escaping it lexically can never reach a
+/// different workspace than the OS would.
 fn parent_step(prefix: &Path) -> ParentStep {
-    let Ok(meta) = fs::symlink_metadata(prefix) else {
-        return ParentStep::Lexical;
+    let meta = match fs::symlink_metadata(prefix) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ParentStep::Lexical;
+        },
+        Err(_) => return ParentStep::Preserved,
     };
     if meta.file_type().is_symlink() {
         return match prefix.canonicalize() {
@@ -327,6 +334,41 @@ mod tests {
             normalize_lexically(Path::new("../../x")),
             PathBuf::from("../../x")
         );
+    }
+
+    /// A search-permission mode removing all access, for the denied case.
+    #[cfg(unix)]
+    const LOCKED_MODE: u32 = 0o000;
+    /// A normal directory mode, restored so cleanup can run.
+    #[cfg(unix)]
+    const OPEN_MODE: u32 = 0o755;
+
+    #[cfg(unix)]
+    /// `..` under an unsearchable directory is preserved instead of escaping
+    /// lexically toward a different, accessible workspace.
+    #[test]
+    fn traversal_in_an_unsearchable_directory_is_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("muster-denied-{}", std::process::id()));
+        let locked = base.join("locked");
+        let inner = locked.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(LOCKED_MODE)).unwrap();
+        let probe = inner.join("x/../muster.yml");
+        // Root ignores permission bits; only assert when access was denied.
+        let denied = matches!(
+            fs::symlink_metadata(inner.join("x")),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+        );
+
+        let normalized = normalize_lexically(&probe);
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(OPEN_MODE)).unwrap();
+        if denied {
+            assert_eq!(normalized, probe, "the traversal survives untouched");
+        }
+        fs::remove_dir_all(&base).unwrap();
     }
 
     /// `..` after an existing regular file is preserved: the OS rejects the

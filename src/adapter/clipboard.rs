@@ -39,10 +39,12 @@ pub fn preferred_tool() -> Option<&'static str> {
 
 /// Returns true when `program` exists as an executable regular file on PATH.
 fn on_path(program: &str) -> bool {
-    let Ok(path_var) = env::var("PATH") else {
+    // `var_os`, not `var`: a Unix PATH may validly contain non-UTF-8 entries
+    // and must not disqualify every tool on it.
+    let Some(path_var) = env::var_os("PATH") else {
         return false;
     };
-    on_path_in(program, path_var.as_ref())
+    on_path_in(program, &path_var)
 }
 
 /// Unix permission bits that indicate at least one executable bit is set.
@@ -152,6 +154,30 @@ mod tests {
                 }
             },
         }
+    }
+
+    /// A non-UTF-8 PATH entry does not disqualify tools elsewhere on PATH.
+    #[cfg(unix)]
+    #[test]
+    fn on_path_in_accepts_a_non_utf8_path() {
+        use std::{
+            ffi::OsString,
+            fs,
+            os::unix::{ffi::OsStringExt, fs::PermissionsExt},
+        };
+
+        let dir = std::env::temp_dir().join(format!("muster-clip-utf8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("muster-fake-tool");
+        fs::write(&tool, "").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(EXECUTABLE_MODE)).unwrap();
+        // PATH = <non-utf8 dir>:<real dir>
+        let mut path_var = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xFF]);
+        path_var.push(":");
+        path_var.push(&dir);
+
+        assert!(on_path_in("muster-fake-tool", &path_var));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// A non-executable file with the right name must not count as a candidate.

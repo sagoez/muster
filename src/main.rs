@@ -231,6 +231,12 @@ fn main() -> Result<()> {
         ),
         Some(Command::Projects { command }) => run_projects(command),
         Some(Command::Hooks { command }) => run_hooks(command),
+        Some(Command::Completions { shell }) => {
+            for line in cli::registration(shell) {
+                println!("{line}");
+            }
+            Ok(())
+        },
         Some(Command::Hook { command }) => run_internal_hook(command),
         None => run_tui(args.config),
     }

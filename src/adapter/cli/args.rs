@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use super::run::RunArgs;
+use super::{completions::CompletionShell, run::RunArgs};
 use crate::domain::process::AgentTool;
 
 /// Command-line arguments. With no subcommand, muster launches its TUI.
@@ -35,6 +35,12 @@ pub enum Command {
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
+    },
+    /// Print the shell hook that enables completions.
+    Completions {
+        /// Shell to print the hook for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
     },
     /// Internal provider-hook receiver.
     #[command(hide = true)]

@@ -183,8 +183,6 @@ const SETTINGS_UNAVAILABLE: &str = "settings are unavailable";
 /// Shown when removal is asked of the launched project's synthetic row, which
 /// has no registry entry to remove.
 const CANNOT_REMOVE_LAUNCHED: &str = "this project is not saved, so there is nothing to remove";
-/// Shown when the registry file cannot be written.
-const REGISTRY_SAVE_ERROR: &str = "could not save the project registry";
 /// Confirmation shown before overwriting an existing config.
 const OVERWRITE_CONFIRM: &str = "A muster.yml already exists in that folder.";
 /// Title of the overwrite confirmation.
@@ -1869,15 +1867,15 @@ impl App {
         }
     }
 
-    /// Removes the registered project at `config_path` from the registry. Reads
-    /// the persisted list so the in-memory launched-project entry is never saved.
+    /// Removes the registered project at `config_path` from the registry,
+    /// under the registry lock and against a freshly read list so concurrent
+    /// CLI mutations are never overwritten with stale state.
     fn remove_project(&mut self, config_path: &Path) {
-        let Ok(mut projects) = self.registry.projects() else {
-            self.notice = Some(REGISTRY_SAVE_ERROR.to_string());
-            return;
-        };
-        projects.retain(|project| !Self::same_config_location(project.config(), config_path));
-        match self.registry.save(&projects) {
+        let result = self.registry.update_projects(&mut |mut projects| {
+            projects.retain(|project| !Self::same_config_location(project.config(), config_path));
+            projects
+        });
+        match result {
             Ok(()) => {
                 self.project_cursor = None;
                 self.refresh_projects();
@@ -2098,18 +2096,24 @@ impl App {
         self.open_form(form, FormIntent::AddConfiguredProcess(kind));
     }
 
-    /// Removes the highlighted project from the registry.
+    /// Removes the highlighted project from the registry. The switcher row
+    /// only names the target; the removal itself runs against a freshly read
+    /// list under the registry lock, so a stale snapshot never overwrites
+    /// concurrent registry changes.
     fn remove_selected_project(&mut self) {
         let Some(switcher) = self.switcher() else {
             return;
         };
-        let selected = switcher.selected;
-        if selected >= switcher.projects.len() {
+        let Some(target) = switcher.projects.get(switcher.selected) else {
             return;
-        }
-        let mut projects = switcher.projects.clone();
-        projects.remove(selected);
-        match self.registry.save(&projects) {
+        };
+        let target_config = target.config().clone();
+        let result = self.registry.update_projects(&mut |mut projects| {
+            projects
+                .retain(|project| !Self::same_config_location(project.config(), &target_config));
+            projects
+        });
+        match result {
             Ok(()) => {
                 self.refresh_projects();
                 self.refresh_switcher();
@@ -2371,24 +2375,22 @@ impl App {
     }
 
     /// Adds `project` to the registry, replacing any entry for the same config
-    /// path. Returns whether it was persisted, setting a form error on failure;
-    /// leaves the form open so the caller decides when to close it.
+    /// path, atomically under the registry lock. Returns whether it was
+    /// persisted, setting a form error on failure; leaves the form open so the
+    /// caller decides when to close it.
     fn try_register(&mut self, project: Project) -> bool {
-        let mut projects = match self.registry.projects() {
-            Ok(projects) => projects,
-            Err(err) => {
-                self.report_error(&err.to_string());
-                return false;
-            },
-        };
         let project = Project::builder()
             .name(project.name().clone())
             .config(path::absolutize(project.config()))
             .build();
-        projects
-            .retain(|existing| !Self::same_config_location(existing.config(), project.config()));
-        projects.push(project);
-        match self.registry.save(&projects) {
+        let result = self.registry.update_projects(&mut |mut projects| {
+            projects.retain(|existing| {
+                !Self::same_config_location(existing.config(), project.config())
+            });
+            projects.push(project.clone());
+            projects
+        });
+        match result {
             Ok(()) => true,
             Err(error) => {
                 self.report_error(&error.to_string());

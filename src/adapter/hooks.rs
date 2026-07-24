@@ -48,6 +48,12 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 const SESSION_START_EVENT: &str = "SessionStart";
 /// Lifecycle event used by Copilot's camel-case hook format.
 const COPILOT_SESSION_START_EVENT: &str = "sessionStart";
+/// Copilot hook key holding the PowerShell command.
+#[cfg(windows)]
+const COPILOT_POWERSHELL_KEY: &str = "powershell";
+/// Copilot hook key holding the POSIX shell command.
+#[cfg(not(windows))]
+const COPILOT_BASH_KEY: &str = "bash";
 /// Kimi lifecycle matcher covering new, resumed, and reset sessions.
 const KIMI_SESSION_MATCHER: &str = "startup|resume|clear";
 /// Canonical lifecycle event accepted by the versioned wire protocol.
@@ -141,6 +147,9 @@ pub enum HookError {
     /// indirection.
     #[error("provider hook config symlink chain is too deep at {0}")]
     SymlinkDepth(PathBuf),
+    /// A provider without a managed integration file was asked for status.
+    #[error("provider {0} has no managed hook integration")]
+    UnmanagedProvider(AgentTool),
 }
 
 /// Installation state of one provider integration file.
@@ -169,55 +178,17 @@ pub struct HookStatus {
     state: HookState,
 }
 
-/// String delimiters our writers place before a command: `"` opens JSON and
-/// TOML basic strings, `'` opens the TOML literal strings toml_edit prefers
-/// for backslash-heavy commands.
-const STRING_DELIMITERS: [char; 2] = ['"', '\''];
-
-/// Whether `content` contains `needle` immediately after a delimiter our own
-/// writers produce: the start of the content, a string-opening quote, or -
-/// only for markers that begin with a quote and therefore cannot be a path
-/// suffix - whitespace (the PowerShell `& '...'` form). Boundaries come from
-/// the writers' actual delimiters rather than guessing which characters may
-/// appear in paths (almost all can), so realistic punctuation (colons,
-/// spaces) in another binary's path never reads as installed. Residual: a
-/// path that itself contains a quote directly before a matching suffix would
-/// still be accepted; representing such a path in these formats is already
-/// out of our writers' vocabulary.
-fn contains_token(content: &str, needle: &str) -> bool {
-    let self_delimited = needle.starts_with(STRING_DELIMITERS);
-    let mut from = 0;
-    while let Some(found) = content[from..].find(needle) {
-        let index = from + found;
-        let boundary = content[..index].chars().next_back().is_none_or(|previous| {
-            STRING_DELIMITERS.contains(&previous) || (self_delimited && previous.is_whitespace())
-        });
-        // The match must also end where the writers end it: whitespace before
-        // the next argument, or the needle's own closing quote. Anything else
-        // (`claude-old`, `claude.old`, `claude+x`) is a single argv token clap
-        // rejects, so it must not read as installed.
-        let terminated = needle.ends_with(STRING_DELIMITERS)
-            || content[index + needle.len()..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace);
-        if boundary && terminated {
-            return true;
-        }
-        from = index + 1;
-    }
-    false
-}
-
-/// The textual forms one provider's installed hook must carry in a config.
-struct HookMarkers {
-    /// `executable + capture arguments` in raw, shell-quoted, PowerShell, and
-    /// JSON-escaped encodings, matching shell-command configs.
-    commands: Vec<String>,
-    /// The executable as a complete JSON string, as plugins embed it.
-    plugin_executable: String,
-    /// The capture argument array as JSON, provider token included.
-    plugin_arguments: String,
+/// The exact artifact setup writes for one provider, compared verbatim when
+/// deciding Installed.
+enum ExpectedHook {
+    /// Command string in the grouped `SessionStart` JSON schema.
+    GroupedCommand(String),
+    /// Command string under Copilot's platform command key.
+    CopilotCommand(String),
+    /// Command string in a Kimi `[[hooks]]` table.
+    KimiCommand(String),
+    /// The complete plugin file contents.
+    Plugin(String),
 }
 
 /// Installs opt-in provider integrations and receives their session identities.
@@ -347,8 +318,8 @@ impl ProviderHooks {
         pairs
             .into_iter()
             .map(|(provider, path)| {
-                let markers = Self::hook_markers(executable, provider)?;
-                let state = Self::file_state(&path, &markers);
+                let expected = Self::expected_hook(executable, provider)?;
+                let state = Self::file_state(&path, &expected);
                 Ok(HookStatus::builder()
                     .provider(provider)
                     .path(path)
@@ -358,50 +329,63 @@ impl ProviderHooks {
             .collect()
     }
 
-    /// The textual markers one provider's installed hook must carry, in the
-    /// encodings setup writes: the executable followed by that provider's
-    /// capture arguments for shell-command configs, and the standalone JSON
-    /// executable plus JSON argument array pair for plugins.
+    /// The exact artifact setup would write for `provider` and `executable`:
+    /// the canonical command string for command-backed providers, or the full
+    /// plugin file for plugin-backed ones. Installed means the provider's
+    /// canonical schema slot equals this, so no textual coincidence in
+    /// unrelated content can read as healthy.
     ///
     /// # Errors
-    /// Returns a [`HookError`] when a marker cannot be encoded.
-    fn hook_markers(executable: &str, provider: AgentTool) -> Result<HookMarkers, HookError> {
-        let args = Self::capture_arguments(provider).join(" ");
-        let mut bases = vec![executable.to_string()];
-        if let Ok(quoted) = shlex::try_quote(executable) {
-            bases.push(quoted.to_string());
-        }
-        bases.push(format!("'{}'", executable.replace('\'', "''")));
-        let mut commands = Vec::new();
-        for base in bases {
-            let followed = format!("{base} {args}");
-            if let Ok(encoded) = serde_json::to_string(&followed) {
-                commands.push(encoded.trim_matches('"').to_string());
-            }
-            commands.push(followed);
-        }
-        commands.sort();
-        commands.dedup();
-        Ok(HookMarkers {
-            commands,
-            plugin_executable: serde_json::to_string(executable)
-                .map_err(HookError::PluginEncoding)?,
-            plugin_arguments: serde_json::to_string(&Self::capture_arguments(provider))
-                .map_err(HookError::PluginEncoding)?,
+    /// Returns a [`HookError`] when the command or plugin cannot be built.
+    fn expected_hook(executable: &str, provider: AgentTool) -> Result<ExpectedHook, HookError> {
+        #[cfg(windows)]
+        let command = Self::powershell_hook_command(executable, provider);
+        #[cfg(not(windows))]
+        let command = Self::posix_hook_command(executable, provider)?;
+        Ok(match provider {
+            AgentTool::Claude | AgentTool::Codex | AgentTool::Gemini => {
+                ExpectedHook::GroupedCommand(command)
+            },
+            AgentTool::Copilot => ExpectedHook::CopilotCommand(command),
+            AgentTool::Kimi => ExpectedHook::KimiCommand(command),
+            AgentTool::Amp => ExpectedHook::Plugin(Self::amp_plugin(executable)?),
+            AgentTool::Opencode => ExpectedHook::Plugin(Self::opencode_plugin(executable)?),
+            // External integrations own their configs; muster installs none.
+            AgentTool::Custom => return Err(HookError::UnmanagedProvider(provider)),
         })
     }
 
     /// Textual state of one integration file, matched against every encoded
     /// form of the executable path.
-    fn file_state(path: &Path, markers: &HookMarkers) -> HookState {
+    fn file_state(path: &Path, expected: &ExpectedHook) -> HookState {
         let Ok(content) = fs::read_to_string(path) else {
             // An unreadable config reads as absent; a later hooks setup surfaces the real error.
             return HookState::Missing;
         };
-        // A hook the provider never evaluates (commented out in TOML or a
-        // plugin) must not count; JSON has no comments, so its lines pass
-        // through untouched. Best effort: block comments are not tracked.
-        let active: String = content
+        let installed = match expected {
+            ExpectedHook::GroupedCommand(command) => {
+                Self::grouped_json_has_exact(&content, command)
+            },
+            ExpectedHook::CopilotCommand(command) => Self::copilot_has_exact(&content, command),
+            ExpectedHook::KimiCommand(command) => Self::kimi_has_exact(&content, command),
+            ExpectedHook::Plugin(plugin) => content.trim_end() == plugin.trim_end(),
+        };
+        if installed {
+            HookState::Installed
+        } else if Self::active_content(&content).contains(CAPTURE_SUBCOMMAND) {
+            // Some muster capture text survives on evaluated lines but does
+            // not match what setup writes: another binary, provider, or shape.
+            HookState::Stale
+        } else {
+            HookState::Missing
+        }
+    }
+
+    /// The lines a provider actually evaluates: comments (TOML/shell `#`,
+    /// JS `//`) are dropped; JSON has no comments so it passes through.
+    /// Best effort: block comments are not tracked.
+    fn active_content(content: &str) -> String {
+        content
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
@@ -410,24 +394,67 @@ impl ProviderHooks {
                     .all(|prefix| !trimmed.starts_with(prefix))
             })
             .collect::<Vec<_>>()
-            .join("\n");
-        let command_installed = markers
-            .commands
-            .iter()
-            .any(|command| contains_token(&active, command));
-        // A plugin is installed only when both the executable and this
-        // provider's argument array are present, so a wrong-provider callback
-        // never reads as healthy. The argument array starts with `[`, which
-        // no path can extend, so a plain contains suffices there.
-        let plugin_installed = contains_token(&active, &markers.plugin_executable)
-            && active.contains(&markers.plugin_arguments);
-        if command_installed || plugin_installed {
-            HookState::Installed
-        } else if active.contains(CAPTURE_SUBCOMMAND) {
-            HookState::Stale
-        } else {
-            HookState::Missing
-        }
+            .join("\n")
+    }
+
+    /// Whether the grouped `SessionStart` schema holds exactly `command`.
+    fn grouped_json_has_exact(content: &str, command: &str) -> bool {
+        let Ok(root) = serde_json::from_str::<Value>(content) else {
+            return false;
+        };
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(SESSION_START_EVENT))
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|members| {
+                            members.iter().any(|member| {
+                                member.get("command").and_then(Value::as_str) == Some(command)
+                            })
+                        })
+                })
+            })
+    }
+
+    /// Whether Copilot's `sessionStart` schema holds exactly `command` under
+    /// the platform's command key.
+    fn copilot_has_exact(content: &str, command: &str) -> bool {
+        #[cfg(windows)]
+        let command_key = COPILOT_POWERSHELL_KEY;
+        #[cfg(not(windows))]
+        let command_key = COPILOT_BASH_KEY;
+        let Ok(root) = serde_json::from_str::<Value>(content) else {
+            return false;
+        };
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(COPILOT_SESSION_START_EVENT))
+            .and_then(Value::as_array)
+            .is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| member.get(command_key).and_then(Value::as_str) == Some(command))
+            })
+    }
+
+    /// Whether a Kimi `[[hooks]]` table holds exactly `command` with the
+    /// session event and matcher setup writes.
+    fn kimi_has_exact(content: &str, command: &str) -> bool {
+        let Ok(document) = content.parse::<DocumentMut>() else {
+            return false;
+        };
+        document
+            .get("hooks")
+            .and_then(Item::as_array_of_tables)
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("event").and_then(Item::as_str) == Some(SESSION_START_EVENT)
+                        && hook.get("matcher").and_then(Item::as_str) == Some(KIMI_SESSION_MATCHER)
+                        && hook.get("command").and_then(Item::as_str) == Some(command)
+                })
+            })
     }
 
     /// Installs every provider integration under explicit testable roots.
@@ -614,9 +641,9 @@ impl ProviderHooks {
     /// Returns a [`HookError`] if the owned hook file cannot be written.
     fn install_copilot(path: &Path, command: &str) -> Result<(), HookError> {
         #[cfg(windows)]
-        let command_key = "powershell";
+        let command_key = COPILOT_POWERSHELL_KEY;
         #[cfg(not(windows))]
-        let command_key = "bash";
+        let command_key = COPILOT_BASH_KEY;
         let hook = json!({
             "version": 1,
             "hooks": {
@@ -1297,6 +1324,33 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A modified plugin file is stale: installed plugins must equal what
+    /// setup writes, byte for byte.
+    #[test]
+    fn status_rejects_a_tampered_plugin() {
+        let root = std::env::temp_dir().join(format!("muster-tamper-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        let plugin = config.join(AMP_PLUGIN);
+        let mut tampered = fs::read_to_string(&plugin).unwrap();
+        tampered.push_str("\nconsole.log(\"extra\")\n");
+        fs::write(&plugin, tampered).unwrap();
+
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        let amp_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Amp)
+            .expect("amp status present");
+        assert_eq!(amp_status.state(), HookState::Stale);
         fs::remove_dir_all(root).unwrap();
     }
 

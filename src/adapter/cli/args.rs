@@ -22,6 +22,8 @@ pub struct Args {
 pub enum Command {
     /// Create a starter muster.yml here and register this folder as a project.
     Init,
+    /// Validate the workspace config and exit non-zero on problems.
+    Check,
     /// Register a command in a project, then run it.
     Run(RunArgs),
     /// Install provider integrations used to preserve native agent sessions.

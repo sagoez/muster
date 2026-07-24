@@ -12,7 +12,7 @@ use std::{path::PathBuf, process::Command as ProcessCommand};
 use clap::{CommandFactory, Parser};
 use muster::{
     adapter::{
-        cli::{self, Args, Command, HooksCommand, InternalHookCommand, RunArgs},
+        cli::{self, Args, CheckOutcome, Command, HooksCommand, InternalHookCommand, RunArgs},
         config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
         hooks::ProviderHooks,
         notifier::DesktopNotifier,
@@ -30,6 +30,9 @@ use muster::{
     error::Result,
 };
 
+/// Exit code used when a command finds problems to report but does not itself
+/// fail. Shared by `muster check` and `muster doctor`.
+const FINDINGS_EXIT_CODE: i32 = 1;
 /// Codex requires user approval before executing a new hook command.
 const CODEX_HOOK_APPROVAL_NOTICE: &str =
     "Codex: approve the Muster hook with /hooks before sessions can be resumed.";
@@ -213,6 +216,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Some(Command::Init) => run_init(),
+        Some(Command::Check) => run_check(
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
         Some(Command::Run(run_args)) => run_capture(
             run_args,
             args.config
@@ -355,6 +362,25 @@ fn run_init() -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// Validates the workspace config at `path`, printing a success line or the
+/// full error chain, and exiting with `FINDINGS_EXIT_CODE` on failure.
+///
+/// # Errors
+/// This function always exits rather than propagating; it returns `Result<()>`
+/// to match the dispatch signature.
+fn run_check(path: PathBuf) -> Result<()> {
+    match cli::check(path.clone()) {
+        CheckOutcome::Valid => {
+            println!("{} is valid", path.display());
+            Ok(())
+        },
+        CheckOutcome::Invalid(report) => {
+            println!("{report}");
+            std::process::exit(FINDINGS_EXIT_CODE);
+        },
+    }
 }
 
 /// Adds a command to a project and runs it in place, reporting a friendly error

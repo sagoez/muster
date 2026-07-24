@@ -4,6 +4,8 @@ use crate::{adapter::config::YamlConfigSource, domain::port::ConfigSource};
 
 /// Separator between links of a reported error chain.
 const CHAIN_SEPARATOR: &str = ": ";
+/// Suffix shared between `muster check` output and the doctor config probe.
+pub const VALID_SUFFIX: &str = "is valid";
 
 /// Result of validating a workspace config.
 pub enum CheckOutcome {

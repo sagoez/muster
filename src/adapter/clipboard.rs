@@ -41,8 +41,7 @@ fn on_path(program: &str) -> bool {
     let Ok(path_var) = env::var("PATH") else {
         return false;
     };
-    env::split_paths(&path_var)
-        .any(|dir| dir.join(program).exists())
+    env::split_paths(&path_var).any(|dir| dir.join(program).exists())
 }
 
 /// The platform clipboard writers worth trying, in herdr's order.

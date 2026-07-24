@@ -15,7 +15,7 @@ use muster::{
     adapter::{
         cli::{
             self, Args, CheckOutcome, Command, HooksCommand, InternalHookCommand, ProjectsCommand,
-            RunArgs,
+            RunArgs, VALID_SUFFIX,
         },
         config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
         hooks::ProviderHooks,
@@ -37,6 +37,8 @@ use muster::{
 /// Exit code used when a command finds problems to report but does not itself
 /// fail. Shared by `muster check` and `muster doctor`.
 const FINDINGS_EXIT_CODE: i32 = 1;
+/// Exit code used when a command encounters a fatal error.
+const FAILURE_EXIT_CODE: i32 = 1;
 
 /// Codex requires user approval before executing a new hook command.
 const CODEX_HOOK_APPROVAL_NOTICE: &str =
@@ -236,15 +238,18 @@ fn main() -> Result<()> {
             args.config
                 .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
         ),
-        Some(Command::Completions { shell }) => {
-            for line in cli::registration(shell) {
-                println!("{line}");
-            }
-            Ok(())
-        },
+        Some(Command::Completions { shell }) => run_completions(shell),
         Some(Command::Hook { command }) => run_internal_hook(command),
         None => run_tui(args.config),
     }
+}
+
+/// Prints the shell-specific registration hook lines for completions.
+fn run_completions(shell: cli::CompletionShell) -> Result<()> {
+    for line in cli::registration(shell) {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Runs user-facing hook setup.
@@ -378,10 +383,7 @@ fn run_projects(command: Option<ProjectsCommand>) -> Result<()> {
                 println!("{line}");
             }
         },
-        Err(error) => {
-            eprintln!("{APP_NAME}: {error}");
-            std::process::exit(1);
-        },
+        Err(error) => fail_with(&error),
     }
     Ok(())
 }
@@ -400,10 +402,7 @@ fn run_init() -> Result<()> {
                 println!("{line}");
             }
         },
-        Err(error) => {
-            eprintln!("{APP_NAME}: {error}");
-            std::process::exit(1);
-        },
+        Err(error) => fail_with(&error),
     }
     Ok(())
 }
@@ -418,7 +417,7 @@ fn run_check(path: PathBuf) -> Result<()> {
     let display = path.display().to_string();
     match cli::check(path) {
         CheckOutcome::Valid => {
-            println!("{display} is valid");
+            println!("{display} {VALID_SUFFIX}");
             Ok(())
         },
         CheckOutcome::Invalid(report) => {
@@ -464,8 +463,7 @@ fn run_doctor(config_path: PathBuf) -> Result<()> {
 fn run_capture(args: RunArgs, config: PathBuf) -> Result<()> {
     let registry = YamlProjectRegistry;
     if let Err(error) = cli::run(args, config, &registry) {
-        eprintln!("{APP_NAME}: {error}");
-        std::process::exit(1);
+        fail_with(&error);
     }
     Ok(())
 }
@@ -511,6 +509,12 @@ fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
         config_path,
         selection_style,
     )
+}
+
+/// Prints `error` to stderr and exits with [`FAILURE_EXIT_CODE`].
+fn fail_with(error: &dyn std::error::Error) -> ! {
+    eprintln!("{APP_NAME}: {error}");
+    std::process::exit(FAILURE_EXIT_CODE);
 }
 
 /// Installs a panic hook that restores the terminal before delegating to the

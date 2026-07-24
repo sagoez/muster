@@ -7,7 +7,7 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{
-    check::{CheckOutcome, check, error_chain},
+    check::{CheckOutcome, VALID_SUFFIX, check, error_chain},
     completions::{CompletionShell, registration_line},
 };
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
         hooks::{HookState, HookStatus},
         path::absolutize,
     },
+    constants::APP_NAME,
     domain::port::{AgentSessionStore, ProjectRegistry},
 };
 
@@ -34,10 +35,20 @@ const CLIPBOARD_LABEL: &str = "clipboard";
 const COMPLETIONS_LABEL: &str = "completions";
 /// Hint shown when providers need (re)installation.
 const HOOKS_HINT: &str = "run `muster hooks setup`";
+/// Bash shell rc file for sourcing completions.
+const BASH_RC: &str = ".bashrc";
+/// Zsh shell rc file for sourcing completions.
+const ZSH_RC: &str = ".zshrc";
 /// Fish shell rc file for sourcing completions.
 const FISH_RC: &str = ".config/fish/config.fish";
 /// Fish shell completions file for direct drop-in.
 const FISH_COMPLETIONS: &str = ".config/fish/completions/muster.fish";
+/// Elvish shell rc file for sourcing completions.
+const ELVISH_RC: &str = ".elvish/rc.elv";
+/// PowerShell profile for sourcing completions.
+const POWERSHELL_RC: &str = ".config/powershell/Microsoft.PowerShell_profile.ps1";
+/// Needle used to detect any shell's completion registration line.
+const COMPLETION_NEEDLE: &str = "COMPLETE";
 
 /// Severity of a probe result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +91,7 @@ pub fn config_probe(config_path: PathBuf) -> Probe {
         CheckOutcome::Valid => probe(
             CONFIG_LABEL,
             ProbeOutcome::Ok,
-            format!("{display} is valid"),
+            format!("{display} {VALID_SUFFIX}"),
         ),
         CheckOutcome::Invalid(report) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
     }
@@ -181,7 +192,7 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
     let registered = rc_files(shell).iter().any(|rc| {
         let path = home.join(rc);
         std::fs::read_to_string(&path)
-            .map(|content| content.contains("COMPLETE=") && content.contains("muster"))
+            .map(|content| content.contains(COMPLETION_NEEDLE) && content.contains(APP_NAME))
             .unwrap_or(false)
     });
     if registered {
@@ -218,11 +229,11 @@ fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
 /// detected.
 fn rc_files(shell: CompletionShell) -> &'static [&'static str] {
     match shell {
-        CompletionShell::Bash => &[".bashrc"],
-        CompletionShell::Zsh => &[".zshrc"],
+        CompletionShell::Bash => &[BASH_RC],
+        CompletionShell::Zsh => &[ZSH_RC],
         CompletionShell::Fish => &[FISH_RC, FISH_COMPLETIONS],
-        CompletionShell::Elvish => &[".elvish/rc.elv"],
-        CompletionShell::Powershell => &[".config/powershell/Microsoft.PowerShell_profile.ps1"],
+        CompletionShell::Elvish => &[ELVISH_RC],
+        CompletionShell::Powershell => &[POWERSHELL_RC],
     }
 }
 
@@ -248,7 +259,9 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use super::*;
-    use crate::domain::{config::ConfigError, process::AgentTool, project::Project, value::ProjectName};
+    use crate::domain::{
+        config::ConfigError, process::AgentTool, project::Project, value::ProjectName,
+    };
 
     /// A registry recording saves of projects and workspaces.
     #[derive(Default)]
@@ -356,6 +369,23 @@ mod tests {
         let probe = completions_probe(Some("/bin/zsh"), &dir);
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The completions probe detects a PowerShell profile containing the exact
+    /// registration line, including the spaces around `=` that would foil a
+    /// `COMPLETE=` needle.
+    #[test]
+    fn completions_probe_detects_powershell_registration() {
+        let dir = std::env::temp_dir().join(format!("muster-pwsh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc_path = dir.join(POWERSHELL_RC);
+        std::fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
+        std::fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
+
+        let probe = completions_probe(Some("/usr/bin/pwsh"), &dir);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Ok);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

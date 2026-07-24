@@ -26,6 +26,9 @@ pub enum CliError {
     /// The command could not be executed.
     #[error("failed to run the command: {0}")]
     Exec(#[source] std::io::Error),
+    /// The path cannot be stored in the registry (not valid UTF-8).
+    #[error("'{0}' contains non-UTF-8 components and cannot be registered")]
+    UnrepresentablePath(std::path::PathBuf),
     /// The folder name could not become a project name.
     #[error("cannot derive a project name from '{0}'")]
     InvalidProjectFolder(std::path::PathBuf),

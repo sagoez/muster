@@ -24,10 +24,12 @@ const RUN_HINT: &str = "run `muster` here to start";
 /// Returns [`CliError`] when the folder name is not a usable project name or
 /// the registry cannot be read or written.
 pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
-    // Validate the name first: a folder that cannot become a project (e.g. a
-    // filesystem root) must fail before anything is written.
+    // Validate everything the registry will persist first: a folder that
+    // cannot become a project (a filesystem root, a non-UTF-8 path) must
+    // fail before anything is written.
     let name = project_name(directory)?;
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
+    ensure_representable(&config_path)?;
     let mut rows = Vec::new();
     // An exclusive create keeps the no-overwrite guarantee even against a
     // concurrent creation. Anything already occupying the path - including a
@@ -109,12 +111,25 @@ pub(super) fn register_folder(
 pub(super) fn project_name(directory: &Path) -> Result<ProjectName, CliError> {
     // Normalize without resolving the final symlink: the registry preserves
     // the alias the user selected, so its name must come from the alias too.
+    // No lossy conversion: a non-UTF-8 name would not round-trip through the
+    // registry, so it is rejected rather than mangled.
     let file_name = absolutize(directory)
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+        .and_then(|name| name.to_str().map(str::to_string))
         .unwrap_or_default();
     ProjectName::try_new(&file_name)
         .map_err(|_| CliError::InvalidProjectFolder(PathBuf::from(directory)))
+}
+
+/// Rejects a config path the registry cannot persist as UTF-8.
+///
+/// # Errors
+/// Returns [`CliError::UnrepresentablePath`] for non-UTF-8 paths.
+pub(super) fn ensure_representable(config_path: &Path) -> Result<(), CliError> {
+    if config_path.to_str().is_none() {
+        return Err(CliError::UnrepresentablePath(config_path.to_path_buf()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -224,6 +239,36 @@ mod tests {
 
         assert_eq!(project_name(&alias).unwrap().as_ref(), "nice-alias");
         fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A non-UTF-8 folder fails before anything is written, not after the
+    /// workspace exists.
+    #[cfg(unix)]
+    #[test]
+    fn init_rejects_a_non_utf8_folder_before_writing() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let mut raw = std::env::temp_dir().into_os_string().into_vec();
+        raw.extend_from_slice(b"/muster-bad-\xff");
+        let dir = PathBuf::from(OsString::from_vec(raw));
+        fs::create_dir_all(&dir).unwrap();
+        let registry = RecordingRegistry::default();
+
+        let result = init(&dir, &registry);
+
+        assert!(
+            matches!(
+                result,
+                Err(CliError::InvalidProjectFolder(_) | CliError::UnrepresentablePath(_))
+            ),
+            "unexpected: {result:?}"
+        );
+        assert!(
+            registry.saved_workspace.borrow().is_none(),
+            "no workspace file was created"
+        );
+        assert!(!dir.join(WORKSPACE_FILE_NAME).exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// A directory with no usable name fails before anything is written.

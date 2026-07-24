@@ -24,8 +24,13 @@ pub fn write_native(text: &str) -> bool {
 }
 
 /// Whether the session should rely on OSC 52 instead of local tools.
-fn prefers_osc52() -> bool {
+pub fn prefers_osc52() -> bool {
     env::var_os("SSH_CONNECTION").is_some() || env::var_os("SSH_TTY").is_some()
+}
+
+/// The native clipboard tool a copy would try first, if any is applicable.
+pub fn preferred_tool() -> Option<&'static str> {
+    clipboard_commands().first().map(|command| command.program)
 }
 
 /// The platform clipboard writers worth trying, in herdr's order.
@@ -84,4 +89,18 @@ fn run_clipboard_command(command: &ClipboardCommand, text: &str) -> bool {
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
     let exited = child.wait().map(|status| status.success()).unwrap_or(false);
     written && exited
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The preferred tool is consistent with the command table's first entry.
+    #[test]
+    fn preferred_tool_matches_the_command_table() {
+        assert_eq!(
+            preferred_tool(),
+            clipboard_commands().first().map(|command| command.program)
+        );
+    }
 }

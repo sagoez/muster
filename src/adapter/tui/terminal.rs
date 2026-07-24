@@ -10,8 +10,8 @@ use crossterm::{
 use getset::MutGetters;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use super::{clipboard, pointer_shape::PointerShape};
-use crate::error::Result;
+use super::pointer_shape::PointerShape;
+use crate::{adapter::clipboard, error::Result};
 
 /// OSC prefix that sets the host pointer shape (xterm OSC 22).
 const POINTER_SHAPE_PREFIX: &str = "\x1b]22;";

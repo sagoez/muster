@@ -1,7 +1,6 @@
 mod activity;
 mod activity_frame;
 mod app;
-mod clipboard;
 mod completion_generation;
 mod event;
 mod form;

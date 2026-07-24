@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod clipboard;
 pub mod config;
 pub mod hooks;
 pub mod notifier;

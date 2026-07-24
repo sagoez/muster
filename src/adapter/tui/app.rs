@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
+    ffi::OsString,
     mem,
     path::{Path, PathBuf},
     thread,
@@ -7,46 +8,66 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
+};
+use fake::{Fake, faker::name::en::FirstName};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
+    style::Style,
 };
-use vt100::{Parser, Screen};
+use vt100::{MouseProtocolMode, Parser, Screen};
 
 use super::{
     activity::ActivityTracker,
+    activity_frame::{ACTIVITY_FRAME_INTERVAL, ActivityFrame},
     completion_generation::CompletionGeneration,
     event::{ChannelOutputSink, RuntimeEvent},
     form::{Field, Form, FormOutcome},
     input,
+    pointer_shape::PointerShape,
+    selection::{
+        self, Autoscroll, AutoscrollDirection, BufferCell, GridCell, ScrollMetrics, Selection,
+    },
     shutdown_generation::ShutdownGeneration,
     signal::{Signal, SignalReader},
     spawn_generation::SpawnGeneration,
     widget::{
-        confirm, empty_state, form, help, sidebar, status_bar, status_bar::StatusContext, switcher,
-        terminal_pane,
+        agent_picker::{self, AgentPickerItem},
+        confirm, empty_state, form, help, sidebar, status_bar,
+        status_bar::{NoticeTone, StatusContext},
+        switcher, terminal_pane, theme,
     },
 };
+mod process_controller;
+mod project_controller;
+mod session_controller;
+
 use crate::{
     adapter::path,
-    application::Workspace,
-    constants::APP_NAME,
+    application::{
+        ExitDecision, ProcessLifecycle, ProcessSpecMatcher, Reconciliation, SessionRestorer,
+        Workspace,
+    },
+    constants::{APP_NAME, MUSTER_AGENT_SESSION_ENV, MUSTER_AGENT_SESSION_STATE_FILE_ENV},
     domain::{
+        agent_session::{AgentSession, AgentSessionId, AgentSessionState, NativeSessionId},
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
         notification::{Notification, NotificationId, NotificationScope},
         port::{
-            ConfigWatcher, Notifier, PathCompleter, ProcessHandle, ProcessRunner, ProjectRegistry,
-            SettingsStore,
+            AgentSessionStore, ConfigWatcher, Notifier, PathCompleter, ProcessHandle,
+            ProcessRunner, ProjectRegistry, SettingsStore,
         },
         process::{
-            ActivityState, AgentTool, ExitIntent, Process, ProcessKind, ProcessOrigin,
-            ProcessState, RestartPolicy, StopPolicy,
+            ActivityState, AgentProtocol, AgentTool, ExitIntent, Process, ProcessKind,
+            ProcessOrigin, ProcessState, StopPolicy,
         },
         project::Project,
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
         settings::Settings,
-        value::{Cols, CommandLine, Description, PaneId, ProcessName, ProjectName, Rows},
+        value::{Cols, CommandLine, PaneId, ProcessName, ProjectName, Rows},
     },
 };
 
@@ -58,11 +79,21 @@ const STATUS_BAR_HEIGHT: u16 = 1;
 const BORDER_THICKNESS: u16 = 1;
 /// Scrollback lines retained per pane.
 const SCROLLBACK_LINES: usize = 1000;
+/// Lines the pane view moves per mouse-wheel notch.
+const WHEEL_SCROLL_LINES: usize = 3;
+/// Delay between edge-drag autoscroll steps (herdr's cadence).
+const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
+/// Window within which a second pane click counts as a double-click.
+const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+/// How long a double-click copy keeps its confirming highlight.
+const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
 /// Notice shown for a bare bell notification that carried no text of its own.
 const AWAITING_INPUT_NOTICE: &str = "awaiting input";
 /// Minimum gap between bell notifications from one pane, absorbing a burst (e.g.
 /// shell tab-completion) into a single alert.
 const BELL_THROTTLE: Duration = Duration::from_secs(3);
+/// Quiet interval before a background terminal bell becomes a desktop alert.
+const BELL_ESCALATION_DELAY: Duration = Duration::from_secs(2);
 /// Leader key (pressed with Control) that begins a command chord.
 const LEADER_KEY: char = 'a';
 /// Minimum PTY dimension. vt100 underflows on some sequences below a couple of
@@ -85,6 +116,8 @@ const FORCE_STOP_NOTICE: &str = "graceful shutdown timed out; force-killed";
 const GRACEFUL_STOP_FALLBACK_NOTICE: &str = "graceful shutdown failed; force-killed";
 /// Shown when Muster cannot deliver either the requested signal or a hard kill.
 const STOP_DELIVERY_FAILED_NOTICE: &str = "could not stop the process";
+/// Shown when a session reopen is unavailable until project teardown completes.
+const PROJECT_SWITCH_IN_PROGRESS: &str = "project switch in progress; reopen after it completes";
 /// Title of the save-current-project form.
 const SAVE_PROJECT_TITLE: &str = "Save project";
 /// Title of the new-project form.
@@ -99,7 +132,7 @@ const PROJECT_CONFIG_FILE: &str = "muster.yml";
 const STARTER_TERMINAL: &str = "Terminal";
 /// Title of the add-process form.
 const ADD_PROCESS_TITLE: &str = "Add process";
-/// Title of the disposable agent-session form.
+/// Title of the advanced agent-session form.
 const ADD_AGENT_TITLE: &str = "New agent session";
 /// Label of a process-kind field.
 const KIND_FIELD: &str = "Kind";
@@ -109,6 +142,8 @@ const TOOL_FIELD: &str = "Tool";
 const SESSION_NAME_FIELD: &str = "Name (optional)";
 /// Label of an optional preset command override.
 const AGENT_COMMAND_FIELD: &str = "Command override";
+/// Label of an optional custom provider resume command.
+const AGENT_RESUME_FIELD: &str = "Resume command (optional)";
 /// Label of a command field.
 const COMMAND_FIELD: &str = "Command";
 /// Process-kind option value for an agent.
@@ -121,8 +156,14 @@ const KIND_COMMAND: &str = "command";
 const KIND_OPTIONS: [&str; 3] = [KIND_AGENT, KIND_TERMINAL, KIND_COMMAND];
 /// Shown when a custom agent session has no launch command.
 const AGENT_COMMAND_REQUIRED: &str = "a custom agent needs a command";
-/// Shown when autostart is requested for a disposable agent session.
-const SESSION_AUTOSTART_UNAVAILABLE: &str = "agent sessions exist only for this TUI run";
+/// Shown when a custom resume placeholder cannot be expanded safely.
+const AGENT_RESUME_TEMPLATE_INVALID: &str =
+    "resume placeholder must be an unquoted standalone shell word";
+/// Shown when a shell composition needs an explicit provider resume command.
+const AGENT_COMPOUND_RESUME_REQUIRED: &str = "shell compositions need an explicit resume command";
+/// Shown when autostart is requested for a runtime agent session.
+const SESSION_AUTOSTART_UNAVAILABLE: &str =
+    "open agent sessions restore automatically; use d to close one";
 /// Shown when close is requested for a configured process.
 const CONFIGURED_AGENT_CLOSE_UNAVAILABLE: &str = "configured agents stay pinned in muster.yml";
 /// Shown when a project's config file cannot be written.
@@ -159,6 +200,19 @@ const REMOVE_PROJECT_VERB: &str = "remove";
 const CLOSE_AGENT_TITLE: &str = "Close agent?";
 /// Accept-action verb for the agent-session close confirmation.
 const CLOSE_AGENT_VERB: &str = "close";
+/// Maximum resumable history rows shown above provider presets.
+const RECENT_AGENT_LIMIT: usize = 5;
+/// Attempts to avoid a generated display-name collision in the active workspace.
+const GENERATED_NAME_ATTEMPTS: usize = 8;
+/// Shown when durable agent-session state cannot be loaded or written.
+const AGENT_SESSION_STORE_ERROR: &str = "could not update agent session history";
+/// Shown when a closed session has no provider identity to resume.
+const AGENT_SESSION_NOT_RESUMABLE: &str =
+    "the provider session ID was not captured; run `muster hooks setup`";
+/// Shown when there is no closed resumable session in this workspace.
+const NO_RECENT_AGENT_SESSION: &str = "no closed agent session to reopen";
+/// Placeholder identity used only to validate provider resume command shape.
+const RESUME_VALIDATION_ID: &str = "muster-resume-validation";
 
 /// Which region currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +233,31 @@ enum ConfigMembership {
     Tracked,
     /// The live pane was removed from config and must disappear when it exits.
     RetireOnExit,
+}
+
+/// How a persisted agent session should enter the active workspace.
+enum AgentSessionActivation {
+    /// Show a closable row without starting a new provider conversation.
+    Stopped,
+    /// Start the provider conversation but keep keyboard focus in the sidebar.
+    StartDetached(CommandLine),
+    /// Start and attach the provider conversation immediately.
+    StartAttached(CommandLine),
+}
+
+impl AgentSessionActivation {
+    /// Returns the command to spawn when this activation starts a child.
+    fn command(&self) -> Option<&CommandLine> {
+        match self {
+            Self::Stopped => None,
+            Self::StartDetached(command) | Self::StartAttached(command) => Some(command),
+        }
+    }
+
+    /// Whether successful activation should attach keyboard focus to the pane.
+    fn should_attach(&self) -> bool {
+        matches!(self, Self::StartAttached(_))
+    }
 }
 
 /// Whether the project Muster launched with has a persisted registry entry.
@@ -204,6 +283,8 @@ struct Pane {
     activity: ActivityTracker,
     /// Last bell accepted from this terminal lifetime, for burst throttling.
     last_bell: Option<Instant>,
+    /// Delayed desktop alert for a background non-agent pane that rang its bell.
+    pending_bell_notification: Option<Instant>,
     handle: Option<Box<dyn ProcessHandle>>,
     started_at: Instant,
     exit_intent: ExitIntent,
@@ -234,6 +315,13 @@ struct Switcher {
     error: Option<String>,
     /// The highlighted project's processes, cached so render does no I/O.
     preview: Vec<(ProcessKind, String)>,
+}
+
+/// Open state of the quick agent launcher.
+struct AgentPicker {
+    items: Vec<AgentPickerItem>,
+    selected: usize,
+    error: Option<String>,
 }
 
 impl Switcher {
@@ -292,6 +380,7 @@ struct FormOverlay {
 /// required by their cancel and failure transitions.
 enum Overlay {
     Switcher(Switcher),
+    AgentPicker(AgentPicker),
     Form(FormOverlay),
     ConfirmOverwrite {
         form: FormOverlay,
@@ -315,7 +404,10 @@ impl Overlay {
         match self {
             Self::Switcher(switcher) => Some(switcher),
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_ref(),
-            Self::ConfirmRemoval { .. } | Self::ConfirmSessionClose { .. } | Self::Help => None,
+            Self::AgentPicker(_)
+            | Self::ConfirmRemoval { .. }
+            | Self::ConfirmSessionClose { .. }
+            | Self::Help => None,
         }
     }
 
@@ -324,7 +416,10 @@ impl Overlay {
         match self {
             Self::Switcher(switcher) => Some(switcher),
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_mut(),
-            Self::ConfirmRemoval { .. } | Self::ConfirmSessionClose { .. } | Self::Help => None,
+            Self::AgentPicker(_)
+            | Self::ConfirmRemoval { .. }
+            | Self::ConfirmSessionClose { .. }
+            | Self::Help => None,
         }
     }
 
@@ -333,6 +428,7 @@ impl Overlay {
         match self {
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&form.modal),
             Self::Switcher(_)
+            | Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
             | Self::Help => None,
@@ -344,6 +440,7 @@ impl Overlay {
         match self {
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => Some(&mut form.modal),
             Self::Switcher(_)
+            | Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
             | Self::Help => None,
@@ -355,6 +452,13 @@ impl Overlay {
         let area = frame.area();
         match self {
             Self::Switcher(switcher) => Self::render_switcher(frame, area, switcher),
+            Self::AgentPicker(picker) => agent_picker::render(
+                frame,
+                area,
+                &picker.items,
+                picker.selected,
+                picker.error.as_deref(),
+            ),
             Self::Form(form_overlay) => {
                 Self::render_form(frame, area, form_overlay);
             },
@@ -414,7 +518,7 @@ enum FormIntent {
     NewProject,
     /// Choose which kind of process to add.
     ChooseProcessKind,
-    /// Launch a disposable coding-agent session.
+    /// Launch a runtime-managed coding-agent session.
     LaunchAgentSession,
     /// Persist a terminal or command in the current workspace.
     AddConfiguredProcess(ProcessKind),
@@ -430,6 +534,11 @@ pub struct App {
     generations: HashMap<PaneId, SpawnGeneration>,
     /// Monotonic source for terminal-lifetime notification scopes.
     next_notification_scope: NotificationScope,
+    /// Current glyph in the working-agent spinner cycle.
+    activity_frame: ActivityFrame,
+    /// Next time a visible working-agent spinner should advance.
+    activity_frame_deadline: Instant,
+    frame_area: Rect,
     pane_size: PtySize,
     focus: Focus,
     running: bool,
@@ -448,15 +557,49 @@ pub struct App {
     project_cursor: Option<usize>,
     overlay: Option<Overlay>,
     pending_switch: Option<PendingSwitch>,
+    /// Reopen requests waiting for the prior pane of the same session to finish
+    /// retiring, keyed by that pane's identity.
+    pending_session_reopens: HashMap<PaneId, AgentSessionId>,
     /// Out-of-band notification delivery (desktop), injected by the composition
     /// root via [`Self::set_notifier`]. `None` until then: notifications stay
     /// in-app, and the App itself never names a concrete notifier adapter.
     notifier: Option<Box<dyn Notifier>>,
     /// Cross-workspace settings and their load result.
     settings: SettingsState,
+    /// Durable provider session identity and history.
+    agent_session_store: Option<Box<dyn AgentSessionStore>>,
     /// A transient one-line message shown in the status bar until the next key,
     /// used for failures that have no open overlay to report into.
     notice: Option<String>,
+    /// The in-progress or lingering drag selection over a pane's buffer.
+    selection: Option<Selection>,
+    /// Active edge-drag autoscroll while a selection is held.
+    selection_autoscroll: Option<Autoscroll>,
+    /// Next tick of the edge-drag autoscroll.
+    autoscroll_deadline: Option<Instant>,
+    /// When a finalized word-copy highlight disappears.
+    selection_clear_deadline: Option<Instant>,
+    /// The last pane press, kept briefly to detect a double-click.
+    last_pane_click: Option<PaneClick>,
+    /// Viewport span of the selection, cached for the next immutable render.
+    selection_view: Option<(GridCell, GridCell)>,
+    /// Highlight style for selected cells, derived from the host terminal.
+    selection_style: Style,
+    /// Text a completed selection queued for the host clipboard; the runtime
+    /// loop drains it because only the terminal guard writes to stdout.
+    pending_clipboard: Option<String>,
+    /// Pointer shape the host terminal currently shows for muster.
+    pointer_shape: PointerShape,
+    /// Pointer-shape change awaiting the runtime's terminal writer.
+    pending_pointer_shape: Option<PointerShape>,
+}
+
+/// A pane press remembered briefly to recognize a double-click.
+#[derive(Clone, Copy)]
+struct PaneClick {
+    pane: PaneId,
+    cell: BufferCell,
+    at: Instant,
 }
 
 /// A pending autocomplete request handed to the completion worker: the newest
@@ -497,6 +640,9 @@ impl App {
             restart_attempts: HashMap::new(),
             generations: HashMap::new(),
             next_notification_scope: NotificationScope::new(0),
+            activity_frame: ActivityFrame::initial(),
+            activity_frame_deadline: Instant::now() + ACTIVITY_FRAME_INTERVAL,
+            frame_area: area,
             pane_size: pane_size_of(area),
             focus: Focus::Sidebar,
             running: true,
@@ -510,9 +656,21 @@ impl App {
             project_cursor: None,
             overlay: None,
             pending_switch: None,
+            pending_session_reopens: HashMap::new(),
             notifier: None,
             settings: SettingsState::Unloaded,
+            agent_session_store: None,
             notice: None,
+            selection: None,
+            selection_autoscroll: None,
+            autoscroll_deadline: None,
+            selection_clear_deadline: None,
+            last_pane_click: None,
+            selection_view: None,
+            selection_style: theme::selection_style(),
+            pending_clipboard: None,
+            pointer_shape: PointerShape::Default,
+            pending_pointer_shape: None,
         }
     }
 
@@ -532,6 +690,12 @@ impl App {
                 SettingsState::LoadFailed(error)
             },
         };
+    }
+
+    /// Wires durable agent-session history. Loading stays lazy so project
+    /// switches and hook-process updates are always observed fresh.
+    pub fn set_agent_session_store(&mut self, store: Box<dyn AgentSessionStore>) {
+        self.agent_session_store = Some(store);
     }
 
     /// Whether desktop notifications are currently enabled. Unavailable or
@@ -602,6 +766,7 @@ impl App {
             Some(Overlay::ConfirmOverwrite { form, .. }) => Some(Overlay::Form(form)),
             Some(
                 Overlay::Switcher(_)
+                | Overlay::AgentPicker(_)
                 | Overlay::ConfirmRemoval { .. }
                 | Overlay::ConfirmSessionClose { .. }
                 | Overlay::Help,
@@ -620,24 +785,8 @@ impl App {
         for (pane, command, cwd) in self.spawn_list() {
             self.spawn(pane, command, cwd);
         }
+        self.restore_open_agent_sessions();
         self.refresh_projects();
-    }
-
-    /// Reloads the cached registered-project list shown in the sidebar tree.
-    fn refresh_projects(&mut self) {
-        let mut projects = self.registry.projects().unwrap_or_default();
-        // Keep the launched project reachable even if it was never saved, so
-        // switching away from it is never a one-way trip.
-        let launched = self.launched_config.clone();
-        let registered = projects
-            .iter()
-            .any(|project| Self::same_config_location(project.config(), &launched));
-        self.launched_project_membership = LaunchedProjectMembership::Registered;
-        if !registered && let Ok(name) = ProjectName::try_new(label_from_config(&launched)) {
-            projects.insert(0, Project::builder().name(name).config(launched).build());
-            self.launched_project_membership = LaunchedProjectMembership::Synthetic;
-        }
-        self.projects = projects;
     }
 
     /// Moves directory completion onto a worker thread so a slow or hung
@@ -667,150 +816,6 @@ impl App {
         self.rewatch_config();
     }
 
-    /// Re-points the config watcher at the active project's config, if both are
-    /// present.
-    fn rewatch_config(&mut self) {
-        if let (Some(watcher), Some(config)) = (self.watcher.as_mut(), self.current_config.as_ref())
-        {
-            watcher.watch(config);
-        }
-    }
-
-    /// Reconciles the workspace after the active project's config changed on
-    /// disk. Newly-added processes appear (stopped, ready to start); existing
-    /// processes keep running untouched, so nothing is bounced and a command
-    /// already launched via `muster run` is not started a second time.
-    pub fn handle_config_changed(&mut self, path: PathBuf) {
-        let Some(current) = self.current_config.clone() else {
-            return;
-        };
-        if path::normalize(&current) != path::normalize(&path) {
-            return;
-        }
-        let Ok(config) = self.registry.workspace(&current) else {
-            return;
-        };
-        self.reconcile_config(&config);
-    }
-
-    /// Adds any process present in `config` but not yet in the workspace, as a
-    /// pending process with a fresh pane id.
-    fn reconcile_config(&mut self, config: &WorkspaceConfig) {
-        // Match by the full specification (kind, name, command, working dir,
-        // description), not name alone: same-named specs with different commands
-        // are distinct, and names are not unique, so count occurrences.
-        let sections = [
-            (ProcessKind::Agent, config.agents()),
-            (ProcessKind::Terminal, config.terminals()),
-            (ProcessKind::Command, config.commands()),
-        ];
-        let spec_identity = |kind: ProcessKind, spec: &ProcessSpec| {
-            (
-                kind,
-                spec.name().clone(),
-                spec.command().clone(),
-                spec.working_dir().clone(),
-                spec.description().clone(),
-                spec.restart_policy(),
-                spec.effective_stop_policy(kind),
-                spec.should_autostart(kind),
-            )
-        };
-        let mut config_counts = HashMap::new();
-        for (kind, specs) in sections {
-            for spec in specs {
-                *config_counts
-                    .entry(spec_identity(kind, spec))
-                    .or_insert(0_usize) += 1;
-            }
-        }
-
-        // Keep an existing process when it still matches the config, or when it
-        // is live (running work is never dropped from under the user); a stopped
-        // process the config no longer lists is removed. This reflects external
-        // removals and modifications, not just additions.
-        let mut kept = Vec::new();
-        let mut removed = Vec::new();
-        let mut next_id = 0;
-        for process in self.workspace.processes() {
-            next_id = next_id.max((*process.id()).into_inner() + 1);
-            if *process.origin() == ProcessOrigin::Session {
-                kept.push(process.clone());
-                continue;
-            }
-            let identity = (
-                *process.kind(),
-                process.name().clone(),
-                process.command().clone(),
-                process.working_dir().clone(),
-                process.description().clone(),
-                *process.restart(),
-                process.effective_stop_policy(),
-                *process.autostart(),
-            );
-            let matched = config_counts
-                .get_mut(&identity)
-                .filter(|count| **count > 0)
-                .map(|count| *count -= 1)
-                .is_some();
-            let pane = *process.id();
-            let live = self
-                .panes
-                .get(&pane)
-                .is_some_and(|pane| pane.handle.is_some());
-            if matched {
-                if let Some(target) = self.panes.get_mut(&pane) {
-                    target.config_membership = ConfigMembership::Tracked;
-                }
-                kept.push(process.clone());
-            } else if live {
-                // Still running but gone from the config: keep it, and mark it to
-                // be retired once it exits instead of restart-looping.
-                if let Some(target) = self.panes.get_mut(&pane) {
-                    target.config_membership = ConfigMembership::RetireOnExit;
-                }
-                kept.push(process.clone());
-            } else {
-                removed.push(pane);
-            }
-        }
-
-        // Config specs that matched no existing process are new: add them stopped.
-        for (kind, specs) in sections {
-            for spec in specs {
-                if let Some(count) = config_counts
-                    .get_mut(&spec_identity(kind, spec))
-                    .filter(|count| **count > 0)
-                {
-                    *count -= 1;
-                    kept.push(spec.to_process(PaneId::new(next_id), kind));
-                    next_id += 1;
-                }
-            }
-        }
-
-        for pane in removed {
-            self.panes.remove(&pane);
-            self.generations.remove(&pane);
-            self.restart_attempts.remove(&pane);
-        }
-
-        kept.sort_by_key(|process| process.kind().section_index());
-
-        // Rebuild the workspace, keeping the selection on the same process when it
-        // survives, else clamping to the first.
-        let selected = self
-            .workspace
-            .selected_process()
-            .map(|process| *process.id())
-            .and_then(|pane| kept.iter().position(|process| *process.id() == pane))
-            .unwrap_or(0);
-        self.workspace = Workspace::builder()
-            .processes(kept)
-            .selected_index(selected)
-            .build();
-    }
-
     /// Kills every live process; called during shutdown.
     pub fn shutdown(&mut self) {
         for pane in self.panes.values_mut() {
@@ -824,231 +829,570 @@ impl App {
     pub fn handle_input(&mut self, event: CrosstermEvent) {
         match event {
             CrosstermEvent::Key(key) => self.handle_key(key),
+            CrosstermEvent::Mouse(mouse) => self.handle_mouse(mouse),
             CrosstermEvent::Resize(width, height) => self.resize(Rect::new(0, 0, width, height)),
             _ => {},
         }
     }
 
-    /// Applies a process output event, ignoring output from a superseded spawn
-    /// generation (e.g. late chunks from a previous child in a restarted pane).
-    pub fn handle_output(
-        &mut self,
-        pane: PaneId,
-        generation: SpawnGeneration,
-        output: ProcessOutput,
-    ) {
-        if self.generations.get(&pane) != Some(&generation) {
+    /// Takes the text a completed selection queued for the host clipboard.
+    pub fn take_pending_clipboard(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
+    }
+
+    /// Takes a pointer-shape change awaiting the terminal writer.
+    pub fn take_pending_pointer_shape(&mut self) -> Option<PointerShape> {
+        self.pending_pointer_shape.take()
+    }
+
+    /// Sets the selection highlight style derived from the host terminal.
+    pub fn set_selection_style(&mut self, style: Style) {
+        self.selection_style = style;
+    }
+
+    /// Routes pointer input the way herdr does: sidebar rows and panes focus
+    /// on click, a child that requested mouse reports receives events
+    /// directly, the wheel scrolls, and a left drag selects pane text.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.overlay.is_some() {
+            self.clear_selection();
             return;
         }
-        match output {
-            ProcessOutput::Chunk(bytes) => {
-                let Some(target) = self.panes.get_mut(&pane) else {
-                    return;
-                };
-                let signals = target.signals.read(&bytes);
-                target.parser.process(&bytes);
-                // Apply signals in stream order, so the final activity reflects
-                // the last event in the chunk rather than an assumed one: a bell
-                // followed by more output ends working, not awaiting input.
-                for signal in signals {
-                    self.apply_signal(pane, signal);
-                }
+        let (sidebar_area, main_area, _) = areas(self.frame_area);
+        self.refresh_pointer_shape(main_area, mouse);
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && sidebar_area.contains(Position::new(mouse.column, mouse.row))
+        {
+            self.clear_selection();
+            self.handle_sidebar_press(sidebar_area, mouse);
+            return;
+        }
+        let Some(pane) = self.selected_pane() else {
+            return;
+        };
+        if self.pane_wants_mouse(pane) {
+            self.clear_selection();
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && main_area.contains(Position::new(mouse.column, mouse.row))
+            {
+                self.focus = Focus::Terminal;
+            }
+            self.forward_mouse_to_pane(pane, main_area, mouse);
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_left_press(pane, main_area, mouse);
             },
-            ProcessOutput::Exited(outcome) => self.handle_exit(pane, outcome),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.handle_left_drag(pane, main_area, mouse)
+            },
+            MouseEventKind::Up(MouseButton::Left) => self.handle_left_release(pane),
+            MouseEventKind::ScrollUp => self.handle_wheel(pane, main_area, mouse, true),
+            MouseEventKind::ScrollDown => self.handle_wheel(pane, main_area, mouse, false),
+            _ => {},
         }
     }
 
-    /// Applies one decoded terminal signal to `pane`: output or in-progress work
-    /// marks it working; a notification or completed progress marks it awaiting
-    /// input, and a notification also raises an alert.
-    fn apply_signal(&mut self, pane: PaneId, signal: Signal) {
-        match signal {
-            Signal::Output => {
-                let activity = self
-                    .panes
-                    .get_mut(&pane)
-                    .and_then(|target| target.activity.observe_output(Instant::now()));
-                if let Some(activity) = activity {
-                    self.workspace.set_activity(pane, activity);
-                }
+    /// Focuses the sidebar on any click into it and, when the click lands on
+    /// a row, selects that row the way keyboard navigation would.
+    fn handle_sidebar_press(&mut self, sidebar_area: Rect, mouse: MouseEvent) {
+        self.focus = Focus::Sidebar;
+        let (active_label, other_projects, selection) = self.sidebar_context();
+        let state = sidebar::SidebarState::builder()
+            .workspace(&self.workspace)
+            .activity_frame(self.activity_frame)
+            .focused(true)
+            .active_project(&active_label)
+            .other_projects(&other_projects)
+            .selection(selection)
+            .build();
+        let Some(clicked) =
+            sidebar::selection_at(&state, sidebar_area, Position::new(mouse.column, mouse.row))
+        else {
+            return;
+        };
+        match clicked {
+            sidebar::SidebarSelection::Process(index) => {
+                self.project_cursor = None;
+                self.workspace.select_at(index);
             },
-            Signal::Title(title) => {
-                let activity = self
-                    .panes
-                    .get_mut(&pane)
-                    .and_then(|target| target.activity.observe_title(Instant::now(), title));
-                if let Some(activity) = activity {
-                    self.workspace.set_activity(pane, activity);
-                }
+            sidebar::SidebarSelection::Project(index) => {
+                self.project_cursor = Some(index);
             },
-            Signal::Progress(active) => {
-                let activity = self
-                    .panes
-                    .get_mut(&pane)
-                    .map(|target| target.activity.observe_progress(active));
-                if let Some(activity) = activity {
-                    self.workspace.set_activity(pane, activity);
-                }
-            },
-            Signal::Notify {
-                identifier,
-                title,
-                body,
-            } => {
-                if let Some(target) = self.panes.get_mut(&pane) {
-                    let activity = target.activity.observe_attention();
-                    self.workspace.set_activity(pane, activity);
-                }
-                self.raise_notification(pane, identifier, title, body);
-            },
-            Signal::Close { identifier } => self.close_notification(pane, &identifier),
         }
     }
 
-    /// Returns the nearest time at which ordinary output should become idle.
-    pub(super) fn next_activity_deadline(&self) -> Option<Instant> {
-        self.panes
-            .values()
-            .filter_map(|pane| pane.activity.deadline())
-            .min()
-    }
-
-    /// Returns panes with expired ordinary-output deadlines to idle. Returns
-    /// whether any activity changed, allowing the runtime to avoid idle redraws.
-    pub(super) fn expire_quiet_activity(&mut self, now: Instant) -> bool {
-        let expired = self
-            .panes
-            .iter_mut()
-            .filter_map(|(pane, target)| {
-                target
-                    .activity
-                    .expire(now)
-                    .map(|activity| (*pane, activity))
-            })
-            .collect::<Vec<_>>();
-        for (pane, activity) in &expired {
-            self.workspace.set_activity(*pane, *activity);
+    /// A left press in the pane: focuses the terminal, detects a double-click
+    /// word copy, and otherwise anchors a new selection at the pressed cell.
+    fn handle_left_press(&mut self, pane: PaneId, main_area: Rect, mouse: MouseEvent) {
+        self.set_autoscroll(None);
+        self.selection_clear_deadline = None;
+        let cell = self
+            .pane_grid(pane, main_area)
+            .and_then(|grid| selection::cell_at(grid, mouse.column, mouse.row));
+        let Some(cell) = cell else {
+            self.clear_selection();
+            return;
+        };
+        self.focus = Focus::Terminal;
+        let Some(metrics) = self.pane_scroll_metrics(pane) else {
+            return;
+        };
+        let pressed = metrics.buffer_cell(cell);
+        let click = PaneClick {
+            pane,
+            cell: pressed,
+            at: Instant::now(),
+        };
+        if self.take_double_click(click) && self.copy_word_at(pane, cell, pressed) {
+            return;
         }
-        !expired.is_empty()
+        self.selection = Some(Selection::anchored(pane, pressed));
     }
 
-    /// Raises a notification for `pane`: always an in-app status-bar notice, and
-    /// a desktop notification too, throttling bare bells so a burst is one alert.
-    fn raise_notification(
-        &mut self,
-        pane: PaneId,
-        identifier: Option<NotificationId>,
-        title: Option<String>,
-        body: Option<String>,
-    ) {
-        let is_bell = title.is_none() && body.is_none();
-        let scope = {
+    /// Consumes a double-click candidate: true when this press matches the
+    /// previous one closely enough (herdr's same-cell, 350 ms rule).
+    fn take_double_click(&mut self, click: PaneClick) -> bool {
+        let matched = self.last_pane_click.is_some_and(|last| {
+            last.pane == click.pane
+                && last.cell == click.cell
+                && click.at.duration_since(last.at) <= PANE_DOUBLE_CLICK_WINDOW
+        });
+        self.last_pane_click = (!matched).then_some(click);
+        matched
+    }
+
+    /// Copies the token under a double-click, leaving a short-lived highlight
+    /// as confirmation (herdr's word copy). Returns whether text was copied.
+    fn copy_word_at(&mut self, pane: PaneId, cell: GridCell, pressed: BufferCell) -> bool {
+        let Some(target) = self.panes.get(&pane) else {
+            return false;
+        };
+        let screen = target.parser.screen();
+        let (_, columns) = screen.size();
+        let row_text = screen.contents_between(cell.row(), 0, cell.row(), columns);
+        let Some((start_column, end_column)) = selection::word_bounds(&row_text, cell.column())
+        else {
+            return false;
+        };
+        let text = screen.contents_between(
+            cell.row(),
+            start_column,
+            cell.row(),
+            end_column.saturating_add(1).min(columns),
+        );
+        if text.is_empty() {
+            return false;
+        }
+        self.pending_clipboard = Some(text);
+        let start = BufferCell::builder()
+            .row(pressed.row())
+            .column(start_column)
+            .build();
+        let end = BufferCell::builder()
+            .row(pressed.row())
+            .column(end_column)
+            .build();
+        self.selection = Some(Selection::word(pane, start, end));
+        self.selection_clear_deadline = Some(Instant::now() + PANE_COPY_HIGHLIGHT_DURATION);
+        true
+    }
+
+    /// Extends the held selection toward the pointer, driving herdr's edge
+    /// autoscroll zones when the drag reaches or leaves the pane vertically.
+    fn handle_left_drag(&mut self, pane: PaneId, main_area: Rect, mouse: MouseEvent) {
+        self.last_pane_click = None;
+        let holding = self
+            .selection
+            .as_ref()
+            .is_some_and(|active| active.pane() == pane && active.is_in_progress());
+        if !holding {
+            return;
+        }
+        let Some(grid) = self.pane_grid(pane, main_area) else {
+            return;
+        };
+        self.extend_selection_to(pane, grid, mouse.column, mouse.row);
+        if !self.selection.as_ref().is_some_and(Selection::is_dragging) {
+            self.set_autoscroll(None);
+            return;
+        }
+        let top = grid.y;
+        let bottom = grid.y + grid.height - 1;
+        if mouse.row < top {
+            self.scroll_by(pane, selection::edge_scroll_lines(top - mouse.row), true);
+            self.extend_selection_to(pane, grid, mouse.column, mouse.row);
+            self.set_autoscroll(Some(Self::autoscroll_at(AutoscrollDirection::Up, mouse)));
+        } else if mouse.row > bottom {
+            self.scroll_by(
+                pane,
+                selection::edge_scroll_lines(mouse.row - bottom),
+                false,
+            );
+            self.extend_selection_to(pane, grid, mouse.column, mouse.row);
+            self.set_autoscroll(Some(Self::autoscroll_at(AutoscrollDirection::Down, mouse)));
+        } else if mouse.row == top {
+            self.set_autoscroll(Some(Self::autoscroll_at(AutoscrollDirection::Up, mouse)));
+        } else if mouse.row == bottom {
+            self.set_autoscroll(Some(Self::autoscroll_at(AutoscrollDirection::Down, mouse)));
+        } else {
+            self.set_autoscroll(None);
+        }
+    }
+
+    /// An autoscroll record for the pointer's current position.
+    fn autoscroll_at(direction: AutoscrollDirection, mouse: MouseEvent) -> Autoscroll {
+        Autoscroll::builder()
+            .direction(direction)
+            .column(mouse.column)
+            .row(mouse.row)
+            .build()
+    }
+
+    /// Completes the held gesture: a bare click clears, a finalized word copy
+    /// keeps its feedback highlight, and a drag copies the spanned text and
+    /// clears (herdr's copy-on-select).
+    fn handle_left_release(&mut self, pane: PaneId) {
+        self.set_autoscroll(None);
+        let Some(active) = self.selection else {
+            return;
+        };
+        if active.pane() != pane || active.is_click() {
+            self.selection = None;
+            return;
+        }
+        if active.is_dragging() {
+            let text = self.extract_selection_text(pane, &active);
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                self.pending_clipboard = Some(text);
+            }
+            self.selection = None;
+        }
+    }
+
+    /// The wheel scrolls the pane: an in-progress selection keeps extending
+    /// under it (herdr), an alternate-screen child receives cursor keys, and
+    /// otherwise the scrollback offset moves.
+    fn handle_wheel(&mut self, pane: PaneId, main_area: Rect, mouse: MouseEvent, up: bool) {
+        if !main_area.contains(Position::new(mouse.column, mouse.row)) {
+            return;
+        }
+        let selecting = self
+            .selection
+            .as_ref()
+            .is_some_and(|active| active.pane() == pane && active.is_in_progress());
+        if !selecting {
             let Some(target) = self.panes.get_mut(&pane) else {
                 return;
             };
-            if is_bell {
-                let now = Instant::now();
-                if target
-                    .last_bell
-                    .is_some_and(|last| now.duration_since(last) < BELL_THROTTLE)
-                {
-                    return;
+            let screen = target.parser.screen();
+            if screen.alternate_screen() {
+                let bytes = input::wheel_arrow(up, screen.application_cursor());
+                if let Some(handle) = target.handle.as_mut() {
+                    for _ in 0..WHEEL_SCROLL_LINES {
+                        let _ = handle.write_input(bytes);
+                    }
                 }
-                target.last_bell = Some(now);
+                return;
             }
-            target.notification_scope
-        };
-        let Some(process) = self.workspace.process(pane) else {
-            return;
-        };
-        let name = process.name().clone();
-        let desktop_body = if is_bell {
-            Some(AWAITING_INPUT_NOTICE.to_string())
-        } else {
-            body.clone()
-        };
-        // Prefer the body, fall back to the title (a title-only notification
-        // still carries its text), then to a generic message for a bare bell.
-        let message = body
-            .or_else(|| title.clone())
-            .unwrap_or_else(|| AWAITING_INPUT_NOTICE.to_string());
-        self.notice = Some(format!("{}: {message}", name.as_ref()));
-        let notification = Notification::builder()
-            .pane(pane)
-            .scope(scope)
-            .source(name)
-            .title(title)
-            .body(desktop_body)
-            .identifier(identifier)
-            .build();
-        if self.desktop_notifications_enabled()
-            && let Some(notifier) = &self.notifier
-        {
-            notifier.notify(&notification);
+        }
+        self.scroll_by(pane, WHEEL_SCROLL_LINES, up);
+        if selecting && let Some(grid) = self.pane_grid(pane, main_area) {
+            self.extend_selection_to(pane, grid, mouse.column, mouse.row);
         }
     }
 
-    /// Closes a prior identified desktop notification. This remains active when
-    /// delivery is toggled off so an already-visible notification can be removed.
-    fn close_notification(&self, pane: PaneId, identifier: &NotificationId) {
-        if let Some(scope) = self
-            .panes
-            .get(&pane)
-            .map(|target| target.notification_scope)
-            && let Some(notifier) = &self.notifier
-        {
-            notifier.close(pane, scope, identifier);
+    /// Moves the selection head to the pane cell nearest the pointer.
+    fn extend_selection_to(&mut self, pane: PaneId, grid: Rect, column: u16, row: u16) {
+        let Some(cell) = selection::nearest_cell(grid, column, row) else {
+            return;
+        };
+        let Some(metrics) = self.pane_scroll_metrics(pane) else {
+            return;
+        };
+        if let Some(active) = self.selection.as_mut() {
+            active.extend_to(metrics.buffer_cell(cell));
         }
     }
 
-    /// Respawns a pane whose restart backoff has elapsed, but only if its
-    /// generation still matches: a manual restart, stop, or newer schedule bumps
-    /// the generation and so cancels this now-stale respawn.
-    pub fn handle_respawn(&mut self, pane: PaneId, generation: SpawnGeneration) {
-        if self.generations.get(&pane) != Some(&generation) {
-            return;
-        }
-        if let Some((command, cwd)) = self.command_of(pane) {
-            self.spawn(pane, command, cwd);
-        }
-    }
-
-    /// Forcibly stops a command whose graceful stop or restart deadline elapsed,
-    /// provided no exit or newer spawn superseded that request.
-    pub fn handle_force_stop(
-        &mut self,
-        pane: PaneId,
-        spawn_generation: SpawnGeneration,
-        shutdown_generation: ShutdownGeneration,
-    ) {
-        if self.generations.get(&pane) != Some(&spawn_generation) {
-            return;
-        }
+    /// Moves the pane's scrollback offset by `lines`.
+    fn scroll_by(&mut self, pane: PaneId, lines: usize, up: bool) {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        if target.shutdown_generation != shutdown_generation
-            || !target.exit_intent.awaits_force_stop()
-        {
-            return;
-        }
-        target.shutdown_generation = target.shutdown_generation.next();
-        let Some(handle) = target.handle.as_mut() else {
-            return;
-        };
-        if handle.kill().is_ok() {
-            self.workspace.set_state(pane, ProcessState::Stopping);
-            self.notice = Some(FORCE_STOP_NOTICE.to_string());
+        let screen = target.parser.screen_mut();
+        let offset = if up {
+            screen.scrollback().saturating_add(lines)
         } else {
-            target.exit_intent = target.exit_intent.force_stop_delivery_failed();
-            self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            screen.scrollback().saturating_sub(lines)
+        };
+        screen.set_scrollback(offset);
+    }
+
+    /// Replaces the autoscroll state, arming its tick when one starts and
+    /// disarming it when it ends.
+    fn set_autoscroll(&mut self, autoscroll: Option<Autoscroll>) {
+        match (&self.selection_autoscroll, &autoscroll) {
+            (None, Some(_)) => {
+                self.autoscroll_deadline = Some(Instant::now() + SELECTION_AUTOSCROLL_INTERVAL);
+            },
+            (_, None) => self.autoscroll_deadline = None,
+            _ => {},
+        }
+        self.selection_autoscroll = autoscroll;
+    }
+
+    /// Drops every piece of selection state: highlight, autoscroll, feedback
+    /// deadline, and the double-click candidate.
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_view = None;
+        self.set_autoscroll(None);
+        self.selection_clear_deadline = None;
+        self.last_pane_click = None;
+    }
+
+    /// The next moment the selection needs servicing: an autoscroll tick or a
+    /// word-highlight expiry.
+    pub fn next_selection_deadline(&self) -> Option<Instant> {
+        match (self.autoscroll_deadline, self.selection_clear_deadline) {
+            (Some(tick), Some(clear)) => Some(tick.min(clear)),
+            (tick, clear) => tick.or(clear),
         }
     }
 
-    /// Draws the whole UI: sidebar, focused terminal, and status bar.
-    pub fn render(&self, frame: &mut Frame) {
-        let (sidebar_area, main_area, status_area) = areas(frame.area());
-        let sidebar_focused = self.focus == Focus::Sidebar;
+    /// Advances selection timers: expires the word-copy highlight and steps an
+    /// active edge autoscroll. Returns whether a redraw is needed.
+    pub fn advance_selection(&mut self, now: Instant) -> bool {
+        let mut redraw = false;
+        if self
+            .selection_clear_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.selection_clear_deadline = None;
+            self.selection = None;
+            redraw = true;
+        }
+        if self
+            .autoscroll_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            redraw |= self.tick_autoscroll(now);
+        }
+        redraw
+    }
+
+    /// One autoscroll step (herdr's 30 ms cadence): scroll a line toward the
+    /// drag direction, stop at the buffer edge, and re-extend the selection
+    /// at the pointer's last known spot.
+    fn tick_autoscroll(&mut self, now: Instant) -> bool {
+        let Some(autoscroll) = self.selection_autoscroll else {
+            self.autoscroll_deadline = None;
+            return false;
+        };
+        let Some(pane) = self
+            .selection
+            .as_ref()
+            .filter(|active| active.is_dragging())
+            .map(Selection::pane)
+        else {
+            self.set_autoscroll(None);
+            return false;
+        };
+        let Some(metrics) = self.pane_scroll_metrics(pane) else {
+            self.set_autoscroll(None);
+            return false;
+        };
+        let at_edge = match autoscroll.direction() {
+            AutoscrollDirection::Up => metrics.offset() >= metrics.len(),
+            AutoscrollDirection::Down => metrics.offset() == 0,
+        };
+        if at_edge {
+            self.set_autoscroll(None);
+            return false;
+        }
+        self.scroll_by(pane, 1, autoscroll.direction() == AutoscrollDirection::Up);
+        let (_, main_area, _) = areas(self.frame_area);
+        if let Some(grid) = self.pane_grid(pane, main_area) {
+            self.extend_selection_to(pane, grid, autoscroll.column(), autoscroll.row());
+        }
+        self.autoscroll_deadline = Some(now + SELECTION_AUTOSCROLL_INTERVAL);
+        true
+    }
+
+    /// Reads the selected text, walking the scrollback in viewport-sized
+    /// chunks when the span extends beyond the visible screen.
+    fn extract_selection_text(&mut self, pane: PaneId, active: &Selection) -> Option<String> {
+        let target = self.panes.get_mut(&pane)?;
+        let screen = target.parser.screen_mut();
+        let (rows, columns) = screen.size();
+        if rows == 0 || columns == 0 {
+            return None;
+        }
+        let saved = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+        let (start, end) = active.span();
+        let max_row = len + usize::from(rows) - 1;
+        if start.row() > max_row {
+            screen.set_scrollback(saved);
+            return None;
+        }
+        let end_row = end.row().min(max_row);
+        let mut text = String::new();
+        let mut chunk_top = start.row();
+        loop {
+            screen.set_scrollback(len.saturating_sub(chunk_top));
+            let viewport_top = len - screen.scrollback();
+            let last_visible = viewport_top + usize::from(rows) - 1;
+            let chunk_end = end_row.min(last_visible);
+            let start_column = if chunk_top == start.row() {
+                start.column()
+            } else {
+                0
+            };
+            let end_column = if chunk_end == end_row {
+                end.column().saturating_add(1).min(columns)
+            } else {
+                columns
+            };
+            text.push_str(&screen.contents_between(
+                (chunk_top - viewport_top) as u16,
+                start_column,
+                (chunk_end - viewport_top) as u16,
+                end_column,
+            ));
+            if chunk_end >= end_row {
+                break;
+            }
+            text.push('\n');
+            chunk_top = last_visible + 1;
+        }
+        screen.set_scrollback(saved);
+        Some(text)
+    }
+
+    /// Where the pane's viewport sits in its scrollback. Learning the total
+    /// briefly clamps the offset to its maximum, so this needs `&mut`.
+    fn pane_scroll_metrics(&mut self, pane: PaneId) -> Option<ScrollMetrics> {
+        let target = self.panes.get_mut(&pane)?;
+        let screen = target.parser.screen_mut();
+        let offset = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+        screen.set_scrollback(offset);
+        Some(ScrollMetrics::builder().offset(offset).len(len).build())
+    }
+
+    /// Recomputes the viewport span of the active selection for the next
+    /// frame, so rendering itself stays immutable.
+    pub fn refresh_selection_view(&mut self) {
+        self.selection_view = None;
+        let Some(active) = self.selection else {
+            return;
+        };
+        if Some(active.pane()) != self.selected_pane() {
+            return;
+        }
+        let Some(metrics) = self.pane_scroll_metrics(active.pane()) else {
+            return;
+        };
+        let Some(target) = self.panes.get(&active.pane()) else {
+            return;
+        };
+        let (rows, columns) = target.parser.screen().size();
+        self.selection_view = active.viewport_span(metrics.viewport_top(), rows, columns);
+    }
+
+    /// Tracks which pointer shape the hovered region wants and queues the
+    /// OSC 22 update when it changes: an I-beam over selectable pane text,
+    /// the regular arrow everywhere else.
+    fn refresh_pointer_shape(&mut self, main_area: Rect, mouse: MouseEvent) {
+        let over_text = self.selected_pane().is_some_and(|pane| {
+            !self.pane_wants_mouse(pane)
+                && self
+                    .pane_grid(pane, main_area)
+                    .is_some_and(|grid| grid.contains(Position::new(mouse.column, mouse.row)))
+        });
+        let shape = if over_text {
+            PointerShape::Text
+        } else {
+            PointerShape::Default
+        };
+        if shape != self.pointer_shape {
+            self.pointer_shape = shape;
+            self.pending_pointer_shape = Some(shape);
+        }
+    }
+
+    /// Whether the pane's live child explicitly enabled xterm mouse reporting.
+    fn pane_wants_mouse(&self, pane: PaneId) -> bool {
+        self.panes.get(&pane).is_some_and(|target| {
+            target.handle.is_some()
+                && target.parser.screen().mouse_protocol_mode() != MouseProtocolMode::None
+        })
+    }
+
+    /// Forwards pointer input to the terminal that requested xterm mouse mode.
+    fn forward_mouse_to_pane(&mut self, pane: PaneId, area: Rect, mouse: MouseEvent) {
+        let Some(target) = self.panes.get(&pane) else {
+            return;
+        };
+        let screen = target.parser.screen();
+        let mode = screen.mouse_protocol_mode();
+        let Some((column, row)) =
+            Self::relative_mouse_position(area, mouse.column, mouse.row, screen)
+        else {
+            return;
+        };
+        let bytes = input::encode_mouse(mouse, column, row, mode, screen.mouse_protocol_encoding());
+        if let Some(bytes) = bytes
+            && let Some(target) = self.panes.get_mut(&pane)
+            && let Some(handle) = target.handle.as_mut()
+        {
+            let _ = handle.write_input(&bytes);
+        }
+    }
+
+    /// Maps an outer-terminal mouse coordinate into the child terminal grid.
+    fn relative_mouse_position(
+        area: Rect,
+        column: u16,
+        row: u16,
+        screen: &Screen,
+    ) -> Option<(u16, u16)> {
+        let x = column.checked_sub(area.x + BORDER_THICKNESS)?;
+        let y = row.checked_sub(area.y + BORDER_THICKNESS)?;
+        let (rows, columns) = screen.size();
+        (x < columns && y < rows).then_some((x, y))
+    }
+
+    /// The absolute rectangle of the pane's visible cells: the main area inside
+    /// its border, intersected with the child screen size.
+    fn pane_grid(&self, pane: PaneId, main_area: Rect) -> Option<Rect> {
+        let target = self.panes.get(&pane)?;
+        let (rows, columns) = target.parser.screen().size();
+        let width = main_area
+            .width
+            .saturating_sub(BORDER_THICKNESS * 2)
+            .min(columns);
+        let height = main_area
+            .height
+            .saturating_sub(BORDER_THICKNESS * 2)
+            .min(rows);
+        (width > 0 && height > 0).then(|| {
+            Rect::new(
+                main_area.x + BORDER_THICKNESS,
+                main_area.y + BORDER_THICKNESS,
+                width,
+                height,
+            )
+        })
+    }
+
+    /// The sidebar display inputs shared by rendering and click hit-testing.
+    fn sidebar_context(&self) -> (String, Vec<String>, sidebar::SidebarSelection) {
         let active_label = self.active_project_label();
         // Append the folder to a project's label when another project shares its
         // name, so duplicates in the tree are distinguishable.
@@ -1072,17 +1416,33 @@ impl App {
             Some(cursor) => sidebar::SidebarSelection::Project(cursor),
             None => sidebar::SidebarSelection::Process(*self.workspace.selected_index()),
         };
-        sidebar::render(
-            frame,
-            sidebar_area,
-            &self.workspace,
-            sidebar_focused,
-            &active_label,
-            &other_projects,
-            selection,
-        );
+        (active_label, other_projects, selection)
+    }
+
+    /// Draws the whole UI: sidebar, focused terminal, and status bar.
+    pub fn render(&self, frame: &mut Frame) {
+        let (sidebar_area, main_area, status_area) = areas(frame.area());
+        let sidebar_focused = self.focus == Focus::Sidebar;
+        let (active_label, other_projects, selection) = self.sidebar_context();
+        let sidebar_state = sidebar::SidebarState::builder()
+            .workspace(&self.workspace)
+            .activity_frame(self.activity_frame)
+            .focused(sidebar_focused)
+            .active_project(&active_label)
+            .other_projects(&other_projects)
+            .selection(selection)
+            .build();
+        sidebar::render(frame, sidebar_area, &sidebar_state);
         let (title, screen) = self.focused_view();
-        terminal_pane::render(frame, main_area, &title, screen, !sidebar_focused);
+        terminal_pane::render(
+            frame,
+            main_area,
+            &title,
+            screen,
+            !sidebar_focused,
+            self.selection_view,
+            self.selection_style,
+        );
         if self.workspace.processes().is_empty() {
             empty_state::render(frame, main_area);
         }
@@ -1097,7 +1457,9 @@ impl App {
             status_area,
             self.status_context(),
             crashed,
-            self.notice.as_deref(),
+            self.notice
+                .as_deref()
+                .map(|notice| (notice, NoticeTone::Error)),
             self.focus == Focus::Leader,
         );
         if let Some(overlay) = &self.overlay {
@@ -1123,7 +1485,7 @@ impl App {
         }
     }
 
-    /// Whether the selected row is a disposable agent session.
+    /// Whether the selected row is a runtime-managed agent session.
     fn selected_is_agent_session(&self) -> bool {
         self.workspace.selected_process().is_some_and(|process| {
             *process.kind() == ProcessKind::Agent && *process.origin() == ProcessOrigin::Session
@@ -1163,230 +1525,15 @@ impl App {
             .collect()
     }
 
-    /// Resolves the exported project path and effective process directory from
-    /// the active config. Relative and absent directories inherit its folder.
-    fn resolve_spawn_paths(
-        current_config: Option<&Path>,
-        configured_working_dir: Option<PathBuf>,
-    ) -> (Option<PathBuf>, Option<PathBuf>) {
-        let project = current_config.map(path::absolutize);
-        let workspace_dir = project
-            .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf);
-        let working_dir = match (workspace_dir, configured_working_dir) {
-            (_, Some(directory)) if directory.is_absolute() => Some(directory),
-            (Some(workspace), Some(directory)) => Some(workspace.join(directory)),
-            (None, Some(directory)) => Some(directory),
-            (Some(workspace), None) => Some(workspace),
-            (None, None) => None,
-        };
-        (project, working_dir)
-    }
-
-    /// Spawns one process, wiring its parser, handle, and output sink. Any prior
-    /// pane for the id is replaced with a fresh session; an absent command
-    /// launches the user's login shell.
-    fn spawn(&mut self, pane: PaneId, command: Option<CommandLine>, cwd: Option<PathBuf>) {
-        let generation = self.bump_generation(pane);
-        let activity = self
-            .workspace
-            .process(pane)
-            .map(ActivityTracker::for_process)
-            .unwrap_or_default();
-        let (project, cwd) = Self::resolve_spawn_paths(self.current_config.as_deref(), cwd);
-        let request = SpawnRequest::builder()
-            .command(command)
-            .working_dir(cwd)
-            .project(project)
-            .size(self.pane_size)
-            .build();
-        let sink = ChannelOutputSink::new(pane, generation, self.events.clone());
-        match self.runner.spawn(request, Box::new(sink)) {
-            Ok(handle) => {
-                let notification_scope = self.allocate_notification_scope();
-                let parser = Parser::new(
-                    self.pane_size.rows().into_inner(),
-                    self.pane_size.cols().into_inner(),
-                    SCROLLBACK_LINES,
-                );
-                self.panes.insert(pane, Pane {
-                    parser,
-                    notification_scope,
-                    signals: SignalReader::new(),
-                    activity,
-                    last_bell: None,
-                    handle: Some(handle),
-                    started_at: Instant::now(),
-                    exit_intent: ExitIntent::FollowPolicy,
-                    shutdown_generation: ShutdownGeneration::initial(),
-                    config_membership: ConfigMembership::Tracked,
-                });
-                self.workspace.set_state(pane, ProcessState::Running);
-                // A fresh child inherits none of the prior generation's activity.
-                self.workspace.set_activity(pane, ActivityState::Idle);
-            },
-            Err(_) => {
-                self.deactivate(pane);
-                // A transient spawn failure must not abandon the restart policy:
-                // stay in the backoff path for always/on_failure, else crash.
-                if self.workspace.should_restart(pane, ExitOutcome::Failed) {
-                    self.workspace.set_state(pane, ProcessState::Restarting);
-                    self.schedule_restart(pane, Instant::now());
-                } else {
-                    self.workspace.set_state(pane, ProcessState::Crashed);
-                }
-            },
-        }
-    }
-
-    /// Bumps and returns a pane's restart generation, invalidating any respawn
-    /// scheduled against an older generation.
-    fn bump_generation(&mut self, pane: PaneId) -> SpawnGeneration {
-        let entry = self
-            .generations
-            .entry(pane)
-            .or_insert_with(SpawnGeneration::initial);
-        *entry = entry.next();
-        *entry
-    }
-
-    /// Advances and returns the graceful shutdown request generation for `pane`,
-    /// invalidating any previously scheduled escalation deadline.
-    fn advance_shutdown_generation(&mut self, pane: PaneId) -> Option<ShutdownGeneration> {
-        let target = self.panes.get_mut(&pane)?;
-        target.shutdown_generation = target.shutdown_generation.next();
-        Some(target.shutdown_generation)
-    }
-
-    /// Allocates an identity that is never reused by another terminal lifetime
-    /// during this application run.
-    fn allocate_notification_scope(&mut self) -> NotificationScope {
-        let scope = self.next_notification_scope;
-        self.next_notification_scope = scope.next();
-        scope
-    }
-
-    /// Drops a pane's live handle but keeps its parser, so the final screen and
-    /// scrollback remain visible after the process exits.
-    fn deactivate(&mut self, pane: PaneId) {
-        if let Some(target) = self.panes.get_mut(&pane) {
-            target.activity.reset();
-            target.handle = None;
-            target.exit_intent = ExitIntent::FollowPolicy;
-        }
-    }
-
-    /// Drops all trace of `pane`: its terminal, generation, restart bookkeeping,
-    /// and workspace entry. Used to retire a process removed from the config.
-    fn retire_pane(&mut self, pane: PaneId) {
-        self.panes.remove(&pane);
-        self.generations.remove(&pane);
-        self.restart_attempts.remove(&pane);
-        self.workspace.remove(pane);
-    }
-
-    /// Handles a process exit: honor a stop, force-restart, back-off restart per
-    /// policy, or record the resting outcome.
-    fn handle_exit(&mut self, pane: PaneId, outcome: ExitOutcome) {
-        let Some((exit_intent, config_membership, started_at)) = self
-            .panes
-            .get(&pane)
-            .map(|p| (p.exit_intent, p.config_membership, p.started_at))
-        else {
-            return;
-        };
-
-        // A process removed from the config while running is retired now that it
-        // has exited, rather than restarting a process that no longer exists.
-        if config_membership == ConfigMembership::RetireOnExit {
-            self.retire_pane(pane);
-            self.advance_pending_switch(pane);
-            return;
-        }
-
-        // The child is gone; drop any attention state so a restart backoff or a
-        // crashed/exited pane never keeps showing the waiting-for-user marker.
-        self.workspace.set_activity(pane, ActivityState::Idle);
-        match exit_intent {
-            ExitIntent::StopRetryable | ExitIntent::StopInFlight => {
-                self.deactivate(pane);
-                self.workspace.set_state(pane, ProcessState::Exited);
-            },
-            ExitIntent::RestartRetryable | ExitIntent::RestartInFlight => {
-                self.restart_attempts.remove(&pane);
-                self.workspace.set_state(pane, ProcessState::Restarting);
-                if let Some((command, cwd)) = self.command_of(pane) {
-                    self.spawn(pane, command, cwd);
-                }
-            },
-            ExitIntent::FollowPolicy if self.workspace.should_restart(pane, outcome) => {
-                self.workspace.set_state(pane, ProcessState::Restarting);
-                self.deactivate(pane);
-                self.schedule_restart(pane, started_at);
-            },
-            ExitIntent::FollowPolicy => {
-                self.deactivate(pane);
-                self.workspace.set_state(pane, exit_state(outcome));
-            },
-        }
-        self.advance_pending_switch(pane);
-    }
-
-    /// Schedules an automatic restart after a backoff, growing the delay for
-    /// repeated fast failures and resetting it after a stable run. The captured
-    /// generation lets a later manual action cancel this respawn.
-    fn schedule_restart(&mut self, pane: PaneId, started_at: Instant) {
-        let attempts = if started_at.elapsed() >= RESTART_STABLE_RUN {
-            0
-        } else {
-            self.restart_attempts.get(&pane).copied().unwrap_or(0)
-        };
-        let delay = (RESTART_BACKOFF_BASE * 2u32.pow(attempts.min(RESTART_BACKOFF_MAX_EXP)))
-            .min(RESTART_BACKOFF_MAX);
-        self.restart_attempts.insert(pane, attempts + 1);
-        let generation = self.bump_generation(pane);
-        let sender = self.events.clone();
-        thread::spawn(move || {
-            thread::sleep(delay);
-            let _ = sender.send(RuntimeEvent::Respawn { pane, generation });
-        });
-    }
-
-    /// Schedules hard-kill escalation for a graceful command stop or restart.
-    /// The generation and exit intent make the event harmless after exit.
-    fn schedule_force_stop(
-        &self,
-        pane: PaneId,
-        spawn_generation: SpawnGeneration,
-        shutdown_generation: ShutdownGeneration,
-        grace_period: Duration,
-    ) {
-        let sender = self.events.clone();
-        thread::spawn(move || {
-            thread::sleep(grace_period);
-            let _ = sender.send(RuntimeEvent::ForceStop {
-                pane,
-                spawn_generation,
-                shutdown_generation,
-            });
-        });
-    }
-
-    /// The launch command and cwd of the process owning `pane`.
-    fn command_of(&self, pane: PaneId) -> Option<(Option<CommandLine>, Option<PathBuf>)> {
-        self.workspace
-            .process(pane)
-            .map(|process| (process.command().clone(), process.working_dir().clone()))
-    }
-
     /// Handles a key: leader chord, command, or forward to the focused pane.
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        // A key press dismisses any transient notice from the previous action.
+        // A key press dismisses any transient notice from the previous action
+        // and, like herdr, any lingering selection state.
         self.notice = None;
+        self.clear_selection();
         match &self.overlay {
             // Help is a read-only reference; any key closes it.
             Some(Overlay::Help) => {
@@ -1403,6 +1550,10 @@ impl App {
             },
             Some(Overlay::Form(_)) => {
                 self.handle_form_key(key);
+                return;
+            },
+            Some(Overlay::AgentPicker(_)) => {
+                self.handle_agent_picker_key(key);
                 return;
             },
             Some(Overlay::Switcher(_)) => {
@@ -1436,6 +1587,7 @@ impl App {
                 self.confirm_remove_selected_project();
             },
             KeyCode::Char('d') => self.confirm_close_selected_session(),
+            KeyCode::Char('u') => self.reopen_last_closed_session(),
             KeyCode::Char('t') if self.project_cursor.is_none() => self.toggle_selected_autostart(),
             KeyCode::Char('s') if self.project_cursor.is_none() => self.toggle_selected(),
             KeyCode::Char('r') if self.project_cursor.is_none() => self.restart_selected(),
@@ -1585,7 +1737,7 @@ impl App {
         self.confirm_remove_project(&project, message);
     }
 
-    /// Confirms closing the selected disposable agent session. A configured
+    /// Confirms closing the selected runtime agent session. A configured
     /// agent remains pinned because its lifecycle is owned by `muster.yml`.
     fn confirm_close_selected_session(&mut self) {
         let Some(process) = self.workspace.selected_process() else {
@@ -1611,17 +1763,24 @@ impl App {
         }
     }
 
-    /// Force-kills and retires one disposable agent session. Its row disappears
-    /// when the child exit event arrives, or immediately when already stopped.
-    /// Focus returns to the sidebar before selection can move to another row.
+    /// Force-kills one runtime agent session and records it closed only after
+    /// stop delivery succeeds. Its row retires on exit, or immediately when it
+    /// was already stopped, with focus returned to the sidebar first.
     fn close_agent_session(&mut self, pane: PaneId) {
         self.focus = Focus::Sidebar;
+        let session_id = self
+            .workspace
+            .process(pane)
+            .and_then(|process| process.agent_session_id().clone());
         let alive = self
             .panes
             .get(&pane)
             .is_some_and(|target| target.handle.is_some());
         if !alive {
-            self.retire_pane(pane);
+            if self.persist_agent_session_state(session_id.as_ref(), AgentSessionState::Closed) {
+                self.pending_session_reopens.remove(&pane);
+                self.retire_pane(pane);
+            }
             return;
         }
         let delivered = self
@@ -1629,14 +1788,36 @@ impl App {
             .get_mut(&pane)
             .and_then(|target| target.handle.as_mut().map(|handle| handle.kill().is_ok()))
             .unwrap_or(false);
-        if delivered {
-            if let Some(target) = self.panes.get_mut(&pane) {
-                target.config_membership = ConfigMembership::RetireOnExit;
-            }
-            self.workspace.set_state(pane, ProcessState::Stopping);
-        } else {
+        if !delivered {
             self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            return;
         }
+        self.workspace.set_state(pane, ProcessState::Stopping);
+        if !self.persist_agent_session_state(session_id.as_ref(), AgentSessionState::Closed) {
+            return;
+        }
+        self.pending_session_reopens.remove(&pane);
+        if let Some(target) = self.panes.get_mut(&pane) {
+            target.config_membership = ConfigMembership::RetireOnExit;
+        }
+    }
+
+    /// Persists one session lifecycle transition and exposes adapter failures
+    /// without allowing the in-memory transition to continue.
+    fn persist_agent_session_state(
+        &mut self,
+        session_id: Option<&AgentSessionId>,
+        state: AgentSessionState,
+    ) -> bool {
+        let (Some(store), Some(session_id)) = (&self.agent_session_store, session_id) else {
+            return true;
+        };
+        if let Err(error) = store.set_state(session_id, state) {
+            self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+            self.overlay = None;
+            return false;
+        }
+        true
     }
 
     /// Whether `project` is the unsaved launched-project row synthesized for the
@@ -1666,7 +1847,7 @@ impl App {
         }
         let pane = *process.id();
         let autostart = !*process.autostart();
-        let target = SpecMatch::of(process);
+        let target = ProcessSpecMatcher::of(process);
         let occurrence = self
             .workspace
             .processes()
@@ -1740,72 +1921,10 @@ impl App {
             KeyCode::Char('o') => self.open_switcher(),
             KeyCode::Char('x') => self.force_stop_selected(),
             KeyCode::Char('d') => self.confirm_close_selected_session(),
+            KeyCode::Char('u') => self.reopen_last_closed_session(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
         }
-    }
-
-    /// Toggles the selected process: stop it if alive, start it if not.
-    fn toggle_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        if self.panes.get(&pane).is_some_and(|p| p.handle.is_some()) {
-            self.stop_selected();
-        } else {
-            self.start_selected();
-        }
-    }
-
-    /// Starts the selected process if it is not currently running.
-    fn start_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        if let Some((command, cwd)) = self.command_of(pane) {
-            self.spawn(pane, command, cwd);
-        }
-    }
-
-    /// Toggles the selected process between paused and running via SIGSTOP and
-    /// SIGCONT. Ignores absent children and panes already stopping or restarting.
-    fn toggle_pause_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        let is_paused = self
-            .workspace
-            .process(pane)
-            .is_some_and(|process| *process.state() == ProcessState::Paused);
-        let now_paused = {
-            let Some(target) = self.panes.get_mut(&pane) else {
-                return;
-            };
-            if target.exit_intent != ExitIntent::FollowPolicy {
-                return;
-            }
-            let Some(handle) = target.handle.as_mut() else {
-                return;
-            };
-            let next = !is_paused;
-            let signalled = if next {
-                handle.pause()
-            } else {
-                handle.resume()
-            };
-            // A failed signal leaves the child unchanged: do not advertise a
-            // transition that did not happen.
-            if signalled.is_err() {
-                return;
-            }
-            next
-        };
-        let state = if now_paused {
-            ProcessState::Paused
-        } else {
-            ProcessState::Running
-        };
-        self.workspace.set_state(pane, state);
     }
 
     /// Opens the project switcher, reloading the registry so on-disk edits are
@@ -1872,13 +1991,101 @@ impl App {
         self.open_form(form, FormIntent::ChooseProcessKind);
     }
 
-    /// Opens the disposable agent-session form with a tool preset, optional
-    /// display name, and optional command override.
-    fn open_agent_session_form(&mut self) {
+    /// Opens the quick agent picker with resumable history and fresh presets.
+    fn open_agent_picker(&mut self) {
+        let project = self.current_config.clone();
+        let (mut items, error) = match self.agent_sessions() {
+            Ok(sessions) => (
+                sessions
+                    .into_iter()
+                    .rev()
+                    .filter(|session| {
+                        *session.state() == AgentSessionState::Closed
+                            && session.restore_command().is_some()
+                            && project.as_ref().is_some_and(|project| {
+                                Self::same_config_location(session.project(), project)
+                            })
+                    })
+                    .take(RECENT_AGENT_LIMIT)
+                    .map(Box::new)
+                    .map(AgentPickerItem::Recent)
+                    .collect::<Vec<_>>(),
+                None,
+            ),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        items.extend(AgentTool::options().map(AgentPickerItem::New));
+        self.overlay = Some(Overlay::AgentPicker(AgentPicker {
+            items,
+            selected: 0,
+            error,
+        }));
+    }
+
+    /// Handles navigation, quick launch, customization, and cancel in the agent
+    /// picker.
+    fn handle_agent_picker_key(&mut self, key: KeyEvent) {
+        let Some(Overlay::AgentPicker(picker)) = &self.overlay else {
+            return;
+        };
+        let count = picker.items.len();
+        let selected = picker.selected;
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Char('j') | KeyCode::Down if count > 0 => {
+                if let Some(Overlay::AgentPicker(picker)) = &mut self.overlay {
+                    picker.selected = (selected + 1) % count;
+                }
+            },
+            KeyCode::Char('k') | KeyCode::Up if count > 0 => {
+                if let Some(Overlay::AgentPicker(picker)) = &mut self.overlay {
+                    picker.selected = selected.checked_sub(1).unwrap_or(count - 1);
+                }
+            },
+            KeyCode::Enter => {
+                let item = match &self.overlay {
+                    Some(Overlay::AgentPicker(picker)) => picker.items.get(selected).cloned(),
+                    _ => None,
+                };
+                match item {
+                    Some(AgentPickerItem::Recent(session)) => {
+                        self.overlay = None;
+                        self.reopen_agent_session(session.id());
+                    },
+                    Some(AgentPickerItem::New(AgentTool::Custom)) => {
+                        self.open_agent_session_form(AgentTool::Custom);
+                    },
+                    Some(AgentPickerItem::New(tool)) => {
+                        self.overlay = None;
+                        self.create_agent_session(tool, None, None, None);
+                    },
+                    None => {},
+                }
+            },
+            KeyCode::Char('e') => {
+                let tool = match &self.overlay {
+                    Some(Overlay::AgentPicker(picker)) => picker.items.get(selected),
+                    _ => None,
+                };
+                if let Some(AgentPickerItem::New(tool)) = tool {
+                    self.open_agent_session_form(*tool);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    /// Opens advanced customization for a fresh agent provider.
+    fn open_agent_session_form(&mut self, tool: AgentTool) {
+        let tool_options = AgentTool::options()
+            .map(|tool| tool.to_string())
+            .collect::<Vec<_>>();
+        let tool_option_refs = tool_options.iter().map(String::as_str).collect::<Vec<_>>();
         let form = Form::new(ADD_AGENT_TITLE, vec![
-            Field::choice(TOOL_FIELD, &AgentTool::OPTIONS),
+            Field::choice_value(TOOL_FIELD, &tool_option_refs, tool.as_ref()),
             Field::text(SESSION_NAME_FIELD),
             Field::text(AGENT_COMMAND_FIELD),
+            Field::text(AGENT_RESUME_FIELD),
         ]);
         self.open_form(form, FormIntent::LaunchAgentSession);
     }
@@ -2151,12 +2358,16 @@ impl App {
         }
     }
 
-    /// Reports an error on the active form or project switcher.
+    /// Reports an error in the active modal, falling back to a status notice.
     fn report_error(&mut self, message: &str) {
         if let Some(modal) = self.form_mut() {
             modal.error = Some(message.to_string());
         } else if let Some(switcher) = self.switcher_mut() {
             switcher.error = Some(message.to_string());
+        } else if let Some(Overlay::AgentPicker(picker)) = &mut self.overlay {
+            picker.error = Some(message.to_string());
+        } else {
+            self.notice = Some(message.to_string());
         }
     }
 
@@ -2190,14 +2401,14 @@ impl App {
     /// Advances the add flow to the selected kind's specific form.
     fn choose_process_kind(&mut self, values: &[String]) {
         match values.first().map(String::as_str) {
-            Some(KIND_AGENT) => self.open_agent_session_form(),
+            Some(KIND_AGENT) => self.open_agent_picker(),
             Some(KIND_TERMINAL) => self.open_configured_process_form(ProcessKind::Terminal),
             Some(KIND_COMMAND) => self.open_configured_process_form(ProcessKind::Command),
             _ => {},
         }
     }
 
-    /// Launches a disposable coding-agent session without modifying `muster.yml`.
+    /// Launches a durable coding-agent session without modifying `muster.yml`.
     fn launch_agent_session(&mut self, values: &[String]) {
         let (Some(tool), Some(name), Some(command)) =
             (values.first(), values.get(1), values.get(2))
@@ -2208,41 +2419,255 @@ impl App {
             return;
         };
         let name = if name.trim().is_empty() {
-            tool.label()
+            None
         } else {
-            name.trim()
-        };
-        let Ok(name) = ProcessName::try_new(name) else {
-            return;
+            ProcessName::try_new(name).ok()
         };
         let command = if command.trim().is_empty() {
-            let Some(command) = tool.default_command() else {
-                self.report_error(AGENT_COMMAND_REQUIRED);
-                return;
-            };
-            command
+            None
         } else {
-            command.trim()
+            CommandLine::try_new(command).ok()
         };
-        let Ok(command) = CommandLine::try_new(command) else {
+        let resume = values.get(3).and_then(|resume| {
+            (!resume.trim().is_empty())
+                .then(|| CommandLine::try_new(resume))
+                .and_then(Result::ok)
+        });
+        self.create_agent_session(tool, name, command, resume);
+    }
+
+    /// Creates, persists, launches, and attaches a new agent conversation.
+    fn create_agent_session(
+        &mut self,
+        tool: AgentTool,
+        name: Option<ProcessName>,
+        command: Option<CommandLine>,
+        resume_command: Option<CommandLine>,
+    ) {
+        if resume_command
+            .as_ref()
+            .is_some_and(|template| !AgentSession::resume_template_is_valid(template))
+        {
+            self.report_error(AGENT_RESUME_TEMPLATE_INVALID);
+            return;
+        }
+        let Some(project) = self.current_config.clone() else {
             return;
         };
+        let command = match command.or_else(|| {
+            tool.default_command()
+                .and_then(|command| CommandLine::try_new(command).ok())
+        }) {
+            Some(command) => command,
+            None => {
+                self.report_error(AGENT_COMMAND_REQUIRED);
+                return;
+            },
+        };
+        if resume_command.is_none() {
+            let Ok(validation_id) = NativeSessionId::try_new(RESUME_VALIDATION_ID) else {
+                self.report_error(AGENT_SESSION_STORE_ERROR);
+                return;
+            };
+            if tool != AgentTool::Custom && tool.resume_command(&command, &validation_id).is_none()
+            {
+                self.report_error(AGENT_COMPOUND_RESUME_REQUIRED);
+                return;
+            }
+        }
+        let Ok(id) = AgentSessionId::generate() else {
+            self.report_error(AGENT_SESSION_STORE_ERROR);
+            return;
+        };
+        let name = match name.or_else(|| self.generated_agent_name(tool, &id)) {
+            Some(name) => name,
+            None => {
+                self.report_error(AGENT_SESSION_STORE_ERROR);
+                return;
+            },
+        };
+        let Some(launch_command) = tool.new_session_command(&command, &id) else {
+            self.report_error(AGENT_COMMAND_REQUIRED);
+            return;
+        };
+        let session = AgentSession::builder()
+            .id(id.clone())
+            .name(name)
+            .tool(tool)
+            .project(project)
+            .launch_command(command.clone())
+            .resume_command(resume_command)
+            .state(AgentSessionState::Pending)
+            .build();
+        if let Some(store) = &self.agent_session_store
+            && let Err(error) = store.upsert(&session)
+        {
+            self.report_error(&format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+            return;
+        }
+        self.insert_agent_session(
+            &session,
+            AgentSessionActivation::StartAttached(launch_command),
+        );
+    }
+
+    /// Generates a friendly non-identifying name, avoiding active-row
+    /// collisions when possible and falling back to the provider plus UUID.
+    fn generated_agent_name(&self, tool: AgentTool, id: &AgentSessionId) -> Option<ProcessName> {
+        for _ in 0..GENERATED_NAME_ATTEMPTS {
+            let generated: String = FirstName().fake();
+            if let Ok(name) = ProcessName::try_new(generated)
+                && !self
+                    .workspace
+                    .processes()
+                    .iter()
+                    .any(|process| process.name() == &name)
+            {
+                return Some(name);
+            }
+        }
+        let suffix: String = id.as_ref().chars().take(8).collect();
+        ProcessName::try_new(format!("{tool} {suffix}")).ok()
+    }
+
+    /// Inserts one persisted session as a process, applying its requested
+    /// stopped, detached-start, or attached-start activation.
+    fn insert_agent_session(&mut self, session: &AgentSession, activation: AgentSessionActivation) {
+        if let Some(process) = self
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.agent_session_id().as_ref() == Some(session.id()))
+        {
+            let pane = *process.id();
+            if let Some(index) = self.workspace.position_of(pane) {
+                self.workspace.select_at(index);
+            }
+            if let Some(command) = activation.command().cloned()
+                && self
+                    .panes
+                    .get(&pane)
+                    .is_none_or(|pane| pane.handle.is_none())
+            {
+                self.spawn(pane, Some(command), session.working_dir().clone());
+            }
+            if activation.should_attach() {
+                self.focus = Focus::Terminal;
+            }
+            return;
+        }
         let pane = self.next_pane_id();
         let process = Process::builder()
             .id(pane)
-            .name(name)
+            .name(session.name().clone())
             .kind(ProcessKind::Agent)
-            .agent_tool(Some(tool))
+            .agent_tool(Some(*session.tool()))
+            .agent_session_id(Some(session.id().clone()))
             .origin(ProcessOrigin::Session)
-            .command(Some(command.clone()))
-            .autostart(false)
+            .command(activation.command().cloned())
+            .working_dir(session.working_dir().clone())
+            .autostart(activation.command().is_some())
             .build();
         let selected = self.workspace.insert_in_section(process);
         self.workspace.select_at(selected);
         self.project_cursor = None;
         self.overlay = None;
-        self.spawn(pane, Some(command), None);
-        self.focus = Focus::Terminal;
+        if let Some(command) = activation.command().cloned() {
+            self.spawn(pane, Some(command), session.working_dir().clone());
+        }
+        if activation.should_attach() {
+            self.focus = Focus::Terminal;
+        }
+    }
+
+    /// Reopens a persisted session by ID with its provider-native command.
+    fn reopen_agent_session(&mut self, id: &AgentSessionId) {
+        if self.pending_switch.is_some() {
+            self.notice = Some(PROJECT_SWITCH_IN_PROGRESS.to_string());
+            return;
+        }
+        let session = match self.agent_sessions() {
+            Ok(sessions) => sessions.into_iter().find(|session| session.id() == id),
+            Err(error) => {
+                self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                return;
+            },
+        };
+        let Some(session) = session else {
+            self.notice = Some(NO_RECENT_AGENT_SESSION.to_string());
+            return;
+        };
+        let Some(command) = session.restore_command() else {
+            self.notice = Some(AGENT_SESSION_NOT_RESUMABLE.to_string());
+            return;
+        };
+        if let Some(store) = &self.agent_session_store
+            && let Err(error) = store.set_state(session.id(), AgentSessionState::Open)
+        {
+            self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+            return;
+        }
+        let closing = self.workspace.processes().iter().find_map(|process| {
+            (process.agent_session_id().as_ref() == Some(session.id()))
+                .then_some(*process.id())
+                .filter(|pane| {
+                    self.panes.get(pane).is_some_and(|target| {
+                        target.handle.is_some()
+                            && target.config_membership == ConfigMembership::RetireOnExit
+                    })
+                })
+        });
+        if let Some(pane) = closing {
+            self.pending_session_reopens
+                .insert(pane, session.id().clone());
+            return;
+        }
+        self.insert_agent_session(&session, AgentSessionActivation::StartAttached(command));
+    }
+
+    /// Reopens the newest closed resumable session owned by this workspace.
+    fn reopen_last_closed_session(&mut self) {
+        let Some(project) = self.current_config.as_ref() else {
+            return;
+        };
+        let sessions = match self.agent_sessions() {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                return;
+            },
+        };
+        let belongs_to_project = |session: &AgentSession| {
+            *session.state() == AgentSessionState::Closed
+                && Self::same_config_location(session.project(), project)
+        };
+        let has_closed = sessions.iter().any(&belongs_to_project);
+        let session = sessions
+            .iter()
+            .rev()
+            .filter(|session| belongs_to_project(session))
+            .find(|session| session.restore_command().is_some());
+        let Some(session) = session else {
+            self.notice = Some(
+                if has_closed {
+                    AGENT_SESSION_NOT_RESUMABLE
+                } else {
+                    NO_RECENT_AGENT_SESSION
+                }
+                .to_string(),
+            );
+            return;
+        };
+        let id = session.id().clone();
+        self.reopen_agent_session(&id);
+    }
+
+    /// Loads durable session history, returning an empty list in test or custom
+    /// compositions that deliberately omit the store.
+    fn agent_sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
+        self.agent_session_store
+            .as_ref()
+            .map_or_else(|| Ok(Vec::new()), |store| store.sessions())
     }
 
     /// Returns a pane id unused by configured and runtime processes.
@@ -2258,7 +2683,7 @@ impl App {
     }
 
     /// Adds a persistent terminal or command and reconciles it in place without
-    /// interrupting existing configured processes or disposable sessions.
+    /// interrupting existing configured processes or agent sessions.
     fn add_configured_process(&mut self, kind: ProcessKind, values: &[String]) {
         if kind == ProcessKind::Agent {
             return;
@@ -2282,7 +2707,7 @@ impl App {
             }
         };
         let spec = ProcessSpec::builder().name(name).command(command).build();
-        let target = SpecMatch::of_spec(kind, &spec);
+        let target = ProcessSpecMatcher::of_spec(kind, &spec);
         // Route through the registry's locked read-modify-write, the same one
         // `muster run` uses, so an overlapping CLI add and this add cannot
         // silently discard each other.
@@ -2341,7 +2766,7 @@ impl App {
     /// spec identity after reconciliation.
     fn configured_process_for_spec_occurrence(
         &self,
-        target: &SpecMatch,
+        target: &ProcessSpecMatcher,
         occurrence: usize,
     ) -> Option<&Process> {
         self.workspace
@@ -2406,330 +2831,25 @@ impl App {
         }
     }
 
-    /// Switches to the project at `index`: on success loads its workspace in
-    /// place, otherwise surfaces the failure and keeps the overlay open.
-    fn switch_to(&mut self, index: usize) {
-        let Some(project) = self
-            .switcher()
-            .and_then(|switcher| switcher.projects.get(index))
-            .cloned()
-        else {
-            return;
-        };
-        let config_path = match path::registered_config_path(&project) {
-            Ok(config_path) => config_path,
-            Err(error) => {
-                if let Some(switcher) = self.switcher_mut() {
-                    switcher.selected = index;
-                    switcher.error = Some(error.to_string());
-                }
-                return;
-            },
-        };
-        match self.registry.workspace(&config_path) {
-            Ok(config) => {
-                self.begin_switch(config, config_path);
-                self.overlay = None;
-            },
-            Err(err) if self.registry.workspace_exists(&config_path) => {
-                if let Some(switcher) = self.switcher_mut() {
-                    switcher.selected = index;
-                    switcher.error = Some(err.to_string());
-                }
-            },
-            // The file is gone: close the switcher and offer to remove the stale
-            // entry, the same one-step flow as from the sidebar tree.
-            Err(err) => self.report_project_open_failure(&project, &err),
-        }
-    }
-
-    /// Begins switching to `config`: kills the current children and defers the
-    /// load until they all report exit, so the replacement processes never race
-    /// the old ones for ports or other resources. Loads at once when nothing is
-    /// running. The children receive stop intent so their exits do not restart.
-    fn begin_switch(&mut self, config: WorkspaceConfig, config_path: PathBuf) {
-        let live: HashSet<PaneId> = self
-            .panes
-            .iter()
-            .filter(|(_, pane)| pane.handle.is_some())
-            .map(|(id, _)| *id)
-            .collect();
-        if live.is_empty() {
-            self.load_project(config, config_path);
-            return;
-        }
-        for pane in &live {
-            if let Some(target) = self.panes.get_mut(pane)
-                && let Some(handle) = target.handle.as_mut()
-            {
-                target.exit_intent = target.exit_intent.request_stop();
-                if handle.kill().is_ok() {
-                    target.exit_intent = target.exit_intent.stop_delivered();
-                }
-            }
-        }
-        self.pending_switch = Some(PendingSwitch {
-            config,
-            config_path,
-            waiting: live,
-        });
-    }
-
-    /// Removes `pane` from a deferred switch's wait set and, once every old child
-    /// has exited, loads the pending project.
-    fn advance_pending_switch(&mut self, pane: PaneId) {
-        let ready = match self.pending_switch.as_mut() {
-            Some(pending) => {
-                pending.waiting.remove(&pane);
-                pending.waiting.is_empty()
-            },
-            None => return,
-        };
-        if ready && let Some(pending) = self.pending_switch.take() {
-            // Reload from disk: an edit or `muster run --project ...` targeting
-            // the destination during the wait happened before its watcher was
-            // installed, so the snapshot read at begin_switch time may be stale.
-            let config = self
-                .registry
-                .workspace(&pending.config_path)
-                .unwrap_or(pending.config);
-            self.load_project(config, pending.config_path);
-        }
-    }
-
-    /// Tears down the current project and starts `config` in its place. The
-    /// generation map is kept so late output from the killed children is
-    /// discarded as stale once the new panes bump their generations.
-    fn load_project(&mut self, config: WorkspaceConfig, config_path: PathBuf) {
-        for pane in self.panes.values_mut() {
-            if let Some(handle) = pane.handle.as_mut() {
-                let _ = handle.kill();
-            }
-        }
-        self.panes.clear();
-        self.restart_attempts.clear();
-        self.workspace = Workspace::builder()
-            .processes(config.to_processes())
-            .build();
-        self.current_config = Some(path::absolutize(&config_path));
-        self.focus = Focus::Sidebar;
-        self.rewatch_config();
-        self.start();
-    }
-
-    /// Whether two config paths name the same stored location after home
-    /// expansion, without resolving symlinks or anchoring legacy relative paths.
-    fn same_config_location(left: &Path, right: &Path) -> bool {
-        let left = path::expand_home(left);
-        let right = path::expand_home(right);
-        left.is_absolute() == right.is_absolute() && left == right
-    }
-
-    /// Index of the active project by its stored location. Symlink aliases are
-    /// separate workspaces because their parent directories affect spawning.
-    fn current_project_index(&self, projects: &[Project]) -> Option<usize> {
-        let current = self.current_config.as_deref()?;
-        projects
-            .iter()
-            .position(|project| Self::same_config_location(project.config(), current))
-    }
-
     /// Forwards an encoded key to the focused pane's PTY, if it is alive.
+    /// Typing snaps a scrolled-back view down to the live screen first.
     fn forward_key(&mut self, key: KeyEvent) {
         let Some(bytes) = input::encode_key(key) else {
             return;
         };
         if let Some(pane) = self.selected_pane()
             && let Some(target) = self.panes.get_mut(&pane)
-            && let Some(handle) = target.handle.as_mut()
         {
-            let _ = handle.write_input(&bytes);
+            target.parser.screen_mut().set_scrollback(0);
+            if let Some(handle) = target.handle.as_mut() {
+                let _ = handle.write_input(&bytes);
+            }
         }
-    }
-
-    /// Restarts the selected process regardless of its restart policy. A command
-    /// with a stop policy exits gracefully first; every other live process is
-    /// killed immediately, and a finished process respawns at once.
-    fn restart_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
-        if alive {
-            if self
-                .panes
-                .get(&pane)
-                .is_some_and(|target| !target.exit_intent.accepts_restart_request())
-            {
-                return;
-            }
-            let policy = self.stop_policy_of(pane);
-            let spawn_generation = self.generations.get(&pane).copied();
-            let shutdown_generation = self.advance_shutdown_generation(pane);
-            let mut awaiting_grace = None;
-            let mut used_fallback = false;
-            let mut delivered = false;
-            if let Some(target) = self.panes.get_mut(&pane) {
-                // Supersede a still-pending stop so the newer restart intent wins
-                // when the exit lands.
-                target.exit_intent = target.exit_intent.request_restart();
-                if let Some(handle) = target.handle.as_mut() {
-                    delivered = if let Some(policy) = &policy {
-                        match handle.terminate(*policy.signal(), *policy.grace_period()) {
-                            Ok(()) => {
-                                awaiting_grace = Some(*policy.grace_period());
-                                true
-                            },
-                            Err(_) => {
-                                used_fallback = true;
-                                handle.kill().is_ok()
-                            },
-                        }
-                    } else {
-                        handle.kill().is_ok()
-                    };
-                    target.exit_intent = if delivered {
-                        target.exit_intent.restart_delivered()
-                    } else {
-                        target.exit_intent.restart_delivery_failed()
-                    };
-                }
-            }
-            if delivered {
-                self.workspace.set_state(pane, ProcessState::Stopping);
-                if used_fallback {
-                    self.notice = Some(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
-                }
-            } else {
-                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
-            }
-            if let (Some(grace_period), Some(spawn_generation), Some(shutdown_generation)) =
-                (awaiting_grace, spawn_generation, shutdown_generation)
-            {
-                self.schedule_force_stop(pane, spawn_generation, shutdown_generation, grace_period);
-            }
-        } else if let Some((command, cwd)) = self.command_of(pane) {
-            self.spawn(pane, command, cwd);
-        }
-    }
-
-    /// Stops the selected process without respawning it. Repeated requests reuse
-    /// a successfully delivered request, while failed delivery remains retryable.
-    fn stop_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        if self.panes.get(&pane).is_some_and(|target| {
-            target.handle.is_some() && !target.exit_intent.accepts_stop_request()
-        }) {
-            return;
-        }
-        let alive = self.panes.get(&pane).is_some_and(|p| p.handle.is_some());
-        if alive {
-            let policy = self.stop_policy_of(pane);
-            let spawn_generation = self.generations.get(&pane).copied();
-            let shutdown_generation = self.advance_shutdown_generation(pane);
-            let mut awaiting_grace = None;
-            let mut used_fallback = false;
-            let mut delivered = false;
-            if let Some(target) = self.panes.get_mut(&pane) {
-                target.exit_intent = target.exit_intent.request_stop();
-                if let Some(handle) = target.handle.as_mut() {
-                    delivered = if let Some(policy) = &policy {
-                        match handle.terminate(*policy.signal(), *policy.grace_period()) {
-                            Ok(()) => {
-                                awaiting_grace = Some(*policy.grace_period());
-                                true
-                            },
-                            Err(_) => {
-                                used_fallback = true;
-                                handle.kill().is_ok()
-                            },
-                        }
-                    } else {
-                        handle.kill().is_ok()
-                    };
-                    if delivered {
-                        target.exit_intent = target.exit_intent.stop_delivered();
-                    } else {
-                        target.exit_intent = target.exit_intent.stop_delivery_failed();
-                    }
-                }
-            }
-            if delivered {
-                self.workspace.set_state(pane, ProcessState::Stopping);
-                if used_fallback {
-                    self.notice = Some(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
-                }
-            } else {
-                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
-            }
-            if let (Some(grace_period), Some(spawn_generation), Some(shutdown_generation)) =
-                (awaiting_grace, spawn_generation, shutdown_generation)
-            {
-                self.schedule_force_stop(pane, spawn_generation, shutdown_generation, grace_period);
-            }
-        } else {
-            // No child will exit here; cancel the pending respawn and stop now.
-            self.bump_generation(pane);
-            self.deactivate(pane);
-            self.workspace.set_state(pane, ProcessState::Exited);
-        }
-    }
-
-    /// Immediately force-kills the selected process without consulting its stop
-    /// policy. A finished process remains stopped and any pending respawn is
-    /// cancelled.
-    fn force_stop_selected(&mut self) {
-        let Some(pane) = self.selected_pane() else {
-            return;
-        };
-        let alive = self
-            .panes
-            .get(&pane)
-            .is_some_and(|target| target.handle.is_some());
-        if alive {
-            self.advance_shutdown_generation(pane);
-            let mut delivered = false;
-            if let Some(target) = self.panes.get_mut(&pane) {
-                target.exit_intent = target.exit_intent.request_stop();
-                if let Some(handle) = target.handle.as_mut() {
-                    delivered = handle.kill().is_ok();
-                    target.exit_intent = if delivered {
-                        target.exit_intent.stop_delivered()
-                    } else {
-                        target.exit_intent.stop_delivery_failed()
-                    };
-                }
-            }
-            if delivered {
-                self.workspace.set_state(pane, ProcessState::Stopping);
-            } else {
-                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
-            }
-        } else {
-            self.bump_generation(pane);
-            self.deactivate(pane);
-            self.workspace.set_state(pane, ProcessState::Exited);
-        }
-    }
-
-    /// Returns the selected command's configured or default shutdown policy.
-    fn stop_policy_of(&self, pane: PaneId) -> Option<StopPolicy> {
-        self.workspace
-            .process(pane)
-            .and_then(Process::effective_stop_policy)
-    }
-
-    /// The pane id of the currently selected process.
-    fn selected_pane(&self) -> Option<PaneId> {
-        self.workspace
-            .selected_process()
-            .map(|process| *process.id())
     }
 
     /// Resizes every live pane's PTY and parser to match `area`.
     fn resize(&mut self, area: Rect) {
+        self.frame_area = area;
         self.pane_size = pane_size_of(area);
         let rows = self.pane_size.rows().into_inner();
         let cols = self.pane_size.cols().into_inner();
@@ -2765,121 +2885,6 @@ fn completion_worker(
         {
             break;
         }
-    }
-}
-
-/// Identifies a process's config spec by its full resolved identity: the same
-/// tuple reconciliation matches on, including the effective autostart. Matching
-/// on the resolved autostart is what distinguishes a spec from an otherwise
-/// identical sibling once one of them is edited, so the right spec is found
-/// regardless of the process's row position after a reconcile.
-struct SpecMatch {
-    kind: ProcessKind,
-    name: ProcessName,
-    command: Option<CommandLine>,
-    working_dir: Option<PathBuf>,
-    description: Option<Description>,
-    restart: RestartPolicy,
-    stop: Option<StopPolicy>,
-    autostart: bool,
-}
-
-impl SpecMatch {
-    /// Builds the resolved identity of `spec` within its config section.
-    fn of_spec(kind: ProcessKind, spec: &ProcessSpec) -> Self {
-        Self {
-            kind,
-            name: spec.name().clone(),
-            command: spec.command().clone(),
-            working_dir: spec.working_dir().clone(),
-            description: spec.description().clone(),
-            restart: spec.restart_policy(),
-            stop: spec.effective_stop_policy(kind),
-            autostart: spec.should_autostart(kind),
-        }
-    }
-
-    /// The match key for `process`'s config spec, taken from its current state.
-    fn of(process: &Process) -> Self {
-        Self {
-            kind: *process.kind(),
-            name: process.name().clone(),
-            command: process.command().clone(),
-            working_dir: process.working_dir().clone(),
-            description: process.description().clone(),
-            restart: *process.restart(),
-            stop: process.effective_stop_policy(),
-            autostart: *process.autostart(),
-        }
-    }
-
-    /// Whether `spec` resolves to the same identity as the identified process.
-    fn matches(&self, spec: &ProcessSpec) -> bool {
-        spec.name() == &self.name
-            && spec.command() == &self.command
-            && spec.working_dir() == &self.working_dir
-            && spec.description() == &self.description
-            && spec.restart_policy() == self.restart
-            && spec.effective_stop_policy(self.kind) == self.stop
-            && spec.should_autostart(self.kind) == self.autostart
-    }
-
-    /// Whether `process` shares this full identity. Used to count which of any
-    /// identical rows the selected one is, so the same-numbered identical spec is
-    /// edited (identical specs are the only case where more than one can match).
-    fn matches_process(&self, process: &Process) -> bool {
-        *process.kind() == self.kind
-            && process.name() == &self.name
-            && process.command() == &self.command
-            && process.working_dir() == &self.working_dir
-            && process.description() == &self.description
-            && *process.restart() == self.restart
-            && process.effective_stop_policy() == self.stop
-            && *process.autostart() == self.autostart
-    }
-
-    /// Returns `config` with the autostart of the `occurrence`-th matching spec
-    /// set to `autostart`, plus whether that spec existed. Identical specs are
-    /// numbered so the selected live row maps back to the same config row.
-    fn with_autostart(
-        &self,
-        config: WorkspaceConfig,
-        occurrence: usize,
-        autostart: Option<bool>,
-    ) -> (WorkspaceConfig, bool) {
-        let mut seen = 0;
-        let mut edited = false;
-        let mut apply = |specs: &[ProcessSpec]| -> Vec<ProcessSpec> {
-            specs
-                .iter()
-                .map(|spec| {
-                    if self.matches(spec) {
-                        let hit = seen == occurrence;
-                        seen += 1;
-                        if hit {
-                            edited = true;
-                            return spec.clone().with_autostart(autostart);
-                        }
-                    }
-                    spec.clone()
-                })
-                .collect()
-        };
-        let config = match self.kind {
-            ProcessKind::Agent => {
-                let specs = apply(config.agents());
-                config.with_agents(specs)
-            },
-            ProcessKind::Terminal => {
-                let specs = apply(config.terminals());
-                config.with_terminals(specs)
-            },
-            ProcessKind::Command => {
-                let specs = apply(config.commands());
-                config.with_commands(specs)
-            },
-        };
-        (config, edited)
     }
 }
 
@@ -2921,14 +2926,6 @@ fn pane_size_of(area: Rect) -> PtySize {
         .build()
 }
 
-/// Maps an exit outcome to the resting lifecycle state.
-fn exit_state(outcome: ExitOutcome) -> ProcessState {
-    match outcome {
-        ExitOutcome::Succeeded => ProcessState::Exited,
-        ExitOutcome::Failed => ProcessState::Crashed,
-    }
-}
-
 /// A starter workspace for a new project: a single terminal running the login
 /// shell, so the project is immediately usable.
 fn starter_config() -> WorkspaceConfig {
@@ -2955,11 +2952,13 @@ mod tests {
     };
 
     use crossbeam_channel::bounded;
+    use crossterm::event::{MouseButton, MouseEventKind};
 
     use super::*;
     use crate::{
-        adapter::tui::activity::OUTPUT_IDLE_TIMEOUT,
+        adapter::{process_identity::LocalProcessIdentity, tui::activity::OUTPUT_IDLE_TIMEOUT},
         domain::{
+            agent_session::{AgentProcessId, AgentProcessStartToken, NativeSessionId},
             config::{ConfigError, ProcessSpec},
             port::OutputSink,
             process::{Process, ProcessKind, RestartPolicy, StopSignal},
@@ -2991,6 +2990,196 @@ mod tests {
     struct Recorder {
         projects: Rc<RefCell<Option<Vec<Project>>>>,
         workspaces: Rc<RefCell<Vec<(PathBuf, WorkspaceConfig)>>>,
+    }
+
+    /// Shared in-memory durable state for agent-session lifecycle tests.
+    #[derive(Clone, Default)]
+    struct SessionRecorder {
+        sessions: Rc<RefCell<Vec<AgentSession>>>,
+    }
+
+    /// An agent-session store with the same history ordering semantics as the
+    /// YAML adapter, without touching platform state during TUI tests.
+    struct FakeAgentSessionStore {
+        recorder: SessionRecorder,
+    }
+
+    impl AgentSessionStore for FakeAgentSessionStore {
+        fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
+            Ok(self.recorder.sessions.borrow().clone())
+        }
+
+        fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
+            Ok(None)
+        }
+
+        fn upsert(&self, session: &AgentSession) -> Result<(), ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            sessions.retain(|candidate| candidate.id() != session.id());
+            sessions.push(session.clone());
+            Ok(())
+        }
+
+        fn set_state(
+            &self,
+            id: &AgentSessionId,
+            state: AgentSessionState,
+        ) -> Result<(), ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            let index = sessions
+                .iter()
+                .position(|session| session.id() == id)
+                .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
+            let session = sessions.remove(index).with_state(state);
+            sessions.push(session);
+            Ok(())
+        }
+
+        fn set_owner_process_id(
+            &self,
+            id: &AgentSessionId,
+            process_id: AgentProcessId,
+            process_start_token: Option<AgentProcessStartToken>,
+            wrapper_process_id: Option<AgentProcessId>,
+        ) -> Result<(), ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            let session = sessions
+                .iter_mut()
+                .find(|session| session.id() == id)
+                .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
+            *session = session.clone().with_launch_processes(
+                process_id,
+                process_start_token,
+                wrapper_process_id,
+            );
+            Ok(())
+        }
+
+        fn capture_native_id(
+            &self,
+            id: &AgentSessionId,
+            provider: AgentTool,
+            process_id: AgentProcessId,
+            parent_process_id: Option<AgentProcessId>,
+            native_id: NativeSessionId,
+        ) -> Result<(), ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            let session = sessions
+                .iter_mut()
+                .find(|session| session.id() == id)
+                .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
+            if *session.tool() != provider {
+                return Err(ConfigError::AgentSessionProviderMismatch {
+                    id: id.clone(),
+                    expected: *session.tool(),
+                    reported: provider,
+                });
+            }
+            let owns_process = session.owner_process_id().as_ref() == Some(&process_id);
+            let is_wrapper_handoff = session.wrapper_process_id().is_some()
+                && session.wrapper_process_id().as_ref() == parent_process_id.as_ref();
+            if !owns_process && !is_wrapper_handoff {
+                return Err(ConfigError::AgentSessionProcessMismatch {
+                    id: id.clone(),
+                    expected: *session.owner_process_id(),
+                    reported: process_id,
+                });
+            }
+            *session = session.clone().with_native_id(native_id);
+            Ok(())
+        }
+    }
+
+    /// A store that models an unavailable platform state directory.
+    struct FailingAgentSessionStore;
+
+    impl AgentSessionStore for FailingAgentSessionStore {
+        fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
+            Ok(Vec::new())
+        }
+
+        fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
+            Ok(None)
+        }
+
+        fn upsert(&self, _session: &AgentSession) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn set_state(
+            &self,
+            _id: &AgentSessionId,
+            _state: AgentSessionState,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn set_owner_process_id(
+            &self,
+            _id: &AgentSessionId,
+            _process_id: AgentProcessId,
+            _process_start_token: Option<AgentProcessStartToken>,
+            _wrapper_process_id: Option<AgentProcessId>,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn capture_native_id(
+            &self,
+            _id: &AgentSessionId,
+            _provider: AgentTool,
+            _process_id: AgentProcessId,
+            _parent_process_id: Option<AgentProcessId>,
+            _native_id: NativeSessionId,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+    }
+
+    /// A store that fails reads while preserving the rest of the port shape.
+    struct UnreadableAgentSessionStore;
+
+    impl AgentSessionStore for UnreadableAgentSessionStore {
+        fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn upsert(&self, _session: &AgentSession) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn set_state(
+            &self,
+            _id: &AgentSessionId,
+            _state: AgentSessionState,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn set_owner_process_id(
+            &self,
+            _id: &AgentSessionId,
+            _process_id: AgentProcessId,
+            _process_start_token: Option<AgentProcessStartToken>,
+            _wrapper_process_id: Option<AgentProcessId>,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn capture_native_id(
+            &self,
+            _id: &AgentSessionId,
+            _provider: AgentTool,
+            _process_id: AgentProcessId,
+            _parent_process_id: Option<AgentProcessId>,
+            _native_id: NativeSessionId,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
     }
 
     /// A registry returning a fixed project list and one workspace config, and
@@ -3069,6 +3258,29 @@ mod tests {
             _request: SpawnRequest,
             _sink: Box<dyn OutputSink>,
         ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+            Ok(Box::new(FakeHandle))
+        }
+    }
+
+    /// Shared record of complete PTY requests for command and environment
+    /// assertions.
+    #[derive(Clone, Default)]
+    struct SpawnRecorder {
+        requests: Rc<RefCell<Vec<SpawnRequest>>>,
+    }
+
+    /// A successful runner that retains each spawn request.
+    struct RequestRecordingRunner {
+        recorder: SpawnRecorder,
+    }
+
+    impl ProcessRunner for RequestRecordingRunner {
+        fn spawn(
+            &self,
+            request: SpawnRequest,
+            _sink: Box<dyn OutputSink>,
+        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+            self.recorder.requests.borrow_mut().push(request);
             Ok(Box::new(FakeHandle))
         }
     }
@@ -3623,6 +3835,506 @@ mod tests {
             .shutdown_generation
     }
 
+    /// A child that enables xterm mouse tracking receives pointer events instead
+    /// of having its terminal text selected by Muster.
+    #[test]
+    fn mouse_aware_terminal_receives_sgr_pointer_input() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("sh").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(RecordingRunner {
+                written: written.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        app.panes
+            .get_mut(&PaneId::new(PANE))
+            .expect("selected pane exists")
+            .parser
+            .process(b"\x1b[?1002h\x1b[?1006h");
+        let (_, main, _) = areas(app.frame_area);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: main.x + BORDER_THICKNESS,
+            row: main.y + BORDER_THICKNESS,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_input(CrosstermEvent::Mouse(click));
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[<0;1;1M".to_vec());
+    }
+
+    /// Builds a pointer event at an absolute terminal coordinate.
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Feeds bytes into the selected pane's parser.
+    fn feed_pane(app: &mut App, bytes: &[u8]) {
+        app.panes
+            .get_mut(&PaneId::new(PANE))
+            .expect("selected pane exists")
+            .parser
+            .process(bytes);
+    }
+
+    /// Dragging across pane text queues exactly that text for the clipboard.
+    #[test]
+    fn drag_selection_copies_pane_text() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello world");
+        let (_, main, _) = areas(app.frame_area);
+        let (x, y) = (main.x + BORDER_THICKNESS, main.y + BORDER_THICKNESS);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            x + 4,
+            y,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x + 4,
+            y,
+        )));
+
+        assert_eq!(app.take_pending_clipboard(), Some("hello".to_string()));
+        assert_eq!(app.take_pending_clipboard(), None);
+    }
+
+    /// A bare click never copies anything.
+    #[test]
+    fn click_without_drag_copies_nothing() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello world");
+        let (_, main, _) = areas(app.frame_area);
+        let (x, y) = (main.x + BORDER_THICKNESS, main.y + BORDER_THICKNESS);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            y,
+        )));
+
+        assert_eq!(app.take_pending_clipboard(), None);
+    }
+
+    /// A drag that starts over the sidebar selects nothing in the pane.
+    #[test]
+    fn drag_from_sidebar_selects_nothing() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello world");
+        let (sidebar, main, _) = areas(app.frame_area);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            main.x + BORDER_THICKNESS + 5,
+            main.y + BORDER_THICKNESS,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            main.x + BORDER_THICKNESS + 5,
+            main.y + BORDER_THICKNESS,
+        )));
+
+        assert_eq!(app.take_pending_clipboard(), None);
+    }
+
+    /// The wheel moves the primary screen through its scrollback.
+    #[test]
+    fn wheel_scrolls_primary_screen_scrollback() {
+        let mut app = app_with(RestartPolicy::Never);
+        for line in 0..64 {
+            feed_pane(&mut app, format!("line {line}\r\n").as_bytes());
+        }
+        let (_, main, _) = areas(app.frame_area);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::ScrollUp,
+            main.x + BORDER_THICKNESS,
+            main.y + BORDER_THICKNESS,
+        )));
+
+        let screen = app
+            .panes
+            .get(&PaneId::new(PANE))
+            .expect("selected pane exists")
+            .parser
+            .screen();
+        assert_eq!(screen.scrollback(), WHEEL_SCROLL_LINES);
+    }
+
+    /// An alternate-screen child receives cursor keys per wheel notch instead,
+    /// matching the host terminal's alternate-scroll behavior.
+    #[test]
+    fn wheel_in_alternate_screen_sends_cursor_keys() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("sh").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(RecordingRunner {
+                written: written.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        feed_pane(&mut app, b"\x1b[?1049h");
+        let (_, main, _) = areas(app.frame_area);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::ScrollDown,
+            main.x + BORDER_THICKNESS,
+            main.y + BORDER_THICKNESS,
+        )));
+
+        assert_eq!(
+            *written.lock().unwrap(),
+            b"\x1b[B".repeat(WHEEL_SCROLL_LINES)
+        );
+    }
+
+    /// Clicking pane text attaches the terminal, like herdr's click-to-focus.
+    #[test]
+    fn pane_click_focuses_the_terminal() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello");
+        let (_, main, _) = areas(app.frame_area);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            main.x + BORDER_THICKNESS,
+            main.y + BORDER_THICKNESS,
+        )));
+
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    /// A double-click copies the word under the pointer and its confirming
+    /// highlight expires on its own.
+    #[test]
+    fn double_click_copies_the_word_under_the_pointer() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello world");
+        let (_, main, _) = areas(app.frame_area);
+        let (x, y) = (main.x + BORDER_THICKNESS + 7, main.y + BORDER_THICKNESS);
+        for _ in 0..2 {
+            app.handle_input(CrosstermEvent::Mouse(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                y,
+            )));
+            app.handle_input(CrosstermEvent::Mouse(mouse_event(
+                MouseEventKind::Up(MouseButton::Left),
+                x,
+                y,
+            )));
+        }
+
+        assert_eq!(app.take_pending_clipboard(), Some("world".to_string()));
+        assert!(app.selection.is_some());
+        assert!(app.advance_selection(Instant::now() + PANE_COPY_HIGHLIGHT_DURATION));
+        assert!(app.selection.is_none());
+    }
+
+    /// Dragging above the pane scrolls into scrollback immediately and keeps
+    /// scrolling on the autoscroll tick.
+    #[test]
+    fn drag_past_top_edge_autoscrolls_into_scrollback() {
+        let mut app = app_with(RestartPolicy::Never);
+        for line in 0..64 {
+            feed_pane(&mut app, format!("line {line}\r\n").as_bytes());
+        }
+        let (_, main, _) = areas(app.frame_area);
+        let (x, top) = (main.x + BORDER_THICKNESS, main.y + BORDER_THICKNESS);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            top,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            x + 2,
+            top,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            x + 2,
+            main.y,
+        )));
+
+        let scrolled = app
+            .pane_scroll_metrics(PaneId::new(PANE))
+            .expect("pane metrics")
+            .offset();
+        assert_eq!(scrolled, selection::edge_scroll_lines(1));
+        assert!(app.advance_selection(Instant::now() + SELECTION_AUTOSCROLL_INTERVAL));
+        let ticked = app
+            .pane_scroll_metrics(PaneId::new(PANE))
+            .expect("pane metrics")
+            .offset();
+        assert_eq!(ticked, scrolled + 1);
+    }
+
+    /// The wheel keeps extending an in-progress selection while it scrolls.
+    #[test]
+    fn wheel_extends_an_active_selection() {
+        let mut app = app_with(RestartPolicy::Never);
+        for line in 0..64 {
+            feed_pane(&mut app, format!("line {line}\r\n").as_bytes());
+        }
+        let (_, main, _) = areas(app.frame_area);
+        let (x, y) = (main.x + BORDER_THICKNESS, main.y + BORDER_THICKNESS);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            y,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::ScrollUp,
+            x,
+            y,
+        )));
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            y,
+        )));
+
+        let copied = app.take_pending_clipboard().expect("wheel-extended copy");
+        assert!(copied.contains("line 41"));
+    }
+
+    /// A selection spanning several screens extracts across scrollback chunks
+    /// and restores the viewer's scroll position.
+    #[test]
+    fn extraction_walks_scrollback_chunks() {
+        let mut app = app_with(RestartPolicy::Never);
+        for line in 0..64 {
+            feed_pane(&mut app, format!("line {line}\r\n").as_bytes());
+        }
+        let mut selection = Selection::anchored(
+            PaneId::new(PANE),
+            BufferCell::builder().row(0).column(0).build(),
+        );
+        selection.extend_to(BufferCell::builder().row(45).column(3).build());
+
+        let text = app
+            .extract_selection_text(PaneId::new(PANE), &selection)
+            .expect("spanning extraction");
+
+        assert!(text.starts_with("line 0"));
+        assert!(text.contains("line 30"));
+        assert!(text.ends_with("line"));
+        let restored = app
+            .pane_scroll_metrics(PaneId::new(PANE))
+            .expect("pane metrics")
+            .offset();
+        assert_eq!(restored, 0);
+    }
+
+    /// Clicking a sidebar row selects that process, like keyboard navigation.
+    #[test]
+    fn sidebar_click_selects_the_clicked_process() {
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("first").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("true").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+                Process::builder()
+                    .id(PaneId::new(1))
+                    .name(ProcessName::try_new("second").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("true").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        let (sidebar_area, ..) = areas(app.frame_area);
+        // Rows: project header, section header, then one row per process.
+        let second_process_row = sidebar_area.y + 3;
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar_area.x + 1,
+            second_process_row,
+        )));
+
+        assert_eq!(*app.workspace.selected_index(), 1);
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    /// Clicking anywhere in the sidebar, even dead space, focuses it back
+    /// without disturbing the current selection.
+    #[test]
+    fn sidebar_click_on_dead_space_refocuses_the_sidebar() {
+        let mut app = app_with(RestartPolicy::Never);
+        feed_pane(&mut app, b"hello");
+        let (sidebar_area, main, _) = areas(app.frame_area);
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            main.x + BORDER_THICKNESS,
+            main.y + BORDER_THICKNESS,
+        )));
+        assert_eq!(app.focus, Focus::Terminal);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar_area.x + 1,
+            sidebar_area.bottom() - 1,
+        )));
+
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(*app.workspace.selected_index(), 0);
+    }
+
+    /// Hovering pane text queues the I-beam pointer; leaving it restores the
+    /// arrow, and unchanged positions queue nothing.
+    #[test]
+    fn hovering_pane_text_requests_the_ibeam_pointer() {
+        let mut app = app_with(RestartPolicy::Never);
+        let (sidebar_area, main, _) = areas(app.frame_area);
+        let inside = (main.x + BORDER_THICKNESS, main.y + BORDER_THICKNESS);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Moved,
+            inside.0,
+            inside.1,
+        )));
+        assert_eq!(app.take_pending_pointer_shape(), Some(PointerShape::Text));
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Moved,
+            inside.0 + 1,
+            inside.1,
+        )));
+        assert_eq!(app.take_pending_pointer_shape(), None);
+
+        app.handle_input(CrosstermEvent::Mouse(mouse_event(
+            MouseEventKind::Moved,
+            sidebar_area.x + 1,
+            sidebar_area.y + 1,
+        )));
+        assert_eq!(
+            app.take_pending_pointer_shape(),
+            Some(PointerShape::Default)
+        );
+    }
+
+    /// A failed first PTY spawn keeps a reported-ID session safely retryable.
+    #[test]
+    fn failed_initial_agent_spawn_remains_a_pending_fresh_launch() {
+        let (sender, _receiver) = bounded(16);
+        let sessions = SessionRecorder::default();
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(FailingRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+
+        let pane = *app
+            .workspace
+            .selected_process()
+            .expect("agent pane exists")
+            .id();
+        let session = sessions
+            .sessions
+            .borrow()
+            .last()
+            .cloned()
+            .expect("session persisted");
+        assert_eq!(
+            *app.workspace.process(pane).expect("agent exists").state(),
+            ProcessState::Crashed
+        );
+        assert_eq!(*session.state(), AgentSessionState::Pending);
+        assert_eq!(
+            session
+                .restore_command()
+                .expect("fresh retry command")
+                .as_ref(),
+            "codex"
+        );
+    }
+
     #[test]
     fn exit_without_restart_keeps_the_parser_and_marks_crashed() {
         let mut app = app_with(RestartPolicy::Never);
@@ -3796,7 +4508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bell_marks_the_process_awaiting_input_and_notifies() {
+    fn a_foreground_terminal_bell_marks_awaiting_input_without_notifying() {
         let mut app = app_with(RestartPolicy::Never);
         let notifier = RecordingNotifier::default();
         app.set_notifier(Box::new(notifier.clone()));
@@ -3809,9 +4521,11 @@ mod tests {
         );
 
         assert_eq!(activity(&app), ActivityState::AwaitingInput);
-        assert!(app.notice.is_some(), "an in-app notice is raised");
-        assert_eq!(notifier.count(), 1, "the desktop notifier is called");
-        assert_eq!(notifier.bodies(), [Some(AWAITING_INPUT_NOTICE.to_string())]);
+        assert!(
+            app.notice.is_none(),
+            "the sidebar marker is sufficient in the foreground"
+        );
+        assert_eq!(notifier.count(), 0, "foreground shell bells stay local");
     }
 
     #[test]
@@ -3849,7 +4563,7 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_of_bells_is_throttled_to_one_notification() {
+    fn a_burst_of_foreground_bells_does_not_notify() {
         let mut app = app_with(RestartPolicy::Never);
         let notifier = RecordingNotifier::default();
         app.set_notifier(Box::new(notifier.clone()));
@@ -3862,7 +4576,122 @@ mod tests {
                 ProcessOutput::Chunk(b"\x07".to_vec()),
             );
         }
-        assert_eq!(notifier.count(), 1, "a bell burst collapses to one alert");
+        assert_eq!(notifier.count(), 0, "foreground shell bells stay local");
+    }
+
+    /// A quiet background terminal bell escalates after a short grace period.
+    #[test]
+    fn a_quiet_background_terminal_bell_escalates_once() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+        let background = PaneId::new(PANE + 1);
+        app.workspace.insert_in_section(
+            Process::builder()
+                .id(background)
+                .name(ProcessName::try_new("background").unwrap())
+                .kind(ProcessKind::Terminal)
+                .command(Some(CommandLine::try_new("sh").unwrap()))
+                .restart(RestartPolicy::Never)
+                .build(),
+        );
+        app.spawn(background, Some(CommandLine::try_new("sh").unwrap()), None);
+        let generation = *app
+            .generations
+            .get(&background)
+            .expect("background pane spawned");
+
+        app.handle_output(
+            background,
+            generation,
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+
+        assert_eq!(notifier.count(), 0, "the bell is initially sidebar-only");
+        let deadline = app
+            .next_activity_deadline()
+            .expect("background bell has an escalation deadline");
+        assert!(app.expire_quiet_activity(deadline));
+
+        assert_eq!(notifier.bodies(), [Some(AWAITING_INPUT_NOTICE.to_string())]);
+    }
+
+    /// A terminal that exits during the bell grace period must not raise a
+    /// late desktop alert for a process that can no longer need input.
+    #[test]
+    fn an_exited_background_terminal_cancels_its_pending_bell() {
+        let mut app = app_with(RestartPolicy::Never);
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        enable_desktop(&mut app);
+        let background = PaneId::new(PANE + 1);
+        app.workspace.insert_in_section(
+            Process::builder()
+                .id(background)
+                .name(ProcessName::try_new("background").unwrap())
+                .kind(ProcessKind::Terminal)
+                .command(Some(CommandLine::try_new("sh").unwrap()))
+                .restart(RestartPolicy::Never)
+                .build(),
+        );
+        app.spawn(background, Some(CommandLine::try_new("sh").unwrap()), None);
+        let generation = *app
+            .generations
+            .get(&background)
+            .expect("background pane spawned");
+
+        app.handle_output(
+            background,
+            generation,
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+        app.handle_output(
+            background,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+
+        assert!(!app.expire_quiet_activity(Instant::now() + BELL_ESCALATION_DELAY));
+        assert_eq!(notifier.count(), 0);
+    }
+
+    /// Agent bells remain immediate because they are part of the agent attention contract.
+    #[test]
+    fn an_agent_bell_notifies_immediately() {
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("agent").unwrap())
+                    .kind(ProcessKind::Agent)
+                    .command(Some(CommandLine::try_new("agent").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        let notifier = RecordingNotifier::default();
+        app.set_notifier(Box::new(notifier.clone()));
+        app.set_settings_store(Box::new(FakeSettingsStore::default()));
+        app.start();
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x07".to_vec()),
+        );
+
+        assert_eq!(notifier.bodies(), [Some(AWAITING_INPUT_NOTICE.to_string())]);
     }
 
     #[test]
@@ -3940,7 +4769,7 @@ mod tests {
         app.handle_output(
             PaneId::new(PANE),
             current_gen(&app),
-            ProcessOutput::Chunk(b"\x07".to_vec()),
+            ProcessOutput::Chunk(b"\x1b]9;attention requested\x07".to_vec()),
         );
 
         assert!(app.notice.is_some(), "the in-app notice still shows");
@@ -4664,6 +5493,49 @@ mod tests {
         );
         app.start();
         (app, recorder)
+    }
+
+    /// Builds an empty app wired to observable durable session state and PTY
+    /// requests, then runs startup restoration.
+    fn agent_app(initial: Vec<AgentSession>) -> (App, SessionRecorder, SpawnRecorder) {
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(initial)),
+        };
+        let spawns = SpawnRecorder::default();
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(RequestRecordingRunner {
+                recorder: spawns.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+        (app, sessions, spawns)
+    }
+
+    /// Builds a durable provider session for restoration and history tests.
+    fn persisted_agent_session(
+        tool: AgentTool,
+        native_id: &str,
+        state: AgentSessionState,
+    ) -> AgentSession {
+        AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Ada").unwrap())
+            .tool(tool)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new(tool.default_command().unwrap()).unwrap())
+            .native_id(Some(NativeSessionId::try_new(native_id).unwrap()))
+            .state(state)
+            .build()
     }
 
     /// Builds an app whose in-memory terminal has not yet observed its removal
@@ -5995,10 +6867,529 @@ mod tests {
         assert_eq!(*session.kind(), ProcessKind::Agent);
         assert_eq!(*session.origin(), ProcessOrigin::Session);
         assert_eq!(*session.agent_tool(), Some(AgentTool::Codex));
-        assert_eq!(session.name().as_ref(), "Codex");
+        assert!(!session.name().as_ref().is_empty());
         assert_eq!(session.command().as_ref().unwrap().as_ref(), "codex");
+        assert!(session.agent_session_id().is_some());
+        assert!(*session.autostart());
         assert_eq!(app.focus, Focus::Terminal);
         assert!(recorder.workspaces.borrow().is_empty());
+    }
+
+    /// New sessions are persisted before spawn and correlate provider hooks
+    /// through an environment variable independent of their display name.
+    #[test]
+    fn launching_an_agent_session_persists_identity_and_exports_correlation() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+
+        let sessions = sessions.sessions.borrow();
+        let session = sessions.first().unwrap();
+        assert_eq!(*session.state(), AgentSessionState::Open);
+        assert_eq!(session.project(), Path::new("/here/muster.yml"));
+        assert!(session.native_id().is_none());
+        let requests = spawns.requests.borrow();
+        let request = requests.last().unwrap();
+        assert_eq!(
+            request
+                .environment()
+                .get(std::ffi::OsStr::new(MUSTER_AGENT_SESSION_ENV)),
+            Some(&OsString::from(session.id().as_ref()))
+        );
+        assert_eq!(
+            request.command().as_ref().unwrap().as_ref(),
+            format!("claude --session-id {}", session.id()).as_str()
+        );
+    }
+
+    /// A working agent schedules and advances the sidebar spinner independently
+    /// of process-output redraws.
+    #[test]
+    fn working_agents_schedule_sidebar_animation() {
+        let (mut app, _sessions, _spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        app.workspace.set_activity(pane, ActivityState::Working);
+        let before = app.activity_frame;
+        let deadline = app.next_activity_frame_deadline().unwrap();
+
+        assert!(app.advance_activity_frame(deadline));
+        assert_ne!(app.activity_frame, before);
+        assert!(app.next_activity_frame_deadline().unwrap() > deadline);
+    }
+
+    /// Working command output does not schedule agent-specific animation.
+    #[test]
+    fn working_commands_do_not_schedule_sidebar_animation() {
+        let mut app = app_with(RestartPolicy::Never);
+        let pane = PaneId::new(PANE);
+        app.workspace.set_activity(pane, ActivityState::Working);
+
+        assert!(app.next_activity_frame_deadline().is_none());
+    }
+
+    /// Pausing an explicitly working agent suspends its animation deadline
+    /// without discarding the provider's activity state.
+    #[test]
+    fn paused_working_agents_do_not_schedule_animation() {
+        let (mut app, _sessions, _spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        app.workspace.set_activity(pane, ActivityState::Working);
+
+        app.toggle_pause_selected();
+
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().state(),
+            ProcessState::Paused
+        );
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().activity(),
+            ActivityState::Working
+        );
+        assert!(app.next_activity_frame_deadline().is_none());
+    }
+
+    /// Closing a captured session moves it into history, and reopening uses the
+    /// provider's native ID without duplicating its Muster identity.
+    #[test]
+    fn a_closed_agent_session_reopens_the_same_native_conversation() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+        let id = app
+            .workspace
+            .selected_process()
+            .unwrap()
+            .agent_session_id()
+            .clone()
+            .unwrap();
+        FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }
+        .set_owner_process_id(&id, AgentProcessId::try_new(1).unwrap(), None, None)
+        .unwrap();
+        FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }
+        .capture_native_id(
+            &id,
+            AgentTool::Codex,
+            AgentProcessId::try_new(1).unwrap(),
+            None,
+            NativeSessionId::try_new("codex-thread").unwrap(),
+        )
+        .unwrap();
+
+        app.close_agent_session(pane);
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Closed
+        );
+
+        app.reopen_last_closed_session();
+
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Open
+        );
+        assert_eq!(
+            app.workspace
+                .processes()
+                .iter()
+                .filter(|process| process.agent_session_id().as_ref() == Some(&id))
+                .count(),
+            1
+        );
+        assert_eq!(
+            spawns
+                .requests
+                .borrow()
+                .last()
+                .unwrap()
+                .command()
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            "codex resume codex-thread"
+        );
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    /// Reopening during a delayed close waits for the retiring child before it
+    /// creates the replacement pane, so the persisted open state stays visible.
+    #[test]
+    fn reopening_a_closing_session_respawns_after_its_exit() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+        let id = app
+            .workspace
+            .selected_process()
+            .unwrap()
+            .agent_session_id()
+            .clone()
+            .unwrap();
+        FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }
+        .set_owner_process_id(&id, AgentProcessId::try_new(1).unwrap(), None, None)
+        .unwrap();
+        FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }
+        .capture_native_id(
+            &id,
+            AgentTool::Codex,
+            AgentProcessId::try_new(1).unwrap(),
+            None,
+            NativeSessionId::try_new("codex-thread").unwrap(),
+        )
+        .unwrap();
+
+        app.close_agent_session(pane);
+        app.reopen_last_closed_session();
+
+        assert_eq!(spawns.requests.borrow().len(), 1);
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Open
+        );
+        assert_eq!(app.pending_session_reopens.get(&pane), Some(&id));
+
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+
+        assert_eq!(spawns.requests.borrow().len(), 2);
+        assert!(app.pending_session_reopens.is_empty());
+        assert_eq!(
+            app.workspace
+                .selected_process()
+                .unwrap()
+                .agent_session_id()
+                .as_ref(),
+            Some(&id)
+        );
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    /// Closing a session again cancels a reopen queued while its child exits.
+    #[test]
+    fn closing_again_cancels_a_queued_session_reopen() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+        let id = app
+            .workspace
+            .selected_process()
+            .unwrap()
+            .agent_session_id()
+            .clone()
+            .unwrap();
+        let store = FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        };
+        store
+            .set_owner_process_id(&id, AgentProcessId::try_new(1).unwrap(), None, None)
+            .unwrap();
+        store
+            .capture_native_id(
+                &id,
+                AgentTool::Codex,
+                AgentProcessId::try_new(1).unwrap(),
+                None,
+                NativeSessionId::try_new("codex-thread").unwrap(),
+            )
+            .unwrap();
+
+        app.close_agent_session(pane);
+        app.reopen_last_closed_session();
+        assert_eq!(app.pending_session_reopens.get(&pane), Some(&id));
+
+        app.close_agent_session(pane);
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+
+        assert_eq!(spawns.requests.borrow().len(), 1);
+        assert!(app.pending_session_reopens.is_empty());
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Closed
+        );
+    }
+
+    /// Session reopens wait for project switching to finish so a pane cannot be
+    /// created in the old workspace and immediately torn down.
+    #[test]
+    fn reopening_is_rejected_while_a_project_switch_is_pending() {
+        let session =
+            persisted_agent_session(AgentTool::Codex, "codex-thread", AgentSessionState::Closed);
+        let (mut app, _sessions, spawns) = agent_app(vec![session]);
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let spawned = spawns.requests.borrow().len();
+
+        app.begin_switch(empty_workspace_config(), PathBuf::from("next.yml"));
+        assert!(app.pending_switch.is_some());
+
+        app.reopen_last_closed_session();
+
+        assert_eq!(spawns.requests.borrow().len(), spawned);
+        assert_eq!(app.notice.as_deref(), Some(PROJECT_SWITCH_IN_PROGRESS));
+    }
+
+    /// Restart waits for a reported native ID rather than destroying the live
+    /// conversation and accidentally launching a new one.
+    #[test]
+    fn an_uncaptured_agent_session_is_not_restarted_as_a_new_conversation() {
+        let (mut app, _sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let generation = app.generations[&pane];
+
+        app.restart_selected();
+
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().state(),
+            ProcessState::Running
+        );
+        assert_eq!(app.generations[&pane], generation);
+        assert_eq!(spawns.requests.borrow().len(), 1);
+        assert_eq!(app.notice.as_deref(), Some(AGENT_SESSION_NOT_RESUMABLE));
+    }
+
+    /// A store read failure after exit settles the pane instead of leaving it restarting.
+    #[test]
+    fn restart_after_exit_surfaces_a_session_store_failure() {
+        let (mut app, _sessions, _spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let pane = *app
+            .workspace
+            .selected_process()
+            .expect("agent pane exists")
+            .id();
+        let generation = app.generations[&pane];
+        app.panes
+            .get_mut(&pane)
+            .expect("live pane exists")
+            .exit_intent = ExitIntent::RestartInFlight;
+        app.set_agent_session_store(Box::new(UnreadableAgentSessionStore));
+
+        app.handle_output(pane, generation, ProcessOutput::Exited(ExitOutcome::Failed));
+
+        assert_eq!(
+            *app.workspace
+                .process(pane)
+                .expect("agent remains visible")
+                .state(),
+            ProcessState::Crashed
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with(AGENT_SESSION_STORE_ERROR))
+        );
+    }
+
+    /// Reopen skips newer history that lacks a provider identity instead of
+    /// making an older resumable conversation unreachable from the hotkey.
+    #[test]
+    fn reopen_uses_the_latest_resumable_agent_session() {
+        let older = persisted_agent_session(
+            AgentTool::Codex,
+            "captured-thread",
+            AgentSessionState::Closed,
+        );
+        let older_id = older.id().clone();
+        let newer = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Grace").unwrap())
+            .tool(AgentTool::Gemini)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("gemini").unwrap())
+            .state(AgentSessionState::Closed)
+            .build();
+        let (mut app, _sessions, spawns) = agent_app(vec![older, newer]);
+
+        app.reopen_last_closed_session();
+
+        assert_eq!(
+            app.workspace.processes()[0].agent_session_id().as_ref(),
+            Some(&older_id)
+        );
+        assert_eq!(
+            spawns.requests.borrow()[0]
+                .command()
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            "codex resume captured-thread"
+        );
+    }
+
+    /// Startup restores open sessions with their resume command but leaves
+    /// closed history dormant.
+    #[test]
+    fn startup_restores_only_open_agent_sessions() {
+        let open =
+            persisted_agent_session(AgentTool::Gemini, "gemini-open", AgentSessionState::Open);
+        let open_id = open.id().clone();
+        let closed = persisted_agent_session(
+            AgentTool::Copilot,
+            "copilot-closed",
+            AgentSessionState::Closed,
+        );
+
+        let (app, _sessions, spawns) = agent_app(vec![open, closed]);
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(
+            app.workspace.processes()[0].agent_session_id().as_ref(),
+            Some(&open_id)
+        );
+        assert_eq!(
+            spawns.requests.borrow()[0]
+                .command()
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            "gemini --resume gemini-open"
+        );
+        assert!(*app.workspace.processes()[0].autostart());
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    /// A second Muster instance leaves a session alone while its owner lives.
+    #[cfg(unix)]
+    #[test]
+    fn startup_skips_an_open_session_with_a_live_owner() {
+        let owner = AgentProcessId::try_new(std::process::id()).unwrap();
+        let token = LocalProcessIdentity::start_token(owner).unwrap();
+        let session =
+            persisted_agent_session(AgentTool::Codex, "owned-thread", AgentSessionState::Open)
+                .with_launch_processes(owner, Some(token), None);
+
+        let (app, _sessions, spawns) = agent_app(vec![session]);
+
+        assert!(app.workspace.processes().is_empty());
+        assert!(spawns.requests.borrow().is_empty());
+    }
+
+    /// A numeric PID without its creation token cannot suppress restoration,
+    /// because it may already belong to an unrelated process.
+    #[test]
+    fn startup_restores_a_session_with_an_unverifiable_owner() {
+        let owner = AgentProcessId::try_new(std::process::id()).unwrap();
+        let session = persisted_agent_session(
+            AgentTool::Codex,
+            "unverifiable-owner-thread",
+            AgentSessionState::Open,
+        )
+        .with_owner_process_id(owner);
+
+        let (app, _sessions, spawns) = agent_app(vec![session]);
+
+        assert_eq!(app.workspace.processes().len(), 1);
+        assert_eq!(spawns.requests.borrow().len(), 1);
+    }
+
+    /// An unconfirmed caller-assigned identity retries its original launch
+    /// command instead of resuming a conversation the provider never created.
+    #[test]
+    fn startup_retries_an_unconfirmed_assigned_agent_session() {
+        let session = AgentSession::builder()
+            .id(AgentSessionId::try_new("assigned-session").unwrap())
+            .name(ProcessName::try_new("Ada").unwrap())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .state(AgentSessionState::Open)
+            .build();
+        let id = session.id().clone();
+
+        let (app, _sessions, spawns) = agent_app(vec![session]);
+
+        assert_eq!(
+            app.workspace.processes()[0].agent_session_id().as_ref(),
+            Some(&id)
+        );
+        assert_eq!(
+            spawns.requests.borrow()[0]
+                .command()
+                .as_ref()
+                .unwrap()
+                .as_ref(),
+            "claude --session-id assigned-session"
+        );
+    }
+
+    /// An open session whose provider ID was never captured returns as a
+    /// stopped row that can be closed instead of becoming stranded in history.
+    #[test]
+    fn startup_restores_an_uncaptured_session_as_a_closable_stopped_row() {
+        let session = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Ada").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("codex").unwrap())
+            .state(AgentSessionState::Open)
+            .build();
+        let id = session.id().clone();
+
+        let (mut app, sessions, spawns) = agent_app(vec![session]);
+
+        let restored = app.workspace.selected_process().unwrap();
+        let pane = *restored.id();
+        assert_eq!(restored.agent_session_id().as_ref(), Some(&id));
+        assert_eq!(*restored.state(), ProcessState::Pending);
+        assert!(!app.panes.contains_key(&pane));
+        assert!(spawns.requests.borrow().is_empty());
+        assert_eq!(app.notice.as_deref(), Some(AGENT_SESSION_NOT_RESUMABLE));
+
+        press(&mut app, KeyCode::Char('d'));
+
+        assert!(app.workspace.process(pane).is_none());
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Closed
+        );
+    }
+
+    /// A one-key launch surfaces durable-state failures after the picker has
+    /// closed instead of failing without visible feedback.
+    #[test]
+    fn quick_agent_launch_reports_session_store_failures() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.set_agent_session_store(Box::new(FailingAgentSessionStore));
+        app.open_agent_picker();
+
+        press(&mut app, KeyCode::Enter);
+
+        assert!(
+            app.workspace
+                .processes()
+                .iter()
+                .all(|process| { *process.origin() != ProcessOrigin::Session })
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains(AGENT_SESSION_STORE_ERROR))
+        );
     }
 
     /// The `a` flow defaults to the first preset and launches on submission.
@@ -6009,12 +7400,89 @@ mod tests {
         press(&mut app, KeyCode::Char('a'));
         assert_eq!(app.form().unwrap().form.title(), ADD_PROCESS_TITLE);
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.form().unwrap().form.title(), ADD_AGENT_TITLE);
+        assert!(matches!(app.overlay, Some(Overlay::AgentPicker(_))));
         press(&mut app, KeyCode::Enter);
 
         let session = app.workspace.selected_process().unwrap();
         assert_eq!(*session.agent_tool(), Some(AgentTool::Claude));
         assert_eq!(*session.origin(), ProcessOrigin::Session);
+    }
+
+    /// Opening advanced customization from Custom preserves the custom provider
+    /// instead of falling back to the first choice.
+    #[test]
+    fn custom_agent_form_preserves_the_selected_provider() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.open_agent_session_form(AgentTool::Custom);
+
+        assert_eq!(
+            app.form().unwrap().form.values()[0],
+            AgentTool::Custom.to_string()
+        );
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        type_text(&mut app, "my-agent");
+        press(&mut app, KeyCode::Enter);
+
+        let session = app.workspace.selected_process().unwrap();
+        assert_eq!(*session.agent_tool(), Some(AgentTool::Custom));
+        assert_eq!(session.command().as_ref().unwrap().as_ref(), "my-agent");
+    }
+
+    /// An incomplete placeholder-free resume template remains in the advanced
+    /// form with a visible error and is never persisted or launched.
+    #[test]
+    fn invalid_resume_templates_are_rejected_before_agent_launch() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.open_agent_session_form(AgentTool::Codex);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        type_text(&mut app, "agent --resume \"");
+
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.form().unwrap().error.as_deref(),
+            Some(AGENT_RESUME_TEMPLATE_INVALID)
+        );
+        assert!(sessions.sessions.borrow().is_empty());
+        assert!(spawns.requests.borrow().is_empty());
+        assert!(app.workspace.processes().is_empty());
+    }
+
+    /// A composed launch command must name its own resume behavior before the
+    /// session is persisted, avoiding a later resume against the wrong command.
+    #[test]
+    fn compound_agent_commands_require_an_explicit_resume_template() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(
+            AgentTool::Codex,
+            None,
+            Some(CommandLine::try_new("codex | tee agent.log").unwrap()),
+            None,
+        );
+
+        assert_eq!(app.notice.as_deref(), Some(AGENT_COMPOUND_RESUME_REQUIRED));
+        assert!(sessions.sessions.borrow().is_empty());
+        assert!(spawns.requests.borrow().is_empty());
+    }
+
+    /// An unsupported fresh Claude composition must fail before durable state
+    /// is written, even when its explicit resume template is valid.
+    #[test]
+    fn unsupported_fresh_agent_launch_is_not_persisted() {
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
+        app.create_agent_session(
+            AgentTool::Claude,
+            None,
+            Some(CommandLine::try_new("claude | tee agent.log").unwrap()),
+            Some(CommandLine::try_new("claude --resume {session_id} | tee agent.log").unwrap()),
+        );
+
+        assert_eq!(app.notice.as_deref(), Some(AGENT_COMMAND_REQUIRED));
+        assert!(sessions.sessions.borrow().is_empty());
+        assert!(spawns.requests.borrow().is_empty());
     }
 
     /// Closing a live session waits for exit before removing its workspace row.
@@ -6045,6 +7513,84 @@ mod tests {
         assert!(app.workspace.process(pane).is_none());
         assert!(!app.panes.contains_key(&pane));
         assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    /// A failed hard-stop leaves durable history open and the live pane tracked,
+    /// while a later successful retry closes and schedules that pane to retire.
+    #[test]
+    fn failed_agent_session_stop_does_not_persist_a_close() {
+        let (mut app, sessions, _spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        let signals = Arc::new(RetryStopSignals::default());
+        app.panes.get_mut(&pane).unwrap().handle = Some(Box::new(RetryStopHandle {
+            signals: signals.clone(),
+            terminate_outcome: TerminateOutcome::Fails,
+        }));
+
+        app.close_agent_session(pane);
+
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Open
+        );
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::Tracked
+        );
+        assert!(app.panes.get(&pane).unwrap().handle.is_some());
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().state(),
+            ProcessState::Running
+        );
+        assert_eq!(app.notice.as_deref(), Some(STOP_DELIVERY_FAILED_NOTICE));
+
+        app.close_agent_session(pane);
+
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Closed
+        );
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::RetireOnExit
+        );
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().state(),
+            ProcessState::Stopping
+        );
+    }
+
+    /// A delivered stop with failed durable persistence remains a tracked row
+    /// and an open history record so its eventual exit cannot lose the session.
+    #[test]
+    fn failed_session_close_persistence_keeps_the_session_recoverable() {
+        let (mut app, sessions, _spawns) = agent_app(Vec::new());
+        app.create_agent_session(AgentTool::Claude, None, None, None);
+        let pane = *app.workspace.selected_process().unwrap().id();
+        app.set_agent_session_store(Box::new(FailingAgentSessionStore));
+
+        app.close_agent_session(pane);
+
+        assert_eq!(
+            *sessions.sessions.borrow().last().unwrap().state(),
+            AgentSessionState::Open
+        );
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::Tracked
+        );
+        assert_eq!(
+            *app.workspace.process(pane).unwrap().state(),
+            ProcessState::Stopping
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains(AGENT_SESSION_STORE_ERROR))
+        );
     }
 
     /// Delayed retirement of a closing session keeps a later selected process

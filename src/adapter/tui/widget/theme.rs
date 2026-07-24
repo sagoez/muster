@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::domain::process::{ProcessKind, ProcessState};
 
@@ -15,6 +15,12 @@ pub fn border_style(focused: bool) -> Style {
         IDLE_BORDER_COLOR
     };
     Style::default().fg(color)
+}
+
+/// Style laid over pane cells inside an active drag selection. Reversing keeps
+/// the selection legible over any content the child drew.
+pub fn selection_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
 }
 
 /// Color of a sidebar section header.

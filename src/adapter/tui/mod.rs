@@ -1,10 +1,15 @@
 mod activity;
+mod activity_frame;
 mod app;
+mod clipboard;
 mod completion_generation;
 mod event;
 mod form;
+mod host_theme;
 mod input;
+mod pointer_shape;
 mod runtime;
+mod selection;
 mod shutdown_generation;
 mod signal;
 mod spawn_generation;
@@ -12,5 +17,6 @@ mod terminal;
 mod watch;
 mod widget;
 
+pub use host_theme::*;
 pub use runtime::*;
 pub use terminal::*;

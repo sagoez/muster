@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use crate::domain::{pty::PtySize, value::CommandLine};
+use crate::domain::{agent_session::AgentSessionId, pty::PtySize, value::CommandLine};
 
 /// A request to spawn one process under a PTY.
 #[derive(Clone, Debug, Getters, CopyGetters, TypedBuilder)]
@@ -21,6 +21,14 @@ pub struct SpawnRequest {
     #[getset(get = "pub")]
     #[builder(default)]
     project: Option<PathBuf>,
+    /// Additional environment exported only to this child process.
+    #[getset(get = "pub")]
+    #[builder(default)]
+    environment: BTreeMap<OsString, OsString>,
+    /// Durable session whose provider process must bind before it starts.
+    #[getset(get = "pub")]
+    #[builder(default)]
+    agent_session_id: Option<AgentSessionId>,
     /// Initial PTY size.
     #[getset(get_copy = "pub")]
     size: PtySize,

@@ -7,13 +7,18 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, after, bounded, never, select, unbounded};
 use crossterm::event;
-use ratatui::layout::{Rect, Size};
+use ratatui::{
+    layout::{Rect, Size},
+    style::Style,
+};
 use typed_builder::TypedBuilder;
 
 use super::{TerminalGuard, app::App, event::RuntimeEvent, watch::NotifyConfigWatcher};
 use crate::{
     application::Workspace,
-    domain::port::{Notifier, PathCompleter, ProcessRunner, ProjectRegistry, SettingsStore},
+    domain::port::{
+        AgentSessionStore, Notifier, PathCompleter, ProcessRunner, ProjectRegistry, SettingsStore,
+    },
     error::Result,
 };
 
@@ -28,6 +33,7 @@ pub struct Adapters {
     completer: Box<dyn PathCompleter + Send>,
     notifier: Box<dyn Notifier>,
     settings_store: Box<dyn SettingsStore>,
+    agent_session_store: Box<dyn AgentSessionStore>,
 }
 
 /// Poll timeout for the input reader thread.
@@ -49,6 +55,7 @@ pub fn run(
     workspace: Workspace,
     adapters: Adapters,
     current_config: PathBuf,
+    selection_style: Style,
 ) -> Result<()> {
     let Adapters {
         runner,
@@ -56,6 +63,7 @@ pub fn run(
         completer,
         notifier,
         settings_store,
+        agent_session_store,
     } = adapters;
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(OUTPUT_CAPACITY);
@@ -76,6 +84,8 @@ pub fn run(
     app.set_config_watcher(Box::new(NotifyConfigWatcher::new(watch_tx)));
     app.set_notifier(notifier);
     app.set_settings_store(settings_store);
+    app.set_agent_session_store(agent_session_store);
+    app.set_selection_style(selection_style);
     app.start();
 
     // Children are running now, so shut them down on every return path,
@@ -97,9 +107,17 @@ fn run_loop(
 ) -> Result<()> {
     guard.terminal_mut().draw(|frame| app.render(frame))?;
     while app.is_running() {
-        match drain(app, control_rx, output_rx) {
+        let outcome = drain(app, control_rx, output_rx);
+        if let Some(text) = app.take_pending_clipboard() {
+            guard.copy_to_clipboard(&text)?;
+        }
+        if let Some(shape) = app.take_pending_pointer_shape() {
+            guard.set_pointer_shape(shape)?;
+        }
+        match outcome {
             ControlFlow::Break(()) => break,
             ControlFlow::Continue(redraw) if redraw && app.is_running() => {
+                app.refresh_selection_view();
                 guard.terminal_mut().draw(|frame| app.render(frame))?;
             },
             ControlFlow::Continue(_) => {},
@@ -118,6 +136,14 @@ fn drain(
 ) -> ControlFlow<(), bool> {
     let activity_timeout = app
         .next_activity_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
+    let activity_frame_timeout = app
+        .next_activity_frame_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
+    let selection_timeout = app
+        .next_selection_deadline()
         .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
         .unwrap_or_else(never);
     let mut redraw = false;
@@ -139,6 +165,12 @@ fn drain(
         recv(activity_timeout) -> now => if let Ok(now) = now {
             redraw = app.expire_quiet_activity(now);
         },
+        recv(activity_frame_timeout) -> now => if let Ok(now) = now {
+            redraw = app.advance_activity_frame(now);
+        },
+        recv(selection_timeout) -> now => if let Ok(now) = now {
+            redraw = app.advance_selection(now);
+        },
     }
     while let Ok(event) = control_rx.try_recv() {
         if !apply(app, event) {
@@ -157,6 +189,9 @@ fn drain(
             Err(_) => break,
         }
     }
+    let now = Instant::now();
+    redraw |= app.advance_activity_frame(now);
+    redraw |= app.advance_selection(now);
     ControlFlow::Continue(redraw)
 }
 

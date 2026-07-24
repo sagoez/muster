@@ -107,9 +107,9 @@ pub(super) fn register_folder(
 /// # Errors
 /// Returns [`CliError::InvalidProjectFolder`] when the folder yields no name.
 pub(super) fn project_name(directory: &Path) -> Result<ProjectName, CliError> {
-    let file_name = directory
-        .canonicalize()
-        .unwrap_or_else(|_| directory.to_path_buf())
+    // Normalize without resolving the final symlink: the registry preserves
+    // the alias the user selected, so its name must come from the alias too.
+    let file_name = absolutize(directory)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -207,6 +207,23 @@ mod tests {
         );
         assert!(rows.iter().any(|row| row.detail().contains(EXISTS_NOTE)));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A symlinked folder keeps its alias name, matching the alias the
+    /// registry stores, so two aliases of one target stay distinguishable.
+    #[cfg(unix)]
+    #[test]
+    fn project_name_keeps_the_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_dir("alias-name");
+        let target = base.join("real-target");
+        let alias = base.join("nice-alias");
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(project_name(&alias).unwrap().as_ref(), "nice-alias");
+        fs::remove_dir_all(base).unwrap();
     }
 
     /// A directory with no usable name fails before anything is written.

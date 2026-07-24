@@ -192,12 +192,24 @@ fn contains_token(content: &str, needle: &str) -> bool {
         let boundary = content[..index].chars().next_back().is_none_or(|previous| {
             STRING_DELIMITERS.contains(&previous) || (self_delimited && previous.is_whitespace())
         });
-        if boundary {
+        // The match must also end at a token boundary, so a marker ending in
+        // `--provider claude` never accepts `--provider claude-old`.
+        let terminated = content[index + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !is_token_char(next));
+        if boundary && terminated {
             return true;
         }
         from = index + 1;
     }
     false
+}
+
+/// Characters that can extend a provider token rightward; a match followed by
+/// one names a different provider or binary.
+fn is_token_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '-' | '_')
 }
 
 /// The textual forms one provider's installed hook must carry in a config.
@@ -1288,6 +1300,46 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A provider token that merely begins with the expected value is not a
+    /// working callback.
+    #[test]
+    fn status_rejects_a_provider_token_prefix() {
+        let root = std::env::temp_dir().join(format!("muster-tokpre-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        // Corrupt Claude's callback into a token clap would reject.
+        let claude = home.join(CLAUDE_SETTINGS);
+        let broken = fs::read_to_string(&claude).unwrap().replace(
+            &format!(
+                "{CAPTURE_PROVIDER_ARGUMENT} {}",
+                AgentTool::Claude.protocol_token()
+            ),
+            &format!(
+                "{CAPTURE_PROVIDER_ARGUMENT} {}-old",
+                AgentTool::Claude.protocol_token()
+            ),
+        );
+        fs::write(&claude, broken).unwrap();
+
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        let claude_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Claude)
+            .expect("claude status present");
+        assert_eq!(
+            claude_status.state(),
+            HookState::Stale,
+            "a token prefix is a broken callback, not an installed hook"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

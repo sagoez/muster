@@ -82,10 +82,10 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
-/// Expands `~` and makes a path absolute without resolving symlinks,
-/// preserving the user-selected filesystem location. `.` and `..` components
-/// are removed lexically so equivalent addressings of one location compare
-/// and store identically.
+/// Expands `~` and makes a path absolute, preserving the user-selected
+/// filesystem location. `.` and `..` components are normalized so equivalent
+/// addressings of one location compare and store identically; only a `..`
+/// crossing a real symlink consults the filesystem.
 pub fn absolutize(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
     let absolute = if expanded.is_absolute() {
@@ -99,10 +99,12 @@ pub fn absolutize(path: &Path) -> PathBuf {
     normalize_lexically(&absolute)
 }
 
-/// Lexically removes `.` and drops `..` against its preceding component,
-/// without touching the filesystem, so symlink aliases survive. Leading `..`
-/// components of a relative path are kept; excess `..` at an absolute root is
-/// dropped, matching how the OS resolves it.
+/// Removes `.` and applies `..` against its preceding component, keeping the
+/// user's symlink aliases wherever `..` does not cross one. A `..` whose
+/// preceding component is a real symlink resolves through the filesystem,
+/// because `link/..` names the link target's parent, not the link's. Leading
+/// `..` components of a relative path are kept; excess `..` at an absolute
+/// root is dropped, matching how the OS resolves it.
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -114,7 +116,11 @@ fn normalize_lexically(path: &Path) -> PathBuf {
                     .next_back()
                     .is_some_and(|last| matches!(last, Component::Normal(_)));
                 if poppable {
-                    normalized.pop();
+                    if let Some(resolved) = resolve_symlink_parent(&normalized) {
+                        normalized = resolved;
+                    } else {
+                        normalized.pop();
+                    }
                 } else if !normalized.has_root() {
                     normalized.push(component.as_os_str());
                 }
@@ -123,6 +129,22 @@ fn normalize_lexically(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+/// The filesystem parent of `prefix` when `prefix` is a symlink, so `..`
+/// after it lands where the OS would; `None` for every other prefix (missing
+/// paths fall back to lexical popping, the only option left).
+fn resolve_symlink_parent(prefix: &Path) -> Option<PathBuf> {
+    let is_symlink = fs::symlink_metadata(prefix)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return None;
+    }
+    prefix
+        .canonicalize()
+        .ok()
+        .and_then(|target| target.parent().map(Path::to_path_buf))
 }
 
 /// Resolves a registered config only when its stored path is independent of the
@@ -258,14 +280,14 @@ mod tests {
         );
     }
 
-    /// Component normalization is lexical: a symlink component is popped by
-    /// `..` without consulting the filesystem, keeping the user's alias.
+    /// Components that do not exist on disk normalize lexically - the only
+    /// resolution left for them.
     #[test]
-    fn lexical_normalization_keeps_symlink_aliases() {
+    fn missing_components_normalize_lexically() {
         assert_eq!(
             normalize_lexically(Path::new("/a/link/../b")),
             PathBuf::from("/a/b"),
-            "lexical resolution, by design"
+            "a missing component cannot be a symlink, so popping is safe"
         );
         assert_eq!(
             normalize_lexically(Path::new("../x/./y")),
@@ -275,5 +297,28 @@ mod tests {
             normalize_lexically(Path::new("../../x")),
             PathBuf::from("../../x")
         );
+    }
+
+    #[cfg(unix)]
+    /// `..` across a real symlink resolves through the filesystem: the parent
+    /// of the link's target, not of the link itself.
+    #[test]
+    fn parent_of_a_symlink_resolves_through_the_filesystem() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("muster-link-dotdot-{}", std::process::id()));
+        let real_sub = base.join("real/sub");
+        let link = base.join("link");
+        fs::create_dir_all(&real_sub).unwrap();
+        symlink(&real_sub, &link).unwrap();
+
+        let resolved = normalize_lexically(&link.join("../muster.yml"));
+
+        assert_eq!(
+            resolved,
+            base.join("real").canonicalize().unwrap().join("muster.yml"),
+            "link/.. lands beside the link target, matching the OS"
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 }

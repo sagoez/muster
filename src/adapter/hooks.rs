@@ -62,6 +62,9 @@ const CAPTURE_PROVIDER_ARGUMENT: &str = "--provider";
 const CAPTURE_PROCESS_ID_ARGUMENT: &str = "--process-id";
 /// CLI argument identifying the provider process's immediate parent.
 const CAPTURE_PARENT_PROCESS_ID_ARGUMENT: &str = "--parent-process-id";
+/// Line-comment prefixes across provider config formats (TOML/shell-style
+/// and JS/TS), used to skip hooks the provider never evaluates.
+const COMMENT_PREFIXES: [&str; 2] = ["#", "//"];
 /// Maximum provider-config symlinks followed before treating the path as a
 /// cycle or an unreasonable chain.
 const MAX_PROVIDER_CONFIG_SYMLINKS: usize = 40;
@@ -346,12 +349,25 @@ impl ProviderHooks {
             // An unreadable config reads as absent; a later hooks setup surfaces the real error.
             return HookState::Missing;
         };
+        // A hook the provider never evaluates (commented out in TOML or a
+        // plugin) must not count; JSON has no comments, so its lines pass
+        // through untouched. Best effort: block comments are not tracked.
+        let active: String = content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                COMMENT_PREFIXES
+                    .iter()
+                    .all(|prefix| !trimmed.starts_with(prefix))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if candidates
             .iter()
-            .any(|candidate| content.contains(candidate.as_str()))
+            .any(|candidate| active.contains(candidate.as_str()))
         {
             HookState::Installed
-        } else if content.contains(CAPTURE_SUBCOMMAND) {
+        } else if active.contains(CAPTURE_SUBCOMMAND) {
             HookState::Stale
         } else {
             HookState::Missing
@@ -1225,6 +1241,40 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hook the provider never evaluates (commented out) is not installed.
+    #[test]
+    fn status_ignores_commented_out_hooks() {
+        let root = std::env::temp_dir().join(format!("muster-comment-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        // Disable the Kimi hook the way a user would: comment every line out.
+        let kimi = home.join(KIMI_CONFIG);
+        let disabled: String = fs::read_to_string(&kimi)
+            .unwrap()
+            .lines()
+            .map(|line| format!("# {line}\n"))
+            .collect();
+        fs::write(&kimi, disabled).unwrap();
+
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        let kimi_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Kimi)
+            .expect("kimi status present");
+        assert_eq!(
+            kimi_status.state(),
+            HookState::Missing,
+            "a fully commented hook is not active"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

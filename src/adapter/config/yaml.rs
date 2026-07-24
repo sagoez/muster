@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{ErrorKind, Write},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -49,6 +49,43 @@ pub(crate) fn load_workspace(path: &Path) -> Result<WorkspaceConfig, ConfigError
     Ok(config)
 }
 
+/// Writes `value` to `path` only when nothing exists there. The complete
+/// contents land in a sibling temporary file first and are published with a
+/// no-replace hard link, so a concurrent creation is never clobbered, a
+/// dangling symlink is refused, and an interrupted write can never leave a
+/// truncated destination blocking a later attempt. Returns whether the file
+/// was created.
+///
+/// # Errors
+/// Returns a `ConfigError` when serialization, the write, or the publish
+/// fails.
+pub(crate) fn create_config_new<T: Serialize>(path: &Path, value: &T) -> Result<bool, ConfigError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let raw = serde_yaml_ng::to_string(value)?;
+    let temp = temp_path(path);
+    fs::write(&temp, raw).map_err(|source| ConfigError::Write {
+        path: temp.clone(),
+        source,
+    })?;
+    let published = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(source) => Err(ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        }),
+    };
+    let _ = fs::remove_file(&temp);
+    published
+}
+
 /// Serializes `value` to YAML and writes it to `path`, creating any missing
 /// parent directories first. The write is atomic: it lands in a sibling
 /// temporary file that is then renamed over the destination, so a crash, full
@@ -60,44 +97,6 @@ pub(crate) fn load_workspace(path: &Path) -> Result<WorkspaceConfig, ConfigError
 ///
 /// # Errors
 /// Returns a `ConfigError::Write` if a directory, temp file, or rename fails.
-/// Writes `value` to `path` only when nothing exists there, via an exclusive
-/// create so a concurrent creation is never clobbered; the exclusive open
-/// also refuses dangling symlinks. Returns whether the file was created.
-///
-/// # Errors
-/// Returns a `ConfigError` when serialization or the write fails.
-pub(crate) fn create_config_new<T: Serialize>(path: &Path, value: &T) -> Result<bool, ConfigError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let raw = serde_yaml_ng::to_string(value)?;
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(source) if source.kind() == ErrorKind::AlreadyExists => return Ok(false),
-        Err(source) => {
-            return Err(ConfigError::Write {
-                path: path.to_path_buf(),
-                source,
-            });
-        },
-    };
-    file.write_all(raw.as_bytes())
-        .map_err(|source| ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(true)
-}
-
 pub(crate) fn write_config<T: Serialize>(path: &Path, value: &T) -> Result<(), ConfigError> {
     let dest = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(parent) = dest.parent()
@@ -162,6 +161,12 @@ mod tests {
             "existing file wins"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "first");
+        let residue = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(residue, 0, "no temporary files survive either outcome");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

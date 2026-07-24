@@ -84,8 +84,9 @@ pub fn expand_home(path: &Path) -> PathBuf {
 
 /// Expands `~` and makes a path absolute, preserving the user-selected
 /// filesystem location. `.` and `..` components are normalized so equivalent
-/// addressings of one location compare and store identically; only a `..`
-/// crossing a real symlink consults the filesystem.
+/// addressings of one location compare and store identically; a `..` whose
+/// preceding component exists on disk follows that component's real nature
+/// (see [`parent_step`]).
 pub fn absolutize(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
     let absolute = if expanded.is_absolute() {
@@ -100,11 +101,12 @@ pub fn absolutize(path: &Path) -> PathBuf {
 }
 
 /// Removes `.` and applies `..` against its preceding component, keeping the
-/// user's symlink aliases wherever `..` does not cross one. A `..` whose
-/// preceding component is a real symlink resolves through the filesystem,
-/// because `link/..` names the link target's parent, not the link's. Leading
-/// `..` components of a relative path are kept; excess `..` at an absolute
-/// root is dropped, matching how the OS resolves it.
+/// user's symlink aliases wherever `..` does not cross one. Each `..` follows
+/// [`parent_step`]: popped lexically over directories and missing components,
+/// resolved through the filesystem over directory symlinks, and preserved
+/// over existing non-directories the OS would reject. Leading `..` components
+/// of a relative path are kept; excess `..` at an absolute root is dropped,
+/// matching how the OS resolves it.
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -139,32 +141,39 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 /// How a `..` applies to the prefix before it.
 enum ParentStep {
-    /// Not a symlink: popping the prefix is exactly what the OS would do.
+    /// A directory or missing prefix: popping is what the OS would do (or the
+    /// only resolution available).
     Lexical,
     /// A symlink to a directory: `..` lands at the target's parent.
     Resolved(PathBuf),
-    /// A symlink to anything else (a file, or dangling): the OS rejects the
+    /// An existing non-directory, plain or via symlink: the OS rejects the
     /// traversal, so it is kept intact rather than rewritten to a valid but
     /// unrelated path.
     Preserved,
 }
 
-/// Classifies `..` against `prefix`, consulting the filesystem only when the
-/// prefix is a real symlink.
+/// Classifies `..` against `prefix`. Only directories may be traversed
+/// upward: a missing prefix normalizes lexically (the only resolution left),
+/// an existing non-directory preserves the traversal for the OS to reject,
+/// and a directory symlink resolves through the filesystem.
 fn parent_step(prefix: &Path) -> ParentStep {
-    let is_symlink = fs::symlink_metadata(prefix)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false);
-    if !is_symlink {
+    let Ok(meta) = fs::symlink_metadata(prefix) else {
         return ParentStep::Lexical;
+    };
+    if meta.file_type().is_symlink() {
+        return match prefix.canonicalize() {
+            Ok(target) if target.is_dir() => match target.parent() {
+                Some(parent) => ParentStep::Resolved(parent.to_path_buf()),
+                // The target is the filesystem root, whose parent is itself.
+                None => ParentStep::Resolved(target),
+            },
+            _ => ParentStep::Preserved,
+        };
     }
-    match prefix.canonicalize() {
-        Ok(target) if target.is_dir() => match target.parent() {
-            Some(parent) => ParentStep::Resolved(parent.to_path_buf()),
-            // The target is the filesystem root, whose parent is itself.
-            None => ParentStep::Resolved(target),
-        },
-        _ => ParentStep::Preserved,
+    if meta.is_dir() {
+        ParentStep::Lexical
+    } else {
+        ParentStep::Preserved
     }
 }
 
@@ -318,6 +327,37 @@ mod tests {
             normalize_lexically(Path::new("../../x")),
             PathBuf::from("../../x")
         );
+    }
+
+    /// `..` after an existing regular file is preserved: the OS rejects the
+    /// traversal, so normalization must not rewrite it to a valid path.
+    #[test]
+    fn parent_of_a_regular_file_is_preserved() {
+        let base = std::env::temp_dir().join(format!("muster-file-dotdot-{}", std::process::id()));
+        let blocker = base.join("blocker");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(&blocker, "").unwrap();
+
+        assert_eq!(
+            normalize_lexically(&blocker.join("../muster.yml")),
+            blocker.join("../muster.yml"),
+            "the invalid traversal survives for the OS to reject"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// `..` after an existing real directory still pops, matching the OS.
+    #[test]
+    fn parent_of_a_real_directory_pops() {
+        let base = std::env::temp_dir().join(format!("muster-dir-dotdot-{}", std::process::id()));
+        let sub = base.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        assert_eq!(
+            normalize_lexically(&sub.join("../muster.yml")),
+            base.join("muster.yml")
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]

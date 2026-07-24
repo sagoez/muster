@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
@@ -72,11 +75,12 @@ fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
 
 /// Validates the workspace config.
 pub fn config_probe(config_path: PathBuf) -> Probe {
-    match check(config_path.clone()) {
+    let display = config_path.display().to_string();
+    match check(config_path) {
         CheckOutcome::Valid => probe(
             CONFIG_LABEL,
             ProbeOutcome::Ok,
-            format!("{} is valid", config_path.display()),
+            format!("{display} is valid"),
         ),
         CheckOutcome::Invalid(report) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
     }
@@ -144,18 +148,19 @@ pub fn hooks_probe(statuses: &[HookStatus]) -> Probe {
 }
 
 /// A hooks probe for when the status scan itself failed.
-pub fn hooks_probe_error(error: &dyn std::error::Error) -> Probe {
+pub fn hooks_probe_error(error: &dyn Error) -> Probe {
     probe(HOOKS_LABEL, ProbeOutcome::Fail, error_chain(error))
 }
 
 /// Reports which clipboard path a copy would take. Informational only.
 pub fn clipboard_probe() -> Probe {
-    let detail = match (clipboard::prefers_osc52(), clipboard::preferred_tool()) {
+    let tool = clipboard::preferred_tool();
+    let detail = match (clipboard::prefers_osc52(), &tool) {
         (true, _) => "remote session; OSC 52 via the terminal".to_string(),
-        (false, Some(tool)) => format!("native tool: {tool}"),
+        (false, Some(tool_name)) => format!("native tool: {tool_name}"),
         (false, None) => "no native tool; OSC 52 via the terminal".to_string(),
     };
-    let outcome = if clipboard::preferred_tool().is_some() || clipboard::prefers_osc52() {
+    let outcome = if tool.is_some() || clipboard::prefers_osc52() {
         ProbeOutcome::Ok
     } else {
         ProbeOutcome::Warn
@@ -203,6 +208,7 @@ fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
         "zsh" => Some(CompletionShell::Zsh),
         "fish" => Some(CompletionShell::Fish),
         "elvish" => Some(CompletionShell::Elvish),
+        "pwsh" | "powershell" => Some(CompletionShell::Powershell),
         _ => None,
     }
 }
@@ -351,6 +357,15 @@ mod tests {
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// PowerShell paths map to the powershell completion shell.
+    #[test]
+    fn shell_from_path_recognizes_powershell() {
+        assert_eq!(
+            shell_from_path("/usr/bin/pwsh"),
+            Some(CompletionShell::Powershell)
+        );
     }
 
     /// Rendering prefixes the outcome glyph.

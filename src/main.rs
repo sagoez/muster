@@ -34,6 +34,10 @@ use muster::{
     error::Result,
 };
 
+/// Environment variable controlling the XDG configuration root.
+const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+/// XDG configuration root under home when the environment does not override.
+const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Exit code used when a command finds problems to report but does not itself
 /// fail. Shared by `muster check` and `muster doctor`.
 const FINDINGS_EXIT_CODE: i32 = 1;
@@ -222,11 +226,23 @@ impl Drop for WindowsLaunchGate {
 ///
 /// # Errors
 /// Returns an error if the config cannot be loaded or the terminal fails.
-fn main() -> Result<()> {
+fn main() {
     // When invoked by a shell's completion hook this generates candidates and
     // exits; otherwise it returns and normal parsing proceeds.
     clap_complete::CompleteEnv::with_factory(Args::command).complete();
     let args = Args::parse();
+    if let Err(error) = dispatch(args) {
+        // Every escaping error speaks in the CLI's styled voice; the default
+        // Result-from-main path would print the Debug form instead.
+        fail_with(&error);
+    }
+}
+
+/// Routes the parsed arguments to their command.
+///
+/// # Errors
+/// Returns an error when a command fails; `main` renders it via [`fail_with`].
+fn dispatch(args: Args) -> Result<()> {
     match args.command {
         Some(Command::Init) => run_init(),
         Some(Command::Check) => run_check(
@@ -461,7 +477,13 @@ fn run_doctor(config_path: PathBuf) -> Result<()> {
     let home = BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
         .unwrap_or_default();
-    probes.push(cli::completions_probe(shell.as_deref(), &home));
+    // The XDG root the shells actually read: the override when absolute,
+    // else the conventional ~/.config.
+    let xdg_config = std::env::var_os(XDG_CONFIG_HOME_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
+    probes.push(cli::completions_probe(shell.as_deref(), &home, &xdg_config));
     cli::print(&cli::doctor_report(&probes));
     if cli::any_failed(&probes) {
         std::process::exit(FINDINGS_EXIT_CODE);

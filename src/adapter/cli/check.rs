@@ -30,8 +30,13 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
     let mut report = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
-        report.push_str(CHAIN_SEPARATOR);
-        report.push_str(&cause.to_string());
+        let text = cause.to_string();
+        // Many error displays already embed their source text; appending
+        // those again would repeat every diagnostic verbatim.
+        if !report.contains(&text) {
+            report.push_str(CHAIN_SEPARATOR);
+            report.push_str(&text);
+        }
         source = cause.source();
     }
     report
@@ -73,5 +78,62 @@ mod tests {
     fn a_missing_file_reports() {
         let path = std::env::temp_dir().join("muster-check-missing/muster.yml");
         assert!(matches!(check(path), CheckOutcome::Invalid(_)));
+    }
+
+    /// An error whose display already embeds its source text.
+    #[derive(Debug)]
+    struct EmbeddingError(WrappedError);
+
+    impl std::fmt::Display for EmbeddingError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "could not parse: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for EmbeddingError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// An error whose display is context-only, not embedding its source.
+    #[derive(Debug)]
+    struct ContextError(WrappedError);
+
+    impl std::fmt::Display for ContextError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "loading the config failed")
+        }
+    }
+
+    impl std::error::Error for ContextError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[derive(Debug)]
+    struct WrappedError;
+
+    impl std::fmt::Display for WrappedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unexpected token at line 3")
+        }
+    }
+
+    impl std::error::Error for WrappedError {}
+
+    /// Sources already rendered by the outer display are not appended again;
+    /// sources adding new text still are.
+    #[test]
+    fn error_chain_skips_already_rendered_sources() {
+        assert_eq!(
+            error_chain(&EmbeddingError(WrappedError)),
+            "could not parse: unexpected token at line 3"
+        );
+        assert_eq!(
+            error_chain(&ContextError(WrappedError)),
+            "loading the config failed: unexpected token at line 3"
+        );
     }
 }

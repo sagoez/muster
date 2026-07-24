@@ -36,6 +36,7 @@ Requires a recent Rust toolchain.
 
 ```sh
 cargo install muster-workspace
+muster init                  # scaffolds a starter muster.yml here and registers it
 muster                       # starts the TUI on a local or registered workspace
 muster hooks setup           # enables native session discovery for agent CLIs
 ```
@@ -140,7 +141,24 @@ group, wait for its grace period, then use SIGKILL if it is still alive. `x`
 always force-kills the selected process immediately. Agents, terminals, project
 switches, and quitting always use immediate kill.
 
-## muster run
+## The CLI
+
+Beyond the TUI, muster ships workspace commands:
+
+```sh
+muster init                  # scaffold a starter muster.yml and register the folder
+muster check                 # validate the config; exits non-zero for CI and hooks
+muster projects              # list registered projects; add/remove subcommands
+muster completions zsh       # print the shell hook enabling tab completion
+muster doctor                # diagnose config, projects, sessions, hooks,
+                             # clipboard, and completions
+```
+
+On a terminal the commands render as styled reports in the TUI's visual
+language; piped or under NO_COLOR they emit plain line-per-fact output for
+scripts.
+
+### muster run
 
 `muster run` registers a command into a project and runs it in place, without
 opening the config:

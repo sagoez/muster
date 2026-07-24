@@ -46,12 +46,15 @@ mod project_controller;
 mod session_controller;
 
 use crate::{
-    adapter::path,
+    adapter::{config::starter_workspace, path},
     application::{
         ExitDecision, ProcessLifecycle, ProcessSpecMatcher, Reconciliation, SessionRestorer,
         Workspace,
     },
-    constants::{APP_NAME, MUSTER_AGENT_SESSION_ENV, MUSTER_AGENT_SESSION_STATE_FILE_ENV},
+    constants::{
+        APP_NAME, MUSTER_AGENT_SESSION_ENV, MUSTER_AGENT_SESSION_STATE_FILE_ENV,
+        WORKSPACE_FILE_NAME,
+    },
     domain::{
         agent_session::{AgentSession, AgentSessionId, AgentSessionState, NativeSessionId},
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
@@ -126,10 +129,6 @@ const NEW_PROJECT_TITLE: &str = "New project";
 const NAME_FIELD: &str = "Name";
 /// Label of a project-folder field.
 const FOLDER_FIELD: &str = "Folder";
-/// Workspace config file name created inside a new project's folder.
-const PROJECT_CONFIG_FILE: &str = "muster.yml";
-/// Name of the starter terminal created for a new project.
-const STARTER_TERMINAL: &str = "Terminal";
 /// Title of the add-process form.
 const ADD_PROCESS_TITLE: &str = "Add process";
 /// Title of the advanced agent-session form.
@@ -2283,7 +2282,7 @@ impl App {
         if folder.is_empty() {
             return;
         }
-        let config_path = PathBuf::from(folder).join(PROJECT_CONFIG_FILE);
+        let config_path = PathBuf::from(folder).join(WORKSPACE_FILE_NAME);
         if self.registry.workspace_exists(&config_path) {
             self.confirm_overwrite(name, config_path);
             return;
@@ -2317,7 +2316,7 @@ impl App {
         }
         if self
             .registry
-            .save_workspace(&config_path, &starter_config())
+            .save_workspace(&config_path, &starter_workspace())
             .is_err()
         {
             self.report_error(WORKSPACE_SAVE_ERROR);
@@ -2923,19 +2922,6 @@ fn pane_size_of(area: Rect) -> PtySize {
     PtySize::builder()
         .rows(Rows::new(rows))
         .cols(Cols::new(cols))
-        .build()
-}
-
-/// A starter workspace for a new project: a single terminal running the login
-/// shell, so the project is immediately usable.
-fn starter_config() -> WorkspaceConfig {
-    let terminals = ProcessName::try_new(STARTER_TERMINAL)
-        .map(|name| vec![ProcessSpec::builder().name(name).build()])
-        .unwrap_or_default();
-    WorkspaceConfig::builder()
-        .agents(vec![])
-        .terminals(terminals)
-        .commands(vec![])
         .build()
 }
 
@@ -3612,7 +3598,7 @@ mod tests {
     #[test]
     fn spawn_paths_are_anchored_to_the_workspace_config() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let config = workspace.join(PROJECT_CONFIG_FILE);
+        let config = workspace.join(WORKSPACE_FILE_NAME);
 
         let (project, inherited) = App::resolve_spawn_paths(Some(&config), None);
         assert_eq!(project, Some(config.clone()));
@@ -3637,8 +3623,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("muster-app-link-{}", std::process::id()));
         let workspace_dir = dir.join("workspace");
         let shared_dir = dir.join("shared");
-        let target = shared_dir.join(PROJECT_CONFIG_FILE);
-        let link = workspace_dir.join(PROJECT_CONFIG_FILE);
+        let target = shared_dir.join(WORKSPACE_FILE_NAME);
+        let link = workspace_dir.join(WORKSPACE_FILE_NAME);
         fs::create_dir_all(&workspace_dir).unwrap();
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(&target, "").unwrap();
@@ -5910,9 +5896,9 @@ mod tests {
         let shared_dir = dir.join("shared");
         let first_dir = dir.join("first");
         let second_dir = dir.join("second");
-        let target = shared_dir.join(PROJECT_CONFIG_FILE);
-        let first = first_dir.join(PROJECT_CONFIG_FILE);
-        let second = second_dir.join(PROJECT_CONFIG_FILE);
+        let target = shared_dir.join(WORKSPACE_FILE_NAME);
+        let first = first_dir.join(WORKSPACE_FILE_NAME);
+        let second = second_dir.join(WORKSPACE_FILE_NAME);
         fs::create_dir_all(&shared_dir).unwrap();
         fs::create_dir_all(&first_dir).unwrap();
         fs::create_dir_all(&second_dir).unwrap();
@@ -6215,7 +6201,7 @@ mod tests {
     /// loading against the TUI process's current directory from either UI path.
     #[test]
     fn relative_projects_are_not_opened_from_the_ui() {
-        let projects = vec![project("legacy", PROJECT_CONFIG_FILE)];
+        let projects = vec![project("legacy", WORKSPACE_FILE_NAME)];
         let (mut app, _recorder) = flow_app(projects, empty_workspace_config(), "/here/muster.yml");
 
         press(&mut app, KeyCode::Char('j'));
@@ -6606,7 +6592,7 @@ mod tests {
     /// config path and closes the form.
     #[test]
     fn saving_the_current_workspace_registers_it() {
-        let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), PROJECT_CONFIG_FILE);
+        let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), WORKSPACE_FILE_NAME);
         app.open_switcher();
         press(&mut app, KeyCode::Char('s'));
         type_text(&mut app, "My Setup");
@@ -6622,7 +6608,7 @@ mod tests {
         assert_eq!(saved[0].name().as_ref(), "My Setup");
         assert_eq!(
             saved[0].config(),
-            &path::absolutize(Path::new(PROJECT_CONFIG_FILE))
+            &path::absolutize(Path::new(WORKSPACE_FILE_NAME))
         );
         assert!(saved[0].config().is_absolute());
     }
@@ -8374,8 +8360,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("muster-switcher-link-{}", std::process::id()));
         let workspace_dir = dir.join("workspace");
         let shared_dir = dir.join("shared");
-        let target = shared_dir.join(PROJECT_CONFIG_FILE);
-        let alias = workspace_dir.join(PROJECT_CONFIG_FILE);
+        let target = shared_dir.join(WORKSPACE_FILE_NAME);
+        let alias = workspace_dir.join(WORKSPACE_FILE_NAME);
         fs::create_dir_all(&workspace_dir).unwrap();
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(&target, "").unwrap();

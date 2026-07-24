@@ -22,7 +22,7 @@ use muster::{
         tui::{self, Adapters, TerminalGuard},
     },
     application::Workspace,
-    constants::APP_NAME,
+    constants::{APP_NAME, WORKSPACE_FILE_NAME},
     domain::{
         agent_session::{AgentProcessId, AgentSessionId},
         port::{AgentSessionStore, ConfigSource},
@@ -30,8 +30,6 @@ use muster::{
     error::Result,
 };
 
-/// Conventional workspace filename used when no explicit path is supplied.
-const DEFAULT_CONFIG_FILE: &str = "muster.yml";
 /// Codex requires user approval before executing a new hook command.
 const CODEX_HOOK_APPROVAL_NOTICE: &str =
     "Codex: approve the Muster hook with /hooks before sessions can be resumed.";
@@ -217,7 +215,7 @@ fn main() -> Result<()> {
         Some(Command::Run(run_args)) => run_capture(
             run_args,
             args.config
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE)),
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
         ),
         Some(Command::Hooks { command }) => run_hooks(command),
         Some(Command::Hook { command }) => run_internal_hook(command),
@@ -357,7 +355,7 @@ fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
     install_panic_hook();
     let registry = YamlProjectRegistry;
     let current_project = cli::current_project_from_env();
-    let local_config = PathBuf::from(DEFAULT_CONFIG_FILE);
+    let local_config = PathBuf::from(WORKSPACE_FILE_NAME);
     let config_path = cli::resolve_tui_config(
         explicit_config.as_deref(),
         current_project.as_deref(),

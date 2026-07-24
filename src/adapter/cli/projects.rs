@@ -1,6 +1,9 @@
 use std::{fs, path::Path};
 
-use super::error::CliError;
+use super::{
+    error::CliError,
+    report::{Row, RowKind},
+};
 use crate::{
     adapter::path::absolutize,
     constants::WORKSPACE_FILE_NAME,
@@ -18,10 +21,10 @@ const EMPTY_NOTE: &str = "no registered projects; run `muster init` in a project
 ///
 /// # Errors
 /// Returns [`CliError`] when the registry cannot be read.
-pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<String>, CliError> {
+pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<Row>, CliError> {
     let projects = registry.projects()?;
     if projects.is_empty() {
-        return Ok(vec![EMPTY_NOTE.to_string()]);
+        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
     }
     Ok(projects
         .iter()
@@ -35,7 +38,10 @@ pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<St
                 .parent()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| project.config().display().to_string());
-            format!("{marker}{}  {folder}", project.name().as_ref())
+            Row::unlabeled(
+                RowKind::Plain,
+                format!("{marker}{}  {folder}", project.name().as_ref()),
+            )
         })
         .collect())
 }
@@ -52,7 +58,7 @@ fn is_current(project: &Project, current_dir: &Path) -> bool {
 /// # Errors
 /// Returns [`CliError::MissingWorkspaceFile`] when the folder has no
 /// `muster.yml`, or a registry error when it cannot be updated.
-pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<String>, CliError> {
+pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
     if fs::symlink_metadata(&config_path).is_err() {
         return Err(CliError::MissingWorkspaceFile(config_path));
@@ -69,7 +75,7 @@ pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Strin
 /// # Errors
 /// Returns [`CliError::UnknownProjectAmong`] when no project has that name, or
 /// [`CliError::AmbiguousProject`] when more than one project shares the name.
-pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<String>, CliError> {
+pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let projects = registry.projects()?;
     let matches: Vec<&Project> = projects
         .iter()
@@ -103,7 +109,10 @@ pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<String>,
         .cloned()
         .collect();
     registry.save(&remaining)?;
-    Ok(vec![format!("removed '{name}' from the registry")])
+    Ok(vec![Row::unlabeled(
+        RowKind::Ok,
+        format!("removed '{name}' from the registry"),
+    )])
 }
 
 #[cfg(test)]
@@ -175,21 +184,21 @@ mod tests {
             ],
             ..RecordingRegistry::default()
         };
-        let lines = list(&registry, Path::new("/w/api/src")).unwrap();
-        assert_eq!(lines.len(), 2);
-        assert!(!lines[0].starts_with(CURRENT_MARKER));
-        assert!(lines[1].starts_with(CURRENT_MARKER));
-        assert!(lines[1].contains("api") && lines[1].contains("/w/api"));
+        let rows = list(&registry, Path::new("/w/api/src")).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].detail().starts_with(CURRENT_MARKER));
+        assert!(rows[1].detail().starts_with(CURRENT_MARKER));
+        assert!(rows[1].detail().contains("api") && rows[1].detail().contains("/w/api"));
         // The second column must be the project folder, not the config file path.
-        assert!(!lines[1].contains("muster.yml"));
+        assert!(!rows[1].detail().contains("muster.yml"));
     }
 
     /// An empty registry says so instead of printing nothing.
     #[test]
     fn list_reports_an_empty_registry() {
         let registry = RecordingRegistry::default();
-        let lines = list(&registry, Path::new("/")).unwrap();
-        assert_eq!(lines, vec![EMPTY_NOTE.to_string()]);
+        let rows = list(&registry, Path::new("/")).unwrap();
+        assert_eq!(rows[0].detail(), EMPTY_NOTE);
     }
 
     /// Adding requires the folder to contain a workspace file.
@@ -211,9 +220,9 @@ mod tests {
         fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
         let registry = RecordingRegistry::default();
 
-        let lines = add(&dir, &registry).unwrap();
+        let rows = add(&dir, &registry).unwrap();
         assert!(registry.saved_projects.borrow().is_some());
-        assert!(lines[0].contains("registered"));
+        assert!(rows[0].detail().contains("registered"));
 
         let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
         let seeded = RecordingRegistry {
@@ -230,7 +239,7 @@ mod tests {
             seeded.saved_projects.borrow().is_none(),
             "re-add saves nothing"
         );
-        assert!(again[0].contains("already registered"));
+        assert!(again[0].detail().contains("already registered"));
 
         fs::remove_dir_all(dir).unwrap();
     }

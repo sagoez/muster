@@ -1,13 +1,27 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{
+    Parser, Subcommand,
+    builder::styling::{AnsiColor, Styles},
+};
 
 use super::{completions::CompletionShell, run::RunArgs};
 use crate::domain::process::AgentTool;
 
+/// Help styling matching the CLI's report palette: cyan structure, green
+/// literals, yellow placeholders.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Cyan.on_default().bold())
+    .usage(AnsiColor::Cyan.on_default().bold())
+    .literal(AnsiColor::Green.on_default())
+    .placeholder(AnsiColor::Yellow.on_default());
+
 /// Command-line arguments. With no subcommand, muster launches its TUI.
 #[derive(Parser)]
-#[command(about = "A terminal workspace for running CLI agents and dev processes")]
+#[command(
+    about = "A terminal workspace for running CLI agents and dev processes",
+    styles = HELP_STYLES
+)]
 pub struct Args {
     /// Path to the workspace config file. Global, so it is recognized before or
     /// after a subcommand rather than being swallowed by `run`'s command args.

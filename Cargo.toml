@@ -28,6 +28,8 @@ name = "muster"
 path = "src/main.rs"
 
 [dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
 atomic-write-file = "0.3.0"
 base64 = "0.22.1"
 clap = { version = "4.6.2", features = ["derive"] }

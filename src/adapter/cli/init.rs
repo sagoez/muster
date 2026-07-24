@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::error::CliError;
+use super::{
+    error::CliError,
+    report::{Row, RowKind},
+};
 use crate::{
     adapter::{config::starter_workspace, path::absolutize},
     constants::WORKSPACE_FILE_NAME,
@@ -18,23 +21,29 @@ const REGISTERED_NOTE: &str = "already registered";
 const RUN_HINT: &str = "run `muster` here to start";
 
 /// Scaffolds a starter workspace in `directory` and registers it as a project.
-/// Returns the report lines to print, in order.
+/// Returns the report rows to print, in order.
 ///
 /// # Errors
 /// Returns [`CliError`] when the folder name is not a usable project name or
 /// the registry cannot be read or written.
-pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<String>, CliError> {
+pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
     let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
-    let mut lines = Vec::new();
+    let mut rows = Vec::new();
     if fs::symlink_metadata(&config_path).is_ok() {
-        lines.push(format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"));
+        rows.push(Row::unlabeled(
+            RowKind::Hint,
+            format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"),
+        ));
     } else {
         registry.save_workspace(&config_path, &starter_workspace())?;
-        lines.push(format!("created {WORKSPACE_FILE_NAME}"));
+        rows.push(Row::unlabeled(
+            RowKind::Ok,
+            format!("created {WORKSPACE_FILE_NAME}"),
+        ));
     }
-    lines.push(register_folder(directory, &config_path, registry)?);
-    lines.push(RUN_HINT.to_string());
-    Ok(lines)
+    rows.push(register_folder(directory, &config_path, registry)?);
+    rows.push(Row::unlabeled(RowKind::Dim, RUN_HINT));
+    Ok(rows)
 }
 
 /// Registers the folder as a project unless its config path already is one.
@@ -47,15 +56,15 @@ pub(super) fn register_folder(
     directory: &Path,
     config_path: &Path,
     registry: &dyn ProjectRegistry,
-) -> Result<String, CliError> {
+) -> Result<Row, CliError> {
     let mut projects = registry.projects()?;
     if let Some(existing) = projects
         .iter()
         .find(|project| absolutize(project.config()) == config_path)
     {
-        return Ok(format!(
-            "{REGISTERED_NOTE} as '{}'",
-            existing.name().as_ref()
+        return Ok(Row::unlabeled(
+            RowKind::Hint,
+            format!("{REGISTERED_NOTE} as '{}'", existing.name().as_ref()),
         ));
     }
     let name = project_name(directory)?;
@@ -67,7 +76,10 @@ pub(super) fn register_folder(
             .build(),
     );
     registry.save(&projects)?;
-    Ok(format!("registered project '{label}'"))
+    Ok(Row::unlabeled(
+        RowKind::Ok,
+        format!("registered project '{label}'"),
+    ))
 }
 
 /// The project name derived from the folder's file name.
@@ -144,7 +156,7 @@ mod tests {
         let dir = temp_dir("fresh");
         let registry = RecordingRegistry::default();
 
-        let lines = init(&dir, &registry).unwrap();
+        let rows = init(&dir, &registry).unwrap();
 
         assert!(
             registry.saved_workspace.borrow().is_some(),
@@ -152,7 +164,10 @@ mod tests {
         );
         let saved = registry.saved_projects.borrow();
         assert_eq!(saved.as_ref().unwrap().len(), 1, "project registered");
-        assert!(lines.iter().any(|line| line.contains(WORKSPACE_FILE_NAME)));
+        assert!(
+            rows.iter()
+                .any(|row| row.detail().contains(WORKSPACE_FILE_NAME))
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -163,14 +178,14 @@ mod tests {
         fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
         let registry = RecordingRegistry::default();
 
-        let lines = init(&dir, &registry).unwrap();
+        let rows = init(&dir, &registry).unwrap();
 
         assert!(registry.saved_workspace.borrow().is_none(), "no overwrite");
         assert!(
             registry.saved_projects.borrow().is_some(),
             "still registered"
         );
-        assert!(lines.iter().any(|line| line.contains(EXISTS_NOTE)));
+        assert!(rows.iter().any(|row| row.detail().contains(EXISTS_NOTE)));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -190,10 +205,13 @@ mod tests {
             ..RecordingRegistry::default()
         };
 
-        let lines = init(&dir, &registry).unwrap();
+        let rows = init(&dir, &registry).unwrap();
 
         assert!(registry.saved_projects.borrow().is_none(), "no re-save");
-        assert!(lines.iter().any(|line| line.contains(REGISTERED_NOTE)));
+        assert!(
+            rows.iter()
+                .any(|row| row.detail().contains(REGISTERED_NOTE))
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -39,6 +39,12 @@ use muster::{
 const FINDINGS_EXIT_CODE: i32 = 1;
 /// Exit code used when a command encounters a fatal error.
 const FAILURE_EXIT_CODE: i32 = 1;
+/// Report titles for the styled CLI output boxes.
+const INIT_TITLE: &str = "muster init";
+const CHECK_TITLE: &str = "muster check";
+const PROJECTS_TITLE: &str = "muster projects";
+const COMPLETIONS_TITLE: &str = "muster completions";
+const HOOKS_TITLE: &str = "muster hooks";
 
 /// Codex requires user approval before executing a new hook command.
 const CODEX_HOOK_APPROVAL_NOTICE: &str =
@@ -246,9 +252,11 @@ fn main() -> Result<()> {
 
 /// Prints the shell-specific registration hook lines for completions.
 fn run_completions(shell: cli::CompletionShell) -> Result<()> {
-    for line in cli::registration(shell) {
-        println!("{line}");
-    }
+    let [hint, line] = cli::registration(shell);
+    cli::print(&cli::Report::new(COMPLETIONS_TITLE, vec![
+        cli::Row::unlabeled(cli::RowKind::Dim, hint),
+        cli::Row::unlabeled(cli::RowKind::Plain, line),
+    ]));
     Ok(())
 }
 
@@ -262,11 +270,18 @@ fn run_hooks(command: HooksCommand) -> Result<()> {
         HooksCommand::Setup => {
             let executable = std::env::current_exe()?;
             let paths = ProviderHooks::setup(&executable)?;
-            println!("installed agent session integrations:");
-            for path in paths {
-                println!("  {}", path.display());
-            }
-            println!("{CODEX_HOOK_APPROVAL_NOTICE}");
+            let mut rows = vec![cli::Row::unlabeled(
+                cli::RowKind::Ok,
+                "installed agent session integrations:",
+            )];
+            rows.extend(paths.iter().map(|path| {
+                cli::Row::unlabeled(cli::RowKind::Plain, format!("  {}", path.display()))
+            }));
+            rows.push(cli::Row::unlabeled(
+                cli::RowKind::Hint,
+                CODEX_HOOK_APPROVAL_NOTICE,
+            ));
+            cli::print(&cli::Report::new(HOOKS_TITLE, rows));
         },
     }
     Ok(())
@@ -378,11 +393,7 @@ fn run_projects(command: Option<ProjectsCommand>) -> Result<()> {
         Some(ProjectsCommand::Remove { name }) => cli::remove(&name, &registry),
     };
     match result {
-        Ok(lines) => {
-            for line in lines {
-                println!("{line}");
-            }
-        },
+        Ok(rows) => cli::print(&cli::Report::new(PROJECTS_TITLE, rows)),
         Err(error) => fail_with(&error),
     }
     Ok(())
@@ -397,11 +408,7 @@ fn run_init() -> Result<()> {
     let directory = std::env::current_dir()?;
     let registry = YamlProjectRegistry;
     match cli::init(&directory, &registry) {
-        Ok(lines) => {
-            for line in lines {
-                println!("{line}");
-            }
-        },
+        Ok(rows) => cli::print(&cli::Report::new(INIT_TITLE, rows)),
         Err(error) => fail_with(&error),
     }
     Ok(())
@@ -417,11 +424,17 @@ fn run_check(path: PathBuf) -> Result<()> {
     let display = path.display().to_string();
     match cli::check(path) {
         CheckOutcome::Valid => {
-            println!("{display} {VALID_SUFFIX}");
+            cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
+                cli::RowKind::Ok,
+                format!("{display} {VALID_SUFFIX}"),
+            )]));
             Ok(())
         },
         CheckOutcome::Invalid(report) => {
-            println!("{report}");
+            cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
+                cli::RowKind::Fail,
+                report,
+            )]));
             std::process::exit(FINDINGS_EXIT_CODE);
         },
     }
@@ -448,9 +461,7 @@ fn run_doctor(config_path: PathBuf) -> Result<()> {
         .map(|dirs| dirs.home_dir().to_path_buf())
         .unwrap_or_default();
     probes.push(cli::completions_probe(shell.as_deref(), &home));
-    for probe in &probes {
-        println!("{}", cli::render(probe));
-    }
+    cli::print(&cli::doctor_report(&probes));
     if cli::any_failed(&probes) {
         std::process::exit(FINDINGS_EXIT_CODE);
     }
@@ -511,9 +522,10 @@ fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
     )
 }
 
-/// Prints `error` to stderr and exits with [`FAILURE_EXIT_CODE`].
+/// Prints `error` to stderr in the CLI's styled voice and exits with
+/// [`FAILURE_EXIT_CODE`].
 fn fail_with(error: &dyn std::error::Error) -> ! {
-    eprintln!("{APP_NAME}: {error}");
+    cli::print_error(APP_NAME, error);
     std::process::exit(FAILURE_EXIT_CODE);
 }
 

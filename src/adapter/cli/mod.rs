@@ -5,6 +5,7 @@ mod doctor;
 mod error;
 mod init;
 mod projects;
+mod report;
 mod run;
 
 pub use args::*;
@@ -14,4 +15,5 @@ pub use doctor::*;
 pub use error::*;
 pub use init::*;
 pub use projects::*;
+pub use report::*;
 pub use run::*;

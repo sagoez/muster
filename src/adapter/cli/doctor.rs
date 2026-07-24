@@ -10,6 +10,7 @@ use typed_builder::TypedBuilder;
 use super::{
     check::{CheckOutcome, VALID_SUFFIX, check, error_chain},
     completions::{CompletionShell, registration_line},
+    report::{Report, Row, RowKind, summary_line},
 };
 use crate::{
     adapter::{
@@ -20,12 +21,16 @@ use crate::{
     domain::port::{AgentSessionStore, ProjectRegistry},
 };
 
-/// Glyph for a passing probe.
-const OK_GLYPH: &str = "●";
-/// Glyph for an advisory probe.
-const WARN_GLYPH: &str = "!";
-/// Glyph for a failing probe.
-const FAIL_GLYPH: &str = "✗";
+/// Title of the doctor report box.
+const DOCTOR_TITLE: &str = "muster doctor";
+/// Summary word for passing probes.
+const SUMMARY_OK: &str = "ok";
+/// Summary words for advisory probes.
+const SUMMARY_HINT: &str = "hint";
+const SUMMARY_HINTS: &str = "hints";
+/// Summary words for failing probes.
+const SUMMARY_FAILURE: &str = "failure";
+const SUMMARY_FAILURES: &str = "failures";
 /// Probe labels.
 const CONFIG_LABEL: &str = "config";
 const REGISTRY_LABEL: &str = "projects";
@@ -235,14 +240,50 @@ fn rc_files(shell: CompletionShell) -> &'static [&'static str] {
     }
 }
 
-/// One rendered doctor line.
-pub fn render(probe: &Probe) -> String {
-    let glyph = match probe.outcome() {
-        ProbeOutcome::Ok => OK_GLYPH,
-        ProbeOutcome::Warn => WARN_GLYPH,
-        ProbeOutcome::Fail => FAIL_GLYPH,
+/// The report over all probes: one labeled row each, closed by a summary
+/// counting outcomes (shown in the boxed layout only).
+pub fn doctor_report(probes: &[Probe]) -> Report {
+    let rows = probes.iter().map(probe_row).collect();
+    let ok = outcome_count(probes, ProbeOutcome::Ok);
+    let hints = outcome_count(probes, ProbeOutcome::Warn);
+    let failures = outcome_count(probes, ProbeOutcome::Fail);
+    let mut parts = vec![format!("{ok} {SUMMARY_OK}")];
+    if hints > 0 {
+        parts.push(format!(
+            "{hints} {}",
+            plural(hints, SUMMARY_HINT, SUMMARY_HINTS)
+        ));
+    }
+    if failures > 0 {
+        parts.push(format!(
+            "{failures} {}",
+            plural(failures, SUMMARY_FAILURE, SUMMARY_FAILURES)
+        ));
+    }
+    Report::new(DOCTOR_TITLE, rows).with_summary(summary_line(&parts))
+}
+
+/// One probe as a report row: outcome glyph, bold label, detail.
+fn probe_row(probe: &Probe) -> Row {
+    let kind = match probe.outcome() {
+        ProbeOutcome::Ok => RowKind::Ok,
+        ProbeOutcome::Warn => RowKind::Hint,
+        ProbeOutcome::Fail => RowKind::Fail,
     };
-    format!("{glyph} {}: {}", probe.label(), probe.detail())
+    Row::labeled(kind, probe.label().clone(), probe.detail().clone())
+}
+
+/// How many probes ended with `outcome`.
+fn outcome_count(probes: &[Probe], outcome: ProbeOutcome) -> usize {
+    probes
+        .iter()
+        .filter(|probe| probe.outcome() == outcome)
+        .count()
+}
+
+/// The singular or plural word for a count.
+fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
+    if count == 1 { singular } else { many }
 }
 
 /// Whether any probe failed (warnings do not fail the run).
@@ -424,14 +465,28 @@ mod tests {
         );
     }
 
-    /// Rendering prefixes the outcome glyph.
+    /// The doctor report maps probes to labeled rows and counts the summary.
     #[test]
-    fn rendering_prefixes_the_glyph() {
-        let probe = Probe::builder()
-            .label("config".to_string())
-            .outcome(ProbeOutcome::Ok)
-            .detail("fine".to_string())
-            .build();
-        assert!(render(&probe).starts_with(OK_GLYPH));
+    fn doctor_report_maps_probes_and_summarizes() {
+        let probes = vec![
+            Probe::builder()
+                .label("config".to_string())
+                .outcome(ProbeOutcome::Ok)
+                .detail("fine".to_string())
+                .build(),
+            Probe::builder()
+                .label("completions".to_string())
+                .outcome(ProbeOutcome::Warn)
+                .detail("not registered".to_string())
+                .build(),
+        ];
+
+        let report = doctor_report(&probes);
+
+        assert_eq!(report.rows().len(), 2);
+        assert_eq!(report.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(report.rows()[0].label().as_deref(), Some("config"));
+        assert_eq!(report.rows()[1].kind(), RowKind::Hint);
+        assert_eq!(report.summary().as_deref(), Some("1 ok · 1 hint"));
     }
 }

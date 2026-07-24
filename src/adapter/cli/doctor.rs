@@ -1,0 +1,366 @@
+use std::path::{Path, PathBuf};
+
+use getset::{CopyGetters, Getters};
+use typed_builder::TypedBuilder;
+
+use super::{
+    check::{CheckOutcome, check, error_chain},
+    completions::{CompletionShell, registration_line},
+};
+use crate::{
+    adapter::{
+        clipboard,
+        hooks::{HookState, HookStatus},
+        path::absolutize,
+    },
+    domain::port::{AgentSessionStore, ProjectRegistry},
+};
+
+/// Glyph for a passing probe.
+const OK_GLYPH: &str = "●";
+/// Glyph for an advisory probe.
+const WARN_GLYPH: &str = "!";
+/// Glyph for a failing probe.
+const FAIL_GLYPH: &str = "✗";
+/// Probe labels.
+const CONFIG_LABEL: &str = "config";
+const REGISTRY_LABEL: &str = "projects";
+const SESSIONS_LABEL: &str = "sessions";
+const HOOKS_LABEL: &str = "agent hooks";
+const CLIPBOARD_LABEL: &str = "clipboard";
+const COMPLETIONS_LABEL: &str = "completions";
+/// Hint shown when providers need (re)installation.
+const HOOKS_HINT: &str = "run `muster hooks setup`";
+/// Fish shell rc file for sourcing completions.
+const FISH_RC: &str = ".config/fish/config.fish";
+/// Fish shell completions file for direct drop-in.
+const FISH_COMPLETIONS: &str = ".config/fish/completions/muster.fish";
+
+/// Severity of a probe result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// Healthy.
+    Ok,
+    /// Advisory; does not fail the doctor run.
+    Warn,
+    /// Broken; the doctor run exits non-zero.
+    Fail,
+}
+
+/// One diagnostic line: what was probed, how it went, and the detail text.
+#[derive(Debug, Getters, CopyGetters, TypedBuilder)]
+pub struct Probe {
+    /// What was probed.
+    #[getset(get = "pub")]
+    label: String,
+    /// Severity of the result.
+    #[getset(get_copy = "pub")]
+    outcome: ProbeOutcome,
+    /// Human detail for the line.
+    #[getset(get = "pub")]
+    detail: String,
+}
+
+/// Builds one probe.
+fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
+    Probe::builder()
+        .label(label.to_string())
+        .outcome(outcome)
+        .detail(detail)
+        .build()
+}
+
+/// Validates the workspace config.
+pub fn config_probe(config_path: PathBuf) -> Probe {
+    match check(config_path.clone()) {
+        CheckOutcome::Valid => probe(
+            CONFIG_LABEL,
+            ProbeOutcome::Ok,
+            format!("{} is valid", config_path.display()),
+        ),
+        CheckOutcome::Invalid(report) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
+    }
+}
+
+/// Reads the registry and flags projects whose config file is gone.
+pub fn registry_probe(registry: &dyn ProjectRegistry) -> Probe {
+    match registry.projects() {
+        Ok(projects) => {
+            let dangling: Vec<String> = projects
+                .iter()
+                .filter(|project| std::fs::symlink_metadata(absolutize(project.config())).is_err())
+                .map(|project| project.name().as_ref().to_string())
+                .collect();
+            if dangling.is_empty() {
+                probe(
+                    REGISTRY_LABEL,
+                    ProbeOutcome::Ok,
+                    format!("{} registered", projects.len()),
+                )
+            } else {
+                probe(
+                    REGISTRY_LABEL,
+                    ProbeOutcome::Fail,
+                    format!("missing config for: {}", dangling.join(", ")),
+                )
+            }
+        },
+        Err(error) => probe(REGISTRY_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+    }
+}
+
+/// Confirms the agent-session store is readable.
+pub fn sessions_probe(store: &dyn AgentSessionStore) -> Probe {
+    match store.sessions() {
+        Ok(sessions) => probe(
+            SESSIONS_LABEL,
+            ProbeOutcome::Ok,
+            format!("{} stored", sessions.len()),
+        ),
+        Err(error) => probe(SESSIONS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+    }
+}
+
+/// Aggregates provider hook states into one line.
+pub fn hooks_probe(statuses: &[HookStatus]) -> Probe {
+    let broken: Vec<String> = statuses
+        .iter()
+        .filter(|status| status.state() != HookState::Installed)
+        .map(|status| format!("{} ({:?})", status.provider(), status.state()))
+        .collect();
+    if broken.is_empty() {
+        probe(
+            HOOKS_LABEL,
+            ProbeOutcome::Ok,
+            format!("{} providers installed", statuses.len()),
+        )
+    } else {
+        probe(
+            HOOKS_LABEL,
+            ProbeOutcome::Fail,
+            format!("{}; {HOOKS_HINT}", broken.join(", ")),
+        )
+    }
+}
+
+/// A hooks probe for when the status scan itself failed.
+pub fn hooks_probe_error(error: &dyn std::error::Error) -> Probe {
+    probe(HOOKS_LABEL, ProbeOutcome::Fail, error_chain(error))
+}
+
+/// Reports which clipboard path a copy would take. Informational only.
+pub fn clipboard_probe() -> Probe {
+    let detail = match (clipboard::prefers_osc52(), clipboard::preferred_tool()) {
+        (true, _) => "remote session; OSC 52 via the terminal".to_string(),
+        (false, Some(tool)) => format!("native tool: {tool}"),
+        (false, None) => "no native tool; OSC 52 via the terminal".to_string(),
+    };
+    let outcome = if clipboard::preferred_tool().is_some() || clipboard::prefers_osc52() {
+        ProbeOutcome::Ok
+    } else {
+        ProbeOutcome::Warn
+    };
+    probe(CLIPBOARD_LABEL, outcome, detail)
+}
+
+/// Best-effort check that the shell's rc file registers completions; warns
+/// with the exact line to add when it does not.
+pub fn completions_probe(shell_path: Option<&str>, home: &Path) -> Probe {
+    let Some(shell) = shell_path.and_then(shell_from_path) else {
+        return probe(
+            COMPLETIONS_LABEL,
+            ProbeOutcome::Warn,
+            "unknown shell; see `muster completions --help`".to_string(),
+        );
+    };
+    let registered = rc_files(shell).iter().any(|rc| {
+        let path = home.join(rc);
+        std::fs::read_to_string(&path)
+            .map(|content| content.contains("COMPLETE=") && content.contains("muster"))
+            .unwrap_or(false)
+    });
+    if registered {
+        let primary_rc = home.join(rc_files(shell)[0]);
+        probe(
+            COMPLETIONS_LABEL,
+            ProbeOutcome::Ok,
+            format!("registered in {}", primary_rc.display()),
+        )
+    } else {
+        probe(
+            COMPLETIONS_LABEL,
+            ProbeOutcome::Warn,
+            format!("not registered; add: {}", registration_line(shell)),
+        )
+    }
+}
+
+/// The completion shell inferred from a `$SHELL` path.
+fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
+    let name = Path::new(shell_path).file_name()?.to_str()?;
+    match name {
+        "bash" => Some(CompletionShell::Bash),
+        "zsh" => Some(CompletionShell::Zsh),
+        "fish" => Some(CompletionShell::Fish),
+        "elvish" => Some(CompletionShell::Elvish),
+        _ => None,
+    }
+}
+
+/// The rc files probed for each shell, relative to home. Fish returns two
+/// locations so both the sourcing approach and the completions drop-in are
+/// detected.
+fn rc_files(shell: CompletionShell) -> &'static [&'static str] {
+    match shell {
+        CompletionShell::Bash => &[".bashrc"],
+        CompletionShell::Zsh => &[".zshrc"],
+        CompletionShell::Fish => &[FISH_RC, FISH_COMPLETIONS],
+        CompletionShell::Elvish => &[".elvish/rc.elv"],
+        CompletionShell::Powershell => &[".config/powershell/Microsoft.PowerShell_profile.ps1"],
+    }
+}
+
+/// One rendered doctor line.
+pub fn render(probe: &Probe) -> String {
+    let glyph = match probe.outcome() {
+        ProbeOutcome::Ok => OK_GLYPH,
+        ProbeOutcome::Warn => WARN_GLYPH,
+        ProbeOutcome::Fail => FAIL_GLYPH,
+    };
+    format!("{glyph} {}: {}", probe.label(), probe.detail())
+}
+
+/// Whether any probe failed (warnings do not fail the run).
+pub fn any_failed(probes: &[Probe]) -> bool {
+    probes
+        .iter()
+        .any(|probe| probe.outcome() == ProbeOutcome::Fail)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, path::Path};
+
+    use super::*;
+    use crate::domain::{config::ConfigError, project::Project, value::ProjectName};
+
+    /// A registry recording saves of projects and workspaces.
+    #[derive(Default)]
+    struct RecordingRegistry {
+        projects: Vec<Project>,
+        saved_projects: RefCell<Option<Vec<Project>>>,
+    }
+
+    impl crate::domain::port::ProjectRegistry for RecordingRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(self.projects.clone())
+        }
+
+        fn workspace(
+            &self,
+            _config_path: &Path,
+        ) -> Result<crate::domain::config::WorkspaceConfig, ConfigError> {
+            unreachable!("doctor never loads a workspace")
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            false
+        }
+
+        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+            *self.saved_projects.borrow_mut() = Some(projects.to_vec());
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &crate::domain::config::WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            unreachable!("doctor never saves a workspace")
+        }
+    }
+
+    fn project(name: &str, config: &str) -> Project {
+        Project::builder()
+            .name(ProjectName::try_new(name).unwrap())
+            .config(PathBuf::from(config))
+            .build()
+    }
+
+    fn hook_status(provider: &'static str, state: HookState) -> HookStatus {
+        HookStatus::builder()
+            .provider(provider)
+            .path(PathBuf::from("/dummy/path"))
+            .state(state)
+            .build()
+    }
+
+    /// A missing config fails the config probe.
+    #[test]
+    fn config_probe_fails_on_a_missing_file() {
+        let probe = config_probe(std::path::PathBuf::from("/definitely/missing/muster.yml"));
+        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
+    }
+
+    /// Registry entries whose config is gone are flagged.
+    #[test]
+    fn registry_probe_flags_dangling_projects() {
+        let registry = RecordingRegistry {
+            projects: vec![project("gone", "/definitely/missing/muster.yml")],
+            ..RecordingRegistry::default()
+        };
+        let probe = registry_probe(&registry);
+        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
+        assert!(probe.detail().contains("gone"));
+    }
+
+    /// Hook statuses aggregate: any missing or stale provider fails the probe.
+    #[test]
+    fn hooks_probe_fails_when_any_provider_is_missing() {
+        let statuses = vec![
+            hook_status("claude", HookState::Installed),
+            hook_status("codex", HookState::Missing),
+        ];
+        let probe = hooks_probe(&statuses);
+        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
+        assert!(probe.detail().contains("codex"));
+    }
+
+    /// All-installed hooks pass.
+    #[test]
+    fn hooks_probe_passes_when_everything_is_installed() {
+        let statuses = vec![hook_status("claude", HookState::Installed)];
+        assert_eq!(hooks_probe(&statuses).outcome(), ProbeOutcome::Ok);
+    }
+
+    /// The clipboard probe never fails; it informs.
+    #[test]
+    fn clipboard_probe_is_informational() {
+        let probe = clipboard_probe();
+        assert_ne!(probe.outcome(), ProbeOutcome::Fail);
+    }
+
+    /// The completions probe warns with the exact line when unregistered.
+    #[test]
+    fn completions_probe_warns_with_the_hook_line() {
+        let dir = std::env::temp_dir().join(format!("muster-doc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".zshrc"), "# nothing here\n").unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), &dir);
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(probe.detail().contains("COMPLETE=zsh"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Rendering prefixes the outcome glyph.
+    #[test]
+    fn rendering_prefixes_the_glyph() {
+        let probe = Probe::builder()
+            .label("config".to_string())
+            .outcome(ProbeOutcome::Ok)
+            .detail("fine".to_string())
+            .build();
+        assert!(render(&probe).starts_with(OK_GLYPH));
+    }
+}

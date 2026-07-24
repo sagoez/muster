@@ -36,6 +36,8 @@ pub enum Command {
         #[command(subcommand)]
         command: HooksCommand,
     },
+    /// Diagnose config, projects, sessions, hooks, clipboard, and completions.
+    Doctor,
     /// Print the shell hook that enables completions.
     Completions {
         /// Shell to print the hook for.

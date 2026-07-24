@@ -10,6 +10,7 @@ use std::{
 use std::{path::PathBuf, process::Command as ProcessCommand};
 
 use clap::{CommandFactory, Parser};
+use directories::BaseDirs;
 use muster::{
     adapter::{
         cli::{
@@ -231,6 +232,10 @@ fn main() -> Result<()> {
         ),
         Some(Command::Projects { command }) => run_projects(command),
         Some(Command::Hooks { command }) => run_hooks(command),
+        Some(Command::Doctor) => run_doctor(
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
         Some(Command::Completions { shell }) => {
             for line in cli::registration(shell) {
                 println!("{line}");
@@ -421,6 +426,36 @@ fn run_check(path: PathBuf) -> Result<()> {
             std::process::exit(FINDINGS_EXIT_CODE);
         },
     }
+}
+
+/// Runs all doctor probes, prints each line, and exits non-zero if any probe
+/// failed.
+///
+/// # Errors
+/// Returns an error if the running executable path cannot be resolved.
+fn run_doctor(config_path: PathBuf) -> Result<()> {
+    let mut probes = vec![
+        cli::config_probe(config_path),
+        cli::registry_probe(&YamlProjectRegistry),
+        cli::sessions_probe(&YamlAgentSessionStore),
+    ];
+    probes.push(match ProviderHooks::status(&std::env::current_exe()?) {
+        Ok(statuses) => cli::hooks_probe(&statuses),
+        Err(error) => cli::hooks_probe_error(&error),
+    });
+    probes.push(cli::clipboard_probe());
+    let shell = std::env::var("SHELL").ok();
+    let home = BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .unwrap_or_default();
+    probes.push(cli::completions_probe(shell.as_deref(), &home));
+    for probe in &probes {
+        println!("{}", cli::render(probe));
+    }
+    if cli::any_failed(&probes) {
+        std::process::exit(FINDINGS_EXIT_CODE);
+    }
+    Ok(())
 }
 
 /// Adds a command to a project and runs it in place, reporting a friendly error

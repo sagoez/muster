@@ -9,10 +9,10 @@ use std::{
 };
 use std::{path::PathBuf, process::Command as ProcessCommand};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser};
 use muster::{
     adapter::{
-        cli::{self, RunArgs},
+        cli::{self, Args, Command, HooksCommand, InternalHookCommand, RunArgs},
         config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
         hooks::ProviderHooks,
         notifier::DesktopNotifier,
@@ -26,7 +26,6 @@ use muster::{
     domain::{
         agent_session::{AgentProcessId, AgentSessionId},
         port::{AgentSessionStore, ConfigSource},
-        process::AgentTool,
     },
     error::Result,
 };
@@ -203,69 +202,6 @@ impl Drop for WindowsLaunchGate {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
-}
-
-/// Command-line arguments. With no subcommand, muster launches its TUI.
-#[derive(Parser)]
-#[command(about = "A terminal workspace for running CLI agents and dev processes")]
-struct Args {
-    /// Path to the workspace config file. Global, so it is recognized before or
-    /// after a subcommand rather than being swallowed by `run`'s command args.
-    #[arg(short, long, global = true)]
-    config: Option<PathBuf>,
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-/// Subcommands. Absent, muster runs the TUI.
-#[derive(Subcommand)]
-enum Command {
-    /// Register a command in a project, then run it.
-    Run(RunArgs),
-    /// Install provider integrations used to preserve native agent sessions.
-    Hooks {
-        #[command(subcommand)]
-        command: HooksCommand,
-    },
-    /// Internal provider-hook receiver.
-    #[command(hide = true)]
-    Hook {
-        #[command(subcommand)]
-        command: InternalHookCommand,
-    },
-}
-
-/// User-facing lifecycle-integration commands.
-#[derive(Subcommand)]
-enum HooksCommand {
-    /// Install idempotent session-ID hooks/plugins for supported agents.
-    Setup,
-}
-
-/// Commands invoked by installed provider integrations.
-#[derive(Subcommand)]
-enum InternalHookCommand {
-    /// Capture a provider session ID from JSON on standard input.
-    Capture {
-        /// Provider integration that emitted this lifecycle event.
-        #[arg(long)]
-        provider: AgentTool,
-        /// Parent provider process that invoked the capture hook.
-        #[arg(long)]
-        process_id: u32,
-        /// Parent of the provider process, when the provider was launched by a shell wrapper.
-        #[arg(long)]
-        parent_process_id: Option<u32>,
-    },
-    /// Bind a durable session to this process, then start its provider command.
-    Launch {
-        /// Stable Muster identity of the session being launched.
-        #[arg(long)]
-        session: String,
-        /// Original provider command, preserved as one shell expression.
-        #[arg(last = true, allow_hyphen_values = true)]
-        command: String,
-    },
 }
 
 /// Entry point: dispatches to the `run` capture command or, by default, the TUI.

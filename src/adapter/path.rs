@@ -141,31 +141,24 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 /// How a `..` applies to the prefix before it.
 enum ParentStep {
-    /// A directory or missing prefix: popping is what the OS would do (or the
-    /// only resolution available).
+    /// A real directory: popping is exactly what the OS would do.
     Lexical,
     /// A symlink to a directory: `..` lands at the target's parent.
     Resolved(PathBuf),
-    /// An existing non-directory, plain or via symlink: the OS rejects the
-    /// traversal, so it is kept intact rather than rewritten to a valid but
-    /// unrelated path.
+    /// Anything else - missing, unreachable, or a non-directory: the OS
+    /// rejects the traversal, so it is kept intact rather than rewritten to a
+    /// valid but unrelated path.
     Preserved,
 }
 
-/// Classifies `..` against `prefix`. Only directories may be traversed
-/// upward: a missing prefix normalizes lexically (the only resolution left),
-/// an existing non-directory preserves the traversal for the OS to reject,
-/// and a directory symlink resolves through the filesystem. A prefix that
-/// cannot even be inspected (e.g. inside an unsearchable directory) also
-/// preserves its traversal, so escaping it lexically can never reach a
-/// different workspace than the OS would.
+/// Classifies `..` against `prefix`. Only a real, reachable directory may be
+/// traversed upward; a directory symlink resolves through the filesystem, and
+/// everything else - missing, denied, or a non-directory - preserves its
+/// traversal, because the OS would reject it (`ENOENT`, `EACCES`, `ENOTDIR`)
+/// and normalizing it away could silently select a different workspace.
 fn parent_step(prefix: &Path) -> ParentStep {
-    let meta = match fs::symlink_metadata(prefix) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ParentStep::Lexical;
-        },
-        Err(_) => return ParentStep::Preserved,
+    let Ok(meta) = fs::symlink_metadata(prefix) else {
+        return ParentStep::Preserved;
     };
     if meta.file_type().is_symlink() {
         return match prefix.canonicalize() {
@@ -299,13 +292,9 @@ mod tests {
         assert_eq!(FsPathCompleter::candidate(raw, "/tmp/", "val"), None);
     }
 
-    /// Equivalent dot-component addressings normalize to one stored path.
+    /// Dot components vanish; `..` over a real directory pops to its parent.
     #[test]
     fn absolutize_normalizes_dot_components() {
-        assert_eq!(
-            absolutize(Path::new("/tmp/proj/sub/../muster.yml")),
-            PathBuf::from("/tmp/proj/muster.yml")
-        );
         assert_eq!(
             absolutize(Path::new("/tmp/./proj/./muster.yml")),
             PathBuf::from("/tmp/proj/muster.yml")
@@ -315,20 +304,30 @@ mod tests {
             PathBuf::from("/etc/passwd"),
             "excess parent components at the root are dropped"
         );
+        let real = std::env::temp_dir().join(format!("muster-abs-dot-{}", std::process::id()));
+        let sub = real.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            absolutize(&sub.join("../muster.yml")),
+            real.join("muster.yml"),
+            "an existing directory pops"
+        );
+        fs::remove_dir_all(real).unwrap();
     }
 
-    /// Components that do not exist on disk normalize lexically - the only
-    /// resolution left for them.
+    /// `..` over a missing component is preserved: the OS would fail the
+    /// resolution with ENOENT, so it must not be normalized into a valid,
+    /// unrelated path.
     #[test]
-    fn missing_components_normalize_lexically() {
+    fn missing_components_preserve_their_traversal() {
         assert_eq!(
-            normalize_lexically(Path::new("/a/link/../b")),
-            PathBuf::from("/a/b"),
-            "a missing component cannot be a symlink, so popping is safe"
+            normalize_lexically(Path::new("/a/missing/../b")),
+            PathBuf::from("/a/missing/../b")
         );
         assert_eq!(
             normalize_lexically(Path::new("../x/./y")),
-            PathBuf::from("../x/y")
+            PathBuf::from("../x/y"),
+            "leading parent components and dot removal are untouched"
         );
         assert_eq!(
             normalize_lexically(Path::new("../../x")),
@@ -356,18 +355,12 @@ mod tests {
         fs::create_dir_all(&inner).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(LOCKED_MODE)).unwrap();
         let probe = inner.join("x/../muster.yml");
-        // Root ignores permission bits; only assert when access was denied.
-        let denied = matches!(
-            fs::symlink_metadata(inner.join("x")),
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
-        );
-
         let normalized = normalize_lexically(&probe);
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(OPEN_MODE)).unwrap();
-        if denied {
-            assert_eq!(normalized, probe, "the traversal survives untouched");
-        }
+        // Denied and missing prefixes both preserve, so this holds even for
+        // root, which ignores the permission bits and sees the path missing.
+        assert_eq!(normalized, probe, "the traversal survives untouched");
         fs::remove_dir_all(&base).unwrap();
     }
 

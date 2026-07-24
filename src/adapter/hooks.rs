@@ -169,6 +169,17 @@ pub struct HookStatus {
     state: HookState,
 }
 
+/// The textual forms one provider's installed hook must carry in a config.
+struct HookMarkers {
+    /// `executable + capture arguments` in raw, shell-quoted, PowerShell, and
+    /// JSON-escaped encodings, matching shell-command configs.
+    commands: Vec<String>,
+    /// The executable as a complete JSON string, as plugins embed it.
+    plugin_executable: String,
+    /// The capture argument array as JSON, provider token included.
+    plugin_arguments: String,
+}
+
 /// Installs opt-in provider integrations and receives their session identities.
 pub struct ProviderHooks;
 
@@ -292,59 +303,57 @@ impl ProviderHooks {
         codex_home: &Path,
     ) -> Result<Vec<HookStatus>, HookError> {
         let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
-        let candidates = Self::executable_candidates(executable);
         let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
-        Ok(pairs
+        pairs
             .into_iter()
             .map(|(provider, path)| {
-                let state = Self::file_state(&path, &candidates);
-                HookStatus::builder()
+                let markers = Self::hook_markers(executable, provider)?;
+                let state = Self::file_state(&path, &markers);
+                Ok(HookStatus::builder()
                     .provider(provider)
                     .path(path)
                     .state(state)
-                    .build()
+                    .build())
             })
-            .collect())
+            .collect()
     }
 
-    /// The exactly-terminated forms setup embeds the executable in: complete
-    /// JSON strings (plugins) and each quoted form followed by the hook
-    /// subcommand (shell commands, in raw and JSON-escaped encodings).
+    /// The textual markers one provider's installed hook must carry, in the
+    /// encodings setup writes: the executable followed by that provider's
+    /// capture arguments for shell-command configs, and the standalone JSON
+    /// executable plus JSON argument array pair for plugins.
     ///
-    /// Using suffix-terminated tokens (e.g. `<exe> hook`) rather than bare
-    /// path substrings prevents a path that is a strict prefix of the installed
-    /// one (e.g. `/opt/muster-old/mus` vs `/opt/muster-old/muster`) from
-    /// matching as Installed.
-    fn executable_candidates(executable: &str) -> Vec<String> {
+    /// # Errors
+    /// Returns a [`HookError`] when a marker cannot be encoded.
+    fn hook_markers(executable: &str, provider: AgentTool) -> Result<HookMarkers, HookError> {
+        let args = Self::capture_arguments(provider).join(" ");
         let mut bases = vec![executable.to_string()];
         if let Ok(quoted) = shlex::try_quote(executable) {
             bases.push(quoted.to_string());
         }
         bases.push(format!("'{}'", executable.replace('\'', "''")));
-        let mut candidates = Vec::new();
-        // Amp and OpenCode plugins embed the executable as a standalone
-        // JSON string, so a complete JSON-encoded form (with surrounding
-        // double-quotes) is an exactly-terminated token on its own.
-        if let Ok(encoded) = serde_json::to_string(executable) {
-            candidates.push(encoded);
-        }
+        let mut commands = Vec::new();
         for base in bases {
-            let followed = format!("{base} {HOOK_SUBCOMMAND}");
-            // JSON-escaped form covers TOML basic-string escaping too, and
-            // strips the surrounding quotes so the interior is matched.
+            let followed = format!("{base} {args}");
             if let Ok(encoded) = serde_json::to_string(&followed) {
-                candidates.push(encoded.trim_matches('"').to_string());
+                commands.push(encoded.trim_matches('"').to_string());
             }
-            candidates.push(followed);
+            commands.push(followed);
         }
-        candidates.sort();
-        candidates.dedup();
-        candidates
+        commands.sort();
+        commands.dedup();
+        Ok(HookMarkers {
+            commands,
+            plugin_executable: serde_json::to_string(executable)
+                .map_err(HookError::PluginEncoding)?,
+            plugin_arguments: serde_json::to_string(&Self::capture_arguments(provider))
+                .map_err(HookError::PluginEncoding)?,
+        })
     }
 
     /// Textual state of one integration file, matched against every encoded
     /// form of the executable path.
-    fn file_state(path: &Path, candidates: &[String]) -> HookState {
+    fn file_state(path: &Path, markers: &HookMarkers) -> HookState {
         let Ok(content) = fs::read_to_string(path) else {
             // An unreadable config reads as absent; a later hooks setup surfaces the real error.
             return HookState::Missing;
@@ -362,10 +371,16 @@ impl ProviderHooks {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        if candidates
+        let command_installed = markers
+            .commands
             .iter()
-            .any(|candidate| active.contains(candidate.as_str()))
-        {
+            .any(|command| active.contains(command.as_str()));
+        // A plugin is installed only when both the executable and this
+        // provider's argument array are present, so a wrong-provider callback
+        // never reads as healthy.
+        let plugin_installed = active.contains(&markers.plugin_executable)
+            && active.contains(&markers.plugin_arguments);
+        if command_installed || plugin_installed {
             HookState::Installed
         } else if active.contains(CAPTURE_SUBCOMMAND) {
             HookState::Stale
@@ -1241,6 +1256,39 @@ mod tests {
             );
         }
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hook invoking the wrong provider callback is not healthy.
+    #[test]
+    fn status_rejects_a_wrong_provider_callback() {
+        let root = std::env::temp_dir().join(format!("muster-wrongp-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        // Corrupt Claude's hook to invoke the Gemini callback.
+        let claude = home.join(CLAUDE_SETTINGS);
+        let wrong = fs::read_to_string(&claude).unwrap().replace(
+            AgentTool::Claude.protocol_token(),
+            AgentTool::Gemini.protocol_token(),
+        );
+        fs::write(&claude, wrong).unwrap();
+
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        let claude_status = statuses
+            .iter()
+            .find(|status| status.provider() == AgentTool::Claude)
+            .expect("claude status present");
+        assert_eq!(
+            claude_status.state(),
+            HookState::Stale,
+            "a wrong-provider callback needs hooks setup again"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

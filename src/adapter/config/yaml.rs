@@ -23,6 +23,16 @@ pub(crate) fn config_dir_path(filename: &str) -> Option<PathBuf> {
     ProjectDirs::from("", "", APP_DIR).map(|dirs| dirs.config_dir().join(filename))
 }
 
+/// Path to `filename` inside muster's platform state directory, falling back to
+/// local data on platforms without a distinct state location.
+pub(crate) fn state_dir_path(filename: &str) -> Option<PathBuf> {
+    ProjectDirs::from("", "", APP_DIR).map(|dirs| {
+        dirs.state_dir()
+            .unwrap_or_else(|| dirs.data_local_dir())
+            .join(filename)
+    })
+}
+
 /// Reads and parses a `muster.yml`-style workspace config from `path`. Shared by
 /// the single-file config source and the project registry.
 ///

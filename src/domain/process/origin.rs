@@ -4,6 +4,6 @@ pub enum ProcessOrigin {
     /// A persistent process declared in `muster.yml`.
     #[default]
     Configured,
-    /// A disposable process created for the current TUI session.
+    /// A durable runtime agent session managed outside `muster.yml`.
     Session,
 }

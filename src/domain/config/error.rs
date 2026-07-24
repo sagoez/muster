@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::domain::{
-    process::ProcessKind,
+    agent_session::{AgentProcessId, AgentSessionId},
+    process::{AgentTool, ProcessKind},
     value::{ProcessName, ProjectName},
 };
 
@@ -29,6 +30,44 @@ pub enum ConfigError {
     /// No writable config directory could be located on this platform.
     #[error("no config directory is available")]
     NoConfigDir,
+    /// The session-state file uses a schema newer than this binary understands.
+    #[error("unsupported agent-session state version {0}")]
+    UnsupportedAgentSessionVersion(u8),
+    /// A lifecycle update referenced a session no longer present in state.
+    #[error("agent session '{0}' is not present in session state")]
+    AgentSessionNotFound(AgentSessionId),
+    /// A lifecycle event came from a provider that does not own the session.
+    #[error(
+        "agent session '{id}' belongs to {expected}, but received a lifecycle event from {reported}"
+    )]
+    AgentSessionProviderMismatch {
+        /// Session whose provider rejected the lifecycle event.
+        id: AgentSessionId,
+        /// Provider recorded when the session was created.
+        expected: AgentTool,
+        /// Provider that emitted the lifecycle event.
+        reported: AgentTool,
+    },
+    /// A lifecycle event came from a descendant instead of the managed provider process.
+    #[error(
+        "agent session '{id}' belongs to process {expected:?}, but received a lifecycle event from process {reported}"
+    )]
+    AgentSessionProcessMismatch {
+        /// Session whose provider process rejected the lifecycle event.
+        id: AgentSessionId,
+        /// Process currently owning the managed agent session.
+        expected: Option<AgentProcessId>,
+        /// Process that emitted the lifecycle event.
+        reported: AgentProcessId,
+    },
+    /// A concurrent Muster instance already owns the managed agent session.
+    #[error("agent session '{id}' is already owned by live process {owner}")]
+    AgentSessionAlreadyOwned {
+        /// Session whose ownership claim was rejected.
+        id: AgentSessionId,
+        /// Live provider process retaining ownership.
+        owner: AgentProcessId,
+    },
     /// A legacy registry entry has no stable location outside its original
     /// launch directory.
     #[error(

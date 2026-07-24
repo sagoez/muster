@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use crate::domain::{config::ConfigError, pty::PtyError};
+use crate::{
+    adapter::hooks::HookError,
+    domain::{config::ConfigError, pty::PtyError},
+};
 
 /// Top-level error type for muster.
 ///
@@ -17,6 +20,9 @@ pub enum MusterError {
     /// A PTY / process-spawning failure.
     #[error(transparent)]
     Pty(#[from] PtyError),
+    /// A provider lifecycle integration failure.
+    #[error(transparent)]
+    Hook(#[from] HookError),
 }
 
 /// Crate-wide result alias.

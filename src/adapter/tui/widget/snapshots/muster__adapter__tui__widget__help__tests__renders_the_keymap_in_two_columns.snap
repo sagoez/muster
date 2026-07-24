@@ -1,6 +1,6 @@
 ---
 source: src/adapter/tui/widget/help.rs
-assertion_line: 171
+assertion_line: 173
 expression: terminal.backend()
 ---
 "     ╭ Keybindings ──────────────────────────────────────────────╮      "
@@ -17,7 +17,8 @@ expression: terminal.backend()
 "     │   p          pause / resume     r          restart        │      "
 "     │   x          force kill         p          pause / resume │      "
 "     │   d          close session      x          force kill     │      "
-"     │   t          autostart          d          close session  │      "
+"     │   u          reopen session     d          close session  │      "
+"     │   t          autostart          u          reopen session │      "
 "     │   a          add                a          add            │      "
 "     │ General                         n          new            │      "
 "     │   N          notifications      N          notifications  │      "
@@ -26,4 +27,3 @@ expression: terminal.backend()
 "     │                                 q          quit           │      "
 "     │                                                           │      "
 "     ╰───────────────────────────────────────────────────────────╯      "
-"                                                                        "

@@ -1,40 +1,13 @@
 use std::time::{Duration, Instant};
 
-use crate::domain::process::{ActivityState, AgentTool, Process, ProcessKind};
+use crate::domain::process::{
+    ActivityState, AgentActivitySource, AgentProtocol, Process, ProcessKind,
+};
 
 /// Quiet period after activity evidence before a process returns to idle.
 pub(super) const OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Which terminal evidence indicates that an agent is actively working.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum ActivityStrategy {
-    /// Ordinary visible output indicates work.
-    #[default]
-    Output,
-    /// Terminal-title changes indicate work.
-    Title,
-}
-
-impl ActivityStrategy {
-    /// Selects a strategy from the process kind and agent preset.
-    fn for_process(process: &Process) -> Self {
-        if *process.kind() != ProcessKind::Agent {
-            return Self::Output;
-        }
-        match process.agent_tool() {
-            Some(AgentTool::Codex | AgentTool::Gemini | AgentTool::Amp) => Self::Title,
-            Some(
-                AgentTool::Claude
-                | AgentTool::Opencode
-                | AgentTool::Copilot
-                | AgentTool::Kimi
-                | AgentTool::Custom,
-            )
-            | None => Self::Output,
-        }
-    }
-}
-
 /// Evidence currently governing inferred process activity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum ActivityEvidence {
@@ -50,7 +23,7 @@ enum ActivityEvidence {
 /// Tracks provider-specific activity evidence for one terminal lifetime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ActivityTracker {
-    strategy: ActivityStrategy,
+    strategy: AgentActivitySource,
     evidence: ActivityEvidence,
     last_title: Option<String>,
 }
@@ -59,7 +32,13 @@ impl ActivityTracker {
     /// Creates a tracker using the selected process's agent preset.
     pub(super) fn for_process(process: &Process) -> Self {
         Self {
-            strategy: ActivityStrategy::for_process(process),
+            strategy: if *process.kind() == ProcessKind::Agent {
+                process
+                    .agent_tool()
+                    .map_or(AgentActivitySource::Output, |tool| tool.activity_source())
+            } else {
+                AgentActivitySource::Output
+            },
             evidence: ActivityEvidence::Unscheduled,
             last_title: None,
         }
@@ -67,7 +46,7 @@ impl ActivityTracker {
 
     /// Records ordinary terminal output when the provider uses output activity.
     pub(super) fn observe_output(&mut self, now: Instant) -> Option<ActivityState> {
-        if self.strategy != ActivityStrategy::Output {
+        if self.strategy != AgentActivitySource::Output {
             return None;
         }
         if self.evidence != ActivityEvidence::ExplicitProgress {
@@ -78,7 +57,7 @@ impl ActivityTracker {
 
     /// Records a terminal-title change when the provider uses title activity.
     pub(super) fn observe_title(&mut self, now: Instant, title: String) -> Option<ActivityState> {
-        if self.strategy != ActivityStrategy::Title
+        if self.strategy != AgentActivitySource::Title
             || self.last_title.as_deref() == Some(title.as_str())
         {
             return None;
@@ -137,7 +116,7 @@ impl ActivityTracker {
 mod tests {
     use super::*;
     use crate::domain::{
-        process::ProcessOrigin,
+        process::{AgentTool, ProcessOrigin},
         value::{PaneId, ProcessName},
     };
 
@@ -145,7 +124,7 @@ mod tests {
     fn agent(tool: AgentTool) -> Process {
         Process::builder()
             .id(PaneId::new(1))
-            .name(ProcessName::try_new(tool.label()).unwrap())
+            .name(ProcessName::try_new(tool.to_string()).unwrap())
             .kind(ProcessKind::Agent)
             .agent_tool(Some(tool))
             .origin(ProcessOrigin::Session)

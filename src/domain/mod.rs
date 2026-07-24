@@ -1,3 +1,4 @@
+pub mod agent_session;
 pub mod config;
 pub mod notification;
 pub mod port;

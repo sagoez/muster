@@ -1,3 +1,4 @@
+mod agent_session_store;
 mod config_source;
 mod config_watcher;
 mod notifier;
@@ -6,6 +7,7 @@ mod process_runner;
 mod project_registry;
 mod settings_store;
 
+pub use agent_session_store::*;
 pub use config_source::*;
 pub use config_watcher::*;
 pub use notifier::*;

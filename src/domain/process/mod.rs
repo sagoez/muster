@@ -1,4 +1,5 @@
 mod activity;
+mod agent_protocol;
 mod agent_tool;
 mod entity;
 mod exit_intent;
@@ -9,6 +10,7 @@ mod state;
 mod stop;
 
 pub use activity::*;
+pub use agent_protocol::*;
 pub use agent_tool::*;
 pub use entity::*;
 pub use exit_intent::*;

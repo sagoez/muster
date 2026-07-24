@@ -136,6 +136,11 @@ Prefer enums over raw string literals for any fixed set of domain values compare
 or matched (process state, process kind, pane focus, key actions, ...). Give them
 `Display`/`FromStr` via `strum` or a manual impl. Never stringly-typed.
 
+### Enum derivations
+Use `strum` derives and iterator traits for enum display, parsing, and variant
+enumeration whenever they express the behavior. Do not hand-maintain option
+arrays or `match` implementations for those mechanical conversions.
+
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare
 `String`/`u64`. Use `nutype` for sanitization + validation instead of

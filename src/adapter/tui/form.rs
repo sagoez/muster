@@ -48,6 +48,19 @@ impl Field {
         }
     }
 
+    /// A choice field over `options`, selecting `value` when it is present.
+    pub fn choice_value(label: &str, options: &[&str], value: &str) -> Self {
+        let selected = options
+            .iter()
+            .position(|option| *option == value)
+            .unwrap_or(0);
+        Self::Choice {
+            label: label.to_string(),
+            options: options.iter().map(|option| option.to_string()).collect(),
+            selected,
+        }
+    }
+
     /// The field's label.
     pub fn label(&self) -> &str {
         match self {

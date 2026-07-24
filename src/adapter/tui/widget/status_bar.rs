@@ -27,8 +27,10 @@ const KILL_HINT: Hint = ("x", "kill");
 const AUTOSTART_HINT: Hint = ("t", "autostart");
 /// Add-process hint.
 const ADD_HINT: Hint = ("a", "add");
-/// Close disposable agent-session hint.
+/// Close runtime agent-session hint.
 const CLOSE_HINT: Hint = ("d", "close");
+/// Reopen the most recently closed agent session.
+const REOPEN_HINT: Hint = ("u", "reopen");
 /// Attached terminal detach hint.
 const DETACH_HINT: Hint = ("h", "detach");
 /// Slim hints for a process selected in the active project.
@@ -39,6 +41,7 @@ const PROCESS_HINTS: &[Hint] = &[
     RESTART_HINT,
     KILL_HINT,
     AUTOSTART_HINT,
+    REOPEN_HINT,
     ADD_HINT,
 ];
 /// Process hints in retention order when the status row is narrow.
@@ -50,8 +53,9 @@ const PROCESS_HINT_PRIORITY: &[Hint] = &[
     MOVE_HINT,
     ATTACH_HINT,
     AUTOSTART_HINT,
+    REOPEN_HINT,
 ];
-/// Slim hints for a disposable agent session selected in the sidebar.
+/// Slim hints for a runtime agent session selected in the sidebar.
 const AGENT_SESSION_HINTS: &[Hint] = &[
     MOVE_HINT,
     ATTACH_HINT,
@@ -59,11 +63,13 @@ const AGENT_SESSION_HINTS: &[Hint] = &[
     RESTART_HINT,
     KILL_HINT,
     CLOSE_HINT,
+    REOPEN_HINT,
     ADD_HINT,
 ];
 /// Agent-session hints in retention order when the status row is narrow.
 const AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
     CLOSE_HINT,
+    REOPEN_HINT,
     START_STOP_HINT,
     ADD_HINT,
     RESTART_HINT,
@@ -74,22 +80,36 @@ const AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
 /// Slim hints for a collapsed other-project row.
 const PROJECT_HINTS: &[Hint] = &[("↑↓", "move"), ("→", "open"), ("d", "remove")];
 /// Slim hints for an active project that has no processes yet.
-const EMPTY_HINTS: &[Hint] = &[ADD_HINT, ("n", "new"), ("o", "projects")];
+const EMPTY_HINTS: &[Hint] = &[ADD_HINT, REOPEN_HINT, ("n", "new"), ("o", "projects")];
 /// Slim hints for an attached terminal; each key follows the leader chord.
-const TERMINAL_HINTS: &[Hint] = &[DETACH_HINT, START_STOP_HINT, RESTART_HINT, KILL_HINT];
+const TERMINAL_HINTS: &[Hint] = &[
+    DETACH_HINT,
+    START_STOP_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    REOPEN_HINT,
+];
 /// Terminal hints in retention order when the status row is narrow.
-const TERMINAL_HINT_PRIORITY: &[Hint] = &[START_STOP_HINT, RESTART_HINT, KILL_HINT, DETACH_HINT];
-/// Slim hints while attached to a disposable agent session.
+const TERMINAL_HINT_PRIORITY: &[Hint] = &[
+    START_STOP_HINT,
+    REOPEN_HINT,
+    RESTART_HINT,
+    KILL_HINT,
+    DETACH_HINT,
+];
+/// Slim hints while attached to a runtime agent session.
 const TERMINAL_AGENT_SESSION_HINTS: &[Hint] = &[
     DETACH_HINT,
     START_STOP_HINT,
     RESTART_HINT,
     KILL_HINT,
     CLOSE_HINT,
+    REOPEN_HINT,
 ];
 /// Attached agent-session hint retention order for narrow rows.
 const TERMINAL_AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
     CLOSE_HINT,
+    REOPEN_HINT,
     START_STOP_HINT,
     RESTART_HINT,
     KILL_HINT,
@@ -101,7 +121,7 @@ const TERMINAL_AGENT_SESSION_HINT_PRIORITY: &[Hint] = &[
 pub enum StatusContext {
     /// A process in the active project is selected.
     Process,
-    /// A disposable agent session is selected.
+    /// A runtime agent session is selected.
     AgentSession,
     /// A collapsed other-project row is selected.
     Project,
@@ -109,7 +129,7 @@ pub enum StatusContext {
     Empty,
     /// A terminal pane is attached.
     Terminal,
-    /// A disposable agent session's terminal is attached.
+    /// A runtime agent session's terminal is attached.
     TerminalAgentSession,
 }
 
@@ -155,6 +175,13 @@ const ALERT_GLYPH: &str = "⚠";
 /// Prefix on a transient notice line.
 const NOTICE_PREFIX: &str = " ! ";
 
+/// Visual priority for a transient status-bar notice.
+#[derive(Clone, Copy)]
+pub enum NoticeTone {
+    /// A failure or unavailable action that needs attention.
+    Error,
+}
+
 /// Renders the status bar: a transient notice if one is set, otherwise the slim
 /// hints for `context` (always ending in `? help`) plus a right-aligned alert
 /// when any process has crashed. A pending terminal leader fills the row with a
@@ -164,7 +191,7 @@ pub fn render(
     area: Rect,
     context: StatusContext,
     crashed: usize,
-    notice: Option<&str>,
+    notice: Option<(&str, NoticeTone)>,
     leader_pending: bool,
 ) {
     let terminal_context = matches!(
@@ -172,23 +199,24 @@ pub fn render(
         StatusContext::Terminal | StatusContext::TerminalAgentSession
     );
     let leader_pending = leader_pending && terminal_context;
-    if let Some(notice) = notice {
+    if let Some((notice, tone)) = notice {
         let style = if leader_pending {
             Style::default()
                 .fg(LEADER_PENDING_FOREGROUND)
                 .bg(LEADER_PENDING_BACKGROUND)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .fg(ALERT_COLOR)
-                .add_modifier(Modifier::BOLD)
+            let color = match tone {
+                NoticeTone::Error => ALERT_COLOR,
+            };
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
+        };
+        let prefix = match tone {
+            NoticeTone::Error => NOTICE_PREFIX,
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{NOTICE_PREFIX}{notice}"),
-                style,
-            )))
-            .style(style),
+            Paragraph::new(Line::from(Span::styled(format!("{prefix}{notice}"), style)))
+                .style(style),
             area,
         );
         return;
@@ -384,7 +412,7 @@ mod tests {
                     frame.area(),
                     StatusContext::Process,
                     0,
-                    Some("one: no such file"),
+                    Some(("one: no such file", NoticeTone::Error)),
                     false,
                 )
             })
@@ -420,7 +448,7 @@ mod tests {
                     frame.area(),
                     StatusContext::Terminal,
                     0,
-                    Some("agent: finished"),
+                    Some(("agent: finished", NoticeTone::Error)),
                     true,
                 )
             })

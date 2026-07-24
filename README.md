@@ -25,8 +25,9 @@ cleaned-up cut I opened up, done with help of the AI.
 - A projects tree in the sidebar for switching between workspaces.
 - Live config reload: edits are reconciled into the running workspace, adding new
   processes and dropping removed ones while leaving running ones untouched.
-- Disposable agent sessions can be launched from presets in the TUI. Terminals
-  and commands can be added persistently without leaving the app.
+- First-class agent sessions can be launched from presets, named automatically,
+  closed into history, resumed, and restored with their workspace. Terminals and
+  commands can be added persistently without leaving the app.
 - A failed process raises an alert visible from any pane.
 
 ## Getting started
@@ -36,6 +37,7 @@ Requires a recent Rust toolchain.
 ```sh
 cargo install muster-workspace
 muster                       # starts the TUI on a local or registered workspace
+muster hooks setup           # enables native session discovery for agent CLIs
 ```
 
 From a source checkout:
@@ -57,7 +59,8 @@ Press `?` in the app for the full keymap:
 - `j`/`k` or arrows to move, `Enter`/`l` to open, `h` to go back
 - `s` start/stop, `r` restart, `p` pause, `x` force-kill, `t` toggle autostart
 - `a` add a process, `n` new project, `o` switch projects
-- `d` closes a disposable agent session or removes the selected saved project
+- `d` closes an agent session into history or removes the selected saved project
+- `u` reopens the most recently closed agent session
 - `C-a` detaches from a focused pane; the same commands work as `C-a` chords while
   attached
 - `q` to quit
@@ -94,16 +97,33 @@ Entries under `agents` are pinned workspace processes. They persist in
 `muster.yml` and use the normal start, stop, restart, and autostart controls.
 
 Press `a`, choose `agent`, then select Claude, Codex, Gemini, Amp, OpenCode,
-Copilot, Kimi, or Custom to launch a disposable agent session. A known preset
-uses its standard executable when the command field is blank. A custom agent
-requires a command. The optional name defaults to the preset name. These
-sessions exist only for the current TUI run, never modify `muster.yml`, and can
-be closed and removed with `d` or `C-a d` while attached.
+Copilot, Kimi, or Custom to launch a first-class agent session. `Enter` launches
+a known preset immediately with a generated human name; `e` opens the advanced
+form for a custom name, command, and resume command. Sessions never modify
+`muster.yml`. Closing one with `d` or `C-a d` moves it into history, and `u`
+resumes the latest closed conversation. Open resumable sessions return when the
+workspace is opened again. If a provider ID was not captured, the session
+returns as a stopped row so `d` can close it without starting a new conversation.
+
+Run `muster hooks setup` once to install the provider lifecycle integrations
+that capture native conversation IDs. Setup is explicit and idempotent, and
+OpenCode's plugin is installed under its XDG configuration root. Provider
+conversation switches update the durable resume target. OpenCode captures only
+the active top-level conversation, ignoring child and background session
+metadata. Caller-assigned IDs are not treated as resumable until the provider
+confirms them. Muster also exposes a versioned
+[agent event protocol](docs/agent-protocol.md) so new agents can integrate
+without screen scraping or a Rust dependency.
 
 Agent activity detection follows the selected tool. Codex, Gemini, and Amp use
 terminal-title changes; the other presets use visible output. Terminal progress,
 bells, and notification sequences still provide explicit working or waiting
 signals for every preset.
+
+The left dot always shows process lifecycle. A working agent also gets a cyan
+animated marker at the right edge, while any process that explicitly requests
+attention gets a yellow `!`. Ordinary command and terminal output adds no second
+marker.
 
 - `autostart`: `null` uses the default (agents and terminals start with the
   workspace, commands wait for `s`), or set `true`/`false` explicitly. Toggle it

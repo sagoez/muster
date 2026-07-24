@@ -4,6 +4,7 @@ agents:
   working_dir: null
   description: coding agent
   restart: null
+  stop: null
   autostart: false
 terminals:
 - name: shell
@@ -11,6 +12,7 @@ terminals:
   working_dir: null
   description: your login shell
   restart: null
+  stop: null
   autostart: false
 commands:
 - name: clock
@@ -18,4 +20,5 @@ commands:
   working_dir: null
   description: null
   restart: on_failure
+  stop: null
   autostart: false

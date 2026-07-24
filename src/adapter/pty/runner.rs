@@ -3,6 +3,7 @@ use std::io;
 use std::{
     fmt::Display,
     io::{Read, Write},
+    path::Path,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -14,18 +15,34 @@ use portable_pty::{CommandBuilder, PtySize as PortablePtySize, native_pty_system
 use crate::{
     constants::MUSTER_PROJECT_ENV,
     domain::{
+        agent_session::AgentSessionId,
         port::{OutputSink, ProcessHandle, ProcessRunner},
         process::StopSignal,
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
+        value::CommandLine,
     },
 };
 
 /// Size of a single PTY read buffer, in bytes.
 const READ_BUFFER_BYTES: usize = 4096;
-/// Shell used to interpret each process's command line.
+/// POSIX shell used to interpret each non-agent command line.
+#[cfg(unix)]
 const SHELL_PROGRAM: &str = "/bin/sh";
-/// Flag that runs the following argument as a shell command.
+/// Windows command shell used to interpret each non-agent command line.
+#[cfg(windows)]
+const SHELL_PROGRAM: &str = "cmd.exe";
+/// POSIX flag that runs the following argument as a shell command.
+#[cfg(unix)]
 const SHELL_COMMAND_FLAG: &str = "-c";
+/// Windows flag that runs the following argument as a shell command.
+#[cfg(windows)]
+const SHELL_COMMAND_FLAG: &str = "/C";
+/// Hidden CLI namespace that binds session ownership before starting an agent.
+const HOOK_SUBCOMMAND: &str = "hook";
+/// Hidden CLI action that starts a provider after recording its owner process.
+const LAUNCH_SUBCOMMAND: &str = "launch";
+/// CLI option carrying the stable Muster session identity.
+const SESSION_ARGUMENT: &str = "--session";
 /// Environment variable naming the terminal type.
 const TERM_VAR: &str = "TERM";
 /// Terminal type advertised to children when the environment has none.
@@ -57,10 +74,14 @@ impl ProcessRunner for PortablePtyRunner {
 
         let mut command = match request.command() {
             Some(command_line) => {
-                let mut builder = CommandBuilder::new(SHELL_PROGRAM);
-                builder.arg(SHELL_COMMAND_FLAG);
-                builder.arg(command_line.as_ref());
-                builder
+                if let Some(session_id) = request.agent_session_id() {
+                    Self::agent_launcher(session_id, command_line)?
+                } else {
+                    let mut builder = CommandBuilder::new(SHELL_PROGRAM);
+                    builder.arg(SHELL_COMMAND_FLAG);
+                    builder.arg(command_line.as_ref());
+                    builder
+                }
             },
             None => CommandBuilder::new_default_prog(),
         };
@@ -77,6 +98,9 @@ impl ProcessRunner for PortablePtyRunner {
         }
         if let Some(project) = request.project() {
             command.env(MUSTER_PROJECT_ENV, project);
+        }
+        for (name, value) in request.environment() {
+            command.env(name, value);
         }
 
         let mut child = pair.slave.spawn_command(command).map_err(system_error)?;
@@ -141,6 +165,38 @@ impl ProcessRunner for PortablePtyRunner {
             grace_tx,
             pid,
         }))
+    }
+}
+
+impl PortablePtyRunner {
+    /// Builds a direct internal launch command for one durable agent session.
+    ///
+    /// # Errors
+    /// Returns a [`PtyError`] when the running executable cannot be located.
+    fn agent_launcher(
+        session_id: &AgentSessionId,
+        command: &CommandLine,
+    ) -> Result<CommandBuilder, PtyError> {
+        let executable = std::env::current_exe().map_err(system_error)?;
+        Ok(Self::agent_launcher_for(&executable, session_id, command))
+    }
+
+    /// Builds a direct internal launch command using an explicit Muster executable.
+    fn agent_launcher_for(
+        executable: &Path,
+        session_id: &AgentSessionId,
+        command: &CommandLine,
+    ) -> CommandBuilder {
+        let mut launcher = CommandBuilder::new(executable);
+        launcher.args([
+            HOOK_SUBCOMMAND,
+            LAUNCH_SUBCOMMAND,
+            SESSION_ARGUMENT,
+            session_id.as_ref(),
+            "--",
+            command.as_ref(),
+        ]);
+        launcher
     }
 }
 
@@ -347,7 +403,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::domain::value::{Cols, CommandLine, Rows};
+    use crate::domain::{
+        agent_session::AgentSessionId,
+        value::{Cols, CommandLine, Rows},
+    };
 
     /// Maximum time to wait for a test process's events.
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -381,6 +440,29 @@ mod tests {
                     .build(),
             )
             .build()
+    }
+
+    /// The agent-launch handoff keeps advanced shell expressions as one opaque
+    /// argument for the internal launcher on every supported platform.
+    #[test]
+    fn agent_launch_handoff_preserves_shell_expressions() {
+        let session = AgentSessionId::try_new("session $(injection)").unwrap();
+        let command = CommandLine::try_new("FOO=bar codex | tee agent.log").unwrap();
+        let launch = PortablePtyRunner::agent_launcher_for(
+            &PathBuf::from("/tmp/muster"),
+            &session,
+            &command,
+        );
+
+        assert_eq!(launch.get_argv(), &vec![
+            PathBuf::from("/tmp/muster").into_os_string(),
+            HOOK_SUBCOMMAND.into(),
+            LAUNCH_SUBCOMMAND.into(),
+            SESSION_ARGUMENT.into(),
+            "session $(injection)".into(),
+            "--".into(),
+            "FOO=bar codex | tee agent.log".into(),
+        ]);
     }
 
     /// Ensures an early PTY EOF does not bypass a still-live process group.

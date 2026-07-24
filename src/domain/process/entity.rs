@@ -4,6 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
+    agent_session::AgentSessionId,
     process::{
         ActivityState, AgentTool, ProcessKind, ProcessOrigin, ProcessState, RestartPolicy,
         StopPolicy,
@@ -24,7 +25,10 @@ pub struct Process {
     /// Agent preset used for provider-aware activity detection.
     #[builder(default)]
     agent_tool: Option<AgentTool>,
-    /// Whether the process is configured or disposable for this TUI session.
+    /// Durable identity when this process is a first-class agent session.
+    #[builder(default)]
+    agent_session_id: Option<AgentSessionId>,
+    /// Whether configuration or runtime session history owns the process.
     #[builder(default)]
     origin: ProcessOrigin,
     /// Command used to launch it, or the user's login shell when absent.

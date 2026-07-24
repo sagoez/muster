@@ -305,12 +305,14 @@ impl ProviderHooks {
     }
 
     /// The textual forms setup may have embedded the executable path in:
-    /// raw, shell-quoted, their JSON-escaped bodies, and PowerShell quoting.
+    /// raw, shell-quoted, PowerShell-quoted, and their JSON-escaped bodies
+    /// (which also cover TOML basic-string escaping).
     fn executable_candidates(executable: &str) -> Vec<String> {
         let mut candidates = vec![executable.to_string()];
         if let Ok(quoted) = shlex::try_quote(executable) {
             candidates.push(quoted.to_string());
         }
+        candidates.push(executable.replace('\'', "''"));
         for base in candidates.clone() {
             if let Ok(encoded) = serde_json::to_string(&base) {
                 let body = encoded.trim_matches('"').to_string();
@@ -318,12 +320,13 @@ impl ProviderHooks {
                 candidates.push(encoded);
             }
         }
-        candidates.push(executable.replace('\'', "''"));
+        candidates.sort();
         candidates.dedup();
         candidates
     }
 
-    /// Textual state of one integration file for the given executable path.
+    /// Textual state of one integration file, matched against every encoded
+    /// form of the executable path.
     fn file_state(path: &Path, candidates: &[String]) -> HookState {
         let Ok(content) = fs::read_to_string(path) else {
             // An unreadable config reads as absent; a later hooks setup surfaces the real error.
@@ -1215,8 +1218,8 @@ mod tests {
     /// `file_state` would previously search only for the raw path.
     #[test]
     fn status_detects_installed_when_executable_has_special_chars() {
-        let root = std::env::temp_dir()
-            .join(format!("muster-status-encoded-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("muster-status-encoded-{}", uuid::Uuid::new_v4()));
         let home = root.join("home");
         let config = root.join("config");
         let xdg = root.join("xdg");
@@ -1227,8 +1230,7 @@ mod tests {
         let exe_path = Path::new(&exe_path_str);
 
         ProviderHooks::setup_in_with_codex(exe_path, &home, &config, &xdg, &codex).unwrap();
-        let statuses =
-            ProviderHooks::status_in(exe_path, &home, &config, &xdg, &codex).unwrap();
+        let statuses = ProviderHooks::status_in(exe_path, &home, &config, &xdg, &codex).unwrap();
 
         for status in &statuses {
             assert_eq!(

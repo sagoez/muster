@@ -8,6 +8,7 @@ use atomic_write_file::AtomicWriteFile;
 use directories::BaseDirs;
 use getset::{CopyGetters, Getters};
 use serde_json::{Map, Value, json};
+use strum::Display;
 use thiserror::Error;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 use typed_builder::TypedBuilder;
@@ -140,7 +141,8 @@ pub enum HookError {
 }
 
 /// Installation state of one provider integration file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Display, PartialEq, Eq)]
+#[strum(serialize_all = "lowercase")]
 pub enum HookState {
     /// No muster entry exists in the provider's config.
     Missing,
@@ -280,7 +282,7 @@ impl ProviderHooks {
         )
     }
 
-    /// Directory-injected form of [`Self::status`], shared with tests.
+    /// Directory-injected form of [`Self::status`], used directly in tests.
     ///
     /// # Errors
     /// Returns a [`HookError`] when the executable path is not valid UTF-8.
@@ -310,6 +312,7 @@ impl ProviderHooks {
     /// Textual state of one integration file for the given executable path.
     fn file_state(path: &Path, executable: &str) -> HookState {
         let Ok(content) = fs::read_to_string(path) else {
+            // An unreadable config reads as absent; a later hooks setup surfaces the real error.
             return HookState::Missing;
         };
         if content.contains(executable) {

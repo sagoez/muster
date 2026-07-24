@@ -28,9 +28,21 @@ pub fn prefers_osc52() -> bool {
     env::var_os("SSH_CONNECTION").is_some() || env::var_os("SSH_TTY").is_some()
 }
 
-/// The native clipboard tool a copy would try first, if any is applicable.
+/// The native clipboard tool a copy would try first, if any is found on PATH.
 pub fn preferred_tool() -> Option<&'static str> {
-    clipboard_commands().first().map(|command| command.program)
+    clipboard_commands()
+        .iter()
+        .find(|command| on_path(command.program))
+        .map(|command| command.program)
+}
+
+/// Returns true when `program` exists as an executable on the current PATH.
+fn on_path(program: &str) -> bool {
+    let Ok(path_var) = env::var("PATH") else {
+        return false;
+    };
+    env::split_paths(&path_var)
+        .any(|dir| dir.join(program).exists())
 }
 
 /// The platform clipboard writers worth trying, in herdr's order.
@@ -95,12 +107,17 @@ fn run_clipboard_command(command: &ClipboardCommand, text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The preferred tool is consistent with the command table's first entry.
+    /// `preferred_tool` only reports a tool that is actually on PATH (or None).
     #[test]
-    fn preferred_tool_matches_the_command_table() {
-        assert_eq!(
-            preferred_tool(),
-            clipboard_commands().first().map(|command| command.program)
-        );
+    fn preferred_tool_only_reports_a_tool_that_exists_on_path() {
+        match preferred_tool() {
+            Some(tool) => assert!(on_path(tool), "{tool} was reported but is not on PATH"),
+            None => {
+                // Either no candidate commands, or none are on PATH - both valid.
+                for command in clipboard_commands() {
+                    assert!(!on_path(command.program));
+                }
+            },
+        }
     }
 }

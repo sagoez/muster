@@ -130,7 +130,7 @@ pub fn hooks_probe(statuses: &[HookStatus]) -> Probe {
     let broken: Vec<String> = statuses
         .iter()
         .filter(|status| status.state() != HookState::Installed)
-        .map(|status| format!("{} ({:?})", status.provider(), status.state()))
+        .map(|status| format!("{} ({})", status.provider(), status.state()))
         .collect();
     if broken.is_empty() {
         probe(

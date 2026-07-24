@@ -35,4 +35,14 @@ pub enum CliError {
     /// No registered project matched, listing what exists.
     #[error("unknown project '{name}'; registered: {known}")]
     UnknownProjectAmong { name: String, known: String },
+    /// More than one registered project has the requested name.
+    #[error("'{name}' matches {count} projects; remove is ambiguous. Registered paths: {paths}")]
+    AmbiguousProject {
+        /// The name that matched multiple projects.
+        name: String,
+        /// How many projects matched.
+        count: usize,
+        /// The config paths of the matching projects, joined by ", ".
+        paths: String,
+    },
 }

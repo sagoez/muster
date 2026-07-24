@@ -31,11 +31,11 @@ pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<St
             } else {
                 OTHER_INDENT
             };
-            format!(
-                "{marker}{}  {}",
-                project.name().as_ref(),
-                project.config().display()
-            )
+            let folder = absolutize(project.config())
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| project.config().display().to_string());
+            format!("{marker}{}  {folder}", project.name().as_ref())
         })
         .collect())
 }
@@ -67,15 +67,15 @@ pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Strin
 /// Unregisters the named project; files on disk are untouched.
 ///
 /// # Errors
-/// Returns [`CliError::UnknownProjectAmong`] when no project has that name.
+/// Returns [`CliError::UnknownProjectAmong`] when no project has that name, or
+/// [`CliError::AmbiguousProject`] when more than one project shares the name.
 pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<String>, CliError> {
     let projects = registry.projects()?;
-    let remaining: Vec<Project> = projects
+    let matches: Vec<&Project> = projects
         .iter()
-        .filter(|project| project.name().as_ref() != name)
-        .cloned()
+        .filter(|project| project.name().as_ref() == name)
         .collect();
-    if remaining.len() == projects.len() {
+    if matches.is_empty() {
         return Err(CliError::UnknownProjectAmong {
             name: name.to_string(),
             known: projects
@@ -85,6 +85,23 @@ pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<String>,
                 .join(", "),
         });
     }
+    if matches.len() > 1 {
+        let paths = matches
+            .iter()
+            .map(|project| project.config().display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::AmbiguousProject {
+            name: name.to_string(),
+            count: matches.len(),
+            paths,
+        });
+    }
+    let remaining: Vec<Project> = projects
+        .iter()
+        .filter(|project| project.name().as_ref() != name)
+        .cloned()
+        .collect();
     registry.save(&remaining)?;
     Ok(vec![format!("removed '{name}' from the registry")])
 }
@@ -163,6 +180,8 @@ mod tests {
         assert!(!lines[0].starts_with(CURRENT_MARKER));
         assert!(lines[1].starts_with(CURRENT_MARKER));
         assert!(lines[1].contains("api") && lines[1].contains("/w/api"));
+        // The second column must be the project folder, not the config file path.
+        assert!(!lines[1].contains("muster.yml"));
     }
 
     /// An empty registry says so instead of printing nothing.
@@ -230,6 +249,32 @@ mod tests {
             },
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Removing a name that matches two projects returns AmbiguousProject and
+    /// saves nothing.
+    #[test]
+    fn remove_rejects_ambiguous_name() {
+        let registry = RecordingRegistry {
+            projects: vec![
+                project("web", "/w/site/muster.yml"),
+                project("web", "/w/app/muster.yml"),
+            ],
+            ..RecordingRegistry::default()
+        };
+        match remove("web", &registry) {
+            Err(CliError::AmbiguousProject { name, count, paths }) => {
+                assert_eq!(name, "web");
+                assert_eq!(count, 2);
+                assert!(paths.contains("/w/site/muster.yml"));
+                assert!(paths.contains("/w/app/muster.yml"));
+            },
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            registry.saved_projects.borrow().is_none(),
+            "ambiguous remove saves nothing"
+        );
     }
 
     /// Removing keeps every other project and never touches files.

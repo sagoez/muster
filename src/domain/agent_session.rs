@@ -205,7 +205,13 @@ impl AgentSession {
         if self.native_id.is_some() {
             return self.resume();
         }
+        // A session that never bound a launch owner never ran, so starting a
+        // fresh conversation cannot lose one; an owned-but-uncaptured session
+        // with reported identity stays guarded, because its conversation may
+        // exist under an id muster never learned.
+        let never_launched = self.owner_process_id.is_none();
         (self.state == AgentSessionState::Pending
+            || never_launched
             || self.state == AgentSessionState::Open
                 && self.tool.identity_source() == AgentIdentitySource::Assigned)
             .then(|| {
@@ -405,6 +411,42 @@ impl AgentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reported-identity session that never bound an owner never ran, so it
+    /// restores as a fresh conversation instead of being stuck forever.
+    #[test]
+    fn a_never_launched_session_restores_as_a_new_conversation() {
+        let session = AgentSession::builder()
+            .id(AgentSessionId::try_new("48e80ed9-1d5b-410a-9c20-1023d1cae5f4").unwrap())
+            .name(ProcessName::try_new("Rahul").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/p/muster.yml"))
+            .launch_command(CommandLine::try_new("codex").unwrap())
+            .state(AgentSessionState::Open)
+            .build();
+
+        assert!(
+            session.restore_command().is_some(),
+            "no owner was ever bound, so nothing can be lost"
+        );
+    }
+
+    /// An owned but uncaptured reported-identity session stays guarded: its
+    /// conversation may exist under an id muster never learned.
+    #[test]
+    fn an_owned_uncaptured_session_stays_unrestorable() {
+        let session = AgentSession::builder()
+            .id(AgentSessionId::try_new("48e80ed9-1d5b-410a-9c20-1023d1cae5f4").unwrap())
+            .name(ProcessName::try_new("Rahul").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/p/muster.yml"))
+            .launch_command(CommandLine::try_new("codex").unwrap())
+            .state(AgentSessionState::Open)
+            .build()
+            .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
+
+        assert!(session.restore_command().is_none());
+    }
 
     /// A custom resume template substitutes its provider identity safely.
     #[test]
@@ -618,6 +660,8 @@ mod tests {
     /// A closed unconfirmed conversation never becomes a fresh launch from history.
     #[test]
     fn does_not_reopen_a_closed_unconfirmed_assigned_identity() {
+        // The session ran (an owner was bound) but the assigned identity was
+        // never confirmed back by a capture hook.
         let session = AgentSession::builder()
             .id(AgentSessionId::try_new("closed-session").unwrap())
             .name(ProcessName::try_new("Ada").unwrap())
@@ -625,7 +669,8 @@ mod tests {
             .project(PathBuf::from("/repo/muster.yml"))
             .launch_command(CommandLine::try_new("claude").unwrap())
             .state(AgentSessionState::Closed)
-            .build();
+            .build()
+            .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
 
         assert!(session.restore_command().is_none());
     }

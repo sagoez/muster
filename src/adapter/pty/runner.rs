@@ -273,6 +273,10 @@ struct PtyProcessHandle {
 }
 
 impl ProcessHandle for PtyProcessHandle {
+    fn process_id(&self) -> Option<u32> {
+        self.pid
+    }
+
     fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
         self.writer.write_all(bytes)?;
         self.writer.flush()?;

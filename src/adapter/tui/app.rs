@@ -46,7 +46,7 @@ mod project_controller;
 mod session_controller;
 
 use crate::{
-    adapter::{config::starter_workspace, path},
+    adapter::{config::starter_workspace, path, process_identity::LocalProcessIdentity},
     application::{
         ExitDecision, ProcessLifecycle, ProcessSpecMatcher, Reconciliation, SessionRestorer,
         Workspace,
@@ -56,7 +56,9 @@ use crate::{
         WORKSPACE_FILE_NAME,
     },
     domain::{
-        agent_session::{AgentSession, AgentSessionId, AgentSessionState, NativeSessionId},
+        agent_session::{
+            AgentProcessId, AgentSession, AgentSessionId, AgentSessionState, NativeSessionId,
+        },
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
         notification::{Notification, NotificationId, NotificationScope},
         port::{
@@ -204,8 +206,7 @@ const GENERATED_NAME_ATTEMPTS: usize = 8;
 /// Shown when durable agent-session state cannot be loaded or written.
 const AGENT_SESSION_STORE_ERROR: &str = "could not update agent session history";
 /// Shown when a closed session has no provider identity to resume.
-const AGENT_SESSION_NOT_RESUMABLE: &str =
-    "the provider session ID was not captured; run `muster hooks setup`";
+const AGENT_SESSION_NOT_RESUMABLE: &str = "the provider never reported this session's ID; check `muster doctor`, approve hooks in the provider (codex: /hooks), then open a new session";
 /// Shown when there is no closed resumable session in this workspace.
 const NO_RECENT_AGENT_SESSION: &str = "no closed agent session to reopen";
 /// Placeholder identity used only to validate provider resume command shape.
@@ -3270,6 +3271,56 @@ mod tests {
         ) -> Result<Box<dyn ProcessHandle>, PtyError> {
             self.recorder.requests.borrow_mut().push(request);
             Ok(Box::new(FakeHandle))
+        }
+    }
+
+    /// The pid a [`PidHandle`] reports, asserted by the claim tests.
+    #[cfg(unix)]
+    const FAKE_LAUNCHER_PID: u32 = 4242;
+
+    /// A handle that reports a pid, like the real PTY handle does.
+    #[cfg(unix)]
+    struct PidHandle;
+
+    #[cfg(unix)]
+    impl ProcessHandle for PidHandle {
+        fn process_id(&self) -> Option<u32> {
+            Some(FAKE_LAUNCHER_PID)
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn pause(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+
+        fn kill(&mut self) -> Result<(), PtyError> {
+            Ok(())
+        }
+    }
+
+    /// A successful runner whose handles expose a pid.
+    #[cfg(unix)]
+    struct PidRunner;
+
+    #[cfg(unix)]
+    impl ProcessRunner for PidRunner {
+        fn spawn(
+            &self,
+            _request: SpawnRequest,
+            _sink: Box<dyn OutputSink>,
+        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+            Ok(Box::new(PidHandle))
         }
     }
 
@@ -7143,8 +7194,17 @@ mod tests {
     /// conversation and accidentally launching a new one.
     #[test]
     fn an_uncaptured_agent_session_is_not_restarted_as_a_new_conversation() {
-        let (mut app, _sessions, spawns) = agent_app(Vec::new());
+        let (mut app, sessions, spawns) = agent_app(Vec::new());
         app.create_agent_session(AgentTool::Codex, None, None, None);
+        // A running provider always binds a launch owner; model that here so
+        // the uncaptured-but-live guard is what the assertions exercise.
+        {
+            let mut recorded = sessions.sessions.borrow_mut();
+            let bound = recorded[0]
+                .clone()
+                .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
+            recorded[0] = bound;
+        }
         let pane = *app.workspace.selected_process().unwrap().id();
         let generation = app.generations[&pane];
 
@@ -7202,6 +7262,8 @@ mod tests {
             AgentSessionState::Closed,
         );
         let older_id = older.id().clone();
+        // Ran but never captured, so it is not resumable; a never-launched
+        // session would instead restart fresh.
         let newer = AgentSession::builder()
             .id(AgentSessionId::generate().unwrap())
             .name(ProcessName::try_new("Grace").unwrap())
@@ -7209,7 +7271,8 @@ mod tests {
             .project(PathBuf::from("/here/muster.yml"))
             .launch_command(CommandLine::try_new("gemini").unwrap())
             .state(AgentSessionState::Closed)
-            .build();
+            .build()
+            .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
         let (mut app, _sessions, spawns) = agent_app(vec![older, newer]);
 
         app.reopen_last_closed_session();
@@ -7324,10 +7387,78 @@ mod tests {
         );
     }
 
-    /// An open session whose provider ID was never captured returns as a
-    /// stopped row that can be closed instead of becoming stranded in history.
+    /// Spawning a session pane synchronously claims the launcher as owner,
+    /// so no reader can see an owner-less open session while it is live.
+    /// Unix only: the exec-based launch makes the PTY child the durable
+    /// owner; the Windows gate binds an inner shell pid instead.
+    #[cfg(unix)]
+    #[test]
+    fn spawning_a_session_pane_claims_the_owner_synchronously() {
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(Vec::new())),
+        };
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(PidRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+
+        app.create_agent_session(AgentTool::Codex, None, None, None);
+
+        let recorded = sessions.sessions.borrow();
+        assert_eq!(
+            recorded[0].owner_process_id().map(|pid| pid.into_inner()),
+            Some(FAKE_LAUNCHER_PID),
+            "the owner is claimed in the spawn call stack"
+        );
+    }
+
+    /// A never-launched restored session starts a fresh conversation.
+    #[test]
+    fn a_never_launched_session_restores_ready_to_start_fresh() {
+        // The user's trap: a session created but never started has no owner;
+        // it must restore with a runnable fresh command instead of being
+        // permanently stuck behind the not-resumable notice.
+        let session = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Rahul").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("codex").unwrap())
+            .state(AgentSessionState::Open)
+            .build();
+        let id = session.id().clone();
+
+        let (app, _sessions, spawns) = agent_app(vec![session]);
+
+        let restored = app.workspace.selected_process().unwrap();
+        assert_eq!(restored.agent_session_id().as_ref(), Some(&id));
+        assert!(
+            app.notice.is_none(),
+            "no not-resumable notice: {:?}",
+            app.notice
+        );
+        assert!(
+            !spawns.requests.borrow().is_empty(),
+            "the session starts fresh"
+        );
+    }
+
+    /// An open session that ran but whose provider ID was never captured
+    /// returns as a stopped row that can be closed instead of stranding.
     #[test]
     fn startup_restores_an_uncaptured_session_as_a_closable_stopped_row() {
+        // The session ran under a previous muster (owner bound) but its
+        // reported identity was never captured, so it cannot be resumed.
         let session = AgentSession::builder()
             .id(AgentSessionId::generate().unwrap())
             .name(ProcessName::try_new("Ada").unwrap())
@@ -7335,7 +7466,8 @@ mod tests {
             .project(PathBuf::from("/here/muster.yml"))
             .launch_command(CommandLine::try_new("codex").unwrap())
             .state(AgentSessionState::Open)
-            .build();
+            .build()
+            .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
         let id = session.id().clone();
 
         let (mut app, sessions, spawns) = agent_app(vec![session]);

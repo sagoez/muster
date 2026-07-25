@@ -79,13 +79,28 @@ impl App {
             Ok(mut handle) => {
                 if let Some(session_id) = &agent_session_id
                     && let Some(store) = &self.agent_session_store
-                    && let Err(error) = store.set_state(session_id, AgentSessionState::Open)
                 {
-                    let _ = handle.kill();
-                    self.deactivate(pane);
-                    self.workspace.set_state(pane, ProcessState::Crashed);
-                    self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
-                    return;
+                    // Mark open, then synchronously claim the spawned launcher
+                    // as owner, closing the window in which another instance
+                    // could read an owner-less open session and start a
+                    // competing launch; a claim lost to a live owner elsewhere
+                    // backs this spawn off instead of leaving a failed pane.
+                    let claimed = store
+                        .set_state(session_id, AgentSessionState::Open)
+                        .and_then(|()| {
+                            Self::claim_spawned_owner(
+                                store.as_ref(),
+                                session_id,
+                                handle.process_id(),
+                            )
+                        });
+                    if let Err(error) = claimed {
+                        let _ = handle.kill();
+                        self.deactivate(pane);
+                        self.workspace.set_state(pane, ProcessState::Crashed);
+                        self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                        return;
+                    }
                 }
                 let notification_scope = self.allocate_notification_scope();
                 let parser = Parser::new(
@@ -525,6 +540,36 @@ impl App {
     }
 
     /// Returns the pane selected in the active workspace.
+    /// Synchronously records the freshly spawned launcher as the session
+    /// owner. On Unix the launch child execs the provider, so the PTY child
+    /// pid is the durable owner and this claim composes with the child's own
+    /// re-claim of the same pid. On Windows the helper stays alive and binds
+    /// ownership to a separately spawned gated shell, so preclaiming the
+    /// outer pid would fight that claim; the child binding remains the only
+    /// claim there, as it does on platforms that expose no pid at all.
+    ///
+    /// # Errors
+    /// Returns a `ConfigError` when the claim cannot be persisted or another
+    /// live launcher already owns the session.
+    fn claim_spawned_owner(
+        store: &dyn AgentSessionStore,
+        session_id: &AgentSessionId,
+        process_id: Option<u32>,
+    ) -> Result<(), ConfigError> {
+        if cfg!(not(unix)) {
+            return Ok(());
+        }
+        let Some(process_id) = process_id.and_then(|pid| AgentProcessId::try_new(pid).ok()) else {
+            return Ok(());
+        };
+        store.set_owner_process_id(
+            session_id,
+            process_id,
+            LocalProcessIdentity::start_token(process_id),
+            Some(process_id),
+        )
+    }
+
     pub(super) fn selected_pane(&self) -> Option<PaneId> {
         self.workspace
             .selected_process()

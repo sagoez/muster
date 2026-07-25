@@ -15,6 +15,12 @@ pub trait OutputSink: Send + Sync + 'static {
 
 /// Handle to a spawned process: write input, resize, or terminate it.
 pub trait ProcessHandle: Send {
+    /// The OS process ID of the spawned child, when the platform exposes it.
+    /// Defaults to unknown so simple test doubles need not invent one.
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
     /// Writes raw input bytes to the process's PTY.
     ///
     /// # Errors

@@ -242,7 +242,9 @@ mod tests {
     }
 
     /// A non-UTF-8 folder fails before anything is written, not after the
-    /// workspace exists.
+    /// workspace exists. The directory is never created: APFS rejects
+    /// non-UTF-8 names entirely, and init's validation must fire before any
+    /// filesystem access anyway.
     #[cfg(unix)]
     #[test]
     fn init_rejects_a_non_utf8_folder_before_writing() {
@@ -251,7 +253,6 @@ mod tests {
         let mut raw = std::env::temp_dir().into_os_string().into_vec();
         raw.extend_from_slice(b"/muster-bad-\xff");
         let dir = PathBuf::from(OsString::from_vec(raw));
-        fs::create_dir_all(&dir).unwrap();
         let registry = RecordingRegistry::default();
 
         let result = init(&dir, &registry);
@@ -267,8 +268,10 @@ mod tests {
             registry.saved_workspace.borrow().is_none(),
             "no workspace file was created"
         );
-        assert!(!dir.join(WORKSPACE_FILE_NAME).exists());
-        fs::remove_dir_all(dir).unwrap();
+        assert!(
+            registry.saved_projects.borrow().is_none(),
+            "no registration"
+        );
     }
 
     /// A directory with no usable name fails before anything is written.

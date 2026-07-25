@@ -21,6 +21,7 @@ const HELP_STYLES: Styles = Styles::styled()
 #[command(
     name = APP_NAME,
     bin_name = APP_NAME,
+    version,
     about = "A terminal workspace for running CLI agents and dev processes",
     styles = HELP_STYLES
 )]
@@ -130,6 +131,11 @@ mod tests {
 
         assert_eq!(Args::command().get_name(), APP_NAME);
         assert_eq!(Args::command().get_bin_name(), Some(APP_NAME));
+        assert_eq!(
+            Args::command().get_version(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "muster --version must work on installed builds"
+        );
     }
 
     /// The global config flag parses before and after a subcommand.

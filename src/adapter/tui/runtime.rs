@@ -1,4 +1,5 @@
 use std::{
+    iter,
     ops::ControlFlow,
     path::PathBuf,
     thread,
@@ -44,9 +45,11 @@ const OUTPUT_CAPACITY: usize = 1024;
 /// Maximum output events drained per iteration before a single redraw.
 const MAX_BATCH: usize = 512;
 
-/// Runs the TUI. Terminal input flows on its own unbounded channel drained with
-/// priority, so keystrokes are never blocked behind a flood of process output on
-/// the bounded output channel.
+/// Runs the TUI. Terminal input flows on its own unbounded channel and is drained
+/// in full every iteration, so keystrokes are never dropped behind a flood of
+/// process output on the bounded output channel; a bounded output batch is
+/// applied first each iteration so a key is encoded against any keyboard-mode
+/// change the child just negotiated.
 ///
 /// # Errors
 /// Returns an error if querying the terminal size or drawing a frame fails.
@@ -126,9 +129,10 @@ fn run_loop(
     Ok(())
 }
 
-/// Blocks for the next event or activity deadline, then drains all pending input
-/// (priority) followed by a bounded batch of output. Returns whether to redraw,
-/// or `Break` when the loop should stop.
+/// Blocks for the next event or activity deadline, then drains queued output ahead
+/// of the input already pending (see [`drain_pending`]), so a key is encoded against
+/// keyboard-mode changes the child emitted in the same wake-up. Returns whether to
+/// redraw, or `Break` when the loop should stop.
 fn drain(
     app: &mut App,
     control_rx: &Receiver<RuntimeEvent>,
@@ -147,13 +151,13 @@ fn drain(
         .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
         .unwrap_or_else(never);
     let mut redraw = false;
+    // A key consumed by `select!` is held back rather than applied inline, so any
+    // process output already queued (which may carry a keyboard-mode change) is
+    // observed before the key is encoded against the negotiated protocol.
+    let mut buffered_input = None;
     select! {
         recv(control_rx) -> msg => match msg {
-            Ok(event) => if !apply(app, event) {
-                return ControlFlow::Break(());
-            } else {
-                redraw = true;
-            },
+            Ok(event) => buffered_input = Some(event),
             Err(_) => return ControlFlow::Break(()),
         },
         recv(output_rx) -> msg => if let Ok(event) = msg {
@@ -172,16 +176,54 @@ fn drain(
             redraw = app.advance_selection(now);
         },
     }
-    while let Ok(event) = control_rx.try_recv() {
-        if !apply(app, event) {
-            return ControlFlow::Break(());
-        }
-        redraw = true;
+    match drain_pending(control_rx, output_rx, buffered_input, redraw, |event| {
+        apply(app, event)
+    }) {
+        ControlFlow::Break(()) => return ControlFlow::Break(()),
+        ControlFlow::Continue(updated) => redraw = updated,
     }
-    for _ in 0..MAX_BATCH {
+    let now = Instant::now();
+    redraw |= app.advance_activity_frame(now);
+    redraw |= app.advance_selection(now);
+    ControlFlow::Continue(redraw)
+}
+
+/// Applies the events pending after a `select!` wake-up, output before input, so a
+/// key is encoded against the negotiation state the child had already emitted.
+///
+/// Both queues are snapshotted up front. Output leads: with a key waiting the whole
+/// output snapshot is drained (even past `MAX_BATCH`) so no queued mode change is
+/// missed; otherwise the batch is capped so a flood cannot delay a redraw.
+/// Snapshotting - rather than looping until empty - keeps a continuously refilling
+/// child from spinning the drain forever and starving the key, quit, timers, and
+/// redraws. Only the input snapshot is applied, so a key that lands mid-drain is
+/// deferred to the next iteration, where output again leads it. `apply_event`
+/// returns `false` to stop the loop; the returned flag reports whether a redraw is
+/// warranted.
+fn drain_pending(
+    control_rx: &Receiver<RuntimeEvent>,
+    output_rx: &Receiver<RuntimeEvent>,
+    buffered_input: Option<RuntimeEvent>,
+    mut redraw: bool,
+    mut apply_event: impl FnMut(RuntimeEvent) -> bool,
+) -> ControlFlow<(), bool> {
+    // Sample each backlog once. `input_pending` is derived from the same
+    // `input_backlog` count that bounds the input drain, not a separate
+    // `is_empty()` call: a key arriving between the two would otherwise leave
+    // `input_pending` false while `input_backlog` counted it, capping the output
+    // drain and applying the key ahead of queued negotiation.
+    let output_backlog = output_rx.len();
+    let input_backlog = control_rx.len();
+    let input_pending = buffered_input.is_some() || input_backlog > 0;
+    let output_limit = if input_pending {
+        output_backlog
+    } else {
+        output_backlog.min(MAX_BATCH)
+    };
+    for _ in 0..output_limit {
         match output_rx.try_recv() {
             Ok(event) => {
-                if !apply(app, event) {
+                if !apply_event(event) {
                     return ControlFlow::Break(());
                 }
                 redraw = true;
@@ -189,9 +231,15 @@ fn drain(
             Err(_) => break,
         }
     }
-    let now = Instant::now();
-    redraw |= app.advance_activity_frame(now);
-    redraw |= app.advance_selection(now);
+    let input = buffered_input
+        .into_iter()
+        .chain(iter::from_fn(|| control_rx.try_recv().ok()).take(input_backlog));
+    for event in input {
+        if !apply_event(event) {
+            return ControlFlow::Break(());
+        }
+        redraw = true;
+    }
     ControlFlow::Continue(redraw)
 }
 
@@ -250,4 +298,206 @@ fn spawn_input_thread(sender: Sender<RuntimeEvent>) {
 /// Converts a terminal size into a full-screen rectangle.
 fn size_to_rect(size: Size) -> Rect {
     Rect::new(0, 0, size.width, size.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::{
+        adapter::tui::spawn_generation::SpawnGeneration,
+        domain::{pty::ProcessOutput, value::PaneId},
+    };
+
+    /// A process-output event; its payload is irrelevant to ordering.
+    fn output_event() -> RuntimeEvent {
+        RuntimeEvent::Output {
+            pane: PaneId::new(0),
+            generation: SpawnGeneration::initial(),
+            output: ProcessOutput::Chunk(Vec::new()),
+        }
+    }
+
+    /// A key-input event.
+    fn input_event() -> RuntimeEvent {
+        RuntimeEvent::Input(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )))
+    }
+
+    /// Output pending in the same wake-up as input is applied first, so a key is
+    /// never encoded before a keyboard-mode change the child already emitted. The
+    /// buffered key (the one `select!` consumed) and the queued key both follow.
+    #[test]
+    fn queued_output_is_applied_before_input() {
+        let (control_tx, control_rx) = unbounded();
+        let (output_tx, output_rx) = unbounded();
+        output_tx.send(output_event()).unwrap();
+        control_tx.send(input_event()).unwrap();
+
+        let mut is_output = Vec::new();
+        let outcome = drain_pending(
+            &control_rx,
+            &output_rx,
+            Some(input_event()),
+            false,
+            |event| {
+                is_output.push(matches!(event, RuntimeEvent::Output { .. }));
+                true
+            },
+        );
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        assert_eq!(is_output, vec![true, false, false]);
+    }
+
+    /// With a key waiting, output past `MAX_BATCH` is still drained before the
+    /// key, so a mode change beyond the batch cap is not skipped.
+    #[test]
+    fn all_queued_output_drains_before_a_waiting_key() {
+        let (_control_tx, control_rx) = unbounded::<RuntimeEvent>();
+        let (output_tx, output_rx) = unbounded();
+        let overflow = MAX_BATCH + 10;
+        for _ in 0..overflow {
+            output_tx.send(output_event()).unwrap();
+        }
+
+        let mut is_output = Vec::new();
+        let outcome = drain_pending(
+            &control_rx,
+            &output_rx,
+            Some(input_event()),
+            false,
+            |event| {
+                is_output.push(matches!(event, RuntimeEvent::Output { .. }));
+                true
+            },
+        );
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        assert_eq!(is_output.len(), overflow + 1);
+        assert!(is_output[..overflow].iter().all(|&is_output| is_output));
+        assert!(!is_output[overflow]);
+    }
+
+    /// The output drain is bounded by the backlog snapshotted at the start, so a
+    /// child that refills the channel while the batch runs cannot extend it
+    /// indefinitely and starve the waiting key.
+    #[test]
+    fn output_drain_is_bounded_by_the_backlog_snapshot() {
+        let (control_tx, control_rx) = unbounded::<RuntimeEvent>();
+        let (output_tx, output_rx) = unbounded();
+        output_tx.send(output_event()).unwrap();
+        output_tx.send(output_event()).unwrap();
+        control_tx.send(input_event()).unwrap();
+
+        let refill = output_tx.clone();
+        let mut outputs = 0;
+        let mut refilled = false;
+        let outcome = drain_pending(&control_rx, &output_rx, None, false, |event| {
+            if matches!(event, RuntimeEvent::Output { .. }) {
+                outputs += 1;
+                if !refilled {
+                    refill.send(output_event()).unwrap();
+                    refilled = true;
+                }
+            }
+            true
+        });
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        // Only the two events queued at entry are drained; the mid-drain refill
+        // waits for the next iteration.
+        assert_eq!(outputs, 2);
+    }
+
+    /// A key that arrives while the output batch is draining is left for the next
+    /// iteration rather than applied against output still queued behind it.
+    #[test]
+    fn input_arriving_mid_batch_is_deferred() {
+        let (control_tx, control_rx) = unbounded::<RuntimeEvent>();
+        let (output_tx, output_rx) = unbounded();
+        output_tx.send(output_event()).unwrap();
+        output_tx.send(output_event()).unwrap();
+
+        let late = control_tx.clone();
+        let mut applied_input = false;
+        let mut sent = false;
+        let outcome = drain_pending(&control_rx, &output_rx, None, false, |event| {
+            match event {
+                RuntimeEvent::Output { .. } => {
+                    if !sent {
+                        late.send(input_event()).unwrap();
+                        sent = true;
+                    }
+                },
+                RuntimeEvent::Input(_) => applied_input = true,
+                _ => {},
+            }
+            true
+        });
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        assert!(!applied_input);
+        assert!(!control_rx.is_empty());
+    }
+
+    /// A key already queued on the control channel (not just the `select!`-buffered
+    /// one) forces a full output drain past `MAX_BATCH`, since `input_pending` is
+    /// derived from the sampled backlog.
+    #[test]
+    fn queued_control_input_forces_a_full_output_drain() {
+        let (control_tx, control_rx) = unbounded::<RuntimeEvent>();
+        let (output_tx, output_rx) = unbounded();
+        let overflow = MAX_BATCH + 10;
+        for _ in 0..overflow {
+            output_tx.send(output_event()).unwrap();
+        }
+        control_tx.send(input_event()).unwrap();
+
+        let mut outputs = 0;
+        let outcome = drain_pending(&control_rx, &output_rx, None, false, |event| {
+            if matches!(event, RuntimeEvent::Output { .. }) {
+                outputs += 1;
+            }
+            true
+        });
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        assert_eq!(outputs, overflow);
+    }
+
+    /// With no key waiting, the output batch stays capped at `MAX_BATCH` so a
+    /// flood cannot delay the next redraw; the remainder waits for the next drain.
+    #[test]
+    fn output_stays_capped_when_no_key_waits() {
+        let (_control_tx, control_rx) = unbounded::<RuntimeEvent>();
+        let (output_tx, output_rx) = unbounded();
+        for _ in 0..(MAX_BATCH + 10) {
+            output_tx.send(output_event()).unwrap();
+        }
+
+        let mut applied = 0;
+        let outcome = drain_pending(&control_rx, &output_rx, None, false, |_| {
+            applied += 1;
+            true
+        });
+
+        assert!(matches!(outcome, ControlFlow::Continue(true)));
+        assert_eq!(applied, MAX_BATCH);
+    }
+
+    /// An event whose application signals stop ends the drain and reports a break.
+    #[test]
+    fn a_stopping_event_breaks_the_drain() {
+        let (_control_tx, control_rx) = unbounded();
+        let (output_tx, output_rx) = unbounded();
+        output_tx.send(output_event()).unwrap();
+
+        let outcome = drain_pending(&control_rx, &output_rx, None, false, |_| false);
+
+        assert!(matches!(outcome, ControlFlow::Break(())));
+    }
 }

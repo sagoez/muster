@@ -1,11 +1,20 @@
-use std::io::{self, Stdout};
+use std::{
+    io::{self, Stdout},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crossterm::{
     clipboard::CopyToClipboard,
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     style::Print,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use getset::MutGetters;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -17,6 +26,36 @@ use crate::{adapter::clipboard, error::Result};
 const POINTER_SHAPE_PREFIX: &str = "\x1b]22;";
 /// String terminator closing an OSC sequence.
 const OSC_TERMINATOR: &str = "\x1b\\";
+/// Keyboard-enhancement level muster asks the host terminal for. Escape-code
+/// disambiguation lets crossterm tell Shift+Enter and similar combinations apart
+/// from their legacy encodings; event-type reporting delivers key repeats and
+/// releases so muster can forward them to children that enable the Kitty
+/// event-type flag.
+///
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is deliberately excluded, even though it is
+/// what would let the host deliver releases for plain-text keys. Requesting it
+/// routes ordinary typing through escape codes, which breaks input-method
+/// editors (CJK and similar) - the same reason herdr's IME-compatible flag set
+/// omits it. The only capability lost is relaying text-key releases to a child
+/// that enables event types together with all-key reporting, a combination the
+/// agent CLIs muster runs never use; correct text entry outranks it.
+/// Alternate-key reporting is omitted too: muster emits no layout-alternate
+/// codepoints, so requesting them would gain nothing.
+const KEYBOARD_ENHANCEMENT: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        .union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES);
+
+/// Set while muster has pushed keyboard-enhancement flags onto the host, so
+/// `restore` (including the panic hook) knows to pop exactly once.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the host terminal accepted muster's keyboard-enhancement request.
+/// When false, crossterm delivers only legacy key events, so muster cannot
+/// observe Shift+Enter or key releases and must not advertise the Kitty
+/// protocol to its children.
+pub fn keyboard_enhancement_active() -> bool {
+    KEYBOARD_ENHANCED.load(Ordering::SeqCst)
+}
 
 /// The concrete ratatui terminal type: a crossterm backend on stdout.
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -43,6 +82,7 @@ impl TerminalGuard {
             let _ = Self::restore();
             return Err(error.into());
         }
+        Self::enable_keyboard_enhancement(&mut stdout);
         match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
@@ -76,6 +116,42 @@ impl TerminalGuard {
         )
     }
 
+    /// Asks the host terminal to disambiguate escape codes when it supports the
+    /// Kitty keyboard protocol, so keys like Shift+Enter arrive distinctly from
+    /// their legacy encodings. A no-op on terminals without support; records
+    /// that a matching pop is owed on restore.
+    ///
+    /// This marks the host fully enhanced without confirming that both pushed flags
+    /// (disambiguate + event types) actually took effect. Verifying that would mean
+    /// querying the active flags after the push, but crossterm 0.29 does not expose
+    /// its `query_keyboard_enhancement_flags` (it lives behind `pub(crate) mod sys`;
+    /// only the boolean `supports_keyboard_enhancement` is public), and the flags
+    /// reply arrives as an `InternalEvent` its public `Event` enum never surfaces -
+    /// so muster cannot read the applied set without racing crossterm's own input
+    /// reader. In practice terminals implement these two foundational flags together
+    /// (partial support is a higher-flag concern), so the assumption holds. Revisit
+    /// only if crossterm exposes the applied flags; then feed them to the tracker's
+    /// `supported` mask so a disambiguate-only host would not advertise releases.
+    fn enable_keyboard_enhancement(writer: &mut Stdout) {
+        if supports_keyboard_enhancement().unwrap_or(false)
+            && execute!(writer, PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT)).is_ok()
+        {
+            KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Pops the keyboard-enhancement flags if muster pushed them, exactly once.
+    ///
+    /// # Errors
+    /// Returns an error if the pop sequence cannot be written to stdout.
+    fn disable_keyboard_enhancement() -> io::Result<()> {
+        if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+            execute!(io::stdout(), PopKeyboardEnhancementFlags)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Restores the terminal to its original cooked state. Safe to call more
     /// than once; used by both `Drop` and the panic hook.
     ///
@@ -83,6 +159,7 @@ impl TerminalGuard {
     /// Returns an error if raw mode cannot be disabled or the alternate screen
     /// cannot be left.
     pub fn restore() -> io::Result<()> {
+        let keyboard = Self::disable_keyboard_enhancement();
         let raw = disable_raw_mode();
         let mouse = execute!(io::stdout(), DisableMouseCapture);
         let pointer = execute!(
@@ -93,7 +170,7 @@ impl TerminalGuard {
             ))
         );
         let screen = execute!(io::stdout(), LeaveAlternateScreen);
-        raw.and(mouse).and(pointer).and(screen)
+        keyboard.and(raw).and(mouse).and(pointer).and(screen)
     }
 }
 

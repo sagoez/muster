@@ -9,8 +9,8 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use fake::{Fake, faker::name::en::FirstName};
 use ratatui::{
@@ -26,7 +26,8 @@ use super::{
     completion_generation::CompletionGeneration,
     event::{ChannelOutputSink, RuntimeEvent},
     form::{Field, Form, FormOutcome},
-    input,
+    keyboard::{self, HeldEncoding, KeyboardProtocol, KittyKeyboardTracker},
+    mouse,
     pointer_shape::PointerShape,
     selection::{
         self, Autoscroll, AutoscrollDirection, BufferCell, GridCell, ScrollMetrics, Selection,
@@ -268,6 +269,54 @@ enum LaunchedProjectMembership {
     Synthetic,
 }
 
+/// Identity a held terminal key is tracked by. `KeyCode` alone conflates keys
+/// whose only difference is the numeric keypad (main Left vs keypad Left), which
+/// classify to different codepoints and so encode differently under event
+/// reporting. Including the keypad bit keeps two physical keys held at once from
+/// sharing one slot, where the second press would overwrite the first and its
+/// release be routed to the wrong key or dropped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct HeldKeyId {
+    code: KeyCode,
+    keypad: bool,
+}
+
+impl HeldKeyId {
+    /// The held-key identity of `event`: its code plus whether it came from the
+    /// numeric keypad. `BackTab` is folded to `Tab` because crossterm reports the
+    /// same physical key as `BackTab` while Shift is held (the press) but as `Tab`
+    /// once Shift is lifted (the release); folding lets the release find its press.
+    fn of(event: KeyEvent) -> Self {
+        let code = match event.code {
+            KeyCode::BackTab => KeyCode::Tab,
+            other => other,
+        };
+        Self {
+            code,
+            keypad: event.state.contains(KeyEventState::KEYPAD),
+        }
+    }
+}
+
+/// The child a still-held key's press was forwarded to, and how to encode the
+/// key's later events. The pane and spawn generation are captured at press time
+/// so a repeat or release routes back to the same process (dropped if it has
+/// been replaced); the encoding fixes the escape-coded form, while each event
+/// supplies its own current modifiers. The negotiated protocol and screen epoch
+/// are captured too: if the child pops its Kitty flags, or leaves the alternate
+/// screen, before the key is released, the stored encoding no longer applies and
+/// the event is dropped rather than sent as a stale sequence into the restored
+/// shell. The screen epoch catches a screen change the protocol flags cannot,
+/// when both screens carry identical flags.
+#[derive(Clone, Copy)]
+struct HeldPress {
+    pane: PaneId,
+    generation: SpawnGeneration,
+    encoding: HeldEncoding,
+    protocol: KeyboardProtocol,
+    screen_epoch: u64,
+}
+
 /// One managed pane: its VT parser and, while alive, a live process handle. The
 /// parser outlives the handle so a finished process keeps its last screen.
 struct Pane {
@@ -277,6 +326,9 @@ struct Pane {
     /// Decodes notification and progress signals from the same output stream the
     /// vt100 parser renders.
     signals: SignalReader,
+    /// Tracks the Kitty keyboard protocol this child has negotiated, so keys are
+    /// encoded the way it expects.
+    keyboard: KittyKeyboardTracker,
     /// Evidence governing inferred working, idle, and attention transitions.
     activity: ActivityTracker,
     /// Last bell accepted from this terminal lifetime, for burst throttling.
@@ -530,6 +582,15 @@ pub struct App {
     panes: HashMap<PaneId, Pane>,
     restart_attempts: HashMap<PaneId, u32>,
     generations: HashMap<PaneId, SpawnGeneration>,
+    /// Keys whose press was forwarded to a terminal and not yet released, mapped
+    /// to the child that received the press, so a matching release reaches that
+    /// same child even after focus or the selected pane changes, and never an
+    /// unmatched or leader-consumed release.
+    held_terminal_keys: HashMap<HeldKeyId, HeldPress>,
+    /// Whether the host terminal accepted keyboard enhancement. Panes only
+    /// advertise the Kitty protocol to their children when it did, since muster
+    /// otherwise cannot observe the disambiguated keys and releases to relay.
+    keyboard_enhanced: bool,
     /// Monotonic source for terminal-lifetime notification scopes.
     next_notification_scope: NotificationScope,
     /// Current glyph in the working-agent spinner cycle.
@@ -637,6 +698,8 @@ impl App {
             panes: HashMap::new(),
             restart_attempts: HashMap::new(),
             generations: HashMap::new(),
+            held_terminal_keys: HashMap::new(),
+            keyboard_enhanced: super::terminal::keyboard_enhancement_active(),
             next_notification_scope: NotificationScope::new(0),
             activity_frame: ActivityFrame::initial(),
             activity_frame_deadline: Instant::now() + ACTIVITY_FRAME_INTERVAL,
@@ -1086,7 +1149,7 @@ impl App {
             };
             let screen = target.parser.screen();
             if screen.alternate_screen() {
-                let bytes = input::wheel_arrow(up, screen.application_cursor());
+                let bytes = mouse::wheel_arrow(up, screen.application_cursor());
                 if let Some(handle) = target.handle.as_mut() {
                     for _ in 0..WHEEL_SCROLL_LINES {
                         let _ = handle.write_input(bytes);
@@ -1344,7 +1407,7 @@ impl App {
         else {
             return;
         };
-        let bytes = input::encode_mouse(mouse, column, row, mode, screen.mouse_protocol_encoding());
+        let bytes = mouse::encode_mouse(mouse, column, row, mode, screen.mouse_protocol_encoding());
         if let Some(bytes) = bytes
             && let Some(target) = self.panes.get_mut(&pane)
             && let Some(handle) = target.handle.as_mut()
@@ -1526,6 +1589,12 @@ impl App {
     /// Handles a key: leader chord, command, or forward to the focused pane.
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
+            // A release is relayed only when its own press was forwarded, and
+            // only to the child that received that press. That drops the release
+            // of a leader-consumed command key (whose press never reached a
+            // child) and relays a double-leader Ctrl-A's release to the right
+            // pane. Releases never touch notices, overlays, or shortcuts.
+            self.forward_release(key);
             return;
         }
         // A key press dismisses any transient notice from the previous action
@@ -1562,8 +1631,14 @@ impl App {
         }
         match self.focus {
             Focus::Sidebar => self.handle_sidebar_key(key),
-            Focus::Terminal if is_leader(key) => self.focus = Focus::Leader,
+            // Enter leader mode only on the chord's own press; a held-chord
+            // repeat must not re-enter or, once in leader mode, act as a second
+            // press that forwards a literal leader chord and exits.
+            Focus::Terminal if is_leader(key) && key.kind == KeyEventKind::Press => {
+                self.focus = Focus::Leader;
+            },
             Focus::Terminal => self.forward_key(key),
+            Focus::Leader if key.kind == KeyEventKind::Repeat => {},
             Focus::Leader => {
                 self.focus = Focus::Terminal;
                 self.handle_leader_command(key);
@@ -2833,19 +2908,99 @@ impl App {
         }
     }
 
-    /// Forwards an encoded key to the focused pane's PTY, if it is alive.
-    /// Typing snaps a scrolled-back view down to the live screen first.
+    /// Forwards a key press or repeat to the focused pane's PTY, if it is alive.
+    /// Typing snaps a scrolled-back view down to the live screen first. A repeat
+    /// of a still-held key follows that press to its original child even if the
+    /// selection has since moved, so the child never sees a stray repeat.
     fn forward_key(&mut self, key: KeyEvent) {
-        let Some(bytes) = input::encode_key(key) else {
+        if key.kind == KeyEventKind::Repeat
+            && let Some(held) = self.held_terminal_keys.get(&HeldKeyId::of(key)).copied()
+        {
+            self.write_held(held, key);
+            return;
+        }
+        let Some(pane) = self.selected_pane() else {
             return;
         };
-        if let Some(pane) = self.selected_pane()
-            && let Some(target) = self.panes.get_mut(&pane)
-        {
-            target.parser.screen_mut().set_scrollback(0);
-            if let Some(handle) = target.handle.as_mut() {
-                let _ = handle.write_input(&bytes);
+        let (wrote, protocol, screen_epoch) = {
+            let Some(target) = self.panes.get_mut(&pane) else {
+                return;
+            };
+            let protocol: KeyboardProtocol = target.keyboard.protocol();
+            // A repeat with no held entry (the first branch handled tracked ones)
+            // means the matching press never reached this child - it was consumed
+            // by a leader command or overlay, or focus moved since. If the key
+            // would carry a Kitty event type, forwarding it now emits an unmatched
+            // `:2` the child cannot pair with a press, so drop it. Plain text and
+            // legacy keys have no event type and still auto-repeat.
+            if key.kind == KeyEventKind::Repeat && keyboard::held_encoding(key, protocol).is_some()
+            {
+                return;
             }
+            let screen_epoch = target.keyboard.screen_epoch();
+            let wrote = match keyboard::encode_key(key, protocol) {
+                Some(bytes) => {
+                    target.parser.screen_mut().set_scrollback(0);
+                    if let Some(handle) = target.handle.as_mut() {
+                        let _ = handle.write_input(&bytes);
+                    }
+                    true
+                },
+                None => false,
+            };
+            (wrote, protocol, screen_epoch)
+        };
+        // Only a press establishes the release target, and only for a key whose
+        // press was escape-coded, so the child will receive a matching release.
+        // The stored form lets that release apply its own current modifiers.
+        if wrote
+            && key.kind == KeyEventKind::Press
+            && let Some(encoding) = keyboard::held_encoding(key, protocol)
+            && let Some(&generation) = self.generations.get(&pane)
+        {
+            self.held_terminal_keys
+                .insert(HeldKeyId::of(key), HeldPress {
+                    pane,
+                    generation,
+                    encoding,
+                    protocol,
+                    screen_epoch,
+                });
+        }
+    }
+
+    /// Relays a key release to the child whose matching press was forwarded,
+    /// dropping it when no such press is held or that child is no longer running.
+    fn forward_release(&mut self, key: KeyEvent) {
+        let Some(held) = self.held_terminal_keys.remove(&HeldKeyId::of(key)) else {
+            return;
+        };
+        self.write_held(held, key);
+    }
+
+    /// Encodes `event` (a repeat or release of a held key) with the key's stored
+    /// escape-coded form and writes it to the child that received the press, if
+    /// that child is still the live process. The event supplies its own current
+    /// modifiers, so a release after the modifier was lifted still matches. The
+    /// event is dropped if the child's negotiated protocol or active screen
+    /// changed since the press, so a stale Kitty sequence never reaches a child
+    /// that has since popped its flags or left the alternate screen - the screen
+    /// epoch catches the screen change even when both screens share flags.
+    fn write_held(&mut self, held: HeldPress, event: KeyEvent) {
+        if self.generations.get(&held.pane) != Some(&held.generation) {
+            return;
+        }
+        let Some(target) = self.panes.get_mut(&held.pane) else {
+            return;
+        };
+        if target.keyboard.protocol() != held.protocol
+            || target.keyboard.screen_epoch() != held.screen_epoch
+        {
+            return;
+        }
+        let bytes = keyboard::encode_held(held.encoding, event);
+        if let Some(handle) = target.handle.as_mut() {
+            let _ = handle.write_input(&bytes);
         }
     }
 
@@ -3919,6 +4074,425 @@ mod tests {
         app.handle_input(CrosstermEvent::Mouse(click));
 
         assert_eq!(*written.lock().unwrap(), b"\x1b[<0;1;1M".to_vec());
+    }
+
+    /// Builds a started app whose single terminal pane records everything
+    /// written to its PTY, focused so keystrokes forward to the child.
+    fn app_recording_forwarded_input(written: &Arc<Mutex<Vec<u8>>>) -> App {
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("sh").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(RecordingRunner {
+                written: written.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        // The tests exercise the Kitty relay, so stand in for a host that
+        // accepted keyboard enhancement before the pane (and its tracker) spawn.
+        app.keyboard_enhanced = true;
+        app.start();
+        app.focus = Focus::Terminal;
+        app
+    }
+
+    /// After the child enables the Kitty keyboard protocol on its output stream,
+    /// Shift+Enter forwards as a `CSI u` sequence rather than a bare carriage
+    /// return, so the child can tell it apart from a plain Enter.
+    #[test]
+    fn shift_enter_reaches_a_kitty_child_as_csi_u() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>1u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[13;2u".to_vec());
+    }
+
+    /// A child that never negotiated the Kitty protocol still receives the
+    /// legacy carriage return for Shift+Enter.
+    #[test]
+    fn shift_enter_reaches_a_legacy_child_as_a_carriage_return() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"\r".to_vec());
+    }
+
+    /// A child that probes support with `CSI ? u` before enabling the protocol
+    /// receives a reply reporting the current flags, so it proceeds to enable it
+    /// rather than timing out and treating the pane as unsupported.
+    #[test]
+    fn a_capability_query_from_a_child_is_answered() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[?u".to_vec()),
+        );
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[?0u".to_vec());
+    }
+
+    /// A child that enables Kitty event-type reporting receives a key release,
+    /// tagged with the release event code, but only after its press was
+    /// forwarded, so the child never sees an unmatched release.
+    #[test]
+    fn a_key_release_reaches_an_event_type_child() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+
+        assert_eq!(
+            *written.lock().unwrap(),
+            b"\x1b[122;5:1u\x1b[122;5:3u".to_vec()
+        );
+    }
+
+    /// A release whose press was never forwarded (a leader-consumed command key)
+    /// is not relayed, so the child never receives an unmatched release.
+    #[test]
+    fn an_unforwarded_release_is_not_relayed() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// A plain-text press is not tracked as held (the host delivers no release
+    /// for it), so a later modified release sharing the same key code is not
+    /// mistaken for a match and relayed.
+    #[test]
+    fn a_text_press_does_not_arm_a_later_modified_release() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )));
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"z".to_vec());
+    }
+
+    /// Releasing the modifier before the character of a chord still delivers a
+    /// matched release: the bare `z` release routes to the held Ctrl+Z press and
+    /// keeps its escape-coded form, while carrying the modifiers in effect at
+    /// release time (none) rather than the press's Ctrl.
+    #[test]
+    fn a_release_after_the_modifier_is_lifted_still_matches_the_press() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+        // The user lets go of Ctrl first, so crossterm reports a bare 'z' release.
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        assert_eq!(
+            *written.lock().unwrap(),
+            b"\x1b[122;5:1u\x1b[122;1:3u".to_vec()
+        );
+    }
+
+    /// Holding the leader chord (which repeats under event-type reporting) must
+    /// not act as a second leader press that forwards a literal chord and exits.
+    #[test]
+    fn holding_the_leader_chord_does_not_act_as_a_second_press() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char(LEADER_KEY),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+        assert_eq!(app.focus, Focus::Leader);
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char(LEADER_KEY),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+
+        assert_eq!(app.focus, Focus::Leader);
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// If the child pops its Kitty flags while a key is held, the release must
+    /// not be sent as a stale Kitty sequence into the now-legacy child: the same
+    /// generation is still live, but the negotiated protocol has changed.
+    #[test]
+    fn a_held_release_is_dropped_when_the_child_leaves_kitty_mode() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+
+        // The child pops the flags it pushed, returning to the legacy protocol.
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[<1u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        // Only the original press reached the child; the release was dropped.
+        assert_eq!(*written.lock().unwrap(), b"\x1b[122;5:1u".to_vec());
+    }
+
+    /// A key pressed in an alternate-screen app whose release lands after the app
+    /// exits is dropped, not leaked into the restored shell - even when both
+    /// screens carry identical Kitty flags, where the protocol check alone cannot
+    /// tell the screen changed.
+    #[test]
+    fn a_held_release_is_dropped_when_the_alternate_screen_app_exits() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        let generation = current_gen(&app);
+        // The shell enables Kitty on the primary screen.
+        app.handle_output(
+            PaneId::new(PANE),
+            generation,
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+        // A full-screen app enters the alternate screen and enables the same flags.
+        app.handle_output(
+            PaneId::new(PANE),
+            generation,
+            ProcessOutput::Chunk(b"\x1b[?1049h".to_vec()),
+        );
+        app.handle_output(
+            PaneId::new(PANE),
+            generation,
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+
+        // The app exits, leaving the alternate screen; the primary still has {3}.
+        app.handle_output(
+            PaneId::new(PANE),
+            generation,
+            ProcessOutput::Chunk(b"\x1b[?1049l".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[122;5:1u".to_vec());
+    }
+
+    /// The main and keypad variants of one key code are held independently, so
+    /// holding both and releasing each delivers the correct distinct release
+    /// rather than overwriting one entry and misrouting or dropping a release.
+    #[test]
+    fn keypad_and_main_variants_of_a_key_are_held_independently() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        let main_left = |kind| {
+            CrosstermEvent::Key(KeyEvent::new_with_kind_and_state(
+                KeyCode::Left,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::NONE,
+            ))
+        };
+        let keypad_left = |kind| {
+            CrosstermEvent::Key(KeyEvent::new_with_kind_and_state(
+                KeyCode::Left,
+                KeyModifiers::NONE,
+                kind,
+                KeyEventState::KEYPAD,
+            ))
+        };
+
+        app.handle_input(main_left(KeyEventKind::Press));
+        app.handle_input(keypad_left(KeyEventKind::Press));
+        app.handle_input(main_left(KeyEventKind::Release));
+        app.handle_input(keypad_left(KeyEventKind::Release));
+
+        // Main Left encodes as the functional CSI form, keypad Left as its Kitty
+        // codepoint; each release matches its own press.
+        assert_eq!(
+            *written.lock().unwrap(),
+            b"\x1b[1;1:1D\x1b[57417;1:1u\x1b[1;1:3D\x1b[57417;1:3u".to_vec()
+        );
+    }
+
+    /// Shift+Tab is reported as `BackTab` on press but, once Shift is lifted, as
+    /// `Tab` on release; the held identity folds the two so the release still
+    /// matches its press and the child receives its `CSI 9;1:3u` release.
+    #[test]
+    fn a_shift_tab_release_after_shift_is_lifted_still_matches_its_press() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        )));
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[9;2:1u\x1b[9;1:3u".to_vec());
+    }
+
+    /// A repeat of an event-carrying key whose press was never forwarded (e.g.
+    /// consumed by an overlay) is dropped, so the child never sees a `:2` repeat
+    /// with no matching press.
+    #[test]
+    fn an_untracked_event_repeat_is_not_forwarded() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        // No press was forwarded, so there is no held entry for this arrow.
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    /// A repeat of a plain text key still auto-repeats even without a held entry,
+    /// since it carries no event type to leave unmatched.
+    #[test]
+    fn an_untracked_text_repeat_still_auto_repeats() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut app = app_recording_forwarded_input(&written);
+        app.handle_output(
+            PaneId::new(PANE),
+            current_gen(&app),
+            ProcessOutput::Chunk(b"\x1b[>3u".to_vec()),
+        );
+
+        app.handle_input(CrosstermEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+
+        assert_eq!(*written.lock().unwrap(), b"a".to_vec());
     }
 
     /// Builds a pointer event at an absolute terminal coordinate.

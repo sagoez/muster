@@ -112,6 +112,7 @@ impl App {
                     parser,
                     notification_scope,
                     signals: SignalReader::new(),
+                    keyboard: KittyKeyboardTracker::new(self.keyboard_enhanced),
                     activity,
                     last_bell: None,
                     pending_bell_notification: None,
@@ -592,7 +593,13 @@ impl App {
                     return;
                 };
                 let signals = target.signals.read(&bytes);
+                let keyboard_reply = target.keyboard.observe(&bytes);
                 target.parser.process(&bytes);
+                if !keyboard_reply.is_empty()
+                    && let Some(handle) = target.handle.as_mut()
+                {
+                    let _ = handle.write_input(&keyboard_reply);
+                }
                 for signal in signals {
                     self.apply_signal(pane, signal);
                 }

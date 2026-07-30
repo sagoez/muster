@@ -27,18 +27,21 @@ const POINTER_SHAPE_PREFIX: &str = "\x1b]22;";
 /// String terminator closing an OSC sequence.
 const OSC_TERMINATOR: &str = "\x1b\\";
 /// Keyboard-enhancement level muster asks the host terminal for. Escape-code
-/// disambiguation lets crossterm tell Shift+Enter and similar combinations apart
-/// from their legacy encodings; event-type reporting delivers key repeats and
-/// releases so muster can forward them to children that enable the Kitty
-/// event-type flag.
+/// disambiguation makes the host report a modified special key as a `CSI u`
+/// sequence - Shift+Enter arrives as `CSI 13;2u`, which crossterm decodes as
+/// Enter with Shift - so muster can tell it apart from a bare Enter's `\r`; it is
+/// also what lets crossterm read the Super/Hyper/Meta modifiers at all. Event-type
+/// reporting delivers key repeats and releases so muster can forward them to
+/// children that enable the Kitty event-type flag.
 ///
-/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is deliberately excluded, even though it is
-/// what would let the host deliver releases for plain-text keys. Requesting it
-/// routes ordinary typing through escape codes, which breaks input-method
-/// editors (CJK and similar) - the same reason herdr's IME-compatible flag set
-/// omits it. The only capability lost is relaying text-key releases to a child
-/// that enables event types together with all-key reporting, a combination the
-/// agent CLIs muster runs never use; correct text entry outranks it.
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is deliberately excluded. Per crossterm it is
+/// "required to get repeat/release events for plain-text keys": it routes ordinary
+/// typing through escape codes, which breaks input-method editors (CJK and
+/// similar), the same reason herdr's IME-compatible flag set omits it. It is not
+/// what disambiguates Shift+Enter or other modified special keys - disambiguation
+/// already does that, and crossterm decodes the result - it only escape-codes
+/// unmodified Enter/Tab/Backspace and plain text so their releases can be reported,
+/// which the agent CLIs muster runs never require. Correct text entry outranks it.
 /// Alternate-key reporting is omitted too: muster emits no layout-alternate
 /// codepoints, so requesting them would gain nothing.
 const KEYBOARD_ENHANCEMENT: KeyboardEnhancementFlags =

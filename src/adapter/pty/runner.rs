@@ -47,6 +47,15 @@ const SESSION_ARGUMENT: &str = "--session";
 const TERM_VAR: &str = "TERM";
 /// Terminal type advertised to children when the environment has none.
 const DEFAULT_TERM: &str = "xterm-256color";
+/// Environment variable tracking shell-nesting depth.
+const SHELL_LEVEL_VAR: &str = "SHLVL";
+/// Base shell level given to every pane. Muster is launched from the user's
+/// shell, so it inherits a non-zero `SHLVL`; passing that through would start a
+/// pane's shell one level deeper than a shell in a fresh terminal and break
+/// setups keyed on `SHLVL == 1` (for example a login shell that only switches to
+/// the user's preferred shell at the top level). Each pane is its own fresh
+/// terminal, so it starts from the base level and the shell increments it to 1.
+const BASE_SHELL_LEVEL: &str = "0";
 /// Grace the waiter gives the reader to drain a child's final output before
 /// reporting exit. Bounded so a lingering descendant never blocks the report.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
@@ -96,6 +105,7 @@ impl ProcessRunner for PortablePtyRunner {
         if std::env::var_os(TERM_VAR).is_none() {
             command.env(TERM_VAR, DEFAULT_TERM);
         }
+        command.env(SHELL_LEVEL_VAR, BASE_SHELL_LEVEL);
         if let Some(project) = request.project() {
             command.env(MUSTER_PROJECT_ENV, project);
         }
@@ -565,6 +575,29 @@ mod tests {
         }
 
         assert!(String::from_utf8_lossy(&bytes).contains("shutdown"));
+    }
+
+    /// A pane's shell starts at nesting level 1, like a shell in a fresh
+    /// terminal, whatever level muster itself inherited. Setups that only switch
+    /// to the user's preferred shell at the top level (`SHLVL == 1`) then behave
+    /// the same inside a pane as in a bare terminal.
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_shell_starts_at_the_base_nesting_level() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        PortablePtyRunner
+            .spawn(
+                request("printf 'shlvl=%s' \"$SHLVL\""),
+                Box::new(ChannelSink(tx)),
+            )
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        while let ProcessOutput::Chunk(chunk) = rx.recv_timeout(OUTPUT_TIMEOUT).unwrap() {
+            bytes.extend(chunk);
+        }
+
+        assert!(String::from_utf8_lossy(&bytes).contains("shlvl=1"));
     }
 
     #[cfg(unix)]

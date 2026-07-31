@@ -577,10 +577,12 @@ mod tests {
         assert!(String::from_utf8_lossy(&bytes).contains("shutdown"));
     }
 
-    /// A pane's shell starts at nesting level 1, like a shell in a fresh
-    /// terminal, whatever level muster itself inherited. Setups that only switch
-    /// to the user's preferred shell at the top level (`SHLVL == 1`) then behave
-    /// the same inside a pane as in a bare terminal.
+    /// A pane starts from the base nesting level muster passes (`SHLVL=0`), never
+    /// muster's own inherited, elevated level. Its shell therefore reports at most
+    /// one level: shells that count a non-interactive `sh -c` (bash) report 1,
+    /// those that do not (dash, the usual `/bin/sh` on CI) report 0. Either way a
+    /// setup that only switches shells at the top level behaves inside a pane as in
+    /// a bare terminal.
     #[cfg(unix)]
     #[test]
     fn a_pane_shell_starts_at_the_base_nesting_level() {
@@ -597,7 +599,13 @@ mod tests {
             bytes.extend(chunk);
         }
 
-        assert!(String::from_utf8_lossy(&bytes).contains("shlvl=1"));
+        let output = String::from_utf8_lossy(&bytes);
+        let level: u32 = output
+            .rsplit("shlvl=")
+            .next()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no shell level in pane output: {output:?}"));
+        assert!(level <= 1, "pane shell nested at level {level}: {output:?}");
     }
 
     #[cfg(unix)]

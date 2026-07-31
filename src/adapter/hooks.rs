@@ -14,9 +14,9 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 use typed_builder::TypedBuilder;
 
 use crate::{
-    constants::MUSTER_AGENT_SESSION_ENV,
+    constants::{MUSTER_AGENT_LAUNCH_TOKEN_ENV, MUSTER_AGENT_SESSION_ENV},
     domain::{
-        agent_session::{AgentProcessId, AgentSessionId, NativeSessionId},
+        agent_session::{AgentProcessId, AgentSessionId, LaunchToken, NativeSessionId},
         port::AgentSessionStore,
         process::{AGENT_PROTOCOL_VERSION, AgentTool},
     },
@@ -28,6 +28,15 @@ const CLAUDE_SETTINGS: &str = ".claude/settings.json";
 const CODEX_CONFIG_DIR: &str = ".codex";
 /// Codex hook configuration file relative to the Codex configuration directory.
 const CODEX_HOOKS_FILE: &str = "hooks.json";
+/// Codex main configuration file, where the hooks feature is enabled.
+const CODEX_CONFIG_FILE: &str = "config.toml";
+/// Codex `[features]` table gating the opt-in hooks subsystem.
+const CODEX_FEATURES_TABLE: &str = "features";
+/// Codex feature key that must be `true` for any hook to run.
+const CODEX_HOOKS_FEATURE: &str = "hooks";
+/// Hook execution timeout, in seconds, written into Codex's `SessionStart` entry
+/// to match the shape Codex expects (the field herdr's working hook carries).
+const CODEX_HOOK_TIMEOUT_SECS: u64 = 10;
 /// Environment variable overriding Codex's configuration directory.
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// Gemini CLI user settings relative to the user's home directory.
@@ -184,8 +193,9 @@ pub struct HookStatus {
 /// The exact artifact setup writes for one provider, compared verbatim when
 /// deciding Installed.
 enum ExpectedHook {
-    /// Command string in the grouped `SessionStart` JSON schema.
-    GroupedCommand(String),
+    /// Command string in the grouped `SessionStart` JSON schema, with the timeout
+    /// the provider's schema requires (`None` when the provider needs none).
+    GroupedCommand(String, Option<u64>),
     /// Command string under Copilot's platform command key.
     CopilotCommand(String),
     /// Command string in a Kimi `[[hooks]]` table.
@@ -229,7 +239,6 @@ impl ProviderHooks {
         store: &dyn AgentSessionStore,
         provider: AgentTool,
         process_id: u32,
-        parent_process_id: Option<u32>,
         mut input: impl Read,
     ) -> Result<bool, crate::error::MusterError> {
         let Some(internal) = std::env::var_os(MUSTER_AGENT_SESSION_ENV) else {
@@ -240,17 +249,18 @@ impl ProviderHooks {
         };
         let internal =
             AgentSessionId::try_new(internal).map_err(|_| HookError::MissingSessionId)?;
-        let process_id =
+        let reporter =
             AgentProcessId::try_new(process_id).map_err(|_| HookError::MissingProviderProcessId)?;
-        let parent_process_id = parent_process_id
-            .map(AgentProcessId::try_new)
-            .transpose()
-            .map_err(|_| HookError::MissingProviderProcessId)?;
+        let launch_token = std::env::var_os(MUSTER_AGENT_LAUNCH_TOKEN_ENV).and_then(|value| {
+            value
+                .to_str()
+                .and_then(|value| LaunchToken::try_new(value).ok())
+        });
         let mut raw = String::new();
         input.read_to_string(&mut raw).map_err(HookError::from)?;
         let payload: Value = serde_json::from_str(&raw).map_err(HookError::from)?;
         let native = Self::native_id(&payload)?;
-        store.capture_native_id(&internal, provider, process_id, parent_process_id, native)?;
+        store.capture_native_id(&internal, provider, native, reporter, launch_token)?;
         Ok(true)
     }
 
@@ -322,7 +332,16 @@ impl ProviderHooks {
             .into_iter()
             .map(|(provider, path)| {
                 let expected = Self::expected_hook(executable, provider)?;
-                let state = Self::file_state(&path, &expected);
+                let mut state = Self::file_state(&path, &expected);
+                // Codex runs no hook unless its feature is enabled in config.toml, so
+                // a correct hooks.json without the flag is not actually functional and
+                // must report as needing setup, not installed.
+                if matches!(provider, AgentTool::Codex)
+                    && matches!(state, HookState::Installed)
+                    && !Self::codex_hooks_feature_enabled(&codex_home.join(CODEX_CONFIG_FILE))
+                {
+                    state = HookState::Stale;
+                }
                 Ok(HookStatus::builder()
                     .provider(provider)
                     .path(path)
@@ -330,6 +349,23 @@ impl ProviderHooks {
                     .build())
             })
             .collect()
+    }
+
+    /// Whether Codex's `config.toml` enables the opt-in hooks feature. A missing or
+    /// unreadable config, or a false or absent flag, reads as disabled.
+    fn codex_hooks_feature_enabled(path: &Path) -> bool {
+        let Ok(raw) = fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(document) = raw.parse::<DocumentMut>() else {
+            return false;
+        };
+        document
+            .get(CODEX_FEATURES_TABLE)
+            .and_then(Item::as_table_like)
+            .and_then(|features| features.get(CODEX_HOOKS_FEATURE))
+            .and_then(Item::as_bool)
+            == Some(true)
     }
 
     /// The exact artifact setup would write for `provider` and `executable`:
@@ -347,7 +383,7 @@ impl ProviderHooks {
         let command = Self::posix_hook_command(executable, provider)?;
         Ok(match provider {
             AgentTool::Claude | AgentTool::Codex | AgentTool::Gemini => {
-                ExpectedHook::GroupedCommand(command)
+                ExpectedHook::GroupedCommand(command, Self::hook_timeout(provider))
             },
             AgentTool::Copilot => ExpectedHook::CopilotCommand(command),
             AgentTool::Kimi => ExpectedHook::KimiCommand(command),
@@ -366,8 +402,8 @@ impl ProviderHooks {
             return HookState::Missing;
         };
         let installed = match expected {
-            ExpectedHook::GroupedCommand(command) => {
-                Self::grouped_json_has_exact(&content, command)
+            ExpectedHook::GroupedCommand(command, timeout) => {
+                Self::grouped_json_has_exact(&content, command, *timeout)
             },
             ExpectedHook::CopilotCommand(command) => Self::copilot_has_exact(&content, command),
             ExpectedHook::KimiCommand(command) => Self::kimi_has_exact(&content, command),
@@ -409,7 +445,7 @@ impl ProviderHooks {
     }
 
     /// Whether the grouped `SessionStart` schema holds exactly `command`.
-    fn grouped_json_has_exact(content: &str, command: &str) -> bool {
+    fn grouped_json_has_exact(content: &str, command: &str, timeout: Option<u64>) -> bool {
         let Ok(root) = serde_json::from_str::<Value>(content) else {
             return false;
         };
@@ -424,6 +460,13 @@ impl ProviderHooks {
                         .is_some_and(|members| {
                             members.iter().any(|member| {
                                 member.get("command").and_then(Value::as_str) == Some(command)
+                                    // A hook upgraded before the timeout field was
+                                    // required matches the command but lacks it, so
+                                    // it must report as needing setup, not installed.
+                                    && timeout.is_none_or(|timeout| {
+                                        member.get("timeout").and_then(Value::as_u64)
+                                            == Some(timeout)
+                                    })
                             })
                         })
                 })
@@ -535,7 +578,7 @@ impl ProviderHooks {
         #[cfg(not(windows))]
         let copilot_command = Self::posix_hook_command(executable, AgentTool::Copilot)?;
         let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
-        let paths: Vec<PathBuf> = pairs.iter().map(|(_, path)| path.clone()).collect();
+        let mut paths: Vec<PathBuf> = pairs.iter().map(|(_, path)| path.clone()).collect();
         #[cfg(windows)]
         for (provider, path) in pairs[..3].iter().map(|(p, path)| (*p, path)) {
             let command = Self::powershell_hook_command(executable, provider);
@@ -550,7 +593,45 @@ impl ProviderHooks {
         Self::install_kimi(&paths[4], AgentTool::Kimi, &kimi_command)?;
         Self::write_text(&paths[5], &Self::amp_plugin(executable)?)?;
         Self::write_text(&paths[6], &Self::opencode_plugin(executable)?)?;
+        // Codex ignores hooks.json entirely unless its opt-in hooks feature is
+        // enabled in config.toml, so enabling it is part of installing the hook.
+        let codex_config = codex_home.join(CODEX_CONFIG_FILE);
+        Self::enable_codex_hooks_feature(&codex_config)?;
+        paths.push(codex_config);
         Ok(paths)
+    }
+
+    /// Enables Codex's opt-in hooks subsystem by setting `[features] hooks = true`
+    /// in Codex's `config.toml`, preserving all other configuration. Without this
+    /// flag Codex silently runs no hooks, so the capture hook never fires.
+    ///
+    /// # Errors
+    /// Returns a [`HookError`] when the file cannot be read, parsed, or written.
+    fn enable_codex_hooks_feature(path: &Path) -> Result<(), HookError> {
+        let raw = Self::read_text(path)?;
+        let mut document = if raw.trim().is_empty() {
+            DocumentMut::new()
+        } else {
+            raw.parse::<DocumentMut>()
+                .map_err(|source| HookError::Toml {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+        };
+        if document.get(CODEX_FEATURES_TABLE).is_none() {
+            document[CODEX_FEATURES_TABLE] = Item::Table(Table::new());
+        }
+        // `as_table_like_mut` handles both a standard `[features]` table and the
+        // inline form `features = { hooks = false, ... }`, preserving the table's
+        // other keys either way.
+        let features = document[CODEX_FEATURES_TABLE]
+            .as_table_like_mut()
+            .ok_or_else(|| HookError::Schema(path.to_path_buf()))?;
+        if features.get(CODEX_HOOKS_FEATURE).and_then(Item::as_bool) == Some(true) {
+            return Ok(());
+        }
+        features.insert(CODEX_HOOKS_FEATURE, toml_edit::value(true));
+        Self::write_text(path, &document.to_string())
     }
 
     /// Returns the CLI arguments for one provider's lifecycle callback.
@@ -597,6 +678,7 @@ impl ProviderHooks {
         provider: AgentTool,
         command: &str,
     ) -> Result<(), HookError> {
+        let timeout = Self::hook_timeout(provider);
         let mut root = Self::read_json(path)?;
         let object = root
             .as_object_mut()
@@ -623,11 +705,18 @@ impl ProviderHooks {
                     return false;
                 }
                 installed = true;
-                if existing != command {
-                    if let Some(object) = hook.as_object_mut() {
+                let command_differs = existing != command;
+                if let Some(object) = hook.as_object_mut() {
+                    if command_differs {
                         object.insert("command".to_string(), Value::String(command.to_string()));
+                        changed = true;
                     }
-                    changed = true;
+                    if let Some(timeout) = timeout
+                        && object.get("timeout").and_then(Value::as_u64) != Some(timeout)
+                    {
+                        object.insert("timeout".to_string(), json!(timeout));
+                        changed = true;
+                    }
                 }
                 true
             });
@@ -636,15 +725,28 @@ impl ProviderHooks {
         entries.retain(|entry| !Self::is_empty_owned_hook_group(entry));
         changed |= entries.len() != entry_count;
         if !installed {
-            entries.push(json!({
-                "hooks": [{ "type": "command", "command": command }]
-            }));
+            let hook = match timeout {
+                Some(timeout) => {
+                    json!({ "type": "command", "command": command, "timeout": timeout })
+                },
+                None => json!({ "type": "command", "command": command }),
+            };
+            entries.push(json!({ "hooks": [hook] }));
             changed = true;
         }
         if changed {
             Self::write_json(path, &root)?;
         }
         Ok(())
+    }
+
+    /// Hook timeout, in seconds, for providers whose `SessionStart` schema expects
+    /// the field; providers that omit it get `None`.
+    fn hook_timeout(provider: AgentTool) -> Option<u64> {
+        match provider {
+            AgentTool::Codex => Some(CODEX_HOOK_TIMEOUT_SECS),
+            _ => None,
+        }
     }
 
     /// Whether `command` invokes Muster's capture receiver for `provider`,
@@ -1249,6 +1351,146 @@ mod tests {
 
         assert_eq!(paths[1], codex_home.join("hooks.json"));
         assert!(paths[1].is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Codex ignores every hook unless its opt-in feature is enabled, so setup must
+    /// turn it on, preserve existing config, and give the hook the timeout Codex's
+    /// schema expects.
+    #[test]
+    fn setup_enables_the_codex_hooks_feature_and_preserves_config() {
+        let root = std::env::temp_dir().join(format!("muster-codex-feat-{}", uuid::Uuid::new_v4()));
+        let codex_home = root.join("codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let config_path = codex_home.join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            "model = \"gpt-5\"\n\n[tui]\ntheme = \"dark\"\n",
+        )
+        .unwrap();
+
+        ProviderHooks::setup_in_with_codex(
+            Path::new("/tmp/muster"),
+            &root.join("home"),
+            &root.join("config"),
+            &root.join("xdg"),
+            &codex_home,
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(&config_path).unwrap();
+        let document = config.parse::<DocumentMut>().unwrap();
+        let features = document[CODEX_FEATURES_TABLE].as_table().unwrap();
+        assert_eq!(features[CODEX_HOOKS_FEATURE].as_bool(), Some(true));
+        assert_eq!(document["model"].as_str(), Some("gpt-5"));
+        assert_eq!(document["tui"]["theme"].as_str(), Some("dark"));
+
+        let hooks: Value =
+            serde_json::from_str(&fs::read_to_string(codex_home.join(CODEX_HOOKS_FILE)).unwrap())
+                .unwrap();
+        let hook = &hooks["hooks"][SESSION_START_EVENT][0]["hooks"][0];
+        assert_eq!(hook["timeout"].as_u64(), Some(CODEX_HOOK_TIMEOUT_SECS));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An inline `features = { ... }` table must be handled without failing, and
+    /// its other keys preserved, when enabling the hooks feature.
+    #[test]
+    fn enables_the_codex_hooks_feature_in_an_inline_features_table() {
+        let root =
+            std::env::temp_dir().join(format!("muster-codex-inline-{}", uuid::Uuid::new_v4()));
+        let codex_home = root.join("codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let config_path = codex_home.join(CODEX_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            "features = { hooks = false, web_search = true }\n",
+        )
+        .unwrap();
+
+        ProviderHooks::enable_codex_hooks_feature(&config_path).unwrap();
+
+        let document = fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let features = document[CODEX_FEATURES_TABLE].as_table_like().unwrap();
+        assert_eq!(
+            features.get(CODEX_HOOKS_FEATURE).and_then(Item::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            features.get("web_search").and_then(Item::as_bool),
+            Some(true)
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A Codex hook upgraded before the timeout field was required has the command
+    /// but no timeout; status must report it as needing setup, not installed.
+    #[test]
+    fn a_codex_hook_missing_its_timeout_is_not_reported_installed() {
+        let command = "/bin/muster hook capture --provider codex";
+        let with_timeout = format!(
+            "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{command}\",\"timeout\":{CODEX_HOOK_TIMEOUT_SECS}}}]}}]}}}}"
+        );
+        let without_timeout = format!(
+            "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{command}\"}}]}}]}}}}"
+        );
+
+        // Codex requires the timeout, so only the entry that carries it is installed.
+        assert!(ProviderHooks::grouped_json_has_exact(
+            &with_timeout,
+            command,
+            Some(CODEX_HOOK_TIMEOUT_SECS)
+        ));
+        assert!(!ProviderHooks::grouped_json_has_exact(
+            &without_timeout,
+            command,
+            Some(CODEX_HOOK_TIMEOUT_SECS)
+        ));
+        // Providers that require no timeout accept an entry without one.
+        assert!(ProviderHooks::grouped_json_has_exact(
+            &without_timeout,
+            command,
+            None
+        ));
+    }
+
+    /// Codex needs both a correct hooks.json and `[features] hooks = true`. Status
+    /// must report it as needing setup when the feature is disabled, even though the
+    /// hook file itself is current.
+    #[test]
+    fn codex_status_needs_setup_when_the_feature_flag_is_off() {
+        let root =
+            std::env::temp_dir().join(format!("muster-codex-status-{}", uuid::Uuid::new_v4()));
+        let codex_home = root.join("codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        let exe = Path::new("/bin/muster");
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex_home).unwrap();
+        let config_path = codex_home.join(CODEX_CONFIG_FILE);
+
+        let codex_state = |codex_home: &Path| {
+            ProviderHooks::status_in(exe, &home, &config, &xdg, codex_home)
+                .unwrap()
+                .into_iter()
+                .find(|status| status.provider() == AgentTool::Codex)
+                .unwrap()
+                .state()
+        };
+
+        // Setup enabled the flag, so the hook reads as installed.
+        assert_eq!(codex_state(&codex_home), HookState::Installed);
+
+        // Disabling the feature makes the (still-correct) hook non-functional.
+        fs::write(&config_path, "[features]\nhooks = false\n").unwrap();
+        assert_eq!(codex_state(&codex_home), HookState::Stale);
+
         fs::remove_dir_all(root).unwrap();
     }
 

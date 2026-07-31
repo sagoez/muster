@@ -39,6 +39,39 @@ impl AgentSessionId {
     }
 }
 
+/// Per-launch generation marker muster injects into the agent's environment.
+///
+/// A fresh token is minted for every launch of a session and matched against the
+/// provider reports it produces, so a capture left in flight by a previous launch
+/// (which carries the old token) cannot bind the new launch's identity.
+#[nutype(
+    sanitize(trim),
+    validate(not_empty),
+    derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        AsRef,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct LaunchToken(String);
+
+impl LaunchToken {
+    /// Mints a unique token for one launch of a session.
+    ///
+    /// # Errors
+    /// Returns the newtype's validation error if its invariant ever diverges from
+    /// UUID's non-empty textual representation.
+    pub fn generate() -> Result<Self, LaunchTokenError> {
+        Self::try_new(uuid::Uuid::new_v4().to_string())
+    }
+}
+
 /// Provider-owned identity used to resume an existing conversation.
 #[nutype(
     sanitize(trim),
@@ -141,18 +174,31 @@ pub struct AgentSession {
     /// Optional custom resume template. `{session_id}` is replaced when present.
     #[builder(default)]
     resume_command: Option<CommandLine>,
+    /// Per-launch token muster injects into the agent's environment. Provider
+    /// reports must carry the current launch's token to bind the identity, so a
+    /// capture left in flight by a previous launch cannot overwrite it.
+    #[builder(default)]
+    launch_token: Option<LaunchToken>,
     /// Provider identity captured by a lifecycle integration.
     #[builder(default)]
     native_id: Option<NativeSessionId>,
+    /// Process that reported [`AgentSession::native_id`] within the current launch.
+    /// Only that same process, or a replacement after it exits, may change the
+    /// identity; a concurrent different process - a nested launch that inherited the
+    /// session env var - is ignored while this one is alive. Reset once per launch.
+    #[builder(default)]
+    native_reporter_process_id: Option<AgentProcessId>,
+    /// Creation marker for [`AgentSession::native_reporter_process_id`], used to
+    /// tell whether that reporter is still alive (so a wrapper-restarted provider on
+    /// a new PID may rebind) and to reject PID reuse.
+    #[builder(default)]
+    native_reporter_start_token: Option<AgentProcessStartToken>,
     /// Process identity allowed to update the provider conversation.
     #[builder(default)]
     owner_process_id: Option<AgentProcessId>,
     /// Creation marker paired with the owner PID to reject PID reuse.
     #[builder(default)]
     owner_process_start_token: Option<AgentProcessStartToken>,
-    /// Shell wrapper identity allowed to hand off to its direct provider child.
-    #[builder(default)]
-    wrapper_process_id: Option<AgentProcessId>,
     /// Open sessions restore automatically; closed sessions remain in history.
     state: AgentSessionState,
 }
@@ -164,22 +210,50 @@ impl AgentSession {
         self
     }
 
+    /// Returns a copy binding `native_id` and the process that reported it (with its
+    /// creation token), so a later report can tell a live concurrent process apart
+    /// from a replacement after the reporter exits.
+    pub fn with_reported_native_id(
+        mut self,
+        native_id: NativeSessionId,
+        reporter_process_id: AgentProcessId,
+        reporter_start_token: Option<AgentProcessStartToken>,
+    ) -> Self {
+        self.native_id = Some(native_id);
+        self.native_reporter_process_id = Some(reporter_process_id);
+        self.native_reporter_start_token = reporter_start_token;
+        self
+    }
+
     /// Returns a copy bound to the current managed provider process.
     pub fn with_owner_process_id(mut self, process_id: AgentProcessId) -> Self {
         self.owner_process_id = Some(process_id);
         self
     }
 
-    /// Returns a copy bound to a launch owner and its optional shell wrapper.
-    pub fn with_launch_processes(
+    /// Returns a copy bound to a launch owner process and its creation token (used
+    /// only to tell whether that process is still alive). When `launch_token` is
+    /// `Some`, it also begins a new launch generation: the token muster injects into
+    /// the agent's environment is recorded, and a change of token resets the reporter
+    /// so only a report carrying the new token can bind. Because this happens as part
+    /// of the owner claim, a claim the store rejects (a losing or competing launch)
+    /// never touches the token of the launch that actually owns the session. The
+    /// owner-refreshing launcher claim passes `None` to leave the token untouched.
+    pub fn with_launch_owner(
         mut self,
         owner_process_id: AgentProcessId,
         owner_process_start_token: Option<AgentProcessStartToken>,
-        wrapper_process_id: Option<AgentProcessId>,
+        launch_token: Option<LaunchToken>,
     ) -> Self {
+        if let Some(launch_token) = launch_token {
+            if self.launch_token.as_ref() != Some(&launch_token) {
+                self.native_reporter_process_id = None;
+                self.native_reporter_start_token = None;
+            }
+            self.launch_token = Some(launch_token);
+        }
         self.owner_process_id = Some(owner_process_id);
         self.owner_process_start_token = owner_process_start_token;
-        self.wrapper_process_id = wrapper_process_id;
         self
     }
 
@@ -198,17 +272,16 @@ impl AgentSession {
         self.tool.resume_command(&self.launch_command, native_id)
     }
 
-    /// Builds the safest command available after a process or Muster restart.
-    /// Pending launches and open caller-assigned identities retry their original
-    /// new-session command until a lifecycle hook confirms them.
+    /// Command for an automatic restore after a process or Muster restart. With a
+    /// captured native id the conversation resumes; a pending launch or an open
+    /// caller-assigned identity retries its new-session command. An owned-but-
+    /// uncaptured reported identity returns `None` so startup does not silently
+    /// auto-spawn a fresh conversation - it is surfaced as a stopped row the user
+    /// can reopen deliberately (see [`AgentSession::reopen_command`]).
     pub fn restore_command(&self) -> Option<CommandLine> {
         if self.native_id.is_some() {
             return self.resume();
         }
-        // A session that never bound a launch owner never ran, so starting a
-        // fresh conversation cannot lose one; an owned-but-uncaptured session
-        // with reported identity stays guarded, because its conversation may
-        // exist under an id muster never learned.
         let never_launched = self.owner_process_id.is_none();
         (self.state == AgentSessionState::Pending
             || never_launched
@@ -219,6 +292,20 @@ impl AgentSession {
                     .new_session_command(&self.launch_command, &self.id)
             })
             .flatten()
+    }
+
+    /// Command for a user-initiated reopen or restart. Resumes a captured
+    /// conversation; reopens an uncaptured one as a fresh conversation rather than
+    /// refusing - there is nothing to resume (the provider never reported an id, and
+    /// codex only reports on the first turn), so a fresh conversation beats a
+    /// permanently dead pane. Unlike [`AgentSession::restore_command`] this never
+    /// returns `None` for an uncaptured session, so reopen always works.
+    pub fn reopen_command(&self) -> Option<CommandLine> {
+        if self.native_id.is_some() {
+            return self.resume();
+        }
+        self.tool
+            .new_session_command(&self.launch_command, &self.id)
     }
 
     /// Whether a custom resume template can accept a provider identity without
@@ -434,7 +521,10 @@ mod tests {
     /// An owned but uncaptured reported-identity session stays guarded: its
     /// conversation may exist under an id muster never learned.
     #[test]
-    fn an_owned_uncaptured_session_stays_unrestorable() {
+    fn an_owned_uncaptured_session_reopens_as_a_fresh_conversation() {
+        // Codex only fires its capture hook on the first turn, so a session closed
+        // or restarted before then has no native id. Rather than leaving a dead
+        // pane, it reopens as a fresh conversation (the only thing possible).
         let session = AgentSession::builder()
             .id(AgentSessionId::try_new("48e80ed9-1d5b-410a-9c20-1023d1cae5f4").unwrap())
             .name(ProcessName::try_new("Rahul").unwrap())
@@ -445,7 +535,13 @@ mod tests {
             .build()
             .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
 
+        // Startup does not auto-spawn it (surfaced as a stopped row instead)...
         assert!(session.restore_command().is_none());
+        // ...but a user-initiated reopen launches it fresh rather than a dead pane.
+        assert_eq!(
+            session.reopen_command(),
+            AgentTool::Codex.new_session_command(session.launch_command(), session.id())
+        );
     }
 
     /// A custom resume template substitutes its provider identity safely.
@@ -659,9 +755,10 @@ mod tests {
 
     /// A closed unconfirmed conversation never becomes a fresh launch from history.
     #[test]
-    fn does_not_reopen_a_closed_unconfirmed_assigned_identity() {
-        // The session ran (an owner was bound) but the assigned identity was
-        // never confirmed back by a capture hook.
+    fn reopens_a_closed_unconfirmed_assigned_identity_with_its_id() {
+        // The session ran (an owner was bound) but the assigned identity was never
+        // confirmed back by a capture hook. Reopening re-runs with muster's own
+        // assigned id, which continues the same conversation - not a dead pane.
         let session = AgentSession::builder()
             .id(AgentSessionId::try_new("closed-session").unwrap())
             .name(ProcessName::try_new("Ada").unwrap())
@@ -672,7 +769,10 @@ mod tests {
             .build()
             .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
 
-        assert!(session.restore_command().is_none());
+        assert_eq!(
+            session.reopen_command(),
+            AgentTool::Claude.new_session_command(session.launch_command(), session.id())
+        );
     }
 
     /// A reported-ID session retries safely when its initial PTY launch never attached.

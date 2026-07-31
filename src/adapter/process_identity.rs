@@ -16,6 +16,53 @@ impl LocalProcessIdentity {
         Self::platform_start_token(process_id)
     }
 
+    /// Whether `process_id` currently exists. Returns `true` when liveness cannot be
+    /// determined - an unsupported target or a metadata lookup failure - so a caller
+    /// that guards on liveness does not fail open on uncertainty.
+    pub fn is_alive(process_id: AgentProcessId) -> bool {
+        Self::platform_is_alive(process_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn platform_is_alive(process_id: AgentProcessId) -> bool {
+        std::path::Path::new(&format!("/proc/{}", process_id.into_inner())).exists()
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn platform_is_alive(process_id: AgentProcessId) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &process_id.into_inner().to_string()])
+            .status()
+            .map_or(true, |status| status.success())
+    }
+
+    #[cfg(windows)]
+    fn platform_is_alive(process_id: AgentProcessId) -> bool {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+
+        // SAFETY: the PID is an ordinary integer; a non-null handle is closed.
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                process_id.into_inner(),
+            );
+            if handle.is_null() {
+                return false;
+            }
+            let _ = CloseHandle(handle);
+            true
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn platform_is_alive(_process_id: AgentProcessId) -> bool {
+        true
+    }
+
     #[cfg(target_os = "linux")]
     fn platform_start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
         let stat =

@@ -18,7 +18,7 @@ use crate::{
     domain::{
         agent_session::{
             AgentProcessId, AgentProcessStartToken, AgentSession, AgentSessionId,
-            AgentSessionState, NativeSessionId,
+            AgentSessionState, LaunchToken, NativeSessionId,
         },
         config::ConfigError,
         port::AgentSessionStore,
@@ -275,7 +275,7 @@ impl YamlAgentSessionStore {
         id: &AgentSessionId,
         process_id: AgentProcessId,
         process_start_token: Option<AgentProcessStartToken>,
-        wrapper_process_id: Option<AgentProcessId>,
+        launch_token: Option<LaunchToken>,
     ) -> Result<(), ConfigError> {
         if let (Some(owner), Some(token)) = (
             session.owner_process_id(),
@@ -288,53 +288,29 @@ impl YamlAgentSessionStore {
                 owner: *owner,
             });
         }
-        *session = session.clone().with_launch_processes(
-            process_id,
-            process_start_token,
-            wrapper_process_id,
-        );
+        // The launch token is recorded only past this ownership check, so a rejected
+        // claim leaves the owning launch's token untouched.
+        *session = session
+            .clone()
+            .with_launch_owner(process_id, process_start_token, launch_token);
         Ok(())
     }
 
-    /// Replaces the current conversation identity when the owning provider or
-    /// its direct wrapper child reports a new conversation.
+    /// Records the conversation identity a session's provider reported. The report
+    /// is trusted by session id: muster injects the id into the launched process's
+    /// environment, so only that process tree can produce it, whatever launcher
+    /// layers sit between muster and the agent (a node shim below codex, say).
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] when the session is absent or the lifecycle
-    /// event came from a different provider.
+    /// Returns a [`ConfigError`] when the session is absent or the lifecycle event
+    /// came from a different provider.
     fn assign_native_id(
         sessions: &mut [AgentSession],
         id: &AgentSessionId,
         provider: AgentTool,
-        process_id: AgentProcessId,
-        parent_process_id: Option<AgentProcessId>,
         native_id: NativeSessionId,
-    ) -> Result<(), ConfigError> {
-        Self::assign_native_id_with_start_token(
-            sessions,
-            id,
-            provider,
-            process_id,
-            parent_process_id,
-            LocalProcessIdentity::start_token(process_id),
-            native_id,
-        )
-    }
-
-    /// Stores `native_id` only when the lifecycle event belongs to the durable
-    /// owner process identity, including its non-reusable creation token.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the session is absent or the lifecycle
-    /// event does not belong to its managed provider process.
-    fn assign_native_id_with_start_token(
-        sessions: &mut [AgentSession],
-        id: &AgentSessionId,
-        provider: AgentTool,
-        process_id: AgentProcessId,
-        parent_process_id: Option<AgentProcessId>,
-        process_start_token: Option<AgentProcessStartToken>,
-        native_id: NativeSessionId,
+        reporter_process_id: AgentProcessId,
+        reported_launch_token: Option<LaunchToken>,
     ) -> Result<(), ConfigError> {
         let session = sessions
             .iter_mut()
@@ -347,21 +323,48 @@ impl YamlAgentSessionStore {
                 reported: provider,
             });
         }
-        let owns_process = session.owner_process_id().as_ref() == Some(&process_id)
-            && session
-                .owner_process_start_token()
-                .as_ref()
-                .is_none_or(|expected| process_start_token.as_ref() == Some(expected));
-        let is_wrapper_handoff = session.wrapper_process_id().is_some()
-            && session.wrapper_process_id().as_ref() == parent_process_id.as_ref();
-        if !owns_process && !is_wrapper_handoff {
-            return Err(ConfigError::AgentSessionProcessMismatch {
-                id: id.clone(),
-                expected: *session.owner_process_id(),
-                reported: process_id,
-            });
+        // Once a launch has recorded its token, only a report carrying that exact
+        // token binds. A stale capture from a previous launch (a different token) or
+        // from a pre-token launch (no token) is rejected, so it cannot claim the
+        // reporter slot and lock out this launch's real, differently-PID'd report. A
+        // session with no token yet (a legacy launch) still accepts a tokenless
+        // report.
+        if let Some(current) = session.launch_token()
+            && reported_launch_token.as_ref() != Some(current)
+        {
+            return Ok(());
         }
-        *session = session.clone().with_native_id(native_id);
+        // Bind the identity to the process that reports it this launch. A different
+        // process keeps the lock unless the one that bound the identity is confirmed
+        // no longer the live original: it has exited (a wrapper that keeps the launch
+        // alive by restarting the provider yields a new PID under the same token), or
+        // its PID was reused by a different process (a changed start token). Uncertain
+        // liveness or an unavailable start token keeps the lock rather than failing
+        // open, and each launch resets the reporter.
+        if let Some(current) = session.native_reporter_process_id()
+            && *current != reporter_process_id
+        {
+            let replaced = if LocalProcessIdentity::is_alive(*current) {
+                matches!(
+                    (
+                        session.native_reporter_start_token(),
+                        LocalProcessIdentity::start_token(*current),
+                    ),
+                    (Some(recorded), Some(now)) if *recorded != now
+                )
+            } else {
+                true
+            };
+            if !replaced {
+                return Ok(());
+            }
+        }
+        let reporter_start_token = LocalProcessIdentity::start_token(reporter_process_id);
+        *session = session.clone().with_reported_native_id(
+            native_id,
+            reporter_process_id,
+            reporter_start_token,
+        );
         Ok(())
     }
 }
@@ -403,7 +406,7 @@ impl AgentSessionStore for YamlAgentSessionStore {
         id: &AgentSessionId,
         process_id: AgentProcessId,
         process_start_token: Option<AgentProcessStartToken>,
-        wrapper_process_id: Option<AgentProcessId>,
+        launch_token: Option<LaunchToken>,
     ) -> Result<(), ConfigError> {
         let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
         Self::update(&path, |sessions| {
@@ -411,13 +414,7 @@ impl AgentSessionStore for YamlAgentSessionStore {
                 .iter_mut()
                 .find(|session| session.id() == id)
                 .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
-            Self::claim_owner(
-                session,
-                id,
-                process_id,
-                process_start_token,
-                wrapper_process_id,
-            )
+            Self::claim_owner(session, id, process_id, process_start_token, launch_token)
         })
     }
 
@@ -425,9 +422,9 @@ impl AgentSessionStore for YamlAgentSessionStore {
         &self,
         id: &AgentSessionId,
         provider: AgentTool,
-        process_id: AgentProcessId,
-        parent_process_id: Option<AgentProcessId>,
         native_id: NativeSessionId,
+        reporter_process_id: AgentProcessId,
+        reported_launch_token: Option<LaunchToken>,
     ) -> Result<(), ConfigError> {
         let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
         Self::update(&path, |sessions| {
@@ -435,9 +432,9 @@ impl AgentSessionStore for YamlAgentSessionStore {
                 sessions,
                 id,
                 provider,
-                process_id,
-                parent_process_id,
                 native_id,
+                reporter_process_id,
+                reported_launch_token.clone(),
             )
         })
     }
@@ -539,38 +536,40 @@ mod tests {
     fn updates_identity_only_for_the_owning_provider() {
         let original = session();
         let id = original.id().clone();
+        let reporter = AgentProcessId::try_new(100).unwrap();
         let first = NativeSessionId::try_new("first-native").unwrap();
         let second = NativeSessionId::try_new("second-native").unwrap();
-        let descendant = NativeSessionId::try_new("descendant-native").unwrap();
+        let mismatch = NativeSessionId::try_new("mismatch-native").unwrap();
         let mut sessions = vec![original];
 
-        let owner = AgentProcessId::try_new(1).unwrap();
-        sessions[0] = sessions[0].clone().with_owner_process_id(owner);
         YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Codex,
-            owner,
-            None,
             first,
+            reporter,
+            None,
         )
         .unwrap();
+        // The same reporting process switches conversations.
         YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Codex,
-            owner,
-            None,
             second.clone(),
+            reporter,
+            None,
         )
         .unwrap();
+        // A report tagged with a different provider is rejected; the session id
+        // alone is trusted, but only for the provider it was launched for.
         let result = YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Claude,
-            owner,
+            mismatch,
+            reporter,
             None,
-            descendant,
         );
 
         assert!(matches!(
@@ -584,76 +583,265 @@ mod tests {
         assert_eq!(sessions[0].native_id().as_ref(), Some(&second));
     }
 
-    /// Same-provider descendants cannot replace their managed parent's native ID.
+    /// A report binds whatever launcher layers sit between muster and the agent -
+    /// muster trusts the session id injected into the launched environment, so
+    /// codex under an npx node shim (reporting a process that is not muster's
+    /// direct child) is accepted.
     #[test]
-    fn rejects_same_provider_identity_from_another_process() {
-        let original = session().with_owner_process_id(AgentProcessId::try_new(1).unwrap());
+    fn records_a_report_from_a_deeply_nested_launcher() {
+        let original = session();
         let id = original.id().clone();
         let mut sessions = vec![original];
-        let owner = AgentProcessId::try_new(1).unwrap();
-        let descendant = AgentProcessId::try_new(2).unwrap();
-        let first = NativeSessionId::try_new("parent-native").unwrap();
-        let child = NativeSessionId::try_new("child-native").unwrap();
+        let native = NativeSessionId::try_new("codex-native").unwrap();
+        let deep_reporter = AgentProcessId::try_new(4242).unwrap();
 
         YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Codex,
-            owner,
+            native.clone(),
+            deep_reporter,
             None,
-            first.clone(),
         )
         .unwrap();
-        let result = YamlAgentSessionStore::assign_native_id(
+
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&native));
+    }
+
+    /// A nested same-provider launch inherits the session env var but must not
+    /// overwrite the managed conversation; its report is ignored (not an error), and
+    /// beginning a new launch resets the reporter so a resumed process can rebind.
+    #[test]
+    fn a_nested_same_provider_report_is_ignored_until_relaunch() {
+        // The managed reporter must be a live process so the nested report is
+        // rejected while it runs (the reporter-liveness guard).
+        let managed = AgentProcessId::try_new(std::process::id()).unwrap();
+        let nested = AgentProcessId::try_new(1).unwrap();
+        let original = session();
+        let id = original.id().clone();
+        let mut sessions = vec![original];
+        let managed_native = NativeSessionId::try_new("managed-native").unwrap();
+
+        YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Codex,
-            descendant,
+            managed_native.clone(),
+            managed,
             None,
-            child,
-        );
+        )
+        .unwrap();
+        // The nested codex reports a different conversation and is ignored.
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            NativeSessionId::try_new("nested-native").unwrap(),
+            nested,
+            None,
+        )
+        .unwrap();
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&managed_native));
 
-        assert!(matches!(
-            result,
-            Err(ConfigError::AgentSessionProcessMismatch {
-                id: conflict,
-                expected: Some(expected),
-                reported,
-            }) if conflict == id && expected == owner && reported == descendant
-        ));
-        assert_eq!(sessions[0].native_id().as_ref(), Some(&first));
+        // Beginning a new launch (a new token on the owner claim) resets the
+        // reporter, so the next process, reporting the new token, rebinds.
+        let relaunch = LaunchToken::try_new("relaunch").unwrap();
+        sessions[0] = sessions[0]
+            .clone()
+            .with_launch_owner(managed, None, Some(relaunch.clone()));
+        let resumed = NativeSessionId::try_new("resumed-native").unwrap();
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            resumed.clone(),
+            nested,
+            Some(relaunch),
+        )
+        .unwrap();
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&resumed));
     }
 
-    /// A recycled numeric PID cannot claim a durable session with another
-    /// process creation token.
+    /// Once a launch records a token, a report that carries no token (a delayed
+    /// capture from a pre-token launch) is rejected, so it cannot claim the reporter
+    /// slot and lock out the current launch's real, differently-PID'd report.
     #[test]
-    fn rejects_a_reused_owner_pid_with_a_different_start_token() {
-        let owner = AgentProcessId::try_new(1).unwrap();
-        let stored_token = AgentProcessStartToken::try_new(10).unwrap();
-        let reused_token = AgentProcessStartToken::try_new(11).unwrap();
-        let original = session().with_launch_processes(owner, Some(stored_token), None);
+    fn a_tokenless_report_is_rejected_for_a_tokenized_launch() {
+        let current = LaunchToken::try_new("current-launch").unwrap();
+        let stale_reporter = AgentProcessId::try_new(100).unwrap();
+        let live_reporter = AgentProcessId::try_new(200).unwrap();
+        let original = session().with_launch_owner(
+            AgentProcessId::try_new(1).unwrap(),
+            None,
+            Some(current.clone()),
+        );
         let id = original.id().clone();
         let mut sessions = vec![original];
 
-        let result = YamlAgentSessionStore::assign_native_id_with_start_token(
+        // A pre-token launch's capture carries no token and is ignored.
+        YamlAgentSessionStore::assign_native_id(
             &mut sessions,
             &id,
             AgentTool::Codex,
-            owner,
+            NativeSessionId::try_new("pre-token-native").unwrap(),
+            stale_reporter,
             None,
-            Some(reused_token),
-            NativeSessionId::try_new("reused-native").unwrap(),
-        );
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::AgentSessionProcessMismatch {
-                id: conflict,
-                expected: Some(expected),
-                reported,
-            }) if conflict == id && expected == owner && reported == owner
-        ));
+        )
+        .unwrap();
         assert!(sessions[0].native_id().is_none());
+        assert!(sessions[0].native_reporter_process_id().is_none());
+
+        // The current launch's report, carrying the token, still binds.
+        let live = NativeSessionId::try_new("current-native").unwrap();
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            live.clone(),
+            live_reporter,
+            Some(current),
+        )
+        .unwrap();
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&live));
+    }
+
+    /// While the process that bound the identity is still alive, a concurrent report
+    /// from a different process (a nested launch) is rejected.
+    #[test]
+    fn a_live_reporter_rejects_a_concurrent_different_process() {
+        let token = LaunchToken::try_new("launch").unwrap();
+        let live = AgentProcessId::try_new(std::process::id()).unwrap();
+        let live_token = LocalProcessIdentity::start_token(live);
+        assert!(
+            live_token.is_some(),
+            "this platform must expose start tokens"
+        );
+        let managed = NativeSessionId::try_new("managed-native").unwrap();
+        let original = session()
+            .with_launch_owner(live, None, Some(token.clone()))
+            .with_reported_native_id(managed.clone(), live, live_token);
+        let id = original.id().clone();
+        let mut sessions = vec![original];
+
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            NativeSessionId::try_new("nested-native").unwrap(),
+            AgentProcessId::try_new(1).unwrap(),
+            Some(token),
+        )
+        .unwrap();
+
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&managed));
+    }
+
+    /// A wrapper that keeps a launch alive by restarting the provider yields a new
+    /// PID under the same token. Once the process that bound the identity has exited
+    /// (its recorded start token no longer matches), the replacement rebinds.
+    #[test]
+    fn a_replacement_rebinds_after_the_prior_reporter_exits() {
+        let token = LaunchToken::try_new("launch").unwrap();
+        let live = AgentProcessId::try_new(std::process::id()).unwrap();
+        // A start token that cannot match the live PID's real one - modelling the
+        // reporter that bound the identity having exited (or the PID being reused).
+        let exited_token = AgentProcessStartToken::try_new(1).unwrap();
+        assert_ne!(LocalProcessIdentity::start_token(live), Some(exited_token));
+        let original = session()
+            .with_launch_owner(live, None, Some(token.clone()))
+            .with_reported_native_id(
+                NativeSessionId::try_new("first-native").unwrap(),
+                live,
+                Some(exited_token),
+            );
+        let id = original.id().clone();
+        let mut sessions = vec![original];
+
+        let rebound = NativeSessionId::try_new("restarted-native").unwrap();
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            rebound.clone(),
+            AgentProcessId::try_new(2).unwrap(),
+            Some(token),
+        )
+        .unwrap();
+
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&rebound));
+    }
+
+    /// When the bound reporter is still running but its start token is unknown (an
+    /// unsupported target or a metadata lookup failure), the lock is kept - a
+    /// different process must not overwrite the managed conversation.
+    #[test]
+    fn an_unknown_start_token_keeps_the_reporter_lock_while_alive() {
+        let token = LaunchToken::try_new("launch").unwrap();
+        let live = AgentProcessId::try_new(std::process::id()).unwrap();
+        let managed = NativeSessionId::try_new("managed-native").unwrap();
+        // Bound without a start token, so liveness cannot be confirmed by token
+        // even though the process is running.
+        let original = session()
+            .with_launch_owner(live, None, Some(token.clone()))
+            .with_reported_native_id(managed.clone(), live, None);
+        let id = original.id().clone();
+        let mut sessions = vec![original];
+
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            NativeSessionId::try_new("other-native").unwrap(),
+            AgentProcessId::try_new(1).unwrap(),
+            Some(token),
+        )
+        .unwrap();
+
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&managed));
+    }
+
+    /// A capture left in flight by a previous launch carries that launch's token,
+    /// which no longer matches the current launch, so it is ignored and cannot bind
+    /// or claim the reporter slot; the current launch's own report then binds.
+    #[test]
+    fn a_stale_launch_report_cannot_bind_the_new_launch_identity() {
+        let previous = LaunchToken::try_new("launch-a").unwrap();
+        let current = LaunchToken::try_new("launch-b").unwrap();
+        let stale_reporter = AgentProcessId::try_new(100).unwrap();
+        let live_reporter = AgentProcessId::try_new(200).unwrap();
+        let original = session().with_launch_owner(
+            AgentProcessId::try_new(1).unwrap(),
+            None,
+            Some(current.clone()),
+        );
+        let id = original.id().clone();
+        let mut sessions = vec![original];
+
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            NativeSessionId::try_new("stale-native").unwrap(),
+            stale_reporter,
+            Some(previous),
+        )
+        .unwrap();
+        assert!(sessions[0].native_id().is_none());
+        assert!(sessions[0].native_reporter_process_id().is_none());
+
+        // The current launch's own report binds, since the stale one did not claim
+        // the reporter slot.
+        let live = NativeSessionId::try_new("launch-b-native").unwrap();
+        YamlAgentSessionStore::assign_native_id(
+            &mut sessions,
+            &id,
+            AgentTool::Codex,
+            live.clone(),
+            live_reporter,
+            Some(current),
+        )
+        .unwrap();
+        assert_eq!(sessions[0].native_id().as_ref(), Some(&live));
     }
 
     /// A live owner cannot be replaced by another instance claiming the same
@@ -662,7 +850,7 @@ mod tests {
     fn rejects_a_second_claim_while_the_existing_owner_is_live() {
         let owner = AgentProcessId::try_new(std::process::id()).unwrap();
         let token = LocalProcessIdentity::start_token(owner).unwrap();
-        let mut record = session().with_launch_processes(owner, Some(token), None);
+        let mut record = session().with_launch_owner(owner, Some(token), None);
         let id = record.id().clone();
         let claimant = AgentProcessId::try_new(owner.into_inner().saturating_add(1)).unwrap();
 
@@ -679,56 +867,31 @@ mod tests {
         assert_eq!(record.owner_process_start_token(), &Some(token));
     }
 
-    /// A provider launched directly by the managed shell may report its own
-    /// PID while retaining the shell as its immediate parent.
+    /// A claim rejected because a live owner holds the session must not touch the
+    /// launch token: a losing or competing launch cannot invalidate the token the
+    /// owning launch's hooks carry.
     #[test]
-    fn accepts_identity_from_a_direct_provider_child() {
-        let owner = AgentProcessId::try_new(1).unwrap();
-        let provider = AgentProcessId::try_new(2).unwrap();
-        let original = session().with_launch_processes(owner, None, Some(owner));
-        let id = original.id().clone();
-        let native = NativeSessionId::try_new("pipeline-native").unwrap();
-        let mut sessions = vec![original];
+    fn a_rejected_claim_leaves_the_launch_token_untouched() {
+        let owner = AgentProcessId::try_new(std::process::id()).unwrap();
+        let token = LocalProcessIdentity::start_token(owner).unwrap();
+        let held = LaunchToken::try_new("owning-launch").unwrap();
+        let mut record = session().with_launch_owner(owner, Some(token), Some(held.clone()));
+        let id = record.id().clone();
+        let claimant = AgentProcessId::try_new(owner.into_inner().saturating_add(1)).unwrap();
 
-        YamlAgentSessionStore::assign_native_id(
-            &mut sessions,
+        let result = YamlAgentSessionStore::claim_owner(
+            &mut record,
             &id,
-            AgentTool::Codex,
-            provider,
-            Some(owner),
-            native.clone(),
-        )
-        .unwrap();
-
-        assert_eq!(sessions[0].native_id().as_ref(), Some(&native));
-        assert_eq!(sessions[0].owner_process_id(), &Some(owner));
-
-        let switched = NativeSessionId::try_new("resumed-native").unwrap();
-        YamlAgentSessionStore::assign_native_id(
-            &mut sessions,
-            &id,
-            AgentTool::Codex,
-            provider,
-            Some(owner),
-            switched.clone(),
-        )
-        .unwrap();
-        assert_eq!(sessions[0].native_id().as_ref(), Some(&switched));
-
-        let nested = AgentProcessId::try_new(3).unwrap();
-        let result = YamlAgentSessionStore::assign_native_id(
-            &mut sessions,
-            &id,
-            AgentTool::Codex,
-            nested,
-            Some(provider),
-            NativeSessionId::try_new("nested-native").unwrap(),
+            claimant,
+            None,
+            Some(LaunchToken::try_new("competing-launch").unwrap()),
         );
+
         assert!(matches!(
             result,
-            Err(ConfigError::AgentSessionProcessMismatch { .. })
+            Err(ConfigError::AgentSessionAlreadyOwned { .. })
         ));
-        assert_eq!(sessions[0].native_id().as_ref(), Some(&switched));
+        assert_eq!(record.launch_token(), &Some(held));
     }
 
     /// Session-state writes start owner-only, preserve an existing restrictive

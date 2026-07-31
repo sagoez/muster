@@ -9,5 +9,8 @@ pub const WORKSPACE_FILE_NAME: &str = "muster.yml";
 pub const MUSTER_PROJECT_ENV: &str = "MUSTER_PROJECT";
 /// Internal agent-session identity inherited by provider lifecycle hooks.
 pub const MUSTER_AGENT_SESSION_ENV: &str = "MUSTER_AGENT_SESSION_ID";
+/// Per-launch token inherited by provider lifecycle hooks, distinguishing this
+/// launch of a session from earlier ones so a stale capture cannot bind.
+pub const MUSTER_AGENT_LAUNCH_TOKEN_ENV: &str = "MUSTER_AGENT_LAUNCH_TOKEN";
 /// Exact durable session-state file inherited by provider lifecycle hooks.
 pub const MUSTER_AGENT_SESSION_STATE_FILE_ENV: &str = "MUSTER_AGENT_SESSION_STATE_FILE";

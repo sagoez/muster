@@ -48,18 +48,6 @@ pub enum ConfigError {
         /// Provider that emitted the lifecycle event.
         reported: AgentTool,
     },
-    /// A lifecycle event came from a descendant instead of the managed provider process.
-    #[error(
-        "agent session '{id}' belongs to process {expected:?}, but received a lifecycle event from process {reported}"
-    )]
-    AgentSessionProcessMismatch {
-        /// Session whose provider process rejected the lifecycle event.
-        id: AgentSessionId,
-        /// Process currently owning the managed agent session.
-        expected: Option<AgentProcessId>,
-        /// Process that emitted the lifecycle event.
-        reported: AgentProcessId,
-    },
     /// A concurrent Muster instance already owns the managed agent session.
     #[error("agent session '{id}' is already owned by live process {owner}")]
     AgentSessionAlreadyOwned {

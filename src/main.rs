@@ -26,9 +26,9 @@ use muster::{
         tui::{self, Adapters, TerminalGuard},
     },
     application::Workspace,
-    constants::{APP_NAME, WORKSPACE_FILE_NAME},
+    constants::{APP_NAME, MUSTER_AGENT_LAUNCH_TOKEN_ENV, WORKSPACE_FILE_NAME},
     domain::{
-        agent_session::{AgentProcessId, AgentSessionId},
+        agent_session::{AgentProcessId, AgentSessionId, LaunchToken},
         port::{AgentSessionStore, ConfigSource},
     },
     error::Result,
@@ -310,16 +310,19 @@ fn run_hooks(command: HooksCommand) -> Result<()> {
 /// persisted. Hooks from agents outside Muster are ignored.
 fn run_internal_hook(command: InternalHookCommand) -> Result<()> {
     match command {
+        // `process_id` is the reporting provider process, used only to keep a
+        // nested same-provider launch from overwriting the managed conversation;
+        // `parent_process_id` is still accepted for compatibility with previously
+        // installed hooks but ignored. See `ProviderHooks::capture`.
         InternalHookCommand::Capture {
             provider,
             process_id,
-            parent_process_id,
+            ..
         } => {
             ProviderHooks::capture(
                 &YamlAgentSessionStore,
                 provider,
                 process_id,
-                parent_process_id,
                 std::io::stdin(),
             )?;
         },
@@ -338,6 +341,15 @@ fn run_internal_hook(command: InternalHookCommand) -> Result<()> {
 /// Returns an error when durable ownership cannot be written or the provider
 /// command cannot be started.
 fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
+    // Persist this launch's token in the ownership claim. On Unix the TUI already
+    // recorded it, but its claim no-ops on other platforms, so the launcher's claim
+    // is the only one that advances the token there; without it the reporter is
+    // never reset and later restarts are ignored as a different PID.
+    let launch_token = std::env::var_os(MUSTER_AGENT_LAUNCH_TOKEN_ENV).and_then(|value| {
+        value
+            .to_str()
+            .and_then(|value| LaunchToken::try_new(value).ok())
+    });
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -348,7 +360,7 @@ fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
             &session,
             process_id,
             LocalProcessIdentity::start_token(process_id),
-            Some(process_id),
+            launch_token,
         )?;
         let command = format!("{command}\nexit $?");
         let error = ProcessCommand::new("/bin/sh").arg("-c").arg(command).exec();
@@ -379,7 +391,7 @@ fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
             &session,
             process_id,
             LocalProcessIdentity::start_token(process_id),
-            Some(process_id),
+            launch_token,
         ) {
             gate.cancel_and_wait(&mut child);
             return Err(error.into());

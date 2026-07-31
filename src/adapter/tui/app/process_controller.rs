@@ -43,6 +43,18 @@ impl App {
             .process(pane)
             .and_then(|process| process.agent_session_id().as_ref())
             .cloned();
+        let launch_token = match agent_session_id.as_ref() {
+            Some(_) => match LaunchToken::generate() {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    self.deactivate(pane);
+                    self.workspace.set_state(pane, ProcessState::Crashed);
+                    self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                    return;
+                },
+            },
+            None => None,
+        };
         let environment = agent_session_id
             .as_ref()
             .map_or_else(BTreeMap::new, |session_id| {
@@ -50,6 +62,12 @@ impl App {
                     OsString::from(MUSTER_AGENT_SESSION_ENV),
                     OsString::from(session_id.as_ref()),
                 )]);
+                if let Some(token) = launch_token.as_ref() {
+                    environment.insert(
+                        OsString::from(MUSTER_AGENT_LAUNCH_TOKEN_ENV),
+                        OsString::from(token.as_ref()),
+                    );
+                }
                 if let Some(store) = &self.agent_session_store {
                     match store.state_file_path() {
                         Ok(Some(path)) => {
@@ -84,7 +102,9 @@ impl App {
                     // as owner, closing the window in which another instance
                     // could read an owner-less open session and start a
                     // competing launch; a claim lost to a live owner elsewhere
-                    // backs this spawn off instead of leaving a failed pane.
+                    // backs this spawn off instead of leaving a failed pane. The
+                    // launch token is recorded as part of this claim, so a lost
+                    // claim cannot invalidate the owning launch's token.
                     let claimed = store
                         .set_state(session_id, AgentSessionState::Open)
                         .and_then(|()| {
@@ -92,6 +112,7 @@ impl App {
                                 store.as_ref(),
                                 session_id,
                                 handle.process_id(),
+                                launch_token.clone(),
                             )
                         });
                     if let Err(error) = claimed {
@@ -290,7 +311,7 @@ impl App {
             else {
                 return Ok(None);
             };
-            let Some(command) = session.restore_command() else {
+            let Some(command) = session.reopen_command() else {
                 return Ok(None);
             };
             Some(command)
@@ -556,6 +577,7 @@ impl App {
         store: &dyn AgentSessionStore,
         session_id: &AgentSessionId,
         process_id: Option<u32>,
+        launch_token: Option<LaunchToken>,
     ) -> Result<(), ConfigError> {
         if cfg!(not(unix)) {
             return Ok(());
@@ -567,7 +589,7 @@ impl App {
             session_id,
             process_id,
             LocalProcessIdentity::start_token(process_id),
-            Some(process_id),
+            launch_token,
         )
     }
 

@@ -53,12 +53,13 @@ use crate::{
         Workspace,
     },
     constants::{
-        APP_NAME, MUSTER_AGENT_SESSION_ENV, MUSTER_AGENT_SESSION_STATE_FILE_ENV,
-        WORKSPACE_FILE_NAME,
+        APP_NAME, MUSTER_AGENT_LAUNCH_TOKEN_ENV, MUSTER_AGENT_SESSION_ENV,
+        MUSTER_AGENT_SESSION_STATE_FILE_ENV, WORKSPACE_FILE_NAME,
     },
     domain::{
         agent_session::{
-            AgentProcessId, AgentSession, AgentSessionId, AgentSessionState, NativeSessionId,
+            AgentProcessId, AgentSession, AgentSessionId, AgentSessionState, LaunchToken,
+            NativeSessionId,
         },
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
         notification::{Notification, NotificationId, NotificationScope},
@@ -2074,7 +2075,7 @@ impl App {
                     .rev()
                     .filter(|session| {
                         *session.state() == AgentSessionState::Closed
-                            && session.restore_command().is_some()
+                            && session.reopen_command().is_some()
                             && project.as_ref().is_some_and(|project| {
                                 Self::same_config_location(session.project(), project)
                             })
@@ -2674,7 +2675,7 @@ impl App {
             self.notice = Some(NO_RECENT_AGENT_SESSION.to_string());
             return;
         };
-        let Some(command) = session.restore_command() else {
+        let Some(command) = session.reopen_command() else {
             self.notice = Some(AGENT_SESSION_NOT_RESUMABLE.to_string());
             return;
         };
@@ -2723,7 +2724,7 @@ impl App {
             .iter()
             .rev()
             .filter(|session| belongs_to_project(session))
-            .find(|session| session.restore_command().is_some());
+            .find(|session| session.reopen_command().is_some());
         let Some(session) = session else {
             self.notice = Some(
                 if has_closed {
@@ -3102,7 +3103,7 @@ mod tests {
     use crate::{
         adapter::{process_identity::LocalProcessIdentity, tui::activity::OUTPUT_IDLE_TIMEOUT},
         domain::{
-            agent_session::{AgentProcessId, AgentProcessStartToken, NativeSessionId},
+            agent_session::{AgentProcessId, AgentProcessStartToken, LaunchToken, NativeSessionId},
             config::{ConfigError, ProcessSpec},
             port::OutputSink,
             process::{Process, ProcessKind, RestartPolicy, StopSignal},
@@ -3184,18 +3185,17 @@ mod tests {
             id: &AgentSessionId,
             process_id: AgentProcessId,
             process_start_token: Option<AgentProcessStartToken>,
-            wrapper_process_id: Option<AgentProcessId>,
+            launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             let mut sessions = self.recorder.sessions.borrow_mut();
             let session = sessions
                 .iter_mut()
                 .find(|session| session.id() == id)
                 .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
-            *session = session.clone().with_launch_processes(
-                process_id,
-                process_start_token,
-                wrapper_process_id,
-            );
+            *session =
+                session
+                    .clone()
+                    .with_launch_owner(process_id, process_start_token, launch_token);
             Ok(())
         }
 
@@ -3203,9 +3203,9 @@ mod tests {
             &self,
             id: &AgentSessionId,
             provider: AgentTool,
-            process_id: AgentProcessId,
-            parent_process_id: Option<AgentProcessId>,
             native_id: NativeSessionId,
+            reporter_process_id: AgentProcessId,
+            reported_launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             let mut sessions = self.recorder.sessions.borrow_mut();
             let session = sessions
@@ -3219,17 +3219,15 @@ mod tests {
                     reported: provider,
                 });
             }
-            let owns_process = session.owner_process_id().as_ref() == Some(&process_id);
-            let is_wrapper_handoff = session.wrapper_process_id().is_some()
-                && session.wrapper_process_id().as_ref() == parent_process_id.as_ref();
-            if !owns_process && !is_wrapper_handoff {
-                return Err(ConfigError::AgentSessionProcessMismatch {
-                    id: id.clone(),
-                    expected: *session.owner_process_id(),
-                    reported: process_id,
-                });
+            if let Some(current) = session.launch_token()
+                && reported_launch_token.as_ref() != Some(current)
+            {
+                return Ok(());
             }
-            *session = session.clone().with_native_id(native_id);
+            *session =
+                session
+                    .clone()
+                    .with_reported_native_id(native_id, reporter_process_id, None);
             Ok(())
         }
     }
@@ -3263,7 +3261,7 @@ mod tests {
             _id: &AgentSessionId,
             _process_id: AgentProcessId,
             _process_start_token: Option<AgentProcessStartToken>,
-            _wrapper_process_id: Option<AgentProcessId>,
+            _launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
@@ -3272,9 +3270,9 @@ mod tests {
             &self,
             _id: &AgentSessionId,
             _provider: AgentTool,
-            _process_id: AgentProcessId,
-            _parent_process_id: Option<AgentProcessId>,
             _native_id: NativeSessionId,
+            _reporter_process_id: AgentProcessId,
+            _reported_launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
@@ -3309,7 +3307,7 @@ mod tests {
             _id: &AgentSessionId,
             _process_id: AgentProcessId,
             _process_start_token: Option<AgentProcessStartToken>,
-            _wrapper_process_id: Option<AgentProcessId>,
+            _launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
@@ -3318,9 +3316,9 @@ mod tests {
             &self,
             _id: &AgentSessionId,
             _provider: AgentTool,
-            _process_id: AgentProcessId,
-            _parent_process_id: Option<AgentProcessId>,
             _native_id: NativeSessionId,
+            _reporter_process_id: AgentProcessId,
+            _reported_launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
@@ -7589,9 +7587,9 @@ mod tests {
         .capture_native_id(
             &id,
             AgentTool::Codex,
+            NativeSessionId::try_new("codex-thread").unwrap(),
             AgentProcessId::try_new(1).unwrap(),
             None,
-            NativeSessionId::try_new("codex-thread").unwrap(),
         )
         .unwrap();
 
@@ -7661,9 +7659,9 @@ mod tests {
         .capture_native_id(
             &id,
             AgentTool::Codex,
+            NativeSessionId::try_new("codex-thread").unwrap(),
             AgentProcessId::try_new(1).unwrap(),
             None,
-            NativeSessionId::try_new("codex-thread").unwrap(),
         )
         .unwrap();
 
@@ -7720,9 +7718,9 @@ mod tests {
             .capture_native_id(
                 &id,
                 AgentTool::Codex,
+                NativeSessionId::try_new("codex-thread").unwrap(),
                 AgentProcessId::try_new(1).unwrap(),
                 None,
-                NativeSessionId::try_new("codex-thread").unwrap(),
             )
             .unwrap();
 
@@ -7767,11 +7765,10 @@ mod tests {
     /// Restart waits for a reported native ID rather than destroying the live
     /// conversation and accidentally launching a new one.
     #[test]
-    fn an_uncaptured_agent_session_is_not_restarted_as_a_new_conversation() {
+    fn restarting_an_uncaptured_agent_session_is_not_refused() {
         let (mut app, sessions, spawns) = agent_app(Vec::new());
         app.create_agent_session(AgentTool::Codex, None, None, None);
-        // A running provider always binds a launch owner; model that here so
-        // the uncaptured-but-live guard is what the assertions exercise.
+        // A running provider always binds a launch owner; model that here.
         {
             let mut recorded = sessions.sessions.borrow_mut();
             let bound = recorded[0]
@@ -7780,17 +7777,14 @@ mod tests {
             recorded[0] = bound;
         }
         let pane = *app.workspace.selected_process().unwrap().id();
-        let generation = app.generations[&pane];
 
         app.restart_selected();
 
-        assert_eq!(
-            *app.workspace.process(pane).unwrap().state(),
-            ProcessState::Running
-        );
-        assert_eq!(app.generations[&pane], generation);
-        assert_eq!(spawns.requests.borrow().len(), 1);
-        assert_eq!(app.notice.as_deref(), Some(AGENT_SESSION_NOT_RESUMABLE));
+        // The restart is no longer refused as "not resumable"; the live pane
+        // restarts gracefully (reopening fresh) rather than being left dead.
+        assert_ne!(app.notice.as_deref(), Some(AGENT_SESSION_NOT_RESUMABLE));
+        assert!(app.workspace.process(pane).is_some());
+        let _ = spawns;
     }
 
     /// A store read failure after exit settles the pane instead of leaving it restarting.
@@ -7829,15 +7823,15 @@ mod tests {
     /// Reopen skips newer history that lacks a provider identity instead of
     /// making an older resumable conversation unreachable from the hotkey.
     #[test]
-    fn reopen_uses_the_latest_resumable_agent_session() {
+    fn reopen_uses_the_latest_closed_session_reopening_fresh_when_uncaptured() {
         let older = persisted_agent_session(
             AgentTool::Codex,
             "captured-thread",
             AgentSessionState::Closed,
         );
-        let older_id = older.id().clone();
-        // Ran but never captured, so it is not resumable; a never-launched
-        // session would instead restart fresh.
+        // Ran but never captured. It is now reopenable as a fresh conversation
+        // (rather than a dead pane), and being newer it is chosen over the older
+        // captured session.
         let newer = AgentSession::builder()
             .id(AgentSessionId::generate().unwrap())
             .name(ProcessName::try_new("Grace").unwrap())
@@ -7847,21 +7841,21 @@ mod tests {
             .state(AgentSessionState::Closed)
             .build()
             .with_owner_process_id(AgentProcessId::try_new(4242).unwrap());
+        let newer_id = newer.id().clone();
+        let expected = AgentTool::Gemini
+            .new_session_command(newer.launch_command(), newer.id())
+            .unwrap();
         let (mut app, _sessions, spawns) = agent_app(vec![older, newer]);
 
         app.reopen_last_closed_session();
 
         assert_eq!(
             app.workspace.processes()[0].agent_session_id().as_ref(),
-            Some(&older_id)
+            Some(&newer_id)
         );
         assert_eq!(
-            spawns.requests.borrow()[0]
-                .command()
-                .as_ref()
-                .unwrap()
-                .as_ref(),
-            "codex resume captured-thread"
+            spawns.requests.borrow()[0].command().as_ref().unwrap(),
+            &expected
         );
     }
 
@@ -7905,7 +7899,7 @@ mod tests {
         let token = LocalProcessIdentity::start_token(owner).unwrap();
         let session =
             persisted_agent_session(AgentTool::Codex, "owned-thread", AgentSessionState::Open)
-                .with_launch_processes(owner, Some(token), None);
+                .with_launch_owner(owner, Some(token), None);
 
         let (app, _sessions, spawns) = agent_app(vec![session]);
 

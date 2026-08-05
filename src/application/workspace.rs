@@ -2,6 +2,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
+    agent_session::AgentSessionId,
     process::{ActivityState, Process, ProcessState},
     pty::ExitOutcome,
     value::PaneId,
@@ -110,6 +111,13 @@ impl Workspace {
     pub fn set_activity(&mut self, pane: PaneId, activity: ActivityState) {
         if let Some(index) = self.position_of(pane) {
             self.processes[index].set_activity(activity);
+        }
+    }
+
+    /// Binds the process owning `pane` to a durable agent session.
+    pub fn set_agent_session_id(&mut self, pane: PaneId, id: AgentSessionId) {
+        if let Some(index) = self.position_of(pane) {
+            self.processes[index].set_agent_session_id(id);
         }
     }
 

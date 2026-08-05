@@ -18,7 +18,8 @@ use super::{TerminalGuard, app::App, event::RuntimeEvent, watch::NotifyConfigWat
 use crate::{
     application::Workspace,
     domain::port::{
-        AgentSessionStore, Notifier, PathCompleter, ProcessRunner, ProjectRegistry, SettingsStore,
+        AgentSessionStore, EditorLauncher, Notifier, PathCompleter, ProcessMetrics, ProcessRunner,
+        ProjectRegistry, SettingsStore,
     },
     error::Result,
 };
@@ -35,6 +36,8 @@ pub struct Adapters {
     notifier: Box<dyn Notifier>,
     settings_store: Box<dyn SettingsStore>,
     agent_session_store: Box<dyn AgentSessionStore>,
+    editor_launcher: Box<dyn EditorLauncher>,
+    process_metrics: Box<dyn ProcessMetrics>,
 }
 
 /// Poll timeout for the input reader thread.
@@ -67,6 +70,8 @@ pub fn run(
         notifier,
         settings_store,
         agent_session_store,
+        editor_launcher,
+        process_metrics,
     } = adapters;
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(OUTPUT_CAPACITY);
@@ -88,12 +93,19 @@ pub fn run(
     app.set_notifier(notifier);
     app.set_settings_store(settings_store);
     app.set_agent_session_store(agent_session_store);
+    app.set_process_metrics(process_metrics);
     app.set_selection_style(selection_style);
     app.start();
 
     // Children are running now, so shut them down on every return path,
     // including a draw error, rather than leaking them.
-    let result = run_loop(guard, &mut app, &control_rx, &output_rx);
+    let result = run_loop(
+        guard,
+        &mut app,
+        &control_rx,
+        &output_rx,
+        editor_launcher.as_ref(),
+    );
     app.shutdown();
     result
 }
@@ -107,6 +119,7 @@ fn run_loop(
     app: &mut App,
     control_rx: &Receiver<RuntimeEvent>,
     output_rx: &Receiver<RuntimeEvent>,
+    editor_launcher: &dyn EditorLauncher,
 ) -> Result<()> {
     guard.terminal_mut().draw(|frame| app.render(frame))?;
     while app.is_running() {
@@ -116,6 +129,17 @@ fn run_loop(
         }
         if let Some(shape) = app.take_pending_pointer_shape() {
             guard.set_pointer_shape(shape)?;
+        }
+        // Skip a queued open-editor request when quitting: no point opening a
+        // window on the way out.
+        if !shutting_down(&outcome, app.is_running())
+            && let Some(directory) = app.take_pending_editor()
+        {
+            // The editor opens in its own detached window and returns at once, so
+            // muster keeps running with no terminal handoff to manage. Redraw to
+            // surface the resulting toast or error notice.
+            app.report_editor_result(editor_launcher.open(&directory));
+            guard.terminal_mut().draw(|frame| app.render(frame))?;
         }
         match outcome {
             ControlFlow::Break(()) => break,
@@ -150,6 +174,18 @@ fn drain(
         .next_selection_deadline()
         .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
         .unwrap_or_else(never);
+    let toast_timeout = app
+        .next_toast_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
+    let notice_timeout = app
+        .next_notice_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
+    let metrics_timeout = app
+        .next_metrics_deadline()
+        .map(|deadline| after(deadline.saturating_duration_since(Instant::now())))
+        .unwrap_or_else(never);
     let mut redraw = false;
     // A key consumed by `select!` is held back rather than applied inline, so any
     // process output already queued (which may carry a keyboard-mode change) is
@@ -175,6 +211,15 @@ fn drain(
         recv(selection_timeout) -> now => if let Ok(now) = now {
             redraw = app.advance_selection(now);
         },
+        recv(toast_timeout) -> now => if let Ok(now) = now {
+            redraw = app.expire_toast(now);
+        },
+        recv(notice_timeout) -> now => if let Ok(now) = now {
+            redraw = app.expire_notice(now);
+        },
+        recv(metrics_timeout) -> now => if let Ok(now) = now {
+            redraw = app.sample_metrics(now);
+        },
     }
     match drain_pending(control_rx, output_rx, buffered_input, redraw, |event| {
         apply(app, event)
@@ -185,6 +230,9 @@ fn drain(
     let now = Instant::now();
     redraw |= app.advance_activity_frame(now);
     redraw |= app.advance_selection(now);
+    redraw |= app.expire_toast(now);
+    redraw |= app.expire_notice(now);
+    redraw |= app.sample_metrics(now);
     ControlFlow::Continue(redraw)
 }
 
@@ -268,6 +316,14 @@ fn apply(app: &mut App, event: RuntimeEvent) -> bool {
     true
 }
 
+/// Whether the loop should exit this iteration instead of running a deferred
+/// action such as an editor launch. A quit key drained in the same batch clears
+/// `is_running`, while closed or errored input yields a `Break` outcome; either
+/// means a pending editor must not open on the way out.
+fn shutting_down(outcome: &ControlFlow<(), bool>, is_running: bool) -> bool {
+    matches!(outcome, ControlFlow::Break(())) || !is_running
+}
+
 /// Spawns a thread forwarding crossterm input onto the control channel, sending
 /// `InputClosed` if the input source errors so the loop never blocks forever.
 fn spawn_input_thread(sender: Sender<RuntimeEvent>) {
@@ -325,6 +381,25 @@ mod tests {
             KeyCode::Char('a'),
             KeyModifiers::NONE,
         )))
+    }
+
+    /// A quit or closed input queued alongside an open-editor request defers to
+    /// shutdown, so the editor never opens on the way out; while still running,
+    /// the editor is allowed to open.
+    #[test]
+    fn a_queued_shutdown_preempts_the_editor() {
+        assert!(
+            shutting_down(&ControlFlow::Continue(true), false),
+            "a quit key drained in the same batch clears is_running"
+        );
+        assert!(
+            shutting_down(&ControlFlow::Break(()), true),
+            "closed or errored input breaks the loop"
+        );
+        assert!(
+            !shutting_down(&ControlFlow::Continue(true), true),
+            "still running, so a pending editor may open"
+        );
     }
 
     /// Output pending in the same wake-up as input is applied first, so a key is

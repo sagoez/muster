@@ -39,6 +39,40 @@ impl AgentSessionId {
     }
 }
 
+/// Stable identity of the configured agent a session belongs to.
+///
+/// Configured agent names are unique within a project, so the name is a stable
+/// key: it does not shift when sibling agents are added, removed, or reordered,
+/// and it survives command edits (which refresh the same session). A runtime
+/// session carries none, distinguishing it from a configured one.
+#[nutype(
+    sanitize(trim),
+    validate(not_empty),
+    derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        AsRef,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct ConfiguredAgentKey(String);
+
+impl ConfiguredAgentKey {
+    /// Builds the key for the configured agent named `name`.
+    ///
+    /// # Errors
+    /// Returns the newtype's validation error if `name` is empty, which cannot
+    /// happen for a valid process name.
+    pub fn of(name: &ProcessName) -> Result<Self, ConfiguredAgentKeyError> {
+        Self::try_new(name.as_ref().to_string())
+    }
+}
+
 /// Per-launch generation marker muster injects into the agent's environment.
 ///
 /// A fresh token is minted for every launch of a session and matched against the
@@ -199,6 +233,12 @@ pub struct AgentSession {
     /// Creation marker paired with the owner PID to reject PID reuse.
     #[builder(default)]
     owner_process_start_token: Option<AgentProcessStartToken>,
+    /// Present only for a session linked to a configured agent, identifying which
+    /// agent (by its project-unique name) it belongs to. Runtime sessions leave it
+    /// absent, so the config linker never binds a configured agent to a runtime
+    /// conversation.
+    #[builder(default)]
+    configured_key: Option<ConfiguredAgentKey>,
     /// Open sessions restore automatically; closed sessions remain in history.
     state: AgentSessionState,
 }
@@ -260,6 +300,27 @@ impl AgentSession {
     /// Returns a copy with the requested persisted lifecycle state.
     pub fn with_state(mut self, state: AgentSessionState) -> Self {
         self.state = state;
+        self
+    }
+
+    /// Returns a copy with the provider and launch command refreshed, keeping the
+    /// captured conversation when the provider is unchanged so a configured
+    /// session tracks edits to its `muster.yml` command. A provider change drops
+    /// the captured native id, since one provider cannot resume another's
+    /// conversation, and resets the lifecycle to `Pending`: the new provider has
+    /// no conversation yet, so restore relaunches it fresh rather than skipping it
+    /// as an owned-but-uncaptured session. The owner is retained so that while the
+    /// previous provider is still running its live-owner claim blocks the new one
+    /// from starting; once that owner is dead it no longer blocks the new launch.
+    pub fn with_configured_command(mut self, tool: AgentTool, launch_command: CommandLine) -> Self {
+        if self.tool != tool {
+            self.native_id = None;
+            self.native_reporter_process_id = None;
+            self.native_reporter_start_token = None;
+            self.state = AgentSessionState::Pending;
+        }
+        self.tool = tool;
+        self.launch_command = launch_command;
         self
     }
 
@@ -329,14 +390,10 @@ impl AgentSession {
                         }))
     }
 
-    /// Whether built-in provider arguments can be safely appended to `command`.
-    /// Shell compositions require an explicit resume template so arguments are
-    /// never attached to a different command in a pipeline or sequence.
-    pub fn launch_command_accepts_provider_arguments(command: &CommandLine) -> bool {
-        Self::command_text_accepts_provider_arguments(command.as_ref())
-    }
-
-    /// Whether provider arguments can be appended to shell command text.
+    /// Whether provider arguments can be appended to shell command text. Used to
+    /// validate a custom resume template, which appends the provider id to a
+    /// user-supplied command; a composition (pipe or sequence) would attach the id
+    /// to the wrong command, so it requires an explicit `{session_id}` placeholder.
     fn command_text_accepts_provider_arguments(command: &str) -> bool {
         let mut context = ShellContext::Unquoted;
         let mut chars = command.chars();
@@ -611,28 +668,6 @@ mod tests {
         assert!(session.resume().is_none());
     }
 
-    /// Built-in provider flags are never appended to a pipeline or sequence.
-    #[test]
-    fn rejects_shell_compositions_for_provider_arguments() {
-        let pipeline = CommandLine::try_new("codex | tee agent.log").unwrap();
-        let sequence = CommandLine::try_new("codex; echo done").unwrap();
-        let newline = CommandLine::try_new("codex\ntee agent.log").unwrap();
-        let simple = CommandLine::try_new("FOO=bar codex").unwrap();
-
-        assert!(!AgentSession::launch_command_accepts_provider_arguments(
-            &pipeline
-        ));
-        assert!(!AgentSession::launch_command_accepts_provider_arguments(
-            &sequence
-        ));
-        assert!(!AgentSession::launch_command_accepts_provider_arguments(
-            &newline
-        ));
-        assert!(AgentSession::launch_command_accepts_provider_arguments(
-            &simple
-        ));
-    }
-
     /// Placeholder-free templates cannot append an ID after a composition or
     /// comment, while an explicit placeholder remains safe before a pipeline.
     #[test]
@@ -808,6 +843,54 @@ mod tests {
             session.restore_command().unwrap().as_ref(),
             "claude --resume confirmed-session"
         );
+    }
+
+    /// Refreshing a configured session's command keeps the captured conversation
+    /// when the provider is unchanged; a provider change clears the stale provider
+    /// identity so it cannot build a cross-provider resume, but retains the owner
+    /// so a still-running previous provider keeps its live-owner claim and the new
+    /// provider cannot start and share the session until it exits.
+    #[test]
+    fn refreshing_the_configured_command_resets_identity_only_on_a_tool_change() {
+        let session = AgentSession::builder()
+            .id(AgentSessionId::try_new("assigned-session").unwrap())
+            .name(ProcessName::try_new("Ada").unwrap())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/repo/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("thread-one").unwrap()))
+            .owner_process_id(Some(AgentProcessId::try_new(4242).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        let same = session.clone().with_configured_command(
+            AgentTool::Claude,
+            CommandLine::try_new("claude -c").unwrap(),
+        );
+        assert!(same.native_id().is_some());
+        assert_eq!(same.launch_command().as_ref(), "claude -c");
+        assert_eq!(
+            *same.state(),
+            AgentSessionState::Closed,
+            "an unchanged provider keeps its state"
+        );
+
+        let changed = session
+            .with_configured_command(AgentTool::Codex, CommandLine::try_new("codex").unwrap());
+        assert_eq!(*changed.tool(), AgentTool::Codex);
+        assert!(changed.native_id().is_none());
+        assert!(
+            changed.owner_process_id().is_some(),
+            "the owner is retained so a live previous provider blocks the takeover"
+        );
+        assert_eq!(
+            *changed.state(),
+            AgentSessionState::Pending,
+            "a provider change resets the lifecycle so restore relaunches it fresh"
+        );
+        // With the previous owner dead, restore relaunches the new provider fresh
+        // rather than skipping it as owned-but-uncaptured.
+        assert_eq!(changed.restore_command().unwrap().as_ref(), "codex");
     }
 
     /// A confirmed identity with invalid durable resume behavior never falls

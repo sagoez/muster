@@ -81,22 +81,88 @@ impl AgentTool {
         }
     }
 
-    /// Infers a preset from the executable at the start of `command`.
+    /// Infers a preset from the executable in `command`, skipping any leading
+    /// `NAME=VALUE` environment assignments so a prefixed provider (for example
+    /// `ANTHROPIC_MODEL=opus claude`) is still recognized rather than treated as
+    /// a custom command, which would reject its provider's lifecycle reports.
     pub fn from_command(command: Option<&CommandLine>) -> Self {
-        let Some(executable) = command
-            .and_then(|command| command.as_ref().split_whitespace().next())
+        let Some(command) = command else {
+            return Self::Custom;
+        };
+        let tokens = Self::tokenize(command.as_ref());
+        let Some(executable) = tokens
+            .iter()
+            .map(String::as_str)
+            .find(|token| !is_env_assignment(token))
+            .map(Self::executable_head)
             .and_then(|executable| executable.rsplit(['/', '\\']).next())
-            .map(|executable| {
-                executable
-                    .strip_suffix(".exe")
-                    .or_else(|| executable.strip_suffix(".cmd"))
-                    .or_else(|| executable.strip_suffix(".bat"))
-                    .unwrap_or(executable)
-            })
+            .map(strip_launcher_suffix)
         else {
             return Self::Custom;
         };
 
+        Self::identify(executable)
+    }
+
+    /// Splits a command into tokens with POSIX shell quoting and escaping, so a
+    /// quoted or backslash-escaped assignment value (`MODEL="two words"` or
+    /// `MODEL=two\ words`) stays one token before the executable. Falls back to
+    /// whitespace splitting on a command shlex cannot parse (an unbalanced quote).
+    #[cfg(not(windows))]
+    fn tokenize(command: &str) -> Vec<String> {
+        shlex::split(command)
+            .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect())
+    }
+
+    /// Splits a command on Windows, where backslashes are literal path separators
+    /// (`C:\Tools\claude.exe`) rather than escapes. Honors double and single quotes
+    /// so a quoted assignment value stays one token; Windows has no POSIX
+    /// backslash escaping. Not a full shell parser, only enough to isolate the
+    /// executable behind any leading `NAME=VALUE` prefixes.
+    #[cfg(windows)]
+    fn tokenize(command: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut has_token = false;
+        let mut in_single = false;
+        let mut in_double = false;
+        for character in command.chars() {
+            if character == '\'' && !in_double {
+                in_single = !in_single;
+                has_token = true;
+            } else if character == '"' && !in_single {
+                in_double = !in_double;
+                has_token = true;
+            } else if character.is_whitespace() && !in_single && !in_double {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            } else {
+                current.push(character);
+                has_token = true;
+            }
+        }
+        if has_token {
+            tokens.push(current);
+        }
+        tokens
+    }
+
+    /// The executable portion of a token, cut at the first shell operator so a
+    /// compact composition without surrounding spaces (`claude|tee`, `claude;echo`)
+    /// does not fold the operator into the executable name and misclassify the
+    /// provider as `Custom`. `shlex` splits words but not operators, so it leaves
+    /// `claude|tee` as one token. Only unambiguous operators are cut, so a path such
+    /// as `Program Files (x86)` keeps its parentheses.
+    fn executable_head(token: &str) -> &str {
+        token
+            .find(['|', '&', ';', '<', '>'])
+            .map_or(token, |index| &token[..index])
+    }
+
+    /// Matches a bare executable name against each preset's default command.
+    fn identify(executable: &str) -> Self {
         Self::iter()
             .find(|tool| {
                 tool.default_command().is_some_and(|default_command| {
@@ -114,6 +180,47 @@ impl AgentTool {
     }
 }
 
+/// Windows launcher suffixes stripped from an executable name so a `.exe`/`.cmd`/
+/// `.bat` shim resolves to the bare provider name.
+const LAUNCHER_SUFFIXES: [&str; 3] = [".exe", ".cmd", ".bat"];
+
+/// Strips a [`LAUNCHER_SUFFIXES`] suffix from `name`, case-insensitively on Windows
+/// where file names and extensions ignore case (so `CLAUDE.EXE` reduces to
+/// `CLAUDE` and still matches a provider), and case-sensitively elsewhere where
+/// those suffixes are only launcher shims. At most one suffix is removed. Shared
+/// with [`super::agent_protocol`] so command inference and argument injection agree
+/// on the bare executable name.
+pub(super) fn strip_launcher_suffix(name: &str) -> &str {
+    #[cfg(windows)]
+    let lowered = name.to_ascii_lowercase();
+    for suffix in LAUNCHER_SUFFIXES {
+        #[cfg(windows)]
+        let stripped = lowered.strip_suffix(suffix).map(|head| &name[..head.len()]);
+        #[cfg(not(windows))]
+        let stripped = name.strip_suffix(suffix);
+        if let Some(stripped) = stripped {
+            return stripped;
+        }
+    }
+    name
+}
+
+/// Whether a shell token is a leading `NAME=VALUE` environment assignment, which
+/// precedes the executable rather than naming it. The name must be a valid shell
+/// identifier so a flag such as `--model=opus` is not mistaken for one. Shared with
+/// [`super::agent_protocol`] so command inference and argument injection agree on
+/// where the executable begins.
+pub(super) fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.starts_with(|character: char| character.is_ascii_alphabetic() || character == '_')
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +235,9 @@ mod tests {
     }
 
     /// Windows-style paths and command-launcher suffixes identify presets too.
+    /// Only on Windows, where backslashes are literal path separators; under POSIX
+    /// tokenization they are escapes, so this is not a valid Unix command.
+    #[cfg(windows)]
     #[test]
     fn infers_known_windows_executables_from_commands() {
         let command = CommandLine::try_new(r"C:\Tools\claude.cmd").unwrap();
@@ -141,6 +251,94 @@ mod tests {
         let command = CommandLine::try_new("my-agent").unwrap();
 
         assert_eq!(AgentTool::from_command(Some(&command)), AgentTool::Custom);
+    }
+
+    /// Leading environment assignments do not hide the provider, so a prefixed
+    /// command still resumes and captures under its real preset.
+    #[test]
+    fn infers_the_provider_behind_environment_assignments() {
+        let prefixed = CommandLine::try_new("ANTHROPIC_MODEL=opus claude").unwrap();
+        assert_eq!(AgentTool::from_command(Some(&prefixed)), AgentTool::Claude);
+
+        let multiple = CommandLine::try_new("FOO=1 BAR=2 codex --full-auto").unwrap();
+        assert_eq!(AgentTool::from_command(Some(&multiple)), AgentTool::Codex);
+    }
+
+    /// A double-quoted assignment value with spaces stays one token on either
+    /// platform, so the provider after it is still recognized rather than split
+    /// into a bogus executable.
+    #[test]
+    fn infers_the_provider_behind_a_quoted_assignment_value() {
+        let double = CommandLine::try_new(r#"MODEL="two words" claude"#).unwrap();
+        assert_eq!(AgentTool::from_command(Some(&double)), AgentTool::Claude);
+    }
+
+    /// On Unix, POSIX single quotes and backslash escapes keep an assignment
+    /// value with spaces together, so the provider behind it is still recognized
+    /// and its lifecycle reports are not rejected as a mismatch.
+    #[cfg(unix)]
+    #[test]
+    fn infers_the_provider_behind_posix_escaped_assignments() {
+        let escaped = CommandLine::try_new(r"MODEL=two\ words claude").unwrap();
+        assert_eq!(AgentTool::from_command(Some(&escaped)), AgentTool::Claude);
+
+        let single = CommandLine::try_new("MODEL='two words' codex").unwrap();
+        assert_eq!(AgentTool::from_command(Some(&single)), AgentTool::Codex);
+    }
+
+    /// A `--flag=value` argument is not an environment assignment, so it never
+    /// causes the executable itself to be skipped.
+    #[test]
+    fn does_not_treat_flags_as_environment_assignments() {
+        let command = CommandLine::try_new("claude --model=opus").unwrap();
+
+        assert_eq!(AgentTool::from_command(Some(&command)), AgentTool::Claude);
+    }
+
+    /// A lowercase launcher suffix reduces to the bare name on every platform.
+    #[test]
+    fn strips_a_lowercase_launcher_suffix() {
+        assert_eq!(strip_launcher_suffix("claude.exe"), "claude");
+        assert_eq!(strip_launcher_suffix("codex.cmd"), "codex");
+        assert_eq!(strip_launcher_suffix("gemini.bat"), "gemini");
+        assert_eq!(strip_launcher_suffix("plain"), "plain");
+    }
+
+    /// On Windows, executable names and their launcher suffixes are
+    /// case-insensitive, so an upper-case `CLAUDE.EXE` or a mixed-case path still
+    /// resolves to its provider rather than falling back to Custom and losing
+    /// identity capture and durable resume.
+    #[cfg(windows)]
+    #[test]
+    fn infers_a_windows_uppercase_launcher_name() {
+        for (command, expected) in [
+            ("CLAUDE.EXE", AgentTool::Claude),
+            ("CODEX.CMD", AgentTool::Codex),
+            (r"C:\Tools\Claude.Exe --model opus", AgentTool::Claude),
+        ] {
+            let parsed = CommandLine::try_new(command).unwrap();
+            assert_eq!(AgentTool::from_command(Some(&parsed)), expected);
+        }
+    }
+
+    /// A shell operator abutting the executable with no surrounding spaces is not
+    /// part of its name; the provider is still inferred so its lifecycle reports are
+    /// captured and native resume is preserved.
+    #[test]
+    fn infers_the_provider_before_a_compact_shell_operator() {
+        for command in [
+            "claude|tee agent.log",
+            "claude;echo done",
+            "codex&",
+            "codex>out.log",
+        ] {
+            let parsed = CommandLine::try_new(command).unwrap();
+            assert_ne!(
+                AgentTool::from_command(Some(&parsed)),
+                AgentTool::Custom,
+                "`{command}` must infer its provider, not fall back to Custom"
+            );
+        }
     }
 
     /// Every choice exposed by the launcher maps back to an agent tool.

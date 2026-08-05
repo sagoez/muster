@@ -16,6 +16,36 @@ impl App {
         self.projects = projects;
     }
 
+    /// Opens the selected project's directory in the user's editor: the
+    /// collapsed project under the cursor, or the active project otherwise. The
+    /// directory is the folder holding that project's config file.
+    pub(super) fn open_selected_in_editor(&mut self) {
+        // `project_cursor` indexes the collapsed other-project rows, so map it
+        // through `other_projects()` to reach the real project, exactly as
+        // activation and removal do.
+        let config_path = match self.project_cursor {
+            Some(cursor) => self
+                .other_projects()
+                .get(cursor)
+                .copied()
+                .and_then(|index| self.projects.get(index))
+                .map(|project| project.config().clone()),
+            None => self.current_config.clone(),
+        };
+        let Some(config_path) = config_path else {
+            return;
+        };
+        // Registry paths may be home-relative; no shell expands `~` for the
+        // editor, so resolve it before taking the directory. The runtime owns the
+        // terminal, so queue the launch for it to bracket with suspend/restore.
+        let config_path = path::absolutize(&config_path);
+        let directory = config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(config_path);
+        self.pending_editor = Some(directory);
+    }
+
     /// Re-points the config watcher at the active project's config.
     pub(super) fn rewatch_config(&mut self) {
         if let (Some(watcher), Some(config)) = (self.watcher.as_mut(), self.current_config.as_ref())
@@ -62,8 +92,15 @@ impl App {
             self.panes.remove(&pane);
             self.generations.remove(&pane);
             self.restart_attempts.remove(&pane);
+            // A retired pane id can be reused by a new process, so drop its stale
+            // usage sample rather than show it under the reused row.
+            self.usage.remove(&pane);
         }
         self.workspace = reconciliation.into_workspace();
+        // Reconciliation rebuilds processes from config with no session ids, so
+        // re-link configured agents to their durable sessions. Reconcile does not
+        // spawn, so a link failure here is retried on the next start.
+        self.link_configured_agent_sessions();
     }
 
     /// Switches to the project selected in the project switcher.
@@ -158,6 +195,9 @@ impl App {
         self.panes.clear();
         self.restart_attempts.clear();
         self.pending_session_reopens.clear();
+        // The new project restarts pane ids at 0, so stale usage must not surface
+        // under the reused ids before the next sample.
+        self.usage.clear();
         self.workspace = Workspace::builder()
             .processes(config.to_processes())
             .build();

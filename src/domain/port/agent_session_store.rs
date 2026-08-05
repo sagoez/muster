@@ -29,6 +29,18 @@ pub trait AgentSessionStore {
     /// Returns a [`ConfigError`] when the state file cannot be updated.
     fn upsert(&self, session: &AgentSession) -> Result<(), ConfigError>;
 
+    /// Atomically binds a configured agent to its durable session under the store
+    /// lock, returning the resulting session id. If a session matching
+    /// `candidate`'s project and configured key already exists, its provider and
+    /// launch command are refreshed on that latest record (preserving any
+    /// concurrently captured native id, owner, or lifecycle state); otherwise
+    /// `candidate` is inserted. The read and write happen in one transaction so
+    /// two instances first opening a project cannot create duplicate records.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the state file cannot be read or written.
+    fn link_configured(&self, candidate: &AgentSession) -> Result<AgentSessionId, ConfigError>;
+
     /// Changes a session's open/closed state and moves it to the end of history.
     ///
     /// # Errors

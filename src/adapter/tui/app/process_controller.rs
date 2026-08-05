@@ -31,6 +31,32 @@ impl App {
         command: Option<CommandLine>,
         cwd: Option<PathBuf>,
     ) {
+        // Central live-owner gate. Every launch path (autostart, manual start,
+        // restart, add-then-reconcile) resolves a command and calls here, and some
+        // reach this after linking to a session another live Muster instance owns.
+        // Launching then would start a competing provider only for the ownership
+        // claim below to fail and kill it, so refuse before starting anything.
+        if self.agent_session_owned_by_live_process(pane) {
+            // A scheduled restart reaches spawn with the pane `Restarting` and its
+            // one retry already consumed, so settle it to a stopped state rather
+            // than leaving it hung in `Restarting` with no handle and no pending
+            // retry. It is recoverable (a manual start once the owner exits), so
+            // `Exited`, not `Crashed`. Other paths (a stopped pane's manual start,
+            // autostart of a pending pane) are already in a terminal state.
+            if self
+                .workspace
+                .process(pane)
+                .is_some_and(|process| *process.state() == ProcessState::Restarting)
+            {
+                self.deactivate(pane);
+                self.workspace.set_state(pane, ProcessState::Exited);
+            }
+            self.set_notice(AGENT_SESSION_OWNED_ELSEWHERE.to_string());
+            return;
+        }
+        // A fresh process on this pane has a new pid, so drop the prior sample
+        // rather than show it until the next metrics tick.
+        self.usage.remove(&pane);
         let generation = self.bump_generation(pane);
         let activity = self
             .workspace
@@ -49,12 +75,13 @@ impl App {
                 Err(error) => {
                     self.deactivate(pane);
                     self.workspace.set_state(pane, ProcessState::Crashed);
-                    self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                    self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
                     return;
                 },
             },
             None => None,
         };
+        let mut state_file_error = None;
         let environment = agent_session_id
             .as_ref()
             .map_or_else(BTreeMap::new, |session_id| {
@@ -78,12 +105,16 @@ impl App {
                         },
                         Ok(None) => {},
                         Err(error) => {
-                            self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"))
+                            state_file_error =
+                                Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
                         },
                     }
                 }
                 environment
             });
+        if let Some(message) = state_file_error {
+            self.set_notice(message);
+        }
         let request = SpawnRequest::builder()
             .command(command)
             .working_dir(cwd)
@@ -119,7 +150,7 @@ impl App {
                         let _ = handle.kill();
                         self.deactivate(pane);
                         self.workspace.set_state(pane, ProcessState::Crashed);
-                        self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                        self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
                         return;
                     }
                 }
@@ -185,8 +216,9 @@ impl App {
         scope
     }
 
-    /// Drops a live handle while retaining the final terminal screen.
     pub(super) fn deactivate(&mut self, pane: PaneId) {
+        // A stopped pane has no live process, so its cached usage is stale.
+        self.usage.remove(&pane);
         if let Some(target) = self.panes.get_mut(&pane) {
             target.activity.reset();
             // A bell only matters while its child can still need attention.
@@ -201,6 +233,9 @@ impl App {
         self.panes.remove(&pane);
         self.generations.remove(&pane);
         self.restart_attempts.remove(&pane);
+        // Drop the metrics sample too, or a later process reusing this pane id
+        // would briefly show the retired process's pid, memory, and cpu.
+        self.usage.remove(&pane);
         self.workspace.remove(pane);
     }
 
@@ -241,7 +276,16 @@ impl App {
             ExitDecision::RestartNow => {
                 self.restart_attempts.remove(&pane);
                 self.workspace.set_state(pane, ProcessState::Restarting);
-                match self.command_of(pane) {
+                // A restart the user asked for reopens (fresh if nothing to
+                // resume); a policy-driven restart after a crash restores, so an
+                // owned-but-uncaptured reporter session is settled rather than
+                // silently relaunched into a new conversation.
+                let intent = if exit_intent.is_restart() {
+                    LaunchIntent::UserInitiated
+                } else {
+                    LaunchIntent::Automatic
+                };
+                match self.command_of(pane, intent) {
                     Ok(Some((command, cwd))) => self.spawn(pane, command, cwd),
                     Ok(None) => self.settle_unresumable_restart(pane),
                     Err(error) => self.settle_restart_store_failure(pane, error),
@@ -298,8 +342,84 @@ impl App {
         });
     }
 
-    /// Returns the command and working directory for a pane's next spawn.
-    pub(super) fn command_of(&self, pane: PaneId) -> Result<Option<SpawnDetails>, ConfigError> {
+    /// When per-process usage is next resampled, if a metrics sampler is wired and
+    /// there is anything to sample. Disarmed (`None`) on a fully idle workspace - no
+    /// live process to read and no cached usage to clear - so the runtime loop
+    /// sleeps instead of waking every interval to no-op. A later spawn re-arms it,
+    /// since the pane then reports a live process id.
+    pub fn next_metrics_deadline(&self) -> Option<Instant> {
+        self.process_metrics.as_ref()?;
+        let has_live = self.panes.iter().any(|(_, pane)| {
+            pane.handle
+                .as_ref()
+                .and_then(|handle| handle.process_id())
+                .is_some()
+        });
+        if !has_live && self.usage.is_empty() {
+            return None;
+        }
+        Some(self.metrics_deadline)
+    }
+
+    /// Resamples every live pane's resource usage once the metrics deadline has
+    /// passed, keying the result by pane so the sidebar can show it. Returns
+    /// whether a redraw is needed.
+    pub fn sample_metrics(&mut self, now: Instant) -> bool {
+        if self.process_metrics.is_none() || now < self.metrics_deadline {
+            return false;
+        }
+        self.metrics_deadline = now + METRICS_SAMPLE_INTERVAL;
+        let live: Vec<(PaneId, u32)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, pane)| {
+                pane.handle
+                    .as_ref()
+                    .and_then(|handle| handle.process_id())
+                    .map(|pid| (*id, pid))
+            })
+            .collect();
+        // No live process and no cached usage means nothing can change, so return
+        // no-redraw rather than repainting an idle or fully stopped workspace on
+        // every tick.
+        if live.is_empty() && self.usage.is_empty() {
+            return false;
+        }
+        let pids: Vec<u32> = live.iter().map(|(_, pid)| *pid).collect();
+        let samples = self
+            .process_metrics
+            .as_mut()
+            .map(|metrics| metrics.sample(&pids))
+            .unwrap_or_default();
+        let updated: HashMap<PaneId, sidebar::PaneUsage> = live
+            .into_iter()
+            .filter_map(|(id, pid)| {
+                samples.get(&pid).map(|sample| {
+                    (
+                        id,
+                        sidebar::PaneUsage::builder()
+                            .pid(pid)
+                            .cpu_percent(*sample.cpu_percent())
+                            .memory_bytes(*sample.memory_bytes())
+                            .build(),
+                    )
+                })
+            })
+            .collect();
+        let changed = updated != self.usage;
+        self.usage = updated;
+        changed
+    }
+
+    /// Returns the command and working directory for a pane's next spawn. `intent`
+    /// selects resume semantics for a linked agent session: an automatic launch
+    /// restores (never silently starting a fresh conversation for an
+    /// owned-but-uncaptured reporter session), a user launch reopens.
+    pub(super) fn command_of(
+        &self,
+        pane: PaneId,
+        intent: LaunchIntent,
+    ) -> Result<Option<SpawnDetails>, ConfigError> {
         let Some(process) = self.workspace.process(pane) else {
             return Ok(None);
         };
@@ -311,26 +431,67 @@ impl App {
             else {
                 return Ok(None);
             };
-            let Some(command) = session.reopen_command() else {
-                return Ok(None);
+            let resolved = match intent {
+                LaunchIntent::Automatic => session.restore_command(),
+                LaunchIntent::UserInitiated => session.reopen_command(),
             };
-            Some(command)
+            match resolved {
+                Some(command) => Some(command),
+                // A custom configured agent has no built-in resume flag, so it
+                // relaunches its raw command and resumes through the injected
+                // session environment. A provider agent that resolves to no
+                // command (an owned-but-uncaptured reporter under restore
+                // semantics) is surfaced as stopped rather than silently relaunched
+                // into a fresh conversation; a runtime session has no configured
+                // command to fall back on.
+                None if *process.origin() == ProcessOrigin::Configured
+                    && *process.agent_tool() == Some(AgentTool::Custom) =>
+                {
+                    process.command().clone()
+                },
+                None => return Ok(None),
+            }
+        } else if self.agent_session_store.is_some()
+            && *process.kind() == ProcessKind::Agent
+            && *process.origin() == ProcessOrigin::Configured
+        {
+            // A configured agent with no linked session (a store is present but
+            // the link never persisted) must not launch its raw command into a
+            // fresh untracked conversation; surface it as unlaunchable so the
+            // user retries once the store is writable again.
+            return Ok(None);
         } else {
             process.command().clone()
         };
         Ok(Some((command, process.working_dir().clone())))
     }
 
+    /// Retries persisting a configured agent's durable session before a manual
+    /// launch, so a start after a transient store failure links and resumes
+    /// rather than staying blocked. A no-op for an already-linked pane, a
+    /// runtime session, or a non-agent process.
+    fn relink_unlinked_agent(&mut self, pane: PaneId) {
+        let needs_link = self.agent_session_store.is_some()
+            && self.workspace.process(pane).is_some_and(|process| {
+                *process.kind() == ProcessKind::Agent
+                    && *process.origin() == ProcessOrigin::Configured
+                    && process.agent_session_id().is_none()
+            });
+        if needs_link {
+            self.link_configured_agent_sessions();
+        }
+    }
+
     /// Reports a session-state read failure without confusing it with an absent identity.
     fn report_session_store_error(&mut self, error: ConfigError) {
-        self.notice = Some(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+        self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
     }
 
     /// Settles a failed restart whose durable session has no safe launch command.
     fn settle_unresumable_restart(&mut self, pane: PaneId) {
         self.deactivate(pane);
         self.workspace.set_state(pane, ProcessState::Crashed);
-        self.notice = Some(AGENT_SESSION_NOT_RESUMABLE.to_string());
+        self.set_notice(AGENT_SESSION_NOT_RESUMABLE.to_string());
     }
 
     /// Settles a failed restart after preserving the durable-store error for the user.
@@ -361,9 +522,12 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
-        match self.command_of(pane) {
+        // Relink first: an unlinked agent binds to its durable session here, and
+        // `spawn` then applies the live-owner gate against that resolved session.
+        self.relink_unlinked_agent(pane);
+        match self.command_of(pane, LaunchIntent::UserInitiated) {
             Ok(Some((command, cwd))) => self.spawn(pane, command, cwd),
-            Ok(None) => self.notice = Some(AGENT_SESSION_NOT_RESUMABLE.to_string()),
+            Ok(None) => self.set_notice(AGENT_SESSION_NOT_RESUMABLE.to_string()),
             Err(error) => self.report_session_store_error(error),
         }
     }
@@ -413,10 +577,11 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
-        let command = match self.command_of(pane) {
+        self.relink_unlinked_agent(pane);
+        let command = match self.command_of(pane, LaunchIntent::UserInitiated) {
             Ok(Some(command)) => command,
             Ok(None) => {
-                self.notice = Some(AGENT_SESSION_NOT_RESUMABLE.to_string());
+                self.set_notice(AGENT_SESSION_NOT_RESUMABLE.to_string());
                 return;
             },
             Err(error) => {
@@ -438,6 +603,7 @@ impl App {
             }
             self.request_graceful_transition(pane, ExitIntent::request_restart, true);
         } else {
+            // `spawn` refuses if a live owner still holds the session.
             let (command, cwd) = command;
             self.spawn(pane, command, cwd);
         }
@@ -507,10 +673,10 @@ impl App {
         if delivered {
             self.workspace.set_state(pane, ProcessState::Stopping);
             if used_fallback {
-                self.notice = Some(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
+                self.set_notice(GRACEFUL_STOP_FALLBACK_NOTICE.to_string());
             }
         } else {
-            self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            self.set_notice(STOP_DELIVERY_FAILED_NOTICE.to_string());
         }
         if let (Some(grace_period), Some(spawn_generation), Some(shutdown_generation)) =
             (awaiting_grace, spawn_generation, shutdown_generation)
@@ -545,7 +711,7 @@ impl App {
             if delivered {
                 self.workspace.set_state(pane, ProcessState::Stopping);
             } else {
-                self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+                self.set_notice(STOP_DELIVERY_FAILED_NOTICE.to_string());
             }
         } else {
             self.bump_generation(pane);
@@ -784,7 +950,7 @@ impl App {
         let message = body
             .or_else(|| title.clone())
             .unwrap_or_else(|| AWAITING_INPUT_NOTICE.to_string());
-        self.notice = Some(format!("{}: {message}", name.as_ref()));
+        self.set_notice(format!("{}: {message}", name.as_ref()));
         let notification = Notification::builder()
             .pane(pane)
             .scope(scope)
@@ -849,7 +1015,8 @@ impl App {
         if self.generations.get(&pane) != Some(&generation) {
             return;
         }
-        match self.command_of(pane) {
+        // A delayed restart is policy-driven, so restore rather than reopen.
+        match self.command_of(pane, LaunchIntent::Automatic) {
             Ok(Some((command, cwd))) => self.spawn(pane, command, cwd),
             Ok(None) => self.settle_unresumable_restart(pane),
             Err(error) => self.settle_restart_store_failure(pane, error),
@@ -880,10 +1047,10 @@ impl App {
         };
         if handle.kill().is_ok() {
             self.workspace.set_state(pane, ProcessState::Stopping);
-            self.notice = Some(FORCE_STOP_NOTICE.to_string());
+            self.set_notice(FORCE_STOP_NOTICE.to_string());
         } else {
             target.exit_intent = target.exit_intent.force_stop_delivery_failed();
-            self.notice = Some(STOP_DELIVERY_FAILED_NOTICE.to_string());
+            self.set_notice(STOP_DELIVERY_FAILED_NOTICE.to_string());
         }
     }
 }

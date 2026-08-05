@@ -13,7 +13,7 @@ terminals:
   description: your login shell
   restart: null
   stop: null
-  autostart: false
+  autostart: true
 commands:
 - name: clock
   command: while true; do date +%T; sleep 1; done

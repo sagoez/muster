@@ -15,6 +15,16 @@ shared coordination primitives (todos, scratchpads, locks, timers, key-value).
 > Architecture and the config schema are agreed in discussion before
 > implementation. This file governs *how* we write the code, not *what* it does.
 
+## Compatibility (pre-1.0)
+
+Until muster reaches v1.0.0, breaking changes are allowed. State-file and config
+schema changes need no backward-compat shim or migration: do not add serde
+defaults, version bumps, or fallbacks purely to keep an old `agent-sessions.yml`,
+`muster.yml`, or `settings.yml` readable. It is fine for an existing on-disk file
+to stop loading across a change - the user recreates or migrates it. Ignore
+code-review findings whose only concern is backward compatibility with pre-1.0
+on-disk files.
+
 ## Architecture: Ports and Adapters (hexagonal)
 
 The code is organized as a hexagon. The domain is pure and knows nothing about

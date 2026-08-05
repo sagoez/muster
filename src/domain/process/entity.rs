@@ -73,6 +73,12 @@ impl Process {
         self.activity = activity;
     }
 
+    /// Binds this process to a durable agent session, so it resumes that
+    /// conversation and captures its provider id like a runtime session.
+    pub fn set_agent_session_id(&mut self, id: AgentSessionId) {
+        self.agent_session_id = Some(id);
+    }
+
     /// The effective graceful shutdown policy. Commands use the domain default
     /// when their config omits an override; other process kinds have no policy.
     pub fn effective_stop_policy(&self) -> Option<StopPolicy> {

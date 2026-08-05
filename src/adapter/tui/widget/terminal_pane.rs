@@ -4,7 +4,7 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders},
 };
-use tui_term::widget::PseudoTerminal;
+use tui_term::widget::{Cursor, PseudoTerminal};
 use vt100::Screen;
 
 use super::theme;
@@ -25,10 +25,16 @@ pub fn render(
     let block = Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
+        .border_type(theme::border_type(focused))
         .border_style(theme::border_style(focused));
     let inner = block.inner(area);
     match screen {
-        Some(screen) => frame.render_widget(PseudoTerminal::new(screen).block(block), area),
+        Some(screen) => frame.render_widget(
+            PseudoTerminal::new(screen)
+                .block(block)
+                .cursor(Cursor::default().visibility(focused)),
+            area,
+        ),
         None => frame.render_widget(block, area),
     }
     if let Some(span) = selection {
@@ -90,6 +96,42 @@ mod tests {
             .cell((column + BORDER, row + BORDER))
             .expect("cell inside the test buffer");
         cell.style().add_modifier.contains(Modifier::REVERSED)
+    }
+
+    /// The symbol drawn at the cursor cell after feeding `hi`, for a focus state.
+    fn cursor_symbol(focused: bool) -> String {
+        let mut parser = Parser::new(ROWS, COLS, 0);
+        parser.process(b"hi");
+        let backend = TestBackend::new(COLS + BORDER * 2, ROWS + BORDER * 2);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    "pane",
+                    Some(parser.screen()),
+                    focused,
+                    None,
+                    theme::selection_style(),
+                );
+            })
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .cell((2 + BORDER, BORDER))
+            .expect("cursor cell inside the buffer")
+            .symbol()
+            .to_string()
+    }
+
+    /// The pane cursor is drawn only when the pane is focused; an unfocused pane
+    /// leaves the cursor cell blank so it never looks typeable.
+    #[test]
+    fn the_cursor_appears_only_when_the_pane_is_focused() {
+        assert_eq!(cursor_symbol(true), "\u{2588}");
+        assert_eq!(cursor_symbol(false), " ");
     }
 
     /// The drag span is reversed; everything outside it stays untouched.

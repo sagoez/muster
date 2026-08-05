@@ -1,7 +1,9 @@
 pub mod cli;
 pub mod clipboard;
 pub mod config;
+pub mod editor;
 pub mod hooks;
+pub mod metrics;
 pub mod notifier;
 pub mod path;
 pub mod process_identity;

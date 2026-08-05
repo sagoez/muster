@@ -42,8 +42,11 @@ const LEFT_SECTIONS: &[Section] = &[
         ("u", "reopen session"),
         ("t", "autostart"),
         ("a", "add"),
+        ("A", "agent session"),
+        ("!", "jump to attention"),
     ]),
     ("General", &[
+        ("e", "open in editor"),
         ("N", "notifications"),
         ("?", "help"),
         ("q", "quit"),
@@ -68,6 +71,8 @@ const RIGHT_SECTIONS: &[Section] = &[
         ("d", "close session"),
         ("u", "reopen session"),
         ("a", "add"),
+        ("A", "agent session"),
+        ("!", "jump to attention"),
         ("n", "new"),
         ("N", "notifications"),
         ("o", "switcher"),
@@ -115,11 +120,14 @@ pub fn render(frame: &mut Frame, area: Rect) {
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
+    // Center the keymap vertically with as much padding as fits; when the
+    // terminal is tight the pad collapses to zero so no binding is clipped.
+    let top_pad = inner.height.saturating_sub(rows) / 2;
     let body = Rect {
         x: inner.x + LEFT_INDENT,
-        y: inner.y + VERTICAL_PAD,
+        y: inner.y + top_pad,
         width: inner.width.saturating_sub(LEFT_INDENT),
-        height: inner.height.saturating_sub(VERTICAL_PAD),
+        height: inner.height.saturating_sub(top_pad),
     };
     let columns = Layout::horizontal([
         Constraint::Length(left_width),

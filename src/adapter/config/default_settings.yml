@@ -1,1 +1,14 @@
 desktop_notifications: true
+
+# How the `e` action opens a project in an external editor. The editor is
+# launched as a detached window, so muster keeps running untouched.
+editor:
+  # Command that opens the editor. Leave empty to use $VISUAL, then $EDITOR.
+  # The project path is appended. Examples: "code", "zed", "nvim".
+  command: ""
+  # Terminal launcher for a terminal editor: muster runs `<terminal> <command>
+  # <path>` so it opens its own window. Leave empty and a known terminal editor
+  # (nvim, vim, helix, ...) is wrapped in `xdg-terminal-exec` automatically; a GUI
+  # editor (code, zed) launches directly. Set this to override, e.g.:
+  #   "xdg-terminal-exec"   "kitty"   "alacritty -e"   "ghostty -e"
+  terminal: ""

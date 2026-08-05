@@ -71,5 +71,9 @@ mod tests {
         let settings = YamlSettingsStore::defaults().unwrap();
 
         assert!(*settings.desktop_notifications());
+        // The editor defaults to the environment ($VISUAL/$EDITOR), so both fields
+        // ship empty rather than hard-coding a machine-specific editor.
+        assert!(settings.editor().command().is_empty());
+        assert!(settings.editor().terminal().is_empty());
     }
 }

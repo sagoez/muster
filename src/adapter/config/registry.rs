@@ -148,7 +148,12 @@ impl ProjectRegistry for YamlProjectRegistry {
         // lock failure aborts the update rather than risking a silent lost write.
         let _guard = lock_workspace(&dest)?;
         let config = load_workspace(&dest)?;
-        write_config(&dest, &update(config))
+        let updated = update(config);
+        // Validate before writing so an update that would introduce a duplicate
+        // agent name (or other cross-field violation) is rejected here rather
+        // than persisted as a config that then refuses to load.
+        updated.validate()?;
+        write_config(&dest, &updated)
     }
 }
 

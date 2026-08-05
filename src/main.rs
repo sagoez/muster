@@ -18,7 +18,9 @@ use muster::{
             RunArgs, VALID_SUFFIX,
         },
         config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
+        editor::EnvEditorLauncher,
         hooks::ProviderHooks,
+        metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         path::FsPathCompleter,
         process_identity::LocalProcessIdentity,
@@ -543,6 +545,10 @@ fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
         .notifier(Box::new(DesktopNotifier::new()))
         .settings_store(Box::new(YamlSettingsStore))
         .agent_session_store(Box::new(YamlAgentSessionStore))
+        .editor_launcher(Box::new(EnvEditorLauncher::new(Box::new(
+            YamlSettingsStore,
+        ))))
+        .process_metrics(Box::new(SysinfoMetrics::default()))
         .build();
     // Queried before the guard takes the terminal over: the color reply
     // arrives on stdin, which the input thread owns afterwards.

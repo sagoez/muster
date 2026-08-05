@@ -78,4 +78,20 @@ pub enum ConfigError {
         /// Name of the invalid process.
         name: ProcessName,
     },
+    /// Two configured agents share a name. An agent's name is its durable
+    /// session key within a project, so duplicates would bind to one another's
+    /// conversation; the config is rejected rather than loaded ambiguously.
+    #[error("duplicate agent '{name}': agent names must be unique within a project")]
+    DuplicateAgentName {
+        /// Name shared by more than one configured agent.
+        name: ProcessName,
+    },
+    /// A configured agent omits its command. An agent with no command is a login
+    /// shell mislabeled as an agent: it cannot resume or capture a session, so it
+    /// is rejected rather than persisted as an unlaunchable row.
+    #[error("agent '{name}' has no command; every agent must define one")]
+    AgentCommandMissing {
+        /// Name of the agent missing a command.
+        name: ProcessName,
+    },
 }

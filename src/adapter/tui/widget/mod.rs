@@ -9,3 +9,4 @@ pub mod status_bar;
 pub mod switcher;
 pub mod terminal_pane;
 pub mod theme;
+pub mod toast;

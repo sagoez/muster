@@ -171,52 +171,53 @@ const HINT_GAP: &str = "   ";
 const ALERT_COLOR: Color = Color::Red;
 /// Glyph preceding the crashed-process count.
 const ALERT_GLYPH: &str = "⚠";
-
-/// Prefix on a transient notice line.
+/// Prefix on a fallback notice line.
 const NOTICE_PREFIX: &str = " ! ";
 
-/// Visual priority for a transient status-bar notice.
-#[derive(Clone, Copy)]
-pub enum NoticeTone {
-    /// A failure or unavailable action that needs attention.
-    Error,
-}
-
-/// Renders the status bar: a transient notice if one is set, otherwise the slim
-/// hints for `context` (always ending in `? help`) plus a right-aligned alert
-/// when any process has crashed. A pending terminal leader fills the row with a
-/// high-contrast background until the next key completes the chord.
+/// Renders the status bar: the slim hints for `context` (always ending in
+/// `? help`) plus a right-aligned alert when any process has crashed. A pending
+/// terminal leader fills the row with a high-contrast background until the next
+/// key completes the chord. Notices normally render as toasts; `notice` is set
+/// only as the always-visible fallback when a toast cannot fit the window.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     context: StatusContext,
     crashed: usize,
-    notice: Option<(&str, NoticeTone)>,
     leader_pending: bool,
+    notice: Option<&str>,
 ) {
     let terminal_context = matches!(
         context,
         StatusContext::Terminal | StatusContext::TerminalAgentSession
     );
     let leader_pending = leader_pending && terminal_context;
-    if let Some((notice, tone)) = notice {
-        let style = if leader_pending {
-            Style::default()
-                .fg(LEADER_PENDING_FOREGROUND)
-                .bg(LEADER_PENDING_BACKGROUND)
-                .add_modifier(Modifier::BOLD)
+    if let Some(notice) = notice {
+        // A fallback notice replaces the hints, but a pending leader chord must
+        // keep its high-contrast background. Without the cue the user cannot tell
+        // that the next key is still a leader command rather than ordinary input.
+        let (text_style, line_style) = if leader_pending {
+            (
+                Style::default()
+                    .fg(LEADER_PENDING_FOREGROUND)
+                    .bg(LEADER_PENDING_BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().bg(LEADER_PENDING_BACKGROUND),
+            )
         } else {
-            let color = match tone {
-                NoticeTone::Error => ALERT_COLOR,
-            };
-            Style::default().fg(color).add_modifier(Modifier::BOLD)
-        };
-        let prefix = match tone {
-            NoticeTone::Error => NOTICE_PREFIX,
+            (
+                Style::default()
+                    .fg(ALERT_COLOR)
+                    .add_modifier(Modifier::BOLD),
+                Style::default(),
+            )
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!("{prefix}{notice}"), style)))
-                .style(style),
+            Paragraph::new(Line::from(Span::styled(
+                format!("{NOTICE_PREFIX}{notice}"),
+                text_style,
+            )))
+            .style(line_style),
             area,
         );
         return;
@@ -379,7 +380,7 @@ mod tests {
     fn shows_a_crashed_alert_pinned_right() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 2, None, false))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 2, false, None))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -388,7 +389,7 @@ mod tests {
     fn no_alert_when_nothing_has_crashed() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 0, None, false))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Process, 0, false, None))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -397,25 +398,7 @@ mod tests {
     fn a_project_row_shows_its_own_hints() {
         let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Project, 0, None, false))
-            .unwrap();
-        insta::assert_snapshot!(terminal.backend());
-    }
-
-    #[test]
-    fn a_notice_replaces_the_hints() {
-        let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    frame.area(),
-                    StatusContext::Process,
-                    0,
-                    Some(("one: no such file", NoticeTone::Error)),
-                    false,
-                )
-            })
+            .draw(|frame| render(frame, frame.area(), StatusContext::Project, 0, false, None))
             .unwrap();
         insta::assert_snapshot!(terminal.backend());
     }
@@ -426,7 +409,7 @@ mod tests {
         let width = 60;
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), StatusContext::Terminal, 1, None, true))
+            .draw(|frame| render(frame, frame.area(), StatusContext::Terminal, 1, true, None))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -436,29 +419,27 @@ mod tests {
         }
     }
 
-    /// An asynchronous notice retains the pending leader chord's full-row cue.
+    /// A fallback notice takes over the row and shows its message in red, so a
+    /// failure stays visible when a toast cannot fit the window.
     #[test]
-    fn a_notice_keeps_the_pending_leader_cue_visible() {
-        let width = 60;
-        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+    fn a_fallback_notice_replaces_the_hints() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
         terminal
             .draw(|frame| {
                 render(
                     frame,
                     frame.area(),
-                    StatusContext::Terminal,
+                    StatusContext::Process,
                     0,
-                    Some(("agent: finished", NoticeTone::Error)),
-                    true,
+                    false,
+                    Some("boom"),
                 )
             })
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert!(buffer.content.iter().any(|cell| cell.symbol() == "!"));
-        for x in 0..width {
-            let cell = buffer.cell((x, 0)).unwrap();
-            assert_eq!(cell.bg, LEADER_PENDING_BACKGROUND);
-        }
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("boom"));
+        assert!(buffer.content.iter().any(|cell| cell.fg == ALERT_COLOR));
     }
 }

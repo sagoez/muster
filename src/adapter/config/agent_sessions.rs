@@ -388,6 +388,31 @@ impl AgentSessionStore for YamlAgentSessionStore {
         })
     }
 
+    fn link_configured(&self, candidate: &AgentSession) -> Result<AgentSessionId, ConfigError> {
+        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
+        // Default to the create case; overwritten to the existing id on reuse.
+        let mut resolved = candidate.id().clone();
+        Self::update(&path, |sessions| {
+            let existing = sessions.iter_mut().find(|session| {
+                session.project() == candidate.project()
+                    && session.configured_key().is_some()
+                    && session.configured_key() == candidate.configured_key()
+            });
+            match existing {
+                Some(session) => {
+                    *session = session.clone().with_configured_command(
+                        *candidate.tool(),
+                        candidate.launch_command().clone(),
+                    );
+                    resolved = session.id().clone();
+                },
+                None => sessions.push(candidate.clone()),
+            }
+            Ok(())
+        })?;
+        Ok(resolved)
+    }
+
     fn set_state(&self, id: &AgentSessionId, state: AgentSessionState) -> Result<(), ConfigError> {
         let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
         Self::update(&path, |sessions| {

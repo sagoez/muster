@@ -93,7 +93,26 @@ impl App {
             FormIntent::AddConfiguredProcess(kind) => {
                 self.add_configured_process(kind, &values);
             },
+            FormIntent::AddConfiguredAgent(tool) => self.add_configured_agent(tool, &values),
         }
+    }
+
+    /// Persists a configured agent for a chosen provider preset. The form supplies
+    /// only the (optional) name; the launch command is the preset's default, so
+    /// this reuses [`Self::add_configured_process`] with that command filled in.
+    pub(super) fn add_configured_agent(&mut self, tool: AgentTool, values: &[String]) {
+        let Some(name_input) = values.first() else {
+            return;
+        };
+        // Only presets reach here; Custom routes to the command panel instead.
+        let Some(command) = tool.default_command() else {
+            self.report_error(AGENT_COMMAND_REQUIRED);
+            return;
+        };
+        self.add_configured_process(ProcessKind::Agent, &[
+            name_input.clone(),
+            command.to_string(),
+        ]);
     }
 
     /// Registers the current workspace under the typed name. A blank or invalid
@@ -238,13 +257,14 @@ impl App {
         }
     }
 
-    /// Advances the add flow to the selected kind's specific form. Every kind,
-    /// agents included, opens the configured-process form so the new process is
-    /// pinned in `muster.yml` and its autostart is controllable with `t`. The
-    /// disposable-session picker is a separate flow reached with `A`.
+    /// Advances the add flow to the selected kind's next step. The agent kind opens
+    /// the provider menu (presets, or Custom for a typed command); both persist to
+    /// `muster.yml` with autostart controllable by `t`. Terminals and commands go
+    /// straight to their name-and-command form. The disposable-session picker is a
+    /// separate flow reached with `A`.
     pub(super) fn choose_process_kind(&mut self, values: &[String]) {
         match values.first().map(String::as_str) {
-            Some(KIND_AGENT) => self.open_configured_process_form(ProcessKind::Agent),
+            Some(KIND_AGENT) => self.open_configured_agent_picker(),
             Some(KIND_TERMINAL) => self.open_configured_process_form(ProcessKind::Terminal),
             Some(KIND_COMMAND) => self.open_configured_process_form(ProcessKind::Command),
             _ => {},

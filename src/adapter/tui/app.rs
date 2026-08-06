@@ -36,7 +36,7 @@ use super::{
     signal::{Signal, SignalReader},
     spawn_generation::SpawnGeneration,
     widget::{
-        agent_picker::{self, AgentPickerItem},
+        agent_picker::{self, AgentPickerItem, AgentPickerPurpose},
         confirm, empty_state, form, help, sidebar, status_bar,
         status_bar::StatusContext,
         switcher, terminal_pane, theme,
@@ -407,6 +407,10 @@ struct AgentPicker {
     items: Vec<AgentPickerItem>,
     selected: usize,
     error: Option<String>,
+    purpose: AgentPickerPurpose,
+    /// The project switcher to reveal when the picker closes, retained when the
+    /// add flow was reached from the switcher so Esc returns to it.
+    switcher: Option<Switcher>,
 }
 
 impl Switcher {
@@ -489,6 +493,8 @@ impl Overlay {
         match self {
             Self::Switcher(switcher) => Some(switcher),
             Self::Form(form) | Self::ConfirmOverwrite { form, .. } => form.switcher.as_ref(),
+            // The picker's retained switcher is background state for restoration on
+            // close, not an interactive switcher; keep error routing on the picker.
             Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
@@ -537,13 +543,19 @@ impl Overlay {
         let area = frame.area();
         match self {
             Self::Switcher(switcher) => Self::render_switcher(frame, area, switcher),
-            Self::AgentPicker(picker) => agent_picker::render(
-                frame,
-                area,
-                &picker.items,
-                picker.selected,
-                picker.error.as_deref(),
-            ),
+            Self::AgentPicker(picker) => {
+                if let Some(switcher) = &picker.switcher {
+                    Self::render_switcher(frame, area, switcher);
+                }
+                agent_picker::render(
+                    frame,
+                    area,
+                    &picker.items,
+                    picker.selected,
+                    picker.error.as_deref(),
+                    picker.purpose,
+                );
+            },
             Self::Form(form_overlay) => {
                 Self::render_form(frame, area, form_overlay);
             },
@@ -607,6 +619,9 @@ enum FormIntent {
     LaunchAgentSession,
     /// Persist a terminal or command in the current workspace.
     AddConfiguredProcess(ProcessKind),
+    /// Persist a configured agent for the chosen provider preset, naming it from
+    /// the form while the launch command comes from the preset.
+    AddConfiguredAgent(AgentTool),
 }
 
 /// The running TUI application: workspace state plus the live panes.
@@ -912,10 +927,10 @@ impl App {
         let current = self.overlay.take();
         self.overlay = match current {
             Some(Overlay::Form(form)) => form.switcher.map(Overlay::Switcher),
+            Some(Overlay::AgentPicker(picker)) => picker.switcher.map(Overlay::Switcher),
             Some(Overlay::ConfirmOverwrite { form, .. }) => Some(Overlay::Form(form)),
             Some(
                 Overlay::Switcher(_)
-                | Overlay::AgentPicker(_)
                 | Overlay::ConfirmRemoval { .. }
                 | Overlay::ConfirmSessionClose { .. }
                 | Overlay::Help,
@@ -7018,19 +7033,175 @@ mod tests {
         );
     }
 
-    /// The `a` flow routes the Agent kind to the configured-agent form, so the
-    /// new agent is pinned in muster.yml rather than launched as a disposable
-    /// session; the picker moves to its own key.
+    /// The `a` flow routes the Agent kind to the configured provider menu (the same
+    /// picker widget as `A`, in Configure purpose), from which a preset or Custom
+    /// pins a new agent in muster.yml.
     #[test]
-    fn add_hotkey_opens_the_configured_agent_form() {
+    fn add_hotkey_opens_the_configured_agent_picker() {
         let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
 
         press(&mut app, KeyCode::Char('a'));
         assert_eq!(app.form().unwrap().form.title(), ADD_PROCESS_TITLE);
         press(&mut app, KeyCode::Enter);
 
-        assert!(!matches!(app.overlay, Some(Overlay::AgentPicker(_))));
-        assert!(app.form().is_some(), "the configured-agent form is open");
+        assert!(
+            matches!(
+                &app.overlay,
+                Some(Overlay::AgentPicker(picker)) if picker.purpose == AgentPickerPurpose::Configure
+            ),
+            "the agent kind opens the configured provider menu"
+        );
+    }
+
+    /// Choosing a provider preset from the configured menu asks only for a name and
+    /// persists a configured agent whose launch command is the preset default.
+    #[test]
+    fn choosing_a_preset_creates_a_configured_agent() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+
+        press(&mut app, KeyCode::Char('a')); // kind form
+        press(&mut app, KeyCode::Enter); // agent -> provider menu
+        press(&mut app, KeyCode::Enter); // first preset (Claude) -> name step
+        assert_eq!(app.form().unwrap().form.title(), ADD_PROCESS_TITLE);
+        assert_eq!(
+            app.form().unwrap().form.values().len(),
+            1,
+            "the preset name step asks only for a name"
+        );
+        type_text(&mut app, "backend");
+        press(&mut app, KeyCode::Enter);
+
+        let added = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == "backend")
+            .expect("the configured agent was added");
+        assert_eq!(*added.kind(), ProcessKind::Agent);
+        assert_eq!(*added.origin(), ProcessOrigin::Configured);
+        assert_eq!(added.command().as_ref().unwrap().as_ref(), "claude");
+    }
+
+    /// A blank name on the preset step still creates the agent, with a
+    /// project-unique autogenerated name (the name is the durable session key).
+    #[test]
+    fn a_preset_with_a_blank_name_autogenerates_one() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+
+        press(&mut app, KeyCode::Char('a')); // kind form
+        press(&mut app, KeyCode::Enter); // agent -> provider menu
+        press(&mut app, KeyCode::Enter); // first preset (Claude) -> name step
+        press(&mut app, KeyCode::Enter); // blank name -> create
+
+        let added = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| {
+                *process.kind() == ProcessKind::Agent
+                    && *process.origin() == ProcessOrigin::Configured
+            })
+            .expect("a blank name still creates the configured agent");
+        assert!(
+            !added.name().as_ref().is_empty(),
+            "the name is autogenerated"
+        );
+        assert_eq!(added.command().as_ref().unwrap().as_ref(), "claude");
+    }
+
+    /// Custom in the configured menu drops to the command panel, where the command
+    /// is typed (and the provider inferred from it) rather than taken from a preset.
+    #[test]
+    fn choosing_custom_opens_the_command_panel() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+
+        press(&mut app, KeyCode::Char('a')); // kind form
+        press(&mut app, KeyCode::Enter); // agent -> provider menu
+        press(&mut app, KeyCode::Char('k')); // wrap to the last option, Custom
+        press(&mut app, KeyCode::Enter); // Custom -> command panel
+
+        let form = app.form().expect("the command panel is open");
+        assert_eq!(form.form.title(), ADD_PROCESS_TITLE);
+        assert_eq!(
+            form.form.values().len(),
+            2,
+            "the command panel asks for a name and a command"
+        );
+    }
+
+    /// When the add flow is opened from the switcher, canceling the provider menu
+    /// returns to the switcher rather than closing every overlay, matching the
+    /// terminal and command branches.
+    #[test]
+    fn canceling_the_configured_agent_picker_restores_the_switcher() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.open_switcher();
+        press(&mut app, KeyCode::Char('a')); // kind form (switcher retained)
+        press(&mut app, KeyCode::Enter); // agent -> provider menu (switcher retained)
+        assert!(matches!(&app.overlay, Some(Overlay::AgentPicker(_))));
+
+        press(&mut app, KeyCode::Esc);
+
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Switcher(_))),
+            "canceling the provider menu returns to the switcher it was opened from"
+        );
+    }
+
+    /// The retained switcher survives the preset name step too, so canceling there
+    /// also returns to the switcher.
+    #[test]
+    fn canceling_the_preset_name_step_restores_the_switcher() {
+        let (mut app, _recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
+        app.open_switcher();
+        press(&mut app, KeyCode::Char('a')); // kind form
+        press(&mut app, KeyCode::Enter); // agent -> provider menu
+        press(&mut app, KeyCode::Enter); // first preset -> name step
+        assert!(matches!(&app.overlay, Some(Overlay::Form(_))));
+
+        press(&mut app, KeyCode::Esc);
+
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Switcher(_))),
+            "canceling the preset name step returns to the switcher"
+        );
+    }
+
+    /// Opened from the switcher, the provider picker renders the retained switcher
+    /// beneath it (as the terminal and command forms do), so the same picker opened
+    /// without a switcher behind it renders differently. A full-height switcher
+    /// leaves rows above and below the shorter picker to differ on.
+    #[test]
+    fn the_provider_picker_renders_the_retained_switcher_beneath_it() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let picker_buffer = |from_switcher: bool| {
+            let projects = (0..20)
+                .map(|index| {
+                    project(
+                        &format!("proj{index:02}"),
+                        &format!("/repo/{index}/muster.yml"),
+                    )
+                })
+                .collect();
+            let (mut app, _recorder) =
+                flow_app(projects, empty_workspace_config(), "/here/muster.yml");
+            if from_switcher {
+                app.open_switcher();
+            }
+            press(&mut app, KeyCode::Char('a')); // kind form
+            press(&mut app, KeyCode::Enter); // agent -> provider picker
+            assert!(matches!(&app.overlay, Some(Overlay::AgentPicker(_))));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+            terminal.draw(|frame| app.render(frame)).expect("draw");
+            terminal.backend().buffer().clone()
+        };
+
+        assert_ne!(
+            picker_buffer(true),
+            picker_buffer(false),
+            "the retained switcher must render beneath the provider picker"
+        );
     }
 
     /// Adding an agent through the configured form pins it in muster.yml as a

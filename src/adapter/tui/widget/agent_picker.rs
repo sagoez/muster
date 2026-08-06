@@ -9,20 +9,26 @@ use ratatui::{
 use super::overlay;
 use crate::domain::{agent_session::AgentSession, process::AgentTool};
 
-/// Title shown on the picker border.
-const TITLE: &str = "Launch agent";
+/// Title shown when launching a disposable session (the `A` picker).
+const LAUNCH_TITLE: &str = "Launch agent";
+/// Title shown when adding a persisted configured agent (the `a` agent flow).
+const CONFIGURE_TITLE: &str = "Add agent";
 /// Heading above recently closed resumable sessions.
 const RECENT_HEADING: &str = "Recent sessions";
-/// Heading above new provider presets.
-const NEW_HEADING: &str = "New session";
+/// Heading above the provider presets when launching a disposable session.
+const LAUNCH_NEW_HEADING: &str = "New session";
+/// Heading above the provider presets when adding a configured agent.
+const CONFIGURE_NEW_HEADING: &str = "Provider";
 /// Marker to the left of the highlighted row.
 const ACTIVE_MARKER: &str = "▎";
 /// Empty marker occupying the same width as [`ACTIVE_MARKER`].
 const IDLE_MARKER: &str = " ";
 /// Separator between a recent name and provider label.
 const TOOL_SEPARATOR: &str = "  ";
-/// Footer actions.
-const HINT: &str = " ⏎ launch   e customize   esc cancel";
+/// Footer actions when launching a disposable session.
+const LAUNCH_HINT: &str = " ⏎ launch   e customize   esc cancel";
+/// Footer actions when adding a configured agent.
+const CONFIGURE_HINT: &str = " ⏎ select   esc cancel";
 /// Heading color.
 const HEADING_COLOR: Color = Color::DarkGray;
 /// Highlighted-row color.
@@ -43,6 +49,41 @@ pub enum AgentPickerItem {
     New(AgentTool),
 }
 
+/// What the picker is for, which selects its title, provider heading, and hints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AgentPickerPurpose {
+    /// Launch a disposable session (the `A` picker): recent sessions above presets.
+    Launch,
+    /// Add a persisted configured agent (the `a` agent flow): provider presets only.
+    Configure,
+}
+
+impl AgentPickerPurpose {
+    /// Border title for this purpose.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Launch => LAUNCH_TITLE,
+            Self::Configure => CONFIGURE_TITLE,
+        }
+    }
+
+    /// Footer hint for this purpose.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Launch => LAUNCH_HINT,
+            Self::Configure => CONFIGURE_HINT,
+        }
+    }
+
+    /// Heading above the provider presets for this purpose.
+    fn new_heading(self) -> &'static str {
+        match self {
+            Self::Launch => LAUNCH_NEW_HEADING,
+            Self::Configure => CONFIGURE_NEW_HEADING,
+        }
+    }
+}
+
 /// Draws a quick picker with recent sessions above fresh provider presets.
 pub fn render(
     frame: &mut Frame,
@@ -50,8 +91,9 @@ pub fn render(
     items: &[AgentPickerItem],
     selected: usize,
     error: Option<&str>,
+    purpose: AgentPickerPurpose,
 ) {
-    let rows = picker_lines(items, selected);
+    let rows = picker_lines(items, selected, purpose);
     let mut footer = Vec::new();
     if let Some(error) = error {
         footer.push(Line::from(Span::styled(
@@ -60,13 +102,13 @@ pub fn render(
         )));
     }
     footer.push(Line::from(Span::styled(
-        HINT,
+        purpose.hint(),
         Style::default().fg(TOOL_COLOR),
     )));
     let title = Line::from(vec![
         Span::raw(" "),
         Span::styled(
-            TITLE,
+            purpose.title(),
             Style::default()
                 .fg(overlay::ACCENT_COLOR)
                 .add_modifier(Modifier::BOLD),
@@ -131,7 +173,11 @@ fn scroll_offset(selected: usize, len: usize, visible: usize) -> usize {
 }
 
 /// Builds section headings and selectable rows in display order.
-fn picker_lines(items: &[AgentPickerItem], selected: usize) -> Vec<Line<'static>> {
+fn picker_lines(
+    items: &[AgentPickerItem],
+    selected: usize,
+    purpose: AgentPickerPurpose,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let recent = items
         .iter()
@@ -144,7 +190,7 @@ fn picker_lines(items: &[AgentPickerItem], selected: usize) -> Vec<Line<'static>
         }
         lines.push(Line::default());
     }
-    lines.push(heading(NEW_HEADING));
+    lines.push(heading(purpose.new_heading()));
     for (index, item) in items.iter().enumerate().skip(recent) {
         lines.push(item_line(item, index == selected));
     }
@@ -223,12 +269,47 @@ mod tests {
         ];
         let mut terminal = Terminal::new(TestBackend::new(56, 14)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &items, 0, None))
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &items,
+                    0,
+                    None,
+                    AgentPickerPurpose::Launch,
+                );
+            })
             .unwrap();
         let screen = terminal.backend().to_string();
         assert!(screen.contains(RECENT_HEADING));
-        assert!(screen.contains(NEW_HEADING));
+        assert!(screen.contains(LAUNCH_NEW_HEADING));
         assert!(screen.contains("Ada"));
+    }
+
+    /// The configure purpose lists only providers under its own title and heading,
+    /// with no recent-session section.
+    #[test]
+    fn configure_purpose_shows_providers_without_recents() {
+        let items = AgentTool::options()
+            .map(AgentPickerItem::New)
+            .collect::<Vec<_>>();
+        let mut terminal = Terminal::new(TestBackend::new(56, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &items,
+                    0,
+                    None,
+                    AgentPickerPurpose::Configure,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains(CONFIGURE_TITLE));
+        assert!(screen.contains(CONFIGURE_NEW_HEADING));
+        assert!(!screen.contains(RECENT_HEADING));
     }
 
     /// A clipped picker scrolls to its selected provider while retaining the
@@ -246,7 +327,16 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(56, 8)).unwrap();
 
         terminal
-            .draw(|frame| render(frame, frame.area(), &items, selected, None))
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &items,
+                    selected,
+                    None,
+                    AgentPickerPurpose::Launch,
+                );
+            })
             .unwrap();
 
         let screen = terminal.backend().to_string();

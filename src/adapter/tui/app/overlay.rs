@@ -57,6 +57,7 @@ impl App {
         let switcher = match self.overlay.take() {
             Some(Overlay::Switcher(switcher)) => Some(switcher),
             Some(Overlay::Form(form)) => form.switcher,
+            Some(Overlay::AgentPicker(picker)) => picker.switcher,
             _ => None,
         };
         self.overlay = Some(Overlay::Form(FormOverlay {
@@ -124,11 +125,43 @@ impl App {
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
         items.extend(AgentTool::options().map(AgentPickerItem::New));
+        // Reached with `A`, never from the switcher, so nothing to retain behind it.
         self.overlay = Some(Overlay::AgentPicker(AgentPicker {
             items,
             selected: 0,
             error,
+            purpose: AgentPickerPurpose::Launch,
+            switcher: None,
         }));
+    }
+
+    /// Opens the configured-agent flow's provider menu: the same picker as `A` but
+    /// listing only presets (plus Custom) and creating a persisted `muster.yml`
+    /// agent rather than a disposable session. Retains any switcher held behind the
+    /// kind form so Esc returns to it, matching the terminal and command branches.
+    pub(super) fn open_configured_agent_picker(&mut self) {
+        let switcher = match self.overlay.take() {
+            Some(Overlay::Switcher(switcher)) => Some(switcher),
+            Some(Overlay::Form(form)) => form.switcher,
+            Some(Overlay::AgentPicker(picker)) => picker.switcher,
+            _ => None,
+        };
+        let items = AgentTool::options().map(AgentPickerItem::New).collect();
+        self.overlay = Some(Overlay::AgentPicker(AgentPicker {
+            items,
+            selected: 0,
+            error: None,
+            purpose: AgentPickerPurpose::Configure,
+            switcher,
+        }));
+    }
+
+    /// Opens the name step for a configured agent of `tool`. Only the name is
+    /// asked; the launch command comes from the preset. A blank name
+    /// autogenerates a project-unique one.
+    pub(super) fn open_configured_agent_name_form(&mut self, tool: AgentTool) {
+        let form = Form::new(ADD_PROCESS_TITLE, vec![Field::text(SESSION_NAME_FIELD)]);
+        self.open_form(form, FormIntent::AddConfiguredAgent(tool));
     }
 
     /// Handles navigation, quick launch, customization, and cancel in the agent
@@ -139,8 +172,9 @@ impl App {
         };
         let count = picker.items.len();
         let selected = picker.selected;
+        let purpose = picker.purpose;
         match key.code {
-            KeyCode::Esc => self.overlay = None,
+            KeyCode::Esc => self.close_overlay(),
             KeyCode::Char('j') | KeyCode::Down if count > 0 => {
                 if let Some(Overlay::AgentPicker(picker)) = &mut self.overlay {
                     picker.selected = (selected + 1) % count;
@@ -156,22 +190,35 @@ impl App {
                     Some(Overlay::AgentPicker(picker)) => picker.items.get(selected).cloned(),
                     _ => None,
                 };
-                match item {
-                    Some(AgentPickerItem::Recent(session)) => {
+                match (purpose, item) {
+                    (_, None) => {},
+                    (AgentPickerPurpose::Launch, Some(AgentPickerItem::Recent(session))) => {
                         self.overlay = None;
                         self.reopen_agent_session(session.id());
                     },
-                    Some(AgentPickerItem::New(AgentTool::Custom)) => {
+                    (AgentPickerPurpose::Launch, Some(AgentPickerItem::New(AgentTool::Custom))) => {
                         self.open_agent_session_form(AgentTool::Custom);
                     },
-                    Some(AgentPickerItem::New(tool)) => {
+                    (AgentPickerPurpose::Launch, Some(AgentPickerItem::New(tool))) => {
                         self.overlay = None;
                         self.create_agent_session(tool, None, None, None);
                     },
-                    None => {},
+                    (
+                        AgentPickerPurpose::Configure,
+                        Some(AgentPickerItem::New(AgentTool::Custom)),
+                    ) => {
+                        // Custom drops to the command panel, where the command is
+                        // typed and the provider inferred from it.
+                        self.open_configured_process_form(ProcessKind::Agent);
+                    },
+                    (AgentPickerPurpose::Configure, Some(AgentPickerItem::New(tool))) => {
+                        self.open_configured_agent_name_form(tool);
+                    },
+                    // The configure menu lists no recent sessions.
+                    (AgentPickerPurpose::Configure, Some(AgentPickerItem::Recent(_))) => {},
                 }
             },
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if purpose == AgentPickerPurpose::Launch => {
                 let tool = match &self.overlay {
                     Some(Overlay::AgentPicker(picker)) => picker.items.get(selected),
                     _ => None,

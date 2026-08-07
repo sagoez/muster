@@ -56,6 +56,11 @@ pub enum ConfigError {
         /// Live provider process retaining ownership.
         owner: AgentProcessId,
     },
+    /// A concurrent pin already transferred the conversation into a different
+    /// configured agent, so transferring it again would clobber that agent's
+    /// session and orphan its seeded record.
+    #[error("agent session '{0}' was already pinned by another instance")]
+    AgentSessionAlreadyPinned(AgentSessionId),
     /// A legacy registry entry has no stable location outside its original
     /// launch directory.
     #[error(

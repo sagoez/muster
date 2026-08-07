@@ -18,7 +18,7 @@ use crate::{
     domain::{
         agent_session::{
             AgentProcessId, AgentProcessStartToken, AgentSession, AgentSessionId,
-            AgentSessionState, LaunchToken, NativeSessionId,
+            AgentSessionState, ConfiguredAgentKey, LaunchToken, NativeSessionId,
         },
         config::ConfigError,
         port::AgentSessionStore,
@@ -264,6 +264,14 @@ impl YamlAgentSessionStore {
         sessions.push(session);
     }
 
+    /// Whether `session` is the durable record for the same configured agent as
+    /// `other`: same owning project and same (present) configured key.
+    fn same_configured_agent(session: &AgentSession, other: &AgentSession) -> bool {
+        session.project() == other.project()
+            && session.configured_key().is_some()
+            && session.configured_key() == other.configured_key()
+    }
+
     /// Claims a session for a newly launched provider unless a verified live
     /// owner already holds it.
     ///
@@ -393,11 +401,9 @@ impl AgentSessionStore for YamlAgentSessionStore {
         // Default to the create case; overwritten to the existing id on reuse.
         let mut resolved = candidate.id().clone();
         Self::update(&path, |sessions| {
-            let existing = sessions.iter_mut().find(|session| {
-                session.project() == candidate.project()
-                    && session.configured_key().is_some()
-                    && session.configured_key() == candidate.configured_key()
-            });
+            let existing = sessions
+                .iter_mut()
+                .find(|session| Self::same_configured_agent(session, candidate));
             match existing {
                 Some(session) => {
                     *session = session.clone().with_configured_command(
@@ -411,6 +417,104 @@ impl AgentSessionStore for YamlAgentSessionStore {
             Ok(())
         })?;
         Ok(resolved)
+    }
+
+    fn pin_configured(&self, session: &AgentSession) -> Result<Vec<AgentSession>, ConfigError> {
+        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
+        let mut displaced = Vec::new();
+        Self::update(&path, |sessions| {
+            // Under the lock, the source must still be unconfigured, or already this
+            // exact target (an idempotent retry). A source a concurrent instance
+            // already pinned to a different agent must not be transferred again:
+            // doing so would clobber that agent's session and orphan its seed.
+            if let Some(current) = sessions
+                .iter()
+                .find(|candidate| candidate.id() == session.id())
+                && current.configured_key().is_some()
+                && !Self::same_configured_agent(current, session)
+            {
+                return Err(ConfigError::AgentSessionAlreadyPinned(session.id().clone()));
+            }
+            // Overlay the live runtime state of the record being transferred, read
+            // fresh under the lock, so the transfer cannot erase a still-live owner
+            // (letting autostart run a competing provider) or lose an identity a
+            // concurrent reopen captured after the caller's snapshot was taken.
+            let record = sessions
+                .iter()
+                .find(|candidate| candidate.id() == session.id())
+                .map_or_else(
+                    || session.clone(),
+                    |current| session.clone().with_runtime_state_of(current),
+                );
+            // Displaced records (the source and any prior record for this target)
+            // are returned so a failed follow-up can restore the full pre-pin state.
+            let (removed, kept): (Vec<_>, Vec<_>) = sessions.drain(..).partition(|candidate| {
+                candidate.id() == session.id() || Self::same_configured_agent(candidate, session)
+            });
+            *sessions = kept;
+            sessions.push(record);
+            displaced = removed;
+            Ok(())
+        })?;
+        Ok(displaced)
+    }
+
+    fn restore_sessions(
+        &self,
+        expected: &AgentSession,
+        records: &[AgentSession],
+    ) -> Result<(), ConfigError> {
+        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
+        Self::update(&path, |sessions| {
+            for record in records {
+                let position = sessions
+                    .iter()
+                    .position(|candidate| candidate.id() == record.id());
+                let restored = match position {
+                    Some(index) => {
+                        let current = &sessions[index];
+                        // Leave the pin's transferred record alone if a concurrent
+                        // operation re-targeted it, rather than clobbering that change.
+                        if record.id() == expected.id()
+                            && current.configured_key() != expected.configured_key()
+                        {
+                            continue;
+                        }
+                        // Restore the displaced identity but keep any runtime state a
+                        // live provider wrote onto the current record during the write.
+                        record.clone().with_runtime_state_of(current)
+                    },
+                    None => record.clone(),
+                };
+                sessions.retain(|candidate| candidate.id() != record.id());
+                sessions.push(restored);
+            }
+            Ok(())
+        })
+    }
+
+    fn retire_orphaned_configured(
+        &self,
+        project: &Path,
+        live_keys: &[ConfiguredAgentKey],
+    ) -> Result<usize, ConfigError> {
+        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
+        let mut retired = 0;
+        Self::update(&path, |sessions| {
+            for session in sessions.iter_mut() {
+                let orphaned = session.project() == project
+                    && session
+                        .configured_key()
+                        .as_ref()
+                        .is_some_and(|key| !live_keys.contains(key));
+                if orphaned {
+                    *session = session.clone().unconfigure();
+                    retired += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(retired)
     }
 
     fn set_state(&self, id: &AgentSessionId, state: AgentSessionState) -> Result<(), ConfigError> {

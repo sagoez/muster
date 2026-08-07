@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use getset::Getters;
 use nutype::nutype;
@@ -303,13 +303,51 @@ impl AgentSession {
         self
     }
 
+    /// Returns a copy detached from its configured agent, becoming a history
+    /// record again. Used to recover a configured session left without a matching
+    /// `muster.yml` agent so it reappears in history and the pin picker.
+    pub fn unconfigure(mut self) -> Self {
+        self.configured_key = None;
+        self
+    }
+
+    /// Returns a copy carrying `source`'s live runtime state - captured identity,
+    /// reporter binding, live owner, launch token, and lifecycle - while keeping
+    /// this record's configured identity. Used when a conversation is transferred
+    /// into a configured agent, so the transfer cannot drop an owner that is still
+    /// live (which would let autostart run a second provider for the conversation)
+    /// or a native id captured after a stale snapshot was taken.
+    pub fn with_runtime_state_of(mut self, source: &AgentSession) -> Self {
+        self.native_id = source.native_id.clone();
+        self.native_reporter_process_id = source.native_reporter_process_id;
+        self.native_reporter_start_token = source.native_reporter_start_token;
+        self.owner_process_id = source.owner_process_id;
+        self.owner_process_start_token = source.owner_process_start_token;
+        self.launch_token = source.launch_token.clone();
+        self.state = source.state;
+        self
+    }
+
+    /// The directory the conversation ran in: its working dir when set (joined to
+    /// its workspace folder if relative), else that workspace folder. `None` only
+    /// when the owning config path has no parent directory.
+    pub fn effective_working_dir(&self) -> Option<PathBuf> {
+        let workspace = self.project.parent();
+        match &self.working_dir {
+            Some(dir) if dir.is_absolute() => Some(dir.clone()),
+            Some(dir) => workspace.map(|folder| folder.join(dir)),
+            None => workspace.map(Path::to_path_buf),
+        }
+    }
+
     /// Returns a copy with the provider and launch command refreshed, keeping the
     /// captured conversation when the provider is unchanged so a configured
     /// session tracks edits to its `muster.yml` command. A provider change drops
-    /// the captured native id, since one provider cannot resume another's
-    /// conversation, and resets the lifecycle to `Pending`: the new provider has
-    /// no conversation yet, so restore relaunches it fresh rather than skipping it
-    /// as an owned-but-uncaptured session. The owner is retained so that while the
+    /// the captured native id and the provider-specific resume template, since one
+    /// provider cannot resume another's conversation, and resets the lifecycle to
+    /// `Pending`: the new provider has no conversation yet, so restore relaunches
+    /// it fresh rather than skipping it as an owned-but-uncaptured session. The
+    /// owner is retained so that while the
     /// previous provider is still running its live-owner claim blocks the new one
     /// from starting; once that owner is dead it no longer blocks the new launch.
     pub fn with_configured_command(mut self, tool: AgentTool, launch_command: CommandLine) -> Self {
@@ -317,6 +355,11 @@ impl AgentSession {
             self.native_id = None;
             self.native_reporter_process_id = None;
             self.native_reporter_start_token = None;
+            // The resume template is provider-specific (it wraps one provider's
+            // resume invocation), so it cannot survive a provider change: kept, it
+            // would resume the new provider's captured id with the old provider's
+            // command. The new provider resumes with its own built-in mechanism.
+            self.resume_command = None;
             self.state = AgentSessionState::Pending;
         }
         self.tool = tool;
@@ -555,6 +598,107 @@ impl AgentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Transferring a conversation into a configured agent keeps the configured
+    /// identity but takes the source's live runtime state, so a still-live owner
+    /// is preserved rather than dropped (which would let autostart run a second
+    /// provider for the same conversation).
+    #[test]
+    fn with_runtime_state_of_keeps_identity_but_adopts_live_state() {
+        let source = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Grace").unwrap())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/work/backend/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("conv-42").unwrap()))
+            .owner_process_id(Some(AgentProcessId::try_new(4242).unwrap()))
+            .state(AgentSessionState::Open)
+            .build();
+        let configured = AgentSession::builder()
+            .id(source.id().clone())
+            .name(ProcessName::try_new("backend").unwrap())
+            .tool(AgentTool::Custom)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("wrapper").unwrap())
+            .working_dir(Some(PathBuf::from("/work/backend")))
+            .configured_key(Some(
+                ConfiguredAgentKey::of(&ProcessName::try_new("backend").unwrap()).unwrap(),
+            ))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        let merged = configured.with_runtime_state_of(&source);
+
+        assert_eq!(merged.owner_process_id(), source.owner_process_id());
+        assert_eq!(merged.native_id(), source.native_id());
+        assert_eq!(*merged.state(), AgentSessionState::Open);
+        assert_eq!(merged.name().as_ref(), "backend");
+        assert_eq!(*merged.tool(), AgentTool::Custom);
+        assert!(merged.configured_key().is_some());
+        assert_eq!(merged.working_dir(), &Some(PathBuf::from("/work/backend")));
+    }
+
+    /// A conversation's effective directory is its working dir resolved against its
+    /// workspace when relative, taken verbatim when absolute, and the workspace
+    /// folder when unset.
+    #[test]
+    fn effective_working_dir_resolves_the_conversation_directory() {
+        let at = |working_dir: Option<&str>| {
+            AgentSession::builder()
+                .id(AgentSessionId::generate().unwrap())
+                .name(ProcessName::try_new("x").unwrap())
+                .tool(AgentTool::Claude)
+                .project(PathBuf::from("/work/svc/muster.yml"))
+                .launch_command(CommandLine::try_new("claude").unwrap())
+                .working_dir(working_dir.map(PathBuf::from))
+                .state(AgentSessionState::Closed)
+                .build()
+        };
+
+        assert_eq!(
+            at(None).effective_working_dir(),
+            Some(PathBuf::from("/work/svc"))
+        );
+        assert_eq!(
+            at(Some("api")).effective_working_dir(),
+            Some(PathBuf::from("/work/svc/api"))
+        );
+        assert_eq!(
+            at(Some("/elsewhere/api")).effective_working_dir(),
+            Some(PathBuf::from("/elsewhere/api"))
+        );
+    }
+
+    /// A command edit that keeps the provider retains the custom resume template,
+    /// but one that changes the provider drops it along with the captured id, so a
+    /// later restart cannot resume the new provider with the old provider's command.
+    #[test]
+    fn a_provider_change_drops_the_resume_template() {
+        let template = CommandLine::try_new("mycodex resume {session_id}").unwrap();
+        let session = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("agent").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/p/muster.yml"))
+            .launch_command(CommandLine::try_new("mycodex").unwrap())
+            .resume_command(Some(template.clone()))
+            .native_id(Some(NativeSessionId::try_new("conv-1").unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        let same = session.clone().with_configured_command(
+            AgentTool::Codex,
+            CommandLine::try_new("mycodex --model o3").unwrap(),
+        );
+        assert_eq!(same.resume_command().as_ref(), Some(&template));
+        assert!(same.native_id().is_some());
+
+        let changed = session
+            .with_configured_command(AgentTool::Claude, CommandLine::try_new("claude").unwrap());
+        assert!(changed.resume_command().is_none());
+        assert!(changed.native_id().is_none());
+    }
 
     /// A reported-identity session that never bound an owner never ran, so it
     /// restores as a fresh conversation instead of being stuck forever.

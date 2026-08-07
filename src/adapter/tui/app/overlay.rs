@@ -146,7 +146,12 @@ impl App {
             Some(Overlay::AgentPicker(picker)) => picker.switcher,
             _ => None,
         };
-        let items = AgentTool::options().map(AgentPickerItem::New).collect();
+        let mut items: Vec<AgentPickerItem> =
+            AgentTool::options().map(AgentPickerItem::New).collect();
+        // The last row drills into existing conversations to pin one as a native,
+        // persisted agent - which is how a conversation from another folder becomes
+        // a member of this workspace, keeping its own cwd.
+        items.push(AgentPickerItem::FromConversation);
         self.overlay = Some(Overlay::AgentPicker(AgentPicker {
             items,
             selected: 0,
@@ -164,6 +169,58 @@ impl App {
         self.open_form(form, FormIntent::AddConfiguredAgent(tool));
     }
 
+    /// Lists every resumable conversation - across all folders - so one can be
+    /// pinned into this workspace as a configured agent. Only conversations with a
+    /// captured provider identity appear, since only those can be resumed. Retains
+    /// the switcher held behind the configure menu so Esc unwinds to it.
+    pub(super) fn open_pin_conversation_picker(&mut self) {
+        let switcher = match self.overlay.take() {
+            Some(Overlay::Switcher(switcher)) => Some(switcher),
+            Some(Overlay::Form(form)) => form.switcher,
+            Some(Overlay::AgentPicker(picker)) => picker.switcher,
+            _ => None,
+        };
+        let (items, error) = match self.agent_sessions() {
+            Ok(sessions) => (
+                sessions
+                    .into_iter()
+                    .rev()
+                    .filter(|session| {
+                        // Offer only a settled conversation that can actually be
+                        // resumed. A configured record is a muster.yml agent, not
+                        // history (and a pinned conversation is already one, so it is
+                        // never offered twice). `resume` is `Some` only with a
+                        // captured identity and a constructible resume command, so a
+                        // wrapped or template-less session that could not autostart is
+                        // filtered out rather than pinned into a dead agent.
+                        session.configured_key().is_none()
+                            && *session.state() == AgentSessionState::Closed
+                            && session.resume().is_some()
+                    })
+                    .map(Box::new)
+                    .map(AgentPickerItem::Conversation)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        self.overlay = Some(Overlay::AgentPicker(AgentPicker {
+            items,
+            selected: 0,
+            error,
+            purpose: AgentPickerPurpose::PinConversation,
+            switcher,
+        }));
+    }
+
+    /// Opens the name step for pinning `source` as a configured agent. A blank
+    /// name autogenerates a project-unique one; the folder and resume identity come
+    /// from the conversation.
+    pub(super) fn open_pin_conversation_name_form(&mut self, source: Box<AgentSession>) {
+        let form = Form::new(ADD_PROCESS_TITLE, vec![Field::text(SESSION_NAME_FIELD)]);
+        self.open_form(form, FormIntent::PinConversation(source));
+    }
+
     /// Handles navigation, quick launch, customization, and cancel in the agent
     /// picker.
     pub(super) fn handle_agent_picker_key(&mut self, key: KeyEvent) {
@@ -174,6 +231,11 @@ impl App {
         let selected = picker.selected;
         let purpose = picker.purpose;
         match key.code {
+            // The pin list is drilled into from the configure provider menu, so Esc
+            // steps back to that menu rather than unwinding past it to the switcher.
+            KeyCode::Esc if purpose == AgentPickerPurpose::PinConversation => {
+                self.open_configured_agent_picker();
+            },
             KeyCode::Esc => self.close_overlay(),
             KeyCode::Char('j') | KeyCode::Down if count > 0 => {
                 if let Some(Overlay::AgentPicker(picker)) = &mut self.overlay {
@@ -214,8 +276,34 @@ impl App {
                     (AgentPickerPurpose::Configure, Some(AgentPickerItem::New(tool))) => {
                         self.open_configured_agent_name_form(tool);
                     },
-                    // The configure menu lists no recent sessions.
-                    (AgentPickerPurpose::Configure, Some(AgentPickerItem::Recent(_))) => {},
+                    (AgentPickerPurpose::Configure, Some(AgentPickerItem::FromConversation)) => {
+                        self.open_pin_conversation_picker();
+                    },
+                    (
+                        AgentPickerPurpose::PinConversation,
+                        Some(AgentPickerItem::Conversation(session)),
+                    ) => {
+                        self.open_pin_conversation_name_form(session);
+                    },
+                    // Combinations a purpose never surfaces are enumerated rather than
+                    // caught by a wildcard, so a new item or purpose that needs
+                    // wiring fails to compile here instead of silently no-opping.
+                    (
+                        AgentPickerPurpose::Launch,
+                        Some(AgentPickerItem::FromConversation | AgentPickerItem::Conversation(_)),
+                    ) => {},
+                    (
+                        AgentPickerPurpose::Configure,
+                        Some(AgentPickerItem::Recent(_) | AgentPickerItem::Conversation(_)),
+                    ) => {},
+                    (
+                        AgentPickerPurpose::PinConversation,
+                        Some(
+                            AgentPickerItem::Recent(_)
+                            | AgentPickerItem::New(_)
+                            | AgentPickerItem::FromConversation,
+                        ),
+                    ) => {},
                 }
             },
             KeyCode::Char('e') if purpose == AgentPickerPurpose::Launch => {

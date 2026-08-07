@@ -84,7 +84,7 @@ impl App {
             return;
         };
         let values = modal.form.values();
-        let intent = modal.intent;
+        let intent = modal.intent.clone();
         match intent {
             FormIntent::SaveCurrentProject => self.save_current_project(&values),
             FormIntent::NewProject => self.new_project(&values),
@@ -94,6 +94,9 @@ impl App {
                 self.add_configured_process(kind, &values);
             },
             FormIntent::AddConfiguredAgent(tool) => self.add_configured_agent(tool, &values),
+            FormIntent::PinConversation(source) => {
+                self.pin_conversation(&source, values.first().map_or("", String::as_str));
+            },
         }
     }
 
@@ -603,9 +606,6 @@ impl App {
         let (Some(name_input), Some(command)) = (values.first(), values.get(1)) else {
             return;
         };
-        let Some(config_path) = self.current_config.clone() else {
-            return;
-        };
         let Some(name) = self.resolve_configured_name(kind, name_input.trim()) else {
             return;
         };
@@ -625,11 +625,43 @@ impl App {
             self.report_error(AGENT_COMMAND_REQUIRED);
             return;
         }
-        let spec = ProcessSpec::builder().name(name).command(command).build();
-        let target = ProcessSpecMatcher::of_spec(kind, &spec);
-        // Route through the registry's locked read-modify-write, the same one
-        // `muster run` uses, so an overlapping CLI add and this add cannot
-        // silently discard each other.
+        self.persist_configured_process(kind, name, command, None);
+    }
+
+    /// Persists a resolved configured process to `muster.yml` and reconciles it in
+    /// place. `working_dir` pins the process to a directory other than the
+    /// workspace folder, which is how an agent pulled in from another folder keeps
+    /// its own cwd.
+    pub(super) fn persist_configured_process(
+        &mut self,
+        kind: ProcessKind,
+        name: ProcessName,
+        command: Option<CommandLine>,
+        working_dir: Option<PathBuf>,
+    ) {
+        let spec = ProcessSpec::builder()
+            .name(name)
+            .command(command)
+            .working_dir(working_dir)
+            .build();
+        let Some((config, target, occurrence)) = self.write_configured_spec(kind, &spec) else {
+            return;
+        };
+        self.reconcile_configured_launch(&target, &config, occurrence);
+    }
+
+    /// Appends `spec` to `muster.yml` through the registry's locked
+    /// read-modify-write - the same one `muster run` uses, so an overlapping CLI
+    /// add cannot silently discard this one. Returns the new config, the spec
+    /// matcher, and the occurrence index of the appended entry, or `None` (after
+    /// reporting) when the write fails.
+    fn write_configured_spec(
+        &mut self,
+        kind: ProcessKind,
+        spec: &ProcessSpec,
+    ) -> Option<(WorkspaceConfig, ProcessSpecMatcher, usize)> {
+        let config_path = self.current_config.clone()?;
+        let target = ProcessSpecMatcher::of_spec(kind, spec);
         let mut updated = None;
         let mut target_occurrence = None;
         let update_result = {
@@ -662,31 +694,173 @@ impl App {
             };
             self.registry.update_workspace(&config_path, &mut append)
         };
-        if update_result.is_err() {
-            self.report_error(WORKSPACE_SAVE_ERROR);
-            return;
+        match (update_result, updated, target_occurrence) {
+            (Ok(()), Some(config), Some(occurrence)) => Some((config, target, occurrence)),
+            _ => {
+                self.report_error(WORKSPACE_SAVE_ERROR);
+                None
+            },
         }
-        let Some(config) = updated else {
-            self.report_error(WORKSPACE_SAVE_ERROR);
-            return;
-        };
+    }
+
+    /// Reconciles a just-written config in place and autostarts the appended
+    /// process. Agents launch with automatic (restore) semantics: a fresh agent
+    /// launches, a captured one resumes, and a re-added agent whose reporter
+    /// session was never captured is left stopped rather than silently starting a
+    /// new conversation. A failed link yields `Ok(None)`.
+    fn reconcile_configured_launch(
+        &mut self,
+        target: &ProcessSpecMatcher,
+        config: &WorkspaceConfig,
+        occurrence: usize,
+    ) {
         self.overlay = None;
-        self.reconcile_config(&config);
-        let launch_pane = target_occurrence
-            .and_then(|occurrence| self.configured_process_for_spec_occurrence(&target, occurrence))
+        self.reconcile_config(config);
+        let launch_pane = self
+            .configured_process_for_spec_occurrence(target, occurrence)
             .filter(|process| *process.autostart() && !process.state().is_active())
             .map(|process| *process.id());
         if let Some(pane) = launch_pane {
-            // Autostart the just-added agent with automatic (restore) semantics: a
-            // fresh agent launches, a captured one resumes, and a re-added agent
-            // whose reporter session was never captured is left stopped rather than
-            // silently starting a new conversation. A failed link yields Ok(None).
             match self.command_of(pane, LaunchIntent::Automatic) {
                 Ok(Some((command, cwd))) => self.spawn(pane, command, cwd),
                 Ok(None) => {},
                 Err(error) => self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}")),
             }
         }
+    }
+
+    /// Pins an existing conversation as a configured agent in the current
+    /// workspace: a native, autostarting member that resumes that exact
+    /// conversation and keeps running in its own folder, even though this
+    /// workspace lives elsewhere. A blank name autogenerates one.
+    // TODO(pin-atomicity): this is a two-store transaction (the session transfer
+    // in `pin_configured`, then the `muster.yml` write) that is not atomic across
+    // processes. Two known cross-process races remain, both requiring two muster
+    // instances on the same project pinning concurrently, or a crash between the
+    // two writes:
+    //   1. Concurrent pins to the same name can displace each other's transferred
+    //      record before either config write wins, binding an agent to the wrong
+    //      conversation or discarding a record.
+    //   2. `recover_orphaned_pins` on one instance's startup cannot tell another
+    //      instance's in-flight pin from an abandoned one, so it can un-configure a
+    //      live transaction.
+    // Fix: a durable pending-pin lease on the session holding the initiating
+    // instance's process identity (reuse `LocalProcessIdentity`). `pin_configured`
+    // sets it on transfer and rejects a target already held by a *live* lease; a
+    // `commit_pin` step clears it after the config write; recovery un-configures an
+    // orphan only when its lease is absent or its holder is dead. This is a
+    // state-file schema change, deferred until the concurrency is worth the cost.
+    pub(super) fn pin_conversation(&mut self, source: &AgentSession, name_input: &str) {
+        let Some(project) = self.current_config.clone() else {
+            return;
+        };
+        let Some(native_id) = source.native_id().clone() else {
+            self.set_notice(AGENT_SESSION_NOT_RESUMABLE.to_string());
+            return;
+        };
+        let Some(name) = self.resolve_configured_name(ProcessKind::Agent, name_input.trim()) else {
+            return;
+        };
+        let Ok(key) = ConfiguredAgentKey::of(&name) else {
+            return;
+        };
+        let command = source.launch_command().clone();
+        let folder = Self::conversation_folder(source);
+        // Transfer the source conversation into the configured agent's durable
+        // session, reusing its id so the source history record is retired rather
+        // than cloned: the native identity keeps a single launchable owner instead
+        // of leaving the source reopenable from its own workspace in parallel. The
+        // tool is re-inferred from the command it will run under, matching the tool
+        // the linker later derives, so the reconcile refresh keeps the native id
+        // instead of wiping it; the resume template is carried over so a
+        // conversation resumed by a custom invocation keeps resuming that way.
+        let seeded = AgentSession::builder()
+            .id(source.id().clone())
+            .name(name.clone())
+            .tool(AgentTool::from_command(Some(&command)))
+            .project(project.clone())
+            .launch_command(command.clone())
+            .working_dir(folder.clone())
+            .resume_command(source.resume_command().clone())
+            .native_id(Some(native_id))
+            .configured_key(Some(key))
+            .state(AgentSessionState::Closed)
+            .build();
+        // Adopt the identity before publishing the config, so the agent is never
+        // written to muster.yml without its durable session (which would autostart a
+        // fresh conversation). A store failure here touches nothing else; on success
+        // it returns the records it displaced so they can be restored on rollback.
+        let pinned = self
+            .agent_session_store
+            .as_ref()
+            .map(|store| store.pin_configured(&seeded));
+        let displaced = match pinned {
+            Some(Ok(displaced)) => displaced,
+            Some(Err(error)) => {
+                self.report_error(&format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+                return;
+            },
+            None => return,
+        };
+        let spec = ProcessSpec::builder()
+            .name(name)
+            .command(Some(command))
+            .working_dir(folder)
+            .build();
+        let target = ProcessSpecMatcher::of_spec(ProcessKind::Agent, &spec);
+        let Some((config, _, occurrence)) = self.write_configured_spec(ProcessKind::Agent, &spec)
+        else {
+            self.roll_back_pin(&project, &target, &seeded, &displaced);
+            return;
+        };
+        self.reconcile_configured_launch(&target, &config, occurrence);
+    }
+
+    /// Rolls back a pin whose config write failed, restoring the records the
+    /// transfer displaced so the conversation is not stranded as a configured
+    /// record hidden from both pickers.
+    ///
+    /// The rollback is conditional: if an agent matching this pin's exact spec is
+    /// now present in the config, a concurrent instance committed this same pin and
+    /// owns the configured record, so restoring the pre-pin snapshot would clobber
+    /// its live state. Matching the full spec (name and command), not just the name,
+    /// avoids mistaking an unrelated agent that merely shares the name for this
+    /// pin's commit. Only a genuinely orphaned transfer is undone. A restore that
+    /// itself fails is surfaced rather than dropped, since it leaves the session
+    /// store inconsistent with `muster.yml`.
+    fn roll_back_pin(
+        &mut self,
+        config_path: &Path,
+        target: &ProcessSpecMatcher,
+        seeded: &AgentSession,
+        displaced: &[AgentSession],
+    ) {
+        let committed = self
+            .registry
+            .workspace(config_path)
+            .is_ok_and(|config| config.agents().iter().any(|agent| target.matches(agent)));
+        if committed {
+            return;
+        }
+        let restored = self
+            .agent_session_store
+            .as_ref()
+            .map(|store| store.restore_sessions(seeded, displaced));
+        if let Some(Err(error)) = restored {
+            self.report_error(&format!("{AGENT_SESSION_ROLLBACK_ERROR}: {error}"));
+        }
+    }
+
+    /// The absolute directory a conversation ran in, resolved the same way a spawn
+    /// resolves its cwd: its working dir when set (absolutized against its own
+    /// workspace folder if relative), else that workspace folder. `None` only when
+    /// its config path has no parent directory.
+    fn conversation_folder(source: &AgentSession) -> Option<PathBuf> {
+        Self::resolve_spawn_paths(
+            Some(source.project().as_path()),
+            source.working_dir().clone(),
+        )
+        .1
     }
 
     /// Returns the tracked configured process representing one occurrence of a

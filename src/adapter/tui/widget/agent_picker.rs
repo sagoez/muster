@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -29,6 +31,14 @@ const TOOL_SEPARATOR: &str = "  ";
 const LAUNCH_HINT: &str = " ⏎ launch   e customize   esc cancel";
 /// Footer actions when adding a configured agent.
 const CONFIGURE_HINT: &str = " ⏎ select   esc cancel";
+/// Title shown when picking a conversation to pin as a configured agent.
+const PIN_TITLE: &str = "Pin a conversation";
+/// Footer actions when picking a conversation to pin.
+const PIN_HINT: &str = " ⏎ pin   esc cancel";
+/// Heading above the list of resumable conversations to pin.
+const CONVERSATIONS_HEADING: &str = "Conversations";
+/// The configure-menu row that opens the conversation list.
+const FROM_CONVERSATION_LABEL: &str = "Resume a conversation…";
 /// Heading color.
 const HEADING_COLOR: Color = Color::DarkGray;
 /// Highlighted-row color.
@@ -47,15 +57,21 @@ pub enum AgentPickerItem {
     Recent(Box<AgentSession>),
     /// A fresh provider session.
     New(AgentTool),
+    /// The configure-menu row that drills into the conversation list.
+    FromConversation,
+    /// A resumable conversation offered for pinning, labeled with its folder.
+    Conversation(Box<AgentSession>),
 }
 
 /// What the picker is for, which selects its title, provider heading, and hints.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentPickerPurpose {
     /// Launch a disposable session (the `A` picker): recent sessions above presets.
     Launch,
     /// Add a persisted configured agent (the `a` agent flow): provider presets only.
     Configure,
+    /// Pick an existing conversation to pin as a configured agent in this workspace.
+    PinConversation,
 }
 
 impl AgentPickerPurpose {
@@ -64,6 +80,7 @@ impl AgentPickerPurpose {
         match self {
             Self::Launch => LAUNCH_TITLE,
             Self::Configure => CONFIGURE_TITLE,
+            Self::PinConversation => PIN_TITLE,
         }
     }
 
@@ -72,14 +89,16 @@ impl AgentPickerPurpose {
         match self {
             Self::Launch => LAUNCH_HINT,
             Self::Configure => CONFIGURE_HINT,
+            Self::PinConversation => PIN_HINT,
         }
     }
 
-    /// Heading above the provider presets for this purpose.
+    /// Heading above this purpose's non-recent rows.
     fn new_heading(self) -> &'static str {
         match self {
             Self::Launch => LAUNCH_NEW_HEADING,
             Self::Configure => CONFIGURE_NEW_HEADING,
+            Self::PinConversation => CONVERSATIONS_HEADING,
         }
     }
 }
@@ -231,9 +250,39 @@ fn item_line(item: &AgentPickerItem, selected: bool) -> Line<'static> {
                 Style::default().fg(TOOL_COLOR),
             ));
         },
+        AgentPickerItem::Conversation(session) => {
+            spans.push(Span::styled(session.name().as_ref().to_string(), style));
+            spans.push(Span::raw(TOOL_SEPARATOR));
+            spans.push(Span::styled(
+                conversation_folder_label(session),
+                Style::default().fg(TOOL_COLOR),
+            ));
+            spans.push(Span::raw(TOOL_SEPARATOR));
+            spans.push(Span::styled(
+                session.tool().to_string(),
+                Style::default().fg(TOOL_COLOR),
+            ));
+        },
         AgentPickerItem::New(tool) => spans.push(Span::styled(tool.to_string(), style)),
+        AgentPickerItem::FromConversation => {
+            spans.push(Span::styled(FROM_CONVERSATION_LABEL, style));
+        },
     }
     Line::from(spans)
+}
+
+/// A concise label for where a conversation actually ran, and where pinning will
+/// launch it: the name of its effective working directory (its working dir
+/// resolved against its workspace, else the workspace folder), so conversations
+/// from one workspace but different directories are told apart. Falls back to the
+/// config path when there is no such folder.
+fn conversation_folder_label(session: &AgentSession) -> String {
+    session
+        .effective_working_dir()
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| session.project().to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

@@ -229,6 +229,9 @@ const GENERATED_NAME_ATTEMPTS: usize = 8;
 const GENERATED_AGENT_PREFIX: &str = "agent";
 /// Shown when durable agent-session state cannot be loaded or written.
 const AGENT_SESSION_STORE_ERROR: &str = "could not update agent session history";
+/// Shown when rolling back a failed pin cannot restore the displaced session
+/// records, leaving the session store inconsistent with `muster.yml`.
+const AGENT_SESSION_ROLLBACK_ERROR: &str = "could not undo a failed pin; agent session history may be inconsistent - check `muster doctor`";
 /// Shown when a closed session has no provider identity to resume.
 const AGENT_SESSION_NOT_RESUMABLE: &str = "the provider never reported this session's ID; check `muster doctor`, approve hooks in the provider (codex: /hooks), then open a new session";
 /// Shown when there is no closed resumable session in this workspace.
@@ -607,7 +610,7 @@ impl Overlay {
 }
 
 /// What a submitted form should do.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum FormIntent {
     /// Register the current workspace under the typed name.
     SaveCurrentProject,
@@ -622,6 +625,10 @@ enum FormIntent {
     /// Persist a configured agent for the chosen provider preset, naming it from
     /// the form while the launch command comes from the preset.
     AddConfiguredAgent(AgentTool),
+    /// Pin an existing conversation as a configured agent in this workspace,
+    /// naming it from the form; its folder and resume identity come from the
+    /// conversation.
+    PinConversation(Box<AgentSession>),
 }
 
 /// The running TUI application: workspace state plus the live panes.
@@ -946,6 +953,11 @@ impl App {
 
     /// Spawns every configured process.
     pub fn start(&mut self) {
+        // Recover any pin stranded by a crash between its two durable writes - a
+        // configured session with no matching workspace agent - back to history
+        // before linking, so it is offered again instead of hidden from both
+        // pickers.
+        self.recover_orphaned_pins();
         // Link before spawning and restoring: an autostarted configured agent
         // must carry its session id so its first launch resumes and captures, and
         // its session must be present so `restore_open_agent_sessions` does not
@@ -1214,6 +1226,85 @@ mod tests {
             }
         }
 
+        fn pin_configured(&self, session: &AgentSession) -> Result<Vec<AgentSession>, ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            let same_target = |candidate: &AgentSession| {
+                candidate.project() == session.project()
+                    && candidate.configured_key().is_some()
+                    && candidate.configured_key() == session.configured_key()
+            };
+            if let Some(current) = sessions
+                .iter()
+                .find(|candidate| candidate.id() == session.id())
+                && current.configured_key().is_some()
+                && !same_target(current)
+            {
+                return Err(ConfigError::AgentSessionAlreadyPinned(session.id().clone()));
+            }
+            let record = sessions
+                .iter()
+                .find(|candidate| candidate.id() == session.id())
+                .map_or_else(
+                    || session.clone(),
+                    |current| session.clone().with_runtime_state_of(current),
+                );
+            let (removed, kept): (Vec<_>, Vec<_>) = sessions
+                .drain(..)
+                .partition(|candidate| candidate.id() == session.id() || same_target(candidate));
+            *sessions = kept;
+            sessions.push(record);
+            Ok(removed)
+        }
+
+        fn restore_sessions(
+            &self,
+            expected: &AgentSession,
+            records: &[AgentSession],
+        ) -> Result<(), ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            for record in records {
+                let position = sessions
+                    .iter()
+                    .position(|candidate| candidate.id() == record.id());
+                let restored = match position {
+                    Some(index) => {
+                        let current = &sessions[index];
+                        if record.id() == expected.id()
+                            && current.configured_key() != expected.configured_key()
+                        {
+                            continue;
+                        }
+                        record.clone().with_runtime_state_of(current)
+                    },
+                    None => record.clone(),
+                };
+                sessions.retain(|candidate| candidate.id() != record.id());
+                sessions.push(restored);
+            }
+            Ok(())
+        }
+
+        fn retire_orphaned_configured(
+            &self,
+            project: &Path,
+            live_keys: &[ConfiguredAgentKey],
+        ) -> Result<usize, ConfigError> {
+            let mut sessions = self.recorder.sessions.borrow_mut();
+            let mut retired = 0;
+            for session in sessions.iter_mut() {
+                let orphaned = session.project() == project
+                    && session
+                        .configured_key()
+                        .as_ref()
+                        .is_some_and(|key| !live_keys.contains(key));
+                if orphaned {
+                    *session = session.clone().unconfigure();
+                    retired += 1;
+                }
+            }
+            Ok(retired)
+        }
+
         fn set_state(
             &self,
             id: &AgentSessionId,
@@ -1304,6 +1395,21 @@ mod tests {
             Err(ConfigError::NoConfigDir)
         }
 
+        fn pin_configured(
+            &self,
+            _session: &AgentSession,
+        ) -> Result<Vec<AgentSession>, ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn restore_sessions(
+            &self,
+            _expected: &AgentSession,
+            _records: &[AgentSession],
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
         fn set_state(
             &self,
             _id: &AgentSessionId,
@@ -1330,6 +1436,14 @@ mod tests {
             _reporter_process_id: AgentProcessId,
             _reported_launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn retire_orphaned_configured(
+            &self,
+            _project: &Path,
+            _live_keys: &[ConfiguredAgentKey],
+        ) -> Result<usize, ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
     }
@@ -1357,6 +1471,21 @@ mod tests {
             Err(ConfigError::NoConfigDir)
         }
 
+        fn pin_configured(
+            &self,
+            _session: &AgentSession,
+        ) -> Result<Vec<AgentSession>, ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn restore_sessions(
+            &self,
+            _expected: &AgentSession,
+            _records: &[AgentSession],
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
         fn set_state(
             &self,
             _id: &AgentSessionId,
@@ -1383,6 +1512,14 @@ mod tests {
             _reporter_process_id: AgentProcessId,
             _reported_launch_token: Option<LaunchToken>,
         ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+
+        fn retire_orphaned_configured(
+            &self,
+            _project: &Path,
+            _live_keys: &[ConfiguredAgentKey],
+        ) -> Result<usize, ConfigError> {
             Err(ConfigError::NoConfigDir)
         }
     }
@@ -5102,6 +5239,20 @@ mod tests {
             .build()
     }
 
+    /// Builds a closed, resumable conversation (captured native id, no configured
+    /// link) in the given project, for the pin-a-conversation flow.
+    fn pinnable_conversation(name: &str, project: &str, native_id: &str) -> AgentSession {
+        AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new(name).unwrap())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from(project))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new(native_id).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build()
+    }
+
     /// Builds an app whose in-memory terminal has not yet observed its removal
     /// from the empty workspace config on disk.
     fn stale_terminal_app() -> App {
@@ -7117,7 +7268,8 @@ mod tests {
 
         press(&mut app, KeyCode::Char('a')); // kind form
         press(&mut app, KeyCode::Enter); // agent -> provider menu
-        press(&mut app, KeyCode::Char('k')); // wrap to the last option, Custom
+        press(&mut app, KeyCode::Char('k')); // wrap to the last row (Resume a conversation)
+        press(&mut app, KeyCode::Char('k')); // up to Custom
         press(&mut app, KeyCode::Enter); // Custom -> command panel
 
         let form = app.form().expect("the command panel is open");
@@ -7126,6 +7278,807 @@ mod tests {
             form.form.values().len(),
             2,
             "the command panel asks for a name and a command"
+        );
+    }
+
+    /// The add-agent menu's last row drills into resumable conversations from any
+    /// folder, offered so one can be pinned into this workspace.
+    #[test]
+    fn the_add_agent_menu_lists_conversations_to_pin() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, _sessions, _spawns) = agent_app(vec![source]);
+
+        app.open_configured_agent_picker();
+        press(&mut app, KeyCode::Char('k')); // wrap to the last row
+        press(&mut app, KeyCode::Enter); // Resume a conversation -> conversation list
+
+        let Some(Overlay::AgentPicker(picker)) = &app.overlay else {
+            panic!("the conversation list is open");
+        };
+        assert_eq!(picker.purpose, AgentPickerPurpose::PinConversation);
+        let listed: Vec<_> = picker
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                AgentPickerItem::Conversation(session) => Some(session.name().as_ref().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(listed, vec!["Grace".to_string()]);
+    }
+
+    /// Pinning a conversation writes it as a configured agent that runs in the
+    /// conversation's own folder and carries its provider identity, so it resumes
+    /// that exact conversation rather than starting fresh.
+    #[test]
+    fn pinning_a_conversation_makes_it_a_configured_agent_in_its_own_folder() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, sessions, _spawns) = agent_app(vec![source.clone()]);
+
+        app.pin_conversation(&source, "backend");
+
+        let added = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == "backend")
+            .expect("the pinned conversation is now a configured process");
+        assert_eq!(*added.kind(), ProcessKind::Agent);
+        assert_eq!(*added.origin(), ProcessOrigin::Configured);
+        assert_eq!(
+            added.working_dir(),
+            &Some(PathBuf::from("/work/backend")),
+            "the pinned agent keeps the conversation's folder as its cwd"
+        );
+        let seeded = sessions.sessions.borrow().iter().any(|session| {
+            session.configured_key().is_some() && session.native_id() == source.native_id()
+        });
+        assert!(
+            seeded,
+            "a configured session is seeded with the conversation's provider identity so it resumes"
+        );
+    }
+
+    /// A pinned conversation becomes a configured record, so it is no longer
+    /// offered as loose history to pin a second time.
+    #[test]
+    fn an_already_pinned_conversation_is_not_offered_again() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, _sessions, _spawns) = agent_app(vec![source.clone()]);
+
+        app.pin_conversation(&source, "backend");
+        app.open_pin_conversation_picker();
+
+        let Some(Overlay::AgentPicker(picker)) = &app.overlay else {
+            panic!("the conversation list is open");
+        };
+        let listed: Vec<_> = picker
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                AgentPickerItem::Conversation(session) => Some(session.name().as_ref().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            listed.is_empty(),
+            "the just-pinned conversation is excluded from the pin list, not offered a second time"
+        );
+    }
+
+    /// Esc from the drilled-in conversation list steps back to the provider menu it
+    /// was opened from rather than unwinding past it.
+    #[test]
+    fn canceling_the_pin_list_returns_to_the_provider_menu() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, _sessions, _spawns) = agent_app(vec![source]);
+
+        app.open_configured_agent_picker();
+        press(&mut app, KeyCode::Char('k')); // wrap to the last row
+        press(&mut app, KeyCode::Enter); // Resume a conversation -> conversation list
+        assert!(matches!(
+            &app.overlay,
+            Some(Overlay::AgentPicker(picker)) if picker.purpose == AgentPickerPurpose::PinConversation
+        ));
+
+        press(&mut app, KeyCode::Esc);
+
+        assert!(
+            matches!(
+                &app.overlay,
+                Some(Overlay::AgentPicker(picker))
+                    if picker.purpose == AgentPickerPurpose::Configure
+            ),
+            "Esc from the pin list returns to the provider menu, not to the switcher or a closed overlay"
+        );
+    }
+
+    /// Pinning a conversation whose command is an unrecognized wrapper keeps its
+    /// captured identity and custom resume template through reconciliation: the
+    /// seeded tool matches the tool re-inferred from the command, so the linker
+    /// refresh does not treat it as a provider change and wipe the native id.
+    #[test]
+    fn pinning_a_wrapped_conversation_preserves_its_identity_and_resume_template() {
+        let template = CommandLine::try_new("mycodex resume {session_id}").unwrap();
+        let source = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(ProcessName::try_new("Wrapped").unwrap())
+            .tool(AgentTool::Codex)
+            .project(PathBuf::from("/work/svc/muster.yml"))
+            .launch_command(CommandLine::try_new("mycodex").unwrap())
+            .resume_command(Some(template.clone()))
+            .native_id(Some(NativeSessionId::try_new("conv-9").unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+        let (mut app, sessions, _spawns) = agent_app(vec![source.clone()]);
+
+        app.pin_conversation(&source, "svc");
+
+        let store = sessions.sessions.borrow();
+        let seeded = store
+            .iter()
+            .find(|session| session.configured_key().is_some())
+            .expect("a configured session is seeded for the pinned conversation");
+        assert_eq!(
+            seeded.native_id(),
+            source.native_id(),
+            "the captured identity survives reconciliation instead of being wiped by an inferred provider change"
+        );
+        assert_eq!(
+            seeded.resume_command(),
+            source.resume_command(),
+            "the custom resume template is carried over so the conversation resumes the way it was launched"
+        );
+    }
+
+    /// Pinning transfers the source record rather than cloning it: reusing the
+    /// source id retires the original history entry, so the provider identity keeps
+    /// exactly one launchable owner instead of one reopenable from each workspace.
+    #[test]
+    fn pinning_transfers_the_source_leaving_one_owner_for_the_identity() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, sessions, _spawns) = agent_app(vec![source.clone()]);
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        let carriers: Vec<_> = store
+            .iter()
+            .filter(|session| session.native_id() == source.native_id())
+            .collect();
+        assert_eq!(
+            carriers.len(),
+            1,
+            "the native identity has exactly one record after pinning, not a cloned second owner"
+        );
+        assert!(
+            carriers[0].configured_key().is_some(),
+            "the surviving record is the configured agent; the source history record is retired"
+        );
+        assert_eq!(
+            carriers[0].id(),
+            source.id(),
+            "pinning reuses the source id, transferring the record rather than cloning it"
+        );
+    }
+
+    /// Pinning replaces any lingering configured record for the chosen name (for
+    /// example one left by a configured agent removed from muster.yml), so
+    /// reconciliation resumes the just-pinned conversation, never the stale one.
+    #[test]
+    fn pinning_replaces_a_stale_configured_record_for_the_same_name() {
+        let name = ProcessName::try_new("backend").unwrap();
+        let stale = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(name.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("old-1").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, sessions, _spawns) = agent_app(vec![stale, source.clone()]);
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        let configured: Vec<_> = store
+            .iter()
+            .filter(|session| {
+                session.project().as_path() == Path::new("/here/muster.yml")
+                    && session.configured_key().is_some()
+            })
+            .collect();
+        assert_eq!(
+            configured.len(),
+            1,
+            "the stale record for the name is replaced, not left as a second match the linker could pick"
+        );
+        assert_eq!(
+            configured[0].native_id(),
+            source.native_id(),
+            "the surviving configured record resumes the just-pinned conversation, not the stale one"
+        );
+    }
+
+    /// The transfer reads the record fresh under the store lock, so a conversation
+    /// closed while its child is still alive keeps its live owner instead of having
+    /// it wiped by a stale snapshot; the live-owner gate then still blocks a second
+    /// provider.
+    #[test]
+    fn pin_configured_preserves_a_live_owner_from_the_current_record() {
+        let owner = AgentProcessId::try_new(4242).unwrap();
+        let current = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42")
+            .with_owner_process_id(owner);
+        let recorder = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![current.clone()])),
+        };
+        let store = FakeAgentSessionStore {
+            recorder: recorder.clone(),
+        };
+        let name = ProcessName::try_new("backend").unwrap();
+        // A configured template built from a stale snapshot that lacks the owner.
+        let seeded = AgentSession::builder()
+            .id(current.id().clone())
+            .name(name.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(current.native_id().clone())
+            .configured_key(Some(ConfiguredAgentKey::of(&name).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        store.pin_configured(&seeded).unwrap();
+
+        let stored = recorder.sessions.borrow();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].owner_process_id(),
+            current.owner_process_id(),
+            "the live owner survives the transfer so the live-owner gate can still block a competing launch"
+        );
+        assert!(stored[0].configured_key().is_some());
+    }
+
+    /// A registry that reads an empty workspace but fails every workspace write,
+    /// so a config-write step fails while the rest of the app starts normally.
+    struct SaveFailingRegistry;
+
+    impl ProjectRegistry for SaveFailingRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(Vec::new())
+        }
+
+        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Ok(empty_workspace_config())
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::NoConfigDir)
+        }
+    }
+
+    /// An app on `/here/muster.yml` whose config writes always fail, seeded with
+    /// `initial` sessions, for exercising pin rollback.
+    fn save_failing_pin_app(initial: Vec<AgentSession>) -> (App, SessionRecorder) {
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(initial)),
+        };
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(RequestRecordingRunner {
+                recorder: SpawnRecorder::default(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(SaveFailingRegistry),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+        (app, sessions)
+    }
+
+    /// A source a concurrent instance already transferred to a different agent is
+    /// rejected, not clobbered, so the first agent keeps its seeded session.
+    #[test]
+    fn pin_configured_rejects_a_source_already_pinned_to_another_agent() {
+        let shared_id = AgentSessionId::generate().unwrap();
+        let name_a = ProcessName::try_new("alpha").unwrap();
+        let already = AgentSession::builder()
+            .id(shared_id.clone())
+            .name(name_a.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("conv-42").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name_a).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+        let recorder = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![already.clone()])),
+        };
+        let store = FakeAgentSessionStore {
+            recorder: recorder.clone(),
+        };
+        let name_b = ProcessName::try_new("beta").unwrap();
+        let seeded_b = AgentSession::builder()
+            .id(shared_id)
+            .name(name_b.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("conv-42").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name_b).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        let result = store.pin_configured(&seeded_b);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::AgentSessionAlreadyPinned(_))
+        ));
+        let stored = recorder.sessions.borrow();
+        assert_eq!(stored.len(), 1, "the second pin does not add a record");
+        assert_eq!(
+            stored[0].configured_key(),
+            already.configured_key(),
+            "the record still belongs to the first agent, not clobbered by the second pin"
+        );
+    }
+
+    /// If the config write fails after the transfer, the source conversation is
+    /// restored instead of being stranded as a configured record hidden from both
+    /// pickers, so it can be pinned again.
+    #[test]
+    fn a_failed_config_write_rolls_back_the_pinned_conversation() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, sessions) = save_failing_pin_app(vec![source.clone()]);
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        assert_eq!(
+            store.len(),
+            1,
+            "the rolled-back pin leaves no extra record behind"
+        );
+        assert!(
+            store[0].configured_key().is_none(),
+            "the source is restored as loose history, not stranded as a hidden configured record"
+        );
+        assert_eq!(store[0].id(), source.id());
+        assert_eq!(store[0].native_id(), source.native_id());
+    }
+
+    /// Rolling back a failed pin restores every record the transfer displaced,
+    /// including a prior configured record for the name, so that agent's native
+    /// identity is not lost when no config change committed.
+    #[test]
+    fn a_failed_pin_restores_a_displaced_configured_record() {
+        let name = ProcessName::try_new("backend").unwrap();
+        let stale = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(name.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("old-1").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let (mut app, sessions) = save_failing_pin_app(vec![source.clone()]);
+        // The stale configured record appears after startup (its agent was removed
+        // from muster.yml mid-session), so startup recovery has not cleared it and
+        // the pin genuinely displaces it.
+        sessions.sessions.borrow_mut().push(stale.clone());
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        let source_record = store
+            .iter()
+            .find(|session| session.id() == source.id())
+            .expect("the source conversation is restored");
+        assert!(
+            source_record.configured_key().is_none(),
+            "the source is restored unconfigured"
+        );
+        let stale_record = store
+            .iter()
+            .find(|session| session.id() == stale.id())
+            .expect("the displaced configured record is restored, not lost");
+        assert_eq!(
+            stale_record.native_id(),
+            stale.native_id(),
+            "the prior agent keeps its native identity so re-adding it later still resumes"
+        );
+    }
+
+    /// When a concurrent instance wins the config race, the loser's write fails as
+    /// a duplicate name and the agent is already in the config. The loser must not
+    /// roll its transfer back to unconfigured, which would erase the winner's
+    /// configured session and cause reconciliation to start a fresh conversation.
+    #[test]
+    fn a_duplicate_name_failure_leaves_the_concurrent_pin_intact() {
+        struct ConcurrentRegistry {
+            committed: Rc<RefCell<bool>>,
+        }
+
+        impl ProjectRegistry for ConcurrentRegistry {
+            fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+                Ok(Vec::new())
+            }
+
+            fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+                if *self.committed.borrow() {
+                    // The concurrent winner committed the identical pin, so its spec
+                    // matches this one exactly - including the conversation's folder.
+                    Ok(empty_workspace_config().with_agents(vec![
+                        ProcessSpec::builder()
+                            .name(ProcessName::try_new("backend").unwrap())
+                            .command(Some(CommandLine::try_new("claude").unwrap()))
+                            .working_dir(Some(PathBuf::from("/work/backend")))
+                            .build(),
+                    ]))
+                } else {
+                    Ok(empty_workspace_config())
+                }
+            }
+
+            fn workspace_exists(&self, _config_path: &Path) -> bool {
+                true
+            }
+
+            fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
+                Ok(())
+            }
+
+            fn save_workspace(
+                &self,
+                _config_path: &Path,
+                _config: &WorkspaceConfig,
+            ) -> Result<(), ConfigError> {
+                // A concurrent instance committed the same agent first, so this
+                // append is rejected as a duplicate and the config now has it.
+                *self.committed.borrow_mut() = true;
+                Err(ConfigError::DuplicateAgentName {
+                    name: ProcessName::try_new("backend").unwrap(),
+                })
+            }
+        }
+
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![source.clone()])),
+        };
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(RequestRecordingRunner {
+                recorder: SpawnRecorder::default(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(ConcurrentRegistry {
+                committed: Rc::new(RefCell::new(false)),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        let record = store
+            .iter()
+            .find(|session| session.id() == source.id())
+            .expect("the transferred record remains");
+        assert!(
+            record.configured_key().is_some(),
+            "the record is not rolled back to unconfigured, so the concurrent winner's configured session survives"
+        );
+    }
+
+    /// When the committed same-name agent is an unrelated one (a different command),
+    /// not this pin's, the transfer must still be rolled back rather than left
+    /// associating that agent with this conversation.
+    #[test]
+    fn an_unrelated_same_name_agent_does_not_block_rollback() {
+        struct UnrelatedRegistry;
+
+        impl ProjectRegistry for UnrelatedRegistry {
+            fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+                Ok(Vec::new())
+            }
+
+            fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+                // A different agent that merely shares the name "backend".
+                Ok(empty_workspace_config().with_agents(vec![
+                    ProcessSpec::builder()
+                        .name(ProcessName::try_new("backend").unwrap())
+                        .command(Some(CommandLine::try_new("codex").unwrap()))
+                        .build(),
+                ]))
+            }
+
+            fn workspace_exists(&self, _config_path: &Path) -> bool {
+                true
+            }
+
+            fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
+                Ok(())
+            }
+
+            fn save_workspace(
+                &self,
+                _config_path: &Path,
+                _config: &WorkspaceConfig,
+            ) -> Result<(), ConfigError> {
+                Err(ConfigError::DuplicateAgentName {
+                    name: ProcessName::try_new("backend").unwrap(),
+                })
+            }
+        }
+
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![source.clone()])),
+        };
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(RequestRecordingRunner {
+                recorder: SpawnRecorder::default(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(UnrelatedRegistry),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+        app.start();
+
+        app.pin_conversation(&source, "backend");
+
+        let store = sessions.sessions.borrow();
+        let record = store
+            .iter()
+            .find(|session| session.id() == source.id())
+            .expect("the source record survives");
+        assert!(
+            record.configured_key().is_none(),
+            "the transfer is rolled back, so an unrelated agent is not left resuming this conversation"
+        );
+    }
+
+    /// A configured session with no matching config agent - a pin stranded by a
+    /// crash between its two durable writes - is returned to history on startup, so
+    /// it is offered again rather than hidden from both pickers.
+    #[test]
+    fn a_stranded_configured_session_is_recovered_on_startup() {
+        let name = ProcessName::try_new("backend").unwrap();
+        let orphan = AgentSession::builder()
+            .id(AgentSessionId::generate().unwrap())
+            .name(name.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("conv-42").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+
+        let (_app, sessions, _spawns) = agent_app(vec![orphan.clone()]);
+
+        let store = sessions.sessions.borrow();
+        let record = store
+            .iter()
+            .find(|session| session.id() == orphan.id())
+            .expect("the record survives");
+        assert!(
+            record.configured_key().is_none(),
+            "startup recovery returns the stranded pin to history"
+        );
+        assert_eq!(
+            record.native_id(),
+            orphan.native_id(),
+            "recovery keeps the captured identity so the conversation can be resumed again"
+        );
+    }
+
+    /// Restoring a displaced session on rollback keeps the identity captured onto
+    /// the transferred record while the config write was failing, rather than
+    /// reverting to the pre-pin snapshot.
+    #[test]
+    fn restoring_a_displaced_session_preserves_a_capture_made_during_the_write() {
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let name = ProcessName::try_new("backend").unwrap();
+        // The current record is the transferred one, on which the provider captured
+        // a newer native id during the failing write.
+        let transferred = AgentSession::builder()
+            .id(source.id().clone())
+            .name(name.clone())
+            .tool(AgentTool::Claude)
+            .project(PathBuf::from("/here/muster.yml"))
+            .launch_command(CommandLine::try_new("claude").unwrap())
+            .native_id(Some(NativeSessionId::try_new("conv-99").unwrap()))
+            .configured_key(Some(ConfiguredAgentKey::of(&name).unwrap()))
+            .state(AgentSessionState::Closed)
+            .build();
+        let recorder = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![transferred.clone()])),
+        };
+        let store = FakeAgentSessionStore {
+            recorder: recorder.clone(),
+        };
+
+        store
+            .restore_sessions(&transferred, std::slice::from_ref(&source))
+            .unwrap();
+
+        let stored = recorder.sessions.borrow();
+        let record = stored
+            .iter()
+            .find(|session| session.id() == source.id())
+            .expect("the source record is restored");
+        assert!(
+            record.configured_key().is_none(),
+            "the displaced source identity is restored (unconfigured)"
+        );
+        assert_eq!(
+            record.native_id(),
+            transferred.native_id(),
+            "the identity captured during the failed write is preserved, not reverted"
+        );
+    }
+
+    /// A rollback that itself fails is surfaced to the user rather than silently
+    /// dropped, since it leaves the session store inconsistent with `muster.yml`.
+    #[test]
+    fn a_failed_rollback_is_surfaced() {
+        struct RestoreFailingStore {
+            inner: FakeAgentSessionStore,
+        }
+
+        impl AgentSessionStore for RestoreFailingStore {
+            fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
+                self.inner.sessions()
+            }
+
+            fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
+                self.inner.state_file_path()
+            }
+
+            fn upsert(&self, session: &AgentSession) -> Result<(), ConfigError> {
+                self.inner.upsert(session)
+            }
+
+            fn link_configured(
+                &self,
+                candidate: &AgentSession,
+            ) -> Result<AgentSessionId, ConfigError> {
+                self.inner.link_configured(candidate)
+            }
+
+            fn pin_configured(
+                &self,
+                session: &AgentSession,
+            ) -> Result<Vec<AgentSession>, ConfigError> {
+                self.inner.pin_configured(session)
+            }
+
+            fn restore_sessions(
+                &self,
+                _expected: &AgentSession,
+                _records: &[AgentSession],
+            ) -> Result<(), ConfigError> {
+                Err(ConfigError::NoConfigDir)
+            }
+
+            fn set_state(
+                &self,
+                id: &AgentSessionId,
+                state: AgentSessionState,
+            ) -> Result<(), ConfigError> {
+                self.inner.set_state(id, state)
+            }
+
+            fn set_owner_process_id(
+                &self,
+                id: &AgentSessionId,
+                process_id: AgentProcessId,
+                process_start_token: Option<AgentProcessStartToken>,
+                launch_token: Option<LaunchToken>,
+            ) -> Result<(), ConfigError> {
+                self.inner
+                    .set_owner_process_id(id, process_id, process_start_token, launch_token)
+            }
+
+            fn capture_native_id(
+                &self,
+                id: &AgentSessionId,
+                provider: AgentTool,
+                native_id: NativeSessionId,
+                reporter_process_id: AgentProcessId,
+                reported_launch_token: Option<LaunchToken>,
+            ) -> Result<(), ConfigError> {
+                self.inner.capture_native_id(
+                    id,
+                    provider,
+                    native_id,
+                    reporter_process_id,
+                    reported_launch_token,
+                )
+            }
+
+            fn retire_orphaned_configured(
+                &self,
+                project: &Path,
+                live_keys: &[ConfiguredAgentKey],
+            ) -> Result<usize, ConfigError> {
+                self.inner.retire_orphaned_configured(project, live_keys)
+            }
+        }
+
+        let source = pinnable_conversation("Grace", "/work/backend/muster.yml", "conv-42");
+        let sessions = SessionRecorder {
+            sessions: Rc::new(RefCell::new(vec![source.clone()])),
+        };
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(Vec::new()).build(),
+            Box::new(RequestRecordingRunner {
+                recorder: SpawnRecorder::default(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(SaveFailingRegistry),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.set_agent_session_store(Box::new(RestoreFailingStore {
+            inner: FakeAgentSessionStore {
+                recorder: sessions.clone(),
+            },
+        }));
+        app.start();
+
+        app.pin_conversation(&source, "backend");
+
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with(AGENT_SESSION_ROLLBACK_ERROR)),
+            "a rollback failure is reported, not swallowed"
         );
     }
 

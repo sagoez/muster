@@ -81,6 +81,34 @@ impl App {
         }
     }
 
+    /// Returns configured sessions with no matching workspace agent to history, so
+    /// a pin stranded by a crash between its two durable writes (the session
+    /// transferred to configured, but its `muster.yml` entry never written) is
+    /// recovered rather than left hidden from both pickers. Scoped to the current
+    /// project, whose reconciled agents are the authoritative live set.
+    pub(super) fn recover_orphaned_pins(&mut self) {
+        let Some(project) = self.current_config.clone() else {
+            return;
+        };
+        let live_keys: Vec<ConfiguredAgentKey> = self
+            .workspace
+            .processes()
+            .iter()
+            .filter(|process| {
+                *process.kind() == ProcessKind::Agent
+                    && *process.origin() == ProcessOrigin::Configured
+            })
+            .filter_map(|process| ConfiguredAgentKey::of(process.name()).ok())
+            .collect();
+        let retired = self
+            .agent_session_store
+            .as_ref()
+            .map(|store| store.retire_orphaned_configured(&project, &live_keys));
+        if let Some(Err(error)) = retired {
+            self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
+        }
+    }
+
     /// Restores the active project's open durable sessions.
     pub(super) fn restore_open_agent_sessions(&mut self) {
         let Some(project) = self.current_config.clone() else {

@@ -26,7 +26,8 @@ impl App {
             Some(
                 Overlay::ConfirmOverwrite { .. }
                 | Overlay::ConfirmRemoval { .. }
-                | Overlay::ConfirmSessionClose { .. },
+                | Overlay::ConfirmSessionClose { .. }
+                | Overlay::ConfirmProcessRemoval { .. },
             ) => {
                 self.handle_confirm_key(key);
                 return;
@@ -75,7 +76,7 @@ impl App {
             KeyCode::Char('d') if self.project_cursor.is_some() => {
                 self.confirm_remove_selected_project();
             },
-            KeyCode::Char('d') => self.confirm_close_selected_session(),
+            KeyCode::Char('d') => self.confirm_delete_selected(),
             KeyCode::Char('u') => self.reopen_last_closed_session(),
             KeyCode::Char('t') if self.project_cursor.is_none() => self.toggle_selected_autostart(),
             KeyCode::Char('s') if self.project_cursor.is_none() => self.toggle_selected(),

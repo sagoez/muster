@@ -1,5 +1,15 @@
 use super::*;
 
+/// Whether registering a project scaffolds a starter `muster.yml` or adopts an
+/// existing one as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfigDisposition {
+    /// A brand-new folder with no config: write the starter config.
+    Scaffold,
+    /// An existing `muster.yml` the user confirmed: adopt it, write nothing.
+    Adopt,
+}
+
 impl App {
     /// Handles a key while a form is open: edit, submit, or cancel.
     pub(super) fn handle_form_key(&mut self, key: KeyEvent) {
@@ -127,7 +137,10 @@ impl App {
         let Ok(name) = ProjectName::try_new(name.trim()) else {
             return;
         };
-        if self.try_register(Project::builder().name(name).config(config).build()) {
+        if self
+            .try_register(Project::builder().name(name).config(config).build())
+            .is_some()
+        {
             self.close_overlay();
             self.refresh_projects();
             self.refresh_switcher();
@@ -152,7 +165,7 @@ impl App {
             self.confirm_overwrite(name, config_path);
             return;
         }
-        self.create_project(name, config_path);
+        self.create_project(name, config_path, ConfigDisposition::Scaffold);
     }
 
     /// Opens a confirmation over the form before overwriting an existing config.
@@ -168,24 +181,69 @@ impl App {
         });
     }
 
-    /// Registers the project, then writes its starter config. Registration comes
-    /// first so a failed write leaves a recoverable dangling entry (a retry heals
-    /// it) rather than a stranded file that would block re-creation.
-    pub(super) fn create_project(&mut self, name: ProjectName, config_path: PathBuf) {
-        let project = Project::builder()
-            .name(name)
-            .config(config_path.clone())
-            .build();
-        if !self.try_register(project) {
+    /// Registers the project, then writes a starter config only when scaffolding a
+    /// brand-new folder. For a brand-new folder, registration comes first so a
+    /// failed write leaves a recoverable dangling entry (a retry heals it) rather
+    /// than a stranded file that would block re-creation. Adopting an existing
+    /// `muster.yml` instead validates it first by loading it, so a path that is a
+    /// directory, has vanished, or is unreadable never registers a project that
+    /// cannot be opened; the file is then used as-is and never rewritten.
+    pub(super) fn create_project(
+        &mut self,
+        name: ProjectName,
+        config_path: PathBuf,
+        disposition: ConfigDisposition,
+    ) {
+        // Adoption must confirm the config is readable now, not merely that a path
+        // existed when the form opened: it may be a directory, have vanished while
+        // the confirmation was open, or be otherwise unreadable. Load it before
+        // registering so a project that cannot be opened is never created.
+        if disposition == ConfigDisposition::Adopt
+            && let Err(error) = self.registry.workspace(&config_path)
+        {
+            self.report_error(&error.to_string());
             return;
         }
-        if self
-            .registry
-            .save_workspace(&config_path, &starter_workspace())
-            .is_err()
-        {
-            self.report_error(WORKSPACE_SAVE_ERROR);
+        let project = Project::builder()
+            .name(name.clone())
+            .config(config_path.clone())
+            .build();
+        let Some(preimage) = self.try_register(project) else {
             return;
+        };
+        // Scaffold only a brand-new folder. `create_workspace` is an atomic exclusive
+        // create - it never overwrites an existing file and needs no check-then-write
+        // that could clobber a config another process wrote in between. Adoption skips
+        // it: the file already exists, so a write would be redundant and would fail
+        // needlessly in a folder muster cannot write to.
+        if disposition == ConfigDisposition::Scaffold {
+            match self
+                .registry
+                .create_workspace(&config_path, &starter_workspace())
+            {
+                // Wrote a fresh starter config; it is valid by construction.
+                Ok(true) => {},
+                // Another process created the destination between the existence check
+                // and this exclusive create. Adopt the winner, but validate it first:
+                // a malformed, unreadable, or directory path must not close the form
+                // as a success and leave an unopenable project.
+                Ok(false) => {
+                    if let Err(error) = self.registry.workspace(&config_path) {
+                        // Registration ran before this create, but the path now exists
+                        // and is unreadable, so a retry only re-enters the adoption path
+                        // and is rejected again - the dangling entry can never heal.
+                        // Roll it back so no permanently unopenable project is left,
+                        // restoring whatever entry this registration replaced.
+                        self.rollback_registration(&name, &config_path, preimage);
+                        self.report_error(&error.to_string());
+                        return;
+                    }
+                },
+                Err(_) => {
+                    self.report_error(WORKSPACE_SAVE_ERROR);
+                    return;
+                },
+            }
         }
         self.close_overlay();
         self.refresh_projects();
@@ -204,13 +262,21 @@ impl App {
                         config_path,
                     }) => {
                         self.overlay = Some(Overlay::Form(form));
-                        self.create_project(name, config_path);
+                        self.create_project(name, config_path, ConfigDisposition::Adopt);
                     },
                     Some(Overlay::ConfirmRemoval { config_path, .. }) => {
                         self.remove_project(&config_path);
                     },
                     Some(Overlay::ConfirmSessionClose { pane, .. }) => {
                         self.close_agent_session(pane);
+                    },
+                    Some(Overlay::ConfirmProcessRemoval {
+                        target,
+                        occurrence,
+                        config_path,
+                        ..
+                    }) => {
+                        self.remove_configured_process(&target, occurrence, &config_path);
                     },
                     other => self.overlay = other,
                 }
@@ -236,28 +302,64 @@ impl App {
     }
 
     /// Adds `project` to the registry, replacing any entry for the same config
-    /// path, atomically under the registry lock. Returns whether it was
-    /// persisted, setting a form error on failure; leaves the form open so the
-    /// caller decides when to close it.
-    pub(super) fn try_register(&mut self, project: Project) -> bool {
+    /// path, atomically under the registry lock. On success returns the entries it
+    /// replaced (the preimage, usually empty) so a caller can restore them if a
+    /// later step fails; returns `None` and sets a form error when the write fails.
+    /// Leaves the form open so the caller decides when to close it.
+    pub(super) fn try_register(&mut self, project: Project) -> Option<Vec<Project>> {
         let project = Project::builder()
             .name(project.name().clone())
             .config(path::absolutize(project.config()))
             .build();
+        let mut preimage = Vec::new();
         let result = self.registry.update_projects(&mut |mut projects| {
+            // Capture and replace any existing entry at this location under the lock,
+            // so a rollback can put the prior registration back verbatim.
+            preimage.clear();
             projects.retain(|existing| {
-                !Self::same_config_location(existing.config(), project.config())
+                let replaced = Self::same_config_location(existing.config(), project.config());
+                if replaced {
+                    preimage.push(existing.clone());
+                }
+                !replaced
             });
             projects.push(project.clone());
             projects
         });
         match result {
-            Ok(()) => true,
+            Ok(()) => Some(preimage),
             Err(error) => {
                 self.report_error(&error.to_string());
-                false
+                None
             },
         }
+    }
+
+    /// Undoes a `try_register` whose follow-up step failed, restoring the captured
+    /// `preimage`. Removes only our own write (matched by name and location) so a
+    /// registration another writer made in the meantime is preserved, and puts the
+    /// replaced entries back so a failed scaffold never deletes existing registry
+    /// data. Any error is swallowed: the caller already reports the original one.
+    pub(super) fn rollback_registration(
+        &mut self,
+        name: &ProjectName,
+        config_path: &Path,
+        preimage: Vec<Project>,
+    ) {
+        // `try_register` stored the absolutized path; match on the same form or a
+        // relative input would never find its own entry.
+        let config_path = path::absolutize(config_path);
+        let _ = self.registry.update_projects(&mut |mut projects| {
+            let ours = projects.iter().position(|project| {
+                project.name() == name && Self::same_config_location(project.config(), &config_path)
+            });
+            if let Some(index) = ours {
+                projects.remove(index);
+                projects.extend(preimage.iter().cloned());
+            }
+            projects
+        });
+        self.refresh_projects();
     }
 
     /// Advances the add flow to the selected kind's next step. The agent kind opens
@@ -754,6 +856,13 @@ impl App {
         let Some(project) = self.current_config.clone() else {
             return;
         };
+        // A conversation whose provider is still running here must not be pinned: the
+        // transfer would move its association out from under the live process. This
+        // backstops the picker filter against a race between listing and confirming.
+        if Self::session_owner_is_live(source) {
+            self.report_error(PIN_SOURCE_STILL_RUNNING);
+            return;
+        }
         let Some(native_id) = source.native_id().clone() else {
             self.set_notice(AGENT_SESSION_NOT_RESUMABLE.to_string());
             return;

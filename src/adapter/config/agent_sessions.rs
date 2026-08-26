@@ -508,7 +508,12 @@ impl AgentSessionStore for YamlAgentSessionStore {
                         .as_ref()
                         .is_some_and(|key| !live_keys.contains(key));
                 if orphaned {
-                    *session = session.clone().unconfigure();
+                    // Close as well as un-configure, atomically: an orphan left Open
+                    // would be restored as a disposable session and relaunched.
+                    *session = session
+                        .clone()
+                        .unconfigure()
+                        .with_state(AgentSessionState::Closed);
                     retired += 1;
                 }
             }

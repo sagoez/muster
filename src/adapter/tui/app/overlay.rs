@@ -26,7 +26,7 @@ impl App {
             KeyCode::Char('N') => self.toggle_desktop_notifications(),
             KeyCode::Char('o') => self.open_switcher(),
             KeyCode::Char('x') => self.force_stop_selected(),
-            KeyCode::Char('d') => self.confirm_close_selected_session(),
+            KeyCode::Char('d') => self.confirm_delete_selected(),
             KeyCode::Char('u') => self.reopen_last_closed_session(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             _ => {},
@@ -192,10 +192,15 @@ impl App {
                         // never offered twice). `resume` is `Some` only with a
                         // captured identity and a constructible resume command, so a
                         // wrapped or template-less session that could not autostart is
-                        // filtered out rather than pinned into a dead agent.
+                        // filtered out rather than pinned into a dead agent. A just
+                        // deleted agent whose process is still shutting down is closed
+                        // and un-configured, but its owner is still live, so it is held
+                        // back until the provider exits - pinning it now would transfer
+                        // a conversation out from under a running provider.
                         session.configured_key().is_none()
                             && *session.state() == AgentSessionState::Closed
                             && session.resume().is_some()
+                            && !Self::session_owner_is_live(session)
                     })
                     .map(Box::new)
                     .map(AgentPickerItem::Conversation)

@@ -47,17 +47,45 @@ impl App {
         self.confirm_remove_project(&project, message);
     }
 
-    /// Confirms closing the selected runtime agent session. A configured
-    /// agent remains pinned because its lifecycle is owned by `muster.yml`.
-    pub(super) fn confirm_close_selected_session(&mut self) {
+    /// On a process row, `d` either deletes a configured process from
+    /// `muster.yml` (so a pinned agent stops coming back on the next reconcile)
+    /// or closes a disposable runtime agent session. Configured deletion and
+    /// session close are confirmed first.
+    pub(super) fn confirm_delete_selected(&mut self) {
         let Some(process) = self.workspace.selected_process() else {
             return;
         };
-        if *process.kind() != ProcessKind::Agent {
+        if *process.origin() == ProcessOrigin::Configured {
+            // Without an active config there is nothing to edit, so do not offer a
+            // confirmation that could only be a no-op.
+            let Some(config_path) = self.current_config.clone() else {
+                return;
+            };
+            let message = format!(
+                "Delete {} '{}' from muster.yml?",
+                process.kind(),
+                process.name().as_ref()
+            );
+            // Bind the confirmation to the immutable identity (spec + occurrence),
+            // not the pane id: a watcher reconcile can retire this row and reuse its
+            // pane id for a new process before the user confirms.
+            let target = ProcessSpecMatcher::of(process);
+            // A row already retiring has had its spec removed, so it maps to no live
+            // occurrence. Skip it rather than fall back to occurrence 0 and delete a
+            // surviving duplicate's spec instead.
+            let Some(occurrence) = self.configured_occurrence_of(&target, *process.id()) else {
+                self.set_notice(DELETE_ALREADY_RETIRING.to_string());
+                return;
+            };
+            self.overlay = Some(Overlay::ConfirmProcessRemoval {
+                message,
+                target,
+                occurrence,
+                config_path,
+            });
             return;
         }
-        if *process.origin() != ProcessOrigin::Session {
-            self.set_notice(CONFIGURED_AGENT_CLOSE_UNAVAILABLE.to_string());
+        if *process.kind() != ProcessKind::Agent {
             return;
         }
         let pane = *process.id();
@@ -71,6 +99,122 @@ impl App {
         } else {
             self.close_agent_session(pane);
         }
+    }
+
+    /// Whether `pane` is a live row already retiring - an earlier delete removed
+    /// its `muster.yml` entry and it is shutting down, so it maps to no surviving
+    /// configured occurrence.
+    fn pane_is_retiring(&self, pane: PaneId) -> bool {
+        self.panes
+            .get(&pane)
+            .is_some_and(|target| target.config_membership == ConfigMembership::RetireOnExit)
+    }
+
+    /// Position of the configured process on `pane` among the still-tracked rows
+    /// sharing `target`'s identity, in workspace order - the occurrence that keys
+    /// its `muster.yml` spec. Rows already retiring are skipped: their spec is gone
+    /// from the config, so counting them would misnumber the occurrence. Returns
+    /// `None` when `pane` is itself retiring, since no live spec corresponds to it.
+    pub(super) fn configured_occurrence_of(
+        &self,
+        target: &ProcessSpecMatcher,
+        pane: PaneId,
+    ) -> Option<usize> {
+        self.workspace
+            .processes()
+            .iter()
+            .filter(|candidate| *candidate.origin() == ProcessOrigin::Configured)
+            .filter(|candidate| !self.pane_is_retiring(*candidate.id()))
+            .filter(|candidate| target.matches_process(candidate))
+            .position(|candidate| *candidate.id() == pane)
+    }
+
+    /// Deletes the `occurrence`-th configured process matching `target` from
+    /// `config_path`, stopping its live row and returning its durable session to
+    /// history so a pinned agent stops reappearing on the next reconcile. The row
+    /// is resolved by identity, not a stored pane id, so a reconcile that reused
+    /// that id between confirmation and now cannot delete the wrong entry.
+    pub(super) fn remove_configured_process(
+        &mut self,
+        target: &ProcessSpecMatcher,
+        occurrence: usize,
+        config_path: &Path,
+    ) {
+        // A deferred switch loads the next project from a pane exit event, which can
+        // land while this confirmation is open and leaves the old rows selectable
+        // until it does. Identity alone does not disambiguate across projects, so a
+        // matching spec in the newly loaded `muster.yml` would be deleted instead of
+        // the process the user picked. Refuse once the project has moved on.
+        if !self
+            .current_config
+            .as_deref()
+            .is_some_and(|current| Self::same_config_location(current, config_path))
+        {
+            self.set_notice(DELETE_PROJECT_CHANGED.to_string());
+            return;
+        }
+        let mut removed = false;
+        let mut updated = None;
+        let mut apply = |config: WorkspaceConfig| {
+            let (config, hit) = target.without(config, occurrence);
+            removed = hit;
+            updated = Some(config.clone());
+            config
+        };
+        if self
+            .registry
+            .update_workspace(config_path, &mut apply)
+            .is_err()
+        {
+            self.set_notice(WORKSPACE_SAVE_ERROR.to_string());
+            return;
+        }
+        // Nothing matched the stored identity: the entry vanished under the open
+        // confirmation, so there is nothing to delete. Report it like the sibling
+        // no-op branches rather than closing the destructive dialog in silence.
+        let Some(config) = updated.filter(|_| removed) else {
+            self.set_notice(DELETE_ENTRY_GONE.to_string());
+            return;
+        };
+        self.focus = Focus::Sidebar;
+        // Resolve the live row by the same identity, never a stored pane id, and
+        // over the same still-tracked rows the occurrence was numbered against so a
+        // duplicate already retiring is never miscounted.
+        let pane = self
+            .workspace
+            .processes()
+            .iter()
+            .filter(|candidate| *candidate.origin() == ProcessOrigin::Configured)
+            .filter(|candidate| !self.pane_is_retiring(*candidate.id()))
+            .filter(|candidate| target.matches_process(candidate))
+            .nth(occurrence)
+            .map(|candidate| *candidate.id());
+        if let Some(pane) = pane {
+            // Mark this exact pane as deleted so reconciliation retires it. With
+            // identical duplicate specs a plain reconcile would match the surviving
+            // occurrence back to this first row and retire a later duplicate; the
+            // mark pins the retirement to the pane the user picked and survives the
+            // self-generated watcher reconcile.
+            self.deleted_panes.insert(pane);
+            // Stop the live row through the same graceful path `s` uses - the
+            // configured (or default) stop signal and grace period, then a single
+            // escalation - never an immediate force-kill, so a command like a database
+            // can clean up. Reuse an active graceful stop rather than re-signaling it:
+            // this mirrors `stop_selected`'s `accepts_stop_request` guard, so a process
+            // already stopping is not sent a second SIGINT with a reset escalation
+            // deadline. Reconcile below still marks it `RetireOnExit`.
+            if self.panes.get(&pane).is_some_and(|entry| {
+                entry.handle.is_some() && entry.exit_intent.accepts_stop_request()
+            }) {
+                self.request_graceful_transition(pane, ExitIntent::request_stop, false);
+            }
+        }
+        self.reconcile_config(&config);
+        // The deleted row is now retiring, so its key drops out of the live set and
+        // recovery closes and un-configures its durable session in one write - the
+        // deleted agent's session can never be restored as a disposable one and
+        // relaunched.
+        self.recover_orphaned_pins();
     }
 
     /// Force-kills one runtime agent session and records it closed only after
@@ -142,8 +286,9 @@ impl App {
     /// when that write both succeeds and actually found a spec to change, so the
     /// sidebar never shows a state the config did not record. The spec is located
     /// by the process's full resolved identity, and among identical rows by the
-    /// selected one's position within them, so the persisted change lands on the
-    /// row the user picked whatever order a reconcile left the rows in.
+    /// selected one's position among the still-tracked ones, so the persisted
+    /// change lands on the row the user picked whatever order a reconcile left the
+    /// rows in. A row already retiring has no surviving spec, so it is refused.
     pub(super) fn toggle_selected_autostart(&mut self) {
         let Some(config_path) = self.current_config.clone() else {
             return;
@@ -158,14 +303,14 @@ impl App {
         let pane = *process.id();
         let autostart = !*process.autostart();
         let target = ProcessSpecMatcher::of(process);
-        let occurrence = self
-            .workspace
-            .processes()
-            .iter()
-            .filter(|candidate| *candidate.origin() == ProcessOrigin::Configured)
-            .filter(|candidate| target.matches_process(candidate))
-            .position(|candidate| *candidate.id() == pane)
-            .unwrap_or(0);
+        // Number the occurrence over the still-tracked rows only, skipping any
+        // already retiring: their spec is gone from the config, so counting them
+        // would edit a surviving duplicate's spec (or fall past the last one and do
+        // nothing). `None` means the selected row is itself retiring, so refuse.
+        let Some(occurrence) = self.configured_occurrence_of(&target, pane) else {
+            self.set_notice(AUTOSTART_UNTRACKED.to_string());
+            return;
+        };
 
         let mut edited = false;
         let mut apply = |config: WorkspaceConfig| {

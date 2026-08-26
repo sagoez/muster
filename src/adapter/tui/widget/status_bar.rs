@@ -29,6 +29,8 @@ const AUTOSTART_HINT: Hint = ("t", "autostart");
 const ADD_HINT: Hint = ("a", "add");
 /// Close runtime agent-session hint.
 const CLOSE_HINT: Hint = ("d", "close");
+/// Delete a configured process from muster.yml hint.
+const DELETE_HINT: Hint = ("d", "delete");
 /// Reopen the most recently closed agent session.
 const REOPEN_HINT: Hint = ("u", "reopen");
 /// Attached terminal detach hint.
@@ -43,6 +45,7 @@ const PROCESS_HINTS: &[Hint] = &[
     AUTOSTART_HINT,
     REOPEN_HINT,
     ADD_HINT,
+    DELETE_HINT,
 ];
 /// Process hints in retention order when the status row is narrow.
 const PROCESS_HINT_PRIORITY: &[Hint] = &[
@@ -50,6 +53,7 @@ const PROCESS_HINT_PRIORITY: &[Hint] = &[
     ADD_HINT,
     RESTART_HINT,
     KILL_HINT,
+    DELETE_HINT,
     MOVE_HINT,
     ATTACH_HINT,
     AUTOSTART_HINT,
@@ -87,6 +91,7 @@ const TERMINAL_HINTS: &[Hint] = &[
     START_STOP_HINT,
     RESTART_HINT,
     KILL_HINT,
+    DELETE_HINT,
     REOPEN_HINT,
 ];
 /// Terminal hints in retention order when the status row is narrow.
@@ -95,6 +100,7 @@ const TERMINAL_HINT_PRIORITY: &[Hint] = &[
     REOPEN_HINT,
     RESTART_HINT,
     KILL_HINT,
+    DELETE_HINT,
     DETACH_HINT,
 ];
 /// Slim hints while attached to a runtime agent session.

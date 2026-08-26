@@ -85,6 +85,11 @@ pub trait AgentSessionStore {
     /// again instead of being stranded, hidden from both pickers. Returns the number
     /// of records changed.
     ///
+    /// The caller must build `live_keys` from a config read taken while holding the
+    /// workspace lock (`ProjectRegistry::with_workspace_locked`), so a config re-add
+    /// cannot land between that read and this retirement and cause a still-configured
+    /// agent's session to be closed.
+    ///
     /// # Errors
     /// Returns a [`ConfigError`] when the state file cannot be read or written.
     fn retire_orphaned_configured(

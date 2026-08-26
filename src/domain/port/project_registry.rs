@@ -57,6 +57,26 @@ pub trait ProjectRegistry {
         self.save_workspace(config_path, &update(config))
     }
 
+    /// Reads the workspace at `config_path` and runs `read` against it while the
+    /// exclusive workspace lock is held, so a caller can coordinate an external
+    /// action - retiring a deleted agent's durable session, say - with concurrent
+    /// config writes: another instance writing the same `muster.yml` is blocked
+    /// until `read` returns, so no re-add can land between the config check and the
+    /// action. The default is an unlocked load; a filesystem-backed adapter should
+    /// override it to hold the same lock `update_workspace` uses.
+    ///
+    /// # Errors
+    /// Returns a `ConfigError` if the workspace cannot be read or locked, or `read`
+    /// itself fails.
+    fn with_workspace_locked(
+        &self,
+        config_path: &Path,
+        read: &mut dyn FnMut(&WorkspaceConfig) -> Result<(), ConfigError>,
+    ) -> Result<(), ConfigError> {
+        let config = self.workspace(config_path)?;
+        read(&config)
+    }
+
     /// Creates the workspace at `config_path` only when nothing exists there.
     /// Returns whether this call created the file. The default checks then
     /// writes; a filesystem-backed adapter should override it with an atomic

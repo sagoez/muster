@@ -182,8 +182,6 @@ const NO_ATTENTION_WAITING: &str = "nothing is waiting on you";
 const EDITOR_OPEN_FAILED: &str = "could not open editor";
 /// Confirmation shown after launching the editor on a project.
 const OPENED_IN_EDITOR: &str = "opened in editor";
-/// Shown when close is requested for a configured process.
-const CONFIGURED_AGENT_CLOSE_UNAVAILABLE: &str = "configured agents stay pinned in muster.yml";
 /// Shown when a project's config file cannot be written.
 const WORKSPACE_SAVE_ERROR: &str = "could not write the project config";
 /// Shown when a new agent's name is already used by another configured agent.
@@ -194,6 +192,16 @@ const AGENT_SESSION_OWNED_ELSEWHERE: &str = "this agent's session is already run
 /// Shown when autostart cannot persist because the process has no config entry
 /// (for example a process left running after its spec was removed).
 const AUTOSTART_UNTRACKED: &str = "autostart unchanged: process is not in the config";
+/// Shown when a delete confirmation is answered after the active project changed
+/// underneath it, so its target no longer belongs to the loaded config.
+const DELETE_PROJECT_CHANGED: &str = "delete cancelled: the active project changed";
+/// Shown when `d` targets a row that is already retiring from an earlier delete,
+/// so its `muster.yml` entry is gone and there is nothing left to remove.
+const DELETE_ALREADY_RETIRING: &str = "already being removed";
+/// Shown when a delete confirmation is answered after its `muster.yml` entry has
+/// already vanished (an external edit or another muster instance removed it), so
+/// there is nothing left to delete.
+const DELETE_ENTRY_GONE: &str = "delete cancelled: the entry is no longer in muster.yml";
 /// Confirmation shown when desktop notifications are toggled on.
 const DESKTOP_NOTIFICATIONS_ON: &str = "desktop notifications on";
 /// Confirmation shown when desktop notifications are toggled off.
@@ -207,12 +215,12 @@ const SETTINGS_UNAVAILABLE: &str = "settings are unavailable";
 /// Shown when removal is asked of the launched project's synthetic row, which
 /// has no registry entry to remove.
 const CANNOT_REMOVE_LAUNCHED: &str = "this project is not saved, so there is nothing to remove";
-/// Confirmation shown before overwriting an existing config.
-const OVERWRITE_CONFIRM: &str = "A muster.yml already exists in that folder.";
-/// Title of the overwrite confirmation.
-const OVERWRITE_TITLE: &str = "Overwrite?";
-/// Accept-action verb for the overwrite confirmation.
-const OVERWRITE_VERB: &str = "overwrite";
+/// Confirmation shown before registering a project whose config already exists.
+const OVERWRITE_CONFIRM: &str = "A muster.yml already exists there; it will be used as-is.";
+/// Title of the adopt-existing-config confirmation.
+const OVERWRITE_TITLE: &str = "Use existing config?";
+/// Accept-action verb for the adopt-existing-config confirmation.
+const OVERWRITE_VERB: &str = "use";
 /// Title of the project-removal confirmation.
 const REMOVE_PROJECT_TITLE: &str = "Remove project?";
 /// Accept-action verb for the project-removal confirmation.
@@ -221,6 +229,10 @@ const REMOVE_PROJECT_VERB: &str = "remove";
 const CLOSE_AGENT_TITLE: &str = "Close agent?";
 /// Accept-action verb for the agent-session close confirmation.
 const CLOSE_AGENT_VERB: &str = "close";
+/// Title of the configured-process delete confirmation.
+const DELETE_PROCESS_TITLE: &str = "Delete from muster.yml?";
+/// Accept-action verb for the configured-process delete confirmation.
+const DELETE_PROCESS_VERB: &str = "delete";
 /// Maximum resumable history rows shown above provider presets.
 const RECENT_AGENT_LIMIT: usize = 5;
 /// Attempts to avoid a generated display-name collision in the active workspace.
@@ -234,6 +246,9 @@ const AGENT_SESSION_STORE_ERROR: &str = "could not update agent session history"
 const AGENT_SESSION_ROLLBACK_ERROR: &str = "could not undo a failed pin; agent session history may be inconsistent - check `muster doctor`";
 /// Shown when a closed session has no provider identity to resume.
 const AGENT_SESSION_NOT_RESUMABLE: &str = "the provider never reported this session's ID; check `muster doctor`, approve hooks in the provider (codex: /hooks), then open a new session";
+/// Shown when a conversation whose provider is still running is pinned, so its
+/// association would be transferred out from under the live process.
+const PIN_SOURCE_STILL_RUNNING: &str = "cannot pin: that conversation is still running";
 /// Shown when there is no closed resumable session in this workspace.
 const NO_RECENT_AGENT_SESSION: &str = "no closed agent session to reopen";
 
@@ -487,6 +502,15 @@ enum Overlay {
         message: String,
         pane: PaneId,
     },
+    ConfirmProcessRemoval {
+        message: String,
+        target: ProcessSpecMatcher,
+        occurrence: usize,
+        /// The project this confirmation was opened against. A deferred switch can
+        /// load another project while it stays open, so the deletion is applied
+        /// only while this is still the active config.
+        config_path: PathBuf,
+    },
     Help,
 }
 
@@ -501,6 +525,7 @@ impl Overlay {
             Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
+            | Self::ConfirmProcessRemoval { .. }
             | Self::Help => None,
         }
     }
@@ -513,6 +538,7 @@ impl Overlay {
             Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
+            | Self::ConfirmProcessRemoval { .. }
             | Self::Help => None,
         }
     }
@@ -525,6 +551,7 @@ impl Overlay {
             | Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
+            | Self::ConfirmProcessRemoval { .. }
             | Self::Help => None,
         }
     }
@@ -537,6 +564,7 @@ impl Overlay {
             | Self::AgentPicker(_)
             | Self::ConfirmRemoval { .. }
             | Self::ConfirmSessionClose { .. }
+            | Self::ConfirmProcessRemoval { .. }
             | Self::Help => None,
         }
     }
@@ -582,6 +610,13 @@ impl Overlay {
             Self::ConfirmSessionClose { message, .. } => {
                 confirm::render(frame, area, CLOSE_AGENT_TITLE, message, CLOSE_AGENT_VERB)
             },
+            Self::ConfirmProcessRemoval { message, .. } => confirm::render(
+                frame,
+                area,
+                DELETE_PROCESS_TITLE,
+                message,
+                DELETE_PROCESS_VERB,
+            ),
             Self::Help => help::render(frame, area),
         }
     }
@@ -639,6 +674,12 @@ pub struct App {
     panes: HashMap<PaneId, Pane>,
     restart_attempts: HashMap<PaneId, u32>,
     generations: HashMap<PaneId, SpawnGeneration>,
+    /// Panes this delete flow retired, kept out of reconciliation matching until
+    /// they exit so the self-generated `muster.yml` watcher event cannot re-track
+    /// them onto a surviving duplicate's spec. Scoped to intentional deletions,
+    /// so an external config edit that removes then restores a spec still reclaims
+    /// its still-running pane rather than discarding it for a fresh duplicate.
+    deleted_panes: HashSet<PaneId>,
     /// Keys whose press was forwarded to a terminal and not yet released, mapped
     /// to the child that received the press, so a matching release reaches that
     /// same child even after focus or the selected pane changes, and never an
@@ -773,6 +814,7 @@ impl App {
             panes: HashMap::new(),
             restart_attempts: HashMap::new(),
             generations: HashMap::new(),
+            deleted_panes: HashSet::new(),
             held_terminal_keys: HashMap::new(),
             keyboard_enhanced: super::terminal::keyboard_enhancement_active(),
             next_notification_scope: NotificationScope::new(0),
@@ -940,6 +982,7 @@ impl App {
                 Overlay::Switcher(_)
                 | Overlay::ConfirmRemoval { .. }
                 | Overlay::ConfirmSessionClose { .. }
+                | Overlay::ConfirmProcessRemoval { .. }
                 | Overlay::Help,
             )
             | None => None,
@@ -1298,7 +1341,10 @@ mod tests {
                         .as_ref()
                         .is_some_and(|key| !live_keys.contains(key));
                 if orphaned {
-                    *session = session.clone().unconfigure();
+                    *session = session
+                        .clone()
+                        .unconfigure()
+                        .with_state(AgentSessionState::Closed);
                     retired += 1;
                 }
             }
@@ -4673,6 +4719,58 @@ mod tests {
         assert_eq!(app.notice.as_deref(), Some(FORCE_STOP_NOTICE));
     }
 
+    /// A process retired mid graceful stop can leave a `ForceStop` queued in a
+    /// timer thread. If the pane id were reused and the spawn generation reset,
+    /// that stale escalation would match and kill the new process early. Retiring
+    /// advances the counter, so the next spawn on this id is past it.
+    #[test]
+    fn reusing_a_retired_pane_id_advances_past_a_queued_force_stop() {
+        let (mut app, _signals) = app_with_stop_signals(ProcessKind::Command);
+        let pane = PaneId::new(PANE);
+        // The generation a `ForceStop` would carry, captured just before the exit.
+        let scheduled = current_gen(&app);
+
+        // The process exits before its deadline and its row retires.
+        app.retire_pane(pane);
+        // A later process reuses the freed pane id.
+        let reused = app.bump_generation(pane);
+
+        assert_ne!(
+            reused, scheduled,
+            "a reused pane id must not reset to a generation a stale ForceStop carries"
+        );
+        assert!(
+            reused.into_inner() > scheduled.into_inner(),
+            "the spawn generation advances monotonically across pane-id reuse"
+        );
+    }
+
+    /// A pane waiting on a delayed `Respawn` is deleted. Retiring must advance the
+    /// spawn generation, not merely keep it: a non-autostart process reusing the
+    /// pane id never spawns, so it never bumps the counter, and the stale respawn
+    /// would otherwise still match and start it unexpectedly.
+    #[test]
+    fn retiring_a_pane_voids_a_delayed_respawn_on_the_reused_id() {
+        let (mut app, _signals) = app_with_stop_signals(ProcessKind::Command);
+        let pane = PaneId::new(PANE);
+        // The generation a queued `Respawn` was tagged with before the pane retired.
+        let scheduled = current_gen(&app);
+
+        app.retire_pane(pane);
+
+        assert_ne!(
+            app.generations.get(&pane).copied(),
+            Some(scheduled),
+            "retiring advances the generation so a queued Respawn no longer matches"
+        );
+        // Delivering the stale respawn is a no-op: it never resurrects the pane.
+        app.handle_respawn(pane, scheduled);
+        assert!(
+            !app.panes.contains_key(&pane),
+            "a stale delayed Respawn after retirement never spawns on the reused id"
+        );
+    }
+
     /// Commands use the default graceful policy when `stop` is absent.
     #[test]
     fn a_command_without_a_stop_policy_uses_graceful_defaults() {
@@ -5651,7 +5749,7 @@ mod tests {
             .config(first.clone())
             .build();
 
-        assert!(app.try_register(renamed));
+        assert!(app.try_register(renamed).is_some());
         let saved = recorder.projects.borrow().clone().unwrap();
         assert_eq!(saved.len(), 2);
         assert!(saved.iter().any(|project| project.config() == &second));
@@ -7307,6 +7405,67 @@ mod tests {
         assert_eq!(listed, vec!["Grace".to_string()]);
     }
 
+    /// A just-deleted agent whose process is still shutting down is closed and
+    /// un-configured, but its owner is still live, so the pin picker must not offer
+    /// its conversation as settled history until the provider exits.
+    #[cfg(unix)]
+    #[test]
+    fn the_pin_picker_hides_a_conversation_whose_provider_is_still_running() {
+        let owner = AgentProcessId::try_new(std::process::id()).unwrap();
+        let token = LocalProcessIdentity::start_token(owner).unwrap();
+        let settled = pinnable_conversation("Settled", "/work/backend/muster.yml", "conv-settled");
+        let running = pinnable_conversation("Running", "/work/backend/muster.yml", "conv-running")
+            .with_launch_owner(owner, Some(token), None);
+        let (mut app, _sessions, _spawns) = agent_app(vec![settled, running]);
+
+        app.open_pin_conversation_picker();
+
+        let Some(Overlay::AgentPicker(picker)) = &app.overlay else {
+            panic!("the pin picker is open");
+        };
+        let listed: Vec<_> = picker
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                AgentPickerItem::Conversation(session) => Some(session.name().as_ref().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            listed.contains(&"Settled".to_string()),
+            "a settled conversation is offered"
+        );
+        assert!(
+            !listed.contains(&"Running".to_string()),
+            "a conversation whose provider is still running is hidden"
+        );
+    }
+
+    /// Even if a live-owner conversation reaches the pin step (a race between listing
+    /// and confirming), pinning is refused so its association is never transferred
+    /// out from under the running provider.
+    #[cfg(unix)]
+    #[test]
+    fn pinning_a_still_running_conversation_is_refused() {
+        let owner = AgentProcessId::try_new(std::process::id()).unwrap();
+        let token = LocalProcessIdentity::start_token(owner).unwrap();
+        let running = pinnable_conversation("Running", "/work/backend/muster.yml", "conv-running")
+            .with_launch_owner(owner, Some(token), None);
+        let (mut app, sessions, _spawns) = agent_app(vec![running.clone()]);
+
+        app.pin_conversation(&running, "backend");
+
+        assert_eq!(app.notice.as_deref(), Some(PIN_SOURCE_STILL_RUNNING));
+        assert!(
+            sessions
+                .sessions
+                .borrow()
+                .iter()
+                .all(|session| session.configured_key().is_none()),
+            "no configured association is created for a still-running conversation"
+        );
+    }
+
     /// Pinning a conversation writes it as a configured agent that runs in the
     /// conversation's own folder and carries its provider identity, so it resumes
     /// that exact conversation rather than starting fresh.
@@ -8592,33 +8751,32 @@ mod tests {
     }
 
     #[test]
-    fn creating_a_project_asks_before_overwriting_then_overwrites() {
+    fn registering_a_project_with_an_existing_config_adopts_it_without_overwriting() {
         let (mut app, recorder) = flow_app(vec![], empty_workspace_config(), "/here/muster.yml");
-        // Simulate an existing config already in the target folder.
+        // A populated config with a configured agent already lives in the folder.
+        let existing = empty_workspace_config().with_agents(vec![
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("keep-me").unwrap())
+                .command(Some(CommandLine::try_new("claude").unwrap()))
+                .build(),
+        ]);
         recorder
             .workspaces
             .borrow_mut()
-            .push((PathBuf::from("/taken/muster.yml"), empty_workspace_config()));
+            .push((PathBuf::from("/taken/muster.yml"), existing));
         app.open_switcher();
         app.open_new_project_form();
         app.new_project(&["proj".to_string(), "/taken".to_string()]);
 
-        // A confirmation is shown; nothing is written yet.
-        assert!(
-            confirmation_open(&app),
-            "an overwrite asks for confirmation"
-        );
+        // An existing config asks for confirmation; nothing is written yet.
+        assert!(confirmation_open(&app), "an existing config asks first");
         assert_eq!(
             recorder.workspaces.borrow().len(),
             1,
             "nothing is written before confirming"
         );
-        assert!(
-            recorder.projects.borrow().is_none(),
-            "nothing is registered before confirming"
-        );
 
-        // Confirming overwrites the config and registers the project.
+        // Confirming registers the project and adopts the config - never overwrites it.
         press(&mut app, KeyCode::Enter);
         assert!(!confirmation_open(&app), "confirming closes the dialog");
         assert_eq!(
@@ -8627,13 +8785,184 @@ mod tests {
                 .as_ref(),
             "proj"
         );
+        assert_eq!(
+            recorder.workspaces.borrow().len(),
+            1,
+            "the existing config is never rewritten, so it cannot be clobbered"
+        );
+        assert_eq!(
+            recorder.workspaces.borrow()[0].1.agents().len(),
+            1,
+            "the existing configured agent survives registering the project"
+        );
+    }
+
+    /// Stands in for a folder that already holds a config but cannot be written
+    /// to: every `create_workspace` fails on its staging write before it could
+    /// notice the destination exists, exactly as the filesystem adapter does.
+    struct ReadOnlyFolderRegistry {
+        recorder: Recorder,
+    }
+
+    impl ProjectRegistry for ReadOnlyFolderRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(self.recorder.projects.borrow().clone().unwrap_or_default())
+        }
+
+        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Ok(empty_workspace_config())
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+            *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn create_workspace(
+            &self,
+            config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<bool, ConfigError> {
+            Err(ConfigError::Write {
+                path: config_path.to_path_buf(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            })
+        }
+    }
+
+    #[test]
+    fn adopting_a_config_in_a_non_writable_folder_registers_without_a_spurious_error() {
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder().processes(vec![]).build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(ReadOnlyFolderRegistry {
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        app.open_switcher();
+        app.open_new_project_form();
+        app.new_project(&["proj".to_string(), "/taken".to_string()]);
+        assert!(confirmation_open(&app), "an existing config asks first");
+
+        // Confirming adopts the config as-is. Adoption never calls `create_workspace`,
+        // so the unwritable folder does not surface a spurious write failure.
+        press(&mut app, KeyCode::Enter);
         assert!(
+            !confirmation_open(&app),
+            "confirming closes the dialog even in a folder muster cannot write to"
+        );
+        assert!(
+            app.form().is_none(),
+            "adoption succeeds, so no write error keeps the form open"
+        );
+        assert_eq!(
             recorder
-                .workspaces
+                .projects
                 .borrow()
-                .iter()
-                .any(|(path, _)| path == &PathBuf::from("/taken/muster.yml")),
-            "the config is written on confirm"
+                .as_ref()
+                .expect("the project is registered")[0]
+                .name()
+                .as_ref(),
+            "proj",
+            "the project is registered by adopting the existing config"
+        );
+    }
+
+    /// Stands in for a path that `workspace_exists` reports as present but that
+    /// cannot be loaded: a directory, a file removed while the confirmation was
+    /// open, or an otherwise unreadable config.
+    struct UnreadableConfigRegistry {
+        recorder: Recorder,
+    }
+
+    impl ProjectRegistry for UnreadableConfigRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(self.recorder.projects.borrow().clone().unwrap_or_default())
+        }
+
+        fn workspace(&self, config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Err(ConfigError::Read {
+                path: config_path.to_path_buf(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+            *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            config_path: &Path,
+            config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            self.recorder
+                .workspaces
+                .borrow_mut()
+                .push((config_path.to_path_buf(), config.clone()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn adopting_an_unreadable_config_reports_the_error_and_registers_nothing() {
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder().processes(vec![]).build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(UnreadableConfigRegistry {
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        app.open_switcher();
+        app.open_new_project_form();
+        app.new_project(&["proj".to_string(), "/broken".to_string()]);
+        assert!(confirmation_open(&app), "an existing path asks first");
+
+        // Confirming tries to adopt the config, but it cannot be loaded. The form
+        // keeps the error for a retry and no unopenable project is registered.
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.form().is_some_and(|form| form.error.is_some()),
+            "the adoption failure is surfaced on the form for a retry"
+        );
+        assert!(
+            recorder.projects.borrow().is_none(),
+            "a project that cannot be opened is never registered"
         );
     }
 
@@ -8666,32 +8995,1215 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_failed_confirmed_overwrite_keeps_the_form_for_retry() {
+    /// Simulates losing the scaffold race: `workspace_exists` was false at check
+    /// time, but `create_workspace` finds the destination already created by
+    /// another process (`Ok(false)`). Whether that winning file then loads is
+    /// configurable, standing in for a valid config or a malformed one.
+    struct ScaffoldRaceRegistry {
+        recorder: Recorder,
+        winner_readable: bool,
+    }
+
+    impl ProjectRegistry for ScaffoldRaceRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(self.recorder.projects.borrow().clone().unwrap_or_default())
+        }
+
+        fn workspace(&self, config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            if self.winner_readable {
+                Ok(empty_workspace_config())
+            } else {
+                Err(ConfigError::Read {
+                    path: config_path.to_path_buf(),
+                    source: std::io::Error::from(std::io::ErrorKind::NotFound),
+                })
+            }
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            false
+        }
+
+        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+            *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn create_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<bool, ConfigError> {
+            Ok(false)
+        }
+    }
+
+    fn scaffold_race_app(winner_readable: bool) -> (App, Recorder) {
         let recorder = Recorder::default();
-        recorder
-            .workspaces
-            .borrow_mut()
-            .push((PathBuf::from("/taken/muster.yml"), empty_workspace_config()));
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder().processes(vec![]).build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(ScaffoldRaceRegistry {
+                recorder: recorder.clone(),
+                winner_readable,
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        (app, recorder)
+    }
+
+    #[test]
+    fn scaffolding_over_a_racing_writers_unreadable_config_reports_the_error() {
+        let (mut app, recorder) = scaffold_race_app(false);
+        app.open_switcher();
+        app.open_new_project_form();
+        // The folder looked empty, so this scaffolds - but another process wrote the
+        // config first, and that winning file cannot be loaded.
+        app.new_project(&["proj".to_string(), "/raced".to_string()]);
+
+        assert!(
+            app.form().is_some_and(|form| form.error.is_some()),
+            "an unreadable race winner keeps the form with an error, not a closed success"
+        );
+        // The registration made before the failed create is rolled back: retrying
+        // would hit the now-existing unreadable path and be rejected forever, so no
+        // permanently unopenable project may be left behind.
+        assert!(
+            recorder
+                .projects
+                .borrow()
+                .as_ref()
+                .is_none_or(|projects| projects.is_empty()),
+            "the unopenable project is unregistered, not left dangling"
+        );
+    }
+
+    #[test]
+    fn scaffolding_over_a_racing_writers_valid_config_adopts_it() {
+        let (mut app, recorder) = scaffold_race_app(true);
+        app.open_switcher();
+        app.open_new_project_form();
+        app.new_project(&["proj".to_string(), "/raced".to_string()]);
+
+        assert!(
+            app.form().is_none(),
+            "a readable race winner is adopted and the form closes"
+        );
+        assert!(
+            recorder.projects.borrow().is_some(),
+            "the project is registered on adopting the race winner"
+        );
+    }
+
+    #[test]
+    fn rolling_back_a_raced_scaffold_removes_a_relative_path_registration() {
+        // The folder is entered as a relative path. `try_register` stores it
+        // absolutized, so the rollback must absolutize too or it never matches its
+        // own entry and leaves the unopenable project permanently registered.
+        let (mut app, recorder) = scaffold_race_app(false);
+        app.open_switcher();
+        app.open_new_project_form();
+        app.new_project(&["proj".to_string(), "relative-project".to_string()]);
+
+        assert!(
+            app.form().is_some_and(|form| form.error.is_some()),
+            "the unreadable race winner is reported on the form"
+        );
+        assert!(
+            recorder
+                .projects
+                .borrow()
+                .as_ref()
+                .is_none_or(|projects| projects.is_empty()),
+            "the relative-path registration is rolled back, not left dangling"
+        );
+    }
+
+    #[test]
+    fn a_failed_scaffold_rollback_restores_a_replaced_registry_entry() {
+        // The path already carries a (dangling) registration. Registering the new
+        // project replaces it; when the scaffold then loses to an unreadable racing
+        // file, the rollback must restore that replaced entry, not delete it.
+        let recorder = Recorder::default();
+        let existing = Project::builder()
+            .name(ProjectName::try_new("old").unwrap())
+            .config(path::absolutize(Path::new("raced/muster.yml")))
+            .build();
+        *recorder.projects.borrow_mut() = Some(vec![existing]);
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(vec![]).build(),
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(ScaffoldRaceRegistry {
+                recorder: recorder.clone(),
+                winner_readable: false,
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        app.open_switcher();
+        app.open_new_project_form();
+        app.new_project(&["proj".to_string(), "raced".to_string()]);
+
+        let projects = recorder.projects.borrow();
+        let projects = projects.as_ref().expect("the registry still has entries");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.name().as_ref() == "old"),
+            "the pre-existing registration is restored, not deleted, on rollback"
+        );
+        assert!(
+            !projects
+                .iter()
+                .any(|project| project.name().as_ref() == "proj"),
+            "the failed registration is rolled back"
+        );
+    }
+
+    #[test]
+    fn rollback_leaves_a_concurrent_registration_untouched() {
+        // Another writer replaced our entry at the path between register and
+        // rollback. The rollback removes only its own write, so it neither deletes
+        // that entry nor restores the preimage over it.
+        let recorder = Recorder::default();
+        let concurrent = Project::builder()
+            .name(ProjectName::try_new("concurrent").unwrap())
+            .config(path::absolutize(Path::new("raced/muster.yml")))
+            .build();
+        *recorder.projects.borrow_mut() = Some(vec![concurrent]);
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(vec![]).build(),
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: empty_workspace_config(),
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        let preimage = vec![
+            Project::builder()
+                .name(ProjectName::try_new("old").unwrap())
+                .config(path::absolutize(Path::new("raced/muster.yml")))
+                .build(),
+        ];
+        app.rollback_registration(
+            &ProjectName::try_new("proj").unwrap(),
+            Path::new("raced/muster.yml"),
+            preimage,
+        );
+
+        let projects = recorder.projects.borrow();
+        let projects = projects.as_ref().expect("the registry still has entries");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.name().as_ref() == "concurrent"),
+            "a registration another writer made is preserved"
+        );
+        assert!(
+            !projects
+                .iter()
+                .any(|project| project.name().as_ref() == "old"),
+            "the preimage is not restored over a concurrent write"
+        );
+    }
+
+    #[test]
+    fn a_concurrently_readded_agents_session_survives_orphan_recovery() {
+        // A configured agent was removed locally, but the latest muster.yml still
+        // lists it - another instance re-added it after our config write released the
+        // lock. Orphan recovery must read that fresh config and preserve the session,
+        // not close and unconfigure it and lose the association.
+        let ada = ProcessName::try_new("Ada").unwrap();
+        let config_with_ada = empty_workspace_config().with_agents(vec![
+            ProcessSpec::builder()
+                .name(ada.clone())
+                .command(Some(CommandLine::try_new("claude").unwrap()))
+                .build(),
+        ]);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        // The local workspace omits Ada, as if it were deleted here before the re-add.
+        let workspace = Workspace::builder().processes(vec![]).build();
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: config_with_ada,
+                recorder,
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        let sessions = SessionRecorder::default();
+        sessions.sessions.borrow_mut().push(
+            AgentSession::builder()
+                .id(AgentSessionId::generate().unwrap())
+                .name(ada.clone())
+                .tool(AgentTool::Claude)
+                .project(PathBuf::from("/here/muster.yml"))
+                .launch_command(CommandLine::try_new("claude").unwrap())
+                .configured_key(Some(ConfiguredAgentKey::of(&ada).unwrap()))
+                .state(AgentSessionState::Open)
+                .build(),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+
+        app.recover_orphaned_pins();
+
+        let ada_session = sessions
+            .sessions
+            .borrow()
+            .iter()
+            .find(|session| session.name() == &ada)
+            .cloned()
+            .expect("Ada's session is present");
+        assert!(
+            ada_session.configured_key().is_some(),
+            "the re-added agent keeps its configured association"
+        );
+        assert_ne!(
+            *ada_session.state(),
+            AgentSessionState::Closed,
+            "the re-added agent's session is not closed by orphan recovery"
+        );
+    }
+
+    /// A registry whose re-added agent is visible only through the locked read, so
+    /// a recovery that consulted the plain unlocked read would miss it and retire.
+    struct LockedReadRegistry {
+        locked_config: WorkspaceConfig,
+    }
+
+    impl ProjectRegistry for LockedReadRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(Vec::new())
+        }
+
+        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Ok(empty_workspace_config())
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn with_workspace_locked(
+            &self,
+            _config_path: &Path,
+            read: &mut dyn FnMut(&WorkspaceConfig) -> Result<(), ConfigError>,
+        ) -> Result<(), ConfigError> {
+            read(&self.locked_config)
+        }
+    }
+
+    #[test]
+    fn orphan_recovery_reads_the_config_under_the_workspace_lock() {
+        // The retirement's config check must go through `with_workspace_locked` - the
+        // lock that serializes against config writes - not an unlocked read. This
+        // registry surfaces the re-added agent only through the locked read, so if
+        // recovery consulted the plain read it would retire the agent and drop the
+        // session.
+        let ada = ProcessName::try_new("Ada").unwrap();
+        let locked_config = empty_workspace_config().with_agents(vec![
+            ProcessSpec::builder()
+                .name(ada.clone())
+                .command(Some(CommandLine::try_new("claude").unwrap()))
+                .build(),
+        ]);
+        let (sender, _receiver) = bounded(16);
+        let mut app = App::new(
+            Workspace::builder().processes(vec![]).build(),
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(LockedReadRegistry { locked_config }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        let sessions = SessionRecorder::default();
+        sessions.sessions.borrow_mut().push(
+            AgentSession::builder()
+                .id(AgentSessionId::generate().unwrap())
+                .name(ada.clone())
+                .tool(AgentTool::Claude)
+                .project(PathBuf::from("/here/muster.yml"))
+                .launch_command(CommandLine::try_new("claude").unwrap())
+                .configured_key(Some(ConfiguredAgentKey::of(&ada).unwrap()))
+                .state(AgentSessionState::Open)
+                .build(),
+        );
+        app.set_agent_session_store(Box::new(FakeAgentSessionStore {
+            recorder: sessions.clone(),
+        }));
+
+        app.recover_orphaned_pins();
+
+        let ada_session = sessions
+            .sessions
+            .borrow()
+            .iter()
+            .find(|session| session.name() == &ada)
+            .cloned()
+            .expect("Ada's session is present");
+        assert!(
+            ada_session.configured_key().is_some(),
+            "the agent seen only through the locked config read is preserved"
+        );
+        assert_ne!(*ada_session.state(), AgentSessionState::Closed);
+    }
+
+    #[test]
+    fn a_failed_new_project_config_write_keeps_the_form_for_retry() {
         let mut app = controlled_app(ControlledRegistry {
             workspace: empty_workspace_config(),
             fail_save: false,
             fail_save_workspace: true,
-            recorder,
+            recorder: Recorder::default(),
         });
         app.open_switcher();
         app.open_new_project_form();
-        app.new_project(&["proj".to_string(), "/taken".to_string()]);
-        assert!(confirmation_open(&app), "an overwrite asks first");
+        // A brand-new folder scaffolds a starter config, and that write fails.
+        app.new_project(&["proj".to_string(), "/fresh".to_string()]);
 
-        // Confirm; the workspace write then fails.
-        press(&mut app, KeyCode::Enter);
-
-        assert!(!confirmation_open(&app), "the confirmation closes");
         let form = app
             .form()
             .expect("the form is kept so the user can retry without refilling it");
         assert!(form.error.is_some(), "the failure is shown on the form");
+    }
+
+    #[test]
+    fn deleting_a_configured_process_removes_it_from_the_config() {
+        let config = empty_workspace_config().with_terminals(vec![
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("db").unwrap())
+                .command(Some(CommandLine::try_new("psql").unwrap()))
+                .build(),
+        ]);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let registry = Box::new(FakeRegistry {
+            projects: vec![],
+            workspace: config,
+            recorder: recorder.clone(),
+        });
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        // A configured process asks to delete it, not the old "stay pinned" refusal.
+        app.confirm_delete_selected();
+        assert!(
+            matches!(&app.overlay, Some(Overlay::ConfirmProcessRemoval { .. })),
+            "deleting a configured process asks to remove it from muster.yml"
+        );
+
+        // Confirming rewrites muster.yml without the deleted process.
+        press(&mut app, KeyCode::Enter);
+        let written = recorder.workspaces.borrow();
+        let latest = written
+            .last()
+            .expect("the config is rewritten on delete")
+            .1
+            .clone();
+        assert!(
+            latest.terminals().is_empty(),
+            "the deleted configured process is removed from muster.yml"
+        );
+    }
+
+    /// A deferred switch loads the next project from a pane exit event, which can
+    /// land while a delete confirmation is open - and the identity stored in that
+    /// confirmation matches a spec in the new project too. Confirming afterwards
+    /// must not delete the entry out of the project that just loaded.
+    #[test]
+    fn delete_is_refused_when_a_pending_switch_changed_the_project() {
+        let config = empty_workspace_config().with_terminals(vec![
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("db").unwrap())
+                .command(Some(CommandLine::try_new("psql").unwrap()))
+                .build(),
+        ]);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let registry = Box::new(FakeRegistry {
+            projects: vec![],
+            workspace: config.clone(),
+            recorder: recorder.clone(),
+        });
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        // The switch defers until the live pane exits, so the old row stays
+        // selectable and the confirmation can still be opened against it.
+        app.begin_switch(config, PathBuf::from("/next/muster.yml"));
+        let pane = *app
+            .panes
+            .iter()
+            .find(|(_, target)| target.handle.is_some())
+            .expect("the configured process is live, so the switch is deferred")
+            .0;
+        assert!(app.pending_switch.is_some());
+
+        app.confirm_delete_selected();
+        assert!(
+            matches!(&app.overlay, Some(Overlay::ConfirmProcessRemoval { .. })),
+            "the old project's row is still selectable while the switch is pending"
+        );
+
+        // That exit completes the switch and loads the new project underneath the
+        // still-open confirmation.
+        let generation = app.generations[&pane];
+        app.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+        assert!(app.pending_switch.is_none());
+        assert_eq!(
+            app.current_config.as_deref(),
+            Some(Path::new("/next/muster.yml")),
+            "the deferred switch loaded the next project"
+        );
+
+        press(&mut app, KeyCode::Enter);
+
+        assert!(
+            !recorder
+                .workspaces
+                .borrow()
+                .iter()
+                .any(|(path, _)| path == Path::new("/next/muster.yml")),
+            "a confirmation bound to the old project must never edit the new one's config"
+        );
+        assert_eq!(app.notice.as_deref(), Some(DELETE_PROJECT_CHANGED));
+    }
+
+    #[test]
+    fn delete_targets_the_confirmed_identity_not_a_reused_pane() {
+        // Two distinct configured terminals; only the second is deleted.
+        let config = empty_workspace_config().with_terminals(vec![
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("keep").unwrap())
+                .command(Some(CommandLine::try_new("true").unwrap()))
+                .build(),
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("target").unwrap())
+                .command(Some(CommandLine::try_new("psql").unwrap()))
+                .build(),
+        ]);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let registry = Box::new(FakeRegistry {
+            projects: vec![],
+            workspace: config,
+            recorder: recorder.clone(),
+        });
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        let target = app
+            .workspace
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == "target")
+            .map(ProcessSpecMatcher::of)
+            .expect("the target terminal is present");
+        app.remove_configured_process(&target, 0, Path::new("/here/muster.yml"));
+
+        let written = recorder.workspaces.borrow();
+        let latest = written.last().expect("the config is rewritten").1.clone();
+        let names: Vec<_> = latest
+            .terminals()
+            .iter()
+            .map(|spec| spec.name().as_ref().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["keep".to_string()],
+            "delete removes the identity that was confirmed, leaving the other row"
+        );
+    }
+
+    #[test]
+    fn confirming_a_delete_whose_entry_vanished_removes_nothing() {
+        // The confirmation carries an identity that no longer exists in the config,
+        // as if a watcher reconcile retired that row (and reused its pane id) before
+        // the user confirmed: resolving by identity finds no match and deletes nothing.
+        let config = empty_workspace_config().with_terminals(vec![
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("survivor").unwrap())
+                .command(Some(CommandLine::try_new("true").unwrap()))
+                .build(),
+        ]);
+        let recorder = Recorder::default();
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let registry = Box::new(FakeRegistry {
+            projects: vec![],
+            workspace: config,
+            recorder: recorder.clone(),
+        });
+        let mut app = App::new(
+            workspace,
+            Box::new(FakeRunner),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            registry,
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        let vanished = ProcessSpecMatcher::of_spec(
+            ProcessKind::Terminal,
+            &ProcessSpec::builder()
+                .name(ProcessName::try_new("vanished").unwrap())
+                .command(Some(CommandLine::try_new("gone").unwrap()))
+                .build(),
+        );
+        app.remove_configured_process(&vanished, 0, Path::new("/here/muster.yml"));
+
+        assert!(
+            app.workspace
+                .processes()
+                .iter()
+                .any(|process| process.name().as_ref() == "survivor"),
+            "an unrelated row is never deleted when the confirmed identity is gone"
+        );
+        assert_eq!(
+            app.notice.as_deref(),
+            Some(DELETE_ENTRY_GONE),
+            "the vanished-entry no-op reports feedback rather than closing silently"
+        );
+    }
+
+    #[test]
+    fn deleting_a_running_command_stops_it_through_its_graceful_policy() {
+        // A running command carries a graceful stop policy; deleting it must send
+        // that signal (so a database can clean up), never an immediate force-kill.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let command = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![command]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: config,
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        app.confirm_delete_selected();
+        assert!(
+            matches!(&app.overlay, Some(Overlay::ConfirmProcessRemoval { .. })),
+            "deleting a configured command asks to remove it from muster.yml"
+        );
+        press(&mut app, KeyCode::Enter);
+
+        // The command received its configured graceful signal, not a force-kill.
+        assert_eq!(
+            signals.terminates.load(Ordering::SeqCst),
+            1,
+            "the deleted command is stopped gracefully, not force-killed"
+        );
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *signals.termination.lock().unwrap(),
+            Some((StopSignal::Interrupt, TEST_STOP_GRACE))
+        );
+        // It is gone from the config and, marked RetireOnExit, will not restart.
+        let written = recorder.workspaces.borrow();
+        assert!(
+            written
+                .last()
+                .expect("the config is rewritten on delete")
+                .1
+                .commands()
+                .is_empty(),
+            "the deleted command is removed from muster.yml"
+        );
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().config_membership,
+            ConfigMembership::RetireOnExit,
+            "the live row retires on exit rather than restarting"
+        );
+    }
+
+    #[test]
+    fn deleting_an_already_stopping_command_reuses_the_active_graceful_stop() {
+        // A command is already stopping when the user deletes it. The delete must
+        // not re-signal: no second SIGINT, no reset escalation deadline.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let command = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![command]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: config,
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+
+        // A graceful stop is already in flight when the delete is confirmed.
+        app.stop_selected();
+        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
+        let shutdown_before = current_shutdown_gen(&app);
+
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            signals.terminates.load(Ordering::SeqCst),
+            1,
+            "the active graceful stop is reused, not re-signaled with a second SIGINT"
+        );
+        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            current_shutdown_gen(&app),
+            shutdown_before,
+            "the escalation deadline is not reset by the delete"
+        );
+        assert_eq!(
+            app.panes.get(&PaneId::new(PANE)).unwrap().config_membership,
+            ConfigMembership::RetireOnExit,
+            "the row is still marked to retire so it will not restart"
+        );
+    }
+
+    #[test]
+    fn an_externally_restored_spec_reclaims_its_retiring_pane() {
+        // An external config edit removes a running command, then restores the
+        // identical spec before the child exits. The running pane must be reclaimed
+        // as tracked, not left retiring while a duplicate is spawned.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let command = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let with = empty_workspace_config().with_commands(vec![command]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder().processes(with.to_processes()).build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: with.clone(),
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        let pane = PaneId::new(PANE);
+
+        // An external edit removes the spec: the running pane starts retiring.
+        app.reconcile_config(&empty_workspace_config());
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::RetireOnExit,
+            "the externally removed process starts retiring"
+        );
+
+        // The same spec is restored before the child exits.
+        app.reconcile_config(&with);
+
+        assert_eq!(
+            app.panes.get(&pane).unwrap().config_membership,
+            ConfigMembership::Tracked,
+            "the restored spec reclaims the still-running pane"
+        );
+        assert!(
+            app.panes.get(&pane).unwrap().handle.is_some(),
+            "the surviving child is preserved"
+        );
+        assert_eq!(
+            app.workspace.processes().len(),
+            1,
+            "no duplicate pending row is added for the restored spec"
+        );
+    }
+
+    #[test]
+    fn deleting_one_of_two_identical_commands_retires_the_selected_pane() {
+        // Two identical configured commands run side by side. Deleting the first
+        // must retire that exact pane and keep the duplicate running as tracked,
+        // not stop the first yet retire the second.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![spec.clone(), spec]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: config,
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        let first = PaneId::new(PANE);
+        let second = PaneId::new(PANE + 1);
+        assert!(
+            app.panes.get(&first).unwrap().handle.is_some()
+                && app.panes.get(&second).unwrap().handle.is_some(),
+            "both identical commands start"
+        );
+
+        // The first (selected) row is deleted.
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.panes.get(&first).unwrap().config_membership,
+            ConfigMembership::RetireOnExit,
+            "the selected pane is the one that retires"
+        );
+        assert_eq!(
+            app.panes.get(&second).unwrap().config_membership,
+            ConfigMembership::Tracked,
+            "the surviving duplicate stays tracked, not retiring"
+        );
+        assert!(
+            app.panes.get(&second).unwrap().handle.is_some(),
+            "the surviving duplicate keeps running"
+        );
+        assert_eq!(
+            signals.terminates.load(Ordering::SeqCst),
+            1,
+            "only the deleted pane is stopped, never the surviving duplicate"
+        );
+        assert_eq!(
+            recorder
+                .workspaces
+                .borrow()
+                .last()
+                .expect("the config is rewritten")
+                .1
+                .commands()
+                .len(),
+            1,
+            "one of the two identical command specs is removed from muster.yml"
+        );
+    }
+
+    #[test]
+    fn a_deleted_duplicate_stays_retired_across_the_watcher_reconcile() {
+        // Two identical commands; the first is deleted while still shutting down.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![spec.clone(), spec.clone()]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(FakeRegistry {
+                projects: vec![],
+                workspace: config,
+                recorder: recorder.clone(),
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        let first = PaneId::new(PANE);
+        let second = PaneId::new(PANE + 1);
+
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+
+        // The write to muster.yml fires the config watcher, which reconciles again
+        // against the surviving single spec with no explicit pane to retire.
+        let surviving = empty_workspace_config().with_commands(vec![spec]);
+        app.reconcile_config(&surviving);
+
+        assert_eq!(
+            app.panes.get(&first).unwrap().config_membership,
+            ConfigMembership::RetireOnExit,
+            "the deleted pane stays retired after the self-generated watcher event"
+        );
+        assert_eq!(
+            app.panes.get(&second).unwrap().config_membership,
+            ConfigMembership::Tracked,
+            "the surviving duplicate is not flipped to retiring by the watcher event"
+        );
+        assert!(
+            app.panes.get(&second).unwrap().handle.is_some(),
+            "the surviving duplicate keeps running"
+        );
+    }
+
+    /// A registry whose `workspace` reflects the most recent `save_workspace`, so a
+    /// sequence of edits accumulates the way the filesystem adapter does.
+    struct StatefulRegistry {
+        recorder: Recorder,
+        initial: WorkspaceConfig,
+    }
+
+    impl ProjectRegistry for StatefulRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(self.recorder.projects.borrow().clone().unwrap_or_default())
+        }
+
+        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Ok(self
+                .recorder
+                .workspaces
+                .borrow()
+                .last()
+                .map(|(_, config)| config.clone())
+                .unwrap_or_else(|| self.initial.clone()))
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
+            *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            config_path: &Path,
+            config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            self.recorder
+                .workspaces
+                .borrow_mut()
+                .push((config_path.to_path_buf(), config.clone()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn deleting_a_duplicate_while_its_twin_retires_targets_the_right_occurrence() {
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![spec.clone(), spec.clone()]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(StatefulRegistry {
+                recorder: recorder.clone(),
+                initial: config,
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        let first = PaneId::new(PANE);
+        let second = PaneId::new(PANE + 1);
+        let target = ProcessSpecMatcher::of(
+            app.workspace
+                .processes()
+                .iter()
+                .find(|process| *process.id() == first)
+                .unwrap(),
+        );
+
+        // Delete the first duplicate; it retires while the second stays tracked.
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.panes.get(&first).unwrap().config_membership,
+            ConfigMembership::RetireOnExit
+        );
+        assert_eq!(
+            app.panes.get(&second).unwrap().config_membership,
+            ConfigMembership::Tracked
+        );
+
+        // The retiring row is skipped when numbering occurrences: the survivor is
+        // occurrence 0, and the retiring row itself maps to no occurrence.
+        assert_eq!(app.configured_occurrence_of(&target, second), Some(0));
+        assert_eq!(app.configured_occurrence_of(&target, first), None);
+
+        // Trying to delete the already-retiring row is a no-op that says so.
+        let retiring_at = app
+            .workspace
+            .processes()
+            .iter()
+            .position(|process| *process.id() == first)
+            .unwrap();
+        app.workspace.select_at(retiring_at);
+        app.confirm_delete_selected();
+        assert!(
+            !matches!(app.overlay, Some(Overlay::ConfirmProcessRemoval { .. })),
+            "deleting an already-retiring row opens no confirmation"
+        );
+        assert_eq!(app.notice.as_deref(), Some(DELETE_ALREADY_RETIRING));
+
+        // Deleting the surviving duplicate now removes the last spec instead of a
+        // nonexistent occurrence 1, and retires it too.
+        let survivor_at = app
+            .workspace
+            .processes()
+            .iter()
+            .position(|process| *process.id() == second)
+            .unwrap();
+        app.workspace.select_at(survivor_at);
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.panes.get(&second).unwrap().config_membership,
+            ConfigMembership::RetireOnExit
+        );
+        assert!(
+            recorder
+                .workspaces
+                .borrow()
+                .last()
+                .unwrap()
+                .1
+                .commands()
+                .is_empty(),
+            "deleting the survivor empties the config rather than silently no-opping"
+        );
+    }
+
+    #[test]
+    fn autostart_toggle_skips_a_retiring_duplicate() {
+        // Two identical commands; the first is deleted and left retiring. Toggling
+        // autostart must target the surviving duplicate (occurrence 0) and refuse on
+        // the retiring row rather than editing the survivor's spec.
+        let signals = Arc::new(StopSignals::default());
+        let (sender, _receiver) = bounded(16);
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("db").unwrap())
+            .command(Some(CommandLine::try_new("postgres").unwrap()))
+            .autostart(Some(true))
+            .stop(Some(test_stop_policy()))
+            .build();
+        let config = empty_workspace_config().with_commands(vec![spec.clone(), spec.clone()]);
+        let recorder = Recorder::default();
+        let workspace = Workspace::builder()
+            .processes(config.to_processes())
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(StopSignalRunner {
+                signals: signals.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            Box::new(StatefulRegistry {
+                recorder: recorder.clone(),
+                initial: config,
+            }),
+            PathBuf::from("/here/muster.yml"),
+        );
+        app.start();
+        let first = PaneId::new(PANE);
+        let second = PaneId::new(PANE + 1);
+
+        // Delete the first duplicate; it retires while the second stays tracked.
+        app.confirm_delete_selected();
+        press(&mut app, KeyCode::Enter);
+
+        // Toggling autostart on the retiring row is refused: no write, no change.
+        let retiring_at = app
+            .workspace
+            .processes()
+            .iter()
+            .position(|process| *process.id() == first)
+            .unwrap();
+        app.workspace.select_at(retiring_at);
+        let writes_before = recorder.workspaces.borrow().len();
+        app.toggle_selected_autostart();
+        assert_eq!(app.notice.as_deref(), Some(AUTOSTART_UNTRACKED));
+        assert_eq!(
+            recorder.workspaces.borrow().len(),
+            writes_before,
+            "no config write is made for a retiring row"
+        );
+
+        // Toggling autostart on the survivor edits the single remaining spec.
+        let survivor_at = app
+            .workspace
+            .processes()
+            .iter()
+            .position(|process| *process.id() == second)
+            .unwrap();
+        app.workspace.select_at(survivor_at);
+        app.toggle_selected_autostart();
+        assert!(
+            !*app.workspace.process(second).unwrap().autostart(),
+            "the survivor's in-memory autostart flips off"
+        );
+        let written = recorder.workspaces.borrow();
+        let latest = &written.last().unwrap().1;
+        assert_eq!(latest.commands().len(), 1);
+        assert_eq!(
+            *latest.commands()[0].autostart(),
+            Some(false),
+            "the surviving spec's autostart is flipped, not a phantom occurrence 1"
+        );
     }
 
     #[test]

@@ -231,8 +231,17 @@ impl App {
     /// Retires a process that no longer belongs in the workspace.
     pub(super) fn retire_pane(&mut self, pane: PaneId) {
         self.panes.remove(&pane);
-        self.generations.remove(&pane);
+        // Advance the spawn generation rather than dropping it. A retired pane can
+        // still have a `ForceStop` or a delayed `Respawn` queued in a timer thread;
+        // dropping the counter would let a process that later reuses this pane id
+        // match those stale events. A reused non-autostart pane never spawns, so it
+        // would never bump the counter itself - advancing here past every queued
+        // value is what makes `handle_force_stop` and `handle_respawn` reject them.
+        self.bump_generation(pane);
         self.restart_attempts.remove(&pane);
+        // The pane has exited, so its id may be reused; clear any deletion mark so a
+        // future occupant is not force-retired by a stale entry.
+        self.deleted_panes.remove(&pane);
         // Drop the metrics sample too, or a later process reusing this pane id
         // would briefly show the retired process's pid, memory, and cpu.
         self.usage.remove(&pane);
@@ -633,7 +642,7 @@ impl App {
     }
 
     /// Sends the configured graceful signal and schedules a single matching escalation.
-    fn request_graceful_transition(
+    pub(super) fn request_graceful_transition(
         &mut self,
         pane: PaneId,
         request: impl FnOnce(ExitIntent) -> ExitIntent,

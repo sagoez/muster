@@ -132,15 +132,58 @@ impl ProcessSpecMatcher {
         };
         (config, edited)
     }
+
+    /// Removes the `occurrence`-th spec matching this identity from the config,
+    /// returning the new config and whether a spec was actually removed.
+    pub fn without(&self, config: WorkspaceConfig, occurrence: usize) -> (WorkspaceConfig, bool) {
+        let mut seen = 0;
+        let mut removed = false;
+        let mut retain = |specs: &[ProcessSpec]| -> Vec<ProcessSpec> {
+            specs
+                .iter()
+                .filter(|spec| {
+                    if self.matches(spec) {
+                        let hit = seen == occurrence;
+                        seen += 1;
+                        if hit {
+                            removed = true;
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect()
+        };
+        let config = match self.kind {
+            ProcessKind::Agent => {
+                let specs = retain(config.agents());
+                config.with_agents(specs)
+            },
+            ProcessKind::Terminal => {
+                let specs = retain(config.terminals());
+                config.with_terminals(specs)
+            },
+            ProcessKind::Command => {
+                let specs = retain(config.commands());
+                config.with_commands(specs)
+            },
+        };
+        (config, removed)
+    }
 }
 
 impl Reconciliation {
     /// Reconciles `workspace` with `config`, consulting `is_live` before
-    /// removing a process whose configuration entry disappeared.
+    /// removing a process whose configuration entry disappeared. `force_retire`
+    /// names panes the caller is deleting: each retires even when its identity
+    /// still has a surviving config occurrence, so a later identical duplicate is
+    /// kept as the tracked row instead of the specific pane that was removed.
     pub fn apply(
         workspace: &Workspace,
         config: &WorkspaceConfig,
         is_live: impl Fn(PaneId) -> bool,
+        force_retire: impl Fn(PaneId) -> bool,
     ) -> Self {
         let sections = [
             (ProcessKind::Agent, config.agents()),
@@ -168,12 +211,17 @@ impl Reconciliation {
                 continue;
             }
             let identity = ProcessSpecIdentity::of_process(process);
-            let matched = config_counts
-                .get_mut(&identity)
-                .filter(|count| **count > 0)
-                .map(|count| *count -= 1)
-                .is_some();
             let pane = *process.id();
+            // A pane the caller is deleting must retire even when its identity still
+            // has a surviving config occurrence: leaving its count for a later
+            // identical duplicate keeps that duplicate running as the tracked row,
+            // and this stopped pane retires rather than lingering as a tracked stop.
+            let matched = !force_retire(pane)
+                && config_counts
+                    .get_mut(&identity)
+                    .filter(|count| **count > 0)
+                    .map(|count| *count -= 1)
+                    .is_some();
             if matched {
                 tracked.push(pane);
                 kept.push(process.clone());

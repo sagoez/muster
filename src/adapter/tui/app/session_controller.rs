@@ -97,14 +97,40 @@ impl App {
             .filter(|process| {
                 *process.kind() == ProcessKind::Agent
                     && *process.origin() == ProcessOrigin::Configured
+                    // A row retiring after its config entry vanished (a deleted
+                    // agent) is no longer live, so its session is recoverable.
+                    && self
+                        .panes
+                        .get(process.id())
+                        .is_none_or(|pane| pane.config_membership != ConfigMembership::RetireOnExit)
             })
             .filter_map(|process| ConfiguredAgentKey::of(process.name()).ok())
             .collect();
-        let retired = self
-            .agent_session_store
-            .as_ref()
-            .map(|store| store.retire_orphaned_configured(&project, &live_keys));
-        if let Some(Err(error)) = retired {
+        let Some(store) = self.agent_session_store.as_ref() else {
+            return;
+        };
+        // Read the config and retire while holding the workspace lock. After a delete's
+        // config write releases that lock, another Muster or CLI instance may re-add the
+        // same agent, and the local workspace has not reconciled that yet. Coordinating
+        // the config check with config writes - not just the session-store lock - means
+        // a re-add cannot land between reading the agent list and retiring: an agent in
+        // the locked config is folded in as live so its session is preserved (its
+        // conversation association survives the next link), while a genuinely deleted
+        // agent is absent from disk and still retires.
+        let result = self
+            .registry
+            .with_workspace_locked(&project, &mut |config| {
+                let mut keys = live_keys.clone();
+                keys.extend(
+                    config
+                        .agents()
+                        .iter()
+                        .filter_map(|spec| ConfiguredAgentKey::of(spec.name()).ok()),
+                );
+                store.retire_orphaned_configured(&project, &keys)?;
+                Ok(())
+            });
+        if let Err(error) = result {
             self.set_notice(format!("{AGENT_SESSION_STORE_ERROR}: {error}"));
         }
     }
@@ -154,7 +180,7 @@ impl App {
     }
 
     /// Returns whether a locally running process still owns the session.
-    fn session_owner_is_live(session: &AgentSession) -> bool {
+    pub(super) fn session_owner_is_live(session: &AgentSession) -> bool {
         let Some(process_id) = session.owner_process_id() else {
             return false;
         };

@@ -155,6 +155,29 @@ impl ProjectRegistry for YamlProjectRegistry {
         updated.validate()?;
         write_config(&dest, &updated)
     }
+
+    fn with_workspace_locked(
+        &self,
+        config_path: &Path,
+        read: &mut dyn FnMut(&WorkspaceConfig) -> Result<(), ConfigError>,
+    ) -> Result<(), ConfigError> {
+        // Same canonicalization and lock as `update_workspace`, so this read and a
+        // concurrent write to the same workspace take the one lock and serialize: a
+        // re-add cannot interleave between `read`'s config check and whatever it does
+        // with the result.
+        //
+        // A coordinated read must not require write access to the config's directory,
+        // though: an adopted read-only workspace cannot host a `.lock` sibling. Take
+        // the lock when we can; when we cannot (the directory is not writable), read
+        // unlocked rather than failing - a directory this process cannot write also
+        // cannot be written by a concurrent instance, so there is nothing to serialize
+        // against.
+        let expanded = expand_home(config_path);
+        let dest = expanded.canonicalize().unwrap_or(expanded);
+        let _guard = lock_workspace(&dest).ok();
+        let config = load_workspace(&dest)?;
+        read(&config)
+    }
 }
 
 /// Acquires an exclusive advisory lock for the workspace at `dest`, on a stable
@@ -419,5 +442,41 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A coordinated read must not require write access to the config's directory:
+    /// an adopted read-only workspace has no writable place for a `.lock` sibling,
+    /// so `with_workspace_locked` falls back to an unlocked read instead of failing.
+    #[cfg(unix)]
+    #[test]
+    fn with_workspace_locked_reads_a_read_only_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("muster-ro-lock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("muster.yml");
+        fs::write(&path, "agents: []\nterminals: []\ncommands: []\n").unwrap();
+        // Read and execute only: a `.lock` sibling cannot be created here.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let mut read = false;
+        let result = YamlProjectRegistry.with_workspace_locked(&path, &mut |config| {
+            read = true;
+            assert!(config.agents().is_empty());
+            Ok(())
+        });
+
+        // Restore write permission so the directory can be removed.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            result.is_ok(),
+            "a read-only workspace is read without a spurious lock-write failure"
+        );
+        assert!(
+            read,
+            "the config callback still runs against the unlocked read"
+        );
     }
 }

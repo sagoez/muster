@@ -70,11 +70,23 @@ impl App {
 
     /// Applies changed disk configuration without bouncing surviving processes.
     pub(super) fn reconcile_config(&mut self, config: &WorkspaceConfig) {
-        let reconciliation = Reconciliation::apply(&self.workspace, config, |pane| {
-            self.panes
-                .get(&pane)
-                .is_some_and(|target| target.handle.is_some())
-        });
+        let reconciliation = Reconciliation::apply(
+            &self.workspace,
+            config,
+            |pane| {
+                self.panes
+                    .get(&pane)
+                    .is_some_and(|target| target.handle.is_some())
+            },
+            // Keep a pane the delete flow retired out of identity matching. The
+            // write to `muster.yml` fires a self-generated watcher reconcile; without
+            // this, that pass would match the surviving duplicate's spec back to the
+            // just-deleted pane and retire the still-running one instead. Only panes
+            // this flow deleted are excluded - a pane merely marked `RetireOnExit` by
+            // an external removal must stay matchable, so restoring its spec before
+            // it exits reclaims the running child rather than spawning a duplicate.
+            |pane| self.deleted_panes.contains(&pane),
+        );
         let tracked = reconciliation.tracked().clone();
         let retiring = reconciliation.retiring().clone();
         let removed = reconciliation.removed().clone();
@@ -90,8 +102,14 @@ impl App {
         }
         for pane in removed {
             self.panes.remove(&pane);
-            self.generations.remove(&pane);
+            // Advance the spawn generation rather than dropping it: a removed pane can
+            // still have a `ForceStop` or a delayed `Respawn` queued in a timer thread,
+            // and resetting the counter would let a process that reuses this pane id
+            // match those stale events. Bumping past any queued value invalidates them.
+            self.bump_generation(pane);
             self.restart_attempts.remove(&pane);
+            // The pane id is now free to be reused, so it must not stay force-retired.
+            self.deleted_panes.remove(&pane);
             // A retired pane id can be reused by a new process, so drop its stale
             // usage sample rather than show it under the reused row.
             self.usage.remove(&pane);

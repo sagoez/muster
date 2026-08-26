@@ -37,8 +37,11 @@ const PIN_TITLE: &str = "Pin a conversation";
 const PIN_HINT: &str = " ⏎ pin   esc cancel";
 /// Heading above the list of resumable conversations to pin.
 const CONVERSATIONS_HEADING: &str = "Conversations";
-/// The configure-menu row that opens the conversation list.
-const FROM_CONVERSATION_LABEL: &str = "Resume a conversation…";
+/// The configure-menu row that opens the conversation list, set apart from the
+/// provider presets by a leading glyph and a divider above it.
+const FROM_CONVERSATION_LABEL: &str = "⟳  Resume a conversation";
+/// Character count of the divider drawn above the resume-a-conversation row.
+const DIVIDER_WIDTH: usize = 24;
 /// Heading color.
 const HEADING_COLOR: Color = Color::DarkGray;
 /// Highlighted-row color.
@@ -175,11 +178,18 @@ fn selected_line(items: &[AgentPickerItem], selected: usize) -> usize {
         .take_while(|item| matches!(item, AgentPickerItem::Recent(_)))
         .count();
     let selected = selected.min(items.len().saturating_sub(1));
-    if recent > 0 && selected >= recent {
+    let base = if recent > 0 && selected >= recent {
         selected + 3
     } else {
         selected + 1
-    }
+    };
+    // Each divider rendered at or before the selection pushes its line down one.
+    let dividers = items
+        .iter()
+        .take(selected + 1)
+        .filter(|item| matches!(item, AgentPickerItem::FromConversation))
+        .count();
+    base + dividers
 }
 
 /// Returns the vertical offset that keeps `selected` inside a viewport with
@@ -211,9 +221,21 @@ fn picker_lines(
     }
     lines.push(heading(purpose.new_heading()));
     for (index, item) in items.iter().enumerate().skip(recent) {
+        if matches!(item, AgentPickerItem::FromConversation) {
+            lines.push(divider());
+        }
         lines.push(item_line(item, index == selected));
     }
     lines
+}
+
+/// Builds the divider that separates the provider presets from the
+/// resume-a-conversation action.
+fn divider() -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {}", "─".repeat(DIVIDER_WIDTH)),
+        Style::default().fg(HEADING_COLOR),
+    ))
 }
 
 /// Builds one subdued section heading.
@@ -359,6 +381,32 @@ mod tests {
         assert!(screen.contains(CONFIGURE_TITLE));
         assert!(screen.contains(CONFIGURE_NEW_HEADING));
         assert!(!screen.contains(RECENT_HEADING));
+    }
+
+    /// The resume-a-conversation action is set apart from the provider presets by
+    /// a divider above it and its own glyph label.
+    #[test]
+    fn resume_a_conversation_row_is_divided_from_the_providers() {
+        let mut items = AgentTool::options()
+            .map(AgentPickerItem::New)
+            .collect::<Vec<_>>();
+        items.push(AgentPickerItem::FromConversation);
+        let mut terminal = Terminal::new(TestBackend::new(56, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &items,
+                    0,
+                    None,
+                    AgentPickerPurpose::Configure,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains(FROM_CONVERSATION_LABEL));
+        assert!(screen.contains(&"─".repeat(DIVIDER_WIDTH)));
     }
 
     /// A clipped picker scrolls to its selected provider while retaining the

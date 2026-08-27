@@ -2,6 +2,7 @@ mod activity;
 mod activity_frame;
 mod app;
 mod completion_generation;
+mod emulator;
 mod event;
 mod form;
 mod host_theme;

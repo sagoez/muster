@@ -1,5 +1,10 @@
 use super::*;
 
+/// Bracketed-paste introducer sent to a child before pasted text (`CSI 200 ~`).
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed-paste terminator sent to a child after pasted text (`CSI 201 ~`).
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
 impl App {
     /// Forwards a key press or repeat to the focused pane's PTY, if it is alive.
     /// Typing snaps a scrolled-back view down to the live screen first. A repeat
@@ -33,7 +38,7 @@ impl App {
             let screen_epoch = target.keyboard.screen_epoch();
             let wrote = match keyboard::encode_key(key, protocol) {
                 Some(bytes) => {
-                    target.parser.screen_mut().set_scrollback(0);
+                    target.parser.set_scrollback(0);
                     if let Some(handle) = target.handle.as_mut() {
                         let _ = handle.write_input(&bytes);
                     }
@@ -59,6 +64,45 @@ impl App {
                     protocol,
                     screen_epoch,
                 });
+        }
+    }
+
+    /// Routes a bracketed paste from the host. Into an open text form it inserts
+    /// the characters; attached to a live terminal it forwards the text to the
+    /// child, wrapped in bracketed-paste markers when the child requested them so
+    /// the child treats it as one paste instead of a burst of typed keys (which
+    /// an agent like Codex flags for sanitizing). It is ignored elsewhere.
+    pub(super) fn handle_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if matches!(self.overlay, Some(Overlay::Form(_))) {
+            for ch in text.chars().filter(|ch| !ch.is_control()) {
+                self.handle_form_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            return;
+        }
+        if self.focus != Focus::Terminal {
+            return;
+        }
+        let Some(pane) = self.selected_pane() else {
+            return;
+        };
+        let Some(target) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        // Typing (here, pasting) snaps a scrolled-back view down to the live screen.
+        target.parser.set_scrollback(0);
+        let bracketed = target.parser.bracketed_paste();
+        let Some(handle) = target.handle.as_mut() else {
+            return;
+        };
+        if bracketed {
+            let _ = handle.write_input(BRACKETED_PASTE_START);
+            let _ = handle.write_input(text.as_bytes());
+            let _ = handle.write_input(BRACKETED_PASTE_END);
+        } else {
+            let _ = handle.write_input(text.as_bytes());
         }
     }
 
@@ -105,7 +149,7 @@ impl App {
         let cols = self.pane_size.cols().into_inner();
         let size = self.pane_size;
         for pane in self.panes.values_mut() {
-            pane.parser.screen_mut().set_size(rows, cols);
+            pane.parser.set_size(rows, cols);
             if let Some(handle) = pane.handle.as_mut() {
                 let _ = handle.resize(size);
             }

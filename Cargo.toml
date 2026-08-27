@@ -28,6 +28,7 @@ name = "muster"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal = "0.26"
 anstream = "1.0.0"
 anstyle = "1.0.14"
 atomic-write-file = "0.3.0"
@@ -56,11 +57,9 @@ terminal-colorsaurus = "1.0.3"
 thiserror = "2.0.19"
 toml_edit = { version = "0.23.7", features = ["serde"] }
 tui-input = { version = "0.14.0", default-features = false }
-tui-term = "0.3.4"
 typed-builder = "0.23.2"
 unicode-width = "0.2.2"
 uuid = { version = "1.18.1", features = ["v4"] }
-vt100 = "0.16.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

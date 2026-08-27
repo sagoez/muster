@@ -119,16 +119,13 @@ impl App {
         })
     }
 
-    /// The (title, screen) of the currently focused pane. A finished pane still
-    /// has its parser, so its last screen keeps rendering.
-    pub(super) fn focused_view(&self) -> (String, Option<&Screen>) {
+    /// The (title, emulator) of the currently focused pane. A finished pane still
+    /// has its emulator, so its last screen keeps rendering.
+    pub(super) fn focused_view(&self) -> (String, Option<&TerminalEmulator>) {
         match self.workspace.selected_process() {
             Some(process) => {
-                let screen = self
-                    .panes
-                    .get(process.id())
-                    .map(|pane| pane.parser.screen());
-                (process.name().as_ref().to_string(), screen)
+                let emulator = self.panes.get(process.id()).map(|pane| &pane.parser);
+                (process.name().as_ref().to_string(), emulator)
             },
             None => (APP_NAME.to_string(), None),
         }

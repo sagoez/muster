@@ -188,7 +188,7 @@ impl KittyNotification {
 /// Decodes title, notification, and progress signals from a single process's PTY
 /// stream. Raw OSC framing is retained across calls so payload text is never
 /// constrained by VTE's bounded parameter view. Screen rendering remains with
-/// the separate vt100 parser.
+/// the separate terminal emulator.
 pub struct SignalReader {
     state: StreamState,
     osc: Vec<u8>,

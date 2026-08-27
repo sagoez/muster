@@ -2,7 +2,8 @@
 //! reporting, across the legacy, UTF-8, and SGR protocol encodings.
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+
+use crate::adapter::tui::emulator::{MouseProtocolEncoding, MouseProtocolMode};
 
 /// Escape byte that introduces control sequences.
 const ESC: u8 = 0x1B;
@@ -302,7 +303,7 @@ mod tests {
                 mouse,
                 MAX_LEGACY_MOUSE_COORDINATE,
                 0,
-                MouseProtocolMode::Press,
+                MouseProtocolMode::PressRelease,
                 MouseProtocolEncoding::Default,
             ),
             None

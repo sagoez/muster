@@ -88,7 +88,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Terminal I/O | `crossterm` |
 | Event loop | std threads + `std::sync::mpsc` |
 | PTY | `portable-pty` |
-| VT parse + embed | `vt100` + `tui-term` |
+| VT parse + embed | `alacritty_terminal` |
 | Validated newtypes | `nutype` |
 | Restart backoff | `backon` |
 | Arg parsing | `clap` |
@@ -247,8 +247,9 @@ pub use state::*;
 - Redraw on change, not a busy spin.
 
 ### PTY handling
-- Spawn children under a PTY via `portable-pty`. Parse output through `vt100`
-  into a screen/scrollback model; ratatui (via `tui-term`) renders that model.
+- Spawn children under a PTY via `portable-pty`. Parse output through
+  `alacritty_terminal` into a screen/scrollback model, wrapped by the pane's
+  `TerminalEmulator`; ratatui renders that model.
 - PTY read/write runs off the render path; communicate over channels, never
   shared locks on the render path. The runtime loop owns the parsers; reader
   tasks only shuttle bytes and lifecycle events as messages.

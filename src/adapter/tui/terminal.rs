@@ -6,8 +6,8 @@ use std::{
 use crossterm::{
     clipboard::CopyToClipboard,
     event::{
-        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     style::Print,
@@ -81,7 +81,12 @@ impl TerminalGuard {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = Self::restore();
             return Err(error.into());
         }
@@ -165,6 +170,7 @@ impl TerminalGuard {
         let keyboard = Self::disable_keyboard_enhancement();
         let raw = disable_raw_mode();
         let mouse = execute!(io::stdout(), DisableMouseCapture);
+        let paste = execute!(io::stdout(), DisableBracketedPaste);
         let pointer = execute!(
             io::stdout(),
             Print(format!(
@@ -173,7 +179,12 @@ impl TerminalGuard {
             ))
         );
         let screen = execute!(io::stdout(), LeaveAlternateScreen);
-        keyboard.and(raw).and(mouse).and(pointer).and(screen)
+        keyboard
+            .and(raw)
+            .and(mouse)
+            .and(paste)
+            .and(pointer)
+            .and(screen)
     }
 }
 

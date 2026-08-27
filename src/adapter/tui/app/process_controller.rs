@@ -155,7 +155,7 @@ impl App {
                     }
                 }
                 let notification_scope = self.allocate_notification_scope();
-                let parser = Parser::new(
+                let parser = TerminalEmulator::new(
                     self.pane_size.rows().into_inner(),
                     self.pane_size.cols().into_inner(),
                     SCROLLBACK_LINES,
@@ -792,10 +792,16 @@ impl App {
                 let signals = target.signals.read(&bytes);
                 let keyboard_reply = target.keyboard.observe(&bytes);
                 target.parser.process(&bytes);
-                if !keyboard_reply.is_empty()
-                    && let Some(handle) = target.handle.as_mut()
-                {
-                    let _ = handle.write_input(&keyboard_reply);
+                // The emulator answers device-status and identity queries; forward
+                // those replies to the child, and the keyboard tracker's own reply.
+                let terminal_reply = target.parser.take_pty_writes();
+                if let Some(handle) = target.handle.as_mut() {
+                    if !keyboard_reply.is_empty() {
+                        let _ = handle.write_input(&keyboard_reply);
+                    }
+                    if !terminal_reply.is_empty() {
+                        let _ = handle.write_input(&terminal_reply);
+                    }
                 }
                 for signal in signals {
                     self.apply_signal(pane, signal);

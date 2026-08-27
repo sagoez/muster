@@ -1,7 +1,8 @@
 # VHS tape for the README demo. Render with:
 #   mise exec vhs@0.11.0 ttyd@latest -- vhs docs/demo.tape
-# Records against ~/.cargo/bin/muster with XDG dirs isolated to /tmp,
-# so the real project registry and session store stay untouched.
+# Runs ~/.cargo/bin/muster against an isolated copy of the repo's muster.yml in
+# /tmp, with XDG dirs isolated too, so the real project registry, session store,
+# and workspace config all stay untouched (the delete demo mutates only the copy).
 
 Output docs/muster-demo.gif
 
@@ -14,10 +15,19 @@ Set TypingSpeed 55ms
 Set Theme "GruvboxDark"
 
 Hide
-Type "export PATH=$HOME/.cargo/bin:$PATH XDG_CONFIG_HOME=/tmp/muster-vhs/xdg-config XDG_STATE_HOME=/tmp/muster-vhs/xdg-state; rm -rf /tmp/muster-vhs /tmp/demo; mkdir -p /tmp/demo/blog; cd /tmp/demo/blog; clear"
+Type "export PATH=$HOME/Projects/muster/target/release:$HOME/.cargo/bin:$PATH XDG_CONFIG_HOME=/tmp/muster-vhs/xdg-config XDG_STATE_HOME=/tmp/muster-vhs/xdg-state"
+Enter
+Type "rm -rf /tmp/muster-vhs /tmp/muster-blog /tmp/muster-demo"
+Enter
+Type "mkdir -p /tmp/muster-blog /tmp/muster-demo"
+Enter
+Type "cp $HOME/Projects/muster/muster.yml /tmp/muster-demo/muster.yml"
+Enter
+Type "cd /tmp/muster-blog; clear"
 Enter
 Show
 
+# CLI: scaffold, validate, and check a new project.
 Type "muster init"
 Enter
 Sleep 1.5s
@@ -29,26 +39,30 @@ Enter
 Sleep 3s
 
 Hide
-Type "cd ~/Projects/muster; clear"
+Type "cd /tmp/muster-demo; clear"
 Enter
 Show
 
+# Launch the workspace TUI: agents, terminals, and commands side by side.
 Type "muster"
 Enter
 Sleep 2s
 
-# shell terminal: start it, attach, run a command
+# Attach the login-shell terminal and run a couple of commands.
 Down
 Sleep 500ms
 Type "s"
-Sleep 1s
+Sleep 800ms
 Enter
-Sleep 1s
+Sleep 900ms
 Type "echo hello from muster"
+Enter
+Sleep 900ms
+Type "ls"
 Enter
 Sleep 1.2s
 
-# leader back to the sidebar, start the clock command
+# Leader detaches back to the sidebar; start the clock command.
 Ctrl+a
 Sleep 300ms
 Type "h"
@@ -58,21 +72,35 @@ Sleep 400ms
 Type "s"
 Sleep 2.5s
 
-# launch a live claude session and attach to it
+# Launch a live Claude agent session and attach to it.
 Up
 Sleep 300ms
 Up
 Sleep 400ms
 Type "s"
-Sleep 1s
+Sleep 900ms
 Enter
-Sleep 9s
+Sleep 8s
 
-# back to the sidebar: the named session row is live
+# Detach, then open the keybinding overlay.
 Ctrl+a
 Sleep 300ms
 Type "h"
+Sleep 800ms
+Type "?"
 Sleep 2.5s
+Escape
+Sleep 500ms
+
+# Delete the running clock command from muster.yml: pick it, confirm, gone.
+Down
+Sleep 300ms
+Down
+Sleep 400ms
+Type "d"
+Sleep 1.8s
+Enter
+Sleep 1.8s
 
 Type "q"
 Sleep 800ms

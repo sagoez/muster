@@ -18,7 +18,6 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::Style,
 };
-use vt100::{MouseProtocolMode, Parser, Screen};
 
 use super::{
     activity::ActivityTracker,
@@ -43,6 +42,7 @@ use super::{
         toast::{self, TOAST_COPIED, TOAST_DURATION, Toast, ToastTone},
     },
 };
+use crate::adapter::tui::emulator::{MouseProtocolMode, TerminalEmulator};
 mod feedback;
 mod forms;
 mod input;
@@ -114,9 +114,9 @@ const BELL_THROTTLE: Duration = Duration::from_secs(3);
 const BELL_ESCALATION_DELAY: Duration = Duration::from_secs(2);
 /// Leader key (pressed with Control) that begins a command chord.
 const LEADER_KEY: char = 'a';
-/// Minimum PTY dimension. vt100 underflows on some sequences below a couple of
-/// cells (e.g. a wide glyph in a 1-column grid), so a pane is never sized smaller
-/// than this even when the real area is tiny or zero.
+/// Minimum PTY dimension. A terminal grid degenerates on some sequences below a
+/// couple of cells (e.g. a wide glyph in a 1-column grid), so a pane is never
+/// sized smaller than this even when the real area is tiny or zero.
 const MIN_PANE_DIMENSION: u16 = 8;
 /// Delay before the first automatic restart of a failing process.
 const RESTART_BACKOFF_BASE: Duration = Duration::from_millis(200);
@@ -373,11 +373,11 @@ struct HeldPress {
 /// One managed pane: its VT parser and, while alive, a live process handle. The
 /// parser outlives the handle so a finished process keeps its last screen.
 struct Pane {
-    parser: Parser,
+    parser: TerminalEmulator,
     /// Unique scope for Kitty identifiers emitted by this terminal lifetime.
     notification_scope: NotificationScope,
     /// Decodes notification and progress signals from the same output stream the
-    /// vt100 parser renders.
+    /// terminal emulator renders.
     signals: SignalReader,
     /// Tracks the Kitty keyboard protocol this child has negotiated, so keys are
     /// encoded the way it expects.
@@ -1063,6 +1063,7 @@ impl App {
         match event {
             CrosstermEvent::Key(key) => self.handle_key(key),
             CrosstermEvent::Mouse(mouse) => self.handle_mouse(mouse),
+            CrosstermEvent::Paste(text) => self.handle_paste(text),
             CrosstermEvent::Resize(width, height) => self.resize(Rect::new(0, 0, width, height)),
             _ => {},
         }
@@ -3665,12 +3666,11 @@ mod tests {
             main.y + BORDER_THICKNESS,
         )));
 
-        let screen = app
+        let screen = &app
             .panes
             .get(&PaneId::new(PANE))
             .expect("selected pane exists")
-            .parser
-            .screen();
+            .parser;
         assert_eq!(screen.scrollback(), WHEEL_SCROLL_LINES);
     }
 
@@ -3716,6 +3716,61 @@ mod tests {
             *written.lock().unwrap(),
             b"\x1b[B".repeat(WHEEL_SCROLL_LINES)
         );
+    }
+
+    /// Builds an attached terminal wired to a handle that records everything
+    /// written to its PTY, with `setup` bytes already processed by its screen.
+    fn recording_terminal(setup: &[u8]) -> (App, Arc<Mutex<Vec<u8>>>) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let (sender, _receiver) = bounded(16);
+        let workspace = Workspace::builder()
+            .processes(vec![
+                Process::builder()
+                    .id(PaneId::new(PANE))
+                    .name(ProcessName::try_new("p").unwrap())
+                    .kind(ProcessKind::Terminal)
+                    .command(Some(CommandLine::try_new("sh").unwrap()))
+                    .restart(RestartPolicy::Never)
+                    .build(),
+            ])
+            .build();
+        let mut app = App::new(
+            workspace,
+            Box::new(RecordingRunner {
+                written: written.clone(),
+            }),
+            sender,
+            Rect::new(0, 0, 80, 24),
+            Box::new(FakeCompleter),
+            empty_registry(),
+            PathBuf::from("muster.yml"),
+        );
+        app.start();
+        feed_pane(&mut app, setup);
+        app.focus = Focus::Terminal;
+        written.lock().unwrap().clear();
+        (app, written)
+    }
+
+    /// A paste into a child that enabled bracketed paste is wrapped in the
+    /// markers, so the child treats it as one paste instead of typed keys.
+    #[test]
+    fn a_paste_is_bracketed_when_the_child_requested_it() {
+        let (mut app, written) = recording_terminal(b"\x1b[?2004h");
+
+        app.handle_input(CrosstermEvent::Paste("hello\nworld".to_string()));
+
+        assert_eq!(*written.lock().unwrap(), b"\x1b[200~hello\nworld\x1b[201~");
+    }
+
+    /// A paste into a child without bracketed paste is forwarded verbatim.
+    #[test]
+    fn a_paste_is_raw_without_bracketed_paste() {
+        let (mut app, written) = recording_terminal(b"");
+
+        app.handle_input(CrosstermEvent::Paste("abc".to_string()));
+
+        assert_eq!(*written.lock().unwrap(), b"abc");
     }
 
     /// Clicking pane text attaches the terminal, like herdr's click-to-focus.
@@ -5135,7 +5190,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_size_never_below_the_vt100_safe_minimum() {
+    fn pane_size_never_below_the_grid_safe_minimum() {
         let size = pane_size_of(Rect::new(0, 0, 0, 0));
         assert!(size.rows().into_inner() >= MIN_PANE_DIMENSION);
         assert!(size.cols().into_inner() >= MIN_PANE_DIMENSION);
@@ -5204,13 +5259,9 @@ mod tests {
             ProcessOutput::Chunk(b"fresh".to_vec()),
         );
 
-        let screen = app
-            .panes
-            .get(&PaneId::new(PANE))
-            .unwrap()
-            .parser
-            .screen()
-            .contents();
+        let emulator = &app.panes.get(&PaneId::new(PANE)).unwrap().parser;
+        let (rows, cols) = emulator.size();
+        let screen = emulator.contents_between(0, 0, rows - 1, cols);
         assert!(screen.contains("fresh"));
         assert!(!screen.contains("stale"));
     }

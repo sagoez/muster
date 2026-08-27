@@ -144,7 +144,7 @@ impl App {
         let Some(target) = self.panes.get(&pane) else {
             return false;
         };
-        let screen = target.parser.screen();
+        let screen = &target.parser;
         let (_, columns) = screen.size();
         let row_text = screen.contents_between(cell.row(), 0, cell.row(), columns);
         let Some((start_column, end_column)) = selection::word_bounds(&row_text, cell.column())
@@ -269,7 +269,7 @@ impl App {
             let Some(target) = self.panes.get_mut(&pane) else {
                 return;
             };
-            let screen = target.parser.screen();
+            let screen = &target.parser;
             if screen.alternate_screen() {
                 let bytes = mouse::wheel_arrow(up, screen.application_cursor());
                 if let Some(handle) = target.handle.as_mut() {
@@ -304,7 +304,7 @@ impl App {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        let screen = target.parser.screen_mut();
+        let screen = &mut target.parser;
         let offset = if up {
             screen.scrollback().saturating_add(lines)
         } else {
@@ -412,7 +412,7 @@ impl App {
         active: &Selection,
     ) -> Option<String> {
         let target = self.panes.get_mut(&pane)?;
-        let screen = target.parser.screen_mut();
+        let screen = &mut target.parser;
         let (rows, columns) = screen.size();
         if rows == 0 || columns == 0 {
             return None;
@@ -464,7 +464,7 @@ impl App {
     /// briefly clamps the offset to its maximum, so this needs `&mut`.
     pub(super) fn pane_scroll_metrics(&mut self, pane: PaneId) -> Option<ScrollMetrics> {
         let target = self.panes.get_mut(&pane)?;
-        let screen = target.parser.screen_mut();
+        let screen = &mut target.parser;
         let offset = screen.scrollback();
         screen.set_scrollback(usize::MAX);
         let len = screen.scrollback();
@@ -488,7 +488,7 @@ impl App {
         let Some(target) = self.panes.get(&active.pane()) else {
             return;
         };
-        let (rows, columns) = target.parser.screen().size();
+        let (rows, columns) = target.parser.size();
         self.selection_view = active.viewport_span(metrics.viewport_top(), rows, columns);
     }
 
@@ -517,7 +517,7 @@ impl App {
     pub(super) fn pane_wants_mouse(&self, pane: PaneId) -> bool {
         self.panes.get(&pane).is_some_and(|target| {
             target.handle.is_some()
-                && target.parser.screen().mouse_protocol_mode() != MouseProtocolMode::None
+                && target.parser.mouse_protocol_mode() != MouseProtocolMode::None
         })
     }
 
@@ -526,7 +526,7 @@ impl App {
         let Some(target) = self.panes.get(&pane) else {
             return;
         };
-        let screen = target.parser.screen();
+        let screen = &target.parser;
         let mode = screen.mouse_protocol_mode();
         let Some((column, row)) =
             Self::relative_mouse_position(area, mouse.column, mouse.row, screen)
@@ -547,7 +547,7 @@ impl App {
         area: Rect,
         column: u16,
         row: u16,
-        screen: &Screen,
+        screen: &TerminalEmulator,
     ) -> Option<(u16, u16)> {
         let x = column.checked_sub(area.x + BORDER_THICKNESS)?;
         let y = row.checked_sub(area.y + BORDER_THICKNESS)?;
@@ -559,7 +559,7 @@ impl App {
     /// its border, intersected with the child screen size.
     pub(super) fn pane_grid(&self, pane: PaneId, main_area: Rect) -> Option<Rect> {
         let target = self.panes.get(&pane)?;
-        let (rows, columns) = target.parser.screen().size();
+        let (rows, columns) = target.parser.size();
         let width = main_area
             .width
             .saturating_sub(BORDER_THICKNESS * 2)

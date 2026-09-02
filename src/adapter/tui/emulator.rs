@@ -7,7 +7,7 @@
 //! progress are decoded separately from the raw byte stream by the signal reader,
 //! so they are deliberately not surfaced here.
 
-use std::{cell::RefCell, mem, rc::Rc};
+use std::{cell::RefCell, mem, rc::Rc, sync::OnceLock};
 
 use alacritty_terminal::{
     Term,
@@ -15,7 +15,7 @@ use alacritty_terminal::{
     grid::{Dimensions, Scroll},
     index::{Column, Line},
     term::{Config, TermMode, cell::Flags, test::TermSize},
-    vte::ansi::{self, Color as VtColor},
+    vte::ansi::{self, Color as VtColor, NamedColor, Rgb},
 };
 use ratatui::style::{Color, Modifier, Style};
 
@@ -89,11 +89,26 @@ struct EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.sink
+        match event {
+            // Status and identity reports the terminal wants written back verbatim.
+            Event::PtyWrite(text) => self
+                .sink
                 .borrow_mut()
                 .pty_writes
-                .extend_from_slice(text.as_bytes());
+                .extend_from_slice(text.as_bytes()),
+            // A child querying a color (OSC 10/11 for the default foreground and
+            // background, OSC 4 for a palette entry) must get an answer, or an agent
+            // like Codex, unable to read the background, themes for a light terminal
+            // and renders white on white. Reply from a standard palette with a dark
+            // background, the way a real terminal does.
+            Event::ColorRequest(index, format) => {
+                let reply = format(color_for_index(index));
+                self.sink
+                    .borrow_mut()
+                    .pty_writes
+                    .extend_from_slice(reply.as_bytes());
+            },
+            _ => {},
         }
     }
 }
@@ -326,12 +341,243 @@ fn to_color(color: VtColor) -> Color {
     }
 }
 
+/// The standard xterm palette for the sixteen ANSI colors, reported for color
+/// queries of indices 0-15.
+const ANSI_PALETTE: [Rgb; 16] = [
+    Rgb {
+        r: 0x00,
+        g: 0x00,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x80,
+        g: 0x00,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0x80,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x80,
+        g: 0x80,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0x00,
+        b: 0x80,
+    },
+    Rgb {
+        r: 0x80,
+        g: 0x00,
+        b: 0x80,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0x80,
+        b: 0x80,
+    },
+    Rgb {
+        r: 0xC0,
+        g: 0xC0,
+        b: 0xC0,
+    },
+    Rgb {
+        r: 0x80,
+        g: 0x80,
+        b: 0x80,
+    },
+    Rgb {
+        r: 0xFF,
+        g: 0x00,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0xFF,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0xFF,
+        g: 0xFF,
+        b: 0x00,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0x00,
+        b: 0xFF,
+    },
+    Rgb {
+        r: 0xFF,
+        g: 0x00,
+        b: 0xFF,
+    },
+    Rgb {
+        r: 0x00,
+        g: 0xFF,
+        b: 0xFF,
+    },
+    Rgb {
+        r: 0xFF,
+        g: 0xFF,
+        b: 0xFF,
+    },
+];
+
+/// Dark background reported for an OSC 11 query when the host's real background
+/// could not be detected, so a child still themes for a dark terminal (the common
+/// default).
+const FALLBACK_BACKGROUND: Rgb = Rgb {
+    r: 0x12,
+    g: 0x12,
+    b: 0x12,
+};
+/// Light foreground reported for an OSC 10 query when the host's colors are
+/// unknown.
+const FALLBACK_FOREGROUND: Rgb = Rgb {
+    r: 0xD0,
+    g: 0xD0,
+    b: 0xD0,
+};
+
+/// The host terminal's default background and foreground, detected once at
+/// startup. A child querying OSC 10/11 must get the *host's* colors - not a fixed
+/// guess - or on a light terminal a dark-guessing reply makes agents render light
+/// text that vanishes into the background (and the reverse on a dark terminal).
+static HOST_COLORS: OnceLock<(Rgb, Rgb)> = OnceLock::new();
+
+/// Records the host terminal's detected background so color queries answer with
+/// the real theme. The foreground is derived to contrast, since only the
+/// background is detected. Set once at startup; later calls are ignored.
+pub fn set_host_background(background: (u8, u8, u8)) {
+    let background = Rgb {
+        r: background.0,
+        g: background.1,
+        b: background.2,
+    };
+    let foreground = if is_light(background) {
+        Rgb {
+            r: 0x10,
+            g: 0x10,
+            b: 0x10,
+        }
+    } else {
+        Rgb {
+            r: 0xE0,
+            g: 0xE0,
+            b: 0xE0,
+        }
+    };
+    let _ = HOST_COLORS.set((background, foreground));
+}
+
+/// Whether `color` reads as light, by WCAG relative luminance.
+fn is_light(color: Rgb) -> bool {
+    let channel = |value: u8| {
+        let value = f32::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b) > 0.5
+}
+
+/// Resolves a color-query index against the detected host colors.
+fn color_for_index(index: usize) -> Rgb {
+    resolve_color(index, HOST_COLORS.get().copied())
+}
+
+/// Resolves a color-query index to an RGB value: the xterm 256-color palette for
+/// indices 0-255, and `host` background/foreground (or a dark fallback) for the
+/// named default background/foreground.
+fn resolve_color(index: usize, host: Option<(Rgb, Rgb)>) -> Rgb {
+    match index {
+        0..=15 => ANSI_PALETTE[index],
+        16..=231 => cube_color(index - 16),
+        232..=255 => {
+            let level = ((index - 232) * 10 + 8) as u8;
+            Rgb {
+                r: level,
+                g: level,
+                b: level,
+            }
+        },
+        i if i == NamedColor::Background as usize => host.map_or(FALLBACK_BACKGROUND, |(bg, _)| bg),
+        _ => host.map_or(FALLBACK_FOREGROUND, |(_, fg)| fg),
+    }
+}
+
+/// One color of xterm's 6x6x6 color cube (palette indices 16-231, passed here as
+/// a 0-215 offset).
+fn cube_color(offset: usize) -> Rgb {
+    let component = |value: usize| -> u8 {
+        if value == 0 {
+            0
+        } else {
+            (value * 40 + 55) as u8
+        }
+    };
+    Rgb {
+        r: component(offset / 36),
+        g: component((offset / 6) % 6),
+        b: component(offset % 6),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Rgb};
     use ratatui::style::Color;
 
-    use super::to_color;
+    use super::{FALLBACK_BACKGROUND, TerminalEmulator, resolve_color, to_color};
+
+    /// A child querying the background color (OSC 11) must get an answer at all, or
+    /// an agent that themes off it (Codex) renders invisible text. Regression for
+    /// the migration leaving `Event::ColorRequest` unanswered.
+    #[test]
+    fn a_background_color_query_is_answered() {
+        let mut emulator = TerminalEmulator::new(10, 40, 0);
+        emulator.process(b"\x1b]11;?\x1b\\");
+        let reply = String::from_utf8(emulator.take_pty_writes()).expect("utf8 color reply");
+        assert!(
+            reply.starts_with("\x1b]11;rgb:"),
+            "the background query is answered, got {reply:?}"
+        );
+    }
+
+    /// The reported background is the detected host color, so an agent themes for
+    /// the real terminal - a light host reports light, not a dark guess.
+    #[test]
+    fn a_color_query_reports_the_host_background() {
+        let light = Rgb {
+            r: 0xF5,
+            g: 0xF5,
+            b: 0xF0,
+        };
+        let dark_fg = Rgb {
+            r: 0x10,
+            g: 0x10,
+            b: 0x10,
+        };
+        let background = NamedColor::Background as usize;
+        assert_eq!(
+            resolve_color(background, Some((light, dark_fg))),
+            light,
+            "a light host is reported light, not a dark fallback"
+        );
+    }
+
+    /// Without a detected host, the background falls back to dark - the common
+    /// terminal default.
+    #[test]
+    fn a_color_query_falls_back_dark_without_a_host() {
+        let background = NamedColor::Background as usize;
+        assert_eq!(resolve_color(background, None), FALLBACK_BACKGROUND);
+    }
 
     /// The named default foreground and background must resolve to the host
     /// default, not a palette index: a `u8` cast once wrapped 257 to 1 and painted

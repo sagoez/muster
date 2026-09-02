@@ -25,7 +25,14 @@ const BLACK: Rgb = (u8::MIN, u8::MIN, u8::MIN);
 /// the terminal, because the color query reads the reply from stdin.
 pub fn detect_selection_style() -> Style {
     match background_color(QueryOptions::default()) {
-        Ok(background) => selection_style_for(background.scale_to_8bit()),
+        Ok(background) => {
+            let background = background.scale_to_8bit();
+            // Publish the host background so a child's OSC 10/11 color query is
+            // answered with the real theme - otherwise agents guess the wrong
+            // light/dark and render invisible text.
+            super::emulator::set_host_background(background);
+            selection_style_for(background)
+        },
         Err(_) => theme::selection_style(),
     }
 }

@@ -27,6 +27,11 @@ const MAX_REQUEST_BYTES: u64 = 1 << 20;
 /// MCP client connects to. The absolutized project path is hashed so the socket
 /// name stays within the platform's socket-path length limit and is stable for a
 /// given project across processes.
+///
+/// A unix socket path is capped by `sun_path` (104 bytes on macOS, 108 on Linux),
+/// which is why the project is hashed to 16 characters rather than embedded. If
+/// the state directory itself is long enough to breach that cap, `bind` fails and
+/// live workspace tools stay unavailable; coordination is unaffected.
 #[must_use]
 pub fn socket_path(project: &Path) -> Option<PathBuf> {
     let mut hasher = DefaultHasher::new();
@@ -151,6 +156,14 @@ mod tests {
         Pong(u32),
     }
 
+    /// A socket path short enough for every platform's `sun_path` cap. macOS
+    /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches
+    /// the 104-byte limit, so these tests bind under `/tmp` directly.
+    fn short_socket_path() -> PathBuf {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        Path::new("/tmp").join(format!("mstr-{}.sock", &unique[..8]))
+    }
+
     /// A socket path is stable for a project and differs between projects.
     #[test]
     fn socket_paths_are_stable_and_project_scoped() {
@@ -164,9 +177,7 @@ mod tests {
     /// A request round-trips through the listener to a handler and back.
     #[test]
     fn a_request_round_trips_through_the_socket() {
-        let dir = std::env::temp_dir().join(format!("muster-ipc-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = short_socket_path();
         let listener = bind(&path).unwrap();
 
         let server = thread::spawn(move || {
@@ -181,17 +192,14 @@ mod tests {
         let response: Pong = request(&path, &Ping::Ping).unwrap();
         assert_eq!(response, Pong::Pong(42));
         server.join().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
+        unlink(&path);
     }
 
     /// A live workspace's socket is never stolen by a second instance, but a
     /// stale file left by a crashed run is reclaimed.
     #[test]
     fn bind_refuses_a_live_socket_and_reclaims_a_stale_one() {
-        let dir = std::env::temp_dir().join(format!("muster-bind-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
-
+        let path = short_socket_path();
         let live = bind(&path).unwrap();
         let stolen = bind(&path);
         assert_eq!(
@@ -205,16 +213,14 @@ mod tests {
         drop(live);
         assert!(path.exists(), "the stale socket file is still on disk");
         bind(&path).expect("a stale socket is reclaimed");
-        std::fs::remove_dir_all(dir).unwrap();
+        unlink(&path);
     }
 
     /// A peer that floods bytes without a newline is cut off at the frame cap
     /// instead of growing the server's memory without bound.
     #[test]
     fn an_oversized_request_is_refused() {
-        let dir = std::env::temp_dir().join(format!("muster-frame-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = short_socket_path();
         let listener = bind(&path).unwrap();
 
         let server = thread::spawn(move || {
@@ -231,7 +237,7 @@ mod tests {
             server.join().unwrap().is_err(),
             "the server refuses a frame that exceeds the cap"
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        unlink(&path);
     }
 
     /// Connecting when nothing listens is an error the caller reads as "no

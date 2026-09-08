@@ -14,15 +14,20 @@ use directories::BaseDirs;
 use muster::{
     adapter::{
         cli::{
-            self, Args, CheckOutcome, Command, HooksCommand, InternalHookCommand, ProjectsCommand,
-            RunArgs, VALID_SUFFIX,
+            self, Args, CheckOutcome, Command, CoordinationCommand, HooksCommand,
+            InternalHookCommand, KvCommand, NoteCommand, ProjectsCommand, RunArgs, TodoCommand,
+            VALID_SUFFIX,
         },
-        config::{YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry, YamlSettingsStore},
+        config::{
+            SqliteCoordinationStore, YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry,
+            YamlSettingsStore,
+        },
         editor::EnvEditorLauncher,
         hooks::ProviderHooks,
+        mcp,
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
-        path::FsPathCompleter,
+        path::{FsPathCompleter, absolutize},
         process_identity::LocalProcessIdentity,
         pty::PortablePtyRunner,
         tui::{self, Adapters, TerminalGuard},
@@ -31,7 +36,8 @@ use muster::{
     constants::{APP_NAME, MUSTER_AGENT_LAUNCH_TOKEN_ENV, WORKSPACE_FILE_NAME},
     domain::{
         agent_session::{AgentProcessId, AgentSessionId, LaunchToken},
-        port::{AgentSessionStore, ConfigSource},
+        coordination::Author,
+        port::{AgentSessionStore, ConfigSource, CoordinationStore},
     },
     error::Result,
 };
@@ -49,6 +55,10 @@ const FAILURE_EXIT_CODE: i32 = 1;
 const INIT_TITLE: &str = "muster init";
 const CHECK_TITLE: &str = "muster check";
 const PROJECTS_TITLE: &str = "muster projects";
+const NOTE_TITLE: &str = "muster note";
+const TODO_TITLE: &str = "muster todo";
+const KV_TITLE: &str = "muster kv";
+const COORDINATION_TITLE: &str = "muster coordination";
 const COMPLETIONS_TITLE: &str = "muster completions";
 const HOOKS_TITLE: &str = "muster hooks";
 
@@ -257,6 +267,35 @@ fn dispatch(args: Args) -> Result<()> {
                 .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
         ),
         Some(Command::Projects { command }) => run_projects(command),
+        Some(Command::Note { command }) => run_note(
+            command,
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
+        Some(Command::Todo { command }) => run_todo(
+            command,
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
+        Some(Command::Kv { command }) => run_kv(
+            command,
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
+        Some(Command::Coordination { command }) => run_coordination(
+            command,
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+        ),
+        Some(Command::Mcp {
+            print_config,
+            author,
+        }) => run_mcp(
+            args.config
+                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
+            print_config,
+            author,
+        ),
         Some(Command::Hooks { command }) => run_hooks(command),
         Some(Command::Doctor) => run_doctor(
             args.config
@@ -425,6 +464,100 @@ fn run_projects(command: Option<ProjectsCommand>) -> Result<()> {
     match result {
         Ok(rows) => cli::print(&cli::Report::new(PROJECTS_TITLE, rows)),
         Err(error) => fail_with(&error),
+    }
+    Ok(())
+}
+
+/// Reads or writes shared scratchpad notes for the project at `config`. The
+/// config path is absolutized so a note keeps the same project identity however
+/// the command is invoked. Prints each report line and exits non-zero on failure.
+///
+/// # Errors
+/// This function always exits on error rather than propagating; it returns
+/// `Result<()>` to match the dispatch signature.
+fn run_note(command: Option<NoteCommand>, config: PathBuf) -> Result<()> {
+    let project = absolutize(&config);
+    let store = SqliteCoordinationStore::open_default()?;
+    match cli::note(command, &store, &project, &Author::human()) {
+        Ok(rows) => cli::print(&cli::Report::new(NOTE_TITLE, rows)),
+        Err(error) => fail_with(&error),
+    }
+    Ok(())
+}
+
+/// Lists or manages the shared todos for the project at `config`, absolutizing
+/// the path for a stable project identity. Prints each report line and exits
+/// non-zero on failure.
+///
+/// # Errors
+/// This function always exits on error rather than propagating; it returns
+/// `Result<()>` to match the dispatch signature.
+fn run_todo(command: Option<TodoCommand>, config: PathBuf) -> Result<()> {
+    let project = absolutize(&config);
+    let store = SqliteCoordinationStore::open_default()?;
+    match cli::todo(command, &store, &project, &Author::human()) {
+        Ok(rows) => cli::print(&cli::Report::new(TODO_TITLE, rows)),
+        Err(error) => fail_with(&error),
+    }
+    Ok(())
+}
+
+/// Reads or writes the shared key-value state for the project at `config`,
+/// absolutizing the path for a stable project identity. Prints each report line
+/// and exits non-zero on failure.
+///
+/// # Errors
+/// This function always exits on error rather than propagating; it returns
+/// `Result<()>` to match the dispatch signature.
+fn run_kv(command: Option<KvCommand>, config: PathBuf) -> Result<()> {
+    let project = absolutize(&config);
+    let store = SqliteCoordinationStore::open_default()?;
+    match cli::kv(command, &store, &project, &Author::human()) {
+        Ok(rows) => cli::print(&cli::Report::new(KV_TITLE, rows)),
+        Err(error) => fail_with(&error),
+    }
+    Ok(())
+}
+
+/// Exports or restores this project's coordination state as portable YAML.
+/// Prints the summary line and exits non-zero on failure.
+///
+/// # Errors
+/// Returns an error if the coordination store cannot be opened.
+fn run_coordination(command: CoordinationCommand, config: PathBuf) -> Result<()> {
+    let project = absolutize(&config);
+    let store = SqliteCoordinationStore::open_default()?;
+    match cli::coordination(command, &store, &project) {
+        Ok(rows) => cli::print(&cli::Report::new(COORDINATION_TITLE, rows)),
+        Err(error) => fail_with(&error),
+    }
+    Ok(())
+}
+
+/// Serves this project's coordination state to agents over stdio as an MCP
+/// server, blocking until the connecting agent disconnects. With `print_config`,
+/// prints the paste-in config snippet and exits instead of serving. Builds a
+/// single-threaded tokio runtime scoped to this subprocess; the sync TUI runtime
+/// is untouched.
+///
+/// # Errors
+/// Returns an error if the async runtime cannot be built; a server failure exits
+/// via `fail_with` rather than propagating.
+fn run_mcp(config: PathBuf, print_config: bool, author: Option<String>) -> Result<()> {
+    let project = absolutize(&config);
+    if print_config {
+        let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
+        println!("{}", mcp::connection_config(&executable, &project));
+        return Ok(());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let author = Author::agent(author.as_deref().unwrap_or_default());
+    let store: Box<dyn CoordinationStore + Send + Sync> =
+        Box::new(SqliteCoordinationStore::open_default()?);
+    if let Err(error) = runtime.block_on(mcp::serve_stdio(store, project, author)) {
+        fail_with(&error);
     }
     Ok(())
 }

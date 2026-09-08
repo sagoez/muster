@@ -7,7 +7,10 @@ use super::{
     completion_generation::CompletionGeneration, shutdown_generation::ShutdownGeneration,
     spawn_generation::SpawnGeneration,
 };
-use crate::domain::{port::OutputSink, pty::ProcessOutput, value::PaneId};
+use crate::{
+    adapter::bridge::{WorkspaceRequest, WorkspaceResponse},
+    domain::{port::OutputSink, pty::ProcessOutput, value::PaneId},
+};
 
 /// A message processed by the runtime's event loop.
 pub enum RuntimeEvent {
@@ -54,6 +57,15 @@ pub enum RuntimeEvent {
     ConfigChanged {
         /// Normalized path of the config that changed.
         path: PathBuf,
+    },
+    /// A workspace query from the MCP IPC bridge. The runtime answers it against
+    /// live state on the event loop and sends the reply back over `reply`, so the
+    /// off-loop socket thread never touches app state directly.
+    Command {
+        /// The query to answer.
+        request: WorkspaceRequest,
+        /// One-shot channel the runtime sends the answer back on.
+        reply: Sender<WorkspaceResponse>,
     },
     /// The terminal input source failed or closed; the runtime should stop.
     InputClosed,

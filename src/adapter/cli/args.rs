@@ -6,7 +6,10 @@ use clap::{
 };
 
 use super::{completions::CompletionShell, run::RunArgs};
-use crate::{constants::APP_NAME, domain::process::AgentTool};
+use crate::{
+    constants::APP_NAME,
+    domain::{coordination::TodoStatus, process::AgentTool},
+};
 
 /// Help styling matching the CLI's report palette: cyan structure, green
 /// literals, yellow placeholders.
@@ -48,6 +51,39 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
     },
+    /// Read or write shared scratchpad notes for the current project.
+    Note {
+        #[command(subcommand)]
+        command: Option<NoteCommand>,
+    },
+    /// List or manage the current project's shared todos.
+    Todo {
+        #[command(subcommand)]
+        command: Option<TodoCommand>,
+    },
+    /// Read or write the current project's shared key-value state.
+    Kv {
+        #[command(subcommand)]
+        command: Option<KvCommand>,
+    },
+    /// Export or restore this project's coordination state as portable YAML.
+    Coordination {
+        #[command(subcommand)]
+        command: CoordinationCommand,
+    },
+    /// Serve this project's coordination state to agents as an MCP server over
+    /// stdio (spawned as a child process by a connecting agent).
+    Mcp {
+        /// Print the JSON config snippet to add muster to an agent's MCP servers,
+        /// then exit instead of serving.
+        #[arg(long)]
+        print_config: bool,
+        /// Identity this server stamps on coordination writes (the connecting
+        /// agent's name), so entries are attributable. Defaults to a generic
+        /// agent label.
+        #[arg(long = "as", value_name = "NAME")]
+        author: Option<String>,
+    },
     /// Install provider integrations used to preserve native agent sessions.
     Hooks {
         #[command(subcommand)]
@@ -81,6 +117,91 @@ pub enum ProjectsCommand {
     Remove {
         /// Registered project name.
         name: String,
+    },
+}
+
+/// Scratchpad actions under `muster note`. Absent, notes are listed.
+#[derive(Subcommand)]
+pub enum NoteCommand {
+    /// Print a note's body by key.
+    Get {
+        /// Note key.
+        key: String,
+    },
+    /// Create or replace a note.
+    Set {
+        /// Note key.
+        key: String,
+        /// Markdown body.
+        body: String,
+    },
+    /// Delete a note by key.
+    Rm {
+        /// Note key.
+        key: String,
+    },
+}
+
+/// Todo actions under `muster todo`. Absent, todos are listed.
+#[derive(Subcommand)]
+pub enum TodoCommand {
+    /// Add a new pending todo.
+    Add {
+        /// What the task is.
+        title: String,
+        /// Id of a todo this one depends on (repeatable).
+        #[arg(long = "dep")]
+        deps: Vec<String>,
+    },
+    /// Set a todo's status: pending, in-progress, or done.
+    Status {
+        /// Todo id.
+        id: String,
+        /// New status.
+        status: TodoStatus,
+    },
+    /// Delete a todo by id.
+    Rm {
+        /// Todo id.
+        id: String,
+    },
+}
+
+/// Key-value actions under `muster kv`. Absent, entries are listed.
+#[derive(Subcommand)]
+pub enum KvCommand {
+    /// Print a value by key.
+    Get {
+        /// Entry key.
+        key: String,
+    },
+    /// Create or replace a value.
+    Set {
+        /// Entry key.
+        key: String,
+        /// Value to store.
+        value: String,
+    },
+    /// Delete an entry by key.
+    Rm {
+        /// Entry key.
+        key: String,
+    },
+}
+
+/// Snapshot actions under `muster coordination`.
+#[derive(Subcommand)]
+pub enum CoordinationCommand {
+    /// Write this project's scratchpads, todos, and key-values to a YAML file.
+    Export {
+        /// File to write.
+        file: PathBuf,
+    },
+    /// Restore entries from a YAML file, preserving ids, authors, and timestamps.
+    /// Entries merge; those absent from the file are left alone.
+    Import {
+        /// File to read.
+        file: PathBuf,
     },
 }
 

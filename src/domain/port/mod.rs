@@ -1,6 +1,7 @@
 mod agent_session_store;
 mod config_source;
 mod config_watcher;
+mod coordination_store;
 mod editor_launcher;
 mod notifier;
 mod path_completer;
@@ -12,6 +13,7 @@ mod settings_store;
 pub use agent_session_store::*;
 pub use config_source::*;
 pub use config_watcher::*;
+pub use coordination_store::*;
 pub use editor_launcher::*;
 pub use notifier::*;
 pub use path_completer::*;

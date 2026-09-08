@@ -5,6 +5,22 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 use unicode_width::UnicodeWidthStr;
 
+use crate::domain::coordination::Author;
+
+/// Columns before an author attribution suffix on a listed line.
+const ATTRIBUTION_GAP: &str = "  ";
+
+/// A trailing `(by <name>)` attribution for a coordination entry, or an empty
+/// string when the human wrote it - so a human's own lists stay uncluttered and
+/// an agent's contributions stand out.
+pub(crate) fn attribution(author: &Author) -> String {
+    if author.is_human() {
+        String::new()
+    } else {
+        format!("{ATTRIBUTION_GAP}(by {author})")
+    }
+}
+
 /// Style of a passing row's glyph.
 const OK_STYLE: Style = AnsiColor::Green.on_default();
 /// Style of an advisory row's glyph.
@@ -334,6 +350,13 @@ fn bottom_border(content_width: usize, styled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The human writer gets no attribution; an agent gets a `(by name)` suffix.
+    #[test]
+    fn attribution_marks_only_agents() {
+        assert_eq!(attribution(&Author::human()), "");
+        assert_eq!(attribution(&Author::agent("claude")), "  (by claude)");
+    }
 
     fn sample() -> Report {
         Report::new("muster doctor", vec![

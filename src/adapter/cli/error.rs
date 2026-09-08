@@ -8,6 +8,27 @@ pub enum CliError {
     /// No registered project matched the requested name.
     #[error("unknown project '{0}'")]
     UnknownProject(String),
+    /// A note key was blank or whitespace-only.
+    #[error("'{0}' is not a valid note key")]
+    InvalidNoteKey(String),
+    /// No note is stored under the requested key.
+    #[error("no note '{0}'")]
+    UnknownNote(String),
+    /// A todo title was blank or whitespace-only.
+    #[error("'{0}' is not a valid todo title")]
+    InvalidTodoTitle(String),
+    /// A todo id was blank or whitespace-only.
+    #[error("'{0}' is not a valid todo id")]
+    InvalidTodoId(String),
+    /// No todo exists with the requested id.
+    #[error("no todo '{0}'")]
+    UnknownTodo(String),
+    /// A key-value key was blank or whitespace-only.
+    #[error("'{0}' is not a valid key")]
+    InvalidKvKey(String),
+    /// No value is stored under the requested key.
+    #[error("no value '{0}'")]
+    UnknownValue(String),
     /// The derived or given process name was empty.
     #[error("'{0}' is not a valid process name")]
     InvalidName(String),

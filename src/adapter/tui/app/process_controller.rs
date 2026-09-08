@@ -531,6 +531,13 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
+        self.start_pane(pane);
+    }
+
+    /// Starts `pane` if it is not currently running. Shared by the keybinding and
+    /// the MCP bridge, so an agent's request takes the same lifecycle path the
+    /// human's keystroke does.
+    pub(super) fn start_pane(&mut self, pane: PaneId) {
         // Relink first: an unlinked agent binds to its durable session here, and
         // `spawn` then applies the live-owner gate against that resolved session.
         self.relink_unlinked_agent(pane);
@@ -586,6 +593,12 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
+        self.restart_pane(pane);
+    }
+
+    /// Restarts `pane` regardless of its configured restart policy. Shared by the
+    /// keybinding and the MCP bridge.
+    pub(super) fn restart_pane(&mut self, pane: PaneId) {
         self.relink_unlinked_agent(pane);
         let command = match self.command_of(pane, LaunchIntent::UserInitiated) {
             Ok(Some(command)) => command,
@@ -623,6 +636,12 @@ impl App {
         let Some(pane) = self.selected_pane() else {
             return;
         };
+        self.stop_pane(pane);
+    }
+
+    /// Stops `pane` without allowing its restart policy to respawn it. Shared by
+    /// the keybinding and the MCP bridge.
+    pub(super) fn stop_pane(&mut self, pane: PaneId) {
         if self.panes.get(&pane).is_some_and(|target| {
             target.handle.is_some() && !target.exit_intent.accepts_stop_request()
         }) {

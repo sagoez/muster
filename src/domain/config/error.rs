@@ -33,6 +33,19 @@ pub enum ConfigError {
     /// The session-state file uses a schema newer than this binary understands.
     #[error("unsupported agent-session state version {0}")]
     UnsupportedAgentSessionVersion(u8),
+    /// The coordination-state file uses a schema newer than this binary
+    /// understands.
+    #[error("unsupported coordination state version {0}")]
+    UnsupportedCoordinationVersion(u8),
+    /// A coordination id could not be generated (its UUID text was empty, which
+    /// cannot happen in practice).
+    #[error("could not generate a coordination id: {0}")]
+    CoordinationId(String),
+    /// The coordination database could not be opened, read, or written. Carries a
+    /// message rather than the driver's error type so no database library leaks
+    /// into the domain.
+    #[error("coordination database error: {0}")]
+    Database(String),
     /// A lifecycle update referenced a session no longer present in state.
     #[error("agent session '{0}' is not present in session state")]
     AgentSessionNotFound(AgentSessionId),

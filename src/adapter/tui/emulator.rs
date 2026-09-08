@@ -286,6 +286,21 @@ impl TerminalEmulator {
         }
         out
     }
+
+    /// The text on the pane's live bottom screen - the latest `rows` lines the
+    /// process wrote - independent of any scrollback the human has scrolled to,
+    /// so an agent observing a process always reads its most recent output.
+    pub fn screen_text(&self) -> String {
+        let (rows, cols) = self.size();
+        if rows == 0 || cols == 0 {
+            return String::new();
+        }
+        // `contents_between` reads viewport rows relative to the current
+        // display offset; offsetting by that offset targets the active screen
+        // (grid lines 0..rows), i.e. the live bottom, whatever the scroll.
+        let display = self.scrollback() as u16;
+        self.contents_between(display, 0, display + rows - 1, cols - 1)
+    }
 }
 
 /// Resolves an `alacritty_terminal` cell's colors and attribute flags to a
@@ -547,6 +562,16 @@ mod tests {
             reply.starts_with("\x1b]11;rgb:"),
             "the background query is answered, got {reply:?}"
         );
+    }
+
+    /// `screen_text` returns the live written lines, trimmed of trailing blanks.
+    #[test]
+    fn screen_text_returns_written_lines() {
+        let mut emulator = TerminalEmulator::new(6, 20, 100);
+        emulator.process(b"hello\r\nworld\r\n");
+        let text = emulator.screen_text();
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines, vec!["hello", "world"]);
     }
 
     /// The reported background is the detected host color, so an agent themes for

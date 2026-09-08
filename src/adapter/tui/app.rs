@@ -47,6 +47,7 @@ mod feedback;
 mod forms;
 mod input;
 mod key_forward;
+mod mcp_bridge;
 mod overlay;
 mod pointer;
 mod process_controller;

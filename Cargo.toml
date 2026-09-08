@@ -47,6 +47,9 @@ notify-rust = "4.11.7"
 nutype = { version = "0.7.0", features = ["serde"] }
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
+rmcp = { version = "3.2.0", features = ["server", "macros", "transport-io"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml_ng = "0.10.0"
@@ -55,6 +58,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 terminal-colorsaurus = "1.0.3"
 thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt", "macros", "io-std", "io-util", "time"] }
 toml_edit = { version = "0.23.7", features = ["serde"] }
 tui-input = { version = "0.14.0", default-features = false }
 typed-builder = "0.23.2"

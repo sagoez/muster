@@ -1,19 +1,27 @@
 mod args;
 mod check;
 mod completions;
+mod coordination;
 mod doctor;
 mod error;
 mod init;
+mod kv;
+mod note;
 mod projects;
 mod report;
 mod run;
+mod todo;
 
 pub use args::*;
 pub use check::*;
 pub use completions::*;
+pub use coordination::*;
 pub use doctor::*;
 pub use error::*;
 pub use init::*;
+pub use kv::*;
+pub use note::*;
 pub use projects::*;
 pub use report::*;
 pub use run::*;
+pub use todo::*;

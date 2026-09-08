@@ -1,7 +1,7 @@
 use std::{
     iter,
     ops::ControlFlow,
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -75,8 +75,13 @@ pub fn run(
     } = adapters;
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(OUTPUT_CAPACITY);
+    let (command_tx, command_rx) = unbounded();
     let watch_tx = output_tx.clone();
     spawn_input_thread(control_tx);
+    #[cfg(unix)]
+    let socket = spawn_bridge_thread(&current_config, command_tx);
+    #[cfg(not(unix))]
+    drop(command_tx);
 
     let area = size_to_rect(guard.terminal_mut().size()?);
     let mut app = App::new(
@@ -104,9 +109,15 @@ pub fn run(
         &mut app,
         &control_rx,
         &output_rx,
+        &command_rx,
         editor_launcher.as_ref(),
     );
     app.shutdown();
+    // Leave no socket behind for this project; the next run binds a fresh one.
+    #[cfg(unix)]
+    if let Some(path) = socket {
+        crate::adapter::ipc::unlink(&path);
+    }
     result
 }
 
@@ -119,11 +130,12 @@ fn run_loop(
     app: &mut App,
     control_rx: &Receiver<RuntimeEvent>,
     output_rx: &Receiver<RuntimeEvent>,
+    command_rx: &Receiver<RuntimeEvent>,
     editor_launcher: &dyn EditorLauncher,
 ) -> Result<()> {
     guard.terminal_mut().draw(|frame| app.render(frame))?;
     while app.is_running() {
-        let outcome = drain(app, control_rx, output_rx);
+        let outcome = drain(app, control_rx, output_rx, command_rx);
         if let Some(text) = app.take_pending_clipboard() {
             guard.copy_to_clipboard(&text)?;
         }
@@ -161,6 +173,7 @@ fn drain(
     app: &mut App,
     control_rx: &Receiver<RuntimeEvent>,
     output_rx: &Receiver<RuntimeEvent>,
+    command_rx: &Receiver<RuntimeEvent>,
 ) -> ControlFlow<(), bool> {
     let activity_timeout = app
         .next_activity_deadline()
@@ -202,6 +215,12 @@ fn drain(
             }
             redraw = true;
         },
+        recv(command_rx) -> msg => if let Ok(event) = msg {
+            // A read-only workspace query: answer it, but do not redraw for it.
+            if !apply(app, event) {
+                return ControlFlow::Break(());
+            }
+        },
         recv(activity_timeout) -> now => if let Ok(now) = now {
             redraw = app.expire_quiet_activity(now);
         },
@@ -220,6 +239,14 @@ fn drain(
         recv(metrics_timeout) -> now => if let Ok(now) = now {
             redraw = app.sample_metrics(now);
         },
+    }
+    // Answer queued workspace queries before the output batch: a reply is cheap
+    // and a caller is blocked on it, so it must not wait behind a flood of PTY
+    // output. Answering never redraws.
+    while let Ok(event) = command_rx.try_recv() {
+        if !apply(app, event) {
+            return ControlFlow::Break(());
+        }
     }
     match drain_pending(control_rx, output_rx, buffered_input, redraw, |event| {
         apply(app, event)
@@ -311,6 +338,10 @@ fn apply(app: &mut App, event: RuntimeEvent) -> bool {
             candidates,
         } => app.handle_completions(generation, candidates),
         RuntimeEvent::ConfigChanged { path } => app.handle_config_changed(path),
+        RuntimeEvent::Command { request, reply } => {
+            // The socket thread may already be gone; a failed reply is harmless.
+            let _ = reply.send(app.handle_workspace_request(request));
+        },
         RuntimeEvent::InputClosed => return false,
     }
     true
@@ -322,6 +353,55 @@ fn apply(app: &mut App, event: RuntimeEvent) -> bool {
 /// means a pending editor must not open on the way out.
 fn shutting_down(outcome: &ControlFlow<(), bool>, is_running: bool) -> bool {
     matches!(outcome, ControlFlow::Break(())) || !is_running
+}
+
+/// Spawns a thread serving the workspace IPC socket for `config`'s project: each
+/// connection carries one [`WorkspaceRequest`], answered on the event loop via
+/// `command_tx` and replied over the socket. Returns the bound socket path so the
+/// caller can unlink it on shutdown. Best-effort - if the socket cannot be bound
+/// (no state dir, or another workspace already serves this project), live tools
+/// simply stay unavailable to agents.
+///
+/// Each connection is served on its own thread, so one slow or stalled peer
+/// cannot head-of-line-block another agent's tool call.
+///
+/// The reply wait is deliberately unbounded rather than timed out: the reply
+/// sender travels inside the queued `Command`, so if the loop stops without
+/// handling it the sender is dropped and `recv` fails at once. A timeout here
+/// would let a client give up on a request the loop later applies anyway - which,
+/// for `SendInput`, would type the keystrokes after the agent already saw an
+/// error and retried, delivering them twice.
+#[cfg(unix)]
+fn spawn_bridge_thread(config: &Path, command_tx: Sender<RuntimeEvent>) -> Option<PathBuf> {
+    use crate::adapter::{
+        bridge::{WorkspaceRequest, WorkspaceResponse},
+        ipc,
+        path::absolutize,
+    };
+
+    let path = ipc::socket_path(&absolutize(config))?;
+    let listener = ipc::bind(&path).ok()?;
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let command_tx = command_tx.clone();
+            thread::spawn(move || {
+                let _ = ipc::serve_connection(stream, move |request: WorkspaceRequest| {
+                    let (reply_tx, reply_rx) = bounded(1);
+                    if command_tx
+                        .send(RuntimeEvent::Command {
+                            request,
+                            reply: reply_tx,
+                        })
+                        .is_err()
+                    {
+                        return WorkspaceResponse::Unavailable;
+                    }
+                    reply_rx.recv().unwrap_or(WorkspaceResponse::Unavailable)
+                });
+            });
+        }
+    });
+    Some(path)
 }
 
 /// Spawns a thread forwarding crossterm input onto the control channel, sending
@@ -381,6 +461,34 @@ mod tests {
             KeyCode::Char('a'),
             KeyModifiers::NONE,
         )))
+    }
+
+    /// The bridge waits on the reply with no timeout, which is only safe because
+    /// a command the loop never handles drops its reply sender and fails the wait
+    /// at once. That is what removes the abandonment window: a client can never
+    /// give up on a request the loop later applies anyway (which, for `SendInput`,
+    /// would type the keystrokes a second time after the agent retried).
+    #[cfg(unix)]
+    #[test]
+    fn a_command_the_loop_drops_fails_its_reply_immediately() {
+        use crate::adapter::bridge::WorkspaceRequest;
+
+        let (command_tx, command_rx) = unbounded::<RuntimeEvent>();
+        let (reply_tx, reply_rx) = bounded(1);
+        command_tx
+            .send(RuntimeEvent::Command {
+                request: WorkspaceRequest::ListProcesses,
+                reply: reply_tx,
+            })
+            .unwrap();
+
+        // The loop stops without handling the queued command.
+        drop(command_rx);
+
+        assert!(
+            reply_rx.recv().is_err(),
+            "an unhandled command must fail its waiter rather than hang it"
+        );
     }
 
     /// A quit or closed input queued alongside an open-editor request defers to

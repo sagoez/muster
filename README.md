@@ -60,7 +60,8 @@ muster rm worker
 taken as a shell expression; several are joined as shell words. Each process
 has:
 
-- a name, unique within the project, that every command addresses it by;
+- a name, unique within the project and free of control characters, that
+  every command addresses it by;
 - a command, run by the shell;
 - `--cwd`, where it runs, stored relative to the project folder when inside it;
   the project folder when left out;
@@ -129,7 +130,7 @@ one and `muster config set <key> <value>` changes it.
 |---|---|
 | `desktop-notifications` | `true` or `false`: whether failures raise a desktop notification |
 | `default-size` | `ROWSxCOLS`, such as `24x80`: the terminal size a process starts with, 1 to 1000 rows by 2 to 2000 columns |
-| `detach-key` | a Control chord, such as `ctrl-\`: the key that ends `muster attach` |
+| `detach-key` | a Control chord, such as `ctrl-\`: the key that ends `muster attach`; `ctrl-m`, `ctrl-j`, `ctrl-i`, `ctrl-h` and `ctrl-c` are refused, since terminals send them for Enter, Tab, Backspace and interrupt |
 | `log-max-size` | a size, such as `10MiB`: when a process's log rotates |
 | `scrollback` | lines of history each process's terminal keeps |
 | `color-scheme` | `dark` or `light`: the default colors a process's terminal reports |
@@ -141,6 +142,11 @@ one and `muster config set <key> <value>` changes it.
 `detach-key` applies at the next attach, `desktop-notifications` at once, the
 size, scrollback, log size and color scheme to processes started afterwards, and
 the `default-*` settings to processes added afterwards.
+
+With `--json`, `muster config` prints `{"settings": [{"key": "detach-key",
+"value": "ctrl-\\"}, ...]}`, and `get` and `set` print one `{"key", "value"}`;
+each value is written as `config set` reads it. The MCP server's `config_get`
+answers in the same shapes.
 
 ## Commands
 

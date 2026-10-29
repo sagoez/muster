@@ -46,9 +46,12 @@ plugs into a port.
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
   `domain` only.
 - **`adapter`** - infrastructure:
-  - **driving adapters** `adapter/cli` (clap commands, `attach`, the service
-    client) and `adapter/mcp` (the rmcp server). Both edit stored state through
-    `StackEditor` and drive the service.
+  - **driving adapters** `adapter/cli` (clap commands, `attach`) and
+    `adapter/mcp` (the rmcp server). Both edit stored state through
+    `StackEditor` and drive the service through `adapter/client`, which holds
+    the service client, the process use cases, their reports and views, and
+    `ClientError`; each driver maps that error to its own surface and neither
+    imports the other.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It only
     reads the database; writers tell it what changed.
@@ -82,8 +85,10 @@ src/
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
   application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
   adapter/
-    cli/               # driving: commands, attach, the service client
+    cli/               # driving: commands, attach
     mcp/               # driving: the MCP server over stdio
+    client/            # what both drivers share: service client, process use cases, reports
+    sanitize.rs        # control characters made safe to print, for the service and the CLI
     bridge/            # the MCP-to-service requests the service protocol lacks
     service/           # the per-user service and its supervisors
     holder/            # one detached process per child, owning its PTY

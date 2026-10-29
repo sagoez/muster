@@ -128,7 +128,7 @@ mod tests {
         };
         let keyed = |note: usize, value: usize| {
             format!(
-                "version: 1\nscratchpads:\n- key: {}\n  body: b\n  author: human\n  updated_at: 1\ntodos: []\nvalues:\n- key: {}\n  value: v\n  author: human\n  updated_at: 1\n",
+                "version: 1\nscratchpads:\n- key: {}\n  body: b\n  author: human\n  updated_at: 1970-01-01T00:00:01Z\ntodos: []\nvalues:\n- key: {}\n  value: v\n  author: human\n  updated_at: 1970-01-01T00:00:01Z\n",
                 "k".repeat(note),
                 "k".repeat(value)
             )
@@ -143,7 +143,7 @@ mod tests {
         }
         let todo = |deps: usize| {
             format!(
-                "version: 1\nscratchpads: []\ntodos:\n- id: t\n  title: ship\n  status: pending\n  deps: [{}]\n  claim: null\n  author: human\n  updated_at: 1\nvalues: []\n",
+                "version: 1\nscratchpads: []\ntodos:\n- id: t\n  title: ship\n  status: pending\n  deps: [{}]\n  claim: null\n  author: human\n  updated_at: 1970-01-01T00:00:01Z\nvalues: []\n",
                 vec!["a"; deps].join(", ")
             )
         };

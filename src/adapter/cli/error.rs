@@ -348,6 +348,7 @@ impl CliError {
             Self::Config(error) => FailureKind::from(error),
             Self::Client(error) => error.kind(),
             Self::NothingRunning(_) => FailureKind::NotRunning,
+            Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::UnknownNote(_) => FailureKind::UnknownNote,
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
@@ -370,7 +371,6 @@ impl CliError {
             | Self::TooLong { .. }
             | Self::TooMany { .. }
             | Self::InvalidTodoId(_)
-            | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
             | Self::InvalidName { .. }
@@ -530,6 +530,13 @@ mod tests {
             CliExit::from(CliError::NothingToChange.kind()),
             CliExit::Usage
         );
+        let held = CliError::HeldByOther {
+            what: "todo 't'".into(),
+            owner: Author::agent("claude"),
+            expires_in: Duration::from_secs(60),
+        };
+        assert_eq!(held.kind(), FailureKind::Conflict);
+        assert_eq!(CliExit::from(held.kind()), CliExit::ActionFailed);
         assert_eq!(
             CliExit::from(
                 CliError::NotAProject {

@@ -237,7 +237,7 @@ crashed or exited rather than started.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A process did not end up as asked, or the action failed |
+| 1 | A process did not end up as asked, the action failed, or the current state refused it (a todo another agent holds) |
 | 2 | The command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
 | 4 | An invalid value: not a project, an unknown project or process, a taken name, a refused argument, an import conflict, or an unusable file |
@@ -246,7 +246,9 @@ crashed or exited rather than started.
 Every invalid value exits 4, whether the command line parser refuses it
 (`--timeout 0s`, an unknown setting key) or the command does (a bad regex, an
 unknown project). Exit 2 is kept for a command line that does not parse at
-all, such as an unknown flag or a missing argument. A question is cancelled
+all, such as an unknown flag or a missing argument. A valid request the
+current state refuses, such as changing a todo another agent holds without
+`--force`, exits 1 with the kind `conflict`. A question is cancelled
 with Esc or Ctrl-C.
 
 ### At a terminal

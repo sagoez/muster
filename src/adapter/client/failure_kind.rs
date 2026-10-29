@@ -39,6 +39,9 @@ pub enum FailureKind {
     InvalidInput,
     /// A setting the user chose forbids what was asked.
     NotAllowed,
+    /// The request is well formed but the current state refuses it, such as a
+    /// todo another agent holds.
+    Conflict,
     /// The command line itself could not be parsed, or a question was
     /// cancelled.
     Usage,
@@ -63,6 +66,7 @@ impl FailureKind {
             | Self::ProcessFailed
             | Self::InvalidInput
             | Self::NotAllowed
+            | Self::Conflict
             | Self::Usage => true,
             Self::ServiceUnavailable
             | Self::VersionMismatch

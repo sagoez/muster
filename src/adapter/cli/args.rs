@@ -42,7 +42,7 @@ const HELP_STYLES: Styles = Styles::styled()
 const AFTER_HELP: &str = "\
 Exit codes:
     0  success
-    1  a process did not end up as asked, or the action failed
+    1  a process did not end up as asked, the action failed, or the current state refused it (a todo another agent holds)
     2  the command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled
     3  the muster service is unavailable or runs a newer version
     4  an invalid value: not a project, an unknown project or process, a taken name, a refused argument, an import conflict, or an unusable file

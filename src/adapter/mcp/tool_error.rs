@@ -222,9 +222,9 @@ impl ToolError {
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
-            | Self::HeldByOther { .. }
             | Self::InvalidKvKey(_)
             | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
+            Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
     }

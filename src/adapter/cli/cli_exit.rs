@@ -8,7 +8,8 @@ use crate::adapter::client::FailureKind;
 pub enum CliExit {
     /// It did what was asked.
     Success,
-    /// A process it acted on did not end up as asked, or the action failed.
+    /// A process it acted on did not end up as asked, the action failed, or
+    /// the current state refused it.
     ActionFailed,
     /// The command line could not be parsed, or a question was cancelled.
     Usage,
@@ -52,9 +53,10 @@ impl From<FailureKind> for CliExit {
             | FailureKind::UnknownKey
             | FailureKind::InvalidInput
             | FailureKind::NotAllowed => Self::InvalidInput,
-            FailureKind::NotRunning | FailureKind::ProcessFailed | FailureKind::Io => {
-                Self::ActionFailed
-            },
+            FailureKind::NotRunning
+            | FailureKind::ProcessFailed
+            | FailureKind::Conflict
+            | FailureKind::Io => Self::ActionFailed,
             FailureKind::Usage => Self::Usage,
             FailureKind::Interrupted => Self::Interrupted,
         }

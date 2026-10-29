@@ -2943,6 +2943,41 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     assert!(stop.status.success(), "{}", shown(&stop));
 }
 
+/// Changing a todo another agent holds is a refusal over state: it exits 1
+/// with the kind `conflict`, not as an invalid value, and `--force` takes it.
+#[test]
+fn a_todo_held_by_an_agent_is_refused_as_a_conflict() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    let added = mcp.result("todo_add", serde_json::json!({ "title": "ship" }));
+    let id = added["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let claimed = mcp.result("todo_claim", serde_json::json!({ "id": id }));
+    assert_eq!(claimed["isError"], false, "{claimed}");
+
+    let held = scratch.on(&project, &["todo", "status", &id, "done", "--json"]);
+    assert_eq!(held.status.code(), Some(ACTION_FAILED), "{}", shown(&held));
+    assert_eq!(
+        parsed(&held)["error"]["kind"],
+        "conflict",
+        "{}",
+        shown(&held)
+    );
+    let plain = scratch.on(&project, &["todo", "status", &id, "done"]);
+    assert_eq!(
+        plain.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&plain)
+    );
+
+    let forced = scratch.on(&project, &["todo", "status", &id, "done", "--force"]);
+    assert!(forced.status.success(), "{}", shown(&forced));
+}
+
 /// Every field an agent writes has a named maximum: a key, command,
 /// description or dependency list past it is refused naming the limit, over
 /// MCP and the CLI alike, and after maximal writes `stack_status` and

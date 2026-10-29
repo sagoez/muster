@@ -11,7 +11,10 @@ use std::{
 };
 
 use super::{log_reader::read_log_range, protocol::HolderMessage};
-use crate::domain::{port::OutputSink, pty::ProcessOutput, value::OutputCursor};
+use crate::{
+    adapter::ipc,
+    domain::{port::OutputSink, pty::ProcessOutput, value::OutputCursor},
+};
 
 /// Reported when the holder closed the connection without an exit and no
 /// longer serves its socket.
@@ -135,7 +138,7 @@ pub(super) fn spawn_reader(mut reader: Reader) {
 /// connection before its listener, which then still queues a connect until
 /// the exit resets it, so a connect alone would mistake it for serving.
 fn holder_serves(socket: &Path) -> bool {
-    let Ok(mut probe) = UnixStream::connect(socket) else {
+    let Ok(mut probe) = ipc::connect(socket) else {
         return false;
     };
     if probe.set_read_timeout(Some(SERVING_PROBE)).is_err() {

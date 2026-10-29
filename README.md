@@ -48,8 +48,12 @@ after a service restart still shows it until the process starts again. Each
 process listens on a Unix socket in that directory. The service listens in a
 short runtime directory instead, `$XDG_RUNTIME_DIR/muster`, else
 `/tmp/muster-<uid>`, which must be yours with mode 0700, on a socket named for
-the state directory. A socket path too long to fit is refused naming it, with a
-hint to set a shorter `XDG_STATE_HOME` or `XDG_RUNTIME_DIR`.
+the state directory. It records that socket in `service.socket` in the state
+directory, so a command started with another runtime directory, or none, still
+reaches it. A client checks the socket's directory is yours with mode 0700
+before it connects, and talks only to a service running as you. A socket path
+too long to fit is refused naming it, with a hint to set a shorter
+`XDG_STATE_HOME` or `XDG_RUNTIME_DIR`.
 
 Commands act on the project given by `--project` (a registered name, or a
 folder when the value contains `/` or starts with `.` or `~`; such a value

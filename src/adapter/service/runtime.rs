@@ -165,12 +165,21 @@ impl ServiceRuntime {
         let state_dir = singleton.state_dir().clone();
         let settings = deps.settings.load().map_err(ServiceError::Settings)?;
         let (sender, events) = bounded(EVENT_CAPACITY);
-        let mut acceptor = Acceptor::bind(&deps.socket, sender.clone())?;
+        let socket = deps.socket.clone();
+        let mut acceptor = Acceptor::bind(&socket, sender.clone())?;
+        if let Err(source) = protocol::publish_socket(&state_dir, &socket) {
+            acceptor.close();
+            return Err(ServiceError::Publish {
+                path: socket,
+                source,
+            });
+        }
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         let exit = runtime.serve(&events);
         runtime.shutdown();
         acceptor.close();
+        protocol::withdraw_socket(&state_dir, &socket);
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
         runtime.store_recorder.flush();

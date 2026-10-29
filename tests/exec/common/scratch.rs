@@ -7,6 +7,7 @@ use std::{
 use muster::{
     adapter::{
         holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord},
+        private_dir::{prepare_socket_dir, prepare_state_dir},
         service::{
             ServiceRequest, ServiceResponse,
             protocol::{self, SERVICE_SUBCOMMAND},
@@ -28,7 +29,7 @@ const SHORT_TEMP_ROOT: &str = "/tmp";
 /// Prefix of every scratch directory.
 const SCRATCH_PREFIX: &str = "me-";
 /// Directory muster keeps its state under, inside each XDG root.
-pub const APP_DIR: &str = "muster";
+const APP_DIR: &str = "muster";
 /// The database file inside muster's state directory.
 const DATABASE_FILE: &str = "muster.db";
 /// Longest a service may take to answer one request a test sends.
@@ -98,7 +99,19 @@ impl Scratch {
 
     /// The socket a service over this scratch listens on.
     pub fn socket(&self) -> PathBuf {
-        protocol::socket_path(&self.runtime_dir().join(APP_DIR), &self.state_dir())
+        protocol::socket_path(&self.socket_dir(), &self.state_dir())
+    }
+
+    /// The directory that socket goes in.
+    pub fn socket_dir(&self) -> PathBuf {
+        self.runtime_dir().join(APP_DIR)
+    }
+
+    /// Creates the state directory and the socket directory private, as a
+    /// service would, for a test that listens there itself.
+    pub fn prepare_socket_dirs(&self) {
+        prepare_state_dir(&self.state_dir()).unwrap();
+        prepare_socket_dir(&self.socket_dir()).unwrap();
     }
 
     /// The database muster keeps here.

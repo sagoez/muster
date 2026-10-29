@@ -24,6 +24,14 @@ pub enum ServiceError {
         /// The underlying error.
         source: io::Error,
     },
+    /// Where the service listens could not be recorded for its clients.
+    #[error("could not record the service socket {path} in the state directory: {source}")]
+    Publish {
+        /// The socket the service bound.
+        path: PathBuf,
+        /// The underlying error.
+        source: io::Error,
+    },
     /// A path the service binds or listens at does not fit in a Unix socket
     /// address.
     #[error(

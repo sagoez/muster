@@ -145,7 +145,7 @@ impl HolderRunner {
         since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        let stream = UnixStream::connect(record.socket())?;
+        let stream = ipc::connect(record.socket())?;
         let handle = HolderHandle::supervise(
             stream,
             record.socket(),
@@ -333,7 +333,7 @@ impl HolderRunner {
 pub(crate) fn abandon(socket: &Path) {
     let deadline = Instant::now() + ABANDON_TIMEOUT;
     loop {
-        match UnixStream::connect(socket) {
+        match ipc::connect(socket) {
             Ok(mut stream) => {
                 let _ = kill_and_collect(&mut stream, socket, deadline);
                 return;
@@ -420,7 +420,7 @@ fn connect_by(
         if let Some(failure) = reported_failure(socket, error_file) {
             return Err(failure);
         }
-        match UnixStream::connect(socket) {
+        match ipc::connect(socket) {
             Ok(stream) => return Ok(stream),
             Err(error)
                 if !matches!(
@@ -544,7 +544,7 @@ mod tests {
     /// applies one connection's frames in order, so once it serves at a size a
     /// supervisor sent, it has applied everything that supervisor sent before.
     fn serves_at(socket: &Path, size: PtySize) -> bool {
-        let Ok(mut stream) = UnixStream::connect(socket) else {
+        let Ok(mut stream) = ipc::connect(socket) else {
             return false;
         };
         greet(

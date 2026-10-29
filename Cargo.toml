@@ -49,7 +49,7 @@ portable-pty = "0.9.0"
 regex = "1.13.1"
 rmcp = { version = "3.2.0", features = ["server", "macros", "transport-io"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-rustix = { version = "1.1.4", features = ["event", "fs", "process", "stdio", "termios"] }
+rustix = { version = "1.1.4", features = ["event", "fs", "net", "process", "stdio", "termios"] }
 schemars = "1.2.2"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }

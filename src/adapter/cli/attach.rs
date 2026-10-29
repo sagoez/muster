@@ -34,6 +34,7 @@ use crate::{
             ClientRole, HolderError, HolderMessage,
             client::{Greeting, greet},
         },
+        ipc,
         sanitize::printable,
         service::{Located, ServiceRequest, ServiceResponse},
     },
@@ -259,7 +260,7 @@ fn connect(
             source,
         },
     };
-    let mut stream = UnixStream::connect(socket).map_err(|error| failed(error.into()))?;
+    let mut stream = ipc::connect(socket).map_err(|error| failed(error.into()))?;
     let greeting = greet(
         &mut stream,
         socket,

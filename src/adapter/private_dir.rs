@@ -68,8 +68,10 @@ pub fn socket_dir() -> PathBuf {
 }
 
 /// Readies `dir` for the service socket: creates it and any missing parents
-/// owner-only, then refuses it unless it is a real directory this user owns
-/// with mode 0700, since it lies in a folder other users may write to.
+/// owner-only, then refuses it as [`check_socket_dir`] does, since it lies in
+/// a folder other users may write to. The service binds there, and a client
+/// connects only after this, so neither trusts a directory another user
+/// made or can enter.
 ///
 /// # Errors
 /// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
@@ -77,6 +79,17 @@ pub fn socket_dir() -> PathBuf {
 /// creating or inspecting it.
 pub fn prepare_socket_dir(dir: &Path) -> io::Result<()> {
     create_private_dir_all(dir)?;
+    check_socket_dir(dir)
+}
+
+/// Refuses `dir` unless it is a real directory, not a link, this user owns
+/// with mode 0700.
+///
+/// # Errors
+/// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
+/// directory when it is not private to this user, or the I/O error from
+/// inspecting it, of kind [`io::ErrorKind::NotFound`] when it is absent.
+pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(dir)?;
     let private = metadata.is_dir()
         && metadata.uid() == geteuid().as_raw()
@@ -87,7 +100,7 @@ pub fn prepare_socket_dir(dir: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "the socket directory {} is not a directory private to this user (mode {PRIVATE_DIR_MODE:o}); muster will not listen there",
+            "the socket directory {} is not a directory private to this user (mode {PRIVATE_DIR_MODE:o}); muster will not use a socket there",
             dir.display()
         ),
     ))
@@ -213,6 +226,24 @@ mod tests {
             );
         }
         assert_eq!(mode_of(&shared), SHARED_DIR_MODE);
+    }
+
+    /// A socket directory that already exists but another user owns is
+    /// refused, naming it, even with no group or other bits to narrow.
+    #[test]
+    fn a_socket_dir_another_user_owns_is_refused() {
+        if geteuid().is_root() {
+            return;
+        }
+        let root = Path::new(ROOT_OWNED_DIR);
+
+        for error in [
+            prepare_socket_dir(root).unwrap_err(),
+            check_socket_dir(root).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(error.to_string().contains("directory / "), "{error}");
+        }
     }
 
     /// A state directory another user owns is refused, naming it, and left

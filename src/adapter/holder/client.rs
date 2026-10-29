@@ -11,7 +11,7 @@ use super::{
     protocol::HolderMessage,
 };
 use crate::{
-    adapter::terminal::TerminalEmulator,
+    adapter::{ipc, terminal::TerminalEmulator},
     domain::{
         color_scheme::ColorScheme,
         pty::{PtyError, PtySize},
@@ -101,7 +101,7 @@ pub fn greet(
 /// # Errors
 /// Returns a [`PtyError`] when the holder cannot be reached or sends no screen.
 pub fn screen_text(socket: &Path) -> Result<String, PtyError> {
-    let mut stream = UnixStream::connect(socket)?;
+    let mut stream = ipc::connect(socket)?;
     let greeting = greet(
         &mut stream,
         socket,

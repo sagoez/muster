@@ -27,6 +27,7 @@ use muster::{
             HolderRunner, client::greet,
         },
         open_files::OpenFilesLimit,
+        private_dir::RUNTIME_DIR_ENV,
         service::{
             BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
             ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps, ServiceError,
@@ -49,7 +50,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::common::{
-    APP_DIR, BINARY, HeldLauncher, McpSession, Pty, QuietPorts, Scratch, WAIT, alive, entry,
+    BINARY, HeldLauncher, McpSession, Pty, QuietPorts, Scratch, WAIT, alive, entry,
     processes_under, result_text, stack, wait_until,
 };
 
@@ -1427,6 +1428,38 @@ fn service_stop_keeps_processes_and_the_next_command_restarts_it() {
     );
 }
 
+/// Every client of a state directory reaches its running service, whatever
+/// runtime directory the client has, or with none: the service publishes the
+/// socket it bound there, so no second service is started.
+#[test]
+fn a_client_with_another_runtime_dir_reaches_the_running_service() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    scratch.on(&project, &["up"]);
+    let services = processes_under(SERVICE_SUBCOMMAND, scratch.root());
+    let elsewhere = scratch.root().join("elsewhere");
+
+    for runtime in [Some(elsewhere.as_path()), None] {
+        let mut command = scratch.command(&["-p", project.to_str().unwrap(), "ps", "--json"]);
+        match runtime {
+            Some(dir) => command.env(RUNTIME_DIR_ENV, dir),
+            None => command.env_remove(RUNTIME_DIR_ENV),
+        };
+        let output = command.output().unwrap();
+
+        assert!(output.status.success(), "{runtime:?}: {}", shown(&output));
+        assert_eq!(parsed(&output)[0]["processes"][0]["state"], "running");
+    }
+    assert_eq!(
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()),
+        services
+    );
+    assert!(
+        !elsewhere.exists(),
+        "the client made no socket dir of its own"
+    );
+}
+
 /// A crash and its last exit outlive the service that saw them: the next
 /// service lists the process crashed with how it ended, and a process
 /// stopped on request is not listed crashed.
@@ -1562,8 +1595,7 @@ fn request_name(request: &ServiceRequest) -> &'static str {
 /// after [`SLOW_ANSWER`], so a command can be interrupted before it sends
 /// what it asks for. Returns what it was asked, in order.
 fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'static str>>> {
-    fs::create_dir_all(scratch.state_dir()).unwrap();
-    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    scratch.prepare_socket_dirs();
     let listener = UnixListener::bind(scratch.socket()).unwrap();
     let asked = Arc::new(Mutex::new(Vec::new()));
     let heard = Arc::clone(&asked);
@@ -1607,8 +1639,7 @@ fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'s
 /// answers `up` by leaving `api` alone with [`REFUSAL_REASON`], and reports
 /// the matching error notice raised now.
 fn scripted_service(scratch: &Scratch, project: PathBuf) {
-    fs::create_dir_all(scratch.state_dir()).unwrap();
-    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    scratch.prepare_socket_dirs();
     let listener = UnixListener::bind(scratch.socket()).unwrap();
     let api = ProcessName::try_new("api").unwrap();
     thread::spawn(move || {
@@ -1705,8 +1736,7 @@ fn an_up_refusal_is_reported_once_with_its_reason() {
 #[test]
 fn service_stop_needs_no_hello() {
     let scratch = Scratch::new();
-    fs::create_dir_all(scratch.state_dir()).unwrap();
-    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    scratch.prepare_socket_dirs();
     let listener = UnixListener::bind(scratch.socket()).unwrap();
     let service = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();

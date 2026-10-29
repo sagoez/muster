@@ -1,13 +1,13 @@
-//! Refusing a start whose port another supervised process already listens
-//! on, so a second dev server does not fail on `EADDRINUSE` while the first
-//! one keeps serving.
+//! Refusing a start whose port another process already listens on, so a
+//! second dev server does not fail on `EADDRINUSE` while the first one keeps
+//! serving.
 
 use std::collections::HashMap;
 
 use super::entity::Supervisor;
 use crate::{
-    adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder},
-    domain::value::PaneId,
+    adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner},
+    domain::{process::ProcessState, value::PaneId},
 };
 
 /// Opens the notice of a start refused for a held port, before the port.
@@ -44,32 +44,12 @@ impl Supervisor {
     }
 
     /// Refuses to launch `pane` when another process listens on the port its
-    /// readiness check names: the refusal is an error notice, a `blocked`
-    /// event and the pane's `blocked_on`. Returns whether it refused.
+    /// readiness check names, whether a supervised process of any project or
+    /// one muster does not run: the refusal is an error notice, a `blocked`
+    /// event, the pane's `blocked_on` and its `blocked` state. Returns
+    /// whether it refused.
     pub(super) fn refuse_blocked_launch(&mut self, pane: PaneId) -> bool {
-        let Some(process) = self.workspace.process(pane) else {
-            return false;
-        };
-        let me = PortHolder::builder()
-            .project(self.project.name().clone())
-            .process(process.name().clone())
-            .build();
-        let block = process
-            .ready()
-            .as_ref()
-            .and_then(|check| check.probe().port())
-            .and_then(|port| {
-                self.held_ports
-                    .get(&port.into_inner())
-                    .filter(|holder| **holder != me)
-                    .map(|holder| {
-                        PortBlock::builder()
-                            .port(port)
-                            .holder(holder.clone())
-                            .build()
-                    })
-            });
-        let Some(block) = block else {
+        let Some(block) = self.port_block(pane) else {
             self.blocks.remove(&pane);
             return false;
         };
@@ -81,7 +61,27 @@ impl Supervisor {
         self.notify(NoticeLevel::Error, Some(pane), message.clone());
         self.record_event(Some(pane), EventKind::Blocked, message);
         self.blocks.insert(pane, block);
+        self.workspace.set_state(pane, ProcessState::Blocked);
         true
+    }
+
+    /// What blocks `pane`'s launch: the port its readiness check names,
+    /// held by another supervised process as last sampled, or else by any
+    /// process the OS socket table shows listening on it. A port its own
+    /// process was last seen on is free to it.
+    fn port_block(&mut self, pane: PaneId) -> Option<PortBlock> {
+        let process = self.workspace.process(pane)?;
+        let port = process.ready().as_ref()?.probe().port()?;
+        let me = PortHolder::builder()
+            .project(self.project.name().clone())
+            .process(process.name().clone())
+            .build();
+        let owner = match self.held_ports.get(&port.into_inner()) {
+            Some(holder) if *holder == me => return None,
+            Some(holder) => PortOwner::Supervised(holder.clone()),
+            None => PortOwner::Other(self.port_occupants.as_mut()?.occupant(port.into_inner())?),
+        };
+        Some(PortBlock::builder().port(port).holder(owner).build())
     }
 }
 
@@ -94,8 +94,9 @@ mod tests {
         adapter::service::{LaunchEnvironment, supervisor::testing::*},
         domain::{
             config::ProcessSpec,
-            port::ListeningSocket,
-            process::{ProcessState, ReadyCheck, ReadyProbe, RestartPolicy},
+            port::{ListeningSocket, PortOccupant, PortOccupants},
+            process::{ReadyCheck, ReadyProbe, RestartPolicy},
+            pty::{ExitOutcome, ProcessOutput},
             value::{LocalPort, PositiveDuration, ProjectName},
         },
     };
@@ -111,6 +112,28 @@ mod tests {
                 .timeout(PositiveDuration::try_new(Duration::from_secs(30)).unwrap())
                 .build(),
         ))
+    }
+
+    /// The pid of the program muster does not run.
+    const OUTSIDER_PID: u32 = 777;
+    /// Its command line.
+    const OUTSIDER_COMMAND: &str = "python3 -m http.server 3000";
+
+    /// Answers every port lookup with the same occupant.
+    struct Occupied(Option<PortOccupant>);
+
+    impl PortOccupants for Occupied {
+        fn occupant(&mut self, _port: u16) -> Option<PortOccupant> {
+            self.0.clone()
+        }
+    }
+
+    /// A program muster does not run, listening on [`PORT`].
+    fn outsider() -> PortOccupant {
+        PortOccupant::builder()
+            .pid(OUTSIDER_PID)
+            .command(OUTSIDER_COMMAND.to_string())
+            .build()
     }
 
     /// `process` of the project `project`, as a port's holder.
@@ -140,9 +163,12 @@ mod tests {
         );
         let status = harness.supervisor.snapshot();
         let web = &status.processes()[0];
-        assert_eq!(*web.state(), ProcessState::Pending);
+        assert_eq!(*web.state(), ProcessState::Blocked);
         let block = web.blocked_on().as_ref().expect("blocked");
-        assert_eq!(block.holder(), &holder("admin", "web"));
+        assert_eq!(
+            block.holder(),
+            &PortOwner::Supervised(holder("admin", "web"))
+        );
         assert_eq!(
             harness
                 .event_log
@@ -159,6 +185,64 @@ mod tests {
         let status = harness.supervisor.snapshot();
         assert!(status.processes()[0].blocked_on().is_none());
         assert!(status.processes()[0].state().may_be_running());
+    }
+
+    /// A port a process muster does not run listens on refuses the start too,
+    /// naming that process by pid and command line.
+    #[test]
+    fn a_start_on_a_port_another_program_holds_is_refused_naming_it() {
+        let mut harness = Harness::over(Box::new(PidRunner), &[on_port("web")]);
+        harness
+            .supervisor
+            .set_port_occupants(Box::new(Occupied(Some(outsider()))));
+
+        let batch = harness.supervisor.up(&LaunchEnvironment::default());
+
+        assert!(batch.acted().is_empty());
+        assert_eq!(
+            batch.refused()[0].reason(),
+            &format!("did not start: port 3000 is held by pid {OUTSIDER_PID} ({OUTSIDER_COMMAND})")
+        );
+        let status = harness.supervisor.snapshot();
+        assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
+        assert_eq!(
+            status.processes()[0]
+                .blocked_on()
+                .as_ref()
+                .map(PortBlock::holder),
+            Some(&PortOwner::Other(outsider()))
+        );
+    }
+
+    /// A policy respawn whose port was taken meanwhile is refused like a
+    /// start: the process is blocked and nothing is launched.
+    #[test]
+    fn a_policy_respawn_on_a_taken_port_is_blocked() {
+        let respawning = on_port("web").with_restart(RestartPolicy::Always);
+        let mut harness = Harness::over(Box::new(PidRunner), &[respawning]);
+        harness.up();
+        let pane = harness.supervisor.pane_named(&name("web")).unwrap();
+        let generation = harness.supervisor.generations()[&pane];
+        harness.supervisor.handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
+        );
+        assert_eq!(
+            *harness.supervisor.snapshot().processes()[0].state(),
+            ProcessState::Restarting
+        );
+
+        harness
+            .supervisor
+            .set_held_ports(HashMap::from([(PORT, holder("admin", "web"))]));
+        let respawn = harness.supervisor.generations()[&pane];
+        harness.supervisor.handle_respawn(pane, respawn);
+
+        let status = harness.supervisor.snapshot();
+        assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
+        assert!(status.processes()[0].blocked_on().is_some());
+        assert_eq!(harness.supervisor.generations()[&pane], respawn);
     }
 
     /// A process's own port never blocks it, and the ports a project's live

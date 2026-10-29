@@ -27,6 +27,9 @@ pub enum ProcessState {
     /// The process may still be running under a holder the service cannot
     /// reach, so it is neither supervised nor safe to start again.
     Unsupervised,
+    /// Its last start was refused because a port it needs is taken; nothing
+    /// runs until a later start finds the port free.
+    Blocked,
 }
 
 impl ProcessState {

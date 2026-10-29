@@ -159,6 +159,7 @@ fn unsettled(state: ProcessState) -> Outcome {
         | ProcessState::Crashed
         | ProcessState::Restarting
         | ProcessState::Unsupervised => Outcome::StillStarting,
+        ProcessState::Blocked => Outcome::NotStarted,
     }
 }
 
@@ -177,7 +178,10 @@ fn halted(was: Option<ProcessState>, now: Option<ProcessState>) -> Outcome {
         | ProcessState::Paused
         | ProcessState::Restarting
         | ProcessState::Unsupervised => Outcome::StillRunning,
-        ProcessState::Pending | ProcessState::Exited | ProcessState::Crashed => Outcome::Stopped,
+        ProcessState::Pending
+        | ProcessState::Exited
+        | ProcessState::Crashed
+        | ProcessState::Blocked => Outcome::Stopped,
     }
 }
 
@@ -193,7 +197,8 @@ fn paused(was: Option<ProcessState>, state: ProcessState) -> Outcome {
         | ProcessState::Exited
         | ProcessState::Crashed
         | ProcessState::Restarting
-        | ProcessState::Unsupervised => Outcome::Unchanged,
+        | ProcessState::Unsupervised
+        | ProcessState::Blocked => Outcome::Unchanged,
     }
 }
 
@@ -209,7 +214,8 @@ fn resumed(was: Option<ProcessState>, state: ProcessState) -> Outcome {
         | ProcessState::Exited
         | ProcessState::Crashed
         | ProcessState::Restarting
-        | ProcessState::Unsupervised => Outcome::Unchanged,
+        | ProcessState::Unsupervised
+        | ProcessState::Blocked => Outcome::Unchanged,
     }
 }
 
@@ -250,9 +256,10 @@ fn launched(
         },
         ProcessState::Exited => Outcome::Exited,
         ProcessState::Crashed | ProcessState::Restarting => Outcome::Crashed,
-        ProcessState::Pending | ProcessState::Starting | ProcessState::Stopping => {
-            Outcome::NotStarted
-        },
+        ProcessState::Pending
+        | ProcessState::Starting
+        | ProcessState::Stopping
+        | ProcessState::Blocked => Outcome::NotStarted,
     }
 }
 

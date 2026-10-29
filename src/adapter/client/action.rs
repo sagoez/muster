@@ -91,7 +91,10 @@ impl Action {
             | ProcessState::Paused
             | ProcessState::Restarting
             | ProcessState::Unsupervised => self == Self::Remove,
-            ProcessState::Pending | ProcessState::Exited | ProcessState::Crashed => false,
+            ProcessState::Pending
+            | ProcessState::Exited
+            | ProcessState::Crashed
+            | ProcessState::Blocked => false,
         }
     }
 

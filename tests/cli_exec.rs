@@ -41,7 +41,7 @@ use muster::{
         store::SqliteStore,
     },
     domain::{
-        port::Notifier,
+        port::{Notifier, PortOccupants},
         process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
@@ -435,6 +435,10 @@ struct QuietPorts;
 
 impl ProjectPorts for QuietPorts {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
+        None
+    }
+
+    fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
         None
     }
 }

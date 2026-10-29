@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod notifier;
 pub mod open_files;
 pub mod path;
+pub mod port_occupants;
 pub mod private_dir;
 pub mod probe;
 pub mod process_identity;

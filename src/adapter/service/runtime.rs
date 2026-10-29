@@ -818,6 +818,7 @@ impl ServiceRuntime {
             .event_log(Arc::clone(&self.event_log))
             .probes(Some(self.probes.clone()))
             .notifier(self.ports.notifier())
+            .port_occupants(self.ports.port_occupants())
             .settings(self.settings.clone())
             .build();
         let mut supervisor =
@@ -1065,7 +1066,7 @@ mod tests {
                 Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
                 SettingChange,
             },
-            port::{Notifier, OutputSink, ProcessHandle, ProcessRunner},
+            port::{Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessRunner},
             process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, SpawnRequest},
             value::{Cols, CommandLine, PaneId, Rows},
@@ -1271,6 +1272,10 @@ mod tests {
 
     impl ProjectPorts for TestPorts {
         fn notifier(&self) -> Option<Box<dyn Notifier>> {
+            None
+        }
+
+        fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
             None
         }
     }

@@ -77,9 +77,11 @@ has:
 - a readiness check, what each run waits for before it counts as ready: one of
   `--ready-log TEXT` (with `--ready-regex` for a regex), `--ready-port PORT` or
   `--ready-http URL` on localhost, and `--ready-timeout`, how long a run has to
-  pass it. A run that misses it raises a warning and keeps running. A start
-  whose readiness port another supervised process listens on is refused,
-  naming that process.
+  pass it. A run that misses it raises a warning and keeps running. A start,
+  or a restart by policy, whose readiness port another process listens on is
+  refused, naming that process: its project and name when muster runs it,
+  otherwise its pid and command line. `muster ps` shows the process as
+  `blocked` until a later start finds the port free.
 
 A field left out takes the matching `default-*` setting, and the process stores
 that value, so changing a default later changes only processes added after it.

@@ -138,6 +138,7 @@ impl Harness {
             .event_log(event_log.clone())
             .probes(None)
             .notifier(None)
+            .port_occupants(None)
             .settings(test_settings())
             .build();
         Self {

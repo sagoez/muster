@@ -8,6 +8,7 @@ use muster::{
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         open_files::OpenFilesLimit,
+        port_occupants::OsPortOccupants,
         private_dir::{prepare_state_dir, state_dir},
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton, protocol,
@@ -16,7 +17,10 @@ use muster::{
         store::SqliteStore,
     },
     constants::APP_VERSION,
-    domain::{config::ConfigError, port::Notifier},
+    domain::{
+        config::ConfigError,
+        port::{Notifier, PortOccupants},
+    },
     error::MusterError,
 };
 
@@ -70,6 +74,10 @@ impl CliPorts for LocalPorts {
 impl ProjectPorts for LocalPorts {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
         Some(Box::new(DesktopNotifier::new()))
+    }
+
+    fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
+        Some(Box::new(OsPortOccupants::default()))
     }
 }
 

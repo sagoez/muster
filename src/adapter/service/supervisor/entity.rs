@@ -23,7 +23,7 @@ use crate::{
     application::{StackSync, Workspace},
     domain::{
         config::Stack,
-        port::{ListeningSocket, Notifier, ProcessHandle, ProcessRunner},
+        port::{ListeningSocket, Notifier, PortOccupants, ProcessHandle, ProcessRunner},
         process::{ProcessState, ReadyCheck, ReadyProbe},
         project::Project,
         pty::ExitOutcome,
@@ -90,6 +90,9 @@ pub struct Supervisor {
     pub(super) usage: HashMap<PaneId, ProcessUsage>,
     /// Delivers desktop notifications.
     pub(super) notifier: Option<Box<dyn Notifier>>,
+    /// Finds who listens on a port a start needs, when no supervised
+    /// process was seen on it.
+    pub(super) port_occupants: Option<Box<dyn PortOccupants>>,
     /// The settings launches take their terminal, log and colors from, and
     /// that decide whether a crash reaches the desktop.
     pub(super) settings: Settings,
@@ -141,6 +144,7 @@ impl Supervisor {
             event_log,
             probes,
             notifier,
+            port_occupants,
             settings,
         } = deps;
         let empty = Workspace::builder().processes(Vec::new()).build();
@@ -163,6 +167,7 @@ impl Supervisor {
             detaching: false,
             usage: HashMap::new(),
             notifier,
+            port_occupants,
             settings,
             failing_screen_reads: HashSet::new(),
             attached: HashMap::new(),
@@ -203,6 +208,13 @@ impl Supervisor {
     #[cfg(test)]
     pub(crate) fn set_notifier(&mut self, notifier: Box<dyn Notifier>) {
         self.notifier = Some(notifier);
+    }
+
+    /// Swaps in the lookup of who listens on a port, for a test to inject a
+    /// fake.
+    #[cfg(test)]
+    pub(crate) fn set_port_occupants(&mut self, occupants: Box<dyn PortOccupants>) {
+        self.port_occupants = Some(occupants);
     }
 
     /// The project's processes, for a test to arrange state directly.

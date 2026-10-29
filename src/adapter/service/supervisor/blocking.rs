@@ -167,13 +167,13 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::Ipv4Addr, sync::PoisonError, time::Duration};
+    use std::{net::Ipv4Addr, sync::PoisonError, time::Duration};
 
     use super::*;
     use crate::{
         adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*},
         domain::{
-            config::ProcessSpec,
+            config::{DeclaredPorts, ProcessSpec},
             port::{ListeningSocket, PortOccupant, ProcessRunner},
             process::{ReadyCheck, ReadyProbe, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
@@ -206,7 +206,7 @@ mod tests {
     /// `raw`, declaring `ports` and no readiness check.
     fn declaring(raw: &str, ports: &[u16]) -> ProcessSpec {
         spec(raw, "true", RestartPolicy::Never)
-            .with_ports(ports.iter().copied().map(port).collect::<BTreeSet<_>>())
+            .with_ports(DeclaredPorts::of(ports.iter().copied().map(port)).unwrap())
     }
 
     /// `port` held by `holder`, as a refusal carries it.
@@ -523,7 +523,8 @@ mod tests {
     /// one scan with the other declared ports, ascending.
     #[test]
     fn a_declared_port_and_the_readiness_port_are_checked_once() {
-        let web = on_port("web").with_ports(BTreeSet::from([port(SECOND_PORT), port(PORT)]));
+        let web =
+            on_port("web").with_ports(DeclaredPorts::of([port(SECOND_PORT), port(PORT)]).unwrap());
         let mut harness = Harness::over(Box::new(PidRunner), &[web]);
         let occupied = Occupied::by(None);
         let asked = occupied.asked();
@@ -542,8 +543,8 @@ mod tests {
     /// the first one held settles it blocked, naming that port.
     #[test]
     fn a_worker_launch_scans_the_socket_table_once_for_all_ports() {
-        let web =
-            on_port("web").with_ports(BTreeSet::from([port(SECOND_PORT), port(BETWEEN_PORT)]));
+        let web = on_port("web")
+            .with_ports(DeclaredPorts::of([port(SECOND_PORT), port(BETWEEN_PORT)]).unwrap());
         let mut harness = Harness::over(Box::new(WorkerRunner::default()), &[web]);
         let occupied = Occupied::on(&[port(BETWEEN_PORT), port(SECOND_PORT)], outsider());
         let asked = occupied.asked();

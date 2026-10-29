@@ -717,7 +717,8 @@ impl ServiceRuntime {
                 return Ok(Reply::Held);
             },
             ServiceRequest::Locate { project, name } => {
-                ServiceResponse::Located(self.locate(&project, &name)?)
+                self.locate(&project, &name, reply.clone())?;
+                return Ok(Reply::Held);
             },
             ServiceRequest::Notices { project } => ServiceResponse::Notices(
                 self.notices
@@ -860,28 +861,40 @@ impl ServiceRuntime {
         statuses
     }
 
-    /// Where the running process `name` of `project` can be reached.
+    /// Answers on `reply` where the running process `name` of `project` can
+    /// be reached, or that it has no holder record. Its holder is looked for
+    /// on a worker, since that reads every record and probes a socket, so the
+    /// loop never waits on it.
     ///
     /// # Errors
-    /// Returns the refusal when the process is unknown, not running, or has
-    /// no holder record.
+    /// Returns the refusal when the process is unknown or not running.
     fn locate(
         &mut self,
         project: &ProjectRoot,
         name: &ProcessName,
-    ) -> Result<Located, ServiceErrorBody> {
+        reply: Sender<ServiceResponse>,
+    ) -> Result<(), ServiceErrorBody> {
         let pid = self
             .process(project, name)?
             .live_pid(name)
             .ok_or_else(|| refused(ServiceErrorKind::NotRunning, NOT_RUNNING.to_string()))?;
-        let record = self
-            .holders
-            .locate(pid)
-            .ok_or_else(|| refused(ServiceErrorKind::NotRunning, NO_HOLDER.to_string()))?;
-        Ok(Located::builder()
-            .socket(record.socket().clone())
-            .log(record.log().clone())
-            .build())
+        let holders = Arc::clone(&self.holders);
+        thread::spawn(move || {
+            let answer = match holders.locate(pid) {
+                Some(record) => ServiceResponse::Located(
+                    Located::builder()
+                        .socket(record.socket().clone())
+                        .log(record.log().clone())
+                        .build(),
+                ),
+                None => ServiceResponse::Error(refused(
+                    ServiceErrorKind::NotRunning,
+                    NO_HOLDER.to_string(),
+                )),
+            };
+            let _ = reply.send(answer);
+        });
+        Ok(())
     }
 
     /// Reads `screen` from its holder on a worker thread, which posts the
@@ -1741,6 +1754,49 @@ mod tests {
         }
     }
 
+    /// Finding a process's holder for an attach runs off the loop: while the
+    /// look is slow, the loop still answers at once, and the attach is
+    /// answered once the look comes back.
+    #[test]
+    fn a_slow_locate_never_stalls_the_loop() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let orphan = Orphan::spawn();
+        let (open, gate) = bounded(0);
+        let service = fixture.start(Arc::new(
+            FakePool::new(Vec::new(), None).running_as(orphan.pid(), gate),
+        ));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+
+        let socket = service.socket().clone();
+        let located = {
+            let project = project.clone();
+            thread::spawn(move || {
+                protocol::send_within(
+                    &socket,
+                    &ServiceRequest::Locate {
+                        project,
+                        name: ProcessName::try_new("api").unwrap(),
+                    },
+                    REPLY,
+                )
+                .unwrap()
+            })
+        };
+        thread::sleep(GATE_DELAY);
+        let asked = Instant::now();
+        service.status(&project);
+        assert!(asked.elapsed() < PROMPT_ANSWER, "the loop answered at once");
+        drop(open);
+
+        let ServiceResponse::Error(refusal) = located.join().unwrap() else {
+            panic!("a process with no holder record is refused");
+        };
+        assert_eq!(refusal.kind(), &ServiceErrorKind::NotRunning);
+        service.stop();
+    }
+
     /// A reconnect still looking for its holder when the service stops holds
     /// the exit only until that look comes back, never the whole detach wait.
     #[test]
@@ -1750,7 +1806,9 @@ mod tests {
         let orphan = Orphan::spawn();
         let (open, gate) = bounded(0);
         let service = fixture.start(Arc::new(
-            FakePool::new(Vec::new(), None).breaking_streams(orphan.pid(), gate),
+            FakePool::new(Vec::new(), None)
+                .running_as(orphan.pid(), gate)
+                .breaking_streams(),
         ));
         service.up(&project);
         wait_until("the broken stream to be told", || {

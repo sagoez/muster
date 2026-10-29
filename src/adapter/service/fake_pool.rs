@@ -42,10 +42,12 @@ pub(super) struct FakePool {
     socket: Option<PathBuf>,
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     gate: Option<Receiver<()>>,
-    /// The child pid every spawned handle reports, whose output stream
-    /// breaks at once when one is given.
+    /// The child pid every spawned handle reports, when one is given.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
-    broken_pid: Option<Pid>,
+    pid: Option<Pid>,
+    /// Whether every spawned handle's output stream breaks at once.
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    breaks_streams: bool,
     /// Held, a look for a holder waits until it opens or is dropped.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     locate_gate: Option<Receiver<()>>,
@@ -66,7 +68,8 @@ impl FakePool {
             kills: Arc::default(),
             socket,
             gate: None,
-            broken_pid: None,
+            pid: None,
+            breaks_streams: false,
             locate_gate: None,
             legacy_removals: Arc::default(),
             legacy_result: Mutex::new(None),
@@ -82,13 +85,22 @@ impl FakePool {
         }
     }
 
-    /// This pool, whose every spawn runs the child `pid` and breaks its
-    /// output stream at once, so the service looks for its holder again; that
-    /// look waits until `locate_gate` opens or is dropped, and finds none.
-    pub(super) fn breaking_streams(self, pid: Pid, locate_gate: Receiver<()>) -> Self {
+    /// This pool, whose every spawn runs the child `pid`, and whose every
+    /// look for a holder waits until `locate_gate` opens or is dropped, then
+    /// finds none.
+    pub(super) fn running_as(self, pid: Pid, locate_gate: Receiver<()>) -> Self {
         Self {
-            broken_pid: Some(pid),
+            pid: Some(pid),
             locate_gate: Some(locate_gate),
+            ..self
+        }
+    }
+
+    /// This pool, whose every spawned handle's output stream breaks at once,
+    /// so the service looks for its holder again.
+    pub(super) fn breaking_streams(self) -> Self {
+        Self {
+            breaks_streams: true,
             ..self
         }
     }
@@ -109,14 +121,14 @@ impl ProcessRunner for FakePool {
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
         self.wait_at_gate();
-        if self.broken_pid.is_some() {
+        if self.breaks_streams {
             sink.send(ProcessOutput::Unreadable(BROKEN_STREAM.to_string()));
         }
         Ok(Box::new(
             StalledHandle::builder()
                 .socket(self.socket.clone())
                 .kills(Arc::clone(&self.kills))
-                .pid(self.broken_pid)
+                .pid(self.pid)
                 .build(),
         ))
     }

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Why one process entry of a stack file is refused.
@@ -13,9 +15,21 @@ pub enum EntryError {
     /// `name` is blank.
     #[error("name must not be empty")]
     EmptyName,
+    /// `name` holds a control character.
+    #[error("name must not contain control characters")]
+    ControlCharacterName,
     /// `command` is blank.
     #[error("command must not be empty")]
     EmptyCommand,
+    /// `working_dir` is present but empty.
+    #[error("working_dir must not be empty; leave the key out to run in the project root")]
+    EmptyWorkingDir,
+    /// `working_dir` is absolute or climbs above the project root.
+    #[error("working_dir {} must be a folder under the project root, given relative to it", dir.display())]
+    WorkingDirOutsideRoot {
+        /// The directory refused.
+        dir: PathBuf,
+    },
     /// `description` is present but blank.
     #[error("description must not be empty; leave the key out instead")]
     EmptyDescription,

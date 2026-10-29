@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Component, PathBuf},
+};
 
 use getset::Getters;
 use serde::{Deserialize, Serialize};
@@ -8,7 +11,9 @@ use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, StopGrace},
+    value::{
+        CommandLine, Description, EnvName, EnvValue, ProcessName, ProcessNameError, StopGrace,
+    },
 };
 
 /// One process of a stack file. Optional keys are written only when set, and
@@ -21,7 +26,7 @@ pub struct ProcessEntry {
     name: String,
     /// The shell command it runs.
     command: String,
-    /// Its working directory, relative to the project root unless absolute.
+    /// Its working directory, relative to the project root and under it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     working_dir: Option<PathBuf>,
@@ -82,6 +87,38 @@ impl From<&ProcessSpec> for ProcessEntry {
     }
 }
 
+/// Reads the entry's name, refusing a blank one and one holding a control
+/// character each for its own reason.
+fn process_name(raw: String) -> Result<ProcessName, EntryError> {
+    ProcessName::try_new(raw).map_err(|error| match error {
+        ProcessNameError::NotEmptyViolated => EntryError::EmptyName,
+        ProcessNameError::PredicateViolated => EntryError::ControlCharacterName,
+    })
+}
+
+/// Reads the entry's working directory: a non-empty folder given relative to
+/// the project root that never climbs above it.
+fn working_dir(dir: PathBuf) -> Result<PathBuf, EntryError> {
+    if dir.as_os_str().is_empty() {
+        return Err(EntryError::EmptyWorkingDir);
+    }
+    let mut depth: usize = 0;
+    for component in dir.components() {
+        depth = match component {
+            Component::Normal(_) => depth + 1,
+            Component::CurDir => depth,
+            Component::ParentDir => match depth.checked_sub(1) {
+                Some(depth) => depth,
+                None => return Err(EntryError::WorkingDirOutsideRoot { dir }),
+            },
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(EntryError::WorkingDirOutsideRoot { dir });
+            },
+        };
+    }
+    Ok(dir)
+}
+
 /// Reads one variable, refusing an unfilled placeholder.
 fn variable(raw: String, value: Option<String>) -> Result<(EnvName, EnvValue), EntryError> {
     let name = EnvName::try_new(raw.clone())
@@ -106,9 +143,9 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
             .map(|(name, value)| variable(name, value))
             .collect::<Result<Environment, EntryError>>()?;
         Ok(ProcessSpec::builder()
-            .name(ProcessName::try_new(entry.name).map_err(|_| EntryError::EmptyName)?)
+            .name(process_name(entry.name)?)
             .command(CommandLine::try_new(entry.command).map_err(|_| EntryError::EmptyCommand)?)
-            .working_dir(entry.working_dir)
+            .working_dir(entry.working_dir.map(working_dir).transpose()?)
             .description(
                 entry
                     .description

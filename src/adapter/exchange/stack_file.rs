@@ -127,7 +127,10 @@ fn malformed(error: serde_yaml_ng::Error) -> ExchangeError {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use super::*;
     use crate::domain::{
@@ -393,6 +396,42 @@ processes:
             refusal(&entry_with("").replace("name: web", "name: ''")),
             "processes[0]: name must not be empty"
         );
+    }
+
+    /// A name holding a control character is refused for that, never as an
+    /// empty name.
+    #[test]
+    fn a_name_with_a_control_character_says_so() {
+        let refused = refusal(&entry_with("").replace("name: web", "name: \"we\\eb\""));
+        assert!(
+            refused.ends_with(": name must not contain control characters"),
+            "{refused}"
+        );
+    }
+
+    /// A working directory must be a folder under the root, given relative
+    /// to it: an absolute, empty or climbing one is refused, naming the
+    /// entry; one that climbs back inside is kept.
+    #[test]
+    fn a_working_dir_outside_the_root_is_refused() {
+        for dir in ["/etc", "..", "../elsewhere", "src/../../elsewhere"] {
+            assert_eq!(
+                refusal(&entry_with(&format!("working_dir: '{dir}'"))),
+                format!(
+                    "processes[0] (web): working_dir {dir} must be a folder under the project \
+                     root, given relative to it"
+                ),
+            );
+        }
+        assert_eq!(
+            refusal(&entry_with("working_dir: ''")),
+            "processes[0] (web): working_dir must not be empty; leave the key out to run in \
+             the project root"
+        );
+        for dir in ["frontend", "./web/src", "src/../web"] {
+            let read = read_stack_file(&entry_with(&format!("working_dir: '{dir}'"))).unwrap();
+            assert_eq!(read[0].working_dir().as_deref(), Some(Path::new(dir)));
+        }
     }
 
     /// Names that read the same in normal form C are one name.

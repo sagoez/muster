@@ -783,6 +783,10 @@ impl Supervisor {
             },
         };
         self.adoption_retries.forget(pane);
+        match handle.output_end() {
+            Some(end) => self.replays.insert(pane, end),
+            None => self.replays.remove(&pane),
+        };
         let backlog = self.install_pane(pane, handle);
         if carried.is_none() {
             self.restarts.take_history(pane, record.history());

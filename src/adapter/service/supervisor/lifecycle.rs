@@ -975,6 +975,7 @@ impl Supervisor {
             probes.forget(self.root(), pane);
         }
         self.taps.remove(&pane);
+        self.replays.remove(&pane);
         self.readiness.remove(&pane);
         self.panes.remove(&pane);
         // Advance the spawn generation rather than dropping it. A retired pane can

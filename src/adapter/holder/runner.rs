@@ -134,7 +134,8 @@ impl HolderRunner {
 
     /// Becomes the supervisor of the running holder `record` describes,
     /// forwarding its screen and then its output and exit to `sink`, with the
-    /// output it logged after `since`, or since its run began, as backlog.
+    /// output it logged after `since`, or since its run began, replayed to the
+    /// sink first once the backlog is taken.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the holder cannot be reached or sends no
@@ -146,15 +147,15 @@ impl HolderRunner {
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         let stream = ipc::connect(record.socket())?;
-        let handle = HolderHandle::supervise(
+        let handle = HolderHandle::supervise_replaying(
             stream,
             record.socket(),
             Some(record.log()),
             sink,
             HOLDER_READY_TIMEOUT.into_inner(),
+            since,
         )?
-        .with_started_at(record.child_started_at())
-        .with_backlog(since);
+        .with_started_at(record.child_started_at());
         Ok(Box::new(handle))
     }
 
@@ -300,7 +301,7 @@ impl ProcessRunner for HolderRunner {
             Ok(handle) => Ok(handle),
         };
         let _ = fs::remove_file(&error_file);
-        Ok(Box::new(supervised?.with_backlog(None)))
+        Ok(Box::new(supervised?.with_backlog()))
     }
 }
 
@@ -464,12 +465,13 @@ mod tests {
         thread::JoinHandle,
     };
 
-    use crossbeam_channel::bounded;
+    use crossbeam_channel::{Receiver, bounded, unbounded};
     use rustix::net::listen;
 
     use super::*;
     use crate::{
         adapter::{
+            channel_sink::ChannelSink,
             holder::{
                 ServedScreen,
                 client::{greet, screen_text},
@@ -488,7 +490,7 @@ mod tests {
         domain::{
             color_scheme::ColorScheme,
             process::StopSignal,
-            pty::{ExitCause, ExitOutcome, PtySize, ScreenSource},
+            pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
             value::{Cols, CommandLine, ProcessName, Rows, StartToken},
         },
     };
@@ -496,6 +498,16 @@ mod tests {
     /// Longest one screen probe waits for the holder, far below [`WAIT`] so a
     /// polling loop stays within its bound.
     const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+    /// The line a replayed child prints first.
+    const REPLAY_MARKER: &str = "REPLAY-MARKER";
+    /// The line a replayed child prints last.
+    const REPLAY_DONE: &str = "REPLAY-DONE";
+    /// Bytes the replayed child prints between them: past what one backlog
+    /// read used to hold.
+    const REPLAY_FLOOD_BYTES: usize = 1024 * 1024;
+    /// How long a test watches for a replay held back until the backlog is
+    /// taken.
+    const HELD_REPLAY: Duration = Duration::from_millis(300);
     /// PTY rows of every test child.
     const ROWS: u16 = TEST_ROWS;
     /// PTY cols of every test child.
@@ -622,6 +634,7 @@ mod tests {
         assert_eq!(runner.live_records(), vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
         let mut adopted = runner.adopt(&record, None, sink).unwrap();
+        watch.connected(&mut adopted);
         watch.until("the held exit", |watch| watch.exit().is_some());
         assert_eq!(watch.exit(), Some(ExitOutcome::Succeeded));
         adopted.acknowledge_exit().unwrap();
@@ -668,19 +681,84 @@ mod tests {
         });
         watch.drain();
 
-        let (sink, _watch) = Watch::new();
-        let mut whole = runner.adopt(&record, None, sink).unwrap();
-        let (at, bytes) = whole.take_backlog().unwrap();
-        assert_eq!(at, start);
-        assert_eq!(bytes, b"first\r\nsecond\r\n");
-        assert_eq!(whole.take_backlog(), None, "taken once");
+        let (sender, outputs) = unbounded();
+        let mut whole = runner
+            .adopt(&record, None, Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        assert_eq!(whole.take_backlog(), None, "replayed through the sink");
+        assert_eq!(
+            replayed(&outputs, 2),
+            (start, b"first\r\nsecond\r\n".to_vec())
+        );
         drop(whole);
 
         let later = start.advanced("first\r\n".len() as u64);
-        let (sink, _watch) = Watch::new();
-        let mut rest = runner.adopt(&record, Some(later), sink).unwrap();
-        assert_eq!(rest.take_backlog(), Some((later, b"second\r\n".to_vec())));
+        let (sender, outputs) = unbounded();
+        let mut rest = runner
+            .adopt(&record, Some(later), Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        let _ = rest.take_backlog();
+        assert_eq!(replayed(&outputs, 1), (later, b"second\r\n".to_vec()));
         rest.kill().unwrap();
+    }
+
+    /// An adopting handle replays nothing until its backlog is taken, then
+    /// the whole run back to a line far past what one read used to hold, in
+    /// pieces, so readiness and waits still see it.
+    #[test]
+    fn an_adoption_replays_a_run_far_back_once_its_backlog_is_taken() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let command = format!(
+            "echo {REPLAY_MARKER}; head -c {REPLAY_FLOOD_BYTES} /dev/zero | tr '\\0' x; \
+             echo; echo {REPLAY_DONE}; sleep 600"
+        );
+        let (sink, _watch) = Watch::new();
+        let handle = runner.spawn(fixture.request(&command), sink).unwrap();
+        drop(handle);
+        let record = runner.live_records().remove(0);
+        wait_until("the flood in the log", || {
+            fixture.log(&record).contains(REPLAY_DONE)
+        });
+
+        let (sender, outputs) = unbounded();
+        let mut adopted = runner
+            .adopt(&record, None, Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        assert!(
+            outputs.recv_timeout(HELD_REPLAY).is_err(),
+            "nothing is replayed before the backlog is taken"
+        );
+        let _ = adopted.take_backlog();
+
+        let mut text = Vec::new();
+        let mut pieces = 0;
+        while !String::from_utf8_lossy(&text).contains(REPLAY_DONE) {
+            if let ProcessOutput::Placed { bytes, .. } = outputs.recv_timeout(WAIT).unwrap() {
+                text.extend_from_slice(&bytes);
+                pieces += 1;
+            }
+        }
+        assert!(String::from_utf8_lossy(&text).contains(REPLAY_MARKER));
+        assert!(pieces > 1, "replayed in pieces");
+        adopted.kill().unwrap();
+    }
+
+    /// The first `count` pieces of output an adopting handle replayed to
+    /// `outputs`, joined, with where the first began.
+    fn replayed(outputs: &Receiver<ProcessOutput>, count: usize) -> (OutputCursor, Vec<u8>) {
+        let mut start = None;
+        let mut bytes = Vec::new();
+        let mut lines = 0;
+        while lines < count {
+            if let ProcessOutput::Placed { at, bytes: piece } = outputs.recv_timeout(WAIT).unwrap()
+            {
+                start.get_or_insert(at);
+                lines += piece.iter().filter(|byte| **byte == b'\n').count();
+                bytes.extend_from_slice(&piece);
+            }
+        }
+        (start.unwrap(), bytes)
     }
 
     #[test]

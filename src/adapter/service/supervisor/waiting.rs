@@ -778,6 +778,15 @@ impl Supervisor {
             .unwrap_or_else(SpawnGeneration::initial)
     }
 
+    /// Where a wait with no cursor of its own starts counting `pane`'s lines
+    /// while its adopted handle still replays older output: the end of that
+    /// replay, until the tap has caught up with it.
+    fn replay_floor(&self, pane: PaneId) -> Option<OutputCursor> {
+        let end = self.replays.get(&pane).copied()?;
+        let behind = self.taps.get(&pane).is_none_or(|tap| tap.cursor() < end);
+        behind.then_some(end)
+    }
+
     /// Registers `prepared` with its answer going to `reply`, answering it at
     /// once when that is already known.
     fn register(
@@ -795,6 +804,7 @@ impl Supervisor {
             timeout,
             already_running,
         } = prepared;
+        let since = since.or_else(|| self.replay_floor(pane));
         let current = self.current_generation(pane);
         let pin = after.map_or(RunPin::From(current), RunPin::After);
         let now = Instant::now();

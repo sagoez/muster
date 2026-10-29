@@ -10,6 +10,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crossbeam_channel::{Sender, bounded};
+
 use super::{
     client::greet,
     client_message::ClientMessage,
@@ -32,9 +34,15 @@ use crate::domain::{
 /// Longest one write to the holder may wait for it to read, so a holder that
 /// stops reading fails the request instead of stalling the service.
 pub(super) const HOLDER_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Most bytes of logged output a handle reads back as it connects: what a
-/// service's output tap keeps, so older output would only be dropped again.
+/// Most bytes of logged output a fresh launch's handle reads back as it
+/// connects: what a service's output tap keeps, so older output would only
+/// be dropped again.
 const BACKLOG_MAX_BYTES: u64 = 256 * 1024;
+/// Most bytes of logged output an adopting handle replays before the
+/// holder's frames, so readiness and waits still see a line printed well
+/// before a service restart or a reconnect, while a huge log is never
+/// replayed whole.
+pub(super) const REPLAY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The service's supervisor connection to one holder, driving its child.
 ///
@@ -73,6 +81,11 @@ pub struct HolderHandle {
     log_end: OutputCursor,
     /// Output logged before `log_end`, and where it starts, until taken.
     backlog: Option<(OutputCursor, Vec<u8>)>,
+    /// Tells the held-back reader where to replay the log from, until the
+    /// backlog is taken; dropping it lets the reader on with no replay.
+    replay: Option<Sender<OutputCursor>>,
+    /// Where the reader replays the log from once the backlog is taken.
+    replay_from: Option<OutputCursor>,
     /// The child's log, once known.
     log: Option<PathBuf>,
     /// Set when this handle is dropped, so the reader reports no exit.
@@ -92,11 +105,56 @@ impl HolderHandle {
     /// Returns a [`HolderError`] when the holder does not send its screen or
     /// the connection cannot be shared with the reader.
     pub(super) fn supervise(
+        stream: UnixStream,
+        socket: &Path,
+        log: Option<&Path>,
+        sink: Box<dyn OutputSink>,
+        timeout: Duration,
+    ) -> Result<Self, HolderError> {
+        Self::connect(stream, socket, log, sink, timeout, false)
+    }
+
+    /// As [`Self::supervise`], for a holder whose child already ran: once
+    /// [`ProcessHandle::take_backlog`] is called, as the handle is installed,
+    /// its reader replays the log from `since`, or from the run's start,
+    /// within the last [`REPLAY_MAX_BYTES`], in pieces and before the
+    /// holder's frames, so output logged before this connection is seen in
+    /// order without being read on the caller's thread.
+    ///
+    /// # Errors
+    /// As [`Self::supervise`].
+    pub(super) fn supervise_replaying(
+        stream: UnixStream,
+        socket: &Path,
+        log: Option<&Path>,
+        sink: Box<dyn OutputSink>,
+        timeout: Duration,
+        since: Option<OutputCursor>,
+    ) -> Result<Self, HolderError> {
+        let mut handle = Self::connect(stream, socket, log, sink, timeout, true)?;
+        let from = since
+            .unwrap_or(handle.run_start)
+            .max(handle.run_start)
+            .max(OutputCursor::new(
+                handle.log_end.offset().saturating_sub(REPLAY_MAX_BYTES),
+            ));
+        handle.replay_from = handle.log.is_some().then_some(from);
+        Ok(handle)
+    }
+
+    /// Greets the holder at `socket` over `stream` as its supervisor and
+    /// starts the reader, which is held back until the handle says where to
+    /// replay the log from when `replaying` is set.
+    ///
+    /// # Errors
+    /// As [`Self::supervise`].
+    fn connect(
         mut stream: UnixStream,
         socket: &Path,
         log: Option<&Path>,
         sink: Box<dyn OutputSink>,
         timeout: Duration,
+        replaying: bool,
     ) -> Result<Self, HolderError> {
         let greeting = greet(&mut stream, socket, ClientRole::Supervisor, timeout)?;
         stream.set_read_timeout(None)?;
@@ -111,6 +169,7 @@ impl HolderHandle {
             sink: Arc::clone(&sink),
             detached: Arc::clone(&detached),
         };
+        let (replay, held) = bounded(1);
         spawn_reader(Reader {
             stream,
             socket: socket.to_path_buf(),
@@ -119,8 +178,11 @@ impl HolderHandle {
             sink,
             detached: Arc::clone(&detached),
             exit_held: Arc::clone(&exit_held),
+            replay: held,
         });
         Ok(Self {
+            replay: replaying.then_some(replay),
+            replay_from: None,
             writer,
             closer,
             child_pid: greeting.pid(),
@@ -145,21 +207,18 @@ impl HolderHandle {
         self
     }
 
-    /// Reads what the child wrote to its log before this handle connected,
-    /// from `since` or the run's start and at most the last
+    /// Reads what a child just launched wrote to its log before this handle
+    /// connected, from the run's start and at most the last
     /// [`BACKLOG_MAX_BYTES`], for [`ProcessHandle::take_backlog`]. A log that
     /// is not known or cannot be read leaves no backlog, and the output from
     /// here on is still streamed.
-    pub(super) fn with_backlog(mut self, since: Option<OutputCursor>) -> Self {
+    pub(super) fn with_backlog(mut self) -> Self {
         let Some(log) = self.log.clone() else {
             return self;
         };
-        let from = since
-            .unwrap_or(self.run_start)
-            .max(self.run_start)
-            .max(OutputCursor::new(
-                self.log_end.offset().saturating_sub(BACKLOG_MAX_BYTES),
-            ));
+        let from = self.run_start.max(OutputCursor::new(
+            self.log_end.offset().saturating_sub(BACKLOG_MAX_BYTES),
+        ));
         if from < self.log_end {
             self.backlog = read_log_range(&log, from, self.log_end, BACKLOG_MAX_BYTES)
                 .ok()
@@ -228,7 +287,13 @@ impl ProcessHandle for HolderHandle {
         self.log.as_deref().and_then(|log| log_end(log).ok())
     }
 
+    /// The backlog a fresh launch read as it connected. An adopting handle
+    /// has none here: taking it lets the reader replay the log through the
+    /// sink, ahead of the holder's frames.
     fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        if let (Some(replay), Some(from)) = (self.replay.take(), self.replay_from.take()) {
+            let _ = replay.send(from);
+        }
         self.backlog.take()
     }
 

@@ -17,7 +17,7 @@ use crate::{
         port::ProcessRunner,
         project::Project,
         settings::Settings,
-        value::{PaneId, ProjectRoot},
+        value::{OutputCursor, PaneId, ProjectRoot},
     },
 };
 
@@ -65,6 +65,10 @@ pub struct Supervisor {
     pub(super) probes: Option<ProbeWorker>,
     /// Each pane's output as lines, across its runs.
     pub(super) taps: HashMap<PaneId, OutputTap>,
+    /// Where the log an adopted pane's handle replays ends, so a wait with
+    /// no cursor of its own never matches a line printed before it was
+    /// asked that reaches the tap only afterwards.
+    pub(super) replays: HashMap<PaneId, OutputCursor>,
     /// Waits not yet answered.
     pub(super) waiters: Vec<Waiter>,
     /// Waits held, by pane, while the log's end of a process this service
@@ -119,6 +123,7 @@ impl Supervisor {
             settings,
             probes,
             taps: HashMap::new(),
+            replays: HashMap::new(),
             waiters: Vec::new(),
             held_waits: HashMap::new(),
             log_tail_reads: HashMap::new(),

@@ -10,6 +10,8 @@ use std::{
     time::Duration,
 };
 
+use crossbeam_channel::Receiver;
+
 use super::{log_reader::read_log_range, protocol::HolderMessage};
 use crate::{
     adapter::ipc,
@@ -42,9 +44,29 @@ pub(super) struct Reader {
     pub(super) detached: Arc<AtomicBool>,
     /// Set when the holder reports the exit.
     pub(super) exit_held: Arc<AtomicBool>,
+    /// Holds the reader back until its handle says where to replay the log
+    /// from, up to `delivered`, before the holder's frames; closed with no
+    /// word, nothing is replayed.
+    pub(super) replay: Receiver<OutputCursor>,
 }
 
 impl Reader {
+    /// Waits for where to replay the log from, then forwards what the log
+    /// holds from there up to where the holder's frames begin, in pieces, so
+    /// output logged before this connection is seen first and never on the
+    /// caller's thread. A dropped handle replays nothing.
+    fn replay(&mut self) {
+        let Ok(from) = self.replay.recv() else {
+            return;
+        };
+        if self.detached.load(Ordering::SeqCst) || from >= self.delivered {
+            return;
+        }
+        let until = self.delivered;
+        self.delivered = from;
+        self.catch_up(until);
+    }
+
     /// Forwards `bytes` the child wrote at `at`.
     fn forward(&mut self, at: OutputCursor, bytes: Vec<u8>) {
         self.delivered = self.delivered.max(at.advanced(bytes.len() as u64));
@@ -87,6 +109,7 @@ impl Reader {
 /// child to another supervisor, which is reported as nothing.
 pub(super) fn spawn_reader(mut reader: Reader) {
     thread::spawn(move || {
+        reader.replay();
         loop {
             match HolderMessage::read_from(&mut reader.stream) {
                 Ok(HolderMessage::Snapshot {

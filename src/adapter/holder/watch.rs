@@ -97,11 +97,13 @@ impl Watch {
     }
 
     /// Paints the screen `handle` connected with first, as the service does,
-    /// since it is handed back rather than sent to the sink.
+    /// since it is handed back rather than sent to the sink, then takes its
+    /// backlog as the service does, which lets an adopting handle replay.
     pub(super) fn connected(&mut self, handle: &mut Box<dyn ProcessHandle>) {
         let screen = handle
             .take_initial_screen()
             .expect("a holder connection carries its screen");
         self.apply(ProcessOutput::Chunk(screen));
+        let _ = handle.take_backlog();
     }
 }

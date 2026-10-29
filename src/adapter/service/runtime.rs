@@ -1295,6 +1295,11 @@ mod tests {
     const FLOOD_BYTES: usize = 3_000_000 + 2 + 14 + 3_000_000;
     /// The marker in the middle of [`FLOOD`].
     const FLOOD_MARKER: &[u8] = b"MARKER-READY";
+    /// Bytes a child prints after its ready line, past what one backlog read
+    /// used to hold.
+    const FAR_BACK_BYTES: usize = 1024 * 1024;
+    /// The line that child prints once its flood is done.
+    const FAR_BACK_DONE: &str = "FLOOD-DONE";
     /// Longest a flood may take to reach its log, on a loaded machine.
     const FLOOD_WAIT: Duration = Duration::from_secs(60);
     /// How a resync screen starts: a full terminal reset.
@@ -2224,6 +2229,49 @@ mod tests {
         assert_eq!(marker.status(), WaitStatus::Matched, "{marker:?}");
         assert!(*marker.matched().as_ref().unwrap().at() >= before);
         assert!(*marker.cursor() > before, "the cursor never goes back");
+        adopting.stop();
+    }
+
+    /// A ready line printed far back, with much more output after it, while
+    /// no service ran, still makes the adopted run ready: the adoption
+    /// replays the run from its log, not only its last few hundred KiB.
+    #[test]
+    fn a_ready_line_far_back_in_the_log_still_reaches_an_adopted_run() {
+        let fixture = Fixture::new();
+        let folder = fixture.folder("shop");
+        let go = folder.as_ref().join("go");
+        let marked = sleeper("api", false)
+            .with_command(
+                CommandLine::try_new(format!(
+                    "while [ ! -e '{}' ]; do sleep 0.05; done; echo READY now; \
+                     head -c {FAR_BACK_BYTES} /dev/zero | tr '\\0' x; echo; echo {FAR_BACK_DONE}; \
+                     sleep 600",
+                    go.display()
+                ))
+                .unwrap(),
+            )
+            .with_ready(Some(
+                ReadyCheck::builder()
+                    .probe(ReadyProbe::from_stored("log", "READY").unwrap())
+                    .timeout(PositiveDuration::try_new(WAIT * 4).unwrap())
+                    .build(),
+            ));
+        let project = fixture.project_in("shop", vec![marked]);
+        let api = ProcessName::try_new("api").unwrap();
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.control(&project, "api", ProcessAction::Start);
+        service.wait_for(&project, "api", ProcessState::Running);
+        service.stop();
+
+        fs::write(&go, "").unwrap();
+        let log = fixture.dirs().process_log(&project, &api);
+        wait_until("the flood in the log", || {
+            fs::read_to_string(&log).is_ok_and(|text| text.contains(FAR_BACK_DONE))
+        });
+        let adopting = fixture.start(Arc::new(fixture.runner()));
+        wait_until("the adopted run to be ready", || {
+            *process(&adopting.status(&project), "api").ready() == Readiness::Ready
+        });
         adopting.stop();
     }
 

@@ -145,6 +145,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
         .adopt(&record, None, Box::new(ChannelSink::new(sender)))
         .unwrap();
     assert_eq!(adopted.process_id(), Some(record.child_pid()));
+    let _ = adopted.take_backlog();
     receive_until(&outputs, "output after adoption", |output| {
         matches!(output, ProcessOutput::Placed { .. })
     });

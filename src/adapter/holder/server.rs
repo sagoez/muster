@@ -38,7 +38,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
-        value::{Pid, ProjectRoot},
+        value::{OutputCursor, Pid, ProjectRoot},
     },
 };
 
@@ -198,6 +198,8 @@ pub struct HolderServer {
     keyboard: KittyKeyboardTracker,
     /// The child's output log.
     log: RotatingLog,
+    /// Where the child's run began in the log, before it wrote anything.
+    run_start: OutputCursor,
     /// Connected clients by identity.
     clients: HashMap<ClientId, Client>,
     /// Each writable client's last requested size, most recent last.
@@ -343,6 +345,7 @@ impl HolderServer {
                 request.color_scheme(),
             ),
             keyboard: KittyKeyboardTracker::default(),
+            run_start: log.end(),
             log,
             clients: HashMap::new(),
             resizes: Vec::new(),
@@ -394,7 +397,9 @@ impl HolderServer {
                 HolderEvent::Child(
                     ProcessOutput::Unreadable(_)
                     | ProcessOutput::Warning(_)
-                    | ProcessOutput::Attached(_),
+                    | ProcessOutput::Attached(_)
+                    | ProcessOutput::Placed { .. }
+                    | ProcessOutput::Repaint(_),
                 ) => {},
                 HolderEvent::GraceElapsed if !self.child.exited => {
                     let _ = self.child.handle.kill();
@@ -572,6 +577,7 @@ impl HolderServer {
             size: self.size,
             pid: self.child_pid,
             attached: self.writable_attached(),
+            run_start: self.run_start,
         })?];
         if let Some(outcome) = &self.exit {
             frames.push(Frame::try_from(HolderMessage::Exited(outcome.clone()))?);

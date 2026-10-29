@@ -15,6 +15,7 @@ use crate::{
     domain::{
         color_scheme::ColorScheme,
         pty::{PtyError, PtySize},
+        value::OutputCursor,
     },
 };
 
@@ -42,6 +43,9 @@ pub struct Greeting {
     /// The writable attach clients connected.
     #[getset(get_copy = "pub")]
     attached: u32,
+    /// Where the child's run began in its output stream.
+    #[getset(get_copy = "pub")]
+    run_start: OutputCursor,
 }
 
 impl Greeting {
@@ -72,11 +76,13 @@ pub fn greet(
             size,
             pid,
             attached,
+            run_start,
         }) => Ok(Greeting::builder()
             .repaint(repaint)
             .size(size)
             .pid(pid)
             .attached(attached)
+            .run_start(run_start)
             .build()),
         Ok(_) | Err(HolderError::Io(_)) => Err(HolderError::NoSnapshot(socket.to_path_buf())),
         Err(error) => Err(error),

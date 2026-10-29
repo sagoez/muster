@@ -26,9 +26,9 @@ const PID_BYTES: usize = 4;
 const ATTACHED_BYTES: usize = 4;
 /// Bytes an encoded output offset occupies, ahead of the output it places.
 const OFFSET_BYTES: usize = 8;
-/// Bytes of a snapshot payload before its repaint: the pid, the size, then
-/// the attach-client count.
-const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES;
+/// Bytes of a snapshot payload before its repaint: the pid, the size, the
+/// attach-client count, then the run's start offset.
+const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES + OFFSET_BYTES;
 
 /// How a connected client participates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +126,9 @@ pub enum HolderMessage {
         pid: u32,
         /// The writable attach clients connected.
         attached: u32,
+        /// Where the child's run began in the process's output stream, so a
+        /// client that connects late still knows the run's first offset.
+        run_start: OutputCursor,
     },
     /// Bytes the child wrote, with the output offset of the first, so a
     /// client that missed frames sees the gap.
@@ -239,11 +242,13 @@ impl TryFrom<HolderMessage> for Frame {
                 size,
                 pid,
                 attached,
+                run_start,
             } => {
                 let mut payload = Vec::with_capacity(SNAPSHOT_HEADER_BYTES + repaint.len());
                 payload.extend_from_slice(&pid.to_be_bytes());
                 payload.extend_from_slice(&encode_size(size));
                 payload.extend_from_slice(&attached.to_be_bytes());
+                payload.extend_from_slice(&run_start.offset().to_be_bytes());
                 payload.extend(repaint);
                 (FrameTag::Snapshot, payload)
             },
@@ -276,15 +281,19 @@ impl TryFrom<Frame> for HolderMessage {
                 }
                 let repaint = payload.split_off(SNAPSHOT_HEADER_BYTES);
                 let (pid, rest) = payload.split_at(PID_BYTES);
-                let (size, attached) = rest.split_at(SIZE_BYTES);
+                let (size, rest) = rest.split_at(SIZE_BYTES);
+                let (attached, run_start) = rest.split_at(ATTACHED_BYTES);
                 let pid = decode_u32(pid).ok_or(HolderError::MalformedPayload(tag))?;
                 let size = decode_size(size).ok_or(HolderError::MalformedPayload(tag))?;
                 let attached = decode_u32(attached).ok_or(HolderError::MalformedPayload(tag))?;
+                let run_start =
+                    decode_offset(run_start).ok_or(HolderError::MalformedPayload(tag))?;
                 Ok(Self::Snapshot {
                     repaint,
                     size,
                     pid,
                     attached,
+                    run_start,
                 })
             },
             FrameTag::Output => {
@@ -292,12 +301,8 @@ impl TryFrom<Frame> for HolderMessage {
                     return Err(HolderError::MalformedPayload(tag));
                 }
                 let bytes = payload.split_off(OFFSET_BYTES);
-                let at = <[u8; OFFSET_BYTES]>::try_from(payload.as_slice())
-                    .map_err(|_| HolderError::MalformedPayload(tag))?;
-                Ok(Self::Output {
-                    at: OutputCursor::new(u64::from_be_bytes(at)),
-                    bytes,
-                })
+                let at = decode_offset(&payload).ok_or(HolderError::MalformedPayload(tag))?;
+                Ok(Self::Output { at, bytes })
             },
             FrameTag::Exited => Ok(Self::Exited(serde_json::from_slice(&payload)?)),
             FrameTag::Rejected => Ok(Self::Rejected(serde_json::from_slice(&payload)?)),
@@ -324,6 +329,14 @@ fn encode_size(size: PtySize) -> [u8; SIZE_BYTES] {
 /// Decodes a big-endian `u32`, or `None` for the wrong length.
 fn decode_u32(bytes: &[u8]) -> Option<u32> {
     bytes.try_into().ok().map(u32::from_be_bytes)
+}
+
+/// Decodes a big-endian output offset, or `None` for the wrong length.
+fn decode_offset(bytes: &[u8]) -> Option<OutputCursor> {
+    bytes
+        .try_into()
+        .ok()
+        .map(|offset| OutputCursor::new(u64::from_be_bytes(offset)))
 }
 
 /// Decodes a PTY size written by [`encode_size`], or `None` for the wrong
@@ -382,6 +395,7 @@ mod tests {
                 size: size(24, 80),
                 pid: 4242,
                 attached: 2,
+                run_start: OutputCursor::new(u64::MAX - 7),
             },
             HolderMessage::Output {
                 at: OutputCursor::new(u64::MAX - 3),

@@ -736,6 +736,7 @@ mod tests {
                     size: screen,
                     pid: FAKE_PID,
                     attached: 0,
+                    run_start: OutputCursor::new(0),
                 }
                 .write_to(&mut stream)
                 .unwrap();
@@ -993,6 +994,7 @@ mod tests {
             size: size(ROWS, COLS),
             pid: FAKE_PID,
             attached: 0,
+            run_start: OutputCursor::new(0),
         });
         pty.wait_for(b"\x1b[H\x1b[2Jsecond");
         pty.type_keys(DETACH_BYTE);
@@ -1093,6 +1095,7 @@ mod tests {
             size: size(ROWS, COLS),
             pid: FAKE_PID,
             attached: 0,
+            run_start: OutputCursor::new(0),
         });
         pty.wait_for(b"new-screen");
         pty.type_keys(DETACH_BYTE);

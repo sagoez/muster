@@ -979,8 +979,8 @@ mod tests {
         adapter::{
             holder::{
                 ClientMessage, ClientRole, HolderConfig, HolderDirs, HolderError, HolderId,
-                HolderLauncher, HolderRunner, HolderServer, abandon, client::greet,
-                testing::test_request,
+                HolderLauncher, HolderRunner, HolderServer, LogQuery, abandon, client::greet,
+                read_log, testing::test_request,
             },
             ipc,
             service::{
@@ -2325,6 +2325,77 @@ mod tests {
         };
         assert_eq!(stop.status(), WaitStatus::Matched);
         service.stop();
+    }
+
+    /// Cursors are the holder log's offsets: a restarted run begins where the
+    /// first run's output ended in the log, its matched line lies inside it,
+    /// and reading the log from its start returns only that run.
+    #[test]
+    fn cursors_are_log_offsets_across_a_restart() {
+        let fixture = Fixture::new();
+        let printer = sleeper("api", false)
+            .with_command(CommandLine::try_new("echo ready in run $$; sleep 600").unwrap());
+        let project = fixture.project(vec![printer]);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        let api = ProcessName::try_new("api").unwrap();
+        let until = WaitCondition::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new("ready in run").unwrap())
+                .kind(PatternKind::Substring)
+                .build(),
+        );
+        let control = |action| ServiceRequest::Control {
+            project: project.clone(),
+            name: api.clone(),
+            action,
+            environment: no_env(),
+            wait: Some(
+                WaitSpec::builder()
+                    .until(Some(until.clone()))
+                    .timeout(WAIT)
+                    .build(),
+            ),
+        };
+
+        let ServiceResponse::Waited(first) = service.send(control(ProcessAction::Start)) else {
+            panic!("a start with a wait answers how the wait ended");
+        };
+        let ServiceResponse::Waited(second) = service.send(control(ProcessAction::Restart)) else {
+            panic!("a restart with a wait answers how the wait ended");
+        };
+        assert_eq!(first.status(), WaitStatus::Matched);
+        assert_eq!(second.status(), WaitStatus::Matched);
+        let ServiceResponse::Log(log) = service.send(ServiceRequest::Log {
+            project: project.clone(),
+            name: api.clone(),
+        }) else {
+            panic!("the log is found");
+        };
+        let run_start = process(&service.status(&project), "api")
+            .run_start()
+            .expect("a run start");
+
+        let first_line = first.matched().as_ref().unwrap();
+        let second_line = second.matched().as_ref().unwrap();
+        assert!(
+            run_start > *first_line.at(),
+            "{run_start} after {}",
+            first_line.at()
+        );
+        assert!(*second_line.at() >= run_start);
+        let slice = read_log(&log, &LogQuery::builder().since(Some(run_start)).build()).unwrap();
+        assert_eq!(slice.lines(), &vec![second_line.line().clone()]);
+        assert_ne!(first_line.line(), second_line.line());
+        service.stop();
+
+        let adopting = fixture.start(Arc::new(fixture.runner()));
+        let adopted = adopting.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(
+            *process(&adopted, "api").run_start(),
+            Some(run_start),
+            "an adopted run keeps its log offset"
+        );
+        adopting.stop();
     }
 
     /// `Up` and `Down` answer with what they started or stopped and what

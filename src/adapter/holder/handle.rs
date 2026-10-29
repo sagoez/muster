@@ -20,6 +20,7 @@ use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{ProcessOutput, PtyError, PtySize},
+    value::OutputCursor,
 };
 
 /// Reported when a writer panicked mid-frame, leaving the connection unusable.
@@ -66,6 +67,8 @@ pub struct HolderHandle {
     /// When the child started, when known; otherwise it is taken to have
     /// started as this handle connected.
     started_at: Option<SystemTime>,
+    /// Where the child's run began in its output stream.
+    run_start: OutputCursor,
     /// Set when this handle is dropped, so the reader reports no exit.
     detached: Arc<AtomicBool>,
     /// Set once the holder reported the exit, which it then holds until
@@ -115,6 +118,7 @@ impl HolderHandle {
             screen_size: greeting.size(),
             attached: greeting.attached(),
             started_at: None,
+            run_start: greeting.run_start(),
             initial_screen: Some(greeting.into_repaint()),
             detached,
             exit_held,
@@ -172,6 +176,10 @@ impl ProcessHandle for HolderHandle {
 
     fn started_at(&self) -> Option<SystemTime> {
         self.started_at
+    }
+
+    fn run_start(&self) -> Option<OutputCursor> {
+        Some(self.run_start)
     }
 
     /// Collects the exit the holder is keeping, letting it finish. Nothing is
@@ -316,11 +324,11 @@ fn spawn_reader(mut reader: Reader) {
                 Ok(HolderMessage::Snapshot {
                     repaint, attached, ..
                 }) => {
-                    reader.sink.send(ProcessOutput::Chunk(repaint));
+                    reader.sink.send(ProcessOutput::Repaint(repaint));
                     reader.sink.send(ProcessOutput::Attached(attached));
                 },
-                Ok(HolderMessage::Output { bytes, .. }) => {
-                    reader.sink.send(ProcessOutput::Chunk(bytes));
+                Ok(HolderMessage::Output { at, bytes }) => {
+                    reader.sink.send(ProcessOutput::Placed { at, bytes });
                 },
                 Ok(HolderMessage::Exited(outcome)) => {
                     reader.exit_held.store(true, Ordering::SeqCst);
@@ -410,6 +418,7 @@ mod tests {
                 .build(),
             pid: CHILD_PID,
             attached: 0,
+            run_start: OutputCursor::new(0),
         }
         .write_to(&mut holder)
         .unwrap();

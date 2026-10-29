@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::exit_cause::ExitCause;
+use crate::domain::value::OutputCursor;
 
 /// What success says about how a process ended.
 const SUCCEEDED_TEXT: &str = "exited with status 0";
@@ -59,6 +60,17 @@ impl fmt::Display for ExitOutcome {
 pub enum ProcessOutput {
     /// A chunk of raw bytes read from the process's PTY.
     Chunk(Vec<u8>),
+    /// A chunk whose first byte sits at `at` in the process's logged output,
+    /// so a receiver that missed chunks sees the gap.
+    Placed {
+        /// Where `bytes` start in the output stream.
+        at: OutputCursor,
+        /// The bytes.
+        bytes: Vec<u8>,
+    },
+    /// Bytes that rebuild the process's screen in a fresh terminal: a
+    /// repaint, not output the process wrote.
+    Repaint(Vec<u8>),
     /// The process exited with the given outcome.
     Exited(ExitOutcome),
     /// The stream carrying the process's output could not be read any further,

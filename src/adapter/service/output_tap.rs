@@ -70,6 +70,15 @@ impl OutputTap {
         self.run_start = Some(self.next);
     }
 
+    /// Starts a new run at `start`, the offset its log says it began at,
+    /// which every later positioned chunk counts from.
+    pub fn begin_run_at(&mut self, start: OutputCursor) {
+        self.flush_partial();
+        self.next = start;
+        self.partial_at = start;
+        self.run_start = Some(start);
+    }
+
     /// Takes one chunk of raw output, whose first byte is at `at` when the
     /// sender says so, and returns the lines to test: every line it
     /// completed, then the unfinished line, if any, so a prompt with no
@@ -256,6 +265,22 @@ mod tests {
         assert_eq!(tap.tail(2), ["new 2", "new 3"]);
         assert_eq!(tap.tail(10), ["new 1", "new 2", "new 3"]);
         assert_eq!(tap.run_start(), Some(OutputCursor::new(18)));
+    }
+
+    /// A run placed at its log offset counts from there, and positioned
+    /// chunks continue it without a gap.
+    #[test]
+    fn a_run_begins_at_its_log_offset() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.feed(None, b"counted by the service\n");
+
+        tap.begin_run_at(OutputCursor::new(4096));
+        let lines = tap.feed(Some(OutputCursor::new(4096)), b"Listening\n");
+
+        assert_eq!(tap.run_start(), Some(OutputCursor::new(4096)));
+        assert_eq!(lines[0].at(), OutputCursor::new(4096));
+        assert_eq!(tap.cursor(), OutputCursor::new(4106));
+        assert_eq!(tap.tail(5), ["Listening"]);
     }
 
     #[test]

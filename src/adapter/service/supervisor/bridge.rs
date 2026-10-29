@@ -112,7 +112,7 @@ mod tests {
             port::{OutputSink, ProcessHandle, ProcessRunner},
             process::RestartPolicy,
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{Cols, Rows},
+            value::{Cols, OutputCursor, Rows},
         },
     };
 
@@ -247,6 +247,7 @@ mod tests {
                     .build(),
                 pid: FAKE_LAUNCHER_PID,
                 attached: 0,
+                run_start: OutputCursor::new(0),
             }
             .write_to(&mut stream);
         })

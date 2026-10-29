@@ -7,6 +7,7 @@ use std::{
 use crate::domain::{
     process::StopSignal,
     pty::{ProcessOutput, PtyError, PtySize, SpawnRequest},
+    value::OutputCursor,
 };
 
 /// Sink for a single process's output events, supplied by the runtime. The
@@ -78,6 +79,13 @@ pub trait ProcessHandle: Send {
     /// When the process started, when that predates this handle. Defaults to
     /// none: it started as the handle was made.
     fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    /// Where the process's current run began in its logged output, when the
+    /// output is logged with offsets. Defaults to none: a bare PTY logs
+    /// nothing.
+    fn run_start(&self) -> Option<OutputCursor> {
         None
     }
 

@@ -337,6 +337,12 @@ impl Supervisor {
         }
     }
 
+    /// Places `pane`'s current run at `start`, the offset its holder's log
+    /// says it began at, so cursors line up with the log.
+    pub(super) fn place_run(&mut self, pane: PaneId, start: OutputCursor) {
+        self.tap(pane).begin_run_at(start);
+    }
+
     /// Starts a new run on `pane`: its output continues the same stream from
     /// a new run start, and its readiness check, when it has one, waits from
     /// now.

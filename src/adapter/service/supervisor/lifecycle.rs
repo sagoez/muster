@@ -419,6 +419,14 @@ impl Supervisor {
                     self.tap_output(pane, None, &bytes);
                 }
             },
+            ProcessOutput::Placed { at, bytes } => {
+                if self.paint(pane, &bytes) {
+                    self.tap_output(pane, Some(at), &bytes);
+                }
+            },
+            ProcessOutput::Repaint(screen) => {
+                self.paint(pane, &screen);
+            },
             ProcessOutput::Warning(warning) => {
                 self.notify(NoticeLevel::Warning, Some(pane), warning);
             },
@@ -734,8 +742,12 @@ impl Supervisor {
     /// a repaint, not output, so no wait or readiness check sees it.
     pub(super) fn install_pane(&mut self, pane: PaneId, mut handle: Box<dyn ProcessHandle>) {
         let screen = handle.take_initial_screen();
+        let run_start = handle.run_start();
         if self.install_terminal(pane, Some(handle)) {
             self.workspace.set_state(pane, ProcessState::Running);
+            if let Some(start) = run_start {
+                self.place_run(pane, start);
+            }
             if let Some(screen) = screen {
                 self.paint(pane, &screen);
             }

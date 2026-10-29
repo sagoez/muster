@@ -488,7 +488,9 @@ mod tests {
                 ProcessOutput::Exited(_) => break,
                 ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_) => {},
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_) => {},
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()
@@ -575,7 +577,9 @@ mod tests {
                 ProcessOutput::Exited(exit) => outcome = Some(exit),
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -607,7 +611,9 @@ mod tests {
                 ProcessOutput::Exited(_)
                 | ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_) => Vec::new(),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_) => Vec::new(),
             })
             .collect();
         assert!(String::from_utf8_lossy(&output).contains("hello"));
@@ -632,7 +638,9 @@ mod tests {
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
             }
         }
         handle
@@ -644,7 +652,9 @@ mod tests {
                 ProcessOutput::Exited(_) => break,
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -698,7 +708,9 @@ mod tests {
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
             }
         }
         #[cfg(target_os = "macos")]
@@ -716,7 +728,9 @@ mod tests {
                 },
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -761,7 +775,9 @@ mod tests {
                 ProcessOutput::Exited(_)
                 | ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_) => 0,
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Placed { .. }
+                | ProcessOutput::Repaint(_) => 0,
             })
             .sum();
         assert_eq!(

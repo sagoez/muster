@@ -36,6 +36,7 @@ use muster::{
         },
         store::SqliteStore,
     },
+    constants::APP_NAME,
     domain::{
         config::{ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
@@ -50,6 +51,7 @@ use muster::{
     },
 };
 use rusqlite::Connection;
+use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
 
 use crate::common::{
@@ -1522,6 +1524,54 @@ fn a_client_with_another_runtime_dir_reaches_the_running_service() {
         !elsewhere.exists(),
         "the client made no socket dir of its own"
     );
+}
+
+/// A published socket left by a service that died, in a directory that is no
+/// longer private, as after a crash and a folder another user made, is passed
+/// over: `doctor` names it, and a client with its own runtime directory
+/// starts a service there, which takes over the running process.
+#[test]
+fn a_published_socket_in_a_dir_no_longer_private_is_passed_over() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    for pid in processes_under(SERVICE_SUBCOMMAND, scratch.root()) {
+        let pid = Pid::from_raw(pid as i32).unwrap();
+        kill_process(pid, Signal::KILL).unwrap();
+    }
+    wait_until("the service to die", || {
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty()
+    });
+    fs::set_permissions(
+        scratch.socket_dir(),
+        Permissions::from_mode(SHARED_DIR_MODE),
+    )
+    .unwrap();
+    let elsewhere = scratch.root().join("elsewhere");
+    let with_own_runtime = |args: &[&str]| {
+        let mut command = scratch.command(args);
+        command.env(RUNTIME_DIR_ENV, &elsewhere);
+        command.output().unwrap()
+    };
+
+    let doctor = with_own_runtime(&["doctor"]);
+    let ps = with_own_runtime(&["-p", project.to_str().unwrap(), "ps", "--json"]);
+
+    assert!(
+        stdout(&doctor).contains("passed over")
+            && stdout(&doctor).contains(&*scratch.socket_dir().to_string_lossy()),
+        "{}",
+        shown(&doctor)
+    );
+    assert!(ps.status.success(), "{}", shown(&ps));
+    assert!(elsewhere.join(APP_NAME).is_dir(), "the service bound there");
+    wait_until("the process to be taken over", || {
+        let ps = with_own_runtime(&["-p", project.to_str().unwrap(), "ps", "--json"]);
+        parsed(&ps)[0]["processes"][0]["state"] == "running"
+    });
+    let down = with_own_runtime(&["-p", project.to_str().unwrap(), "down"]);
+    assert!(down.status.success(), "{}", shown(&down));
 }
 
 /// A crash and its last exit outlive the service that saw them: the next
@@ -3964,6 +4014,8 @@ const SHARED_FILE_MODE: u32 = 0o644;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 /// The mode of a file nobody can read or write.
 const UNREADABLE_FILE_MODE: u32 = 0o000;
+/// A directory mode other users can enter.
+const SHARED_DIR_MODE: u32 = 0o755;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
 /// Length of a state home whose holder sockets just fit on every platform,

@@ -19,7 +19,10 @@ use super::{
     row_kind::RowKind,
 };
 use crate::{
-    adapter::{client::ProjectTarget, sanitize::printable},
+    adapter::{
+        client::{ClientError, ProjectTarget, SocketDirCheck},
+        sanitize::printable,
+    },
     domain::{
         config::{ConfigError, ProcessSpec, Stack},
         port::{LocalState, ProjectStore, StackStore},
@@ -44,6 +47,12 @@ const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
 const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
 /// What to do about legacy files.
 const LEGACY_HINT: &str = "muster no longer reads them; delete them";
+/// The socket probe when every directory the service is reached through is
+/// private.
+const SOCKET_OK: &str = "private to you";
+/// Opens the socket probe's warning about a published socket it passes
+/// over; why follows.
+const PUBLISHED_PASSED_OVER: &str = "the socket a service published is passed over: ";
 /// Between the parts of a probe's detail.
 const DETAIL_SEPARATOR: &str = "; ";
 /// Between the items a probe lists.
@@ -281,6 +290,33 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     )
 }
 
+/// Whether the directories this user's service is reached through are
+/// private: this client's own fails, since no request goes there, and a
+/// published one that is not private warns, since it is passed over.
+pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
+    let check = match check {
+        Ok(check) => check,
+        Err(error) => {
+            return probe(DoctorCheck::Socket, ProbeOutcome::Fail, error_chain(error));
+        },
+    };
+    if let Some(own) = check.own() {
+        return probe(
+            DoctorCheck::Socket,
+            ProbeOutcome::Fail,
+            printable(&own.to_string()),
+        );
+    }
+    match check.published() {
+        Some(published) => probe(
+            DoctorCheck::Socket,
+            ProbeOutcome::Warn,
+            printable(&format!("{PUBLISHED_PASSED_OVER}{published}")),
+        ),
+        None => probe(DoctorCheck::Socket, ProbeOutcome::Ok, SOCKET_OK.to_string()),
+    }
+}
+
 /// Best-effort check that the shell's rc file registers completions; warns
 /// with the exact line to add when it does not.
 pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Path) -> Probe {
@@ -366,6 +402,8 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -550,6 +588,43 @@ mod tests {
             Some(CompletionShell::Powershell)
         );
         assert_eq!(shell_from_path("/bin/tcsh"), None);
+    }
+
+    /// The socket probe fails on a squatted own socket directory, warns
+    /// naming a published one it passes over, and is fine otherwise.
+    #[test]
+    fn the_socket_probe_names_a_squatted_directory() {
+        let squat = |dir: &str| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("the socket directory {dir} is not a directory owned by you"),
+            )
+        };
+        let checked = |published, own| {
+            Ok(SocketDirCheck::builder()
+                .published(published)
+                .own(own)
+                .build())
+        };
+
+        let own = socket_probe(&checked(None, Some(squat("/tmp/muster-1000"))));
+        let published = socket_probe(&checked(Some(squat("/old/run/muster")), None));
+        let fine = socket_probe(&checked(None, None));
+
+        assert_eq!(own.outcome(), ProbeOutcome::Fail);
+        assert!(
+            own.detail().contains("/tmp/muster-1000"),
+            "{}",
+            own.detail()
+        );
+        assert_eq!(published.outcome(), ProbeOutcome::Warn);
+        assert!(
+            published.detail().contains("passed over")
+                && published.detail().contains("/old/run/muster"),
+            "{}",
+            published.detail()
+        );
+        assert_eq!(fine.outcome(), ProbeOutcome::Ok);
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.

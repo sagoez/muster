@@ -53,7 +53,11 @@ short runtime directory instead, `$XDG_RUNTIME_DIR/muster`, else
 the state directory. It records that socket in `service.socket` in the state
 directory, so a command started with another runtime directory, or none, still
 reaches it. A client checks the socket's directory is yours with mode 0700
-before it connects, and talks only to a service running as you. A socket path
+before it connects, and talks only to a service running as you. A recorded
+socket whose directory is gone or no longer yours is passed over for the
+client's own, where a service is started when none answers, and `muster
+doctor` names it. When another user made the `/tmp` directory, setting
+`XDG_RUNTIME_DIR` to a directory of your own moves the socket. A socket path
 too long to fit is refused naming it, with a hint to set a shorter
 `XDG_STATE_HOME` or `XDG_RUNTIME_DIR`.
 

@@ -36,7 +36,7 @@ use super::{
     coordination_command::CoordinationCommand,
     doctor::{
         any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
-        processes_probe, project_probe, projects_probe,
+        processes_probe, project_probe, projects_probe, socket_probe,
     },
     doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
@@ -1293,6 +1293,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         state_dir().ok().as_deref(),
         config_dir.as_deref(),
     ));
+    probes.push(socket_probe(&ServiceClient::socket_dirs()));
     let shell = env::var(SHELL_ENV).ok();
     let home = BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())

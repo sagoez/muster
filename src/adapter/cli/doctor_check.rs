@@ -6,6 +6,7 @@ const PROJECTS_LABEL: &str = "projects";
 const PROCESSES_LABEL: &str = "processes";
 const THIS_FOLDER_LABEL: &str = "this folder";
 const OLD_FILES_LABEL: &str = "old files";
+const SOCKET_LABEL: &str = "socket";
 const COMPLETIONS_LABEL: &str = "completions";
 
 /// What one `muster doctor` probe checks, named in kebab case under
@@ -23,6 +24,8 @@ pub enum DoctorCheck {
     ThisFolder,
     /// Files an older muster left behind.
     OldFiles,
+    /// Whether the directories the service is reached through are private.
+    Socket,
     /// Whether the shell registers muster's completions.
     Completions,
 }
@@ -36,6 +39,7 @@ impl DoctorCheck {
             Self::Processes => PROCESSES_LABEL,
             Self::ThisFolder => THIS_FOLDER_LABEL,
             Self::OldFiles => OLD_FILES_LABEL,
+            Self::Socket => SOCKET_LABEL,
             Self::Completions => COMPLETIONS_LABEL,
         }
     }

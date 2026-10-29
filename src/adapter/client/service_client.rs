@@ -11,8 +11,9 @@ use std::{
 };
 
 use super::{
-    client_error::ClientError, probe::Probe, running_service::RunningService,
-    service_log::ServiceLog, service_start::ServiceStart, service_status::ServiceStatus,
+    client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
+    running_service::RunningService, service_log::ServiceLog, service_start::ServiceStart,
+    service_status::ServiceStatus, socket_dir_check::SocketDirCheck,
     unavailable_reason::UnavailableReason,
 };
 use crate::{
@@ -20,8 +21,8 @@ use crate::{
         holder::{HolderDirs, HolderId, detached, reap},
         ipc::fits_a_socket,
         private_dir::{
-            RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_socket_dir,
-            prepare_state_dir, socket_dir, state_dir,
+            RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir,
+            state_dir,
         },
         service::{
             Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
@@ -246,46 +247,81 @@ impl ServiceClient {
     }
 
     /// The socket to reach the service at: the one the running service
-    /// published in the state directory, else where a service this client
-    /// starts binds. Its directory is checked private to this user first,
-    /// created when it is this client's own, so no request ever goes to a
-    /// socket another user could have planted. A published socket whose
-    /// directory is gone is stale and passed over.
+    /// published in the state directory while its directory is private to
+    /// this user, else where a service this client starts binds, once its
+    /// directory is checked private too. A published socket in a directory
+    /// that is gone or not private is stale or planted and passed over. No
+    /// directory is created here: the service makes its own as it binds.
     ///
     /// # Errors
-    /// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming
-    /// the directory when it is not private to this user, or the I/O error
-    /// from creating or inspecting it.
-    fn socket(&self) -> io::Result<PathBuf> {
-        if let Some(published) = protocol::published_socket(&self.state_dir) {
-            match check_socket_dir(parent_dir(&published)) {
-                Ok(()) => return Ok(published),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-                Err(error) => return Err(error),
-            }
+    /// Returns the failure naming this client's own socket: of kind
+    /// [`io::ErrorKind::PermissionDenied`] when its directory is not private
+    /// to this user, of kind [`io::ErrorKind::NotFound`] when it does not
+    /// exist yet, or the I/O error from inspecting it.
+    fn socket(&self) -> Result<PathBuf, ExchangeFailure> {
+        if let Some(published) = protocol::published_socket(&self.state_dir)
+            && check_socket_dir(parent_dir(&published)).is_ok()
+        {
+            return Ok(published);
         }
-        prepare_socket_dir(parent_dir(&self.own_socket))?;
+        check_socket_dir(parent_dir(&self.own_socket)).map_err(|source| {
+            ExchangeFailure::builder()
+                .socket(self.own_socket.clone())
+                .source(source)
+                .build()
+        })?;
         Ok(self.own_socket.clone())
     }
 
     /// The socket shown to a person: the one requests go to, or this
     /// client's own when that cannot be told.
     fn shown_socket(&self) -> PathBuf {
-        self.socket().unwrap_or_else(|_| self.own_socket.clone())
+        self.socket()
+            .unwrap_or_else(|failure| failure.into_parts().0)
     }
 
-    /// Sends `request` once to the socket [`Self::socket`] trusts, waiting at
-    /// most `timeout` for the answer.
+    /// Sends `request` once to the socket [`Self::socket`] trusts, resolved
+    /// once for the exchange, waiting at most `timeout` for the answer.
     ///
     /// # Errors
     /// Returns the refusal of the socket's directory or peer, or the failure
-    /// of the exchange.
+    /// of the exchange, naming the socket it went to.
     fn send_once(
         &self,
         request: &ServiceRequest,
         timeout: Duration,
-    ) -> io::Result<ServiceResponse> {
-        protocol::send_within(&self.socket()?, request, timeout)
+    ) -> Result<ServiceResponse, ExchangeFailure> {
+        let socket = self.socket()?;
+        protocol::send_within(&socket, request, timeout).map_err(|source| {
+            ExchangeFailure::builder()
+                .socket(socket)
+                .source(source)
+                .build()
+        })
+    }
+
+    /// Whether the directories this user's service is reached through are
+    /// private: the published socket's, passed over when it is not, and this
+    /// client's own, which refuses when it is not. One that does not exist
+    /// is not a problem.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when there is no state directory or the
+    /// binary cannot be found.
+    pub fn socket_dirs() -> Result<SocketDirCheck, ClientError> {
+        let client = Self::local()?;
+        let untrusted = |dir: &Path| {
+            check_socket_dir(dir)
+                .err()
+                .filter(|error| error.kind() != io::ErrorKind::NotFound)
+        };
+        Ok(SocketDirCheck::builder()
+            .published(
+                protocol::published_socket(&client.state_dir)
+                    .and_then(|published| untrusted(parent_dir(&published))),
+            )
+            .own(untrusted(parent_dir(&client.own_socket)))
+            .build())
     }
 
     /// Refuses a runtime directory too deep for the service's socket, or a
@@ -369,7 +405,7 @@ impl ServiceClient {
                 self.try_send(request, timeout)
             },
             Ok(response) => Ok(response),
-            Err(source) => Err(self.io_error(source)),
+            Err(failure) => Err(io_error(failure)),
         }
     }
 
@@ -387,7 +423,7 @@ impl ServiceClient {
             Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) => Ok(false),
             Err(error) if gone(&error) => Ok(true),
-            Err(source) => Err(client.io_error(source)),
+            Err(failure) => Err(io_error(failure)),
         }
     }
 
@@ -401,8 +437,7 @@ impl ServiceClient {
         request: &ServiceRequest,
         timeout: Duration,
     ) -> Result<ServiceResponse, ClientError> {
-        self.send_once(request, timeout)
-            .map_err(|source| self.io_error(source))
+        self.send_once(request, timeout).map_err(io_error)
     }
 
     /// Sends `request` once.
@@ -461,7 +496,7 @@ impl ServiceClient {
             Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) => Ok(Probe::Absent),
             Err(error) if gone(&error) => Ok(Probe::Exiting),
-            Err(source) => Err(self.io_error(source)),
+            Err(failure) => Err(io_error(failure)),
         }
     }
 
@@ -621,7 +656,7 @@ impl ServiceClient {
             Ok(ServiceResponse::Error(body)) if *body.kind() == ServiceErrorKind::Busy => Ok(()),
             Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) || gone(&error) => Ok(()),
-            Err(source) => Err(self.unavailable(
+            Err(failure) => Err(self.unavailable(
                 UnavailableReason::DidNotMakeWay {
                     theirs: running
                         .version()
@@ -629,7 +664,7 @@ impl ServiceClient {
                         .map(ToString::to_string)
                         .unwrap_or_default(),
                     ours: APP_VERSION,
-                    source,
+                    source: failure.into_parts().1,
                 },
                 None,
             )),
@@ -648,14 +683,13 @@ impl ServiceClient {
             tail,
         }
     }
+}
 
-    /// The failure of an exchange that failed with `source`.
-    fn io_error(&self, source: io::Error) -> ClientError {
-        ClientError::ServiceIo {
-            socket: self.shown_socket(),
-            source,
-        }
-    }
+/// The client failure of an exchange that failed as `failure` says, naming
+/// the socket it went to.
+fn io_error(failure: ExchangeFailure) -> ClientError {
+    let (socket, source) = failure.into_parts();
+    ClientError::ServiceIo { socket, source }
 }
 
 /// The refusal to use the newer service `running`.
@@ -671,19 +705,19 @@ fn newer(running: RunningService) -> ClientError {
     }
 }
 
-/// Whether `error` means nothing listens at the socket.
-fn not_listening(error: &io::Error) -> bool {
+/// Whether `failure` means nothing listens at the socket.
+fn not_listening(failure: &ExchangeFailure) -> bool {
     matches!(
-        error.kind(),
+        failure.source().kind(),
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
     )
 }
 
-/// Whether `error` means the service closed the connection without
+/// Whether `failure` means the service closed the connection without
 /// answering, as one exiting does.
-fn gone(error: &io::Error) -> bool {
+fn gone(failure: &ExchangeFailure) -> bool {
     matches!(
-        error.kind(),
+        failure.source().kind(),
         io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
     )
 }
@@ -701,7 +735,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::{private_dir::GROUP_OTHER_BITS, test_scratch::short_scratch};
+    use crate::adapter::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";
@@ -754,15 +788,20 @@ mod tests {
 
         for error in [probed.to_string(), sent.to_string()] {
             assert!(error.contains(&*dir.to_string_lossy()), "{error}");
-            assert!(error.contains("not a directory private"), "{error}");
+            assert!(
+                error.contains("not a directory owned by you with mode 0700"),
+                "{error}"
+            );
+            assert!(error.contains(RUNTIME_DIR_ENV), "{error}");
         }
         assert!(!reached(&planted), "a request reached the planted socket");
     }
 
-    /// A published socket in a directory others can write is refused too,
-    /// rather than passed over for the client's own.
+    /// A published socket in a directory others can write is passed over,
+    /// never reached: the client falls back to its own socket, and doctor's
+    /// check names the squatted directory.
     #[test]
-    fn a_published_socket_in_an_open_dir_is_refused() {
+    fn a_published_socket_in_an_open_dir_is_passed_over() {
         let scratch = short_scratch(SCRATCH_PREFIX);
         let client = client_in(scratch.path());
         let open = scratch.path().join("open");
@@ -772,15 +811,15 @@ mod tests {
         let planted = listener_at(&socket);
         protocol::publish_socket(&client.state_dir, &socket).unwrap();
 
-        let error = client.probe().map(|_| ()).unwrap_err().to_string();
-
-        assert!(error.contains(&*open.to_string_lossy()), "{error}");
+        assert!(matches!(client.probe(), Ok(Probe::Absent)));
         assert!(!reached(&planted), "a request reached the planted socket");
+        let own_dir = scratch.path().join("run");
+        prepare_socket_dir(&own_dir).unwrap();
+        assert_eq!(client.socket().unwrap(), client.own_socket);
     }
 
     /// The published socket is used over the client's own, and a stale one
-    /// whose directory is gone gives way to the client's own, created
-    /// private.
+    /// whose directory is gone gives way to the client's own.
     #[test]
     fn the_published_socket_is_preferred_until_its_dir_is_gone() {
         let scratch = short_scratch(SCRATCH_PREFIX);
@@ -788,13 +827,30 @@ mod tests {
         let elsewhere = scratch.path().join("elsewhere");
         let published = elsewhere.join("s.sock");
         protocol::publish_socket(&client.state_dir, &published).unwrap();
+        prepare_socket_dir(&scratch.path().join("run")).unwrap();
 
         assert_eq!(client.socket().unwrap(), client.own_socket);
         prepare_socket_dir(&elsewhere).unwrap();
         assert_eq!(client.socket().unwrap(), published);
+    }
+
+    /// Resolving the socket, formatting a failure, a stop and a best-effort
+    /// notice never create a directory: with nothing there, each finds no
+    /// service and the client's own socket directory stays absent.
+    #[test]
+    fn reaching_no_service_creates_no_directory() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let client = client_in(scratch.path());
         let own_dir = scratch.path().join("run");
-        let mode = fs::metadata(&own_dir).unwrap().permissions().mode();
-        assert_eq!(mode & GROUP_OTHER_BITS, 0);
+
+        let failure = client.socket().unwrap_err();
+        assert_eq!(failure.source().kind(), io::ErrorKind::NotFound);
+        assert_eq!(failure.socket(), &client.own_socket);
+        assert_eq!(client.shown_socket(), client.own_socket);
+        assert!(matches!(client.probe(), Ok(Probe::Absent)));
+        let _ = client.send_once(&ServiceRequest::SettingsChanged, NOTIFY_TIMEOUT);
+
+        assert!(!own_dir.exists(), "a directory was created");
     }
 
     /// A stop or replacement waits past every bound the service's exit

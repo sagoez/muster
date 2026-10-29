@@ -100,7 +100,9 @@ pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "the socket directory {} is not a directory private to this user (mode {PRIVATE_DIR_MODE:o}); muster will not use a socket there",
+            "the socket directory {} is not a directory owned by you with mode \
+             {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; if another user \
+             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the socket",
             dir.display()
         ),
     ))

@@ -274,4 +274,15 @@ mod tests {
         assert_eq!(count(&pty, POP_TITLE.as_bytes()), 1, "restored once");
         assert!(contains(&pty.drawn(), b"\x1b]2;muster: api\x07"));
     }
+
+    /// A title's control characters are drawn escaped, so it can neither end
+    /// the title early nor send a sequence of its own.
+    #[test]
+    fn a_title_is_drawn_printable() {
+        let pty = TestPty::open(ROWS, COLS);
+        let mut guard = RawModeGuard::enter(&pty.terminal()).unwrap();
+        guard.set_title("api\x07\x1b[2J").unwrap();
+        pty.wait_for(b"\x1b]2;api\\u{7}\\u{1b}[2J\x07");
+        drop(guard);
+    }
 }

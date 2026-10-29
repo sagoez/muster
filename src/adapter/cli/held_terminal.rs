@@ -6,9 +6,13 @@ use std::{
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 
 use super::host_terminal::HostTerminal;
-use crate::adapter::terminal::{
-    mode_scanner::{ModeScanner, Observation},
-    screen_snapshot::cursor_position,
+use crate::adapter::{
+    sanitize::printable,
+    terminal::{
+        escape::SGR_RESET,
+        mode_scanner::{ModeScanner, Observation},
+        screen_snapshot::cursor_position,
+    },
 };
 
 /// Saves the window title on the terminal's title stack.
@@ -46,8 +50,6 @@ const MODIFY_OTHER_KEYS_DEFAULT: &str = "\x1b[>4m";
 /// Clears the scroll region, saving and restoring the cursor around it since
 /// clearing it homes the cursor.
 const SCROLL_REGION_RESET: &str = "\x1b7\x1b[r\x1b8";
-/// Resets the text attributes.
-const ATTRIBUTES_RESET: &str = "\x1b[0m";
 /// Turns line wrapping back on.
 pub(super) const AUTOWRAP_ON: &str = "\x1b[?7h";
 /// Returns the cursor to the terminal's default shape.
@@ -70,7 +72,7 @@ pub(super) const MODES_RESET: [&str; 15] = [
     KEYS_NORMAL,
     MODIFY_OTHER_KEYS_DEFAULT,
     SCROLL_REGION_RESET,
-    ATTRIBUTES_RESET,
+    SGR_RESET,
     AUTOWRAP_ON,
     CURSOR_SHAPE_DEFAULT,
     CURSOR_SHOWN,
@@ -149,12 +151,13 @@ impl HeldTerminal {
         self.output.write_all(bytes)
     }
 
-    /// Shows `title` as the window title, dropping control characters.
+    /// Shows `title` as the window title, made [`printable`] so it cannot end
+    /// the title early or steer the terminal.
     ///
     /// # Errors
     /// Returns the I/O error when the terminal cannot be written.
     pub fn set_title(&mut self, title: &str) -> io::Result<()> {
-        let title: String = title.chars().filter(|c| !c.is_control()).collect();
+        let title = printable(title);
         self.write(format!("{TITLE_START}{title}{TITLE_END}").as_bytes())
     }
 

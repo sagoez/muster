@@ -218,12 +218,12 @@ CLI alone.
 | `muster export [FILE] [--force] [--with-env]` | Write the project's stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
 | `muster init [--yes]` | Detect a stack in the folder and add it |
-| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read, or remove one with its processes and coordination state |
+| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read and listing by folder any whose own stored row does not, or remove one with its processes and coordination state; a project whose row does not read is removed by its folder, and breaks no other project |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes a running service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long. `todo` and `kv` list a page of `--limit` entries (50 by default, at most 200) as `todo_list` and `kv_read` do: `todo --cursor <id>` reads on, and a `kv` listing cuts each value to 200 characters |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
-| `muster coordination export\|import` | Move that shared state as YAML; an import refuses a note body, value or todo title longer than a write may be |
+| `muster coordination export\|import` | Move that shared state as YAML, the export readable by its owner alone; an import reads only a regular file of at most 16 MiB and refuses a key, note body, value, todo title or dependency list longer than a write may be |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
 | `muster doctor` | Diagnose the database, projects, stored processes and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
@@ -388,10 +388,12 @@ only new output. The tools:
 - coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
-  65536 characters, a value 4096 and a todo title 500; a longer one is refused
-  over MCP, the CLI and `muster coordination import`. `todo_list` pages with `limit`, answering `more` and a
-  `cursor` to pass for the next page, and a `kv_read` listing cuts each value
-  to 200 characters and marks it `truncated`. Setting a todo `in-progress`
+  65536 characters, a value 4096, a todo title 500, a note or kv key 128 and
+  a todo at most 32 dependencies; a longer one is refused over MCP, the CLI
+  and `muster coordination import`. `todo_list`, `note_read` and `kv_read`
+  page with `limit`, answering `more` and a `cursor` to pass for the next
+  page, and a `kv_read` listing cuts each value to 200 characters and marks
+  it `truncated`. Setting a todo `in-progress`
   claims it for the caller, and a forced change to another agent's todo takes
   its claim over.
 
@@ -406,12 +408,17 @@ with the user's rights at the next start:
   process and the fields it actually changed, with the new command and working
   directory when it set them; a `process_set` that changes nothing records
   nothing. A `config_set` is recorded in every project, naming the setting and
-  its new value. It is kept in muster's database with the edit itself, in
+  its new value; a `config_set` to the value already stored records nothing.
+  It is kept in muster's database with the edit itself, in
   one transaction, the newest 50 per project, so it shows in `muster notices`,
   in `stack_status` and as a `notice` event in `stack_events` whether or not
   the service was running at the time.
 - A `working_dir` must be a folder inside the project root; one outside it, or
-  a symlink leading out of it, is refused.
+  a symlink leading out of it, is refused. A stored one that climbs out of the
+  root, as only a hand edit of the database can make, is refused when read,
+  naming the process, and the process is never started.
+- A command holds at most 8192 characters and a description 300, over MCP,
+  the CLI and `muster import`.
 - A definition an agent reads back lists its `environment` by variable name
   alone, never a value.
 
@@ -443,7 +450,9 @@ refused, never cut to fit: a `timeout_s` or `wait_s` past 45, a `limit` of 0 or
 past 200, and a wait whose `since` lies past the output written so far. Output is stripped of terminal
 escapes and capped, saying what it dropped. Every stack and process result
 carries `alerts`: crashes, readiness timeouts and blocked starts since the
-agent's last call, so it learns of a crash without polling. `stack_events`
+agent's last call, so it learns of a crash without polling. Each is reported
+once, even to calls made at the same time, and `alerts_gap: true` says events
+were dropped before they were read, so some alerts were missed. `stack_events`
 carries none and never marks an alert heard.
 
 A mistake in a call, such as an unknown name, a malformed cursor or an invalid

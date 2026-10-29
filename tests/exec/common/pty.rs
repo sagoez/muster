@@ -7,13 +7,17 @@ use std::{
     },
     path::Path,
     process::{Child, Stdio},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Instant,
 };
 
 use libc::O_NOCTTY;
 use rustix::{
+    io::ioctl_fionread,
     process::{ioctl_tiocsctty, setsid},
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
     stdio::stdin,
@@ -46,6 +50,8 @@ pub struct Pty {
     slave: OwnedFd,
     /// Everything drawn on the slave, collected from the master.
     drawn: Arc<Mutex<Vec<u8>>>,
+    /// Clear while the reader stores what it just read.
+    idle: Arc<AtomicBool>,
 }
 
 impl Pty {
@@ -79,18 +85,22 @@ impl Pty {
             master: File::from(master),
             slave,
             drawn: Arc::new(Mutex::new(Vec::new())),
+            idle: Arc::new(AtomicBool::new(true)),
         };
         let mut reader = pty.master.try_clone().unwrap();
         let drawn = Arc::clone(&pty.drawn);
+        let idle = Arc::clone(&pty.idle);
         thread::spawn(move || {
             let mut chunk = [0; PTY_CHUNK];
             while let Ok(read) = reader.read(&mut chunk)
                 && read > 0
             {
+                idle.store(false, Ordering::SeqCst);
                 drawn
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .extend_from_slice(&chunk[..read]);
+                idle.store(true, Ordering::SeqCst);
             }
         });
         pty
@@ -181,16 +191,34 @@ impl Pty {
         });
     }
 
-    /// Waits for `child` to exit and returns its exit code.
-    pub fn exit_code(child: &mut Child) -> Option<i32> {
+    /// Waits for `child` to exit, then for everything it drew to be
+    /// collected, and returns its exit code.
+    pub fn exit_code(&self, child: &mut Child) -> Option<i32> {
         let started = Instant::now();
-        loop {
+        let code = loop {
             if let Some(status) = child.try_wait().unwrap() {
-                return status.code();
+                break status.code();
             }
             assert!(started.elapsed() < WAIT, "the command did not exit");
             thread::sleep(POLL);
-        }
+        };
+        self.drained();
+        code
+    }
+
+    /// Waits until nothing drawn waits on the master unread and the reader
+    /// has stored what it read, on two checks in a row, so a test reading
+    /// what an exited command drew sees all of it.
+    fn drained(&self) {
+        let quiet =
+            || ioctl_fionread(&self.master).unwrap_or(0) == 0 && self.idle.load(Ordering::SeqCst);
+        wait_until("everything drawn to be collected", || {
+            if !quiet() {
+                return false;
+            }
+            thread::sleep(POLL);
+            quiet()
+        });
     }
 }
 

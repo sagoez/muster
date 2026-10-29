@@ -1689,13 +1689,12 @@ mod tests {
         assert_eq!(*process(&status, "api").state(), ProcessState::Unsupervised);
         assert_eq!(*process(&status, "api").pid(), Some(orphan.pid()));
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
-        assert!(
+        wait_until("the refused start to name the pid", || {
             service
                 .notices(&project)
                 .iter()
-                .any(|notice| notice.message().ends_with(&orphan.pid().to_string())),
-            "the refused start names the pid"
-        );
+                .any(|notice| notice.message().ends_with(&orphan.pid().to_string()))
+        });
         service.stop();
     }
 
@@ -2663,7 +2662,9 @@ mod tests {
             successor.send(ServiceRequest::Ps { project: None })
                 == ServiceResponse::Status(Vec::new())
         });
-        assert!(fixture.runner().live_records().is_empty());
+        wait_until("the holder to finish once its exit was collected", || {
+            fixture.runner().live_records().is_empty()
+        });
         successor.stop();
     }
 

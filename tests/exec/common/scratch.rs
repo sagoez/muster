@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::{self, Command, Output},
+    thread,
     time::Duration,
 };
 
@@ -34,6 +35,10 @@ const APP_DIR: &str = "muster";
 const DATABASE_FILE: &str = "muster.db";
 /// Longest a service may take to answer one request a test sends.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Most rounds a scratch's teardown kills what is left under it.
+const TEARDOWN_SWEEPS: usize = 50;
+/// Pause between those rounds, for killed processes to go.
+const TEARDOWN_PAUSE: Duration = Duration::from_millis(20);
 
 /// Isolated XDG roots, a database with desktop notifications off, and holder
 /// directories; dropping it kills every service, holder and child the test
@@ -165,24 +170,42 @@ impl Scratch {
 
 impl Drop for Scratch {
     /// Kills every service, holder, holder child and recorded child left
-    /// under this scratch.
+    /// under this scratch, even when the test failed midway. Services go
+    /// first and the sweep repeats until nothing is left, since a service
+    /// still alive would restart a killed child under a fresh holder.
     fn drop(&mut self) {
-        for record in HolderRecord::load_all(self.holder_dirs().records()) {
-            if record.child_pid().into_inner() != process::id() {
-                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
+        for _ in 0..TEARDOWN_SWEEPS {
+            let services = processes_under(SERVICE_SUBCOMMAND, self.root());
+            for pid in self.children.iter().copied().chain(services) {
+                kill_hard(pid);
             }
-        }
-        for pid in self
-            .children
-            .iter()
-            .copied()
-            .chain(processes_under(SERVICE_SUBCOMMAND, self.root()))
-            .chain(processes_under(HOLDER_SUBCOMMAND, self.root()))
-        {
-            if let Some(pid) = Pid::from_raw(pid as i32) {
-                let _ = kill_process_group(pid, Signal::KILL);
-                let _ = kill_process(pid, Signal::KILL);
+            let records = [self.holder_dirs(), HolderDirs::under(&self.state_dir())]
+                .iter()
+                .flat_map(|dirs| HolderRecord::load_all(dirs.records()))
+                .collect::<Vec<_>>();
+            for record in &records {
+                if record.child_pid().into_inner() != process::id() {
+                    let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
+                }
             }
+            let holders = processes_under(HOLDER_SUBCOMMAND, self.root());
+            for pid in &holders {
+                kill_hard(*pid);
+            }
+            let left = processes_under(SERVICE_SUBCOMMAND, self.root()).len()
+                + processes_under(HOLDER_SUBCOMMAND, self.root()).len();
+            if left == 0 {
+                return;
+            }
+            thread::sleep(TEARDOWN_PAUSE);
         }
+    }
+}
+
+/// Sends SIGKILL to the process `pid` and its group.
+fn kill_hard(pid: u32) {
+    if let Some(pid) = Pid::from_raw(pid as i32) {
+        let _ = kill_process_group(pid, Signal::KILL);
+        let _ = kill_process(pid, Signal::KILL);
     }
 }

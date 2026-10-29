@@ -244,7 +244,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::adapter::{ping::Ping, pong::Pong, test_wait::REPLY};
+    use crate::adapter::{
+        ping::Ping,
+        pong::Pong,
+        test_wait::{REPLY, wait_until},
+    };
 
     /// A socket path short enough for every platform's `sun_path` cap. macOS
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches
@@ -289,9 +293,14 @@ mod tests {
         );
 
         // Drop the listener: the file remains but nothing accepts, so the next
-        // bind may reclaim it.
+        // bind may reclaim it. A child another test thread forked meanwhile
+        // holds a copy of the listener until it execs, so wait for the last
+        // copy to close before calling the socket stale.
         drop(live);
         assert!(path.exists(), "the stale socket file is still on disk");
+        wait_until("the dropped listener's last copy to close", || {
+            UnixStream::connect(&path).is_err()
+        });
         bind(&path).expect("a stale socket is reclaimed");
         unlink(&path);
     }

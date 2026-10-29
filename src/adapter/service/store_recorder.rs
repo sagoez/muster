@@ -337,7 +337,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::service::{failing_history::FailingHistory, notices::Notices},
+        adapter::{
+            service::{failing_history::FailingHistory, notices::Notices},
+            test_wait::wait_until,
+        },
         domain::{pty::ExitOutcome, value::ProcessName},
     };
 
@@ -457,12 +460,19 @@ mod tests {
         let recorder = recorder(
             &history,
             &notices,
-            quick(Duration::from_secs(3600), Duration::from_millis(30)),
+            RecordRetry::builder()
+                .first(Duration::from_millis(1))
+                .max(Duration::from_millis(4))
+                .budget(Duration::from_secs(3600))
+                .drain(Duration::from_millis(30))
+                .settle(FLUSH_BOUND)
+                .build(),
         );
         let started = Instant::now();
 
         recorder.ended(&shop(), run());
         recorder.cleared(&shop(), &ProcessName::try_new("web").unwrap());
+        wait_until("the first record to be retried", || history.attempts() > 1);
         recorder.flush();
 
         assert!(started.elapsed() < FLUSH_BOUND, "{:?}", started.elapsed());
@@ -477,7 +487,9 @@ mod tests {
     /// how many records it could not confirm.
     #[test]
     fn a_flush_past_its_settle_counts_the_records_it_could_not_confirm() {
-        let history = FailingHistory::stalling(Duration::from_millis(500));
+        let (entered, inside) = unbounded();
+        let (release, held) = bounded::<()>(0);
+        let history = FailingHistory::held(entered, held);
         let notices = Notices::shared(None);
         let recorder = recorder(
             &history,
@@ -486,7 +498,11 @@ mod tests {
         );
 
         recorder.ended(&shop(), run());
+        inside
+            .recv_timeout(FLUSH_BOUND)
+            .expect("the write reaches the store");
         recorder.flush();
+        drop(release);
 
         let told = notices.lock().unwrap().recent(&shop());
         assert_eq!(told.len(), 1, "{told:?}");

@@ -1251,16 +1251,22 @@ mod tests {
         harness.finish_collected();
     }
 
+    /// An attach client reading as the flood arrives, as a real one does,
+    /// gets the tail and the exit before a finishing holder closes it.
     #[test]
     fn attach_clients_receive_the_tail_and_exit_before_the_holder_finishes() {
         let harness = Harness::start(&flood(TAIL_BYTES, 'y', "TAIL-END", "exit 0"));
         let (mut watcher, _) = harness.connect(ClientRole::Attach { read_only: true });
+        let watching = thread::spawn(move || {
+            watcher.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
+            watcher
+        });
         let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
         supervisor.send(ClientMessage::Input(b"go\n".to_vec()));
         supervisor.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
         supervisor.send(ClientMessage::CollectExit);
 
-        watcher.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
+        let watcher = watching.join().unwrap();
         assert!(
             watcher
                 .screen()

@@ -2499,8 +2499,8 @@ fn a_waited_start_reports_a_child_that_dies_at_once() {
     let project = scratch.project(
         "shop",
         &stack(&[
-            entry("bad", "sleep 0.2; exit 3", false),
-            entry("ronfail", "sleep 0.2; exit 3", false).with_restart("on-failure"),
+            entry("bad", "exit 3", false),
+            entry("ronfail", "exit 3", false).with_restart("on-failure"),
         ]),
     );
 
@@ -2975,7 +2975,7 @@ fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
     pty.wait_for("stopping", 1);
     pty.interrupt();
     assert_eq!(
-        Pty::exit_code(&mut stop),
+        pty.exit_code(&mut stop),
         Some(INTERRUPTED),
         "{}",
         pty.drawn()
@@ -3009,12 +3009,7 @@ fn ctrl_c_before_the_request_is_sent_cancels_it() {
     });
     pty.interrupt();
 
-    assert_eq!(
-        Pty::exit_code(&mut up),
-        Some(INTERRUPTED),
-        "{}",
-        pty.drawn()
-    );
+    assert_eq!(pty.exit_code(&mut up), Some(INTERRUPTED), "{}", pty.drawn());
     assert!(
         pty.drawn().contains("└  cancelled; nothing was changed"),
         "{}",
@@ -3043,7 +3038,7 @@ fn a_logs_failure_after_the_question_closes_no_frame_twice() {
     pty.type_keys(ENTER);
 
     assert_eq!(
-        Pty::exit_code(&mut logs),
+        pty.exit_code(&mut logs),
         Some(SERVICE_UNAVAILABLE),
         "{}",
         pty.drawn()
@@ -3070,7 +3065,7 @@ fn up_is_framed_and_projects_rm_asks_first() {
 
     let pty = Pty::open();
     let mut up = pty.spawn(&mut scratch, &project, &["up"]);
-    assert_eq!(Pty::exit_code(&mut up), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut up), Some(0), "{}", pty.drawn());
     let drawn = pty.drawn();
     assert!(drawn.contains("muster up · shop"), "{drawn}");
     assert!(drawn.contains("running (pid"), "{drawn}");
@@ -3080,7 +3075,7 @@ fn up_is_framed_and_projects_rm_asks_first() {
     let mut rm = pty.spawn(&mut scratch, &project, &["projects", "rm", "shop"]);
     pty.wait_for("Remove this project", 1);
     pty.type_keys(b"n");
-    assert_eq!(Pty::exit_code(&mut rm), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut rm), Some(0), "{}", pty.drawn());
     assert!(pty.drawn().contains("nothing removed"), "{}", pty.drawn());
     assert_eq!(scratch.row(&project, "api")["state"], "running");
 
@@ -3088,7 +3083,7 @@ fn up_is_framed_and_projects_rm_asks_first() {
     let mut rm = pty.spawn(&mut scratch, &project, &["projects", "rm", "shop"]);
     pty.wait_for("Remove this project", 1);
     pty.type_keys(b"y");
-    assert_eq!(Pty::exit_code(&mut rm), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut rm), Some(0), "{}", pty.drawn());
     assert!(
         pty.drawn().contains("removed project shop"),
         "{}",
@@ -3113,7 +3108,7 @@ fn ctrl_c_under_the_spinner_closes_the_frame() {
     pty.wait_for("stopping slow", 1);
     pty.interrupt();
     assert_eq!(
-        Pty::exit_code(&mut down),
+        pty.exit_code(&mut down),
         Some(INTERRUPTED),
         "{}",
         pty.drawn()
@@ -3145,7 +3140,7 @@ fn attach_without_a_name_offers_the_running_processes() {
     let pty = Pty::open();
     let mut attach = pty.spawn(&mut scratch, &project, &["attach"]);
     assert_eq!(
-        Pty::exit_code(&mut attach),
+        pty.exit_code(&mut attach),
         Some(ACTION_FAILED),
         "{}",
         pty.drawn()
@@ -3168,7 +3163,7 @@ fn attach_without_a_name_offers_the_running_processes() {
     pty.type_keys(ENTER);
     pty.wait_for("attached to café", 1);
     pty.type_keys(DETACH);
-    assert_eq!(Pty::exit_code(&mut attach), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut attach), Some(0), "{}", pty.drawn());
     pty.wait_for("detached from café", 1);
 }
 
@@ -3250,7 +3245,7 @@ fn logs_without_a_name_closes_its_frame_before_the_log() {
     let mut logs = pty.spawn(&mut scratch, &project, &["logs"]);
     pty.wait_for("Which process?", 1);
     pty.type_keys(ENTER);
-    assert_eq!(Pty::exit_code(&mut logs), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut logs), Some(0), "{}", pty.drawn());
     let drawn = pty.drawn();
     let closed = drawn.rfind("└  dev server").expect(&drawn);
     let log = drawn.rfind("dev-ready").expect(&drawn);
@@ -3280,7 +3275,7 @@ fn data_output_is_never_framed() {
         let pty = Pty::open();
         let mut child = pty.spawn(&mut scratch, &project, args);
         assert_eq!(
-            Pty::exit_code(&mut child),
+            pty.exit_code(&mut child),
             Some(0),
             "{args:?}: {}",
             pty.drawn()
@@ -3313,7 +3308,7 @@ fn init_offers_what_the_folder_defines() {
     pty.type_keys(ENTER);
     pty.wait_for("Start them with `muster up`?", 1);
     pty.type_keys(b"y");
-    assert_eq!(Pty::exit_code(&mut init), Some(0), "{}", pty.drawn());
+    assert_eq!(pty.exit_code(&mut init), Some(0), "{}", pty.drawn());
     assert!(
         pty.drawn()
             .contains("added 1 process; `muster up` starts them"),
@@ -3410,7 +3405,7 @@ fn export_to_a_terminal_escapes_what_a_pipe_keeps() {
 
     let pty = Pty::open();
     let mut export = pty.spawn(&mut scratch, &project, &["export", "-"]);
-    assert_eq!(Pty::exit_code(&mut export), Some(0));
+    assert_eq!(pty.exit_code(&mut export), Some(0));
     pty.wait_for("right", 1);
     let raw = pty.raw();
     assert!(raw.contains("left\\u{202e}right"), "{raw:?}");

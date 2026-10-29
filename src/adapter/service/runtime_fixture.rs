@@ -1,6 +1,4 @@
-use std::{
-    fs, mem, os::unix::net::UnixStream, path::PathBuf, process, sync::Arc, thread, time::Instant,
-};
+use std::{fs, mem, path::PathBuf, process, sync::Arc, thread, time::Instant};
 
 use crossbeam_channel::Receiver;
 use getset::{Getters, MutGetters};
@@ -15,6 +13,7 @@ use super::{
     runtime::ServiceRuntime,
     runtime_testing::{POLL, SCRATCH_PREFIX, TEST_BINARY, VERSION, WAIT, wait_until},
     service_deps::ServiceDeps,
+    service_request::ServiceRequest,
     singleton::Singleton,
     test_ports::TestPorts,
 };
@@ -122,7 +121,9 @@ impl Fixture {
         )
     }
 
-    /// Starts a service over `pool` and waits until it accepts clients.
+    /// Starts a service over `pool` and waits until it answers a client,
+    /// which its loop does only once it has taken over what an earlier
+    /// service left; a socket that merely accepts may still be sweeping.
     pub(super) fn start(&self, pool: Arc<dyn HolderPool>) -> Running {
         let state_dir = self.state_dir();
         let socket = protocol::socket_path(&self.scratch.path().join("run"), &state_dir);
@@ -150,8 +151,8 @@ impl Fixture {
                 .build();
             ServiceRuntime::run(singleton, deps)
         });
-        wait_until("the service to accept", || {
-            UnixStream::connect(&socket).is_ok()
+        wait_until("the service to answer", || {
+            protocol::send(&socket, &ServiceRequest::Ps { project: None }).is_ok()
         });
         Running::builder()
             .socket(socket)

@@ -3178,15 +3178,16 @@ fn attach_without_a_name_offers_the_running_processes() {
         "{}",
         pty.drawn()
     );
-    assert!(pty.drawn().contains("no process"), "{}", pty.drawn());
+    pty.wait_for("no process", 1);
 
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
     let pty = Pty::open();
     let mut attach = pty.spawn(&mut scratch, &project, &["attach"]);
     pty.wait_for("Which process?", 1);
+    pty.wait_for("café", 1);
+    pty.wait_for("running", 1);
     let drawn = pty.drawn();
-    assert!(drawn.contains("running"), "{drawn}");
     assert!(
         !drawn.contains("○ api") && !drawn.contains("● api"),
         "{drawn}"
@@ -3196,11 +3197,7 @@ fn attach_without_a_name_offers_the_running_processes() {
     pty.wait_for("attached to café", 1);
     pty.type_keys(DETACH);
     assert_eq!(Pty::exit_code(&mut attach), Some(0), "{}", pty.drawn());
-    assert!(
-        pty.drawn().contains("detached from café"),
-        "{}",
-        pty.drawn()
-    );
+    pty.wait_for("detached from café", 1);
 }
 
 /// Rows of the terminal the surviving attach runs on.

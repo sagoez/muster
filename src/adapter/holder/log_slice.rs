@@ -7,7 +7,8 @@ use crate::domain::value::OutputCursor;
 /// span of output they were taken from.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
 pub struct LogSlice {
-    /// Where the examined output starts.
+    /// Where the returned output starts: the first line kept when the caps
+    /// dropped older ones, otherwise where the read began.
     #[getset(get_copy = "pub")]
     from: OutputCursor,
     /// The end of the examined output; reading again from it returns only

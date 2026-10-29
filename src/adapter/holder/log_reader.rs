@@ -37,7 +37,9 @@ const CUT_CLOSE: &str = " chars cut]";
 /// Reads what `query` asks of the log at `log` and its rotated generation.
 /// With a cursor, output after it, starting at the oldest kept byte when
 /// rotation discarded what the cursor names; without one, the newest lines
-/// that pass the filter. The returned cursor is the end of the log as read.
+/// that pass the filter. The returned cursor is the end of the log as read,
+/// and `from` where the returned output starts: the first line kept when
+/// the caps dropped older ones, otherwise where the read began.
 ///
 /// # Errors
 /// Returns [`HolderError::CursorAhead`] for a cursor past the end of the
@@ -57,11 +59,17 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
     let mut kept = Kept::new(query);
     let mut filter = FilterState::new(query.filter());
     let mut lines = BufReader::with_capacity(BLOCK_BYTES, SpanReader::new(&span, start));
-    while let Some(line) = next_line(&mut lines)? {
-        filter.offer(line, &mut kept);
+    let mut at = start;
+    while let Some((line, consumed)) = next_line(&mut lines)? {
+        filter.offer(line, at, &mut kept);
+        at = at.advanced(consumed);
     }
+    let from = match kept.first_at() {
+        Some(first) if kept.omitted() > 0 => first,
+        Some(_) | None => start,
+    };
     Ok(LogSlice::builder()
-        .from(start)
+        .from(from)
         .cursor(span.end())
         .omitted_lines(kept.omitted())
         .lines(kept.into_lines())
@@ -135,13 +143,15 @@ pub(super) fn read_log_range(
 
 /// Reads the next line from `reader`, stripped, keeping at most
 /// [`RAW_LINE_KEEP_BYTES`] of it and cutting what strips past
-/// [`LINE_MAX_CHARS`]. A final line with no line feed is returned too.
+/// [`LINE_MAX_CHARS`], with the raw bytes it took. A final line with no line
+/// feed is returned too.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when the read fails.
-fn next_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+fn next_line(reader: &mut impl BufRead) -> io::Result<Option<(String, u64)>> {
     let mut head = Vec::new();
     let mut skipped = 0usize;
+    let mut consumed = 0u64;
     let mut read_any = false;
     loop {
         let buffer = reader.fill_buf()?;
@@ -156,7 +166,9 @@ fn next_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
         let room = RAW_LINE_KEEP_BYTES.saturating_sub(head.len());
         head.extend_from_slice(&buffer[..taken.min(room)]);
         skipped = skipped.saturating_add(taken.saturating_sub(room));
-        reader.consume(taken + usize::from(ended));
+        let step = taken + usize::from(ended);
+        reader.consume(step);
+        consumed += step as u64;
         if ended {
             break;
         }
@@ -164,7 +176,7 @@ fn next_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     if !read_any {
         return Ok(None);
     }
-    Ok(Some(cut(strip_line(&head), skipped)))
+    Ok(Some((cut(strip_line(&head), skipped), consumed)))
 }
 
 /// `text` cut to [`LINE_MAX_CHARS`] with a note of how much went, counting
@@ -424,7 +436,11 @@ mod tests {
         );
         assert_eq!(by_lines.lines(), &["line 6", "line 7", "line 8", "line 9"]);
         assert_eq!(by_lines.omitted_lines(), 6);
-        assert_eq!(by_lines.from(), start);
+        assert_eq!(
+            by_lines.from(),
+            start.advanced(numbered(0..6).len() as u64),
+            "from is the first line returned"
+        );
 
         let by_bytes = fixture.read(
             &LogQuery::builder()
@@ -434,6 +450,9 @@ mod tests {
         );
         assert_eq!(by_bytes.lines(), &["line 8", "line 9"]);
         assert_eq!(by_bytes.omitted_lines(), 8);
+        assert_eq!(by_bytes.from(), start.advanced(numbered(0..8).len() as u64));
+        let whole = fixture.read(&LogQuery::builder().since(Some(start)).build());
+        assert_eq!(whole.from(), start, "nothing cut, from is where it began");
 
         fixture.write(b"error one\nfine\nerror two\n");
         let errors = fixture.read(

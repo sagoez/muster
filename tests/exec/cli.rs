@@ -3752,6 +3752,33 @@ fn a_wait_after_a_service_restart_makes_up_no_run_start() {
     assert!(read["structuredContent"]["run_start"].is_null(), "{read}");
 }
 
+/// When `max_bytes` cuts lines, `from` names the first byte returned, so
+/// reading again from it gives back exactly the text that was returned.
+#[test]
+fn a_cut_log_read_starts_from_the_first_line_it_returns() {
+    let mut scratch = Scratch::new();
+    let shop = scratch.project("shop", &stack(&[entry("long", LONG_RUN_COMMAND, false)]));
+    scratch.on(&shop, &["start", "long"]);
+    let (_, crashed) = scratch.json_on(&shop, &["wait", "long", "--state", "crashed"]);
+    assert_eq!(crashed["status"], "matched", "{crashed}");
+    let mut mcp = McpSession::start(&mut scratch, &shop);
+
+    let cut = mcp.result(
+        "process_logs",
+        serde_json::json!({ "name": "long", "lines": 100, "max_bytes": 20 }),
+    )["structuredContent"]
+        .clone();
+    let again = mcp.result(
+        "process_logs",
+        serde_json::json!({ "name": "long", "since": cut["from"] }),
+    )["structuredContent"]
+        .clone();
+
+    assert!(cut["omitted_lines"].as_u64().unwrap() > 0, "{cut}");
+    assert_eq!(again["text"], cut["text"], "{cut} {again}");
+    assert_eq!(again["omitted_lines"], 0, "{again}");
+}
+
 /// A state directory whose holder sockets fit serves, however long: the
 /// service socket lives in the short runtime directory, and the name it is
 /// first bound at is no longer than its own.

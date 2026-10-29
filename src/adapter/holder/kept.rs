@@ -3,13 +3,14 @@ use std::collections::VecDeque;
 use getset::CopyGetters;
 
 use super::{log_query::LogQuery, log_reader::GROUP_SEPARATOR};
+use crate::domain::value::OutputCursor;
 
 /// The newest lines a read keeps, dropping the oldest past the line or byte
 /// cap. Group separators take bytes but do not count as lines.
 #[derive(CopyGetters)]
 pub(super) struct Kept {
-    /// The lines, oldest first.
-    lines: VecDeque<String>,
+    /// The lines, oldest first, each with where it begins in the output.
+    lines: VecDeque<(String, OutputCursor)>,
     /// Separators among the lines.
     separators: usize,
     /// Bytes the lines take with their line feeds.
@@ -36,32 +37,38 @@ impl Kept {
         }
     }
 
-    /// Adds a line that passed the filter.
-    pub(super) fn push(&mut self, line: String) {
+    /// Adds a line that passed the filter, which begins at `at`.
+    pub(super) fn push(&mut self, line: String, at: OutputCursor) {
         self.bytes += line.len() + 1;
-        self.lines.push_back(line);
+        self.lines.push_back((line, at));
         self.enforce_caps();
     }
 
-    /// Adds a separator between error groups, unless nothing precedes it.
-    pub(super) fn separate(&mut self) {
+    /// Adds a separator before the error group whose first line begins at
+    /// `at`, unless nothing precedes it.
+    pub(super) fn separate(&mut self, at: OutputCursor) {
         if !self.lines.is_empty() {
             self.separators += 1;
-            self.push(GROUP_SEPARATOR.to_string());
+            self.push(GROUP_SEPARATOR.to_string(), at);
         }
+    }
+
+    /// Where the oldest line kept begins, when any is.
+    pub(super) fn first_at(&self) -> Option<OutputCursor> {
+        self.lines.front().map(|(_, at)| *at)
     }
 
     /// Drops the oldest lines until the caps hold.
     fn enforce_caps(&mut self) {
         while self.lines.len() - self.separators > self.line_cap || self.bytes > self.byte_cap {
-            if let Some(line) = self.lines.pop_front() {
+            if let Some((line, _)) = self.lines.pop_front() {
                 self.bytes -= line.len() + 1;
                 self.omitted += 1;
             }
             if self
                 .lines
                 .front()
-                .is_some_and(|line| line == GROUP_SEPARATOR)
+                .is_some_and(|(line, _)| line == GROUP_SEPARATOR)
             {
                 self.lines.pop_front();
                 self.separators -= 1;
@@ -72,6 +79,6 @@ impl Kept {
 
     /// The kept lines, oldest first.
     pub(super) fn into_lines(self) -> Vec<String> {
-        self.lines.into()
+        self.lines.into_iter().map(|(line, _)| line).collect()
     }
 }

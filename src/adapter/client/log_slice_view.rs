@@ -17,7 +17,8 @@ pub struct LogSliceView {
     /// The process.
     #[getset(get = "pub")]
     process: ProcessName,
-    /// Where the examined output starts.
+    /// Where the returned output starts: the first line kept when the caps
+    /// dropped older ones, otherwise where the read began.
     #[getset(get_copy = "pub")]
     from: OutputCursor,
     /// The end of what was examined; reading from it returns only newer

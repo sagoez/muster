@@ -4,6 +4,7 @@ use super::{
     line_filter::LineFilter,
     log_reader::ERROR_CONTEXT_LINES,
 };
+use crate::domain::value::OutputCursor;
 
 /// A filter applied line by line, with what errors-only needs to remember.
 pub(super) struct FilterState<'a> {
@@ -26,14 +27,15 @@ impl<'a> FilterState<'a> {
         }
     }
 
-    /// Passes `text` through the filter into `kept`.
-    pub(super) fn offer(&mut self, text: String, kept: &mut Kept) {
+    /// Passes `text`, a line that begins at `at`, through the filter into
+    /// `kept`.
+    pub(super) fn offer(&mut self, text: String, at: OutputCursor, kept: &mut Kept) {
         let keep = match self.filter {
             LineFilter::All => true,
             LineFilter::Grep(matcher) => matcher.is_match(&text),
             LineFilter::ErrorsOnly if is_error_line(&text) => {
                 if !self.previous_kept {
-                    kept.separate();
+                    kept.separate(at);
                 }
                 self.context = ERROR_CONTEXT_LINES;
                 true
@@ -48,7 +50,7 @@ impl<'a> FilterState<'a> {
             },
         };
         if keep {
-            kept.push(text);
+            kept.push(text, at);
         }
         self.previous_kept = keep;
     }

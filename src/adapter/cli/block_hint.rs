@@ -1,8 +1,11 @@
 //! The CLI's words for freeing a port a start found held.
 
 use crate::{
-    adapter::service::{PortBlock, PortOwner},
-    domain::value::ProjectName,
+    adapter::{
+        client::{PortBlockView, PortOwnerView},
+        service::{PortBlock, PortOwner},
+    },
+    domain::value::{ProcessName, ProjectName},
 };
 
 /// The command that frees a port another project's process holds, before
@@ -23,10 +26,28 @@ pub fn block_hint(block: &PortBlock, own_project: &ProjectName) -> Option<String
     let PortOwner::Supervised(holder) = block.holder() else {
         return None;
     };
-    let (command, target) = if holder.project() == own_project {
-        (STOP_HINT, holder.process().as_ref())
+    supervised_hint(holder.project(), holder.process(), own_project)
+}
+
+/// [`block_hint`] for the block a report carries as its view.
+pub fn block_view_hint(block: &PortBlockView, own_project: &ProjectName) -> Option<String> {
+    let PortOwnerView::Supervised { project, process } = block.holder() else {
+        return None;
+    };
+    supervised_hint(project, process, own_project)
+}
+
+/// How to free a port that `process` of `project` holds, for a start in
+/// `own_project`.
+fn supervised_hint(
+    project: &ProjectName,
+    process: &ProcessName,
+    own_project: &ProjectName,
+) -> Option<String> {
+    let (command, target) = if project == own_project {
+        (STOP_HINT, process.as_ref())
     } else {
-        (DOWN_HINT, holder.project().as_ref())
+        (DOWN_HINT, project.as_ref())
     };
     let quoted = shlex::try_quote(target).ok()?;
     Some(format!("`{command} {quoted}` {FREES_IT}"))
@@ -39,7 +60,7 @@ mod tests {
         adapter::service::PortHolder,
         domain::{
             port::PortOccupant,
-            value::{LocalPort, Pid, ProcessName},
+            value::{LocalPort, Pid},
         },
     };
 
@@ -83,6 +104,28 @@ mod tests {
                 .build(),
         ));
         assert_eq!(block_hint(&outside, &project("shop")), None);
+    }
+
+    /// A report's view of a block gives the same hint as the block itself.
+    #[test]
+    fn the_view_of_a_block_gives_the_same_hint() {
+        let outside = block(PortOwner::Other(
+            PortOccupant::builder()
+                .pid(Pid::try_new(4242).unwrap())
+                .command("python3".to_string())
+                .build(),
+        ));
+        for held in [
+            held_by("admin site", "web"),
+            held_by("shop", "dev server"),
+            outside,
+        ] {
+            assert_eq!(
+                block_view_hint(&PortBlockView::from(&held), &project("shop")),
+                block_hint(&held, &project("shop")),
+                "{held}"
+            );
+        }
     }
 
     #[test]

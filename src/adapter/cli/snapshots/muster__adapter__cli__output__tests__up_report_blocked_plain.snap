@@ -1,0 +1,8 @@
+---
+source: src/adapter/cli/output.rs
+expression: plain(&action_rows(&report))
+---
+/home/me/shop
+✗ web: did not start: port 5173 is held by project 'admin site', process 'web'; `muster down -p 'admin site'` frees it
+✗ api: did not start: port 3000 is held by project 'shop', process 'dev server'; `muster stop 'dev server'` frees it
+✗ docs: did not start: port 8000 is held by pid 4242 (python3 -m http.server 8000 \u{1b}[2J)

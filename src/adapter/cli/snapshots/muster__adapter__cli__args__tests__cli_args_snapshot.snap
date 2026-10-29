@@ -313,6 +313,7 @@ Options:
       --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout
       --ready-http <URL>          Ready once this localhost URL answers below 500; needs --ready-timeout
       --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
+      --port <PORT>               A TCP port it listens on, checked free before each start (repeatable); on `set`, the ports given replace the stored ones
       --json                      Print the result as JSON
   -h, --help                      Print help
 
@@ -335,6 +336,7 @@ Options:
       --no-description            Remove the description
       --unset-env <KEY>           Remove an environment variable (repeatable); one that is not set is left alone
       --no-ready                  Remove the readiness check
+      --no-ports                  Remove every declared port
       --env <KEY=VALUE>           Set an environment variable, `KEY=VALUE` (repeatable)
       --autostart                 Start it with `muster up`
       --no-autostart              Leave it out of `muster up`
@@ -346,6 +348,7 @@ Options:
       --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout
       --ready-http <URL>          Ready once this localhost URL answers below 500; needs --ready-timeout
       --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
+      --port <PORT>               A TCP port it listens on, checked free before each start (repeatable); on `set`, the ports given replace the stored ones
       --json                      Print the result as JSON
   -h, --help                      Print help
 

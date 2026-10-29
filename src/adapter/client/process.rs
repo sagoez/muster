@@ -21,6 +21,7 @@ use super::{
     notice_log::NoticeLog,
     notice_view::NoticeView,
     outcome::Outcome,
+    port_block_view::PortBlockView,
     process_outcome::ProcessOutcome,
     process_view::ProcessView,
     project_identity_view::ProjectIdentityView,
@@ -826,6 +827,9 @@ fn report(
         .iter()
         .map(|name| {
             let now = find(&after, name);
+            let block = now
+                .and_then(|status| status.blocked_on().as_ref())
+                .filter(|_| !action.halts());
             ProcessOutcome::builder()
                 .name(name.clone())
                 .outcome(Outcome::settle(
@@ -834,11 +838,8 @@ fn report(
                     now,
                     moved.contains(name),
                 ))
-                .reason(
-                    now.and_then(|status| status.blocked_on().as_ref())
-                        .filter(|_| !action.halts())
-                        .map(ToString::to_string),
-                )
+                .reason(block.map(ToString::to_string))
+                .block(block.map(PortBlockView::from))
                 .status(now.map(ProcessView::from))
                 .build()
         })
@@ -875,8 +876,10 @@ fn wait_end_at_deadline(own: Duration, bound: Duration) -> WaitEnd {
 }
 
 /// `report` with each process `batch` left alone listed as refused, with
-/// its reason and how `ps` lists it now, and the notices about those
-/// processes counted as the report's own rather than as context.
+/// its reason, the held port that kept it (from the refusal, else from its
+/// listing, since a launch may find the port after the answer) and how `ps`
+/// lists it now, and the notices about those processes counted as the
+/// report's own rather than as context.
 ///
 /// # Errors
 /// Returns a [`ClientError`] when the service cannot be reached.
@@ -894,11 +897,17 @@ fn with_refusals(
         .refused()
         .iter()
         .map(|refusal| {
+            let listed = find(&now, refusal.name());
+            let block = refusal
+                .block()
+                .as_ref()
+                .or_else(|| listed.and_then(|status| status.blocked_on().as_ref()));
             ProcessOutcome::builder()
                 .name(refusal.name().clone())
                 .outcome(Outcome::Refused)
                 .reason(Some(refusal.reason().clone()))
-                .status(find(&now, refusal.name()).map(ProcessView::from))
+                .block(block.map(PortBlockView::from))
+                .status(listed.map(ProcessView::from))
                 .build()
         })
         .collect();

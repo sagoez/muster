@@ -1685,7 +1685,33 @@ fn a_start_on_a_held_port_says_why() {
         )),
         "{report}"
     );
-    assert_eq!(scratch.row(&project, "web")["state"], "blocked");
+    let holder = serde_json::json!({
+        "kind": "other",
+        "pid": process::id(),
+        "command": report["processes"][0]["block"]["holder"]["command"],
+    });
+    assert_eq!(
+        report["processes"][0]["block"]["holder"], holder,
+        "{report}"
+    );
+    let row = scratch.row(&project, "web");
+    assert_eq!(row["state"], "blocked");
+    assert_eq!(row["blocked_on"]["port"].to_string(), port, "{row}");
+    assert_eq!(row["blocked_on"]["holder"], holder, "{row}");
+    let (_, statuses) = scratch.json_on(&project, &["ps"]);
+    assert_eq!(statuses[0]["occupancy"]["shells"], 0, "{statuses}");
+    assert_eq!(
+        statuses[0]["occupancy"]["idle_stop"], "30m",
+        "the seeded setting: {statuses}"
+    );
+    let listed = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        listed.contains(&format!(
+            "web: port {port} is held by pid {}",
+            process::id()
+        )),
+        "ps names the holder under its table: {listed}"
+    );
     drop(listener);
 }
 

@@ -1,10 +1,10 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::exit_view::ExitView;
+use super::{exit_view::ExitView, port_block_view::PortBlockView};
 use crate::{
     adapter::service::ProcessStatus,
     domain::{
@@ -52,6 +52,12 @@ pub struct ProcessView {
     /// Seconds, rounded up, a graceful stop waits before it kills.
     #[getset(get_copy = "pub")]
     stop_grace: u64,
+    /// The TCP ports its process tree listens on, ascending, each once.
+    #[getset(get = "pub")]
+    ports: Vec<u16>,
+    /// Why its last start was refused, while it is not running.
+    #[getset(get = "pub")]
+    blocked_on: Option<PortBlockView>,
 }
 
 impl From<&ProcessStatus> for ProcessView {
@@ -72,12 +78,26 @@ impl From<&ProcessStatus> for ProcessView {
                 .as_ref()
                 .map(|exit| ExitView::from(exit.outcome())),
             stop_grace: whole_seconds_up(*status.stop_grace()),
+            ports: listening_ports(status),
+            blocked_on: status.blocked_on().as_ref().map(PortBlockView::from),
         }
     }
 }
 
+/// The ports `status`'s process tree listens on, ascending, each once
+/// however many addresses it is bound to.
+pub fn listening_ports(status: &ProcessStatus) -> Vec<u16> {
+    status
+        .ports()
+        .iter()
+        .map(|socket| socket.port())
+        .collect::<BTreeSet<u16>>()
+        .into_iter()
+        .collect()
+}
+
 /// `duration` in whole seconds, any part of a second counting as one.
-fn whole_seconds_up(duration: Duration) -> u64 {
+pub(super) fn whole_seconds_up(duration: Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
 

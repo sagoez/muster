@@ -1,0 +1,121 @@
+---
+source: src/adapter/cli/output.rs
+expression: json(&report).unwrap()
+---
+{
+  "project": {
+    "name": "shop",
+    "root": "/home/me/shop"
+  },
+  "action": "up",
+  "processes": [
+    {
+      "name": "web",
+      "outcome": "not-started",
+      "reason": "did not start: port 5173 is held by project 'admin site', process 'web'",
+      "block": {
+        "port": 5173,
+        "holder": {
+          "kind": "supervised",
+          "project": "admin site",
+          "process": "web"
+        }
+      },
+      "status": {
+        "name": "web",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 5173,
+          "holder": {
+            "kind": "supervised",
+            "project": "admin site",
+            "process": "web"
+          }
+        }
+      }
+    },
+    {
+      "name": "api",
+      "outcome": "refused",
+      "reason": "did not start: port 3000 is held by project 'shop', process 'dev server'",
+      "block": {
+        "port": 3000,
+        "holder": {
+          "kind": "supervised",
+          "project": "shop",
+          "process": "dev server"
+        }
+      },
+      "status": {
+        "name": "api",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 3000,
+          "holder": {
+            "kind": "supervised",
+            "project": "shop",
+            "process": "dev server"
+          }
+        }
+      }
+    },
+    {
+      "name": "docs",
+      "outcome": "not-started",
+      "reason": "did not start: port 8000 is held by pid 4242 (python3 -m http.server 8000 \u001b[2J)",
+      "block": {
+        "port": 8000,
+        "holder": {
+          "kind": "other",
+          "pid": 4242,
+          "command": "python3 -m http.server 8000 \u001b[2J"
+        }
+      },
+      "status": {
+        "name": "docs",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 8000,
+          "holder": {
+            "kind": "other",
+            "pid": 4242,
+            "command": "python3 -m http.server 8000 \u001b[2J"
+          }
+        }
+      }
+    }
+  ],
+  "notices": [],
+  "other_notices": [],
+  "wait_ended": "settled"
+}

@@ -1,6 +1,8 @@
 //! `muster set`: changes to one process's stored definition. A running
 //! process keeps running and takes the change at its next start.
 
+use std::collections::BTreeSet;
+
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
@@ -46,6 +48,10 @@ const STOP_SIGNAL_CHANGED: &str = "stop-signal";
 const STOP_GRACE_CHANGED: &str = "stop-grace";
 const READY_CHANGED: &str = "ready";
 const READY_CLEARED: &str = "ready cleared";
+const PORTS_CHANGED: &str = "ports";
+const PORTS_CLEARED: &str = "ports cleared";
+/// Between the ports a change names.
+const PORT_SEPARATOR: &str = ", ";
 /// Follows a running process's name in the restart hint.
 const IS_RUNNING: &str = "is running;";
 /// The command that applies a change to a running process.
@@ -139,6 +145,11 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
             (None, true) => FieldEdit::Clear,
             (None, false) => FieldEdit::Keep,
         })
+        .ports(match (args.flags().ports(), args.no_ports()) {
+            (Some(ports), _) => Some(ports),
+            (None, true) => Some(BTreeSet::new()),
+            (None, false) => None,
+        })
         .build();
     let stack = store
         .stack(root)?
@@ -172,6 +183,7 @@ fn asks_nothing(args: &SetArgs) -> bool {
         && !args.no_description()
         && args.unset_env().is_empty()
         && !args.no_ready()
+        && !args.no_ports()
         && args.flags().is_empty()
 }
 
@@ -227,6 +239,18 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
         FieldEdit::Clear => words.push(READY_CLEARED.to_string()),
         FieldEdit::Keep => {},
     }
+    match change.ports() {
+        Some(ports) if ports.is_empty() => words.push(PORTS_CLEARED.to_string()),
+        Some(ports) => words.push(format!(
+            "{PORTS_CHANGED} {}",
+            ports
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(PORT_SEPARATOR)
+        )),
+        None => {},
+    }
     words
 }
 
@@ -262,17 +286,181 @@ pub fn set_rows(view: &SetView) -> Report {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::{
+        fs, iter,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
-    use super::*;
+    use clap::{Parser, error::ErrorKind};
+    use tempfile::TempDir;
+
+    use super::{
+        super::{add::add, add_args::AddArgs, args::Args, command::Command, fake_ports::FakePorts},
+        *,
+    };
     use crate::{
-        adapter::cli::report::plain,
+        adapter::{cli::report::plain, store::test_support::fresh_store},
         domain::{
             config::{Environment, ProcessSpec},
+            port::StackReader,
             process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, EnvName, EnvValue, ProcessName, ProjectName, StopGrace},
+            value::{
+                CommandLine, EnvName, EnvValue, LocalPort, ProcessName, ProjectName, ProjectRoot,
+                StopGrace,
+            },
         },
     };
+
+    /// `muster` run with `words`, parsed.
+    fn parse(words: &[&str]) -> Result<Command, clap::Error> {
+        Args::try_parse_from(iter::once("muster").chain(words.iter().copied()))
+            .map(|args| args.into_command().expect("a command was given"))
+    }
+
+    /// `muster add <words>` parsed.
+    fn add_args(words: &[&str]) -> AddArgs {
+        match parse(&[&["add"], words].concat()).unwrap() {
+            Command::Add(args) => args,
+            _ => panic!("add parses as add"),
+        }
+    }
+
+    /// `muster set <words>` parsed.
+    fn set_args(words: &[&str]) -> SetArgs {
+        match parse(&[&["set"], words].concat()).unwrap() {
+            Command::Set(args) => args,
+            _ => panic!("set parses as set"),
+        }
+    }
+
+    /// The ports `raw` names.
+    fn ports(raw: &[u16]) -> BTreeSet<LocalPort> {
+        raw.iter()
+            .map(|port| LocalPort::try_new(*port).unwrap())
+            .collect()
+    }
+
+    /// Ports over a fresh database, the folder of a project `shop` in it,
+    /// and the scratch dir holding both.
+    fn shop() -> (FakePorts, PathBuf, TempDir) {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        (FakePorts::new(store), dir, scratch)
+    }
+
+    /// The ports stored for `web` in the project at `dir`.
+    fn stored_ports(fakes: &FakePorts, dir: &Path) -> BTreeSet<LocalPort> {
+        let root = ProjectRoot::try_new(dir.to_path_buf()).unwrap();
+        let stack = fakes.store().stack(&root).unwrap().unwrap();
+        stack
+            .process(&ProcessName::try_new("web").unwrap())
+            .unwrap()
+            .ports()
+            .clone()
+    }
+
+    /// `add --port` stores each port once, and `set --port` replaces the
+    /// whole set, each through the editor into the database.
+    #[test]
+    fn add_and_set_take_ports() {
+        let (fakes, dir, _scratch) = shop();
+        let invocation = Invocation::new(Some(dir.to_str().unwrap().to_string()), &fakes);
+
+        let added = add(
+            &invocation,
+            add_args(&[
+                "web",
+                "--port",
+                "5173",
+                "--port",
+                "3000",
+                "--port",
+                "5173",
+                "--",
+                "npm run dev",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(added.process().ports(), &[3000, 5173]);
+        assert_eq!(stored_ports(&fakes, &dir), ports(&[3000, 5173]));
+
+        let changed = set(&invocation, set_args(&["web", "--port", "8080"])).unwrap();
+        assert!(changed.changed());
+        assert!(!changed.needs_restart(), "a ports change restarts nothing");
+        assert_eq!(changed.process().ports(), &[8080]);
+        assert_eq!(changed.changes(), &["ports 8080"]);
+        assert_eq!(stored_ports(&fakes, &dir), ports(&[8080]));
+
+        let plain_add = add(&invocation, add_args(&["api", "--", "bin/api"])).unwrap();
+        assert!(plain_add.process().ports().is_empty());
+    }
+
+    /// `--no-ports` clears the set, and cannot be given with `--port`.
+    #[test]
+    fn no_ports_clears_and_conflicts_with_port() {
+        let (fakes, dir, _scratch) = shop();
+        let invocation = Invocation::new(Some(dir.to_str().unwrap().to_string()), &fakes);
+        add(
+            &invocation,
+            add_args(&["web", "--port", "3000", "--", "npm run dev"]),
+        )
+        .unwrap();
+
+        let cleared = set(&invocation, set_args(&["web", "--no-ports"])).unwrap();
+        assert!(cleared.changed());
+        assert!(cleared.process().ports().is_empty());
+        assert_eq!(cleared.changes(), &["ports cleared"]);
+        assert!(stored_ports(&fakes, &dir).is_empty());
+
+        let again = set(&invocation, set_args(&["web", "--no-ports"])).unwrap();
+        assert!(!again.changed(), "clearing no ports changes nothing");
+
+        let both = parse(&["set", "web", "--port", "3000", "--no-ports"]).err();
+        assert_eq!(
+            both.map(|error| error.kind()),
+            Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    /// A port outside 1 to 65535 is a usage error (exit 2) naming the form
+    /// a port is written in, for `add` and `set` alike.
+    #[test]
+    fn a_zero_port_is_refused_by_the_parser_naming_the_form() {
+        for words in [
+            &["add", "web", "--port", "0", "--", "x"][..],
+            &["set", "web", "--port", "0"],
+            &["set", "web", "--port", "65536"],
+        ] {
+            let error = parse(words).err().expect("the port is refused");
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{words:?}");
+            assert_eq!(error.exit_code(), 2, "{words:?}");
+            assert!(
+                error.to_string().contains("a port from 1 to 65535"),
+                "{error}"
+            );
+        }
+    }
+
+    /// A ports change is summarised by its ports, or as cleared.
+    #[test]
+    fn set_summarises_a_ports_change() {
+        let replaced = ProcessChange::builder()
+            .ports(Some(ports(&[5173, 3000])))
+            .build();
+        assert_eq!(
+            plain(&set_rows(&running_view(&replaced))),
+            "updated api  ports 3000, 5173"
+        );
+        let cleared = ProcessChange::builder()
+            .ports(Some(BTreeSet::new()))
+            .build();
+        assert_eq!(
+            plain(&set_rows(&running_view(&cleared))),
+            "updated api  ports cleared"
+        );
+    }
 
     /// The view of a change to the running `api`, `needs_restart` or not.
     fn running_view(change: &ProcessChange) -> SetView {

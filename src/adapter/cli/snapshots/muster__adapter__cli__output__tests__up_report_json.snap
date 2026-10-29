@@ -13,6 +13,7 @@ expression: json(&report).unwrap()
       "name": "dev server",
       "outcome": "started",
       "reason": null,
+      "block": null,
       "status": {
         "name": "dev server",
         "state": "running",
@@ -24,13 +25,16 @@ expression: json(&report).unwrap()
         "memory_bytes": 134217728,
         "attached": 0,
         "last_exit": null,
-        "stop_grace": 5
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": null
       }
     },
     {
       "name": "café",
       "outcome": "crashed",
       "reason": null,
+      "block": null,
       "status": {
         "name": "café",
         "state": "crashed",
@@ -45,13 +49,16 @@ expression: json(&report).unwrap()
           "status": 127,
           "signal": null
         },
-        "stop_grace": 5
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": null
       }
     },
     {
       "name": "api",
       "outcome": "refused",
       "reason": "cannot start: the pid 4242 may still run unsupervised",
+      "block": null,
       "status": null
     }
   ],

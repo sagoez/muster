@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use getset::CopyGetters;
 
 use super::{
@@ -61,6 +63,10 @@ pub struct ProcessFlags {
     /// How long each run may take to become ready, such as `60s`.
     #[arg(long, requires = READY_GROUP, value_name = "DURATION", value_parser = positive_duration)]
     ready_timeout: Option<PositiveDuration>,
+    /// A TCP port it listens on, checked free before each start
+    /// (repeatable); on `set`, the ports given replace the stored ones.
+    #[arg(long = "port", value_name = "PORT")]
+    port: Vec<LocalPort>,
 }
 
 impl ProcessFlags {
@@ -106,9 +112,15 @@ impl ProcessFlags {
         ))
     }
 
+    /// The `--port` ports, each once, when any was given.
+    pub fn ports(&self) -> Option<BTreeSet<LocalPort>> {
+        (!self.port.is_empty()).then(|| self.port.iter().copied().collect())
+    }
+
     /// Whether no flag was given.
     pub fn is_empty(&self) -> bool {
-        self.env.is_empty()
+        self.port.is_empty()
+            && self.env.is_empty()
             && self.autostart().is_none()
             && self.restart.is_none()
             && self.stop_signal.is_none()

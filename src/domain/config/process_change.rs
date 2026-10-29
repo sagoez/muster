@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::FieldEdit,
     process::{ReadyCheck, RestartPolicy, StopSignal},
-    value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration},
+    value::{CommandLine, Description, EnvName, EnvValue, StopGrace},
 };
 
 /// What `muster set` changes on one process. Every field left unset keeps the
@@ -40,7 +40,7 @@ pub struct ProcessChange {
     stop_signal: Option<StopSignal>,
     /// A new grace period before force-kill.
     #[builder(default)]
-    stop_grace: Option<PositiveDuration>,
+    stop_grace: Option<StopGrace>,
     /// An edit to the readiness check.
     #[builder(default)]
     ready: FieldEdit<ReadyCheck>,

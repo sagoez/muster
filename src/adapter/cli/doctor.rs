@@ -16,7 +16,7 @@ use crate::{
     adapter::{client::ProjectTarget, store::SqliteStore},
     domain::{
         config::ConfigError,
-        port::{ProjectStore, SettingsStore},
+        port::{ProjectStore, SettingsStore, StackStore},
     },
 };
 
@@ -25,6 +25,7 @@ const DOCTOR_TITLE: &str = "muster doctor";
 /// Probe labels.
 const DATABASE_LABEL: &str = "database";
 const PROJECTS_LABEL: &str = "projects";
+const PROCESSES_LABEL: &str = "processes";
 const PROJECT_LABEL: &str = "this folder";
 const LEGACY_LABEL: &str = "old files";
 const COMPLETIONS_LABEL: &str = "completions";
@@ -34,6 +35,10 @@ const DATABASE_OK: &str = "opens at the current schema, settings valid";
 const NO_PROJECT_HERE: &str = "not inside a project; `muster add` starts one";
 /// The legacy probe with nothing left over.
 const NO_LEGACY_FILES: &str = "none left over";
+/// The processes probe when every stored process reads.
+const PROCESSES_OK: &str = "every stored process reads";
+/// What to do about projects whose stored processes do not read.
+const INVALID_HINT: &str = "`muster projects rm <name> --yes` forgets them";
 /// What to do about registered folders that are gone.
 const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
 /// What to do about legacy files.
@@ -152,6 +157,36 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
             }
         },
         Err(error) => probe(PROJECTS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+    }
+}
+
+/// Whether every registered project's stored processes read, naming each
+/// project whose rows do not and why.
+pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> Probe {
+    let projects = match projects.projects() {
+        Ok(projects) => projects,
+        Err(error) => return probe(PROCESSES_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+    };
+    let invalid: Vec<String> = projects
+        .iter()
+        .filter_map(|project| {
+            stacks
+                .stack(project.root())
+                .err()
+                .map(|error| format!("{} ({})", project.name(), error_chain(&error)))
+        })
+        .collect();
+    if invalid.is_empty() {
+        probe(PROCESSES_LABEL, ProbeOutcome::Ok, PROCESSES_OK.to_string())
+    } else {
+        probe(
+            PROCESSES_LABEL,
+            ProbeOutcome::Fail,
+            format!(
+                "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
+                invalid.join(LIST_SEPARATOR)
+            ),
+        )
     }
 }
 

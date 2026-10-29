@@ -33,6 +33,21 @@ pub enum ConfigError {
     /// the domain.
     #[error("database error: {0}")]
     Database(String),
+    /// A stored row holds a value the domain refuses: it was edited by hand
+    /// or written by a different muster.
+    #[error("stored {what} is invalid: {reason}")]
+    CorruptRow {
+        /// What the refused value is.
+        what: String,
+        /// Why it was refused.
+        reason: String,
+    },
+    /// A value is too large for the database to store.
+    #[error("{what} is too large to store")]
+    TooLarge {
+        /// What the value is.
+        what: String,
+    },
     /// The database was written by a newer muster.
     #[error(
         "the database is at schema version {found}, newer than the {supported} this muster supports; upgrade muster"

@@ -557,7 +557,7 @@ mod tests {
             port::ProcessRunner,
             process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken},
+            value::{CommandLine, ProcessName, ProjectRoot, StartToken, StopGrace},
         },
     };
 
@@ -597,7 +597,7 @@ mod tests {
     fn graceful() -> StopPolicy {
         StopPolicy::builder()
             .signal(StopSignal::Interrupt)
-            .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+            .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
             .build()
     }
 

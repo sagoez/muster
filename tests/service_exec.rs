@@ -29,7 +29,7 @@ use muster::{
         config::{Environment, ProcessSpec, SettingChange},
         port::{SettingsStore, StackStore},
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
-        value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot},
+        value::{CommandLine, ProcessName, ProjectRoot, StopGrace},
     },
 };
 use tempfile::TempDir;
@@ -130,7 +130,7 @@ fn process(name: &str, command: &str, restart: RestartPolicy) -> ProcessSpec {
         .stop(
             StopPolicy::builder()
                 .signal(StopSignal::Terminate)
-                .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+                .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
                 .build(),
         )
         .build()

@@ -417,7 +417,7 @@ mod tests {
     use crate::domain::{
         color_scheme::ColorScheme,
         process::StopPolicy,
-        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
+        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
     };
 
     /// Name given to every test process.
@@ -469,7 +469,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
-                    .grace_period(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+                    .grace_period(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
                     .build(),
             )
             .build()

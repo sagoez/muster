@@ -8,7 +8,7 @@ use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName},
+    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, StopGrace},
 };
 
 /// One process of a stack file. Optional keys are written only when set, and
@@ -123,8 +123,8 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
                 StopPolicy::builder()
                     .signal(*entry.stop.signal())
                     .grace_period(
-                        PositiveDuration::try_new(*entry.stop.grace_period())
-                            .map_err(|_| EntryError::ZeroGrace)?,
+                        StopGrace::try_new(*entry.stop.grace_period())
+                            .map_err(|_| EntryError::GraceOutOfRange)?,
                     )
                     .build(),
             )

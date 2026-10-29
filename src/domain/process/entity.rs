@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         process::StopSignal,
-        value::{EnvName, EnvValue, PositiveDuration},
+        value::{EnvName, EnvValue, StopGrace},
     };
 
     fn spec(command: &str) -> ProcessSpec {
@@ -102,7 +102,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Interrupt)
-                    .grace_period(PositiveDuration::try_new(Duration::from_secs(3)).unwrap())
+                    .grace_period(StopGrace::try_new(Duration::from_secs(3)).unwrap())
                     .build(),
             )
             .build()

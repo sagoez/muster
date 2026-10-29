@@ -8,7 +8,7 @@ use crate::domain::{
     color_scheme::ColorScheme,
     process::{StopPolicy, StopSignal},
     pty::{PtySize, SpawnRequest},
-    value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
+    value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
 };
 
 /// PTY rows of every test child.
@@ -34,7 +34,7 @@ pub(crate) fn test_size() -> PtySize {
 pub(crate) fn test_stop() -> StopPolicy {
     StopPolicy::builder()
         .signal(StopSignal::Terminate)
-        .grace_period(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+        .grace_period(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
         .build()
 }
 

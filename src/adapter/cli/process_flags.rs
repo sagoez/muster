@@ -1,12 +1,12 @@
 use super::{
-    args::{positive_duration, restart_parser, stop_signal_parser},
+    args::{positive_duration, restart_parser, stop_grace, stop_signal_parser},
     error::CliError,
 };
 use crate::{
     adapter::holder::LineMatcher,
     domain::{
         process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
-        value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration},
+        value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
     },
 };
 
@@ -35,9 +35,10 @@ pub struct ProcessFlags {
     /// The signal a graceful stop sends.
     #[arg(long, value_name = "SIGNAL", value_parser = stop_signal_parser())]
     pub stop_signal: Option<StopSignal>,
-    /// How long a graceful stop waits before it kills, such as `5s`.
-    #[arg(long, value_name = "DURATION", value_parser = positive_duration)]
-    pub stop_grace: Option<PositiveDuration>,
+    /// How long a graceful stop waits before it kills, such as `5s`; at most
+    /// 1h.
+    #[arg(long, value_name = "DURATION", value_parser = stop_grace)]
+    pub stop_grace: Option<StopGrace>,
     /// Ready once an output line contains this text; needs --ready-timeout.
     #[arg(long, group = READY_GROUP, value_name = "TEXT", requires = "ready_timeout")]
     pub ready_log: Option<String>,

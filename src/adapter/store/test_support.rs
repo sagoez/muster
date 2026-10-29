@@ -6,7 +6,7 @@ use super::{DATABASE_FILE, SqliteStore};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{RestartPolicy, StopPolicy, StopSignal},
-    value::{CommandLine, PositiveDuration, ProcessName},
+    value::{CommandLine, ProcessName, StopGrace},
 };
 
 /// The state folder a test database lives in, under its scratch directory.
@@ -38,7 +38,7 @@ pub fn spec(name: &str, command: &str) -> ProcessSpec {
         .stop(
             StopPolicy::builder()
                 .signal(StopSignal::Terminate)
-                .grace_period(PositiveDuration::try_new(TEST_GRACE).unwrap())
+                .grace_period(StopGrace::try_new(TEST_GRACE).unwrap())
                 .build(),
         )
         .build()

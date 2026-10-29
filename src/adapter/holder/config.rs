@@ -124,7 +124,7 @@ mod tests {
         color_scheme::ColorScheme,
         process::{StopPolicy, StopSignal},
         pty::PtySize,
-        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
+        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
     };
 
     /// A log cap with no exact human-readable form.
@@ -143,7 +143,7 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let stop = StopPolicy::builder()
             .signal(StopSignal::Interrupt)
-            .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+            .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
             .build();
         let request = SpawnRequest::builder()
             .process(ProcessName::try_new("dev server").unwrap())

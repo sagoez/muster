@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     fmt::Display,
     fs::{OpenOptions, Permissions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -8,11 +9,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, ErrorCode, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
 use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
-    domain::{config::ConfigError, value::PositiveDuration},
+    domain::{
+        config::ConfigError,
+        value::{PositiveDuration, StopGrace},
+    },
 };
 
 /// Nanoseconds in a millisecond, for rounding a grace period up.
@@ -91,9 +95,47 @@ impl SqliteStore {
         conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
         switch_to_wal(&conn).map_err(db_error)?;
         migrate(&mut conn)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+        Ok(Self::over(conn))
+    }
+
+    /// Opens the database in muster's state directory read-only, when it
+    /// exists at the current schema.
+    ///
+    /// # Errors
+    /// Returns what [`SqliteStore::open_existing`] returns.
+    pub fn open_default_existing() -> Result<Option<Self>, ConfigError> {
+        state_dir().map_or(Ok(None), |dir| {
+            Self::open_existing(&dir.join(DATABASE_FILE))
         })
+    }
+
+    /// Opens the database at `path` read-only, creating and migrating
+    /// nothing; `None` when it is absent or not at the current schema.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer
+    /// muster wrote, or [`ConfigError::Database`] when SQLite fails.
+    pub fn open_existing(path: &Path) -> Result<Option<Self>, ConfigError> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(db_error)?;
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
+        if pending_from(&conn)?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(Self::over(conn)))
+    }
+
+    /// The store sharing `conn`.
+    fn over(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }
     }
 
     /// Runs `work` in a read transaction, so its queries see one snapshot.
@@ -142,33 +184,52 @@ impl SqliteStore {
 
 /// Applies every pending migration in one immediate transaction, so two
 /// processes opening a fresh database serialize and the second sees the
-/// version the first wrote.
+/// version the first wrote. A current database is only read, so an open never
+/// waits on another process's write.
 ///
 /// # Errors
 /// Returns [`ConfigError::UnsupportedSchema`] when the database is newer than
 /// [`MIGRATIONS`], or [`ConfigError::Database`] when a migration fails.
 fn migrate(conn: &mut Connection) -> Result<(), ConfigError> {
-    let latest = MIGRATIONS.len();
+    if pending_from(conn)?.is_none() {
+        return Ok(());
+    }
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db_error)?;
-    let found: u32 = transaction
-        .pragma_query_value(None, USER_VERSION, |row| row.get(0))
-        .map_err(db_error)?;
-    let applied = found as usize;
-    if applied > latest {
-        return Err(ConfigError::UnsupportedSchema {
-            found,
-            supported: latest as u32,
-        });
-    }
+    let Some(applied) = pending_from(&transaction)? else {
+        return Ok(());
+    };
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
         transaction.execute_batch(migration).map_err(db_error)?;
         transaction
-            .pragma_update(None, USER_VERSION, index as i64 + 1)
+            .pragma_update(None, USER_VERSION, column_integer(USER_VERSION, index + 1)?)
             .map_err(db_error)?;
     }
     transaction.commit().map_err(db_error)
+}
+
+/// How many migrations `conn`'s database has applied when some are pending,
+/// or `None` when it is current.
+///
+/// # Errors
+/// Returns [`ConfigError::UnsupportedSchema`] when the database is newer than
+/// [`MIGRATIONS`], or [`ConfigError::Database`] when the version cannot be
+/// read.
+fn pending_from(conn: &Connection) -> Result<Option<usize>, ConfigError> {
+    let latest = MIGRATIONS.len();
+    let found: u32 = conn
+        .pragma_query_value(None, USER_VERSION, |row| row.get(0))
+        .map_err(db_error)?;
+    let applied = usize::try_from(found).map_err(|error| corrupt(USER_VERSION, error))?;
+    match applied.cmp(&latest) {
+        Ordering::Less => Ok(Some(applied)),
+        Ordering::Equal => Ok(None),
+        Ordering::Greater => Err(ConfigError::UnsupportedSchema {
+            found,
+            supported: u32::try_from(latest).map_err(|error| corrupt(USER_VERSION, error))?,
+        }),
+    }
 }
 
 /// Runs [`CONNECTION_PRAGMAS`], retrying while another opener holds the lock
@@ -202,26 +263,60 @@ pub(super) fn db_error(error: rusqlite::Error) -> ConfigError {
 /// The error for a stored value the domain refuses: the row was edited by
 /// hand or written by a different muster.
 pub(super) fn corrupt(what: &str, error: impl Display) -> ConfigError {
-    ConfigError::Database(format!("stored {what} is invalid: {error}"))
+    ConfigError::CorruptRow {
+        what: what.to_string(),
+        reason: error.to_string(),
+    }
 }
 
-/// A grace period as whole milliseconds, rounded up so a positive grace never
-/// stores as zero.
-pub(super) fn grace_millis(grace: PositiveDuration) -> i64 {
-    grace.into_inner().as_nanos().div_ceil(NANOS_PER_MILLI) as i64
-}
-
-/// The grace period a millisecond column holds.
+/// `value` as the integer SQLite stores.
 ///
 /// # Errors
-/// Returns [`ConfigError::Database`] naming `what` when it is not positive.
-pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<PositiveDuration, ConfigError> {
+/// Returns [`ConfigError::TooLarge`] naming `what` when it does not fit.
+pub(super) fn column_integer(what: &str, value: impl TryInto<i64>) -> Result<i64, ConfigError> {
+    value.try_into().map_err(|_| ConfigError::TooLarge {
+        what: what.to_string(),
+    })
+}
+
+/// `duration` as whole milliseconds, rounded up so a positive duration never
+/// stores as zero.
+///
+/// # Errors
+/// Returns [`ConfigError::TooLarge`] naming `what` when it does not fit.
+pub(super) fn duration_millis(what: &str, duration: Duration) -> Result<i64, ConfigError> {
+    column_integer(what, duration.as_nanos().div_ceil(NANOS_PER_MILLI))
+}
+
+/// The duration a millisecond column holds.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming `what` when it is negative.
+pub(super) fn duration_from_millis(what: &str, millis: i64) -> Result<Duration, ConfigError> {
     u64::try_from(millis)
         .map_err(|error| corrupt(what, error))
-        .and_then(|millis| {
-            PositiveDuration::try_new(Duration::from_millis(millis))
-                .map_err(|error| corrupt(what, error))
-        })
+        .map(Duration::from_millis)
+}
+
+/// The positive duration a millisecond column holds.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming `what` when it is not positive.
+pub(super) fn positive_from_millis(
+    what: &str,
+    millis: i64,
+) -> Result<PositiveDuration, ConfigError> {
+    PositiveDuration::try_new(duration_from_millis(what, millis)?)
+        .map_err(|error| corrupt(what, error))
+}
+
+/// The stop grace a millisecond column holds.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming `what` when it is not a grace
+/// muster accepts.
+pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<StopGrace, ConfigError> {
+    StopGrace::try_new(duration_from_millis(what, millis)?).map_err(|error| corrupt(what, error))
 }
 
 /// Seconds since the Unix epoch, or zero if the clock predates it. The store
@@ -230,7 +325,8 @@ pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<PositiveDurat
 pub(crate) fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
         .unwrap_or(0)
 }
 
@@ -241,7 +337,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::port::SettingsStore;
+    use crate::domain::{config::SettingChange, port::SettingsStore};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -331,16 +427,90 @@ mod tests {
     /// non-positive stored grace is refused.
     #[test]
     fn a_grace_rounds_up_to_whole_milliseconds() {
-        let grace = |nanos| PositiveDuration::try_new(Duration::from_nanos(nanos)).unwrap();
+        let millis = |nanos| duration_millis("grace", Duration::from_nanos(nanos)).unwrap();
 
-        assert_eq!(grace_millis(grace(1_500_000)), 2);
-        assert_eq!(grace_millis(grace(1)), 1);
+        assert_eq!(millis(1_500_000), 2);
+        assert_eq!(millis(1), 1);
         assert_eq!(
-            grace_from_millis("grace", 5000).unwrap(),
-            grace(5_000_000_000)
+            grace_from_millis("grace", 5000).unwrap().into_inner(),
+            Duration::from_secs(5)
         );
         assert!(grace_from_millis("grace", 0).is_err());
         assert!(grace_from_millis("grace", -1).is_err());
+        assert!(matches!(
+            grace_from_millis("grace", 3_600_001),
+            Err(ConfigError::CorruptRow { .. })
+        ));
+        assert!(positive_from_millis("timeout", 0).is_err());
+    }
+
+    /// A duration too long for a millisecond column is refused, never
+    /// wrapped.
+    #[test]
+    fn a_duration_too_large_to_store_is_refused() {
+        assert!(matches!(
+            duration_millis("timeout", Duration::MAX),
+            Err(ConfigError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            column_integer("size", u64::MAX),
+            Err(ConfigError::TooLarge { .. })
+        ));
+    }
+
+    /// Opening a current database and reading it never wait on another
+    /// process holding the write lock.
+    #[test]
+    fn an_open_and_a_read_never_wait_on_a_writer() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        SqliteStore::open(&path).unwrap();
+        let mut writer = Connection::open(&path).unwrap();
+        let held = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        held.execute("UPDATE settings SET scrollback_lines = 5", [])
+            .unwrap();
+        let started = Instant::now();
+
+        let store = SqliteStore::open(&path).unwrap();
+        let settings = store.load().unwrap();
+        let existing = SqliteStore::open_existing(&path).unwrap().unwrap();
+
+        assert!(started.elapsed() < BUSY_TIMEOUT, "{:?}", started.elapsed());
+        assert_eq!(settings.scrollback().into_inner(), 1000);
+        assert_eq!(existing.load().unwrap(), settings);
+        drop(held);
+    }
+
+    /// A read-only open of a missing database creates nothing.
+    #[test]
+    fn a_read_only_open_creates_nothing() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("state").join(DATABASE_FILE);
+
+        assert!(SqliteStore::open_existing(&path).unwrap().is_none());
+
+        assert!(!path.exists());
+        assert!(!scratch.path().join("state").exists());
+    }
+
+    /// A read-only open sees a current database's projects and refuses to
+    /// write.
+    #[test]
+    fn a_read_only_open_reads_and_never_writes() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        SqliteStore::open(&path).unwrap();
+
+        let store = SqliteStore::open_existing(&path).unwrap().unwrap();
+
+        assert!(store.load().is_ok());
+        assert!(
+            store
+                .apply(&SettingChange::DesktopNotifications(false))
+                .is_err()
+        );
     }
 
     /// Processes opening one fresh database at once all succeed, and the

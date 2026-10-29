@@ -556,8 +556,8 @@ impl Supervisor {
                 )
                 .environment(environment)
                 .size(*self.settings.default_size())
-                .scrollback(*self.settings.scrollback())
-                .log_max_size(*self.settings.log_max_size())
+                .scrollback(self.settings.scrollback().into_inner())
+                .log_max_size(self.settings.log_max_size().into_inner())
                 .color_scheme(*self.settings.color_scheme())
                 .stop(*process.stop())
                 .history(
@@ -928,7 +928,7 @@ impl Supervisor {
         let parser = TerminalEmulator::new(
             size.rows(),
             size.cols(),
-            *self.settings.scrollback(),
+            self.settings.scrollback().into_inner(),
             *self.settings.color_scheme(),
         );
         self.panes.insert(
@@ -1561,8 +1561,8 @@ mod tests {
         assert_eq!(first.stop(), test_stop());
         let settings = test_settings();
         assert_eq!(first.size(), *settings.default_size());
-        assert_eq!(first.scrollback(), *settings.scrollback());
-        assert_eq!(first.log_max_size(), *settings.log_max_size());
+        assert_eq!(first.scrollback(), settings.scrollback().into_inner());
+        assert_eq!(first.log_max_size(), settings.log_max_size().into_inner());
         let launched_with = |index: usize| requests[index].launch_environment().clone();
         let from = |value: &str| BTreeMap::from([(OsString::from("FROM"), OsString::from(value))]);
         assert_eq!(launched_with(0), from("first"));

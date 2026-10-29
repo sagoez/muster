@@ -121,7 +121,7 @@ mod tests {
     use crate::domain::{
         config::Environment,
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
-        value::{CommandLine, PositiveDuration, ProjectName, ProjectRoot},
+        value::{CommandLine, PositiveDuration, ProjectName, ProjectRoot, StopGrace},
     };
 
     /// `café` with a precomposed `é`.
@@ -139,7 +139,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
-                    .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                    .grace_period(StopGrace::try_new(Duration::from_secs(5)).unwrap())
                     .build(),
             )
             .build()

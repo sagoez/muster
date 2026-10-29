@@ -29,7 +29,7 @@ use crate::{
         process::{PatternKind, RestartPolicy, StopSignal},
         value::{
             CommandLine, CommandLineError, LocalPort, LocalUrl, OutputCursor, PositiveDuration,
-            ProcessRef,
+            ProcessRef, StopGrace,
         },
     },
 };
@@ -119,6 +119,14 @@ pub(super) fn positive_duration(raw: &str) -> Result<PositiveDuration, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Parses a stop grace such as `5s`, at most an hour.
+///
+/// # Errors
+/// Returns the parse failure of anything else.
+pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, String> {
+    raw.parse::<StopGrace>().map_err(|error| error.to_string())
+}
+
 /// Parses a `muster logs --lines`: a whole number from 1 to
 /// [`MAX_LOG_LINES`].
 ///
@@ -133,10 +141,13 @@ fn line_limit(raw: &str) -> Result<LineLimit, String> {
 }
 
 /// Shell-completion candidates for `--project`: the registered projects'
-/// names, read fresh each time so a new project completes at once.
+/// names, read fresh each time so a new project completes at once. Reads an
+/// existing database read-only and never creates one.
 fn project_candidates() -> Vec<CompletionCandidate> {
-    SqliteStore::open_default()
-        .and_then(|store| store.projects())
+    SqliteStore::open_default_existing()
+        .ok()
+        .flatten()
+        .and_then(|store| store.projects().ok())
         .unwrap_or_default()
         .iter()
         .map(|project| CompletionCandidate::new(project.name().as_ref()))

@@ -175,6 +175,8 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::NoStateDir
         | ConfigError::CoordinationId(_)
         | ConfigError::Database(_)
+        | ConfigError::CorruptRow { .. }
+        | ConfigError::TooLarge { .. }
         | ConfigError::UnsupportedSchema { .. }
         | ConfigError::UnknownProcess { .. }
         | ConfigError::ImportConflict { .. }

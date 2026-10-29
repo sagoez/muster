@@ -1,13 +1,15 @@
 use bytesize::ByteSize as RawByteSize;
 use rusqlite::{Connection, Row, params};
 
-use super::sqlite_store::{SqliteStore, corrupt, db_error, grace_from_millis, grace_millis};
+use super::sqlite_store::{
+    SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
+};
 use crate::domain::{
     config::{ConfigError, SettingChange},
     port::SettingsStore,
     pty::PtySize,
     settings::Settings,
-    value::{ByteSize, Cols, DetachKey, Rows},
+    value::{ByteSize, Cols, DetachKey, LogMaxSize, Rows, ScrollbackLines},
 };
 
 /// Selects the settings row in the order [`settings_from_row`] reads it.
@@ -38,13 +40,19 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
         .map_err(|error| corrupt("log size", error))
         .and_then(|bytes| {
             ByteSize::try_new(RawByteSize::b(bytes)).map_err(|error| corrupt("log size", error))
+        })
+        .and_then(|size| LogMaxSize::try_new(size).map_err(|error| corrupt("log size", error)))?;
+    let scrollback = usize::try_from(scrollback)
+        .map_err(|error| corrupt("scrollback", error))
+        .and_then(|lines| {
+            ScrollbackLines::try_new(lines).map_err(|error| corrupt("scrollback", error))
         })?;
     Ok(Settings::builder()
         .desktop_notifications(row.get(0).map_err(db_error)?)
         .default_size(default_size)
         .detach_key(DetachKey::try_new(detach_key).map_err(|error| corrupt("detach key", error))?)
         .log_max_size(log_max_size)
-        .scrollback(usize::try_from(scrollback).map_err(|error| corrupt("scrollback", error))?)
+        .scrollback(scrollback)
         .color_scheme(
             color_scheme
                 .parse()
@@ -78,13 +86,6 @@ fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
     }
 }
 
-/// A count the domain holds as unsigned, as the integer SQLite stores.
-fn column_integer(what: &str, value: impl TryInto<i64>) -> Result<i64, ConfigError> {
-    value
-        .try_into()
-        .map_err(|_| ConfigError::Database(format!("{what} is too large to store")))
-}
-
 /// Overwrites the settings row with `settings`.
 fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigError> {
     conn.execute(
@@ -98,12 +99,15 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
             settings.default_size().cols().into_inner(),
             settings.detach_key().as_ref(),
             column_integer("log size", settings.log_max_size().bytes())?,
-            column_integer("scrollback", *settings.scrollback())?,
+            column_integer("scrollback", settings.scrollback().into_inner())?,
             settings.color_scheme().to_string(),
             *settings.default_autostart(),
             settings.default_restart().to_string(),
             settings.default_stop_signal().to_string(),
-            grace_millis(*settings.default_stop_grace()),
+            duration_millis(
+                "default stop grace",
+                settings.default_stop_grace().into_inner()
+            )?,
         ],
     )
     .map_err(db_error)?;
@@ -119,7 +123,7 @@ impl SettingsStore for SqliteStore {
         self.write(|conn| {
             let settings = load_settings(conn)?.with_change(change)?;
             store_settings(conn, &settings)?;
-            Ok(settings)
+            load_settings(conn)
         })
     }
 }
@@ -151,7 +155,7 @@ mod tests {
         assert_eq!(settings.default_size().to_string(), "24x80");
         assert_eq!(settings.detach_key().as_ref(), "ctrl-\\");
         assert_eq!(settings.log_max_size().bytes(), 10 * 1024 * 1024);
-        assert_eq!(*settings.scrollback(), 1000);
+        assert_eq!(settings.scrollback().into_inner(), 1000);
         assert_eq!(*settings.color_scheme(), ColorScheme::Dark);
         assert!(!*settings.default_autostart());
         assert_eq!(*settings.default_restart(), RestartPolicy::Never);
@@ -213,6 +217,45 @@ mod tests {
             })
             .unwrap();
 
-        assert!(matches!(store.load(), Err(ConfigError::Database(_))));
+        assert!(matches!(store.load(), Err(ConfigError::CorruptRow { .. })));
+    }
+
+    /// A hand-edited value past a setting's bound is refused on read, as a
+    /// write would refuse it.
+    #[test]
+    fn a_hand_edited_value_out_of_bounds_is_refused() {
+        for edit in [
+            "scrollback_lines = 100001",
+            "log_max_size_bytes = 1024",
+            "log_max_size_bytes = 2147483648",
+            "default_stop_grace_ms = 3600001",
+        ] {
+            let (store, _scratch) = fresh_store();
+            store
+                .write(|conn| {
+                    conn.execute(&format!("UPDATE settings SET {edit}"), [])
+                        .map_err(db_error)
+                })
+                .unwrap();
+
+            assert!(
+                matches!(store.load(), Err(ConfigError::CorruptRow { .. })),
+                "{edit}"
+            );
+        }
+    }
+
+    /// A change answers with the value the database holds, which rounds a
+    /// grace up to whole milliseconds.
+    #[test]
+    fn a_change_answers_with_the_stored_value() {
+        let (store, _scratch) = fresh_store();
+
+        let settings = store
+            .apply(&parsed(SettingKey::DefaultStopGrace, "1500us"))
+            .unwrap();
+
+        assert_eq!(settings.value_text(SettingKey::DefaultStopGrace), "2ms");
+        assert_eq!(settings, store.load().unwrap());
     }
 }

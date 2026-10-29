@@ -13,7 +13,7 @@ use strum::IntoEnumIterator;
 
 use super::tool_error::ToolError;
 use crate::domain::value::{
-    CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName, ProjectRoot,
+    CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
     ValueParseError, parse_choice,
 };
 
@@ -122,8 +122,8 @@ where
 /// The stop grace an agent typed as `raw`, a humantime duration.
 ///
 /// # Errors
-/// Returns the refusal of unreadable text or a zero duration.
-pub(super) fn stop_grace(raw: &str) -> Result<PositiveDuration, ToolError> {
+/// Returns the refusal of unreadable text, zero, or more than an hour.
+pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, ToolError> {
     raw.parse().map_err(|reason| ToolError::InvalidField {
         field: STOP_GRACE_FIELD,
         reason,
@@ -230,5 +230,13 @@ mod tests {
     fn a_stop_grace_must_be_positive() {
         assert_eq!(stop_grace("10s").unwrap().to_string(), "10s");
         assert!(stop_grace("0s").is_err());
+        assert!(matches!(
+            stop_grace("2h"),
+            Err(ToolError::InvalidField {
+                field: STOP_GRACE_FIELD,
+                ..
+            })
+        ));
+        assert!(stop_grace("300000000y").is_err());
     }
 }

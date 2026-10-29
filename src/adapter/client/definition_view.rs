@@ -73,7 +73,7 @@ mod tests {
     use crate::domain::{
         config::Environment,
         process::{ReadyCheck, ReadyProbe, StopPolicy, StopSignal},
-        value::{EnvName, EnvValue, PositiveDuration},
+        value::{EnvName, EnvValue, PositiveDuration, StopGrace},
     };
 
     /// The definition reads as the documented JSON: snake_case keys,
@@ -93,7 +93,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
-                    .grace_period(PositiveDuration::try_new(Duration::from_millis(5_500)).unwrap())
+                    .grace_period(StopGrace::try_new(Duration::from_millis(5_500)).unwrap())
                     .build(),
             )
             .build();

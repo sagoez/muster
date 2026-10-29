@@ -3,13 +3,13 @@ use crate::domain::{
     config::{ConfigError, SettingKey},
     process::{RestartPolicy, StopSignal},
     pty::PtySize,
-    value::{ByteSize, DetachKey, PositiveDuration, parse_as, parse_choice},
+    value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace, parse_as, parse_choice},
 };
 
 /// The form a boolean setting is written in.
 const BOOLEAN_FORM: &str = "true or false";
 /// The form a line count is written in.
-const LINE_COUNT_FORM: &str = "a whole number of lines such as 1000";
+const LINE_COUNT_FORM: &str = "a whole number of lines from 0 to 100000, such as 1000";
 /// The form a detach key is written in.
 const DETACH_KEY_FORM: &str = "a Control chord such as ctrl-\\ or ctrl-a";
 
@@ -23,9 +23,9 @@ pub enum SettingChange {
     /// The key that detaches `muster attach`.
     DetachKey(DetachKey),
     /// Size at which a process's output log rotates.
-    LogMaxSize(ByteSize),
+    LogMaxSize(LogMaxSize),
     /// Lines of scrollback each process's terminal keeps.
-    Scrollback(usize),
+    Scrollback(ScrollbackLines),
     /// The default colors a process's terminal reports.
     ColorScheme(ColorScheme),
     /// Whether a new process starts with `muster up`.
@@ -35,7 +35,7 @@ pub enum SettingChange {
     /// A new process's graceful stop signal.
     DefaultStopSignal(StopSignal),
     /// A new process's grace period before force-kill.
-    DefaultStopGrace(PositiveDuration),
+    DefaultStopGrace(StopGrace),
 }
 
 impl SettingChange {
@@ -148,15 +148,20 @@ mod tests {
             SettingChange::LogMaxSize("20MiB".parse().unwrap())
         );
         refusal(SettingKey::LogMaxSize, "0B");
+        refusal(SettingKey::LogMaxSize, "1KiB");
+        refusal(SettingKey::LogMaxSize, "2GiB");
+        refusal(SettingKey::LogMaxSize, "16EiB");
     }
 
     #[test]
     fn scrollback_reads_a_line_count() {
         assert_eq!(
             parse(SettingKey::Scrollback, "0"),
-            SettingChange::Scrollback(0)
+            SettingChange::Scrollback(ScrollbackLines::try_new(0).unwrap())
         );
         assert!(refusal(SettingKey::Scrollback, "-1").contains(LINE_COUNT_FORM));
+        assert!(refusal(SettingKey::Scrollback, "100001").contains(LINE_COUNT_FORM));
+        refusal(SettingKey::Scrollback, "18446744073709551615");
     }
 
     #[test]
@@ -184,11 +189,11 @@ mod tests {
     fn default_stop_grace_reads_a_positive_duration() {
         assert_eq!(
             parse(SettingKey::DefaultStopGrace, "10s"),
-            SettingChange::DefaultStopGrace(
-                PositiveDuration::try_new(Duration::from_secs(10)).unwrap()
-            )
+            SettingChange::DefaultStopGrace(StopGrace::try_new(Duration::from_secs(10)).unwrap())
         );
         refusal(SettingKey::DefaultStopGrace, "0s");
+        refusal(SettingKey::DefaultStopGrace, "2h");
+        refusal(SettingKey::DefaultStopGrace, "300000000y");
     }
 
     /// The error names the key so a caller can tell which setting refused.

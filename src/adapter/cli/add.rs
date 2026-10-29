@@ -141,7 +141,7 @@ mod tests {
             config::ProcessSpec,
             process::{RestartPolicy, StopPolicy, StopSignal},
             project::Project,
-            value::{CommandLine, PositiveDuration, ProjectName, ProjectRoot},
+            value::{CommandLine, ProjectName, ProjectRoot, StopGrace},
         },
     };
 
@@ -156,7 +156,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
-                    .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                    .grace_period(StopGrace::try_new(Duration::from_secs(5)).unwrap())
                     .build(),
             )
             .build();

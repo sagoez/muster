@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 use typed_builder::TypedBuilder;
 
-use crate::domain::value::PositiveDuration;
+use crate::domain::value::StopGrace;
 
 /// Graceful signal sent before a command is force-killed.
 #[derive(
@@ -39,7 +39,7 @@ pub struct StopPolicy {
     signal: StopSignal,
     /// Time allowed for graceful exit before an unconditional force-kill.
     #[getset(get = "pub", set_with = "pub")]
-    grace_period: PositiveDuration,
+    grace_period: StopGrace,
 }
 
 #[cfg(test)]

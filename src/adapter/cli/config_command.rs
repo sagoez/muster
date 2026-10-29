@@ -86,7 +86,7 @@ mod tests {
             color_scheme::ColorScheme,
             process::{RestartPolicy, StopSignal},
             pty::PtySize,
-            value::{ByteSize, DetachKey, PositiveDuration},
+            value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
         },
     };
 
@@ -96,13 +96,13 @@ mod tests {
             .desktop_notifications(true)
             .default_size("24x80".parse::<PtySize>().unwrap())
             .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
-            .log_max_size("10MiB".parse::<ByteSize>().unwrap())
-            .scrollback(1000)
+            .log_max_size("10MiB".parse::<LogMaxSize>().unwrap())
+            .scrollback(ScrollbackLines::try_new(1000).unwrap())
             .color_scheme(ColorScheme::Dark)
             .default_autostart(false)
             .default_restart(RestartPolicy::Never)
             .default_stop_signal(StopSignal::Terminate)
-            .default_stop_grace(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+            .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
             .build()
     }
 

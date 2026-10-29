@@ -70,7 +70,7 @@ has:
 - `--autostart` or `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`; restarts back off;
 - `--stop-signal`: `terminate` (SIGTERM) or `interrupt` (SIGINT), and
-  `--stop-grace`, how long a stop waits before SIGKILL;
+  `--stop-grace`, how long a stop waits before SIGKILL, at most `1h`;
 - a readiness check, what each run waits for before it counts as ready: one of
   `--ready-log TEXT` (with `--ready-regex` for a regex), `--ready-port PORT` or
   `--ready-http URL` on localhost, and `--ready-timeout`, how long a run has to
@@ -142,13 +142,13 @@ one and `muster config set <key> <value>` changes it.
 | `desktop-notifications` | `true` or `false`: whether failures raise a desktop notification |
 | `default-size` | `ROWSxCOLS`, such as `24x80`: the terminal size a process starts with, 1 to 1000 rows by 2 to 2000 columns |
 | `detach-key` | a Control chord, such as `ctrl-\`: the key that ends `muster attach`; `ctrl-m`, `ctrl-j`, `ctrl-i`, `ctrl-h` and `ctrl-c` are refused, since terminals send them for Enter, Tab, Backspace and interrupt |
-| `log-max-size` | a size, such as `10MiB`: when a process's log rotates |
-| `scrollback` | lines of history each process's terminal keeps |
+| `log-max-size` | a size from `16KiB` to `1GiB`, such as `10MiB`: when a process's log rotates |
+| `scrollback` | 0 to 100000 lines of history each process's terminal keeps |
 | `color-scheme` | `dark` or `light`: the default colors a process's terminal reports |
 | `default-autostart` | `true` or `false` for a new process |
 | `default-restart` | `never`, `on-failure` or `always` for a new process |
 | `default-stop-signal` | `terminate` or `interrupt` for a new process |
-| `default-stop-grace` | a duration, such as `5s`, for a new process |
+| `default-stop-grace` | a duration up to `1h`, such as `5s`, for a new process |
 
 `detach-key` applies at the next attach, `desktop-notifications` at once, the
 size, scrollback, log size and color scheme to processes started afterwards, and
@@ -182,14 +182,14 @@ answers in the same shapes.
 | `muster export [FILE] [--force] [--with-env]` | Write the project's stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
 | `muster init [--yes]` | Detect a stack in the folder and add it |
-| `muster projects` / `projects rm <project>` | List registered projects, or remove one with its processes and coordination state |
+| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read, or remove one with its processes and coordination state |
 | `muster notices` | Show failed starts, forced stops and crashes the service recorded |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
 | `muster coordination export\|import` | Move that shared state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster doctor` | Diagnose the database, projects and completions |
+| `muster doctor` | Diagnose the database, projects, stored processes and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
 ### Exit codes

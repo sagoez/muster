@@ -305,7 +305,7 @@ Options:
       --no-autostart              Leave it out of `muster up`
       --restart <POLICY>          What happens when its child exits [possible values: never, on-failure, always]
       --stop-signal <SIGNAL>      The signal a graceful stop sends [possible values: terminate, interrupt]
-      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`
+      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`; at most 1h
       --ready-log <TEXT>          Ready once an output line contains this text; needs --ready-timeout
       --ready-regex               Read --ready-log as a regular expression
       --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout
@@ -338,7 +338,7 @@ Options:
       --no-autostart              Leave it out of `muster up`
       --restart <POLICY>          What happens when its child exits [possible values: never, on-failure, always]
       --stop-signal <SIGNAL>      The signal a graceful stop sends [possible values: terminate, interrupt]
-      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`
+      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`; at most 1h
       --ready-log <TEXT>          Ready once an output line contains this text; needs --ready-timeout
       --ready-regex               Read --ready-log as a regular expression
       --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout

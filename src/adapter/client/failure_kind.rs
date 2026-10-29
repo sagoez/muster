@@ -95,13 +95,15 @@ impl From<&ConfigError> for FailureKind {
             | ConfigError::ImportConflict { .. }
             | ConfigError::InvalidSetting { .. }
             | ConfigError::InvalidDefaultSize { .. }
+            | ConfigError::TooLarge { .. }
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
             ConfigError::Write { .. }
             | ConfigError::NoStateDir
             | ConfigError::CoordinationId(_)
-            | ConfigError::Database(_) => Self::Io,
+            | ConfigError::Database(_)
+            | ConfigError::CorruptRow { .. } => Self::Io,
         }
     }
 }

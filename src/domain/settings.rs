@@ -6,7 +6,7 @@ use crate::domain::{
     config::{ConfigError, ProcessDefaults, SettingChange, SettingKey},
     process::{RestartPolicy, StopPolicy, StopSignal},
     pty::PtySize,
-    value::{ByteSize, DetachKey, PositiveDuration},
+    value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
 };
 
 /// User settings that apply across every project, stored per machine.
@@ -24,10 +24,10 @@ pub struct Settings {
     detach_key: DetachKey,
     /// Size at which a process's output log rotates.
     #[getset(get = "pub", set_with = "pub")]
-    log_max_size: ByteSize,
+    log_max_size: LogMaxSize,
     /// Lines of scrollback each process's terminal keeps.
     #[getset(get = "pub", set_with = "pub")]
-    scrollback: usize,
+    scrollback: ScrollbackLines,
     /// The default colors a process's terminal reports when asked.
     #[getset(get = "pub", set_with = "pub")]
     color_scheme: ColorScheme,
@@ -42,7 +42,7 @@ pub struct Settings {
     default_stop_signal: StopSignal,
     /// A newly added process's grace period before force-kill.
     #[getset(get = "pub", set_with = "pub")]
-    default_stop_grace: PositiveDuration,
+    default_stop_grace: StopGrace,
 }
 
 impl Settings {
@@ -123,12 +123,12 @@ mod tests {
             .default_size(size(24, 80))
             .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
             .log_max_size("10MiB".parse().unwrap())
-            .scrollback(1000)
+            .scrollback(ScrollbackLines::try_new(1000).unwrap())
             .color_scheme(ColorScheme::Dark)
             .default_autostart(false)
             .default_restart(RestartPolicy::Never)
             .default_stop_signal(StopSignal::Terminate)
-            .default_stop_grace(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+            .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
             .build()
     }
 

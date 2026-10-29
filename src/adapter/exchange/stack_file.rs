@@ -133,7 +133,9 @@ mod tests {
     use crate::domain::{
         config::Environment,
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
-        value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName},
+        value::{
+            CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName, StopGrace,
+        },
     };
 
     /// The two-process stack the design's example shows, values included.
@@ -165,8 +167,8 @@ processes:
     grace_period: 10s
 ";
 
-    fn grace(seconds: u64) -> PositiveDuration {
-        PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap()
+    fn grace(seconds: u64) -> StopGrace {
+        StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
     fn example() -> Vec<ProcessSpec> {
@@ -191,7 +193,7 @@ processes:
                 .ready(Some(
                     ReadyCheck::builder()
                         .probe(ReadyProbe::from_stored("regex", r"ready in \d+ms").unwrap())
-                        .timeout(grace(60))
+                        .timeout(PositiveDuration::try_new(Duration::from_secs(60)).unwrap())
                         .build(),
                 ))
                 .build(),
@@ -332,7 +334,11 @@ processes:
         );
         assert_eq!(
             refusal(&entry_with("").replace("grace_period: 5s", "grace_period: 0s")),
-            "processes[0] (web): stop.grace_period must be longer than zero"
+            "processes[0] (web): stop.grace_period must be longer than zero and at most 1h"
+        );
+        assert_eq!(
+            refusal(&entry_with("").replace("grace_period: 5s", "grace_period: 2h")),
+            "processes[0] (web): stop.grace_period must be longer than zero and at most 1h"
         );
         assert_eq!(
             refusal(&entry_with("").replace("command: npm run dev", "command: '  '")),

@@ -33,8 +33,8 @@ use crate::{
         pty::{PtyError, PtySize, SpawnRequest},
         settings::Settings,
         value::{
-            ByteSize, Cols, CommandLine, DetachKey, PaneId, PositiveDuration, ProcessName,
-            ProjectName, ProjectRoot, Rows,
+            ByteSize, Cols, CommandLine, DetachKey, LogMaxSize, PaneId, ProcessName, ProjectName,
+            ProjectRoot, Rows, ScrollbackLines, StopGrace,
         },
     },
 };
@@ -67,7 +67,7 @@ pub(crate) fn test_project() -> Project {
 pub(crate) fn test_stop() -> StopPolicy {
     StopPolicy::builder()
         .signal(StopSignal::Interrupt)
-        .grace_period(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+        .grace_period(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
         .build()
 }
 
@@ -102,13 +102,16 @@ pub(crate) fn test_settings() -> Settings {
                 .build(),
         )
         .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
-        .log_max_size(ByteSize::try_new(RawByteSize::mib(TEST_LOG_CAP_MIB)).unwrap())
-        .scrollback(TEST_SCROLLBACK)
+        .log_max_size(
+            LogMaxSize::try_new(ByteSize::try_new(RawByteSize::mib(TEST_LOG_CAP_MIB)).unwrap())
+                .unwrap(),
+        )
+        .scrollback(ScrollbackLines::try_new(TEST_SCROLLBACK).unwrap())
         .color_scheme(ColorScheme::Dark)
         .default_autostart(false)
         .default_restart(RestartPolicy::Never)
         .default_stop_signal(StopSignal::Terminate)
-        .default_stop_grace(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+        .default_stop_grace(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
         .build()
 }
 

@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         process::RestartPolicy,
-        value::{EnvName, EnvValue, PositiveDuration},
+        value::{EnvName, EnvValue, StopGrace},
     };
 
     /// Each kind of change is named in the summary, variables by name only.
@@ -259,9 +259,7 @@ mod tests {
                 EnvValue::try_new("secret").unwrap(),
             )])
             .restart(Some(RestartPolicy::OnFailure))
-            .stop_grace(Some(
-                PositiveDuration::try_new(Duration::from_secs(10)).unwrap(),
-            ))
+            .stop_grace(Some(StopGrace::try_new(Duration::from_secs(10)).unwrap()))
             .ready(FieldEdit::Clear)
             .build();
 

@@ -30,8 +30,8 @@ use super::{
     config_command::{set_rows as setting_rows, set_setting, settings, settings_table},
     coordination::coordination,
     doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, legacy_probe, project_probe,
-        projects_probe,
+        any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
+        processes_probe, project_probe, projects_probe,
     },
     emit::{emit, emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
@@ -975,7 +975,7 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
             print_result(json, &removal, |removal| {
                 written(presenter.finish(&removal_rows(removal)));
             });
-            if removal.stopped().failed() {
+            if removal.failed() {
                 exit(CliExit::ActionFailed.code());
             }
         },
@@ -1074,6 +1074,7 @@ fn doctor(invocation: &Invocation<'_>) {
     let mut probes = vec![database_probe(&opened)];
     if let Ok(store) = &opened {
         probes.push(projects_probe(store));
+        probes.push(processes_probe(store, store));
         probes.push(project_probe(&invocation.target(store)));
     }
     let config_dir =

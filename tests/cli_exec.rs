@@ -1745,6 +1745,177 @@ fn projects_rm_stops_and_forgets_the_project() {
     assert_eq!(projects, serde_json::json!([]));
 }
 
+/// A hand-corrupted process row breaks only its own project: `projects`
+/// lists the others and marks it, `doctor` names it, and `projects rm`
+/// still forgets it.
+#[test]
+fn a_corrupt_process_row_breaks_only_its_project() {
+    let scratch = Scratch::new();
+    scratch.project("shop", &shop());
+    scratch.project("blog", &single());
+    rusqlite::Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE processes SET stop_grace_ms = 7200000 WHERE project_id = \
+             (SELECT id FROM projects WHERE name = 'blog')",
+            [],
+        )
+        .unwrap();
+
+    let (listed, projects) = scratch.json(&["projects"]);
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let named = |name: &str| {
+        projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no project {name}: {projects}"))
+    };
+    assert_eq!(named("shop")["processes"], 3);
+    assert_eq!(named("blog")["processes"], Value::Null);
+    assert!(
+        named("blog")["invalid"]
+            .as_str()
+            .unwrap()
+            .contains("stop grace"),
+        "{projects}"
+    );
+
+    let doctor = scratch.muster(&["doctor"]);
+    assert_eq!(
+        doctor.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&doctor)
+    );
+    assert!(
+        stdout(&doctor).contains("blog (stored stop grace is invalid"),
+        "{}",
+        shown(&doctor)
+    );
+
+    let (rm, removal) = scratch.json(&["projects", "rm", "blog", "--yes"]);
+    assert!(rm.status.success(), "{}", shown(&rm));
+    assert_eq!(removal["removed"], true);
+    assert_eq!(removal["stopped"], Value::Null);
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects.as_array().unwrap().len(), 1, "{projects}");
+    assert_eq!(projects[0]["name"], "shop");
+    let doctor = scratch.muster(&["doctor"]);
+    assert!(
+        stdout(&doctor).contains("every stored process reads"),
+        "{}",
+        shown(&doctor)
+    );
+}
+
+/// A setting or field past its bound is refused as invalid input, never as a
+/// database error, and changes nothing; `config set` answers with the value
+/// the database holds.
+#[test]
+fn values_past_their_bounds_are_invalid_input() {
+    let scratch = Scratch::new();
+    for (key, value) in [
+        ("scrollback", "100001"),
+        ("scrollback", "18446744073709551616"),
+        ("log-max-size", "1KiB"),
+        ("log-max-size", "2GiB"),
+        ("default-stop-grace", "2h"),
+        ("default-stop-grace", "300000000y"),
+    ] {
+        let refused = scratch.muster(&["config", "set", key, value]);
+        assert_eq!(
+            refused.status.code(),
+            Some(INVALID_INPUT),
+            "{key} {value}: {}",
+            shown(&refused)
+        );
+        assert!(
+            !stderr(&refused).contains("database"),
+            "{}",
+            shown(&refused)
+        );
+    }
+    let (_, scrollback) = scratch.json(&["config", "get", "scrollback"]);
+    assert_eq!(scrollback["value"], "1000");
+
+    let (set, stored) = scratch.json(&["config", "set", "default-stop-grace", "1500us"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(stored["value"], "2ms");
+
+    let dir = scratch.path().join("shop");
+    fs::create_dir_all(&dir).unwrap();
+    let project = dir.to_str().unwrap();
+    let endless = scratch.muster(&[
+        "-p",
+        project,
+        "add",
+        "web",
+        "--ready-port",
+        "3000",
+        "--ready-timeout",
+        "300000000y",
+        "--",
+        "sleep 600",
+    ]);
+    assert_eq!(
+        endless.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&endless)
+    );
+    assert!(
+        !stderr(&endless).contains("database"),
+        "{}",
+        shown(&endless)
+    );
+    let long_grace = scratch.muster(&[
+        "-p",
+        project,
+        "add",
+        "web",
+        "--stop-grace",
+        "2h",
+        "--",
+        "sleep 600",
+    ]);
+    assert!(!long_grace.status.success(), "{}", shown(&long_grace));
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects, serde_json::json!([]));
+}
+
+/// Completing `--project` reads an existing database and never creates one.
+#[test]
+fn completing_a_project_never_creates_the_database() {
+    let root = tempfile::Builder::new()
+        .prefix(SCRATCH_PREFIX)
+        .tempdir_in(SHORT_TEMP_ROOT)
+        .unwrap();
+    let complete = |root: &Path| {
+        Command::new(BINARY)
+            .args(["--", "muster", "--project", ""])
+            .current_dir(root)
+            .env("COMPLETE", "fish")
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .output()
+            .unwrap()
+    };
+
+    let empty = complete(root.path());
+    assert!(empty.status.success(), "{}", shown(&empty));
+    assert!(!root.path().join("state").exists());
+
+    let scratch = Scratch::new();
+    scratch.project("shop", &single());
+    let listed = complete(scratch.root.path());
+    assert!(listed.status.success(), "{}", shown(&listed));
+    assert!(stdout(&listed).contains("shop"), "{}", shown(&listed));
+}
+
 /// The MCP protocol version the test client speaks.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// The JSON-RPC version every MCP message carries.

@@ -21,7 +21,7 @@ use muster::{
         port::{OutputSink, ProcessRunner},
         process::{StopPolicy, StopSignal},
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
+        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
     },
 };
 use tempfile::TempDir;
@@ -157,7 +157,7 @@ impl Scratch {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
-                    .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+                    .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
                     .build(),
             )
             .build()

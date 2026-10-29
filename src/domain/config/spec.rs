@@ -111,7 +111,7 @@ mod tests {
     use crate::domain::{
         config::FieldEdit,
         process::{ProcessState, StopSignal},
-        value::{EnvName, EnvValue, PositiveDuration},
+        value::{EnvName, EnvValue, StopGrace},
     };
 
     fn name(raw: &str) -> EnvName {
@@ -122,8 +122,8 @@ mod tests {
         EnvValue::try_new(raw).unwrap()
     }
 
-    fn grace(seconds: u64) -> PositiveDuration {
-        PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap()
+    fn grace(seconds: u64) -> StopGrace {
+        StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
     fn spec() -> ProcessSpec {

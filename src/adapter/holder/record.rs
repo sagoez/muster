@@ -152,7 +152,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{process::StopSignal, value::PositiveDuration};
+    use crate::domain::{process::StopSignal, value::StopGrace};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -170,7 +170,7 @@ mod tests {
             .stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Interrupt)
-                    .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+                    .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
                     .build(),
             )
             .launch_environment(vec![("PATH".into(), "/usr/bin".into())])

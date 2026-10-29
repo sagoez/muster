@@ -7,7 +7,9 @@ use rusqlite::{Connection, Row, ffi, params, params_from_iter, types::Value};
 
 use super::{
     project_rows::{ProjectRow, find_project, register, require_project},
-    sqlite_store::{SqliteStore, corrupt, db_error, grace_from_millis, grace_millis},
+    sqlite_store::{
+        SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
+    },
 };
 use crate::domain::{
     config::{
@@ -25,6 +27,10 @@ use crate::domain::{
 const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description, autostart, \
                               restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
                               ready_timeout_ms FROM processes";
+/// A process's stop grace, as its errors name it.
+const STOP_GRACE: &str = "stop grace";
+/// A process's readiness timeout, as its errors name it.
+const READY_TIMEOUT: &str = "readiness timeout";
 
 /// The text a path column holds.
 ///
@@ -59,7 +65,7 @@ fn process_from_row(
                     ReadyProbe::from_stored(&kind, &target)
                         .map_err(|error| corrupt("readiness check", error))?,
                 )
-                .timeout(grace_from_millis("readiness timeout", timeout_ms)?)
+                .timeout(positive_from_millis(READY_TIMEOUT, timeout_ms)?)
                 .build(),
         ),
         _ => None,
@@ -88,7 +94,7 @@ fn process_from_row(
                         .parse()
                         .map_err(|error| corrupt("stop signal", error))?,
                 )
-                .grace_period(grace_from_millis("stop grace", stop_grace_ms)?)
+                .grace_period(grace_from_millis(STOP_GRACE, stop_grace_ms)?)
                 .build(),
         )
         .ready(ready)
@@ -177,10 +183,15 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         .map(path_text)
         .transpose()?
         .map(str::to_owned);
-    let ready = spec.ready().as_ref().map(|check| {
-        let (kind, target) = check.probe().stored();
-        (kind.to_string(), target, grace_millis(*check.timeout()))
-    });
+    let ready = spec
+        .ready()
+        .as_ref()
+        .map(|check| {
+            let (kind, target) = check.probe().stored();
+            duration_millis(READY_TIMEOUT, check.timeout().into_inner())
+                .map(|timeout| (kind.to_string(), target, timeout))
+        })
+        .transpose()?;
     let (ready_kind, ready_target, ready_timeout_ms) = match ready {
         Some((kind, target, timeout)) => (Some(kind), Some(target), Some(timeout)),
         None => (None, None, None),
@@ -198,7 +209,7 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         (*spec.autostart()).into(),
         spec.restart().to_string().into(),
         spec.stop().signal().to_string().into(),
-        grace_millis(*spec.stop().grace_period()).into(),
+        duration_millis(STOP_GRACE, spec.stop().grace_period().into_inner())?.into(),
         ready_kind.into(),
         ready_target.into(),
         ready_timeout_ms.into(),
@@ -362,7 +373,7 @@ impl StackStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, time::Duration};
 
     use tempfile::TempDir;
 
@@ -373,6 +384,7 @@ mod tests {
             config::FieldEdit,
             port::ProjectStore,
             process::{RestartPolicy, StopSignal},
+            value::PositiveDuration,
         },
     };
 
@@ -418,7 +430,7 @@ mod tests {
     fn port_check() -> ReadyCheck {
         ReadyCheck::builder()
             .probe(ReadyProbe::from_stored("port", "3000").unwrap())
-            .timeout(grace_from_millis("readiness timeout", 30_000).unwrap())
+            .timeout(positive_from_millis(READY_TIMEOUT, 30_000).unwrap())
             .build()
     }
 
@@ -510,7 +522,7 @@ mod tests {
         let check = |kind: &str, target: &str| {
             ReadyCheck::builder()
                 .probe(ReadyProbe::from_stored(kind, target).unwrap())
-                .timeout(grace_from_millis("readiness timeout", 60_000).unwrap())
+                .timeout(positive_from_millis(READY_TIMEOUT, 60_000).unwrap())
                 .build()
         };
         let regex = check("regex", r"ready in \d+ms");
@@ -544,6 +556,25 @@ mod tests {
             &None
         );
         assert_eq!(ready_target(&store, "web"), None);
+    }
+
+    /// A readiness timeout too long for a millisecond column is refused as
+    /// the caller's input rather than wrapped, and writes nothing.
+    #[test]
+    fn a_readiness_timeout_too_large_to_store_is_refused() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let endless = ReadyCheck::builder()
+            .probe(ReadyProbe::from_stored("port", "3000").unwrap())
+            .timeout(PositiveDuration::try_new(Duration::MAX).unwrap())
+            .build();
+
+        let error = store
+            .add_process(&root, &spec("web", "npm run dev").with_ready(Some(endless)))
+            .unwrap_err();
+
+        assert!(matches!(error, ConfigError::TooLarge { .. }), "{error}");
+        assert!(store.stack(&root).unwrap().is_none());
     }
 
     #[test]

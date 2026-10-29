@@ -356,7 +356,7 @@ mod tests {
             color_scheme::ColorScheme,
             process::{StopPolicy, StopSignal},
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, OutputCursor, PositiveDuration, Rows},
+            value::{ByteSize, Cols, CommandLine, OutputCursor, Rows, StopGrace},
         },
     };
 
@@ -610,7 +610,7 @@ mod tests {
                 .stop(
                     StopPolicy::builder()
                         .signal(StopSignal::Terminate)
-                        .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                        .grace_period(StopGrace::try_new(Duration::from_secs(5)).unwrap())
                         .build(),
                 )
                 .build();

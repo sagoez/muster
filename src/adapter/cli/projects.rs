@@ -21,6 +21,7 @@ use crate::{
         store::SqliteStore,
     },
     domain::{
+        config::ConfigError,
         port::{ProjectStore, StackStore, StateChangeNotifier},
         project::Project,
     },
@@ -41,6 +42,10 @@ const PROCESSES: &str = "processes";
 /// Said when no project is registered.
 const NO_PROJECTS: &str =
     "no registered projects; `muster add <name> -- <command>` in a folder starts one";
+/// Opens the reason a project's processes do not read.
+const INVALID: &str = "unreadable: ";
+/// Said when a removed project's processes could not be stopped first.
+const NOTHING_STOPPED: &str = "its stored processes did not read, so none were stopped first";
 /// Opens the line saying a project was removed.
 const REMOVED: &str = "removed project";
 /// The question `projects rm` asks at a terminal.
@@ -56,9 +61,15 @@ pub struct ProjectListing {
     #[serde(flatten)]
     #[getset(get = "pub")]
     project: ProjectIdentityView,
-    /// How many processes it has.
+    /// How many processes it has, or none when its stored processes do not
+    /// read.
     #[getset(get_copy = "pub")]
-    processes: usize,
+    processes: Option<usize>,
+    /// Why its stored processes do not read, when they do not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    #[getset(get = "pub")]
+    invalid: Option<String>,
     /// Whether it contains the current folder.
     #[getset(get_copy = "pub")]
     current: bool,
@@ -73,12 +84,23 @@ pub struct ProjectRemoval {
     /// Whether it was still registered when removed.
     #[getset(get_copy = "pub")]
     removed: bool,
-    /// What became of its processes as they were stopped.
+    /// What became of its processes as they were stopped, or none when its
+    /// stored processes did not read and the service could not stop them
+    /// first.
     #[getset(get = "pub")]
-    stopped: ActionReport,
+    stopped: Option<ActionReport>,
 }
 
-/// Every registered project, the one containing `cwd` marked current.
+impl ProjectRemoval {
+    /// Whether a process it stopped did not end up stopped.
+    pub fn failed(&self) -> bool {
+        self.stopped.as_ref().is_some_and(ActionReport::failed)
+    }
+}
+
+/// Every registered project, the one containing `cwd` marked current. A
+/// project whose stored processes do not read is listed with the reason, so
+/// one corrupt row never hides the others.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be read.
@@ -88,12 +110,15 @@ pub fn list(store: &SqliteStore, cwd: &Path) -> Result<Vec<ProjectListing>, CliE
         .projects()?
         .iter()
         .map(|project| {
-            let processes = store
-                .stack(project.root())?
-                .map_or(0, |stack| stack.processes().len());
+            let (processes, invalid) = match store.stack(project.root()) {
+                Ok(stack) => (Some(stack.map_or(0, |stack| stack.processes().len())), None),
+                Err(error @ ConfigError::CorruptRow { .. }) => (None, Some(error.to_string())),
+                Err(error) => return Err(error.into()),
+            };
             Ok(ProjectListing::builder()
                 .project(ProjectIdentityView::from(project))
                 .processes(processes)
+                .invalid(invalid)
                 .current(current.as_ref() == Some(project))
                 .build())
         })
@@ -127,12 +152,15 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
             } else {
                 OTHER_INDENT
             };
-            let count = listing.processes();
-            let noun = if count == 1 { PROCESS } else { PROCESSES };
+            let contents = match (listing.processes(), listing.invalid()) {
+                (Some(1), _) => format!("1 {PROCESS}"),
+                (Some(count), _) => format!("{count} {PROCESSES}"),
+                (None, reason) => format!("{INVALID}{}", reason.as_deref().unwrap_or_default()),
+            };
             Row::unlabeled(
                 RowKind::Plain,
                 format!(
-                    "{marker}{}{COLUMN_GAP}{}{COLUMN_GAP}{count} {noun}",
+                    "{marker}{}{COLUMN_GAP}{}{COLUMN_GAP}{contents}",
                     pad(&name(listing), name_width),
                     pad(&root(listing), root_width),
                 ),
@@ -161,7 +189,18 @@ pub fn remove(
     project: &Project,
     watch: &mut dyn SettleWatch,
 ) -> Result<ProjectRemoval, CliError> {
-    let stopped = down(client, project, watch)?;
+    let stopped = match down(client, project, watch) {
+        Ok(stopped) => Some(stopped),
+        Err(_)
+            if matches!(
+                store.stack(project.root()),
+                Err(ConfigError::CorruptRow { .. })
+            ) =>
+        {
+            None
+        },
+        Err(error) => return Err(error.into()),
+    };
     let removed = store.remove_project(project.root())?;
     RunningServiceNotifier.stack_changed(project.root());
     Ok(ProjectRemoval::builder()
@@ -174,7 +213,10 @@ pub fn remove(
 /// The human report of `removal`: what became of the processes, then the
 /// project forgotten.
 pub fn removal_rows(removal: &ProjectRemoval) -> Report {
-    let mut rows: Vec<Row> = action_rows(removal.stopped()).rows().clone();
+    let mut rows: Vec<Row> = removal.stopped().as_ref().map_or_else(
+        || vec![Row::unlabeled(RowKind::Hint, NOTHING_STOPPED)],
+        |stopped| action_rows(stopped).rows().clone(),
+    );
     rows.push(Row::unlabeled(
         RowKind::Ok,
         format!(
@@ -183,7 +225,7 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
             removal.project().root().display()
         ),
     ));
-    Report::new(PROJECTS_TITLE, rows).with_failure(removal.stopped().failed())
+    Report::new(PROJECTS_TITLE, rows).with_failure(removal.failed())
 }
 
 #[cfg(test)]
@@ -204,9 +246,37 @@ mod tests {
             .build();
         ProjectListing::builder()
             .project(ProjectIdentityView::from(&project))
-            .processes(processes)
+            .processes(Some(processes))
             .current(current)
             .build()
+    }
+
+    /// A project whose processes do not read is listed with the reason.
+    #[test]
+    fn an_unreadable_project_is_listed_with_its_reason() {
+        let project = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/srv/blog")).unwrap())
+            .name(ProjectName::try_new("blog").unwrap())
+            .build();
+        let broken = ProjectListing::builder()
+            .project(ProjectIdentityView::from(&project))
+            .processes(None)
+            .invalid(Some("stored stop grace is invalid".to_string()))
+            .current(false)
+            .build();
+
+        assert_eq!(
+            plain(&list_rows(&[
+                listing("shop", "/home/me/shop", 3, true),
+                broken.clone()
+            ])),
+            "* shop  /home/me/shop  3 processes\n  blog  /srv/blog      unreadable: stored stop \
+             grace is invalid"
+        );
+        assert_eq!(
+            serde_json::to_value(broken).unwrap(),
+            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid"})
+        );
     }
 
     /// Each project is one aligned line with its folder and count, the

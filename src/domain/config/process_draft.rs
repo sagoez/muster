@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::{Environment, ProcessDefaults, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
-    value::{CommandLine, Description, PositiveDuration, ProcessName},
+    value::{CommandLine, Description, ProcessName, StopGrace},
 };
 
 /// A process as `muster add` receives it, before the `default_*` settings fill
@@ -38,7 +38,7 @@ pub struct ProcessDraft {
     stop_signal: Option<StopSignal>,
     /// Its grace period before force-kill, or the default.
     #[builder(default)]
-    stop_grace: Option<PositiveDuration>,
+    stop_grace: Option<StopGrace>,
     /// What each run waits for before it counts as ready, when anything.
     #[builder(default)]
     ready: Option<ReadyCheck>,
@@ -71,8 +71,8 @@ mod tests {
 
     use super::*;
 
-    fn grace(seconds: u64) -> PositiveDuration {
-        PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap()
+    fn grace(seconds: u64) -> StopGrace {
+        StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
     fn defaults() -> ProcessDefaults {

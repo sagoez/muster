@@ -111,7 +111,7 @@ mod tests {
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
-        value::{Cols, CommandLine, DetachKey, PositiveDuration, ProjectName, Rows},
+        value::{Cols, CommandLine, DetachKey, ProjectName, Rows, ScrollbackLines, StopGrace},
     };
 
     /// One step the fakes record, so a test can check what happened in order.
@@ -253,8 +253,8 @@ mod tests {
             .build()
     }
 
-    fn grace(seconds: u64) -> PositiveDuration {
-        PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap()
+    fn grace(seconds: u64) -> StopGrace {
+        StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
     fn settings() -> Settings {
@@ -268,7 +268,7 @@ mod tests {
             )
             .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
             .log_max_size("10MiB".parse().unwrap())
-            .scrollback(1000)
+            .scrollback(ScrollbackLines::try_new(1000).unwrap())
             .color_scheme(ColorScheme::Dark)
             .default_autostart(true)
             .default_restart(RestartPolicy::OnFailure)
@@ -359,10 +359,12 @@ mod tests {
 
         let settings = fakes
             .editor()
-            .configure(&SettingChange::Scrollback(50))
+            .configure(&SettingChange::Scrollback(
+                ScrollbackLines::try_new(50).unwrap(),
+            ))
             .unwrap();
 
-        assert_eq!(*settings.scrollback(), 50);
+        assert_eq!(settings.scrollback().into_inner(), 50);
         assert_eq!(fakes.steps(), [Step::Wrote, Step::SettingsChanged]);
     }
 

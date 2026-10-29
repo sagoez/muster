@@ -42,8 +42,11 @@ plugs into a port.
 
 - **`domain`** - the core. Entities, value objects, and **ports** (traits the
   core needs the outside world to fulfil, e.g. `ProcessRunner`,
-  `StackStore`, `Notifier`). `LocalState` is every store port as one handle.
-  No I/O, no framework types, no `async`. Fully unit-testable in isolation.
+  `StackStore`, `Notifier`). `LocalState` is the state a driver reads and
+  writes, as one handle: projects, stacks, settings, coordination and the
+  edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
+  `CoordinationStore`, `StackEditLog`). `RunHistory` and `RaisedEdits` stay
+  out of it: only the service writes them. No I/O, no framework types, no `async`. Fully unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
   `domain` only.
@@ -53,9 +56,10 @@ plugs into a port.
     `StackEditor` and drive the service through `adapter/client`, which holds
     the service client, the process use cases, their reports and views, and
     `ClientError`; each driver maps that error to its own surface and neither
-    imports the other. Each takes its state and the service as ports
-    (`LocalState`, `ServiceAccess`) from the composition root, so a test
-    injects fakes and never reaches the user's real database or socket.
+    imports the other. Each takes its state, the service and what tells the
+    service of a stored change as ports (`LocalState`, `ServiceAccess`,
+    `StateChangeNotifier`) from the composition root, so a test injects fakes
+    and never reaches the user's real database or socket.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,
@@ -82,6 +86,14 @@ nothing internal. `application` depends on `domain`. `adapter` depends on
 `domain` (and its own crates). `main` depends on everything and wires it. A port
 is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 `adapter`. Framework/library types never cross into `domain`.
+
+Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
+`HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts` and
+`SettleWatch`. Each abstracts one adapter's call into another, or what the
+composition root hands an adapter, and carries adapter types (service
+requests, holder records, clap launches), so it has no place in `domain`. A
+seam the core itself needs, with only domain types in its signature, is a
+domain port.
 
 ```
 src/
@@ -113,6 +125,12 @@ src/
     workspace_request.rs  # the MCP-to-service requests the service protocol lacks
     sanitize.rs        # control characters made safe to print, for the service and the CLI
     ipc.rs, private_dir.rs, no_state_dir.rs, ...  # sockets, the state directory, OS probes
+    test_scratch.rs, test_wait.rs  # cfg(test): the scratch dirs and the poll every unit test shares
+tests/
+  exec/                # one integration test crate running the built binary
+    main.rs            # declares the cli, holder and service suites and their fixtures
+    cli.rs, holder.rs, service.rs  # the suites
+    common/            # the Scratch, sink, PTY, MCP session and launchers they share
 ```
 
 ## Dependencies and libraries
@@ -142,7 +160,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Byte sizes | `bytesize` |
 | Arg parsing and completions | `clap` + `clap_complete` |
 | CLI styling | `anstream` + `anstyle` |
-| Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter |
+| Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter; `Spinners` only holds the spinner line the presenter starts |
 | MCP server and its tool schemas | `rmcp` on `tokio`, `schemars` |
 | Desktop notifications | `notify-rust` |
 | Process usage | `sysinfo` |
@@ -352,7 +370,12 @@ pub use state::*;
   still blocking never keeps the server alive.
 - Every vte parser goes through `BoundedParser`, which drops a sequence that
   runs past `MAX_PENDING_BYTES` without dispatching, so no child can grow a
-  parser's buffer without bound.
+  parser's buffer without bound. The one exception is the emulator's own
+  `ansi::Processor`, which drives alacritty's `Term` through its `Handler`
+  rather than a vte `Perform`, so `BoundedParser` cannot hold it. It is
+  bounded by the emulator's `ModeScanner`, whose `BoundedParser` reads the
+  same bytes first: each byte that parser drops resets the processor and
+  never reaches it.
 
 ### Processes outlive the service
 - Every child runs under its own holder, launched detached from the muster
@@ -374,12 +397,14 @@ pub use state::*;
 
 ### Testing
 - **Tests live inline**, in `#[cfg(test)] mod tests { ... }` in the same file.
-  The `tests/` directory holds only integration tests that run the built binary.
+  The `tests/` directory holds only integration tests that run the built binary,
+  as one crate, `tests/exec`, whose suites share the fixtures in its `common/`.
 - **Test-only types live in `#[cfg(test)]` fixture files** of their module,
   one type per file as elsewhere (`holder/testing.rs`, `holder/watch.rs`,
   `service/supervisor/testing/`), never inline in a `mod tests`. A fake is
   shared, not copied: one `ChannelSink`, one `ThreadLauncher` with its
-  `Holders`, one `FakeService`. Every fixture fn gets a doc comment.
+  `Holders`, one `FakeService`, one `wait_until` (`adapter/test_wait.rs`),
+  one holder `Harness`. Every fixture fn gets a doc comment.
 - **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
   `cargo insta review`; never blindly accept.
 - **Use getters** to read private fields in tests rather than making fields `pub`.

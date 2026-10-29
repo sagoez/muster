@@ -199,9 +199,9 @@ impl Supervisor {
     }
 
     /// Answers the waits held on `pane` once the read `read` of its log's end
-    /// landed, as [`Self::answer_held_waits`] does. A read for a pane retired
-    /// or replaced since it started is dropped: it seeds no output and
-    /// answers no wait.
+    /// landed with `tail`: it seeds the pane's output, then each wait is
+    /// refused or registered. A read for a pane retired or replaced since it
+    /// started is dropped: it seeds no output and answers no wait.
     pub fn handle_log_tail(
         &mut self,
         pane: PaneId,

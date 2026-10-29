@@ -15,7 +15,7 @@ use super::{condition_arg::PORT_FORM, seconds_arg::SecondsArg, tool_error::ToolE
 use crate::{
     adapter::client::WorkingDirPlace,
     domain::{
-        config::Environment,
+        config::{ConfigError, DeclaredPorts, Environment},
         value::{
             COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
             DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, ProcessName,
@@ -166,8 +166,10 @@ pub(super) fn environment(
 ///
 /// # Errors
 /// Returns the refusal naming [`PORTS_FIELD`] of a value that is not a port
-/// from 1 to 65535, or of a port given twice.
-pub(super) fn ports(raw: &[Number]) -> Result<BTreeSet<LocalPort>, ToolError> {
+/// from 1 to 65535, or of a port given twice, and
+/// [`ConfigError::TooManyPorts`] past
+/// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
+pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
     let mut declared = BTreeSet::new();
     for number in raw {
         let port = number
@@ -183,7 +185,7 @@ pub(super) fn ports(raw: &[Number]) -> Result<BTreeSet<LocalPort>, ToolError> {
             ));
         }
     }
-    Ok(declared)
+    Ok(DeclaredPorts::of(declared).map_err(ConfigError::from)?)
 }
 
 /// `raw` read as one of `T`'s kebab-case names in `field`.

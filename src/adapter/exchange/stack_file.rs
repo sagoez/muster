@@ -6,7 +6,7 @@ use serde_yaml_ng::Value;
 use typed_builder::TypedBuilder;
 
 use super::{EntryError, EnvExport, ExchangeError, ProcessEntry};
-use crate::domain::config::ProcessSpec;
+use crate::domain::{config::ProcessSpec, value::ProjectRoot};
 
 /// The stack file `muster export` writes and `muster import` reads, in the
 /// project root unless a path is given.
@@ -74,27 +74,37 @@ pub fn read_stack_file(raw: &str) -> Result<Vec<ProcessSpec>, ExchangeError> {
         .collect()
 }
 
-/// Renders `processes` as a stack file, in their order, with variables
-/// sorted and their values written or replaced by placeholders per `env`.
+/// Renders `processes` of the project at `root` as a stack file, in their
+/// order, with working directories relative to `root`, variables sorted and
+/// their values written or replaced by placeholders per `env`.
 ///
 /// # Errors
-/// Returns [`ExchangeError::Render`] when the YAML serializer fails.
+/// Returns [`ExchangeError::Unexportable`] for a process an import of the
+/// file would refuse, such as one working outside `root`, or
+/// [`ExchangeError::Render`] when the YAML serializer fails.
 pub fn write_stack_file(
+    root: &ProjectRoot,
     processes: &[ProcessSpec],
     env: EnvExport,
 ) -> Result<String, ExchangeError> {
+    let entries = processes
+        .iter()
+        .map(|spec| {
+            let entry = ProcessEntry::from(spec)
+                .relative_to(root)
+                .map_err(|source| ExchangeError::Unexportable {
+                    name: spec.name().clone(),
+                    source,
+                })?;
+            Ok(match env {
+                EnvExport::Values => entry,
+                EnvExport::Placeholders => entry.without_env_values(),
+            })
+        })
+        .collect::<Result<Vec<_>, ExchangeError>>()?;
     let file = StackFile::builder()
         .version(STACK_FILE_VERSION)
-        .processes(
-            processes
-                .iter()
-                .map(ProcessEntry::from)
-                .map(|entry| match env {
-                    EnvExport::Values => entry,
-                    EnvExport::Placeholders => entry.without_env_values(),
-                })
-                .collect::<Vec<_>>(),
-        )
+        .processes(entries)
         .build();
     let body = serde_yaml_ng::to_string(&file).map_err(|error| ExchangeError::Render {
         reason: error.to_string(),
@@ -170,6 +180,14 @@ processes:
     grace_period: 10s
 ";
 
+    /// The root of the project the example stack belongs to.
+    const ROOT: &str = "/home/me/shop";
+
+    /// The project root [`ROOT`].
+    fn root() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from(ROOT)).unwrap()
+    }
+
     fn grace(seconds: u64) -> StopGrace {
         StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
@@ -238,7 +256,7 @@ processes:
     #[test]
     fn writes_the_documented_format() {
         assert_eq!(
-            write_stack_file(&example(), EnvExport::Values).unwrap(),
+            write_stack_file(&root(), &example(), EnvExport::Values).unwrap(),
             EXAMPLE
         );
     }
@@ -246,7 +264,7 @@ processes:
     #[test]
     fn an_export_reads_back_as_the_same_stack() {
         assert_eq!(read_stack_file(EXAMPLE).unwrap(), example());
-        let written = write_stack_file(&example(), EnvExport::Values).unwrap();
+        let written = write_stack_file(&root(), &example(), EnvExport::Values).unwrap();
         assert_eq!(read_stack_file(&written).unwrap(), example());
         assert!(
             read_stack_file("version: 1\nprocesses: []\n")
@@ -259,7 +277,7 @@ processes:
     /// import refuses until it is filled in; an empty value stays a value.
     #[test]
     fn placeholders_hide_values_and_import_refuses_them() {
-        let written = write_stack_file(&example(), EnvExport::Placeholders).unwrap();
+        let written = write_stack_file(&root(), &example(), EnvExport::Placeholders).unwrap();
 
         assert!(written.contains("PORT: null"), "{written}");
         assert!(!written.contains("5173"));
@@ -431,6 +449,41 @@ processes:
         for dir in ["frontend", "./web/src", "src/../web"] {
             let read = read_stack_file(&entry_with(&format!("working_dir: '{dir}'"))).unwrap();
             assert_eq!(read[0].working_dir().as_deref(), Some(Path::new(dir)));
+        }
+    }
+
+    /// An export writes a working directory inside the root relative to it,
+    /// and leaves out the root itself, so the file imports; one outside the
+    /// root, or one an import would refuse, is refused naming its process.
+    #[test]
+    fn an_export_writes_working_dirs_an_import_accepts() {
+        let working_in = |dir: &str| {
+            let mut stack = example();
+            stack[0] = stack[0].clone().with_working_dir(Some(PathBuf::from(dir)));
+            stack
+        };
+        let exported_dir = |dir: &str| {
+            let written = write_stack_file(&root(), &working_in(dir), EnvExport::Values).unwrap();
+            read_stack_file(&written).unwrap()[0].working_dir().clone()
+        };
+
+        assert_eq!(
+            exported_dir(&format!("{ROOT}/frontend/src")),
+            Some(PathBuf::from("frontend/src"))
+        );
+        assert_eq!(exported_dir(ROOT), None);
+        assert_eq!(exported_dir("frontend"), Some(PathBuf::from("frontend")));
+        for dir in ["/opt/tools", "/home/me/shopping", "../elsewhere"] {
+            assert_eq!(
+                write_stack_file(&root(), &working_in(dir), EnvExport::Values).unwrap_err(),
+                ExchangeError::Unexportable {
+                    name: ProcessName::try_new("web").unwrap(),
+                    source: EntryError::WorkingDirOutsideRoot {
+                        dir: PathBuf::from(dir)
+                    },
+                },
+                "{dir}"
+            );
         }
     }
 

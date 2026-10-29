@@ -15,7 +15,7 @@ use super::{
     text_file::write_atomically,
 };
 use crate::{
-    adapter::exchange::{EnvExport, write_stack_file},
+    adapter::exchange::{EnvExport, ExchangeError, write_stack_file},
     domain::{config::ConfigError, port::StackStore, value::ProjectName},
 };
 
@@ -29,9 +29,6 @@ const TO: &str = "to";
 const PROCESS: &str = "process";
 /// Several processes, counted.
 const PROCESSES: &str = "processes";
-/// What an absolute working directory warns of.
-const ABSOLUTE_DIR_HINT: &str =
-    "works in an absolute folder, which will not resolve on another machine";
 
 /// What `muster export` wrote, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -46,10 +43,6 @@ pub struct ExportView {
     #[serde(skip)]
     #[getset(get = "pub")]
     project: ProjectName,
-    /// The processes whose working directory is absolute.
-    #[serde(skip)]
-    #[getset(get = "pub")]
-    absolute_dirs: Vec<String>,
 }
 
 /// What `muster export` produced.
@@ -85,8 +78,14 @@ pub fn export(
     } else {
         EnvExport::Placeholders
     };
-    let text = write_stack_file(stack.processes(), env)
-        .map_err(|error| CliError::Output(io::Error::other(error)))?;
+    let text =
+        write_stack_file(project.root(), stack.processes(), env).map_err(|error| match error {
+            ExchangeError::Unexportable { ref name, .. } => CliError::Unexportable {
+                name: name.clone(),
+                source: error,
+            },
+            other => CliError::Output(io::Error::other(other)),
+        })?;
     let path = match StackPath::of(invocation, project.root().as_ref(), file)? {
         StackPath::Stdio => return Ok(Exported::Text(text)),
         StackPath::File(path) => path,
@@ -103,36 +102,18 @@ pub fn export(
             .path(path)
             .processes(stack.processes().len())
             .project(project.name().clone())
-            .absolute_dirs(
-                stack
-                    .processes()
-                    .iter()
-                    .filter(|spec| {
-                        spec.working_dir()
-                            .as_ref()
-                            .is_some_and(|dir| dir.is_absolute())
-                    })
-                    .map(|spec| spec.name().to_string())
-                    .collect(),
-            )
             .build(),
     ))
 }
 
-/// The human report of `view`: how many processes went where, and which
-/// will not resolve elsewhere.
+/// The human report of `view`: how many processes went where.
 pub fn export_rows(view: &ExportView) -> Report {
     let count = view.processes();
     let noun = if count == 1 { PROCESS } else { PROCESSES };
-    let mut rows = vec![Row::unlabeled(
+    let rows = vec![Row::unlabeled(
         RowKind::Ok,
         format!("{EXPORTED} {count} {noun} {TO} {}", view.path().display()),
     )];
-    rows.extend(
-        view.absolute_dirs()
-            .iter()
-            .map(|name| Row::labeled(RowKind::Hint, name.clone(), ABSOLUTE_DIR_HINT)),
-    );
     Report::new(project_title(EXPORT_WORD, view.project()), rows)
 }
 
@@ -141,19 +122,18 @@ mod tests {
     use super::*;
     use crate::adapter::cli::report::plain;
 
-    /// The count and file are named, and each absolute folder warned of.
+    /// The count and file are named.
     #[test]
     fn an_export_says_what_went_where() {
         let view = ExportView::builder()
             .path(PathBuf::from("/home/me/shop/muster.yml"))
             .processes(1)
             .project(ProjectName::try_new("shop").unwrap())
-            .absolute_dirs(vec!["tools".to_string()])
             .build();
 
         assert_eq!(
             plain(&export_rows(&view)),
-            format!("exported 1 process to /home/me/shop/muster.yml\n! tools: {ABSOLUTE_DIR_HINT}")
+            "exported 1 process to /home/me/shop/muster.yml"
         );
         assert_eq!(
             serde_json::to_value(&view).unwrap(),

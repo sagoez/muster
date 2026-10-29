@@ -1,5 +1,5 @@
 use std::{
-    io,
+    io::{self, Read},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -35,6 +35,9 @@ const WRITER_BROKEN: &str = "the holder connection broke on an earlier write";
 /// Reported when the holder closed the connection without an exit and no
 /// longer serves its socket.
 const HOLDER_LOST: &str = "the holder stopped serving without reporting an exit";
+/// How long a probe of a holder's socket waits for a dying holder's exit to
+/// reset the connection its listener still queued.
+const SERVING_PROBE: Duration = Duration::from_millis(500);
 
 /// The service's supervisor connection to one holder, driving its child.
 ///
@@ -351,12 +354,32 @@ fn spawn_reader(mut reader: Reader) {
                 Err(_) => break,
             }
         }
-        if !reader.detached.load(Ordering::SeqCst) && UnixStream::connect(&reader.socket).is_err() {
+        if !reader.detached.load(Ordering::SeqCst) && !holder_serves(&reader.socket) {
             reader
                 .sink
                 .send(ProcessOutput::Unreadable(HOLDER_LOST.to_string()));
         }
     });
+}
+
+/// Whether a holder still serves `socket`: it takes a connection and keeps it
+/// open for [`SERVING_PROBE`]. A holder killed mid-exit may close this
+/// connection before its listener, which then still queues a connect until
+/// the exit resets it, so a connect alone would mistake it for serving.
+fn holder_serves(socket: &Path) -> bool {
+    let Ok(mut probe) = UnixStream::connect(socket) else {
+        return false;
+    };
+    if probe.set_read_timeout(Some(SERVING_PROBE)).is_err() {
+        return true;
+    }
+    match probe.read(&mut [0; 1]) {
+        Ok(read) => read > 0,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +416,9 @@ mod tests {
     const SCREEN: &[u8] = b"screen";
     /// How long a reader that should report nothing is watched.
     const QUIET: Duration = Duration::from_millis(300);
+    /// How long a dying holder's listener outlives its supervisor connection,
+    /// well within [`SERVING_PROBE`].
+    const LISTENER_LINGER: Duration = Duration::from_millis(100);
     /// Input sent at once to a holder that never reads, far past what the
     /// socket buffers.
     const FLOOD_BYTES: usize = 4 * 1024 * 1024;
@@ -469,6 +495,32 @@ mod tests {
         .unwrap();
 
         holder.shutdown(Shutdown::Both).unwrap();
+
+        assert!(matches!(
+            outputs.recv_timeout(WAIT),
+            Ok(ProcessOutput::Unreadable(reason)) if reason == HOLDER_LOST
+        ));
+    }
+
+    /// A holder killed mid-exit, whose connection closed before its listener,
+    /// is still reported lost once the exit closes the listener too, though a
+    /// connect probe reached the listener first.
+    #[test]
+    fn a_holder_whose_listener_outlives_the_connection_briefly_is_lost() {
+        let scratch = tempfile::Builder::new()
+            .prefix(SCRATCH_PREFIX)
+            .tempdir_in(SHORT_TEMP_ROOT)
+            .unwrap();
+        let socket = scratch.path().join("holder.sock");
+        let dying = UnixListener::bind(&socket).unwrap();
+        let (service, holder) = greeted_pair();
+        let (sender, outputs) = unbounded();
+        let _handle =
+            HolderHandle::supervise(service, &socket, Box::new(ChannelSink(sender)), WAIT).unwrap();
+
+        holder.shutdown(Shutdown::Both).unwrap();
+        thread::sleep(LISTENER_LINGER);
+        drop(dying);
 
         assert!(matches!(
             outputs.recv_timeout(WAIT),

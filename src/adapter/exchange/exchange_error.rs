@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use super::{EntryError, STACK_FILE_VERSION};
+use crate::domain::value::ProcessName;
 
 /// Why a stack file cannot be read or written.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -28,6 +29,14 @@ pub enum ExchangeError {
         /// The entry's name, when it has a readable one.
         name: Option<String>,
         /// What is wrong with it.
+        source: EntryError,
+    },
+    /// A process could not be exported as an entry an import accepts.
+    #[error("cannot export {name}: {source}")]
+    Unexportable {
+        /// The process.
+        name: ProcessName,
+        /// Why an import would refuse its entry.
         source: EntryError,
     },
     /// The stack could not be rendered as YAML.

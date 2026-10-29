@@ -36,6 +36,7 @@ mod presenter;
 mod presenter_theme;
 mod process;
 mod process_flags;
+mod project_log_slice;
 mod projects;
 mod raw_mode_guard;
 mod report;

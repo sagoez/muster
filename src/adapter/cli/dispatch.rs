@@ -50,6 +50,7 @@ use super::{
     output,
     presenter::Presenter,
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
+    project_log_slice::ProjectLogSlice,
     projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
     report::{Report, Row, RowKind, print_error},
     rm::{removable, remove as remove_processes, rm_rows},
@@ -63,9 +64,9 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            Action, ActionReport, ClientError, NoticeView, ProjectTarget, ProjectView,
-            RunningServiceNotifier, ServiceClient, SettingView, SettingsView, SettleWatch,
-            UserService, WaitView, process, resolve_project,
+            Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
+            ProjectView, RunningServiceNotifier, ServiceClient, SettingView, SettingsView,
+            SettleWatch, UserService, WaitView, process, resolve_project,
         },
         mcp::{self, McpDeps, Scope},
         private_dir::state_dir,
@@ -588,14 +589,21 @@ fn filtered_logs(
         )
     });
     match result {
-        Ok(view) => print_result(json, &view, |view| {
-            if view.omitted_lines() > 0 {
-                emit_line(&output::omitted_lines(view.omitted_lines()));
-            }
-            if !view.text().is_empty() {
-                emit_line(&printable_lines(view.text()));
-            }
-        }),
+        Ok(view) => {
+            let report = ProjectLogSlice::builder()
+                .project(ProjectIdentityView::from(&project))
+                .slice(view)
+                .build();
+            print_result(json, &report, |report| {
+                let view = report.slice();
+                if view.omitted_lines() > 0 {
+                    emit_line(&output::omitted_lines(view.omitted_lines()));
+                }
+                if !view.text().is_empty() {
+                    emit_line(&printable_lines(view.text()));
+                }
+            });
+        },
         Err(error) => fail_command(json, &error),
     }
 }

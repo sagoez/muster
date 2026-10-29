@@ -12,7 +12,8 @@ use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
-        CommandLine, Description, EnvName, EnvValue, ProcessName, ProcessNameError, StopGrace,
+        CommandLine, Description, EnvName, EnvValue, ProcessName, ProcessNameError, ProjectRoot,
+        StopGrace,
     },
 };
 
@@ -51,6 +52,28 @@ pub struct ProcessEntry {
 }
 
 impl ProcessEntry {
+    /// This entry with its working directory written as an import of it into
+    /// `root` reads it: relative to `root`, and left out when it is `root`.
+    ///
+    /// # Errors
+    /// Returns the [`EntryError`] an import would refuse the directory with,
+    /// such as one outside `root`.
+    pub fn relative_to(self, root: &ProjectRoot) -> Result<Self, EntryError> {
+        let working_dir = match self.working_dir {
+            Some(dir) if dir.is_absolute() => match root.relative(&dir) {
+                Some(inside) if inside.as_os_str().is_empty() => None,
+                Some(inside) => Some(working_dir(inside)?),
+                None => return Err(EntryError::WorkingDirOutsideRoot { dir }),
+            },
+            Some(dir) => Some(working_dir(dir)?),
+            None => None,
+        };
+        Ok(Self {
+            working_dir,
+            ..self
+        })
+    }
+
     /// This entry with every variable's value replaced by the placeholder.
     pub fn without_env_values(self) -> Self {
         Self {

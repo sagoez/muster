@@ -789,6 +789,13 @@ fn up_ps_logs_and_down_report_what_happened() {
     ]);
     assert!(grepped.status.success(), "{}", shown(&grepped));
     assert_eq!(slice["text"], "dev-ready", "{slice}");
+    assert_eq!(
+        slice["project"],
+        serde_json::json!({"name": "shop", "root": project.to_str().unwrap()}),
+        "{slice}"
+    );
+    let (_, unfiltered) = scratch.json_on(&project, &["logs", "dev server"]);
+    assert_eq!(unfiltered["project"], slice["project"], "{unfiltered}");
     let cursor = slice["cursor"].as_str().unwrap();
     let (_, after) = scratch.json_on(&project, &["logs", "dev server", "--since", cursor]);
     assert_eq!(after["lines_returned"], 0, "{after}");
@@ -979,6 +986,7 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
             "--",
             &format!("echo caller-${CALLER_VARIABLE}; sleep 600"),
         ])
+        .current_dir(&project)
         .env(CALLER_VARIABLE, "seen")
         .output()
         .unwrap();
@@ -992,10 +1000,17 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
         stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen")
     });
 
-    let first = scratch.on(&project, &["run", "--", "sleep", "600"]);
+    let run_here = |args: &[&str]| {
+        scratch
+            .command(&[&["run", "--"], args].concat())
+            .current_dir(&project)
+            .output()
+            .unwrap()
+    };
+    let first = run_here(&["sleep", "600"]);
     assert!(first.status.success(), "{}", shown(&first));
     let before = scratch.exported(&project);
-    let second = scratch.on(&project, &["run", "--", "sleep", "601"]);
+    let second = run_here(&["sleep", "601"]);
     assert_eq!(
         second.status.code(),
         Some(INVALID_INPUT),
@@ -1210,6 +1225,55 @@ fn config_lists_reads_and_changes_settings() {
         stderr(&typo).contains("default-stop-grace"),
         "{}",
         shown(&typo)
+    );
+}
+
+/// An export refuses a process working outside the project, naming it and
+/// how to move it, and writes nothing; once it works in a folder under the
+/// project, the exported file imports elsewhere with that folder.
+#[test]
+fn an_export_writes_only_working_dirs_an_import_accepts() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let outside = scratch.path().join("tools");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(shop.join("frontend")).unwrap();
+    let file = scratch.path().join("stack.yml");
+    let set = scratch.on(&shop, &["set", "api", "--cwd", outside.to_str().unwrap()]);
+    assert!(set.status.success(), "{}", shown(&set));
+
+    let refused = scratch.on(&shop, &["export", file.to_str().unwrap()]);
+
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("`muster set 'api' --cwd <relative>`"),
+        "{}",
+        shown(&refused)
+    );
+    assert!(!file.exists(), "a refused export writes nothing");
+
+    let set = scratch.on(&shop, &[
+        "set",
+        "api",
+        "--cwd",
+        shop.join("frontend").to_str().unwrap(),
+    ]);
+    assert!(set.status.success(), "{}", shown(&set));
+    let export = scratch.on(&shop, &["export", file.to_str().unwrap()]);
+    assert!(export.status.success(), "{}", shown(&export));
+    let copy = scratch.path().join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    let import = scratch.on(&copy, &["import", file.to_str().unwrap()]);
+    assert!(import.status.success(), "{}", shown(&import));
+    assert!(
+        scratch.exported(&copy).contains("working_dir: frontend"),
+        "{}",
+        scratch.exported(&copy)
     );
 }
 
@@ -3059,8 +3123,11 @@ fn init_offers_what_the_folder_defines() {
 }
 
 /// A process that prints colour, a window title, a clipboard write, a
-/// device query and a DCS, then `done`.
-const NOISY: &str = "printf '\\033[31mred\\033[0m \\033]0;pwned\\007 \\033]52;c;aGk=\\007 \\033[6n \\033P1$qm\\033\\\\ done\\n'; sleep 600";
+/// device query, a window report query and a DCS, redraws a progress line,
+/// then prints `done`.
+const NOISY: &str = "printf '\\033[31mred\\033[0m \\033]0;pwned\\007 \\033]52;c;aGk=\\007 \\033[6n \\033[18t \\033P1$qm\\033\\\\ 10%%\\r\\033[2K50%%\\033[1A done\\n'; sleep 600";
+/// The progress redraw [`NOISY`] prints, which a terminal still receives.
+const PROGRESS_REDRAW: &str = "10%\r\x1b[2K50%\x1b[1A";
 
 /// Whether `haystack` holds `needle`.
 fn holds(haystack: &[u8], needle: &[u8]) -> bool {
@@ -3069,9 +3136,9 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// On a terminal, `logs` and `logs -f` show a process's text and colours
-/// but nothing that could retitle the terminal, write its clipboard or query
-/// it; a pipe still receives every byte the process wrote.
+/// On a terminal, `logs` and `logs -f` show a process's text, colours and
+/// progress redraws but nothing that could retitle the terminal, write its
+/// clipboard or query it; a pipe still receives every byte the process wrote.
 #[test]
 fn logs_on_a_terminal_drop_what_could_drive_it() {
     let mut scratch = Scratch::new();
@@ -3089,6 +3156,12 @@ fn logs_on_a_terminal_drop_what_could_drive_it() {
         shown(&piped)
     );
     assert!(holds(&piped.stdout, b"\x1b[6n"), "{}", shown(&piped));
+    assert!(holds(&piped.stdout, b"\x1b[18t"), "{}", shown(&piped));
+    assert!(
+        holds(&piped.stdout, PROGRESS_REDRAW.as_bytes()),
+        "{}",
+        shown(&piped)
+    );
 
     for args in [&["logs", "noisy"][..], &["logs", "-f", "noisy"][..]] {
         let pty = Pty::open();
@@ -3098,7 +3171,10 @@ fn logs_on_a_terminal_drop_what_could_drive_it() {
         let _ = logs.wait();
         let raw = pty.raw();
         assert!(raw.contains("\x1b[31mred\x1b[0m"), "{args:?}: {raw:?}");
-        for driving in ["pwned", "\x1b]", "aGk=", "\x1b[6n", "\x1bP", "1$qm"] {
+        assert!(raw.contains(PROGRESS_REDRAW), "{args:?}: {raw:?}");
+        for driving in [
+            "pwned", "\x1b]", "aGk=", "\x1b[6n", "\x1b[18t", "\x1bP", "1$qm",
+        ] {
             assert!(
                 !raw.contains(driving),
                 "{args:?} let {driving:?} through: {raw:?}"

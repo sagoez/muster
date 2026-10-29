@@ -1,6 +1,7 @@
 //! A process's raw output made safe to print on a person's terminal: text,
-//! line breaks and colours pass, while anything that could query the
-//! terminal, retitle it, write its clipboard or move its cursor is dropped.
+//! line breaks, colours, cursor moves and erases pass, so a progress bar
+//! redraws, while anything that could query the terminal, retitle it or write
+//! its clipboard is dropped.
 
 use std::io::{self, Write};
 
@@ -9,8 +10,10 @@ use vte::{Params, Parser, Perform};
 /// The control characters that only lay text out, kept as they are: line
 /// feed, carriage return, tab and backspace.
 const LAYOUT_CONTROLS: &[u8] = b"\n\r\t\x08";
-/// The final character of a select-graphic-rendition (colour) sequence.
-const SGR_FINAL: char = 'm';
+/// The final characters of the control sequences kept: colour (SGR), cursor
+/// up, down, forward and back (CUU, CUD, CUF, CUB), cursor to column (CHA),
+/// cursor position (CUP), erase in line (EL) and erase in display (ED).
+const KEPT_FINALS: &[char] = &['m', 'A', 'B', 'C', 'D', 'G', 'H', 'K', 'J'];
 /// Opens a control sequence.
 const CSI: &[u8] = b"\x1b[";
 /// Separates a control sequence's parameters.
@@ -20,8 +23,8 @@ const SUBPARAM_SEPARATOR: char = ':';
 
 /// A writer that passes what reaches it on to `out` with every terminal
 /// string (OSC, DCS, APC, PM, SOS), C1 control, escape and control sequence
-/// removed, except colour (SGR) sequences. A sequence split across writes is
-/// still recognised.
+/// removed, except the colour, cursor-move and erase sequences of
+/// [`KEPT_FINALS`]. A sequence split across writes is still recognised.
 pub struct TerminalSafe<W: Write> {
     /// Where the safe bytes go.
     out: W,
@@ -85,10 +88,11 @@ impl Perform for Kept {
         }
     }
 
-    /// Keeps a colour sequence, rebuilt from its parameters; drops every
-    /// other control sequence, such as a device query or a cursor move.
+    /// Keeps a colour, cursor-move or erase sequence, rebuilt from its
+    /// parameters; drops every other control sequence, such as a device,
+    /// status or window query, and any with a private marker.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        if ignore || action != SGR_FINAL || !intermediates.is_empty() {
+        if ignore || !KEPT_FINALS.contains(&action) || !intermediates.is_empty() {
             return;
         }
         let rebuilt: Vec<String> = params
@@ -104,7 +108,9 @@ impl Perform for Kept {
         self.bytes.extend_from_slice(CSI);
         self.bytes
             .extend_from_slice(rebuilt.join(&PARAM_SEPARATOR.to_string()).as_bytes());
-        self.bytes.push(SGR_FINAL as u8);
+        let mut encoded = [0; 4];
+        self.bytes
+            .extend_from_slice(action.encode_utf8(&mut encoded).as_bytes());
     }
 }
 
@@ -123,7 +129,7 @@ mod tests {
     }
 
     /// Colours and layout pass; a title, a clipboard write, a device query,
-    /// a DCS, an APC, a cursor move and C1 controls do not.
+    /// a DCS, an APC, a reset and C1 controls do not.
     #[test]
     fn only_text_layout_and_colour_pass() {
         assert_eq!(
@@ -135,10 +141,36 @@ mod tests {
         assert_eq!(safe(&[b"a\x1b[6nb\x1b[cc\x1b[>cd"]), "abcd");
         assert_eq!(safe(&[b"a\x1bP1$qm\x1b\\b"]), "ab");
         assert_eq!(safe(&[b"a\x1b_payload\x1b\\b\x1b^pm\x1b\\c"]), "abc");
-        assert_eq!(safe(&[b"a\x1b[2J\x1b[Hb\x1bcc"]), "abc");
+        assert_eq!(safe(&[b"a\x1bcb"]), "ab");
         assert_eq!(safe(&["a\u{9b}6nb\u{9d}0;x\u{7}c".as_bytes()]), "a6nb0;xc");
+        assert_eq!(safe(&["a\u{9b}2Kb".as_bytes()]), "a2Kb");
         assert_eq!(safe(&[b"a\x9b6n\x07b"]), "a6nb");
         assert_eq!(safe(&[b"\x1b[38:2:255:0:0mx"]), "\x1b[38:2:255:0:0mx");
+    }
+
+    /// A progress bar's carriage returns, cursor moves and erases pass, so it
+    /// redraws in place.
+    #[test]
+    fn cursor_moves_and_erases_pass() {
+        assert_eq!(
+            safe(&[b"10%\r\x1b[2K20%\x1b[1A\x1b[2B\x1b[3C\x1b[4D\x1b[5G\x1b[2;7H\x1b[0J"]),
+            "10%\r\x1b[2K20%\x1b[1A\x1b[2B\x1b[3C\x1b[4D\x1b[5G\x1b[2;7H\x1b[0J"
+        );
+        assert_eq!(safe(&[b"a\x1b[Kb"]), "a\x1b[0Kb");
+    }
+
+    /// Queries are dropped: status and cursor reports (DSR), device
+    /// attributes (DA), a setting request (DECRQSS), window and title reports,
+    /// a private-mode report, and a private-marker erase or mode change.
+    #[test]
+    fn terminal_queries_are_dropped() {
+        assert_eq!(safe(&[b"a\x1b[5n\x1b[6n\x1b[?6nb"]), "ab");
+        assert_eq!(safe(&[b"a\x1b[c\x1b[0c\x1b[>c\x1b[=cb"]), "ab");
+        assert_eq!(safe(&[b"a\x1bP$q\"p\x1b\\b"]), "ab");
+        assert_eq!(safe(&[b"a\x1b[18t\x1b[21t\x1b[14tb"]), "ab");
+        assert_eq!(safe(&[b"a\x1b[?2026$pb"]), "ab");
+        assert_eq!(safe(&[b"a\x1b[?2J\x1b[?25lb"]), "ab");
+        assert_eq!(safe(&[b"a\x1bX sos \x1b\\b"]), "ab");
     }
 
     /// A sequence split across two writes is still removed whole.

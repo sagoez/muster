@@ -100,8 +100,10 @@ changed: remove the process and add it again.
 
 `muster export [FILE]` writes the project's stack to `muster.yml` in the project
 folder, or to `FILE` (`-` for stdout), and refuses to overwrite a file without
-`--force`. Environment variables are written by name with a null placeholder;
-`--with-env` writes their values too. `muster import [FILE]` loads such a file
+`--force`. Each working directory is written relative to the project, and a
+process working outside the project is refused until `muster set <name> --cwd`
+moves it under it, so every exported file imports. Environment variables are
+written by name with a null placeholder; `--with-env` writes their values too. `muster import [FILE]` loads such a file
 into the current folder, registering it when needed. By default it refuses
 names the project already defines; `--merge` replaces those, `--replace` makes
 the stack exactly the file and stops what it removes, and `--dry-run` prints
@@ -280,9 +282,10 @@ process; `--read-only` watches without typing or resizing.
 Each process writes its raw output to a log under the state directory, across
 restarts and after it exits. A log rotates at `log-max-size`, keeping one older
 file. `muster logs` and `muster logs -f` write it byte for byte to a pipe or
-file; on a terminal they keep text, line breaks and colours and drop every
-other escape sequence and control character, so a log cannot retitle the
-terminal, write its clipboard or query it. `muster logs --screen` prints what
+file; on a terminal they keep text, line breaks, colours, cursor moves and
+erases, so a progress bar redraws, and drop every query, terminal string and
+other control, so a log cannot retitle the terminal, write its clipboard or
+query it. `muster logs --screen` prints what
 the terminal shows now.
 
 Every byte of a process's output has an offset that runs on across restarts

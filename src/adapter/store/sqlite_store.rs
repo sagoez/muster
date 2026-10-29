@@ -340,7 +340,14 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{config::SettingChange, port::SettingsStore};
+    use crate::{
+        adapter::store::test_support::spec,
+        domain::{
+            config::SettingChange,
+            port::{ProjectStore, SettingsStore, StackStore},
+            value::{ProjectRoot, StackRevision},
+        },
+    };
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -403,6 +410,46 @@ mod tests {
 
         assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
         assert!(store.load().is_ok(), "the seeded settings row survives");
+    }
+
+    /// A database at the first schema, with a project in it, is not read
+    /// before it migrates, then migrates forward keeping the project, whose
+    /// stack starts at revision zero and moves on its next write.
+    #[test]
+    fn a_first_schema_database_migrates_forward_keeping_its_projects() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        let dir = scratch.path().join("shop");
+        fs::create_dir(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        let first = Connection::open(&path).unwrap();
+        first.execute_batch(MIGRATIONS[0]).unwrap();
+        first.pragma_update(None, USER_VERSION, 1).unwrap();
+        first
+            .execute(
+                "INSERT INTO projects (root, name, created_at) VALUES (?1, 'shop', 0)",
+                [root.as_ref().to_str().unwrap()],
+            )
+            .unwrap();
+        drop(first);
+
+        assert!(SqliteStore::open_existing(&path).unwrap().is_none());
+        let store = SqliteStore::open(&path).unwrap();
+
+        assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
+        assert_eq!(store.projects().unwrap().len(), 1);
+        assert_eq!(
+            store.stack_revision(&root).unwrap(),
+            Some(StackRevision::new(0))
+        );
+        store
+            .add_process(&root, &spec("web", "npm run dev"))
+            .unwrap();
+        assert_eq!(
+            store.stack_revision(&root).unwrap(),
+            Some(StackRevision::new(1))
+        );
+        assert!(SqliteStore::open_existing(&path).unwrap().is_some());
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

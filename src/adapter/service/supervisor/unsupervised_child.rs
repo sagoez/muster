@@ -33,9 +33,12 @@ impl UnsupervisedChild {
     /// The child running as `pid` that was started with `expected`, when that
     /// child still runs, recorded with its start token. A pid now held by a
     /// process with another start token is a stranger and is never recorded; a
-    /// token that cannot be read is no proof of one, so the child is kept.
+    /// token that cannot be read is no proof of one, so the child is kept. A
+    /// child already dead and waiting to be reaped, as a holder's child is for
+    /// a moment after both were killed, is gone and never recorded.
     pub(crate) fn observe_expected(pid: u32, expected: Option<StartToken>) -> Option<Self> {
-        if !pid_exists(pid) {
+        let exited = Pid::try_new(pid).is_ok_and(LocalProcessIdentity::has_exited);
+        if !pid_exists(pid) || exited {
             return None;
         }
         let current = start_token_of(pid);
@@ -110,14 +113,46 @@ fn pid_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use std::process;
+    #[cfg(target_os = "linux")]
+    use std::{process::Command, thread, time::Duration};
 
     use super::*;
+
+    /// How long the test child would sleep, far past the test.
+    #[cfg(target_os = "linux")]
+    const CHILD_SLEEP: &str = "600";
+    /// Bound on waiting for a killed child to die.
+    #[cfg(target_os = "linux")]
+    const DEATH_WAIT: Duration = Duration::from_secs(5);
+    /// Interval between checks that a killed child died.
+    #[cfg(target_os = "linux")]
+    const DEATH_POLL: Duration = Duration::from_millis(5);
 
     /// The test process itself is running and keeps its own start token.
     #[test]
     fn the_running_test_process_is_observed_and_still_running() {
         let child = UnsupervisedChild::observe_expected(process::id(), None).unwrap();
         assert!(child.is_running());
+    }
+
+    /// A child that died but was not yet reaped, as a holder's child is for a
+    /// moment after both were killed, is not left unsupervised.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_that_died_unreaped_is_not_observed() {
+        let mut child = Command::new("sleep").arg(CHILD_SLEEP).spawn().unwrap();
+        assert!(UnsupervisedChild::observe_expected(child.id(), None).is_some());
+        child.kill().unwrap();
+        let pid = Pid::try_new(child.id()).unwrap();
+        let started = Instant::now();
+        while !LocalProcessIdentity::has_exited(pid) {
+            assert!(started.elapsed() < DEATH_WAIT, "the child never died");
+            thread::sleep(DEATH_POLL);
+        }
+
+        assert!(pid_exists(child.id()), "the child is not reaped yet");
+        assert!(UnsupervisedChild::observe_expected(child.id(), None).is_none());
+        child.wait().unwrap();
     }
 
     /// Pids zero and one are never observed, so their negated group ids, which

@@ -52,6 +52,8 @@ const DATABASE_FILE: &str = "muster.db";
 const SLEEPER: &str = "sleep 600";
 /// A process that ignores the hangup its holder's death sends.
 const HUP_IGNORING: &str = "trap '' HUP; sleep 600";
+/// The state `/proc/<pid>/stat` gives a process that died unreaped.
+const ZOMBIE_STATE: &str = "Z";
 /// A process that fails at once.
 const FLAPPER: &str = "exit 1";
 /// Restarts the flapper makes before its service is stopped.
@@ -401,10 +403,25 @@ impl Drop for Scratch {
 
 /// Sends SIGKILL to the process `pid`, as a crash or the OOM killer would.
 fn kill_hard(pid: u32) {
+    signal(pid, libc::SIGKILL);
+}
+
+/// Sends `signal` to the process `pid`.
+fn signal(pid: u32, signal: libc::c_int) {
     // SAFETY: `kill` takes plain integers and touches no memory.
     unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        libc::kill(pid as libc::pid_t, signal);
     }
+}
+
+/// Whether the process `pid` died and waits to be reaped, or is gone.
+fn exited(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .is_none_or(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, fields)| fields.starts_with(ZOMBIE_STATE))
+        })
 }
 
 /// A child runs with the scrubbed baseline and the environment of the client
@@ -490,9 +507,13 @@ fn a_holder_killed_with_its_child_is_told_as_a_crash() {
     let mut scratch = Scratch::new();
     let project = scratch.project();
     let service = scratch.start_service();
-    scratch.up_running(&project);
+    let child = scratch.up_running(&project).pid().unwrap();
+    let holder = scratch.holders()[0];
 
-    kill_hard(scratch.holders()[0]);
+    signal(holder, libc::SIGSTOP);
+    kill_hard(child);
+    wait_until("the child to die unreaped", || exited(child));
+    kill_hard(holder);
     wait_until("the crash to be told", || {
         scratch
             .notices(&project)

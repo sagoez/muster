@@ -1,4 +1,19 @@
+#[cfg(target_os = "linux")]
+use std::fs;
+
 use crate::domain::value::{Pid, StartToken};
+
+/// The field of `/proc/<pid>/stat`, after the command name, holding the state.
+#[cfg(target_os = "linux")]
+const STAT_STATE: usize = 0;
+/// The field of `/proc/<pid>/stat`, after the command name, holding the start
+/// time in clock ticks since boot.
+#[cfg(target_os = "linux")]
+const STAT_START_TIME: usize = 19;
+/// The states of a process that exited and only waits to be reaped: zombie
+/// and dead.
+#[cfg(target_os = "linux")]
+const EXITED_STATES: &[&str] = &["Z", "X"];
 
 /// Offset basis for a deterministic process-start-text fingerprint.
 #[cfg(not(target_os = "linux"))]
@@ -53,17 +68,29 @@ impl LocalProcessIdentity {
             .map_or(true, |status| status.success())
     }
 
+    /// Whether `process_id` has exited and only waits to be reaped, so it never
+    /// runs again. Returns `false` when that cannot be read.
+    pub fn has_exited(process_id: Pid) -> bool {
+        Self::platform_has_exited(process_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn platform_has_exited(process_id: Pid) -> bool {
+        stat_fields(process_id)
+            .and_then(|fields| fields.into_iter().nth(STAT_STATE))
+            .is_some_and(|state| EXITED_STATES.contains(&state.as_str()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn platform_has_exited(_process_id: Pid) -> bool {
+        false
+    }
+
     #[cfg(target_os = "linux")]
     fn platform_start_token(process_id: Pid) -> Option<StartToken> {
-        let stat =
-            std::fs::read_to_string(format!("/proc/{}/stat", process_id.into_inner())).ok()?;
-        let fields = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        fields
-            .get(19)?
+        stat_fields(process_id)?
+            .into_iter()
+            .nth(STAT_START_TIME)?
             .parse::<u64>()
             .ok()
             .and_then(|token| StartToken::try_new(token).ok())
@@ -85,5 +112,54 @@ impl LocalProcessIdentity {
                 (hash ^ u64::from(byte)).wrapping_mul(START_TOKEN_HASH_PRIME)
             });
         StartToken::try_new(token).ok()
+    }
+}
+
+/// The fields of `/proc/<pid>/stat` after the command name, which may itself
+/// hold spaces and parentheses.
+#[cfg(target_os = "linux")]
+fn stat_fields(process_id: Pid) -> Option<Vec<String>> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", process_id.into_inner())).ok()?;
+    Some(
+        stat.rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::{
+        process::{self, Command},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+
+    /// Bound on waiting for a child to exit.
+    const EXIT_WAIT: Duration = Duration::from_secs(5);
+    /// Interval between checks that a child exited.
+    const EXIT_POLL: Duration = Duration::from_millis(5);
+
+    /// A child that exited but was not yet reaped has exited, though its pid
+    /// still exists; a running process has not.
+    #[test]
+    fn an_unreaped_child_has_exited() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = Pid::try_new(child.id()).unwrap();
+        let started = Instant::now();
+        while !LocalProcessIdentity::has_exited(pid) {
+            assert!(started.elapsed() < EXIT_WAIT, "the child never exited");
+            thread::sleep(EXIT_POLL);
+        }
+
+        assert!(LocalProcessIdentity::is_alive(pid), "still unreaped");
+        child.wait().unwrap();
+        assert!(!LocalProcessIdentity::has_exited(
+            Pid::try_new(process::id()).unwrap()
+        ));
     }
 }

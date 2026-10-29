@@ -163,6 +163,19 @@ pub enum CliError {
     /// `muster export` would overwrite a file.
     #[error("{} already exists; pass --force to overwrite it", .0.display())]
     FileExists(PathBuf),
+    /// `muster export` would write a process an import refuses: one working
+    /// outside the project.
+    #[error(
+        "{source}; `muster set {} --cwd <relative>` moves it to a folder under the project",
+        name.shell_quoted()
+    )]
+    Unexportable {
+        /// The process.
+        name: ProcessName,
+        /// Why it cannot be exported.
+        #[source]
+        source: ExchangeError,
+    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -265,7 +278,8 @@ impl CliError {
             | Self::ProcessNameTaken { .. }
             | Self::StackFile { .. }
             | Self::SnapshotFile { .. }
-            | Self::FileExists(_) => FailureKind::InvalidInput,
+            | Self::FileExists(_)
+            | Self::Unexportable { .. } => FailureKind::InvalidInput,
         }
     }
 

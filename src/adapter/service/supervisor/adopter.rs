@@ -1451,7 +1451,7 @@ mod tests {
         let orphan = Orphan::spawn();
         let long_grace = StopPolicy::builder()
             .signal(StopSignal::Terminate)
-            .grace_period(PositiveDuration::try_new(LONG_STOP_GRACE).unwrap())
+            .grace_period(StopGrace::try_new(LONG_STOP_GRACE).unwrap())
             .build();
         let mut harness = with_adopter(
             Harness::over(

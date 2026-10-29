@@ -1205,10 +1205,18 @@ mod tests {
     /// How long a gated holder waits after the service is told to stop,
     /// well inside the holder ready timeout.
     const GATE_DELAY: Duration = Duration::from_millis(300);
-    /// A child that writes output as fast as it can.
-    const FLOOD: &str = "yes muster-flood-line";
-    /// How long a flood runs while nothing reads the queue.
-    const FLOOD_HOLD: Duration = Duration::from_millis(800);
+    /// A child that waits for its supervisor to connect, then writes a fixed
+    /// flood with a marker in its middle, far past what the event queue and
+    /// a holder's outbox hold, then waits.
+    const FLOOD: &str = "sleep 1; head -c 3000000 /dev/zero | tr '\\0' x; echo; echo MARKER-READY; \
+                         head -c 3000000 /dev/zero | tr '\\0' y; sleep 600";
+    /// What [`FLOOD`] writes in all, each newline made two bytes by the
+    /// terminal.
+    const FLOOD_BYTES: usize = 3_000_000 + 2 + 14 + 3_000_000;
+    /// The marker in the middle of [`FLOOD`].
+    const FLOOD_MARKER: &[u8] = b"MARKER-READY";
+    /// Longest a flood may take to reach its log, on a loaded machine.
+    const FLOOD_WAIT: Duration = Duration::from_secs(60);
     /// How a resync screen starts: a full terminal reset.
     const RESYNC_PREFIX: &[u8] = b"\x1bc";
 
@@ -1755,9 +1763,11 @@ mod tests {
 
     /// A process flooding output while the loop does not read fills the event
     /// queue to its capacity and no further: its holder connection waits, and
-    /// the holder resyncs it with a fresh screen once it reads again.
+    /// the holder resyncs it with a fresh screen. The output that resync
+    /// dropped is read back from the log, so once the loop reads again it
+    /// sees every byte in order with no gap, the marker in the middle too.
     #[test]
-    fn a_flood_waits_on_the_bounded_queue_and_the_holder_resyncs() {
+    fn a_flood_waits_on_the_bounded_queue_and_its_resync_drops_no_byte() {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("flood", false)]));
         let (sender, events) = bounded(EVENT_CAPACITY);
@@ -1771,29 +1781,46 @@ mod tests {
             .runner()
             .spawn(fixture.request(&project, "flood", FLOOD), Box::new(sink))
             .unwrap();
-
-        thread::sleep(FLOOD_HOLD);
+        let flood_bytes = u64::try_from(FLOOD_BYTES).unwrap();
+        let started = Instant::now();
+        while handle
+            .output_end()
+            .is_none_or(|end| end.offset() < flood_bytes)
+        {
+            assert!(started.elapsed() < FLOOD_WAIT, "the flood never finished");
+            thread::sleep(POLL);
+        }
         assert_eq!(
             events.len(),
             EVENT_CAPACITY,
             "the queue is full and no fuller"
         );
 
-        let started = Instant::now();
-        let resynced = loop {
-            assert!(started.elapsed() < WAIT, "timed out waiting for a resync");
-            match events.recv_timeout(WAIT) {
-                Ok(ServiceEvent::Output {
-                    output: ProcessOutput::Repaint { bytes, .. },
-                    ..
-                }) if bytes.starts_with(RESYNC_PREFIX) => break true,
-                Ok(_) => assert!(events.len() <= EVENT_CAPACITY),
-                Err(_) => break false,
+        let mut seen = Vec::new();
+        let mut resynced = false;
+        while seen.len() < FLOOD_BYTES {
+            let Ok(ServiceEvent::Output { output, .. }) = events.recv_timeout(WAIT) else {
+                panic!("the flood stopped at {} bytes", seen.len());
+            };
+            match output {
+                ProcessOutput::Placed { at, bytes } => {
+                    let at = usize::try_from(at.offset()).unwrap();
+                    assert!(at <= seen.len(), "a gap from {} to {at}", seen.len());
+                    seen.extend_from_slice(bytes.get(seen.len() - at..).unwrap_or_default());
+                },
+                ProcessOutput::Repaint { bytes, .. } if bytes.starts_with(RESYNC_PREFIX) => {
+                    resynced = true;
+                },
+                _ => {},
             }
-        };
+        }
         assert!(
             resynced,
             "the holder resynced the connection it could not feed"
+        );
+        assert!(
+            seen.windows(FLOOD_MARKER.len())
+                .any(|window| window == FLOOD_MARKER)
         );
         handle.kill().unwrap();
     }

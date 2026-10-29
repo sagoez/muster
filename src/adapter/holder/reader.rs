@@ -10,8 +10,8 @@ use std::{
     time::Duration,
 };
 
-use super::protocol::HolderMessage;
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
+use super::{log_reader::read_log_range, protocol::HolderMessage};
+use crate::domain::{port::OutputSink, pty::ProcessOutput, value::OutputCursor};
 
 /// Reported when the holder closed the connection without an exit and no
 /// longer serves its socket.
@@ -19,6 +19,9 @@ pub(super) const HOLDER_LOST: &str = "the holder stopped serving without reporti
 /// How long a probe of a holder's socket waits for a dying holder's exit to
 /// reset the connection its listener still queued.
 const SERVING_PROBE: Duration = Duration::from_millis(500);
+/// Most bytes of a resync's catch-up read from the log and sent at once, so
+/// a long gap is replayed in pieces rather than held whole.
+const CATCH_UP_CHUNK_BYTES: u64 = 64 * 1024;
 
 /// Everything the reader thread of a holder connection owns.
 pub(super) struct Reader {
@@ -26,6 +29,10 @@ pub(super) struct Reader {
     pub(super) stream: UnixStream,
     /// The holder's socket, probed when the connection drops unexpectedly.
     pub(super) socket: PathBuf,
+    /// The child's log, which a resync's dropped output is read back from.
+    pub(super) log: Option<PathBuf>,
+    /// Where the output forwarded so far ends.
+    pub(super) delivered: OutputCursor,
     /// Where the child's screen, output and exit go.
     pub(super) sink: Arc<dyn OutputSink>,
     /// Set when the handle was dropped.
@@ -34,9 +41,36 @@ pub(super) struct Reader {
     pub(super) exit_held: Arc<AtomicBool>,
 }
 
+impl Reader {
+    /// Forwards `bytes` the child wrote at `at`.
+    fn forward(&mut self, at: OutputCursor, bytes: Vec<u8>) {
+        self.delivered = self.delivered.max(at.advanced(bytes.len() as u64));
+        self.sink.send(ProcessOutput::Placed { at, bytes });
+    }
+
+    /// Forwards from the log the output a resync dropped: everything between
+    /// what was forwarded and `log_end`, where the holder's frames resume,
+    /// in pieces of at most [`CATCH_UP_CHUNK_BYTES`]. Output the log no
+    /// longer holds is skipped, and the tap sees the gap.
+    fn catch_up(&mut self, log_end: OutputCursor) {
+        let Some(log) = self.log.clone() else {
+            return;
+        };
+        while self.delivered < log_end {
+            let to = log_end.min(self.delivered.advanced(CATCH_UP_CHUNK_BYTES));
+            match read_log_range(&log, self.delivered, to) {
+                Ok((at, bytes)) if !bytes.is_empty() => self.forward(at, bytes),
+                Ok(_) | Err(_) => return,
+            }
+        }
+    }
+}
+
 /// Forwards the holder's frames to the sink until the child exits or the
 /// connection closes. A sink that is slow only delays this thread; the holder
-/// resyncs a supervisor that falls behind rather than waiting for it.
+/// resyncs a supervisor that falls behind rather than waiting for it, and the
+/// output that resync dropped is read back from the log and forwarded first,
+/// so the supervisor sees every byte.
 ///
 /// The exit is forwarded, never collected: the holder keeps it until the
 /// supervisor acknowledges it, so an exit lost on the way leaves the holder
@@ -54,17 +88,17 @@ pub(super) fn spawn_reader(mut reader: Reader) {
                     repaint,
                     size,
                     attached,
+                    log_end,
                     ..
                 }) => {
+                    reader.catch_up(log_end);
                     reader.sink.send(ProcessOutput::Repaint {
                         bytes: repaint,
                         size,
                     });
                     reader.sink.send(ProcessOutput::Attached(attached));
                 },
-                Ok(HolderMessage::Output { at, bytes }) => {
-                    reader.sink.send(ProcessOutput::Placed { at, bytes });
-                },
+                Ok(HolderMessage::Output { at, bytes }) => reader.forward(at, bytes),
                 Ok(HolderMessage::Exited(outcome)) => {
                     reader.exit_held.store(true, Ordering::SeqCst);
                     reader.sink.send(ProcessOutput::Exited(outcome));

@@ -84,8 +84,9 @@ pub struct HolderHandle {
 
 impl HolderHandle {
     /// Introduces `stream` as the supervisor of the holder at `socket`, keeps
-    /// its screen and starts the reader forwarding to `sink`. Waits at most
-    /// `timeout` for the screen.
+    /// its screen and starts the reader forwarding to `sink`, which reads
+    /// output a resync drops back from `log`, the child's log, when known.
+    /// Waits at most `timeout` for the screen.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the holder does not send its screen or
@@ -93,6 +94,7 @@ impl HolderHandle {
     pub(super) fn supervise(
         mut stream: UnixStream,
         socket: &Path,
+        log: Option<&Path>,
         sink: Box<dyn OutputSink>,
         timeout: Duration,
     ) -> Result<Self, HolderError> {
@@ -112,6 +114,8 @@ impl HolderHandle {
         spawn_reader(Reader {
             stream,
             socket: socket.to_path_buf(),
+            log: log.map(Path::to_path_buf),
+            delivered: greeting.log_end(),
             sink,
             detached: Arc::clone(&detached),
             exit_held: Arc::clone(&exit_held),
@@ -127,7 +131,7 @@ impl HolderHandle {
             run_start: greeting.run_start(),
             log_end: greeting.log_end(),
             backlog: None,
-            log: None,
+            log: log.map(Path::to_path_buf),
             initial_screen: Some(greeting.into_repaint()),
             detached,
             exit_held,
@@ -141,13 +145,15 @@ impl HolderHandle {
         self
     }
 
-    /// Keeps `log`, where the child's output is logged, and reads what the
-    /// child wrote there before this handle connected, from `since` or the
-    /// run's start and at most the last [`BACKLOG_MAX_BYTES`], for
-    /// [`ProcessHandle::take_backlog`]. A log that cannot be read leaves no
-    /// backlog, and the output from here on is still streamed.
-    pub(super) fn with_log(mut self, log: &Path, since: Option<OutputCursor>) -> Self {
-        self.log = Some(log.to_path_buf());
+    /// Reads what the child wrote to its log before this handle connected,
+    /// from `since` or the run's start and at most the last
+    /// [`BACKLOG_MAX_BYTES`], for [`ProcessHandle::take_backlog`]. A log that
+    /// is not known or cannot be read leaves no backlog, and the output from
+    /// here on is still streamed.
+    pub(super) fn with_backlog(mut self, since: Option<OutputCursor>) -> Self {
+        let Some(log) = self.log.clone() else {
+            return self;
+        };
         let from = since
             .unwrap_or(self.run_start)
             .max(self.run_start)
@@ -155,7 +161,7 @@ impl HolderHandle {
                 self.log_end.offset().saturating_sub(BACKLOG_MAX_BYTES),
             ));
         if from < self.log_end {
-            self.backlog = read_log_range(log, from, self.log_end)
+            self.backlog = read_log_range(&log, from, self.log_end)
                 .ok()
                 .filter(|(_, bytes)| !bytes.is_empty());
         }
@@ -273,6 +279,7 @@ impl Drop for HolderHandle {
 mod tests {
     use std::{
         io::Write,
+        iter,
         os::unix::net::UnixListener,
         path::Path,
         time::{Duration, Instant},
@@ -285,7 +292,8 @@ mod tests {
         adapter::{
             channel_sink::ChannelSink,
             holder::{
-                protocol::HolderMessage, reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT,
+                log_fixture::Fixture, protocol::HolderMessage, reader::HOLDER_LOST,
+                shared_writer::WRITE_TIMED_OUT,
             },
             test_scratch::short_scratch,
         },
@@ -334,6 +342,63 @@ mod tests {
         (service, holder)
     }
 
+    /// A resync whose snapshot says the log runs past the output forwarded
+    /// has the dropped span read back from the log and forwarded first, in
+    /// order, so the bytes before the frames that follow are never lost.
+    #[test]
+    fn a_resync_forwards_what_it_dropped_from_the_log() {
+        let mut log = Fixture::new();
+        log.write(b"first\n");
+        let dropped = log.write(b"MARKER-READY\n");
+        let resumed = log.write(b"last\n");
+        let (service, mut holder) = greeted_pair();
+        let (sender, outputs) = unbounded();
+        let _handle = HolderHandle::supervise(
+            service,
+            Path::new(UNSERVED_SOCKET),
+            Some(log.path()),
+            Box::new(ChannelSink::new(sender)),
+            WAIT,
+        )
+        .unwrap();
+
+        HolderMessage::Output {
+            at: OutputCursor::new(0),
+            bytes: b"first\n".to_vec(),
+        }
+        .write_to(&mut holder)
+        .unwrap();
+        HolderMessage::Snapshot {
+            repaint: SCREEN.to_vec(),
+            size: PtySize::try_new(ROWS, COLS).unwrap(),
+            pid: Pid::try_new(CHILD_PID).unwrap(),
+            attached: 0,
+            run_start: OutputCursor::new(0),
+            log_end: resumed,
+        }
+        .write_to(&mut holder)
+        .unwrap();
+        HolderMessage::Output {
+            at: resumed,
+            bytes: b"last\n".to_vec(),
+        }
+        .write_to(&mut holder)
+        .unwrap();
+
+        let placed: Vec<(OutputCursor, Vec<u8>)> =
+            iter::from_fn(|| outputs.recv_timeout(QUIET).ok())
+                .filter_map(|output| match output {
+                    ProcessOutput::Placed { at, bytes } => Some((at, bytes)),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(placed, [
+            (OutputCursor::new(0), b"first\n".to_vec()),
+            (dropped, b"MARKER-READY\n".to_vec()),
+            (resumed, b"last\n".to_vec()),
+        ]);
+    }
+
     /// A frame the reader cannot decode is reported as unreadable output,
     /// not mistaken for an exit or swallowed like an eviction.
     #[test]
@@ -345,6 +410,7 @@ mod tests {
         let mut handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
+            None,
             Box::new(ChannelSink::new(sender)),
             WAIT,
         )
@@ -372,6 +438,7 @@ mod tests {
         let _handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
+            None,
             Box::new(ChannelSink::new(sender)),
             WAIT,
         )
@@ -395,9 +462,14 @@ mod tests {
         let dying = UnixListener::bind(&socket).unwrap();
         let (service, holder) = greeted_pair();
         let (sender, outputs) = unbounded();
-        let _handle =
-            HolderHandle::supervise(service, &socket, Box::new(ChannelSink::new(sender)), WAIT)
-                .unwrap();
+        let _handle = HolderHandle::supervise(
+            service,
+            &socket,
+            None,
+            Box::new(ChannelSink::new(sender)),
+            WAIT,
+        )
+        .unwrap();
 
         holder.shutdown(Shutdown::Both).unwrap();
         thread::sleep(LISTENER_LINGER);
@@ -418,9 +490,14 @@ mod tests {
         let _serving = UnixListener::bind(&socket).unwrap();
         let (service, holder) = greeted_pair();
         let (sender, outputs) = unbounded();
-        let mut handle =
-            HolderHandle::supervise(service, &socket, Box::new(ChannelSink::new(sender)), WAIT)
-                .unwrap();
+        let mut handle = HolderHandle::supervise(
+            service,
+            &socket,
+            None,
+            Box::new(ChannelSink::new(sender)),
+            WAIT,
+        )
+        .unwrap();
         assert_eq!(
             format!("{:?}", handle.screen_source()),
             format!(
@@ -460,6 +537,7 @@ mod tests {
         let mut handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
+            None,
             Box::new(ChannelSink::new(sender)),
             WAIT,
         )

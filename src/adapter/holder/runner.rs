@@ -146,11 +146,12 @@ impl HolderRunner {
         let handle = HolderHandle::supervise(
             stream,
             record.socket(),
+            Some(record.log()),
             sink,
             HOLDER_READY_TIMEOUT.into_inner(),
         )?
         .with_started_at(record.child_started_at())
-        .with_log(record.log(), since);
+        .with_backlog(since);
         Ok(Box::new(handle))
     }
 
@@ -272,7 +273,7 @@ impl ProcessRunner for HolderRunner {
             .build();
         let error_file = config.error_path();
         self.launcher.launch(config)?;
-        let supervised = match self.supervise_launched(&socket, &error_file, sink) {
+        let supervised = match self.supervise_launched(&socket, &log, &error_file, sink) {
             Err(error @ HolderError::FailedToStart { .. }) => Err(error),
             Err(error) => {
                 abandon(&socket);
@@ -281,13 +282,13 @@ impl ProcessRunner for HolderRunner {
             Ok(handle) => Ok(handle),
         };
         let _ = fs::remove_file(&error_file);
-        Ok(Box::new(supervised?.with_log(&log, None)))
+        Ok(Box::new(supervised?.with_backlog(None)))
     }
 }
 
 impl HolderRunner {
-    /// Becomes the supervisor of a holder just launched at `socket`, within
-    /// the ready timeout.
+    /// Becomes the supervisor of a holder just launched at `socket`, logging
+    /// to `log`, within the ready timeout.
     ///
     /// # Errors
     /// Returns [`HolderError::FailedToStart`] with the holder's own error when
@@ -296,13 +297,14 @@ impl HolderRunner {
     fn supervise_launched(
         &self,
         socket: &Path,
+        log: &Path,
         error_file: &Path,
         sink: Box<dyn OutputSink>,
     ) -> Result<HolderHandle, HolderError> {
         let deadline = Instant::now() + self.ready_timeout.into_inner();
         let stream = connect_by(socket, error_file, deadline)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        HolderHandle::supervise(stream, socket, sink, remaining.max(READY_POLL))
+        HolderHandle::supervise(stream, socket, Some(log), sink, remaining.max(READY_POLL))
     }
 }
 

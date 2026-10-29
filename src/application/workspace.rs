@@ -2,15 +2,14 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    agent_session::AgentSessionId,
-    process::{ActivityState, Process, ProcessState},
+    process::{Process, ProcessState},
     pty::ExitOutcome,
     value::PaneId,
 };
 
 /// In-memory workspace state: the ordered processes. Pure domain
 /// orchestration, free of any rendering or I/O concern.
-#[derive(Getters, TypedBuilder)]
+#[derive(Clone, Debug, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Workspace {
     processes: Vec<Process>,
@@ -22,16 +21,9 @@ impl Workspace {
         self.processes.is_empty()
     }
 
-    /// Inserts a process at the end of its section and returns its index.
-    pub fn insert_in_section(&mut self, process: Process) -> usize {
-        let section = process.kind().section_index();
-        let index = self
-            .processes
-            .iter()
-            .position(|existing| existing.kind().section_index() > section)
-            .unwrap_or(self.processes.len());
-        self.processes.insert(index, process);
-        index
+    /// Appends a process after every existing one.
+    pub fn push(&mut self, process: Process) {
+        self.processes.push(process);
     }
 
     /// Removes the process owning `pane`, if present.
@@ -60,27 +52,6 @@ impl Workspace {
         }
     }
 
-    /// Sets the autostart flag of the process owning `pane`.
-    pub fn set_autostart(&mut self, pane: PaneId, autostart: bool) {
-        if let Some(index) = self.position_of(pane) {
-            self.processes[index].set_autostart(autostart);
-        }
-    }
-
-    /// Updates the inferred activity of the process owning `pane`.
-    pub fn set_activity(&mut self, pane: PaneId, activity: ActivityState) {
-        if let Some(index) = self.position_of(pane) {
-            self.processes[index].set_activity(activity);
-        }
-    }
-
-    /// Binds the process owning `pane` to a durable agent session.
-    pub fn set_agent_session_id(&mut self, pane: PaneId, id: AgentSessionId) {
-        if let Some(index) = self.position_of(pane) {
-            self.processes[index].set_agent_session_id(id);
-        }
-    }
-
     /// Whether the process owning `pane` should be restarted after `outcome`.
     pub fn should_restart(&self, pane: PaneId, outcome: &ExitOutcome) -> bool {
         self.process(pane)
@@ -91,19 +62,29 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::domain::{
-        process::{ProcessKind, RestartPolicy},
-        value::{CommandLine, ProcessName},
+        config::Environment,
+        process::{RestartPolicy, StopPolicy, StopSignal},
+        value::{CommandLine, PositiveDuration, ProcessName},
     };
 
     fn process(id: u64, restart: RestartPolicy) -> Process {
         Process::builder()
             .id(PaneId::new(id))
             .name(ProcessName::try_new(format!("p{id}")).unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new("true").unwrap()))
+            .command(CommandLine::try_new("true").unwrap())
+            .environment(Environment::empty())
             .restart(restart)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                    .build(),
+            )
+            .autostart(false)
             .build()
     }
 
@@ -145,19 +126,12 @@ mod tests {
         assert!(ws.should_restart(PaneId::new(1), &ExitOutcome::FAILED_UNKNOWN));
     }
 
-    /// A runtime process joins its kind's existing section.
     #[test]
-    fn inserts_a_process_at_the_end_of_its_section() {
+    fn push_appends_after_every_process() {
         let mut ws = workspace();
-        let agent = Process::builder()
-            .id(PaneId::new(2))
-            .name(ProcessName::try_new("agent").unwrap())
-            .kind(ProcessKind::Agent)
-            .build();
 
-        let index = ws.insert_in_section(agent);
+        ws.push(process(2, RestartPolicy::Never));
 
-        assert_eq!(index, 0);
-        assert_eq!(*ws.processes()[index].kind(), ProcessKind::Agent);
+        assert_eq!(ws.position_of(PaneId::new(2)), Some(2));
     }
 }

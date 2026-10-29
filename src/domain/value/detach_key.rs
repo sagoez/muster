@@ -31,7 +31,17 @@ fn is_detach_chord(chord: &str) -> bool {
 #[nutype(
     sanitize(trim, lowercase),
     validate(predicate = is_detach_chord),
-    derive(Debug, Clone, PartialEq, Eq, AsRef, Display, Serialize, Deserialize)
+    derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        AsRef,
+        Display,
+        FromStr,
+        Serialize,
+        Deserialize
+    )
 )]
 pub struct DetachKey(String);
 

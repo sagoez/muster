@@ -6,7 +6,7 @@ use crate::domain::{
 /// Next lifecycle action after a managed child exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitDecision {
-    /// Remove a pane retired by configuration reconciliation.
+    /// Remove a pane whose process was removed from the stack.
     Retire,
     /// Keep the pane stopped after an explicit user stop.
     Stop,
@@ -25,11 +25,11 @@ impl ProcessLifecycle {
     /// Chooses the post-exit action from explicit intent and restart policy.
     pub fn after_exit(
         intent: ExitIntent,
-        retired_by_config: bool,
+        retired_from_stack: bool,
         should_restart: bool,
         outcome: &ExitOutcome,
     ) -> ExitDecision {
-        if retired_by_config {
+        if retired_from_stack {
             return ExitDecision::Retire;
         }
         match intent {

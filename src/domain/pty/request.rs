@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    agent_session::AgentSessionId,
-    process::ProcessKind,
+    color_scheme::ColorScheme,
     pty::{PtySize, SpawnHistory},
-    value::{CommandLine, ProcessName},
+    value::{ByteSize, CommandLine, ProcessName},
 };
 
 /// A request to spawn one process under a PTY.
@@ -18,19 +17,15 @@ pub struct SpawnRequest {
     /// Name of the process being spawned, as its project knows it.
     #[getset(get = "pub")]
     process: ProcessName,
-    /// Section the process belongs to.
-    #[getset(get_copy = "pub")]
-    kind: ProcessKind,
-    /// Command to run, or the user's login shell when absent.
+    /// Shell command to run.
     #[getset(get = "pub")]
-    #[builder(default)]
-    command: Option<CommandLine>,
+    command: CommandLine,
     /// Directory to launch in; inherits the parent's cwd when absent.
     #[getset(get = "pub")]
     #[builder(default)]
     working_dir: Option<PathBuf>,
-    /// Project config path exported to the process, letting the `muster` CLI
-    /// target the current project without a flag. Absent leaves it unset.
+    /// Project root exported to the process, letting the `muster` CLI target
+    /// the current project without a flag. Absent leaves it unset.
     #[getset(get = "pub")]
     #[builder(default)]
     project: Option<PathBuf>,
@@ -39,13 +34,18 @@ pub struct SpawnRequest {
     #[builder(default)]
     #[serde(with = "environment_pairs")]
     environment: BTreeMap<OsString, OsString>,
-    /// Durable session whose provider process must bind before it starts.
-    #[getset(get = "pub")]
-    #[builder(default)]
-    agent_session_id: Option<AgentSessionId>,
     /// Initial PTY size.
     #[getset(get_copy = "pub")]
     size: PtySize,
+    /// Lines of scrollback the process's terminal keeps.
+    #[getset(get_copy = "pub")]
+    scrollback: usize,
+    /// Size at which the process's output log rotates.
+    #[getset(get_copy = "pub")]
+    log_max_size: ByteSize,
+    /// The default colors the process's terminal reports when asked.
+    #[getset(get_copy = "pub")]
+    color_scheme: ColorScheme,
     /// What the process's earlier runs leave to this one.
     #[getset(get = "pub")]
     #[builder(default)]

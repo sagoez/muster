@@ -1,18 +1,21 @@
-use crate::domain::{config::ConfigError, settings::Settings};
+use crate::domain::{
+    config::{ConfigError, SettingChange},
+    settings::Settings,
+};
 
-/// Loads and persists cross-workspace [`Settings`], typically a settings file in
-/// the user's config directory.
+/// Driven port: the machine-wide [`Settings`].
 pub trait SettingsStore {
-    /// Loads the current settings, materializing defaults on first run.
+    /// The current settings.
     ///
     /// # Errors
-    /// Returns a `ConfigError` if an existing settings file cannot be read or
-    /// parsed, or if a fresh default file cannot be written.
+    /// Returns a [`ConfigError`] when the store cannot be read or holds an
+    /// invalid value.
     fn load(&self) -> Result<Settings, ConfigError>;
 
-    /// Persists `settings`.
+    /// Applies `change` and returns the settings it produced.
     ///
     /// # Errors
-    /// Returns a `ConfigError` if the settings file cannot be written.
-    fn save(&self, settings: &Settings) -> Result<(), ConfigError>;
+    /// Returns what [`Settings::with_change`] refuses, or another
+    /// [`ConfigError`] when the store cannot be written.
+    fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError>;
 }

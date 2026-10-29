@@ -1,4 +1,3 @@
-pub mod agent_session;
 pub mod color_scheme;
 pub mod config;
 pub mod coordination;

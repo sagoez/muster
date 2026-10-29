@@ -1,157 +1,229 @@
 use std::path::PathBuf;
 
 use getset::{Getters, WithSetters};
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::ConfigError,
-    process::{AgentTool, Process, ProcessKind, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, PaneId, ProcessName},
+    config::{Environment, ProcessChange},
+    process::{Process, RestartPolicy, StopPolicy},
+    value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
 };
 
-/// Declarative definition of one process within a workspace section.
-#[derive(Clone, Debug, Serialize, Deserialize, Getters, WithSetters, TypedBuilder)]
-#[serde(try_from = "SpecFields")]
+/// The stored definition of one process in a project's stack.
+#[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]
 #[set_with]
 pub struct ProcessSpec {
+    /// The name it is addressed by, unique in its project by NFC key.
     #[getset(get = "pub", set_with = "pub")]
     name: ProcessName,
+    /// The shell command it runs.
     #[getset(get = "pub", set_with = "pub")]
-    #[builder(default)]
-    command: Option<CommandLine>,
+    command: CommandLine,
+    /// Working directory: the project root when absent, relative to it otherwise.
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     working_dir: Option<PathBuf>,
+    /// Optional one-line description.
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     description: Option<Description>,
+    /// Environment exported to it.
     #[getset(get = "pub", set_with = "pub")]
-    #[builder(default)]
-    restart: Option<RestartPolicy>,
-    /// Optional graceful shutdown policy. Only command specs may configure it.
-    #[getset(get = "pub", set_with = "pub")]
-    #[builder(default)]
-    stop: Option<StopPolicy>,
-    /// Whether `muster up` starts this process.
+    environment: Environment,
+    /// Whether `muster up` starts it.
     #[getset(get = "pub", set_with = "pub")]
     autostart: bool,
-}
-
-/// A process entry as written in `muster.yml`, before the rules serde cannot
-/// state are checked. `autostart` is read as optional only so a missing one is
-/// refused with the process's name rather than a bare position.
-#[derive(Deserialize)]
-struct SpecFields {
-    name: ProcessName,
-    command: Option<CommandLine>,
-    working_dir: Option<PathBuf>,
-    description: Option<Description>,
-    restart: Option<RestartPolicy>,
-    stop: Option<StopPolicy>,
-    autostart: Option<bool>,
-}
-
-impl TryFrom<SpecFields> for ProcessSpec {
-    type Error = ConfigError;
-
-    /// Accepts an entry that states its `autostart`.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::AutostartMissing`] naming the process otherwise.
-    fn try_from(fields: SpecFields) -> Result<Self, ConfigError> {
-        let SpecFields {
-            name,
-            command,
-            working_dir,
-            description,
-            restart,
-            stop,
-            autostart,
-        } = fields;
-        let Some(autostart) = autostart else {
-            return Err(ConfigError::AutostartMissing { name });
-        };
-        Ok(Self {
-            name,
-            command,
-            working_dir,
-            description,
-            restart,
-            stop,
-            autostart,
-        })
-    }
+    /// What happens when its child exits.
+    #[getset(get = "pub", set_with = "pub")]
+    restart: RestartPolicy,
+    /// How it is stopped.
+    #[getset(get = "pub", set_with = "pub")]
+    stop: StopPolicy,
 }
 
 impl ProcessSpec {
-    /// Builds the corresponding `Process` entity in its initial `Pending` state.
-    pub fn to_process(&self, id: PaneId, kind: ProcessKind) -> Process {
+    /// This definition with `change` applied; variables are set before they are
+    /// unset, so a name in both ends up unset.
+    pub fn with_change(self, change: &ProcessChange) -> Self {
+        let environment = change
+            .set_env()
+            .iter()
+            .fold(self.environment, |environment, (name, value)| {
+                environment.with_var(name.clone(), value.clone())
+            });
+        let environment = change
+            .unset_env()
+            .iter()
+            .fold(environment, |environment, name| {
+                environment.without_var(name)
+            });
+        let stop = self
+            .stop
+            .with_signal(change.stop_signal().unwrap_or(*self.stop.signal()))
+            .with_grace_period(change.stop_grace().unwrap_or(*self.stop.grace_period()));
+        Self {
+            name: self.name,
+            command: change.command().clone().unwrap_or(self.command),
+            working_dir: change.working_dir().clone().apply(self.working_dir),
+            description: change.description().clone().apply(self.description),
+            environment,
+            autostart: change.autostart().unwrap_or(self.autostart),
+            restart: change.restart().unwrap_or(self.restart),
+            stop,
+        }
+    }
+
+    /// The directory the process launches in under `root`.
+    pub fn launch_dir(&self, root: &ProjectRoot) -> PathBuf {
+        match &self.working_dir {
+            Some(dir) => root.as_ref().join(dir),
+            None => root.as_ref().clone(),
+        }
+    }
+
+    /// The process this definition describes, on pane `id` and `Pending`.
+    pub fn to_process(&self, id: PaneId) -> Process {
         Process::builder()
             .id(id)
             .name(self.name.clone())
-            .kind(kind)
-            .agent_tool(
-                (kind == ProcessKind::Agent)
-                    .then(|| AgentTool::from_command(self.command.as_ref())),
-            )
             .command(self.command.clone())
             .working_dir(self.working_dir.clone())
             .description(self.description.clone())
-            .restart(self.restart_policy())
-            .stop(if kind == ProcessKind::Command {
-                self.stop.clone()
-            } else {
-                None
-            })
+            .environment(self.environment.clone())
+            .restart(self.restart)
+            .stop(self.stop)
             .autostart(self.autostart)
             .build()
-    }
-
-    /// The effective restart policy, treating an absent policy as `Never`.
-    pub fn restart_policy(&self) -> RestartPolicy {
-        self.restart.unwrap_or(RestartPolicy::Never)
-    }
-
-    /// The effective graceful shutdown policy for `kind`. Commands use the
-    /// domain default when the config omits `stop`; other kinds have no policy.
-    pub fn effective_stop_policy(&self, kind: ProcessKind) -> Option<StopPolicy> {
-        if kind == ProcessKind::Command {
-            Some(self.stop.clone().unwrap_or_default())
-        } else {
-            None
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::domain::config::WorkspaceConfig;
+    use crate::domain::{
+        config::FieldEdit,
+        process::{ProcessState, StopSignal},
+        value::{EnvName, EnvValue, PositiveDuration},
+    };
 
-    #[test]
-    fn config_without_autostart_on_a_process_fails_to_load_with_the_process_named() {
-        let raw = "agents: []\nterminals: []\ncommands:\n  - name: dev server\n    command: \
-                   npm run dev\n";
+    fn name(raw: &str) -> EnvName {
+        EnvName::try_new(raw).unwrap()
+    }
 
-        let error = serde_yaml_ng::from_str::<WorkspaceConfig>(raw).unwrap_err();
+    fn value(raw: &str) -> EnvValue {
+        EnvValue::try_new(raw).unwrap()
+    }
 
-        let message = error.to_string();
-        assert!(message.contains("'dev server'"), "{message}");
-        assert!(message.contains("autostart"), "{message}");
+    fn grace(seconds: u64) -> PositiveDuration {
+        PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap()
+    }
+
+    fn spec() -> ProcessSpec {
+        ProcessSpec::builder()
+            .name(ProcessName::try_new("web").unwrap())
+            .command(CommandLine::try_new("npm run dev").unwrap())
+            .working_dir(Some(PathBuf::from("frontend")))
+            .description(Some(Description::try_new("Vite").unwrap()))
+            .environment(
+                Environment::empty()
+                    .with_var(name("PORT"), value("5173"))
+                    .with_var(name("HOST"), value("localhost")),
+            )
+            .autostart(true)
+            .restart(RestartPolicy::OnFailure)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(grace(5))
+                    .build(),
+            )
+            .build()
+    }
+
+    fn root() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()
     }
 
     #[test]
-    fn a_stated_autostart_is_carried_to_the_process() {
-        let raw = "name: worker\ncommand: sleep 1\nautostart: true\n";
-
-        let spec: ProcessSpec = serde_yaml_ng::from_str(raw).unwrap();
-
-        assert!(*spec.autostart());
-        assert!(
-            *spec
-                .to_process(PaneId::new(0), ProcessKind::Command)
-                .autostart()
+    fn an_empty_change_keeps_everything() {
+        assert_eq!(
+            spec().with_change(&ProcessChange::builder().build()),
+            spec()
         );
+    }
+
+    #[test]
+    fn a_change_replaces_only_the_fields_it_names() {
+        let change = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("pnpm dev").unwrap()))
+            .working_dir(FieldEdit::Clear)
+            .description(FieldEdit::Set(Description::try_new("Dev").unwrap()))
+            .set_env(vec![
+                (name("PORT"), value("8080")),
+                (name("NEW"), value("1")),
+            ])
+            .unset_env(vec![name("HOST"), name("ABSENT")])
+            .autostart(Some(false))
+            .restart(Some(RestartPolicy::Always))
+            .stop_grace(Some(grace(9)))
+            .build();
+
+        let changed = spec().with_change(&change);
+
+        assert_eq!(changed.name(), spec().name());
+        assert_eq!(changed.command().as_ref(), "pnpm dev");
+        assert!(changed.working_dir().is_none());
+        assert_eq!(changed.description().as_ref().unwrap().as_ref(), "Dev");
+        assert_eq!(
+            changed.environment(),
+            &Environment::empty()
+                .with_var(name("PORT"), value("8080"))
+                .with_var(name("NEW"), value("1"))
+        );
+        assert!(!*changed.autostart());
+        assert_eq!(*changed.restart(), RestartPolicy::Always);
+        assert_eq!(*changed.stop().signal(), StopSignal::Terminate);
+        assert_eq!(*changed.stop().grace_period(), grace(9));
+    }
+
+    #[test]
+    fn a_variable_both_set_and_unset_ends_unset() {
+        let change = ProcessChange::builder()
+            .set_env(vec![(name("PORT"), value("8080"))])
+            .unset_env(vec![name("PORT")])
+            .build();
+
+        let changed = spec().with_change(&change);
+
+        assert!(!changed.environment().vars().contains_key(&name("PORT")));
+    }
+
+    #[test]
+    fn launches_in_the_root_or_under_it() {
+        assert_eq!(
+            spec().launch_dir(&root()),
+            PathBuf::from("/home/me/shop/frontend")
+        );
+        assert_eq!(
+            spec().with_working_dir(None).launch_dir(&root()),
+            PathBuf::from("/home/me/shop")
+        );
+        assert_eq!(
+            spec()
+                .with_working_dir(Some(PathBuf::from("/srv/data")))
+                .launch_dir(&root()),
+            PathBuf::from("/srv/data")
+        );
+    }
+
+    #[test]
+    fn a_process_starts_pending_on_its_pane() {
+        let process = spec().to_process(PaneId::new(3));
+
+        assert_eq!(*process.id(), PaneId::new(3));
+        assert_eq!(*process.state(), ProcessState::Pending);
+        assert_eq!(process.spec(), spec());
     }
 }

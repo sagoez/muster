@@ -1,9 +1,16 @@
+use std::{fmt, str::FromStr};
+
 use getset::CopyGetters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::PtyError;
-use crate::domain::value::{Cols, Rows};
+use crate::domain::value::{Cols, Rows, ValueParseError};
+
+/// Separates rows from columns in a written size.
+const SIZE_SEPARATOR: char = 'x';
+/// The form a size is written in.
+const SIZE_FORM: &str = "ROWSxCOLS such as 24x80";
 
 /// Dimensions of a pseudo-terminal, in character cells. Every PTY a holder
 /// runs stays within [`PtySize::MIN_ROWS`] by [`PtySize::MIN_COLS`] to
@@ -57,9 +64,53 @@ impl PtySize {
     }
 }
 
+impl FromStr for PtySize {
+    type Err = ValueParseError;
+
+    /// Reads `ROWSxCOLS`, such as `24x80`, without checking the PTY bounds.
+    ///
+    /// # Errors
+    /// Returns [`ValueParseError`] when the text is not two counts around `x`.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        raw.trim()
+            .split_once(SIZE_SEPARATOR)
+            .and_then(|(rows, cols)| Some((rows.parse().ok()?, cols.parse().ok()?)))
+            .map(|(rows, cols)| {
+                Self::builder()
+                    .rows(Rows::new(rows))
+                    .cols(Cols::new(cols))
+                    .build()
+            })
+            .ok_or_else(|| {
+                ValueParseError::builder()
+                    .expected(SIZE_FORM)
+                    .found(raw)
+                    .build()
+            })
+    }
+}
+
+impl fmt::Display for PtySize {
+    /// Writes the size as `ROWSxCOLS`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}{SIZE_SEPARATOR}{}", self.rows, self.cols)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_and_writes_rows_by_columns() {
+        let parsed: PtySize = "24x80".parse().unwrap();
+
+        assert_eq!(parsed, size(24, 80));
+        assert_eq!(parsed.to_string(), "24x80");
+        for refused in ["24", "24x", "x80", "24 by 80", "-1x80"] {
+            assert!(refused.parse::<PtySize>().is_err(), "{refused}");
+        }
+    }
 
     fn size(rows: u16, cols: u16) -> PtySize {
         PtySize::builder()

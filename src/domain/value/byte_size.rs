@@ -1,4 +1,7 @@
-use std::str::FromStr;
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 
 use bytesize::ByteSize as RawByteSize;
 use nutype::nutype;
@@ -7,11 +10,23 @@ use super::ValueParseError;
 
 /// The form a byte size is written in.
 const SIZE_FORM: &str = "a positive size such as 10MiB";
+/// The binary units a size is written in, largest first, each with its
+/// bytes.
+const UNITS: [(&str, u64); 6] = [
+    ("EiB", RawByteSize::eib(1).as_u64()),
+    ("PiB", RawByteSize::pib(1).as_u64()),
+    ("TiB", RawByteSize::tib(1).as_u64()),
+    ("GiB", RawByteSize::gib(1).as_u64()),
+    ("MiB", RawByteSize::mib(1).as_u64()),
+    ("KiB", RawByteSize::kib(1).as_u64()),
+];
+/// The unit of a size that no larger unit divides.
+const BYTES_UNIT: &str = "B";
 
 /// A positive quantity of bytes, read from strings such as `"10MiB"`.
 #[nutype(
     validate(predicate = |size: &RawByteSize| size.as_u64() > 0),
-    derive(Debug, Clone, Copy, PartialEq, Eq, Display, Serialize, Deserialize)
+    derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)
 )]
 pub struct ByteSize(RawByteSize);
 
@@ -19,6 +34,19 @@ impl ByteSize {
     /// The quantity as a plain byte count.
     pub fn bytes(&self) -> u64 {
         self.into_inner().as_u64()
+    }
+}
+
+impl Display for ByteSize {
+    /// The size exactly, in the largest binary unit that divides it, or in
+    /// bytes, so the text reads back as the same size.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let bytes = self.bytes();
+        let (unit, per) = UNITS
+            .into_iter()
+            .find(|(_, per)| bytes.is_multiple_of(*per))
+            .unwrap_or((BYTES_UNIT, 1));
+        write!(f, "{}{unit}", bytes / per)
     }
 }
 
@@ -60,12 +88,21 @@ mod tests {
         assert!("0B".parse::<ByteSize>().is_err());
     }
 
-    /// What a size displays as reads back as the same size.
+    /// What a size displays as reads back as the same size, a size no unit
+    /// divides included, which shows in bytes.
     #[test]
     fn display_round_trips_through_from_str() {
-        let size: ByteSize = "10MiB".parse().unwrap();
-
-        assert_eq!(size.to_string().parse::<ByteSize>().unwrap(), size);
+        for (raw, shown) in [
+            ("10MiB", "10MiB"),
+            ("1000001", "1000001B"),
+            ("1536KiB", "1536KiB"),
+            ("1 GB", "1000000000B"),
+            ("2048", "2KiB"),
+        ] {
+            let size: ByteSize = raw.parse().unwrap();
+            assert_eq!(size.to_string(), shown, "{raw}");
+            assert_eq!(size.to_string().parse::<ByteSize>().unwrap(), size, "{raw}");
+        }
         assert!("lots".parse::<ByteSize>().is_err());
     }
 }

@@ -182,7 +182,7 @@ one and `muster config set <key> <value>` changes it.
 | `desktop-notifications` | `true` or `false`: whether failures raise a desktop notification |
 | `default-size` | `ROWSxCOLS`, such as `24x80`: the terminal size a process starts with, 1 to 1000 rows by 2 to 2000 columns |
 | `detach-key` | a Control chord, such as `ctrl-\`: the key that ends `muster attach`; `ctrl-m`, `ctrl-j`, `ctrl-i`, `ctrl-h` and `ctrl-c` are refused, since terminals send them for Enter, Tab, Backspace and interrupt |
-| `log-max-size` | a size from `16KiB` to `1GiB`, such as `10MiB`: when a process's log rotates |
+| `log-max-size` | a size from `16KiB` to `1GiB`, such as `10MiB`: when a process's log rotates; it shows in the largest binary unit that divides it exactly, or in bytes, such as `1000001B` |
 | `scrollback` | 0 to 100000 lines of history each process's terminal keeps |
 | `color-scheme` | `dark` or `light`: the default colors a process's terminal reports |
 | `default-autostart` | `true` or `false` for a new process |

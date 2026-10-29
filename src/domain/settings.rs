@@ -169,6 +169,22 @@ mod tests {
         assert_eq!(settings().value_text(SettingKey::DefaultStopGrace), "5s");
     }
 
+    /// A log size no binary unit divides shows in bytes and sets back to the
+    /// same size, never rounded to a unit.
+    #[test]
+    fn an_uneven_log_size_round_trips_exactly() {
+        let set = |raw: &str| {
+            settings().with_change(&SettingChange::parse(SettingKey::LogMaxSize, raw).unwrap())
+        };
+        let uneven = set("1000001");
+
+        let shown = uneven.value_text(SettingKey::LogMaxSize);
+
+        assert_eq!(shown, "1000001B");
+        assert_eq!(set(&shown), uneven);
+        assert_eq!(set("10MiB").value_text(SettingKey::LogMaxSize), "10MiB");
+    }
+
     #[test]
     fn process_defaults_come_from_the_default_settings() {
         let defaults = settings()

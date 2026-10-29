@@ -1,8 +1,8 @@
 pub mod bridge;
 pub mod cli;
-pub mod config;
+pub mod detect;
+pub mod exchange;
 pub mod holder;
-pub mod hooks;
 pub mod ipc;
 pub mod mcp;
 pub mod metrics;
@@ -12,4 +12,5 @@ pub mod private_dir;
 pub mod process_identity;
 pub mod pty;
 pub mod service;
+pub mod store;
 pub mod terminal;

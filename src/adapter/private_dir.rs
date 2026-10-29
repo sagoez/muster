@@ -5,13 +5,28 @@ use std::{
     fs::{self, DirBuilder, Permissions},
     io,
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
+
+use directories::ProjectDirs;
+
+/// Application directory name under the platform's state location.
+const APP_DIR: &str = "muster";
 
 /// Mode of a private directory: its owner's alone.
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Mode bits granting the group or other users any access.
 pub const GROUP_OTHER_BITS: u32 = 0o077;
+
+/// Muster's platform state directory (`~/.local/state/muster` on Linux),
+/// falling back to local data on platforms without a distinct state location.
+pub fn state_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", APP_DIR).map(|dirs| {
+        dirs.state_dir()
+            .unwrap_or_else(|| dirs.data_local_dir())
+            .to_path_buf()
+    })
+}
 
 /// Creates `dir` and any missing parents owner-only. An existing directory is
 /// left as it is.

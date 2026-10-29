@@ -1,0 +1,128 @@
+use std::{collections::BTreeMap, path::PathBuf};
+
+use getset::Getters;
+use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
+
+use super::{EntryError, StopEntry};
+use crate::domain::{
+    config::{Environment, ProcessSpec},
+    process::{RestartPolicy, StopPolicy},
+    value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName},
+};
+
+/// One process of a stack file. Optional keys are written only when set, and
+/// a variable whose value is `None` is the export's placeholder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[serde(deny_unknown_fields)]
+#[getset(get = "pub")]
+pub struct ProcessEntry {
+    /// The process's name.
+    name: String,
+    /// The shell command it runs.
+    command: String,
+    /// Its working directory, relative to the project root unless absolute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    working_dir: Option<PathBuf>,
+    /// Its one-line description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    description: Option<String>,
+    /// Its variables, sorted by name; a null value is an unfilled placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    environment: Option<BTreeMap<String, Option<String>>>,
+    /// Whether `muster up` starts it.
+    autostart: bool,
+    /// Its restart policy.
+    restart: RestartPolicy,
+    /// How it is stopped.
+    stop: StopEntry,
+}
+
+impl ProcessEntry {
+    /// This entry with every variable's value replaced by the placeholder.
+    pub fn without_env_values(self) -> Self {
+        Self {
+            environment: self
+                .environment
+                .map(|vars| vars.into_keys().map(|name| (name, None)).collect()),
+            ..self
+        }
+    }
+}
+
+impl From<&ProcessSpec> for ProcessEntry {
+    /// The entry exporting `spec`, values included.
+    fn from(spec: &ProcessSpec) -> Self {
+        let vars = spec.environment().vars();
+        Self {
+            name: spec.name().to_string(),
+            command: spec.command().to_string(),
+            working_dir: spec.working_dir().clone(),
+            description: spec.description().as_ref().map(ToString::to_string),
+            environment: (!vars.is_empty()).then(|| {
+                vars.iter()
+                    .map(|(name, value)| (name.to_string(), Some(value.to_string())))
+                    .collect()
+            }),
+            autostart: *spec.autostart(),
+            restart: *spec.restart(),
+            stop: StopEntry::builder()
+                .signal(*spec.stop().signal())
+                .grace_period(spec.stop().grace_period().into_inner())
+                .build(),
+        }
+    }
+}
+
+/// Reads one variable, refusing an unfilled placeholder.
+fn variable(raw: String, value: Option<String>) -> Result<(EnvName, EnvValue), EntryError> {
+    let name = EnvName::try_new(raw.clone())
+        .map_err(|_| EntryError::InvalidEnvName { name: raw.clone() })?;
+    let value = value.ok_or_else(|| EntryError::MissingEnvValue { name: raw.clone() })?;
+    let value = EnvValue::try_new(value).map_err(|_| EntryError::InvalidEnvValue { name: raw })?;
+    Ok((name, value))
+}
+
+impl TryFrom<ProcessEntry> for ProcessSpec {
+    type Error = EntryError;
+
+    /// The definition `entry` describes.
+    ///
+    /// # Errors
+    /// Returns the [`EntryError`] naming the first invalid field.
+    fn try_from(entry: ProcessEntry) -> Result<Self, Self::Error> {
+        let environment = entry
+            .environment
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, value)| variable(name, value))
+            .collect::<Result<Environment, EntryError>>()?;
+        Ok(ProcessSpec::builder()
+            .name(ProcessName::try_new(entry.name).map_err(|_| EntryError::EmptyName)?)
+            .command(CommandLine::try_new(entry.command).map_err(|_| EntryError::EmptyCommand)?)
+            .working_dir(entry.working_dir)
+            .description(
+                entry
+                    .description
+                    .map(Description::try_new)
+                    .transpose()
+                    .map_err(|_| EntryError::EmptyDescription)?,
+            )
+            .environment(environment)
+            .autostart(entry.autostart)
+            .restart(entry.restart)
+            .stop(
+                StopPolicy::builder()
+                    .signal(*entry.stop.signal())
+                    .grace_period(
+                        PositiveDuration::try_new(*entry.stop.grace_period())
+                            .map_err(|_| EntryError::ZeroGrace)?,
+                    )
+                    .build(),
+            )
+            .build())
+    }
+}

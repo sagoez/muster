@@ -5,7 +5,7 @@ use std::{
 
 use directories::BaseDirs;
 
-use crate::domain::{config::ConfigError, project::Project};
+use crate::domain::{config::ConfigError, value::ProjectRoot};
 
 /// Leading path component expanded to the user's home directory.
 const HOME_PREFIX: &str = "~";
@@ -22,12 +22,22 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
-/// Whether two stored config locations name the same place, after expanding
-/// `~` but without resolving symlink aliases, so an alias stays distinct.
-pub fn same_config_location(left: &Path, right: &Path) -> bool {
-    let left = expand_home(left);
-    let right = expand_home(right);
-    left.is_absolute() == right.is_absolute() && left == right
+/// The project folder `dir` names: `~` expanded, canonicalized, and required
+/// to be an existing directory whose path is UTF-8, since the store keeps
+/// roots as text.
+///
+/// # Errors
+/// Returns [`ConfigError::RootNotADirectory`] when `dir` is missing, is not a
+/// directory, or its canonical path is not UTF-8.
+pub fn project_root(dir: &Path) -> Result<ProjectRoot, ConfigError> {
+    let refused = || ConfigError::RootNotADirectory {
+        path: dir.to_path_buf(),
+    };
+    let canonical = expand_home(dir).canonicalize().map_err(|_| refused())?;
+    if !canonical.is_dir() || canonical.to_str().is_none() {
+        return Err(refused());
+    }
+    ProjectRoot::try_new(canonical).map_err(|_| refused())
 }
 
 /// Expands `~` and makes a path absolute, preserving the user-selected
@@ -125,28 +135,6 @@ fn parent_step(prefix: &Path) -> ParentStep {
     }
 }
 
-/// Resolves a registered config only when its stored path is independent of the
-/// caller's directory.
-///
-/// # Errors
-/// Returns [`ConfigError::RelativeProjectConfig`] for ambiguous legacy entries.
-pub fn registered_config_path(project: &Project) -> Result<PathBuf, ConfigError> {
-    if expand_home(project.config()).is_relative() {
-        return Err(ConfigError::RelativeProjectConfig {
-            name: project.name().clone(),
-            path: project.config().clone(),
-        });
-    }
-    Ok(absolutize(project.config()))
-}
-
-/// Normalizes a config path for identity comparison: absolutizes it, then
-/// canonicalizes existing paths so aliases naming the same file compare equal.
-pub fn normalize(path: &Path) -> PathBuf {
-    let absolute = absolutize(path);
-    absolute.canonicalize().unwrap_or(absolute)
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -166,16 +154,44 @@ mod tests {
         );
     }
 
+    /// A folder reached through a relative path or a symlink alias is one
+    /// project root: the canonical folder.
     #[test]
-    fn relative_and_absolute_paths_to_one_file_normalize_equal() {
-        // `cargo test` runs with the crate root as the working directory, so the
-        // relative name and its absolute form resolve to the same file.
-        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        assert_eq!(normalize(Path::new("Cargo.toml")), normalize(&absolute));
+    fn project_root_canonicalizes_aliases_of_one_folder() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let real = scratch.path().join("real");
+        let link = scratch.path().join("link");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        let canonical = real.canonicalize().unwrap();
+
+        assert_eq!(project_root(&link).unwrap().as_ref(), &canonical);
+        assert_eq!(project_root(&real.join(".")).unwrap().as_ref(), &canonical);
+        assert_eq!(
+            project_root(Path::new(".")).unwrap().as_ref(),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .canonicalize()
+                .unwrap(),
+            "a relative folder resolves against the working directory"
+        );
     }
 
-    /// An absolute location retains a symlink alias while identity normalization
-    /// resolves it to its target.
+    /// A missing folder or a file is not a project root.
+    #[test]
+    fn project_root_refuses_a_missing_folder_or_a_file() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let file = scratch.path().join("file");
+        fs::write(&file, "").unwrap();
+
+        for refused in [scratch.path().join("missing"), file] {
+            assert!(matches!(
+                project_root(&refused),
+                Err(ConfigError::RootNotADirectory { path }) if path == refused
+            ));
+        }
+    }
+
+    /// An absolute location retains a symlink alias.
     #[test]
     fn absolutize_preserves_a_symlink_path() {
         let dir = std::env::temp_dir().join(format!("muster-path-link-{}", std::process::id()));
@@ -186,7 +202,6 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         assert_eq!(absolutize(&link), link);
-        assert_eq!(normalize(&link), target.canonicalize().unwrap());
 
         fs::remove_dir_all(dir).unwrap();
     }

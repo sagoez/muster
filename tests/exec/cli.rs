@@ -681,6 +681,25 @@ fn a_second_up_names_what_was_already_running() {
         report["processes"][0]["outcome"], "already-running",
         "{report}"
     );
+
+    let paused = scratch.on(&project, &["pause", "api"]);
+    assert!(paused.status.success(), "{}", shown(&paused));
+    let third = mcp.result("stack_up", serde_json::json!({}))["structuredContent"].clone();
+    let (_, report) = scratch.json_on(&project, &["up"]);
+    let human = scratch.on(&project, &["up"]);
+
+    assert_eq!(third["already_running"], serde_json::json!([]), "{third}");
+    assert_eq!(
+        report["processes"][0]["outcome"], "already-paused",
+        "{report}"
+    );
+    assert!(
+        stdout(&human).contains("already paused"),
+        "{}",
+        shown(&human)
+    );
+    let resumed = scratch.on(&project, &["resume", "api"]);
+    assert!(resumed.status.success(), "{}", shown(&resumed));
 }
 
 /// A neighbour crash-looping while the command runs is context, not a

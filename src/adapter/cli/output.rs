@@ -1142,6 +1142,36 @@ mod tests {
         insta::assert_snapshot!("up_nothing", plain(&action_rows(&report)));
     }
 
+    /// An `up` shows a row for an autostart process it found stopping or
+    /// paused, and leaves out only the one it found running.
+    #[test]
+    fn an_up_shows_what_it_found_stopping_or_paused() {
+        let report = ActionReport::builder()
+            .project(shop_view())
+            .action(Action::Up)
+            .processes(vec![
+                outcome("web", Outcome::AlreadyRunning, None),
+                outcome("worker", Outcome::StillStopping, None),
+                outcome("db", Outcome::AlreadyPaused, None),
+            ])
+            .notices(vec![])
+            .other_notices(vec![])
+            .build();
+
+        let rendered = plain(&action_rows(&report));
+
+        assert!(!rendered.contains("web"), "{rendered}");
+        let row = |named: &str| {
+            rendered
+                .lines()
+                .find(|line| line.contains(named))
+                .unwrap_or_else(|| panic!("no row for {named}: {rendered}"))
+                .to_string()
+        };
+        assert!(row("worker").contains("still stopping"), "{rendered}");
+        assert!(row("db").contains("already paused"), "{rendered}");
+    }
+
     /// An `up` of a project where nothing autostarts says so and how to
     /// change it, never that every autostart process is running.
     #[test]

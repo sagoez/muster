@@ -68,8 +68,9 @@ const EXIT_ACKNOWLEDGE_FAILED_NOTICE: &str =
 impl Supervisor {
     /// Starts every autostart process that is not already running, each with
     /// `environment`, the environment of the command that brought the project
-    /// up. Returns what it started, the autostart processes already running
-    /// or starting, and what it left stopped, with why.
+    /// up. Returns what it started, the autostart processes it found running
+    /// or starting, stopping, or paused, each apart, and what it left
+    /// stopped, with why.
     pub fn up(&mut self, environment: &LaunchEnvironment) -> BatchOutcome {
         let before: HashSet<PaneId> = self
             .workspace
@@ -78,16 +79,24 @@ impl Supervisor {
             .map(|process| *process.id())
             .filter(|pane| self.is_live(*pane) || self.is_starting(*pane))
             .collect();
-        let already_running: Vec<ProcessName> = self
-            .workspace
-            .processes()
-            .iter()
-            .filter(|process| {
-                let pane = *process.id();
-                *process.autostart() && before.contains(&pane) && !self.is_unsupervised(pane)
-            })
-            .map(|process| process.name().clone())
-            .collect();
+        let found = |state: fn(ProcessState) -> bool| -> Vec<ProcessName> {
+            self.workspace
+                .processes()
+                .iter()
+                .filter(|process| {
+                    let pane = *process.id();
+                    *process.autostart()
+                        && before.contains(&pane)
+                        && !self.is_unsupervised(pane)
+                        && state(*process.state())
+                })
+                .map(|process| process.name().clone())
+                .collect()
+        };
+        let already_running =
+            found(|state| !matches!(state, ProcessState::Stopping | ProcessState::Paused));
+        let stopping = found(|state| state == ProcessState::Stopping);
+        let paused = found(|state| state == ProcessState::Paused);
         self.attention.begin_batch();
         for pane in self.autostart_panes() {
             // Bringing a process up, like starting it, begins a new streak.
@@ -112,7 +121,7 @@ impl Supervisor {
             .filter_map(|process| self.unsupervised_refusal(*process.id()))
             .collect();
         self.finish_batch(acted, left_unsupervised)
-            .with_already_running(already_running)
+            .with_found(already_running, stopping, paused)
     }
 
     /// Ends a project-wide request that acted on `acted`: every error it
@@ -2291,6 +2300,31 @@ mod tests {
                 .state(),
             ProcessState::Pending
         );
+    }
+
+    /// `up` never counts a stopping or paused autostart process as already
+    /// running: it names it as stopping or paused instead, and starts no
+    /// second copy.
+    #[test]
+    fn up_names_a_stopping_or_paused_process_apart_from_a_running_one() {
+        let (mut harness, _) = with_stop_signals();
+        harness.supervisor_mut().pause(&p());
+        assert_eq!(state(&harness), ProcessState::Paused);
+
+        let paused = harness.supervisor_mut().up(&no_env());
+
+        assert!(paused.already_running().is_empty(), "{paused:?}");
+        assert_eq!(paused.paused(), &vec![p()]);
+        assert!(paused.stopping().is_empty() && paused.acted().is_empty());
+
+        harness.supervisor_mut().resume(&p());
+        harness.supervisor_mut().stop(&p());
+        assert_eq!(state(&harness), ProcessState::Stopping);
+        let stopping = harness.supervisor_mut().up(&no_env());
+
+        assert!(stopping.already_running().is_empty(), "{stopping:?}");
+        assert_eq!(stopping.stopping(), &vec![p()]);
+        assert!(stopping.paused().is_empty() && stopping.acted().is_empty());
     }
 
     /// A handled exit is acknowledged to its handle exactly once, so a holder

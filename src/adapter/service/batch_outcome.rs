@@ -20,6 +20,12 @@ pub struct BatchOutcome {
     /// section order.
     #[builder(default)]
     already_running: Vec<ProcessName>,
+    /// The processes `Up` found still stopping, in config section order.
+    #[builder(default)]
+    stopping: Vec<ProcessName>,
+    /// The processes `Up` found paused, in config section order.
+    #[builder(default)]
+    paused: Vec<ProcessName>,
     /// How the wait on each process it started ended, in the order of
     /// `acted`, when it was asked to wait.
     #[builder(default)]
@@ -27,11 +33,19 @@ pub struct BatchOutcome {
 }
 
 impl BatchOutcome {
-    /// This outcome with `already_running`.
+    /// This outcome with what `Up` found running or starting, stopping and
+    /// paused already.
     #[must_use]
-    pub fn with_already_running(self, already_running: Vec<ProcessName>) -> Self {
+    pub fn with_found(
+        self,
+        already_running: Vec<ProcessName>,
+        stopping: Vec<ProcessName>,
+        paused: Vec<ProcessName>,
+    ) -> Self {
         Self {
             already_running,
+            stopping,
+            paused,
             ..self
         }
     }

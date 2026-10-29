@@ -225,8 +225,9 @@ pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<PositiveDurat
 }
 
 /// Seconds since the Unix epoch, or zero if the clock predates it. The store
-/// stamps write times so the domain need not depend on a clock.
-pub(super) fn now_epoch_secs() -> i64 {
+/// stamps write times so the domain need not depend on a clock, and the CLI
+/// reads leases against the same clock.
+pub(crate) fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)

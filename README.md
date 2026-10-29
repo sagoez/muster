@@ -173,7 +173,8 @@ answers in the same shapes.
 | `muster projects` / `projects rm <project>` | List registered projects, or remove one with its processes and coordination state |
 | `muster notices` | Show failed starts, forced stops and crashes the service recorded |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
-| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state |
+| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long |
+| `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
 | `muster coordination export\|import` | Move that shared state as YAML |
 | `muster mcp [--print-config]` | Serve the project to an agent over MCP |
 | `muster doctor` | Diagnose the database, projects and completions |

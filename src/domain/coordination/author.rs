@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 /// Stored label for a write the human made through the CLI.
-const HUMAN_LABEL: &str = "human";
+pub(crate) const HUMAN_LABEL: &str = "human";
 /// Fallback label for an agent that did not name itself.
 const DEFAULT_AGENT_LABEL: &str = "agent";
 

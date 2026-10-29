@@ -45,7 +45,9 @@ use crate::{
     },
     domain::{
         config::{ConfigError, SettingChange, SettingKey},
-        coordination::{KvKey, ScratchpadKey, TodoId, TodoStatus, TodoTitle},
+        coordination::{
+            KvKey, ScratchpadKey, TodoChange, TodoId, TodoStatus, TodoTitle, TodoUpdate,
+        },
         project::Project,
         value::{ProcessRef, ProjectRoot, ValueParseError},
     },
@@ -378,15 +380,20 @@ impl CoordinationMcp {
                     .found(arg.status().as_str())
                     .build(),
             })?;
-        if self.deps.coordination().set_todo_status(
+        let change = TodoChange::builder()
+            .title(None)
+            .status(Some(status))
+            .force(true)
+            .build();
+        match self.deps.coordination().update_todo(
             self.deps.root(),
             self.deps.author(),
             &id,
-            status,
+            &change,
         )? {
-            Ok(text(format!("{id} is {status}")))
-        } else {
-            Err(ToolError::UnknownTodo(id.as_ref().to_string()).into())
+            TodoUpdate::Missing => Err(ToolError::UnknownTodo(id.as_ref().to_string()).into()),
+            TodoUpdate::Updated(_) => Ok(text(format!("{id} is {status}"))),
+            TodoUpdate::HeldBy { owner, .. } => Ok(text(format!("{id} is held by {owner}"))),
         }
     }
 

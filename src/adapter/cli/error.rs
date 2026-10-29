@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 
@@ -11,6 +11,7 @@ use crate::{
     },
     domain::{
         config::ConfigError,
+        coordination::Author,
         value::{ProcessName, ProjectName},
     },
 };
@@ -59,6 +60,22 @@ pub enum CliError {
     /// No todo exists with the requested id.
     #[error("no todo '{0}'")]
     UnknownTodo(String),
+    /// Another agent holds what the command would change under a live lease.
+    #[error(
+        "{what} is held by {owner} for {}; pass --force to change it anyway",
+        humantime::format_duration(*expires_in)
+    )]
+    HeldByOther {
+        /// What is held, as `todo '<id>'`.
+        what: String,
+        /// Who holds it.
+        owner: Author,
+        /// How long the lease has left.
+        expires_in: Duration,
+    },
+    /// A lock name was not 1 to 64 characters of `[a-z0-9._-]`.
+    #[error("'{0}' is not a valid lock name; use 1 to 64 of a-z, 0-9, '.', '_' and '-'")]
+    InvalidLockName(String),
     /// A key-value key was blank or whitespace-only.
     #[error("'{0}' is not a valid key")]
     InvalidKvKey(String),
@@ -220,6 +237,8 @@ impl CliError {
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
             | Self::UnknownTodo(_)
+            | Self::HeldByOther { .. }
+            | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
             | Self::UnknownValue(_)
             | Self::InvalidName(_)

@@ -44,6 +44,7 @@ use super::{
     },
     invocation::Invocation,
     kv::kv,
+    lock::lock,
     note::note,
     output,
     presenter::Presenter,
@@ -84,10 +85,11 @@ use crate::{
 const JSON_FLAG: &str = "--json";
 /// The flag that answers a confirmation up front.
 const YES_FLAG: &str = "--yes";
-/// Title of the `note`, `todo`, `kv` and `coordination` reports.
+/// Title of the `note`, `todo`, `kv`, `lock` and `coordination` reports.
 const NOTE_TITLE: &str = "muster note";
 const TODO_TITLE: &str = "muster todo";
 const KV_TITLE: &str = "muster kv";
+const LOCK_TITLE: &str = "muster lock";
 const COORDINATION_TITLE: &str = "muster coordination";
 const COMPLETIONS_TITLE: &str = "muster completions";
 /// How `projects rm` ends when the person declined.
@@ -217,6 +219,9 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         }),
         Some(Command::Kv { command }) => with_root(invocation, |store, root| {
             kv(command, store, root, &Author::human()).map(|rows| Report::new(KV_TITLE, rows))
+        }),
+        Some(Command::Lock { command }) => with_root(invocation, |store, root| {
+            lock(command, store, root).map(|rows| Report::new(LOCK_TITLE, rows))
         }),
         Some(Command::Coordination { command }) => coordinate(invocation, command),
         Some(Command::Mcp {

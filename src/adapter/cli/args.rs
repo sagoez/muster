@@ -334,6 +334,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<KvCommand>,
     },
+    /// List the locks agents hold on the current project, or release one.
+    Lock {
+        #[command(subcommand)]
+        command: Option<LockCommand>,
+    },
     /// Export or restore this project's coordination state as portable YAML.
     Coordination {
         #[command(subcommand)]
@@ -600,11 +605,24 @@ pub enum TodoCommand {
         id: String,
         /// New status.
         status: TodoStatus,
+        /// Change it even though an agent holds it.
+        #[arg(long)]
+        force: bool,
     },
     /// Delete a todo by id.
     Rm {
         /// Todo id.
         id: String,
+    },
+}
+
+/// Lock actions under `muster lock`. Absent, held locks are listed.
+#[derive(Subcommand)]
+pub enum LockCommand {
+    /// Release a lock whoever holds it, to clear one an agent left behind.
+    Release {
+        /// Lock name.
+        name: String,
     },
 }
 

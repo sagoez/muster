@@ -131,7 +131,10 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::ConfigError,
-        coordination::{KeyValue, KvKey, Scratchpad, Todo, TodoId, TodoStatus, TodoTitle},
+        coordination::{
+            Claim, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
+            Scratchpad, Todo, TodoChange, TodoId, TodoLease, TodoTitle, TodoUpdate,
+        },
     };
 
     /// An in-memory coordination store recording scratchpads for one project.
@@ -206,18 +209,64 @@ mod tests {
             unreachable!("note commands never touch todos")
         }
 
-        fn set_todo_status(
+        fn update_todo(
             &self,
             _project: &ProjectRoot,
-            _author: &Author,
+            _me: &Author,
             _id: &TodoId,
-            _status: TodoStatus,
-        ) -> Result<bool, ConfigError> {
+            _change: &TodoChange,
+        ) -> Result<TodoUpdate, ConfigError> {
+            unreachable!("note commands never touch todos")
+        }
+
+        fn claim_todo(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _id: Option<&TodoId>,
+            _lease: TodoLease,
+        ) -> Result<Claim, ConfigError> {
             unreachable!("note commands never touch todos")
         }
 
         fn delete_todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<bool, ConfigError> {
             unreachable!("note commands never touch todos")
+        }
+
+        fn acquire_lock(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _name: &LockName,
+            _ttl: LockTtl,
+            _note: Option<&LockNote>,
+        ) -> Result<LockAttempt, ConfigError> {
+            unreachable!("note commands never touch locks")
+        }
+
+        fn release_lock(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _name: &LockName,
+        ) -> Result<LockRelease, ConfigError> {
+            unreachable!("note commands never touch locks")
+        }
+
+        fn break_lock(
+            &self,
+            _project: &ProjectRoot,
+            _name: &LockName,
+        ) -> Result<Option<Lock>, ConfigError> {
+            unreachable!("note commands never touch locks")
+        }
+
+        fn release_locks_of(&self, _me: &Author) -> Result<usize, ConfigError> {
+            unreachable!("note commands never touch locks")
+        }
+
+        fn locks(&self, _project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
+            unreachable!("note commands never touch locks")
         }
 
         fn values(&self, _project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError> {

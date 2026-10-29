@@ -1,13 +1,16 @@
-use rusqlite::{Connection, Params, Row, params};
+use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params};
 
 use super::{
+    lock_rows,
     project_rows::require_project,
     sqlite_store::{SqliteStore, corrupt, db_error, now_epoch_secs},
 };
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, KeyValue, KvKey, Scratchpad, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle,
+        Author, Claim, ClaimState, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote,
+        LockRelease, LockTtl, Scratchpad, ScratchpadKey, Todo, TodoChange, TodoClaim, TodoId,
+        TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
     value::ProjectRoot,
@@ -15,10 +18,35 @@ use crate::domain::{
 
 /// Selects a scratchpad in the order [`scratchpad_from_row`] reads it.
 const SELECT_SCRATCHPAD: &str = "SELECT key, body, author, updated_at FROM scratchpads";
-/// Selects a todo in the order [`todo_from_row`] reads it.
-const SELECT_TODO: &str = "SELECT id, title, status, deps, author, updated_at FROM todos";
+/// The columns [`todo_from_row`] reads, in order.
+const TODO_COLUMNS: &str = "id, title, status, deps, author, updated_at, owner, claimed_until";
 /// Selects a key-value in the order [`key_value_from_row`] reads it.
 const SELECT_KV: &str = "SELECT key, value, author, updated_at FROM kv";
+/// Claims the todo `:id` for `:me` when it is pending, its lease ran out, or
+/// `:me` already holds it; run with `RETURNING` [`TODO_COLUMNS`].
+const CLAIM_BY_ID: &str = "\
+UPDATE todos SET status = 'in-progress', owner = :me, claimed_until = :until, \
+    updated_at = :now, author = :me \
+WHERE project_id = :project AND id = :id \
+  AND (status = 'pending' \
+       OR (status = 'in-progress' AND (owner = :me OR claimed_until < :now)))";
+/// The oldest todo of `:project` claimable without naming it: pending or with
+/// a lapsed lease, and no dependency that exists and is not done. Mirrors
+/// [`claimable`](crate::domain::coordination::claimable).
+const NEXT_CLAIMABLE: &str = "\
+SELECT t.id FROM todos t \
+WHERE t.project_id = :project \
+  AND (t.status = 'pending' OR (t.status = 'in-progress' AND t.claimed_until < :now)) \
+  AND NOT EXISTS ( \
+      SELECT 1 FROM json_each(t.deps) d \
+      JOIN todos dep ON dep.project_id = t.project_id AND dep.id = d.value \
+      WHERE dep.status <> 'done') \
+ORDER BY t.rowid LIMIT 1";
+
+/// The clock as Unix seconds, for comparing leases and expiries.
+fn now() -> u64 {
+    now_epoch_secs() as u64
+}
 
 /// A stored write time, which the store only ever stamps from the clock.
 fn updated_at(row: &Row, index: usize) -> Result<u64, ConfigError> {
@@ -44,13 +72,24 @@ fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
         .build())
 }
 
-/// Reads a [`SELECT_TODO`] row.
+/// Reads a todo row selected as [`TODO_COLUMNS`].
 fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
     let id: String = row.get(0).map_err(db_error)?;
     let title: String = row.get(1).map_err(db_error)?;
     let status: String = row.get(2).map_err(db_error)?;
     let deps: String = row.get(3).map_err(db_error)?;
     let author: String = row.get(4).map_err(db_error)?;
+    let owner: Option<String> = row.get(6).map_err(db_error)?;
+    let claimed_until: Option<i64> = row.get(7).map_err(db_error)?;
+    let claim = match owner.zip(claimed_until) {
+        Some((owner, until)) => Some(
+            TodoClaim::builder()
+                .owner(Author::from_label(&owner))
+                .claimed_until(u64::try_from(until).map_err(|error| corrupt("todo lease", error))?)
+                .build(),
+        ),
+        None => None,
+    };
     Ok(Todo::builder()
         .id(TodoId::try_new(id).map_err(|error| corrupt("todo id", error))?)
         .title(TodoTitle::try_new(title).map_err(|error| corrupt("todo title", error))?)
@@ -60,6 +99,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
                 .map_err(|error| corrupt("todo status", error))?,
         )
         .deps(serde_json::from_str(&deps).map_err(|error| corrupt("todo deps", error))?)
+        .claim(claim)
         .author(Author::from_label(&author))
         .updated_at(updated_at(row, 5)?)
         .build())
@@ -79,7 +119,7 @@ fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
 }
 
 /// Every row `sql` selects with `values`, mapped with `map`.
-fn collect<T>(
+pub(super) fn collect<T>(
     conn: &Connection,
     sql: &str,
     values: impl Params,
@@ -115,11 +155,23 @@ fn put_scratchpad(
     Ok(())
 }
 
-/// Writes a todo with the author and time it carries; it is not claimed.
+/// A todo's claim as its `owner` and `claimed_until` columns.
+fn claim_columns(todo: &Todo) -> (Option<&str>, Option<i64>) {
+    todo.claim().as_ref().map_or((None, None), |claim| {
+        (
+            Some(claim.owner().label()),
+            Some(*claim.claimed_until() as i64),
+        )
+    })
+}
+
+/// Writes a todo with the author, time and claim it carries.
 fn put_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), ConfigError> {
+    let (owner, claimed_until) = claim_columns(todo);
     conn.execute(
-        "INSERT OR REPLACE INTO todos (project_id, id, title, status, deps, author, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR REPLACE INTO todos \
+         (project_id, id, title, status, deps, author, updated_at, owner, claimed_until) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             project_id,
             todo.id().as_ref(),
@@ -127,11 +179,84 @@ fn put_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), Confi
             todo.status().to_string(),
             deps_json(todo.deps())?,
             todo.author().label(),
-            *todo.updated_at() as i64
+            *todo.updated_at() as i64,
+            owner,
+            claimed_until
         ],
     )
     .map_err(db_error)?;
     Ok(())
+}
+
+/// Rewrites the mutable fields of a stored todo in place, keeping its place
+/// in creation order.
+fn rewrite_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), ConfigError> {
+    let (owner, claimed_until) = claim_columns(todo);
+    conn.execute(
+        "UPDATE todos SET title = ?1, status = ?2, author = ?3, updated_at = ?4, owner = ?5, \
+         claimed_until = ?6 WHERE project_id = ?7 AND id = ?8",
+        params![
+            todo.title().as_ref(),
+            todo.status().to_string(),
+            todo.author().label(),
+            *todo.updated_at() as i64,
+            owner,
+            claimed_until,
+            project_id,
+            todo.id().as_ref()
+        ],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+/// The todo `id` of project `project_id`, if present.
+fn find_todo(conn: &Connection, project_id: i64, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
+    Ok(collect(
+        conn,
+        &format!("SELECT {TODO_COLUMNS} FROM todos WHERE project_id = ?1 AND id = ?2"),
+        params![project_id, id.as_ref()],
+        todo_from_row,
+    )?
+    .pop())
+}
+
+/// Claims the todo `id` of project `project_id` for `me` until `until`, or
+/// says why it cannot be.
+fn claim_by_id(
+    conn: &Connection,
+    project_id: i64,
+    me: &Author,
+    id: &TodoId,
+    until: u64,
+    now: u64,
+) -> Result<Claim, ConfigError> {
+    let claimed = collect(
+        conn,
+        &format!("{CLAIM_BY_ID} RETURNING {TODO_COLUMNS}"),
+        named_params! {
+            ":project": project_id,
+            ":id": id.as_ref(),
+            ":me": me.label(),
+            ":until": until as i64,
+            ":now": now as i64,
+        },
+        todo_from_row,
+    )?
+    .pop();
+    if let Some(todo) = claimed {
+        return Ok(Claim::Claimed(todo));
+    }
+    let Some(todo) = find_todo(conn, project_id, id)? else {
+        return Ok(Claim::Missing);
+    };
+    Ok(match todo.claim_state(now) {
+        ClaimState::Held { owner, expires_in } => Claim::HeldBy {
+            owner: owner.clone(),
+            expires_in,
+        },
+        ClaimState::Unclaimed | ClaimState::Stale { .. } => Claim::Unavailable(todo),
+    })
 }
 
 /// Writes a key-value with the author and time it carries.
@@ -207,7 +332,7 @@ impl CoordinationStore for SqliteStore {
                 .key(key.clone())
                 .body(body.to_string())
                 .author(author.clone())
-                .updated_at(now_epoch_secs() as u64)
+                .updated_at(now())
                 .build();
             put_scratchpad(conn, project_id, &note)
         })
@@ -234,7 +359,7 @@ impl CoordinationStore for SqliteStore {
             let (project_id, _) = require_project(conn, project)?;
             collect(
                 conn,
-                &format!("{SELECT_TODO} WHERE project_id = ?1 ORDER BY rowid"),
+                &format!("SELECT {TODO_COLUMNS} FROM todos WHERE project_id = ?1 ORDER BY rowid"),
                 params![project_id],
                 todo_from_row,
             )
@@ -244,13 +369,7 @@ impl CoordinationStore for SqliteStore {
     fn todo(&self, project: &ProjectRoot, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            Ok(collect(
-                conn,
-                &format!("{SELECT_TODO} WHERE project_id = ?1 AND id = ?2"),
-                params![project_id, id.as_ref()],
-                todo_from_row,
-            )?
-            .pop())
+            find_todo(conn, project_id, id)
         })
     }
 
@@ -267,8 +386,9 @@ impl CoordinationStore for SqliteStore {
             .title(title.clone())
             .status(TodoStatus::Pending)
             .deps(deps.to_vec())
+            .claim(None)
             .author(author.clone())
-            .updated_at(now_epoch_secs() as u64)
+            .updated_at(now())
             .build();
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -277,33 +397,55 @@ impl CoordinationStore for SqliteStore {
         Ok(todo)
     }
 
-    fn set_todo_status(
+    fn update_todo(
         &self,
         project: &ProjectRoot,
-        author: &Author,
+        me: &Author,
         id: &TodoId,
-        status: TodoStatus,
-    ) -> Result<bool, ConfigError> {
+        change: &TodoChange,
+    ) -> Result<TodoUpdate, ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            // A claim is an in-progress todo with an owner and a lease, so
-            // any other status drops both.
-            let changed = conn
-                .execute(
-                    "UPDATE todos SET status = ?1, author = ?2, updated_at = ?3, \
-                     owner = CASE WHEN ?1 = 'in-progress' THEN owner END, \
-                     claimed_until = CASE WHEN ?1 = 'in-progress' THEN claimed_until END \
-                     WHERE project_id = ?4 AND id = ?5",
-                    params![
-                        status.to_string(),
-                        author.label(),
-                        now_epoch_secs(),
-                        project_id,
-                        id.as_ref()
-                    ],
+            let Some(todo) = find_todo(conn, project_id, id)? else {
+                return Ok(TodoUpdate::Missing);
+            };
+            let update = todo.changed(me, change, now());
+            if let TodoUpdate::Updated(changed) = &update {
+                rewrite_todo(conn, project_id, changed)?;
+            }
+            Ok(update)
+        })
+    }
+
+    fn claim_todo(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        id: Option<&TodoId>,
+        lease: TodoLease,
+    ) -> Result<Claim, ConfigError> {
+        self.write(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            let now = now();
+            let until = now + lease.as_ref().as_secs();
+            if let Some(id) = id {
+                return claim_by_id(conn, project_id, me, id, until, now);
+            }
+            let next: Option<String> = conn
+                .query_row(
+                    NEXT_CLAIMABLE,
+                    named_params! { ":project": project_id, ":now": now as i64 },
+                    |row| row.get(0),
                 )
+                .optional()
                 .map_err(db_error)?;
-            Ok(changed > 0)
+            match next {
+                None => Ok(Claim::NothingClaimable),
+                Some(next) => {
+                    let next = TodoId::try_new(next).map_err(|error| corrupt("todo id", error))?;
+                    claim_by_id(conn, project_id, me, &next, until, now)
+                },
+            }
         })
     }
 
@@ -357,7 +499,7 @@ impl CoordinationStore for SqliteStore {
                 .key(key.clone())
                 .value(value.to_string())
                 .author(author.clone())
-                .updated_at(now_epoch_secs() as u64)
+                .updated_at(now())
                 .build();
             put_value(conn, project_id, &entry)
         })
@@ -372,6 +514,54 @@ impl CoordinationStore for SqliteStore {
                 project_id,
                 key.as_ref(),
             )
+        })
+    }
+
+    fn acquire_lock(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        name: &LockName,
+        ttl: LockTtl,
+        note: Option<&LockNote>,
+    ) -> Result<LockAttempt, ConfigError> {
+        self.write(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            lock_rows::acquire(conn, project_id, me, name, ttl, note, now())
+        })
+    }
+
+    fn release_lock(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        name: &LockName,
+    ) -> Result<LockRelease, ConfigError> {
+        self.write(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            lock_rows::release(conn, project_id, me, name, now())
+        })
+    }
+
+    fn break_lock(
+        &self,
+        project: &ProjectRoot,
+        name: &LockName,
+    ) -> Result<Option<Lock>, ConfigError> {
+        self.write(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            lock_rows::break_lock(conn, project_id, name)
+        })
+    }
+
+    fn release_locks_of(&self, me: &Author) -> Result<usize, ConfigError> {
+        self.write(|conn| lock_rows::release_all_of(conn, me))
+    }
+
+    fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            lock_rows::live(conn, project_id, now())
         })
     }
 
@@ -400,14 +590,14 @@ impl CoordinationStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, slice};
+    use std::{fs, path::PathBuf, slice, thread, time::Duration};
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
         adapter::store::test_support::{database, fresh_store, spec},
-        domain::port::StackStore,
+        domain::{coordination::claimable, port::StackStore},
     };
 
     /// Registers a project at a fresh folder under `scratch`.
@@ -507,6 +697,18 @@ mod tests {
             &[],
             &[]
         )));
+        assert!(refused(
+            store
+                .claim_todo(&ghost, &author(), None, TodoLease::DEFAULT)
+                .map(|_| ())
+        ));
+        let lock = LockName::try_new("migrations").unwrap();
+        assert!(refused(
+            store
+                .acquire_lock(&ghost, &author(), &lock, LockTtl::DEFAULT, None)
+                .map(|_| ())
+        ));
+        assert!(refused(store.locks(&ghost).map(|_| ())));
     }
 
     /// A todo round-trips add, status update and delete.
@@ -530,12 +732,19 @@ mod tests {
             Some(&created)
         );
 
-        assert!(
-            store
-                .set_todo_status(&root, &Author::human(), created.id(), TodoStatus::Done)
-                .unwrap()
-        );
+        let TodoUpdate::Updated(updated) = store
+            .update_todo(
+                &root,
+                &Author::human(),
+                created.id(),
+                &status(TodoStatus::Done, false),
+            )
+            .unwrap()
+        else {
+            panic!("an unclaimed todo updates");
+        };
         let reread = store.todo(&root, created.id()).unwrap().unwrap();
+        assert_eq!(reread, updated, "the result is what was stored");
         assert_eq!(*reread.status(), TodoStatus::Done);
         assert_eq!(
             reread.author(),
@@ -546,56 +755,403 @@ mod tests {
 
         assert!(store.delete_todo(&root, created.id()).unwrap());
         assert!(!store.delete_todo(&root, created.id()).unwrap());
-        assert!(
-            !store
-                .set_todo_status(&root, &author(), created.id(), TodoStatus::Done)
-                .unwrap()
+        assert_eq!(
+            store
+                .update_todo(
+                    &root,
+                    &author(),
+                    created.id(),
+                    &status(TodoStatus::Done, false)
+                )
+                .unwrap(),
+            TodoUpdate::Missing
         );
     }
 
-    /// Finishing or reopening a claimed todo drops its owner and lease, so
-    /// the schema's claim invariant holds.
+    /// A change that sets only `status`, forced or not.
+    fn status(status: TodoStatus, force: bool) -> TodoChange {
+        TodoChange::builder()
+            .title(None)
+            .status(Some(status))
+            .force(force)
+            .build()
+    }
+
+    /// A pending todo titled `title` under `root`.
+    fn add(store: &SqliteStore, root: &ProjectRoot, title: &str, deps: &[TodoId]) -> Todo {
+        store
+            .add_todo(root, &author(), &TodoTitle::try_new(title).unwrap(), deps)
+            .unwrap()
+    }
+
+    /// Runs the lease of todo `id` out, as if its holder went away an hour ago.
+    fn lapse(store: &SqliteStore, id: &TodoId) {
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE todos SET claimed_until = ?1 WHERE id = ?2",
+                    params![now() as i64 - 3600, id.as_ref()],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+    }
+
+    /// The todo `claim` took, or a panic naming what it came to.
+    fn claimed(claim: Claim) -> Todo {
+        match claim {
+            Claim::Claimed(todo) => todo,
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    /// Claiming by id takes a pending todo, renews for its owner, answers
+    /// another agent with the holder, and lets anyone take a lapsed lease.
     #[test]
-    fn a_status_other_than_in_progress_drops_the_claim() {
+    fn claiming_by_id_respects_the_lease() {
         let (store, scratch) = fresh_store();
         let root = project(&store, &scratch, "shop");
-        let todo = store
-            .add_todo(
+        let task = add(&store, &root, "task", &[]);
+        let claude = Author::agent("claude");
+        let codex = Author::agent("codex");
+        let lease = TodoLease::DEFAULT;
+
+        let held = claimed(
+            store
+                .claim_todo(&root, &claude, Some(task.id()), lease)
+                .unwrap(),
+        );
+        assert_eq!(*held.status(), TodoStatus::InProgress);
+        assert_eq!(held.claim().as_ref().unwrap().owner(), &claude);
+        assert_eq!(held.author(), &claude);
+        assert_eq!(store.todo(&root, task.id()).unwrap().unwrap(), held);
+
+        let Claim::HeldBy { owner, expires_in } = store
+            .claim_todo(&root, &codex, Some(task.id()), lease)
+            .unwrap()
+        else {
+            panic!("another agent's live lease holds");
+        };
+        assert_eq!(owner, claude);
+        assert!(expires_in <= *lease.as_ref() && expires_in > Duration::ZERO);
+
+        lapse(&store, task.id());
+        let renewed = claimed(
+            store
+                .claim_todo(&root, &claude, Some(task.id()), lease)
+                .unwrap(),
+        );
+        assert!(
+            renewed.claim().as_ref().unwrap().is_live(now()),
+            "renewal extends it"
+        );
+
+        lapse(&store, task.id());
+        let taken = claimed(
+            store
+                .claim_todo(&root, &codex, Some(task.id()), lease)
+                .unwrap(),
+        );
+        assert_eq!(taken.claim().as_ref().unwrap().owner(), &codex);
+    }
+
+    /// A done todo, an unowned in-progress one and an unknown id are not
+    /// claimable by id.
+    #[test]
+    fn claiming_by_id_refuses_what_it_cannot_take() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let done = add(&store, &root, "done", &[]);
+        let busy = add(&store, &root, "busy", &[]);
+        let me = Author::agent("claude");
+        let lease = TodoLease::DEFAULT;
+        store
+            .update_todo(
                 &root,
-                &author(),
-                &TodoTitle::try_new("claimed").unwrap(),
-                &[],
+                &Author::human(),
+                done.id(),
+                &status(TodoStatus::Done, false),
             )
             .unwrap();
-        let claim = |conn: &Connection| {
-            conn.execute(
-                "UPDATE todos SET status = 'in-progress', owner = 'agent', claimed_until = 99 WHERE id = ?1",
-                params![todo.id().as_ref()],
+        store
+            .update_todo(
+                &root,
+                &Author::human(),
+                busy.id(),
+                &status(TodoStatus::InProgress, false),
             )
-            .map_err(db_error)
-        };
-        let owner = |store: &SqliteStore| -> Option<String> {
+            .unwrap();
+
+        for todo in [&done, &busy] {
+            assert!(matches!(
+                store.claim_todo(&root, &me, Some(todo.id()), lease).unwrap(),
+                Claim::Unavailable(found) if found.id() == todo.id()
+            ));
+        }
+        assert_eq!(
             store
-                .read(|conn| {
-                    conn.query_row(
-                        "SELECT owner FROM todos WHERE id = ?1",
-                        params![todo.id().as_ref()],
-                        |row| row.get(0),
-                    )
-                    .map_err(db_error)
-                })
-                .unwrap()
+                .claim_todo(&root, &me, Some(&TodoId::generate().unwrap()), lease)
+                .unwrap(),
+            Claim::Missing
+        );
+    }
+
+    /// Without an id, the oldest todo whose dependencies are done is taken,
+    /// lapsed leases included, and the choice agrees with the domain's.
+    #[test]
+    fn claiming_the_next_todo_follows_deps_and_age() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let first = add(&store, &root, "first", &[]);
+        let blocked = add(&store, &root, "blocked", slice::from_ref(first.id()));
+        let orphan = add(&store, &root, "orphan", &[TodoId::generate().unwrap()]);
+        let claude = Author::agent("claude");
+        let codex = Author::agent("codex");
+        let lease = TodoLease::DEFAULT;
+        let next_by_domain = |store: &SqliteStore| {
+            claimable(&store.todos(&root).unwrap(), now())
+                .next()
+                .map(|todo| todo.id().clone())
         };
-        store.write(claim).unwrap();
+
+        assert_eq!(next_by_domain(&store).as_ref(), Some(first.id()));
+        let one = claimed(store.claim_todo(&root, &claude, None, lease).unwrap());
+        assert_eq!(one.id(), first.id());
+
+        assert_eq!(next_by_domain(&store).as_ref(), Some(orphan.id()));
+        let two = claimed(store.claim_todo(&root, &codex, None, lease).unwrap());
+        assert_eq!(
+            two.id(),
+            orphan.id(),
+            "a vanished dependency does not block"
+        );
+
+        assert_eq!(next_by_domain(&store), None);
+        assert_eq!(
+            store.claim_todo(&root, &codex, None, lease).unwrap(),
+            Claim::NothingClaimable,
+            "the blocked one waits on an unfinished dependency"
+        );
+
+        lapse(&store, first.id());
+        assert_eq!(next_by_domain(&store).as_ref(), Some(first.id()));
+        let three = claimed(store.claim_todo(&root, &codex, None, lease).unwrap());
+        assert_eq!(three.id(), first.id(), "a lapsed lease is claimable again");
 
         store
-            .set_todo_status(&root, &author(), todo.id(), TodoStatus::InProgress)
+            .update_todo(&root, &codex, first.id(), &status(TodoStatus::Done, false))
             .unwrap();
-        assert_eq!(owner(&store).as_deref(), Some("agent"), "still in progress");
+        let four = claimed(store.claim_todo(&root, &claude, None, lease).unwrap());
+        assert_eq!(four.id(), blocked.id());
+    }
+
+    /// Two stores on one file racing for the next todo never both win it.
+    #[test]
+    fn concurrent_claims_take_distinct_todos() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        add(&store, &root, "only", &[]);
+        let racers: Vec<_> = (0..4)
+            .map(|index| {
+                let store = SqliteStore::open(&database(&scratch)).unwrap();
+                let root = root.clone();
+                thread::spawn(move || {
+                    store
+                        .claim_todo(
+                            &root,
+                            &Author::agent(&format!("agent-{index}")),
+                            None,
+                            TodoLease::DEFAULT,
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let wins = racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .filter(|claim| matches!(claim, Claim::Claimed(_)))
+            .count();
+
+        assert_eq!(wins, 1);
+    }
+
+    /// A held todo refuses another agent's change unless forced; finishing or
+    /// releasing drops the claim, so the schema's claim invariant holds.
+    #[test]
+    fn updating_respects_the_lease_and_drops_the_claim() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let task = add(&store, &root, "task", &[]);
+        let claude = Author::agent("claude");
         store
-            .set_todo_status(&root, &author(), todo.id(), TodoStatus::Done)
+            .claim_todo(&root, &claude, Some(task.id()), TodoLease::DEFAULT)
             .unwrap();
-        assert_eq!(owner(&store), None);
+
+        assert!(matches!(
+            store
+                .update_todo(&root, &Author::human(), task.id(), &status(TodoStatus::Done, false))
+                .unwrap(),
+            TodoUpdate::HeldBy { owner, .. } if owner == claude
+        ));
+        let TodoUpdate::Updated(released) = store
+            .update_todo(
+                &root,
+                &claude,
+                task.id(),
+                &status(TodoStatus::Pending, false),
+            )
+            .unwrap()
+        else {
+            panic!("the owner releases");
+        };
+        assert_eq!(released.claim(), &None);
+
+        store
+            .claim_todo(&root, &claude, Some(task.id()), TodoLease::DEFAULT)
+            .unwrap();
+        let TodoUpdate::Updated(forced) = store
+            .update_todo(
+                &root,
+                &Author::human(),
+                task.id(),
+                &status(TodoStatus::Done, true),
+            )
+            .unwrap()
+        else {
+            panic!("force overrides the lease");
+        };
+        assert_eq!(*forced.status(), TodoStatus::Done);
+        assert_eq!(
+            store.todo(&root, task.id()).unwrap().unwrap().claim(),
+            &None
+        );
+    }
+
+    /// Taking a lock is exclusive until released or expired; the holder
+    /// renews it; another caller hears who holds it and why.
+    #[test]
+    fn a_lock_is_exclusive_until_released_or_expired() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let name = LockName::try_new("migrations").unwrap();
+        let note = LockNote::try_new("running 0042").unwrap();
+        let claude = Author::agent("claude");
+        let codex = Author::agent("codex");
+        let ttl = LockTtl::DEFAULT;
+
+        assert_eq!(
+            store
+                .acquire_lock(&root, &claude, &name, ttl, Some(&note))
+                .unwrap(),
+            LockAttempt::Acquired {
+                expires_in: *ttl.as_ref()
+            }
+        );
+        let LockAttempt::HeldBy {
+            owner,
+            note: held_note,
+            expires_in,
+        } = store.acquire_lock(&root, &codex, &name, ttl, None).unwrap()
+        else {
+            panic!("the lock is held");
+        };
+        assert_eq!((owner, held_note), (claude.clone(), Some(note)));
+        assert!(expires_in <= *ttl.as_ref());
+        assert!(matches!(
+            store
+                .acquire_lock(&root, &claude, &name, ttl, None)
+                .unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        assert_eq!(
+            store.locks(&root).unwrap()[0].note(),
+            &None,
+            "renewal replaces the note"
+        );
+
+        assert_eq!(
+            store.release_lock(&root, &codex, &name).unwrap(),
+            LockRelease::HeldBy {
+                owner: claude.clone()
+            }
+        );
+        assert_eq!(
+            store.release_lock(&root, &claude, &name).unwrap(),
+            LockRelease::Released
+        );
+        assert_eq!(
+            store.release_lock(&root, &claude, &name).unwrap(),
+            LockRelease::NotHeld
+        );
+
+        store
+            .acquire_lock(&root, &claude, &name, ttl, None)
+            .unwrap();
+        expire_locks(&store);
+        assert!(
+            store.locks(&root).unwrap().is_empty(),
+            "an expired lock is not listed"
+        );
+        assert_eq!(
+            store.release_lock(&root, &codex, &name).unwrap(),
+            LockRelease::NotHeld
+        );
+        assert!(matches!(
+            store.acquire_lock(&root, &codex, &name, ttl, None).unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        assert_eq!(store.locks(&root).unwrap()[0].owner(), &codex);
+    }
+
+    /// Runs every lock out, as if their holders went away an hour ago.
+    fn expire_locks(store: &SqliteStore) {
+        store
+            .write(|conn| {
+                conn.execute("UPDATE locks SET expires_at = ?1", params![
+                    now() as i64 - 3600
+                ])
+                .map_err(db_error)
+            })
+            .unwrap();
+    }
+
+    /// Locks are per project; an exiting agent releases its own everywhere;
+    /// the human breaks anyone's.
+    #[test]
+    fn locks_are_per_project_and_released_by_owner() {
+        let (store, scratch) = fresh_store();
+        let one = project(&store, &scratch, "one");
+        let two = project(&store, &scratch, "two");
+        let name = LockName::try_new("db-reset").unwrap();
+        let other = LockName::try_new("deploy").unwrap();
+        let claude = Author::agent("claude");
+        let codex = Author::agent("codex");
+        let ttl = LockTtl::DEFAULT;
+
+        store.acquire_lock(&one, &claude, &name, ttl, None).unwrap();
+        assert!(matches!(
+            store.acquire_lock(&two, &codex, &name, ttl, None).unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        store
+            .acquire_lock(&two, &claude, &other, ttl, None)
+            .unwrap();
+
+        assert_eq!(store.release_locks_of(&claude).unwrap(), 2);
+        assert!(store.locks(&one).unwrap().is_empty());
+        let left: Vec<_> = store
+            .locks(&two)
+            .unwrap()
+            .into_iter()
+            .map(|lock| lock.owner().clone())
+            .collect();
+        assert_eq!(left, vec![codex.clone()]);
+
+        let broken = store.break_lock(&two, &name).unwrap().unwrap();
+        assert_eq!(broken.owner(), &codex);
+        assert_eq!(store.break_lock(&two, &name).unwrap(), None);
     }
 
     #[test]
@@ -629,8 +1185,23 @@ mod tests {
             .title(TodoTitle::try_new("ship").unwrap())
             .status(TodoStatus::Done)
             .deps(vec![TodoId::generate().unwrap()])
+            .claim(None)
             .author(Author::agent("claude"))
             .updated_at(1234)
+            .build();
+        let held = Todo::builder()
+            .id(TodoId::generate().unwrap())
+            .title(TodoTitle::try_new("review").unwrap())
+            .status(TodoStatus::InProgress)
+            .deps(vec![])
+            .claim(Some(
+                TodoClaim::builder()
+                    .owner(Author::agent("codex"))
+                    .claimed_until(5678)
+                    .build(),
+            ))
+            .author(Author::agent("codex"))
+            .updated_at(1200)
             .build();
         let entry = KeyValue::builder()
             .key(KvKey::try_new("port").unwrap())
@@ -643,13 +1214,13 @@ mod tests {
             &store,
             &root,
             slice::from_ref(&note),
-            slice::from_ref(&todo),
+            &[todo.clone(), held.clone()],
             slice::from_ref(&entry),
         )
         .unwrap();
 
         assert_eq!(store.scratchpads(&root).unwrap(), vec![note]);
-        assert_eq!(store.todos(&root).unwrap(), vec![todo]);
+        assert_eq!(store.todos(&root).unwrap(), vec![todo, held]);
         assert_eq!(store.values(&root).unwrap(), vec![entry]);
     }
 

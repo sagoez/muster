@@ -1,7 +1,9 @@
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, KeyValue, KvKey, Scratchpad, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle,
+        Author, Claim, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote, LockRelease,
+        LockTtl, Scratchpad, ScratchpadKey, Todo, TodoChange, TodoId, TodoLease, TodoTitle,
+        TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -80,18 +82,33 @@ pub trait CoordinationStore {
         deps: &[TodoId],
     ) -> Result<Todo, ConfigError>;
 
-    /// Sets the lifecycle status of the todo identified by `id` under `project`,
-    /// stamping `author` and the write time. Returns whether the todo was found.
+    /// Applies `change` by `me` to the todo identified by `id` under `project`,
+    /// as [`Todo::changed`] rules, in one transaction.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or written.
-    fn set_todo_status(
+    fn update_todo(
         &self,
         project: &ProjectRoot,
-        author: &Author,
+        me: &Author,
         id: &TodoId,
-        status: TodoStatus,
-    ) -> Result<bool, ConfigError>;
+        change: &TodoChange,
+    ) -> Result<TodoUpdate, ConfigError>;
+
+    /// Atomically claims a todo under `project` for `me` for `lease`: the one
+    /// `id` names when it is pending, its lease ran out, or `me` holds it
+    /// (renewing); without `id`, the oldest todo
+    /// [`claimable`](crate::domain::coordination::claimable) yields.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    fn claim_todo(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        id: Option<&TodoId>,
+        lease: TodoLease,
+    ) -> Result<Claim, ConfigError>;
 
     /// Removes the todo identified by `id` under `project`. Returns whether one
     /// was removed.
@@ -131,6 +148,56 @@ pub trait CoordinationStore {
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or written.
     fn delete_value(&self, project: &ProjectRoot, key: &KvKey) -> Result<bool, ConfigError>;
+
+    /// Takes the lock `name` under `project` for `me` for `ttl`, in one
+    /// statement: free or expired, it becomes `me`'s; held by `me`, it renews
+    /// and takes `note`.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    fn acquire_lock(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        name: &LockName,
+        ttl: LockTtl,
+        note: Option<&LockNote>,
+    ) -> Result<LockAttempt, ConfigError>;
+
+    /// Releases the lock `name` under `project` when `me` holds it.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    fn release_lock(
+        &self,
+        project: &ProjectRoot,
+        me: &Author,
+        name: &LockName,
+    ) -> Result<LockRelease, ConfigError>;
+
+    /// Removes the lock `name` under `project` whoever holds it, for the
+    /// human clearing a stuck lock. Returns the lock removed.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    fn break_lock(
+        &self,
+        project: &ProjectRoot,
+        name: &LockName,
+    ) -> Result<Option<Lock>, ConfigError>;
+
+    /// Releases every lock `me` holds in any project, as an MCP server does
+    /// when it exits. Returns how many went.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be written.
+    fn release_locks_of(&self, me: &Author) -> Result<usize, ConfigError>;
+
+    /// Every lock under `project` that has not expired, by name.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError>;
 
     /// Restores entries into `project` exactly as given - preserving each entry's
     /// id, author, and timestamp rather than stamping fresh ones - so a snapshot

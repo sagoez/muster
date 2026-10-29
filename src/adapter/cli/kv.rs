@@ -138,7 +138,10 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::ConfigError,
-        coordination::{KeyValue, Scratchpad, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle},
+        coordination::{
+            Claim, KeyValue, Lock, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
+            Scratchpad, ScratchpadKey, Todo, TodoChange, TodoId, TodoLease, TodoTitle, TodoUpdate,
+        },
     };
 
     /// An in-memory coordination store recording key-value entries for one project.
@@ -239,18 +242,64 @@ mod tests {
             unreachable!("kv commands never touch todos")
         }
 
-        fn set_todo_status(
+        fn update_todo(
             &self,
             _project: &ProjectRoot,
-            _author: &Author,
+            _me: &Author,
             _id: &TodoId,
-            _status: TodoStatus,
-        ) -> Result<bool, ConfigError> {
+            _change: &TodoChange,
+        ) -> Result<TodoUpdate, ConfigError> {
+            unreachable!("kv commands never touch todos")
+        }
+
+        fn claim_todo(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _id: Option<&TodoId>,
+            _lease: TodoLease,
+        ) -> Result<Claim, ConfigError> {
             unreachable!("kv commands never touch todos")
         }
 
         fn delete_todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<bool, ConfigError> {
             unreachable!("kv commands never touch todos")
+        }
+
+        fn acquire_lock(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _name: &LockName,
+            _ttl: LockTtl,
+            _note: Option<&LockNote>,
+        ) -> Result<LockAttempt, ConfigError> {
+            unreachable!("kv commands never touch locks")
+        }
+
+        fn release_lock(
+            &self,
+            _project: &ProjectRoot,
+            _me: &Author,
+            _name: &LockName,
+        ) -> Result<LockRelease, ConfigError> {
+            unreachable!("kv commands never touch locks")
+        }
+
+        fn break_lock(
+            &self,
+            _project: &ProjectRoot,
+            _name: &LockName,
+        ) -> Result<Option<Lock>, ConfigError> {
+            unreachable!("kv commands never touch locks")
+        }
+
+        fn release_locks_of(&self, _me: &Author) -> Result<usize, ConfigError> {
+            unreachable!("kv commands never touch locks")
+        }
+
+        fn locks(&self, _project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
+            unreachable!("kv commands never touch locks")
         }
 
         fn import(

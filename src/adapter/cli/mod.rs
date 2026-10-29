@@ -27,6 +27,7 @@ mod interrupt_guard;
 mod invocation;
 mod json_log_lines;
 mod kv;
+mod lock;
 mod log_follower;
 mod note;
 mod output;

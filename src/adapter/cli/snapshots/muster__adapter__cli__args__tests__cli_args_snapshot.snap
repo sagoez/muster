@@ -34,6 +34,7 @@ Commands:
   note          Read or write shared scratchpad notes for the current project
   todo          List or manage the current project's shared todos
   kv            Read or write the current project's shared key-value state
+  lock          List the locks agents hold on the current project, or release one
   coordination  Export or restore this project's coordination state as portable YAML
   mcp           Serve this project to agents as an MCP server over stdio: its processes and shared coordination state (spawned as a child process by a connecting agent)
   doctor        Diagnose muster's database, projects and completions
@@ -587,6 +588,7 @@ Arguments:
   <STATUS>  New status
 
 Options:
+      --force              Change it even though an agent holds it
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
   -h, --help               Print help
 
@@ -654,6 +656,33 @@ Usage: muster kv rm [OPTIONS] <KEY>
 
 Arguments:
   <KEY>  Entry key
+
+Options:
+  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -h, --help               Print help
+
+
+$ muster lock --help
+List the locks agents hold on the current project, or release one
+
+Usage: muster lock [OPTIONS] [COMMAND]
+
+Commands:
+  release  Release a lock whoever holds it, to clear one an agent left behind
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -h, --help               Print help
+
+
+$ muster lock release --help
+Release a lock whoever holds it, to clear one an agent left behind
+
+Usage: muster lock release [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Lock name
 
 Options:
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder

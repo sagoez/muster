@@ -471,6 +471,11 @@ impl ServiceRuntime {
                     );
                 }
             },
+            ServiceEvent::HeldWaitOverdue { project, pane, id } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_held_wait_overdue(pane, id);
+                }
+            },
             ServiceEvent::LogTailRead {
                 project,
                 pane,

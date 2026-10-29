@@ -36,6 +36,12 @@ const UNKNOWN_PROCESS: &str = "no process with that name in this project";
 /// Why a wait from a cursor past a process's output is refused, before the
 /// cursor and the output's end.
 const SINCE_PAST_END: &str = "since is past the end of the output";
+/// Longest a wait on a process this service never saw run is held while the
+/// end of its log is read; past it the wait is refused.
+const LOG_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Why a held wait is refused once its log read is overdue, before the
+/// timeout.
+const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
 
@@ -158,7 +164,10 @@ impl Supervisor {
             self.register(prepared, after, WaitReply::Direct(reply));
             return;
         }
+        let id = self.next_held_wait;
+        self.next_held_wait += 1;
         let held = HeldWait {
+            id,
             prepared,
             after,
             reply,
@@ -170,6 +179,50 @@ impl Supervisor {
                 self.read_log_tail(pane);
             },
         }
+        if self
+            .held_waits
+            .get(&pane)
+            .is_some_and(|waits| waits.iter().any(|held| held.id == id))
+        {
+            self.time_held_wait(pane, id);
+        }
+    }
+
+    /// Refuses the wait `id` held on `pane` if the read of its log has not
+    /// answered it within [`LOG_TAIL_TIMEOUT`], so a log that cannot be read
+    /// never holds a wait past its caller's patience.
+    pub fn handle_held_wait_overdue(&mut self, pane: PaneId, id: u64) {
+        let Some(waits) = self.held_waits.get_mut(&pane) else {
+            return;
+        };
+        let Some(index) = waits.iter().position(|held| held.id == id) else {
+            return;
+        };
+        let overdue = waits.remove(index);
+        if waits.is_empty() {
+            self.held_waits.remove(&pane);
+        }
+        let _ = overdue.reply.send(ServiceResponse::Error(
+            ServiceErrorBody::builder()
+                .kind(ServiceErrorKind::Internal)
+                .message(format!(
+                    "{}: {LOG_TAIL_OVERDUE} {}",
+                    overdue.prepared.process,
+                    humantime::format_duration(LOG_TAIL_TIMEOUT)
+                ))
+                .build(),
+        ));
+    }
+
+    /// Tells the loop, once [`LOG_TAIL_TIMEOUT`] has passed, to refuse the
+    /// wait `id` held on `pane` if its log's end was not read by then.
+    fn time_held_wait(&self, pane: PaneId, id: u64) {
+        let events = self.events.clone();
+        let project = self.root().clone();
+        thread::spawn(move || {
+            thread::sleep(LOG_TAIL_TIMEOUT);
+            let _ = events.send(ServiceEvent::HeldWaitOverdue { project, pane, id });
+        });
     }
 
     /// Answers the waits held on `pane` once the end of its log was read:
@@ -190,6 +243,7 @@ impl Supervisor {
             prepared,
             after,
             reply,
+            ..
         } in held
         {
             if let Some(since) = prepared.since
@@ -1608,6 +1662,40 @@ mod tests {
         };
         assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidInput);
         assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
+    }
+
+    /// A wait held on a log read that never finishes is refused once
+    /// [`LOG_TAIL_TIMEOUT`] has passed, naming the timeout, rather than held
+    /// for as long as the read hangs.
+    #[test]
+    fn a_wait_held_on_a_stuck_log_read_is_refused_after_its_timeout() {
+        let (_release, gate) = unbounded::<()>();
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(StuckLogAdopter::builder().gate(gate).build()));
+        let held = Instant::now();
+
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+        assert!(answers.try_recv().is_err(), "the wait is held for the read");
+
+        let deadline = held + LOG_TAIL_TIMEOUT * 3;
+        let refusal = loop {
+            match harness
+                .events()
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(ServiceEvent::HeldWaitOverdue { pane, id, .. }) => {
+                    harness.supervisor_mut().handle_held_wait_overdue(pane, id);
+                    match answers.try_recv() {
+                        Ok(ServiceResponse::Error(refusal)) => break refusal,
+                        other => panic!("an overdue wait is refused, got {other:?}"),
+                    }
+                },
+                Ok(_) => {},
+                Err(_) => panic!("the held wait never became overdue"),
+            }
+        };
+        assert!(held.elapsed() >= LOG_TAIL_TIMEOUT);
+        assert!(refusal.message().contains(LOG_TAIL_OVERDUE), "{refusal:?}");
     }
 
     /// A `restart: always` run that exits 0 is recorded as exited, never as

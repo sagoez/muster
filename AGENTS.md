@@ -445,7 +445,9 @@ Every new feature passes this gate before it is called done:
    against the code before it is acted on. Each finding that survives owes a
    regression test that fails without its fix.
 2. **`/code-review`** on the same diff after the adversarial findings are fixed.
-3. Repeat both until a full round surfaces nothing new, then run `just ci`.
+3. Repeat both until a full round surfaces no Critical or Important finding
+   and only a few Minor ones (a handful, never dozens), then run `just ci`.
+   Those Minors are logged as a backlog, not left unrecorded.
 
 ## Git
 

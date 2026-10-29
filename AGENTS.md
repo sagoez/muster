@@ -90,11 +90,11 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 
 Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
 `HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts`,
-`SettleWatch` and `FollowedStream`. Each abstracts one adapter's call into another, or what the
-composition root hands an adapter, and carries adapter types (service
-requests, holder records, clap launches), so it has no place in `domain`. A
-seam the core itself needs, with only domain types in its signature, is a
-domain port.
+`SettleWatch` and `FollowedStream`. Each abstracts one adapter's call into
+another, or what the composition root hands an adapter, and carries adapter
+types (service requests, holder records, clap launches), so it has no place
+in `domain`. A seam the core itself needs, with only domain types in its
+signature, is a domain port.
 
 ```
 src/

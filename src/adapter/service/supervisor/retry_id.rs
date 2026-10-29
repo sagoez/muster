@@ -17,6 +17,7 @@ impl RetryId {
 mod tests {
     use super::*;
 
+    /// The id after the first is the next integer.
     #[test]
     fn next_advances_the_id() {
         assert_eq!(RetryId::default().next(), RetryId::new(1));

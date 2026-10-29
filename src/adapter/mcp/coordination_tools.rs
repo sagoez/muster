@@ -317,9 +317,12 @@ impl MusterMcp {
             .await?;
         let start = TodoPage::resume(&positioned, after);
         let now = epoch_now();
-        let todos: Vec<Todo> = positioned.iter().map(|(_, todo)| todo.clone()).collect();
-        let ready: Option<HashSet<&TodoId>> =
-            only_claimable.then(|| claimable(&todos, now).map(Todo::id).collect());
+        let ready: Option<HashSet<TodoId>> = only_claimable.then(|| {
+            let todos: Vec<Todo> = positioned.iter().map(|(_, todo)| todo.clone()).collect();
+            claimable(&todos, now)
+                .map(|todo| todo.id().clone())
+                .collect()
+        });
         let matching = positioned[start..]
             .iter()
             .filter(|(_, todo)| ready.as_ref().is_none_or(|ready| ready.contains(todo.id())))

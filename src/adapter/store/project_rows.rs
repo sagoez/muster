@@ -181,7 +181,7 @@ pub(super) fn register(
     }
     if let Some((_, held)) = readable_where(conn, SELECT_PROJECT, [])?
         .into_iter()
-        .find(|(_, other)| other.root() != root && other.root().as_ref().starts_with(root.as_ref()))
+        .find(|(_, other)| other.root().as_ref().starts_with(root.as_ref()))
     {
         return Err(ConfigError::HoldsProject {
             dir: root.as_ref().clone(),

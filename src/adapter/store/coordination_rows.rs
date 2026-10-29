@@ -134,15 +134,18 @@ pub(super) fn collect<T>(
     Ok(out)
 }
 
-/// Writes a scratchpad with the author and time it carries.
+/// Writes a scratchpad with the author and time it carries; a rewrite keeps
+/// the note's place in write order, so a listing cursor stays valid.
 fn put_scratchpad(
     conn: &Connection,
     project_id: i64,
     note: &Scratchpad,
 ) -> Result<(), ConfigError> {
     conn.execute(
-        "INSERT OR REPLACE INTO scratchpads (project_id, key, body, author, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO scratchpads (project_id, key, body, author, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT (project_id, key) DO UPDATE SET \
+         body = excluded.body, author = excluded.author, updated_at = excluded.updated_at",
         params![
             project_id,
             note.key().as_ref(),
@@ -259,11 +262,14 @@ fn claim_by_id(
     })
 }
 
-/// Writes a key-value with the author and time it carries.
+/// Writes a key-value with the author and time it carries; a rewrite keeps
+/// the entry's place in write order, so a listing cursor stays valid.
 fn put_value(conn: &Connection, project_id: i64, entry: &KeyValue) -> Result<(), ConfigError> {
     conn.execute(
-        "INSERT OR REPLACE INTO kv (project_id, key, value, author, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO kv (project_id, key, value, author, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT (project_id, key) DO UPDATE SET \
+         value = excluded.value, author = excluded.author, updated_at = excluded.updated_at",
         params![
             project_id,
             entry.key().as_ref(),

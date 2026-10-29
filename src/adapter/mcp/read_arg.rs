@@ -20,4 +20,8 @@ pub struct ReadArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     limit: Option<usize>,
+    /// The cursor a previous page returned, to list the entries after it.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    cursor: Option<String>,
 }

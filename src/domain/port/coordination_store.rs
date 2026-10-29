@@ -15,7 +15,7 @@ use crate::domain::{
 /// method fails with [`ConfigError::UnknownProject`] when `project` is not
 /// registered.
 pub trait CoordinationStore {
-    /// Every scratchpad under `project`, in write order.
+    /// Every scratchpad under `project`, in the order each was first written.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
@@ -117,7 +117,8 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or written.
     fn delete_todo(&self, project: &ProjectRoot, id: &TodoId) -> Result<bool, ConfigError>;
 
-    /// Every key-value entry under `project`, in write order.
+    /// Every key-value entry under `project`, in the order each was first
+    /// written.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.

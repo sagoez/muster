@@ -3,13 +3,14 @@
 
 use std::{
     collections::HashSet,
+    fmt::Display,
     time::{Duration, Instant},
 };
 
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
-use serde_json::json as object_of;
+use serde_json::{Value, json as object_of};
 use tokio::time;
 
 use super::{
@@ -33,18 +34,18 @@ use super::{
 };
 use crate::{
     adapter::{
-        client::{ListedValue, NoteEntry, TodoPage, TodoView},
+        client::{ListedValue, NoteEntry, PageSize, TodoPage, TodoView},
         clock::epoch_now,
         wire::WireForm,
     },
     domain::{
         coordination::{
-            Claim, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue, LOCK_TTL_MAX,
-            LockAttempt, LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS,
-            NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey,
-            ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX,
-            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease,
-            TodoStatus, TodoUpdate, claimable,
+            Claim, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvKeyError, KvValue,
+            LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
+            NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody,
+            Scratchpad, ScratchpadKey, ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
+            TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError,
+            TodoLease, TodoStatus, TodoUpdate, claimable,
         },
         port::CoordinationStore,
         value::ProjectRoot,
@@ -69,6 +70,8 @@ const CURSOR_FIELD: &str = "cursor";
 /// The form a `todo_list` cursor is written in.
 const CURSOR_FORM: &str =
     "the cursor of an earlier todo_list page, naming a todo that still exists";
+/// The form a `note_read` or `kv_read` cursor is written in.
+const KEY_CURSOR_FORM: &str = "the cursor of an earlier page, naming an entry that still exists";
 /// The form a bounded list is written in, followed by its maximum.
 const COUNT_FORM: &str = "at most ";
 /// The `deps` field of `todo_add`.
@@ -250,6 +253,47 @@ fn lock_ttl(seconds: Option<u64>) -> Result<LockTtl, ToolError> {
             )
         })
     })
+}
+
+/// One page of at most `size` of `items`, after the item whose key is
+/// `after`: the page, and the last key on it when more follow. `None` when no
+/// item has the key `after` names.
+fn keyed_page<'a, T, K: PartialEq + Clone>(
+    items: &'a [T],
+    key: impl Fn(&T) -> &K,
+    after: Option<&K>,
+    size: PageSize,
+) -> Option<(&'a [T], Option<K>)> {
+    let start = match after {
+        None => 0,
+        Some(after) => items.iter().position(|item| key(item) == after)? + 1,
+    };
+    let rest = &items[start..];
+    let page = &rest[..rest.len().min(size.into_inner())];
+    let cursor = (rest.len() > page.len())
+        .then(|| page.last().map(|last| key(last).clone()))
+        .flatten();
+    Some((page, cursor))
+}
+
+/// The refusal of a listing cursor naming the key `after`, which no entry
+/// has.
+fn unknown_cursor(after: Option<&impl AsRef<str>>) -> ToolError {
+    invalid(
+        CURSOR_FIELD,
+        KEY_CURSOR_FORM,
+        after.map_or("", AsRef::as_ref),
+    )
+}
+
+/// A listing of `items` under `field`, saying whether more follow and, when
+/// they do, the `cursor` to read on from.
+fn listing(field: &str, items: Value, cursor: Option<impl Display>) -> Value {
+    let mut listed = object_of!({ field: items, MORE: cursor.is_some() });
+    if let Some(cursor) = cursor {
+        listed[CURSOR_FIELD] = Value::String(cursor.to_string());
+    }
+    listed
 }
 
 /// The refusal of the unknown todo `id`, listing the project's ids.
@@ -512,13 +556,15 @@ impl MusterMcp {
 
     /// Reads one note, or lists them.
     #[tool(
-        description = "Without key, lists the shared notes {notes: [{key, author, updated_at}]} \
-            without bodies (limit, default <default-list-limit>, at most <max-list-limit>). \
-            With key, returns {key, body, author, updated_at}; an unknown key is flagged \
-            isError."
+        description = "Without key, lists the shared notes {notes: [{key, author, updated_at}], \
+            more} without bodies, oldest first (limit, default <default-list-limit>, at most \
+            <max-list-limit>). When more is true, cursor names where the page ended: pass it as \
+            cursor for the next page. With key, returns {key, body, author, updated_at}; an \
+            unknown key is flagged isError."
     )]
     pub(super) async fn note_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(note_key).transpose()?;
+        let after = arg.cursor().as_deref().map(note_key).transpose()?;
         let limit = page_size(arg.limit())?;
         let notes = self
             .blocking(move |deps| {
@@ -527,12 +573,10 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page: Vec<NoteEntry> = notes
-                .iter()
-                .take(limit.into_inner())
-                .map(NoteEntry::from)
-                .collect();
-            return structured(object_of!({ NOTES: json(&page)? }), false);
+            let (page, cursor) = keyed_page(&notes, Scratchpad::key, after.as_ref(), limit)
+                .ok_or_else(|| unknown_cursor(after.as_ref()))?;
+            let page: Vec<NoteEntry> = page.iter().map(NoteEntry::from).collect();
+            return structured(listing(NOTES, json(&page)?, cursor), false);
         };
         match notes.iter().find(|note| note.key() == &key) {
             Some(note) => structured(json(&note.to_wire())?, false),
@@ -587,13 +631,15 @@ impl MusterMcp {
     /// Reads one key-value entry, or lists them.
     #[tool(
         description = "Without key, lists the shared key-values {entries: [{key, value, author, \
-            updated_at, truncated}], more} (limit, default <default-list-limit>, at most \
-            <max-list-limit>), each value cut to its first <listed-value-chars> characters and \
-            marked truncated when cut. With key, returns that entry whole; an unknown key is \
-            flagged isError."
+            updated_at, truncated}], more}, oldest first (limit, default <default-list-limit>, at \
+            most <max-list-limit>), each value cut to its first <listed-value-chars> characters \
+            and marked truncated when cut. When more is true, cursor names where the page ended: \
+            pass it as cursor for the next page. With key, returns that entry whole; an unknown \
+            key is flagged isError."
     )]
     pub(super) async fn kv_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(kv_key).transpose()?;
+        let after = arg.cursor().as_deref().map(kv_key).transpose()?;
         let limit = page_size(arg.limit())?;
         let entries = self
             .blocking(move |deps| {
@@ -602,13 +648,10 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page: Vec<ListedValue> = entries
-                .iter()
-                .take(limit.into_inner())
-                .map(ListedValue::from)
-                .collect();
-            let more = entries.len() > limit.into_inner();
-            return structured(object_of!({ ENTRIES: json(&page)?, MORE: more }), false);
+            let (page, cursor) = keyed_page(&entries, KeyValue::key, after.as_ref(), limit)
+                .ok_or_else(|| unknown_cursor(after.as_ref()))?;
+            let page: Vec<ListedValue> = page.iter().map(ListedValue::from).collect();
+            return structured(listing(ENTRIES, json(&page)?, cursor), false);
         };
         match entries.iter().find(|entry| entry.key() == &key) {
             Some(entry) => structured(json(&entry.to_wire())?, false),
@@ -1240,6 +1283,90 @@ mod tests {
         );
         assert!(fixture.store().values(fixture.root()).unwrap().is_empty());
         assert_eq!(fixture.store().todos(fixture.root()).unwrap().len(), 1);
+    }
+
+    /// `note_read` and `kv_read` page through every entry by cursor, saying
+    /// when more follow; a rewritten key keeps its place, so a page read
+    /// between writes neither skips nor repeats; a cursor naming no entry is
+    /// refused.
+    #[test]
+    fn note_read_and_kv_read_page_by_cursor() {
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server();
+        let read =
+            |cursor: Option<String>| ReadArg::builder().cursor(cursor).limit(Some(2)).build();
+        runtime().block_on(async {
+            for key in ["one", "two", "three"] {
+                content(
+                    server
+                        .note_write(Parameters(
+                            NoteWriteArg::builder()
+                                .key(key.to_string())
+                                .body("b".to_string())
+                                .build(),
+                        ))
+                        .await,
+                );
+                content(
+                    server
+                        .kv_write(Parameters(
+                            KvWriteArg::builder()
+                                .key(key.to_string())
+                                .value("v".to_string())
+                                .build(),
+                        ))
+                        .await,
+                );
+            }
+            for (listed, field) in [(NOTES, true), (ENTRIES, false)] {
+                let mut keys = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let page = if field {
+                        content(server.note_read(Parameters(read(cursor))).await)
+                    } else {
+                        content(server.kv_read(Parameters(read(cursor))).await)
+                    };
+                    for entry in page[listed].as_array().unwrap() {
+                        keys.push(entry[KEY].as_str().unwrap().to_string());
+                    }
+                    if page[MORE] == false {
+                        assert!(page.get(CURSOR).is_none(), "{page}");
+                        break;
+                    }
+                    if keys.len() == 2 {
+                        content(
+                            server
+                                .note_write(Parameters(
+                                    NoteWriteArg::builder()
+                                        .key("one".to_string())
+                                        .body("again".to_string())
+                                        .build(),
+                                ))
+                                .await,
+                        );
+                        content(
+                            server
+                                .kv_write(Parameters(
+                                    KvWriteArg::builder()
+                                        .key("one".to_string())
+                                        .value("again".to_string())
+                                        .build(),
+                                ))
+                                .await,
+                        );
+                    }
+                    cursor = page[CURSOR].as_str().map(str::to_string);
+                }
+                assert_eq!(keys, ["one", "two", "three"], "{listed}");
+            }
+            let gone = || read(Some("no-such-key".to_string()));
+            let note = refusal(server.note_read(Parameters(gone())).await);
+            assert!(note.contains("invalid cursor"), "{note}");
+            let value = refusal(server.kv_read(Parameters(gone())).await);
+            assert!(value.contains("invalid cursor"), "{value}");
+        });
     }
 
     /// `todo_list` pages through every todo by cursor, saying when more

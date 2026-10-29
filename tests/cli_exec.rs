@@ -2653,6 +2653,35 @@ fn a_waited_start_reports_a_child_that_dies_at_once() {
     mcp.result("process_stop", serde_json::json!({ "name": "ronfail" }));
 }
 
+/// A waited `process_start` of a process already running says so, as the
+/// unwaited start does; one that starts it does not.
+#[test]
+fn a_waited_start_of_a_running_process_says_it_was_already_running() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &stack(&[entry("api", "echo up; sleep 600", false)]));
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    let start = |mcp: &mut McpSession| {
+        mcp.result(
+            "process_start",
+            serde_json::json!({ "name": "api", "wait": true }),
+        )["structuredContent"]
+            .clone()
+    };
+
+    let first = start(&mut mcp);
+    assert_eq!(first["wait"]["status"], "matched", "{first}");
+    assert!(first.get("outcome").is_none(), "{first}");
+    let again = start(&mut mcp);
+    assert_eq!(again["outcome"], "already-running", "{again}");
+    assert_eq!(again["wait"]["status"], "matched", "{again}");
+    let unwaited = mcp.result("process_start", serde_json::json!({ "name": "api" }));
+    assert_eq!(
+        unwaited["structuredContent"]["outcome"], "already-running",
+        "{unwaited}"
+    );
+    mcp.result("process_stop", serde_json::json!({ "name": "api" }));
+}
+
 /// Reading events filtered to other kinds never marks a crash heard: the
 /// next stack call still alerts it.
 #[test]

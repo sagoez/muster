@@ -31,7 +31,7 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            ActionReport, ClientError, DefinitionView, ProjectIdentityView, RemovedView,
+            ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
             ServiceClient, Unwatched, process,
         },
         holder::{
@@ -42,7 +42,7 @@ use crate::{
     },
     domain::{
         config::ConfigError,
-        process::PatternKind,
+        process::{PatternKind, ProcessState},
         project::Project,
         value::{OutputCursor, ProcessName, ProcessRef},
     },
@@ -68,6 +68,7 @@ const RUNNING: &str = "running";
 const SCREEN: &str = "screen";
 const SENT: &str = "sent";
 const WAIT: &str = "wait";
+const OUTCOME: &str = "outcome";
 /// How a removal whose report names no process is described.
 const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 /// How a control answer carrying neither a report nor a wait is described.
@@ -143,7 +144,8 @@ impl MusterMcp {
             (its readiness check, or running when it has none); wait can also be a condition, \
             as in process_wait. Without wait, waits at most <call-bound-s> seconds for it to \
             settle. Returns {project, process, outcome, reason, status, notices, wait_ended, \
-            alerts}, or with wait {process, wait, alerts}. outcome is started, already-running, \
+            alerts}, or with wait {process, wait, alerts}, plus outcome already-running when it \
+            was running before the call. outcome is started, already-running, \
             refused (with reason), crashed, exited, not-started, still-starting or \
             unsupervised. Flagged isError when it failed, crashed or exited while waiting; a \
             wait that ran out of time is status waiting, not an error: continue with \
@@ -484,16 +486,26 @@ impl MusterMcp {
             .map(|wait| wait.spec(bound))
             .transpose()?
             .flatten();
-        let ((report, outcome), alerts) = self
+        let ((report, outcome, already_running), alerts) = self
             .ask(arg.project().clone(), move |client, project| {
-                let answer: (Option<ActionReport>, Option<WaitOutcome>) = match &wait {
+                let answer: (Option<ActionReport>, Option<WaitOutcome>, bool) = match &wait {
                     Some(spec) => {
-                        let name = resolved(client, project, &name)?;
+                        let before = process::status(client, project)?;
+                        let name = process::resolve(&before, project, &name)?;
+                        let already_running = action == ProcessAction::Start
+                            && before.processes().iter().any(|process| {
+                                process.name().key() == name.key()
+                                    && matches!(
+                                        process.state(),
+                                        ProcessState::Running | ProcessState::Paused
+                                    )
+                            });
                         (
                             None,
                             Some(process::control_waiting(
                                 client, project, &name, action, spec,
                             )?),
+                            already_running,
                         )
                     },
                     None => (
@@ -506,17 +518,21 @@ impl MusterMcp {
                             &mut Unwatched,
                         )?),
                         None,
+                        false,
                     ),
                 };
                 Ok(answer)
             })
             .await?;
         if let Some(outcome) = outcome {
-            let value = with_field(
+            let mut value = with_field(
                 with_field(object(), PROCESS, json(outcome.process())?),
                 WAIT,
                 json(&AgentWaitView::from(&outcome))?,
             );
+            if already_running {
+                value = with_field(value, OUTCOME, json(&Outcome::AlreadyRunning)?);
+            }
             return waited(value, &outcome, &alerts);
         }
         let report = report.ok_or(ToolError::Client(ClientError::UnexpectedAnswer(

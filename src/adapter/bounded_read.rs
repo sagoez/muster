@@ -85,10 +85,10 @@ pub fn read_capped(reader: impl Read, max: u64) -> io::Result<String> {
 mod tests {
     use std::{fs, sync::mpsc, thread, time::Duration};
 
-    use rustix::fs::{CWD, FileType, mknodat};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::adapter::test_fifo::make_fifo;
 
     /// How long opening a FIFO may take before the test calls it blocked.
     const FIFO_OPEN_BOUND: Duration = Duration::from_secs(5);
@@ -114,7 +114,7 @@ mod tests {
         );
 
         let fifo = dir.path().join("fifo");
-        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        make_fifo(&fifo);
         assert_eq!(
             read_bounded(&fifo, 64).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
@@ -128,7 +128,7 @@ mod tests {
     fn a_fifo_present_at_open_never_blocks() {
         let dir = TempDir::new().unwrap();
         let fifo = dir.path().join("fifo");
-        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        make_fifo(&fifo);
         let (sent, opened) = mpsc::channel();
         thread::spawn(move || {
             let _ = sent.send(open_nonblocking(&fifo).map(|file| read_regular(file, 64)));

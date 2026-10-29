@@ -31,6 +31,8 @@ pub mod signal_target;
 pub mod store;
 pub mod terminal;
 #[cfg(test)]
+pub(crate) mod test_fifo;
+#[cfg(test)]
 pub(crate) mod test_scratch;
 #[cfg(test)]
 pub(crate) mod test_wait;

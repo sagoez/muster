@@ -97,11 +97,10 @@ fn notification_body(body: &str) -> String {
     body.to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn xdg_delivery_escapes_plain_text_markup_characters() {
         assert_eq!(

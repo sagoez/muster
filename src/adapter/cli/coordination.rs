@@ -151,14 +151,16 @@ mod tests {
         os::unix::fs::PermissionsExt,
     };
 
-    use rustix::fs::{CWD, FileType, Mode, mknodat};
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
-        adapter::store::{
-            SqliteStore,
-            test_support::{fresh_store, spec},
+        adapter::{
+            store::{
+                SqliteStore,
+                test_support::{fresh_store, spec},
+            },
+            test_fifo::make_fifo,
         },
         domain::{coordination::Author, port::StackStore},
     };
@@ -188,7 +190,7 @@ mod tests {
     fn an_import_reads_only_a_bounded_regular_file() {
         let (store, scratch, root) = project();
         let fifo = scratch.path().join("snapshot.fifo");
-        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        make_fifo(&fifo);
         let huge = scratch.path().join("huge.yml");
         File::create(&huge)
             .unwrap()

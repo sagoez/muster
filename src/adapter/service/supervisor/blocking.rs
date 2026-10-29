@@ -4,16 +4,15 @@
 
 use std::collections::HashMap;
 
-use super::entity::Supervisor;
+use super::{entity::Supervisor, spawn_generation::SpawnGeneration};
 use crate::{
-    adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner},
-    domain::{process::ProcessState, value::PaneId},
+    adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner, WaitStatus},
+    domain::{
+        port::PortOccupant,
+        process::ProcessState,
+        value::{LocalPort, PaneId, Pid},
+    },
 };
-
-/// Opens the notice of a start refused for a held port, before the port.
-const BLOCKED_NOTICE: &str = "did not start: port";
-/// Between the port and who holds it in that notice.
-const HELD_BY: &str = "is held by";
 
 impl Supervisor {
     /// The ports this project's live processes listen on, each with who
@@ -43,45 +42,109 @@ impl Supervisor {
         self.metrics.set_held_ports(held);
     }
 
-    /// Refuses to launch `pane` when another process listens on the port its
-    /// readiness check names, whether a supervised process of any project or
-    /// one muster does not run: the refusal is an error notice, a `blocked`
-    /// event, the pane's `blocked_on` and its `blocked` state. Returns
-    /// whether it refused.
+    /// Refuses to launch `pane` when a supervised process of any project was
+    /// last sampled on the port its readiness check names, as
+    /// [`Self::block_launch`] does. A port held by a process muster does not
+    /// run is found by the launch worker instead, since that lookup scans
+    /// the whole socket table. Returns whether it refused.
     pub(super) fn refuse_blocked_launch(&mut self, pane: PaneId) -> bool {
-        let Some(block) = self.port_block(pane) else {
+        let Some(block) = self.sampled_block(pane) else {
             self.metrics.clear_block(pane);
             return false;
         };
-        let message = format!(
-            "{BLOCKED_NOTICE} {} {HELD_BY} {}",
-            block.port(),
-            block.holder()
-        );
+        self.block_launch(pane, block);
+        true
+    }
+
+    /// Refuses `pane`'s launch for `block`: an error notice, a `blocked`
+    /// event, the pane's `blocked_on` and its `blocked` state.
+    fn block_launch(&mut self, pane: PaneId, block: PortBlock) {
+        let message = block.to_string();
         self.notify(NoticeLevel::Error, Some(pane), message.clone());
         self.record_event(Some(pane), EventKind::Blocked, message);
         self.metrics.set_block(pane, block);
         self.workspace.set_state(pane, ProcessState::Blocked);
-        true
     }
 
-    /// What blocks `pane`'s launch: the port its readiness check names,
-    /// held by another supervised process as last sampled, or else by any
-    /// process the OS socket table shows listening on it. A port its own
+    /// What blocks `pane`'s launch as last sampled: the port its readiness
+    /// check names, held by another supervised process. A port its own
     /// process was last seen on is free to it.
-    fn port_block(&mut self, pane: PaneId) -> Option<PortBlock> {
+    fn sampled_block(&self, pane: PaneId) -> Option<PortBlock> {
         let process = self.workspace.process(pane)?;
-        let port = process.ready().as_ref()?.probe().port()?;
+        let port = self.launch_port(pane)?;
         let me = PortHolder::builder()
             .project(self.project.name().clone())
             .process(process.name().clone())
             .build();
-        let owner = match self.metrics.holder_of(port.into_inner()) {
-            Some(holder) if *holder == me => return None,
-            Some(holder) => PortOwner::Supervised(holder.clone()),
-            None => PortOwner::Other(self.metrics.occupant(port.into_inner())?),
+        let holder = self
+            .metrics
+            .holder_of(port.into_inner())
+            .filter(|holder| **holder != me)?;
+        Some(
+            PortBlock::builder()
+                .port(port)
+                .holder(PortOwner::Supervised(holder.clone()))
+                .build(),
+        )
+    }
+
+    /// The port `pane`'s readiness check names, which its launch needs free.
+    pub(super) fn launch_port(&self, pane: PaneId) -> Option<LocalPort> {
+        self.workspace
+            .process(pane)?
+            .ready()
+            .as_ref()?
+            .probe()
+            .port()
+    }
+
+    /// Who runs a live process of this project whose pid is among `pids`,
+    /// as the holder of a port that process tree listens on.
+    pub fn holder_of_pids(&self, pids: &[Pid]) -> Option<PortHolder> {
+        self.live_pids()
+            .into_iter()
+            .find(|(_, pid)| pids.contains(pid))
+            .and_then(|(pane, _)| self.workspace.process(pane))
+            .map(|process| {
+                PortHolder::builder()
+                    .project(self.project.name().clone())
+                    .process(process.name().clone())
+                    .build()
+            })
+    }
+
+    /// Settles the launch of `pane` at `generation`, whose worker found the
+    /// port it needs held as `block` says, so nothing was launched: the
+    /// launch is refused as [`Self::block_launch`] does, its waits end and
+    /// what was asked meanwhile applies. A launch a later action superseded
+    /// is only forgotten.
+    pub fn handle_launch_blocked(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        block: PortBlock,
+    ) {
+        let Some(launch) = self.take_launch(pane, generation) else {
+            self.stale_release(pane, generation);
+            return;
         };
-        Some(PortBlock::builder().port(port).holder(owner).build())
+        let (membership, intent) = (launch.membership(), launch.intent());
+        self.readiness.remove(&pane);
+        self.block_launch(pane, block);
+        self.end_waits(
+            pane,
+            Some(generation),
+            WaitStatus::NotRunning,
+            ProcessState::Blocked,
+        );
+        self.apply_pending(pane, membership, None, intent);
+    }
+
+    /// The owner of the port a launch of `pane` found `occupant` holding: the
+    /// live process of this project it belongs to, else the occupant itself.
+    pub(super) fn owner_of(&self, occupant: PortOccupant) -> PortOwner {
+        self.holder_of_pids(&occupant.lineage())
+            .map_or(PortOwner::Other(occupant), PortOwner::Supervised)
     }
 }
 
@@ -91,7 +154,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::service::{LaunchEnvironment, supervisor::testing::*},
+        adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*},
         domain::{
             config::ProcessSpec,
             port::{ListeningSocket, PortOccupant, PortOccupants},
@@ -278,6 +341,97 @@ mod tests {
             harness.supervisor.snapshot().processes()[0]
                 .blocked_on()
                 .is_none()
+        );
+    }
+
+    /// A launch on a worker asks who holds its port there, never on the
+    /// loop: the start is `starting` until the worker's answer settles it
+    /// blocked, with its wait ended, and nothing is launched.
+    #[test]
+    fn a_worker_launch_finds_its_port_held_off_the_loop() {
+        let mut harness = Harness::over(Box::new(WorkerRunner::default()), &[on_port("web")]);
+        harness
+            .supervisor
+            .metrics
+            .set_port_occupants(Box::new(Occupied(Some(outsider()))));
+
+        harness
+            .supervisor
+            .start(&name("web"), &LaunchEnvironment::default());
+        assert_eq!(
+            *harness.supervisor.snapshot().processes()[0].state(),
+            ProcessState::Starting
+        );
+        let Ok(ServiceEvent::LaunchBlocked {
+            pane,
+            generation,
+            port,
+            occupant,
+            ..
+        }) = harness.events.recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("the worker reports the held port");
+        };
+        let block = PortBlock::builder()
+            .port(port)
+            .holder(harness.supervisor.owner_of(occupant))
+            .build();
+        harness
+            .supervisor
+            .handle_launch_blocked(pane, generation, block);
+
+        let status = harness.supervisor.snapshot();
+        assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
+        assert_eq!(
+            status.processes()[0]
+                .blocked_on()
+                .as_ref()
+                .map(PortBlock::holder),
+            Some(&PortOwner::Other(outsider()))
+        );
+        assert!(harness.supervisor.launches_in_flight() == 0);
+    }
+
+    /// A port a supervised process's child listens on is named after that
+    /// process even before any port sample, from the occupant's ancestors.
+    #[test]
+    fn a_port_a_supervised_tree_holds_is_named_before_any_sample() {
+        let mut harness = Harness::over(Box::new(PidRunner), &[
+            on_port("web"),
+            spec("api", "true", RestartPolicy::Never),
+        ]);
+        harness
+            .supervisor
+            .start(&name("api"), &LaunchEnvironment::default());
+        let child = PortOccupant::builder()
+            .pid(Pid::try_new(OUTSIDER_PID).unwrap())
+            .command(OUTSIDER_COMMAND.to_string())
+            .ancestors(vec![fake_launcher_pid()])
+            .build();
+        harness
+            .supervisor
+            .metrics
+            .set_port_occupants(Box::new(Occupied(Some(child))));
+
+        harness
+            .supervisor
+            .start(&name("web"), &LaunchEnvironment::default());
+
+        let status = harness.supervisor.snapshot();
+        let web = status
+            .processes()
+            .iter()
+            .find(|process| process.name() == &name("web"))
+            .unwrap();
+        assert_eq!(*web.state(), ProcessState::Blocked);
+        assert_eq!(
+            web.blocked_on().as_ref().map(PortBlock::holder),
+            Some(&PortOwner::Supervised(
+                PortHolder::builder()
+                    .project(test_project().name().clone())
+                    .process(name("api"))
+                    .build()
+            ))
         );
     }
 }

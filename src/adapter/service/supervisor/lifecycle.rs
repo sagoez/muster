@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsString,
+    sync::PoisonError,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -8,24 +9,25 @@ use std::{
 use super::{
     channel_output_sink::ChannelOutputSink, config_membership::ConfigMembership,
     entity::Supervisor, launch_purpose::LaunchPurpose, pane::Pane, pending_intent::PendingIntent,
-    pending_launch::PendingLaunch, shutdown_generation::ShutdownGeneration,
-    spawn_generation::SpawnGeneration, stale_release::StaleRelease,
+    pending_launch::PendingLaunch, shared_port_occupants::SharedPortOccupants,
+    shutdown_generation::ShutdownGeneration, spawn_generation::SpawnGeneration,
+    stale_release::StaleRelease,
 };
 use crate::{
     adapter::{
         holder::client::repaint_text,
         service::{
-            BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, Refusal,
-            ServiceEvent, WaitStatus,
+            BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock,
+            Refusal, ServiceEvent, WaitStatus,
         },
     },
     application::{ExitDecision, ProcessLifecycle},
     domain::{
         notification::Notification,
-        port::ProcessHandle,
+        port::{PortOccupant, ProcessHandle},
         process::{EndedRun, ExitIntent, ProcessState, StopPolicy},
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
-        value::{OutputCursor, PaneId, ProcessName},
+        value::{LocalPort, OutputCursor, PaneId, ProcessName},
     },
 };
 
@@ -549,11 +551,22 @@ impl Supervisor {
             PendingLaunch::new(generation, prior_state, LaunchPurpose::Spawn { restarting }),
         );
         self.workspace.set_state(pane, ProcessState::Starting);
+        let needed = self.launch_port(pane).zip(self.metrics.port_occupants());
         match self.runner.detached() {
             Some(runner) => {
                 let events = self.events.clone();
                 let project = self.root().clone();
                 thread::spawn(move || {
+                    if let Some((port, occupant)) = needed.and_then(occupied) {
+                        let _ = events.send(ServiceEvent::LaunchBlocked {
+                            project,
+                            pane,
+                            generation,
+                            port,
+                            occupant,
+                        });
+                        return;
+                    }
                     let result = runner.spawn(request, Box::new(sink));
                     let _ = events.send(ServiceEvent::Spawned {
                         project,
@@ -564,6 +577,14 @@ impl Supervisor {
                 });
             },
             None => {
+                if let Some((port, occupant)) = needed.and_then(occupied) {
+                    let block = PortBlock::builder()
+                        .port(port)
+                        .holder(self.owner_of(occupant))
+                        .build();
+                    self.handle_launch_blocked(pane, generation, block);
+                    return;
+                }
                 let result = self.runner.spawn(request, Box::new(sink));
                 self.settle_spawn(pane, generation, result);
             },
@@ -1269,6 +1290,18 @@ fn instant_of(started: SystemTime) -> Instant {
     Instant::now()
         .checked_sub(elapsed)
         .unwrap_or_else(Instant::now)
+}
+
+/// Who listens on the port a launch needs, asked of `occupants`, with that
+/// port; none while it is free.
+fn occupied(
+    (port, occupants): (LocalPort, SharedPortOccupants),
+) -> Option<(LocalPort, PortOccupant)> {
+    let occupant = occupants
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .occupant(port.into_inner())?;
+    Some((port, occupant))
 }
 
 #[cfg(test)]

@@ -23,7 +23,9 @@ use super::{
     notice::Notice,
     notice_level::NoticeLevel,
     notices::Notices,
+    port_block::PortBlock,
     port_holder::PortHolder,
+    port_owner::PortOwner,
     port_sampler::{PORT_SAMPLE_INTERVAL, PortSampler},
     probe_worker::ProbeWorker,
     process_action::ProcessAction,
@@ -401,6 +403,24 @@ impl ServiceRuntime {
             } => match self.supervisors.get_mut(&project) {
                 Some(supervisor) => supervisor.handle_spawned(pane, generation, result),
                 None => release_unrecorded(result),
+            },
+            ServiceEvent::LaunchBlocked {
+                project,
+                pane,
+                generation,
+                port,
+                occupant,
+            } => {
+                let lineage = occupant.lineage();
+                let holder = self
+                    .supervisors
+                    .values()
+                    .find_map(|supervisor| supervisor.holder_of_pids(&lineage))
+                    .map_or(PortOwner::Other(occupant), PortOwner::Supervised);
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    let block = PortBlock::builder().port(port).holder(holder).build();
+                    supervisor.handle_launch_blocked(pane, generation, block);
+                }
             },
             ServiceEvent::Adopted {
                 project,
@@ -907,7 +927,11 @@ impl ServiceRuntime {
             .any(|supervisor| supervisor.launches_in_flight() > 0)
         {
             match events.recv_deadline(deadline) {
-                Ok(event @ (ServiceEvent::Spawned { .. } | ServiceEvent::Adopted { .. })) => {
+                Ok(
+                    event @ (ServiceEvent::Spawned { .. }
+                    | ServiceEvent::LaunchBlocked { .. }
+                    | ServiceEvent::Adopted { .. }),
+                ) => {
                     self.handle(event);
                 },
                 Ok(_) => {},

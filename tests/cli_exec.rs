@@ -9,6 +9,7 @@
 use std::{
     fs::{self, Permissions},
     io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
     os::{
         fd::OwnedFd,
         unix::{
@@ -18,7 +19,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{self, Child, Command, Output, Stdio},
     sync::{Arc, Mutex, PoisonError},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -1609,6 +1610,41 @@ fn a_crash_survives_a_service_restart() {
     assert_eq!(restored["state"], "crashed", "{restored}");
     assert_eq!(restored["last_exit"], crashed["last_exit"], "{restored}");
     assert_ne!(scratch.row(&project, "web")["state"], "crashed");
+}
+
+/// A start whose readiness port another program holds is refused with the
+/// reason naming that program, found by the launch rather than the loop.
+#[test]
+fn a_start_on_a_held_port_says_why() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &stack(&[entry("web", "sleep 600", false)]));
+    let set = scratch.on(&project, &[
+        "set",
+        "web",
+        "--ready-port",
+        &port,
+        "--ready-timeout",
+        "30s",
+    ]);
+    assert!(set.status.success(), "{}", shown(&set));
+
+    let (started, report) = scratch.json_on(&project, &["start", "web"]);
+
+    assert_eq!(started.status.code(), Some(ACTION_FAILED), "{report}");
+    let reason = report["processes"][0]["reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.starts_with(&format!(
+            "did not start: port {port} is held by pid {}",
+            process::id()
+        )),
+        "{report}"
+    );
+    assert_eq!(scratch.row(&project, "web")["state"], "blocked");
+    drop(listener);
 }
 
 /// A service that cannot start, here for a database a newer muster wrote,

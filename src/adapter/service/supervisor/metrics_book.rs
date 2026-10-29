@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
+use super::shared_port_occupants::SharedPortOccupants;
 use crate::{
     adapter::service::{PortBlock, PortHolder, ProcessUsage},
     domain::{
-        port::{ListeningSocket, PortOccupant, PortOccupants},
+        port::{ListeningSocket, PortOccupants},
         value::PaneId,
     },
 };
@@ -21,8 +25,8 @@ pub(crate) struct MetricsBook {
     /// Each pane whose last start was refused for a held port, and why.
     blocks: HashMap<PaneId, PortBlock>,
     /// Finds who listens on a port a start needs, when no supervised
-    /// process was seen on it.
-    port_occupants: Option<Box<dyn PortOccupants>>,
+    /// process was seen on it; shared with the launch workers that ask it.
+    port_occupants: Option<SharedPortOccupants>,
 }
 
 impl MetricsBook {
@@ -34,7 +38,7 @@ impl MetricsBook {
             ports: HashMap::new(),
             held_ports: HashMap::new(),
             blocks: HashMap::new(),
-            port_occupants,
+            port_occupants: port_occupants.map(|occupants| Arc::new(Mutex::new(occupants))),
         }
     }
 
@@ -42,7 +46,12 @@ impl MetricsBook {
     /// fake.
     #[cfg(test)]
     pub(super) fn set_port_occupants(&mut self, occupants: Box<dyn PortOccupants>) {
-        self.port_occupants = Some(occupants);
+        self.port_occupants = Some(Arc::new(Mutex::new(occupants)));
+    }
+
+    /// The lookup of who listens on a port, for a launch worker to ask.
+    pub(super) fn port_occupants(&self) -> Option<SharedPortOccupants> {
+        self.port_occupants.clone()
     }
 
     /// `pane`'s latest sampled usage.
@@ -104,11 +113,6 @@ impl MetricsBook {
     /// Who holds `port` among the supervised processes of every project.
     pub(super) fn holder_of(&self, port: u16) -> Option<&PortHolder> {
         self.held_ports.get(&port)
-    }
-
-    /// Who listens on `port` by the OS socket table, when it can be asked.
-    pub(super) fn occupant(&mut self, port: u16) -> Option<PortOccupant> {
-        self.port_occupants.as_mut()?.occupant(port)
     }
 
     /// Why `pane`'s last start was refused, while it stands.

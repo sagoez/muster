@@ -15,7 +15,8 @@ pub struct ProcessOutcome {
     /// What became of it.
     #[getset(get_copy = "pub")]
     outcome: Outcome,
-    /// Why the service left it alone, for a `refused` outcome.
+    /// Why the service left it alone, for a `refused` outcome or a start a
+    /// held port blocked.
     #[builder(default)]
     #[getset(get = "pub")]
     reason: Option<String>,

@@ -1,5 +1,7 @@
 use listeners::{Protocol, SocketState};
-use sysinfo::{Pid as SysinfoPid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{
+    Pid as SysinfoPid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
+};
 
 use crate::domain::{
     port::{PortOccupant, PortOccupants},
@@ -8,6 +10,8 @@ use crate::domain::{
 
 /// Between the arguments of a command line read from the process table.
 const ARGUMENT_SEPARATOR: &str = " ";
+/// Most ancestors of an occupant read, past any process tree's depth.
+const MAX_ANCESTORS: usize = 64;
 
 /// A [`PortOccupants`] over the OS socket tables through `listeners`, naming
 /// each occupant by its command line read through `sysinfo`.
@@ -55,13 +59,44 @@ impl PortOccupants for OsPortOccupants {
             })
             .filter(|command| !command.is_empty())
             .unwrap_or(listener.process.name);
-        Some(PortOccupant::builder().pid(pid).command(command).build())
+        Some(
+            PortOccupant::builder()
+                .pid(pid)
+                .command(command)
+                .ancestors(self.ancestors(pid))
+                .build(),
+        )
+    }
+}
+
+impl OsPortOccupants {
+    /// The parent of `pid`, its parent and so on, at most [`MAX_ANCESTORS`]
+    /// of them, reading each from the process table as it is reached.
+    fn ancestors(&mut self, pid: Pid) -> Vec<Pid> {
+        let mut ancestors = Vec::new();
+        let mut current = SysinfoPid::from_u32(pid.into_inner());
+        while ancestors.len() < MAX_ANCESTORS {
+            let Some(parent) = self.system.process(current).and_then(Process::parent) else {
+                break;
+            };
+            let Ok(parent_pid) = Pid::try_new(parent.as_u32()) else {
+                break;
+            };
+            ancestors.push(parent_pid);
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[parent]),
+                true,
+                ProcessRefreshKind::nothing().without_tasks(),
+            );
+            current = parent;
+        }
+        ancestors
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{net::TcpListener, process};
+    use std::{net::TcpListener, os::unix::process::parent_id, process};
 
     use super::*;
 
@@ -77,6 +112,14 @@ mod tests {
 
         assert_eq!(occupant.pid().into_inner(), process::id());
         assert!(!occupant.command().is_empty());
+        assert_eq!(
+            occupant
+                .ancestors()
+                .first()
+                .map(|parent| parent.into_inner()),
+            Some(parent_id()),
+            "its parent leads its ancestors"
+        );
         drop(listener);
         assert_eq!(occupants.occupant(port), None);
     }

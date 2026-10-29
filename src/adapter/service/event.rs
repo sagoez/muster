@@ -11,9 +11,9 @@ use super::{
 use crate::{
     adapter::holder::HolderRecord,
     domain::{
-        port::{ListeningSocket, ProcessHandle},
+        port::{ListeningSocket, PortOccupant, ProcessHandle},
         pty::{ProcessOutput, PtyError},
-        value::{PaneId, Pid, ProjectRoot},
+        value::{LocalPort, PaneId, Pid, ProjectRoot},
     },
 };
 
@@ -65,6 +65,21 @@ pub enum ServiceEvent {
         generation: SpawnGeneration,
         /// The running process, or why it could not be launched.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
+    },
+    /// A launch handed to a worker found the port its readiness check names
+    /// taken, so nothing was launched; settle it as blocked, unless a later
+    /// action superseded it.
+    LaunchBlocked {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane the process was to be launched for.
+        pane: PaneId,
+        /// Spawn generation the launch belongs to.
+        generation: SpawnGeneration,
+        /// The port it needs.
+        port: LocalPort,
+        /// Who listens on it.
+        occupant: PortOccupant,
     },
     /// An adoption handed to a worker finished; supervise the holder or settle
     /// the failure, unless a later action superseded it.

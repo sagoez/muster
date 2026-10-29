@@ -718,6 +718,11 @@ fn report(
                     now,
                     moved.contains(name),
                 ))
+                .reason(
+                    now.and_then(|status| status.blocked_on().as_ref())
+                        .filter(|_| !action.halts())
+                        .map(ToString::to_string),
+                )
                 .status(now.map(ProcessView::from))
                 .build()
         })

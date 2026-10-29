@@ -32,6 +32,7 @@ mod restart_book;
 mod run_end;
 mod run_readiness;
 mod screen_reply;
+mod shared_port_occupants;
 mod shutdown_generation;
 mod snapshot;
 mod spawn_generation;

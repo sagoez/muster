@@ -7,7 +7,7 @@ use std::{
 
 use tempfile::TempDir;
 
-use super::service_client::ServiceClient;
+use super::{connector::Connector, service_client::ServiceClient};
 use crate::adapter::{
     ipc,
     private_dir::prepare_socket_dir,
@@ -23,9 +23,6 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STATE_DIR: &str = "state";
 /// The socket directory under the scratch directory.
 const SOCKET_DIR: &str = "run";
-
-/// Makes a client of a [`ServedService`].
-pub(crate) type Connector = Box<dyn Fn() -> ServiceClient + Send + Sync>;
 
 /// A service on a scratch socket, answering a hello with its version and
 /// every other request with the answer a test scripted, and recording what

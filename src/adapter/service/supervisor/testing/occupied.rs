@@ -1,15 +1,13 @@
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, PoisonError},
 };
 
+use super::asked_scans::AskedScans;
 use crate::domain::{
     port::{PortOccupant, PortOccupants},
     value::LocalPort,
 };
-
-/// The ports each socket-table scan was asked about, in order.
-pub(crate) type AskedScans = Arc<Mutex<Vec<Vec<LocalPort>>>>;
 
 /// Answers port lookups with one occupant, on every port or only on some,
 /// recording each scan it was asked for.

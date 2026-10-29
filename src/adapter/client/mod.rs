@@ -7,6 +7,8 @@ mod action_report;
 mod asked;
 mod client_error;
 mod condition_view;
+#[cfg(test)]
+mod connector;
 mod definition_view;
 mod elapsed_seconds;
 mod environment_view;

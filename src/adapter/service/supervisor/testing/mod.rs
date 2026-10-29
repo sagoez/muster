@@ -2,6 +2,7 @@
 
 mod ack_count_handle;
 mod ack_count_runner;
+mod asked_scans;
 mod backlog_handle;
 mod backlog_runner;
 mod connected_handle;
@@ -56,6 +57,7 @@ mod worker_runner;
 
 pub(crate) use ack_count_handle::*;
 pub(crate) use ack_count_runner::*;
+pub(crate) use asked_scans::*;
 pub(crate) use backlog_runner::*;
 pub(crate) use exited_holder::*;
 pub(crate) use failing_runner::*;

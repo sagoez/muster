@@ -5,8 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-/// Which file a path named: its device and inode.
-type FileIdentity = (u64, u64);
+use super::file_identity::FileIdentity;
 
 /// Follows a process log the way `tail -f` does, across the holder's
 /// rotation: when the live path starts naming a new file, the old one is read

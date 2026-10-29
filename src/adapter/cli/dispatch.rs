@@ -18,11 +18,12 @@ use directories::{BaseDirs, ProjectDirs};
 
 use super::{
     add::{add, add_rows},
+    announce::Announce,
     args::{
         Args, Command, ConfigCommand, CoordinationCommand, LogFilterArgs, ProcessArgs,
         ProjectsCommand, RunArgs, ServiceCommand, SetArgs, StartArgs, WaitArgs, completing_command,
     },
-    attach::{Announce, attach_named},
+    attach::attach_named,
     attach_end::AttachEnd,
     cli_exit::CliExit,
     cli_ports::CliPorts,
@@ -53,8 +54,10 @@ use super::{
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
     project_log_slice::ProjectLogSlice,
     projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
-    report::{Report, Row, RowKind, print_error, print_note},
+    report::{Report, print_error, print_note},
     rm::{removable, remove as remove_processes, rm_rows},
+    row::Row,
+    row_kind::RowKind,
     run::RunPlan,
     service_stopped::ServiceStopped,
     set::{set, set_rows},

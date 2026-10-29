@@ -11,19 +11,7 @@ use signal_hook::{
     flag::{register, register_conditional_default},
 };
 
-/// The two flags `SIGINT` drives once a guard first armed it: whether one
-/// arrived, and whether no guard is armed, in which case it ends the process
-/// as it would have without muster's handler; and how many guards are armed.
-struct Flags {
-    /// Set by each `SIGINT`.
-    interrupted: Arc<AtomicBool>,
-    /// Set while no guard is armed.
-    disarmed: Arc<AtomicBool>,
-    /// Guards alive now; only the first arms and only the last disarms, so a
-    /// prompt's guard inside a spinner's neither clears nor ends the
-    /// spinner's.
-    armed: Mutex<usize>,
-}
+use super::interrupt_flags::Flags;
 
 /// The flags, registered once per process; `None` when registering failed,
 /// which leaves `SIGINT` to end the process as usual.

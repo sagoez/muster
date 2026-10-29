@@ -22,7 +22,7 @@ use rustix::{
 };
 
 use super::{
-    attach_end::AttachEnd, attach_event::AttachEvent, attach_pump::AttachPump,
+    announce::Announce, attach_end::AttachEnd, attach_event::AttachEvent, attach_pump::AttachPump,
     detach_scanner::DetachScanner, error::CliError, host_signals::HostSignals,
     host_terminal::HostTerminal, raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
@@ -64,9 +64,6 @@ const TITLE_SEPARATOR: &str = ":";
 /// Said after the session when the holder dropped typed input.
 const DROPPED_INPUT: &str =
     "some of what was typed did not reach it: it was not reading its input fast enough";
-
-/// Says the line a session opens with, before it takes the terminal over.
-pub type Announce = Box<dyn FnOnce(&str) -> io::Result<()> + Send>;
 
 /// Attaches `terminal` to the process of `project` named exactly `name`. The
 /// holder counts the session for the service, so nothing is noted here.
@@ -337,41 +334,29 @@ fn spawn_input_reader(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::pipe,
-        os::unix::net::UnixListener,
-        path::PathBuf,
-        sync::{Mutex, PoisonError, mpsc},
-        thread,
-        time::Instant,
-    };
+    use std::{io::pipe, thread, time::Instant};
 
-    use bytesize::ByteSize as RawByteSize;
-    use rustix::{process::Signal, termios::Termios};
-    use tempfile::TempDir;
+    use rustix::termios::Termios;
 
     use super::*;
     use crate::{
         adapter::{
             cli::{
                 attach_pump::RESYNC_WAIT,
+                attach_testing::{COLS, FAKE_PID, ROWS, scratch, size},
                 ending_signal::EndingSignal,
+                fake_holder::FakeHolder,
                 held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
-                test_pty::{TestPty, WAIT, contains, same_settings, wait_until},
+                running_session::Running,
+                served_holder::Holder,
+                test_pty::{TestPty, contains, same_settings},
             },
-            holder::{
-                ClientMessage, HolderConfig, HolderControl, HolderId, HolderRecord, HolderServer,
-                RejectReason,
-            },
-            signal_target::SignalTarget,
+            holder::{ClientMessage, RejectReason},
             terminal::emulator::RESET_TERMINAL,
-            test_scratch::short_scratch,
         },
         domain::{
-            color_scheme::ColorScheme,
-            process::{StopPolicy, StopSignal},
-            pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, CommandLine, OutputCursor, Pid, StopGrace},
+            pty::{ExitCause, ExitOutcome},
+            value::{OutputCursor, Pid},
         },
     };
 
@@ -382,22 +367,8 @@ mod tests {
             bytes: bytes.to_vec(),
         }
     }
-    /// Prefix of every test scratch directory.
-    const SCRATCH_PREFIX: &str = "ma-";
-    /// Rows of the test terminal.
-    const ROWS: u16 = 24;
-    /// Columns of the test terminal.
-    const COLS: u16 = 80;
-    /// Scrollback of the test holder.
-    const SCROLLBACK: usize = 100;
-    /// First-supervisor deadline of a test holder, past any test's length.
-    const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
-    /// The detach key every test uses.
-    const DETACH: &str = "ctrl-\\";
     /// The detach key's legacy byte.
     const DETACH_BYTE: &[u8] = b"\x1c";
-    /// Pid a fake holder reports.
-    const FAKE_PID: u32 = 4242;
     /// How long a test lets a refused keystroke travel before proving it did
     /// not arrive.
     const SETTLE: Duration = Duration::from_millis(200);
@@ -418,26 +389,6 @@ mod tests {
     /// Turns line wrapping on.
     const WRAP_ON: &[u8] = b"\x1b[?7h";
 
-    /// The process every test attaches to.
-    fn name() -> ProcessName {
-        ProcessName::try_new("api").unwrap()
-    }
-
-    /// The detach key every test uses.
-    fn detach() -> DetachKey {
-        DetachKey::try_new(DETACH).unwrap()
-    }
-
-    /// A terminal size of `rows` by `cols`.
-    fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::try_new(rows, cols).unwrap()
-    }
-
-    /// A scratch directory under a short root, removed even on a panic.
-    fn scratch() -> TempDir {
-        short_scratch(SCRATCH_PREFIX)
-    }
-
     /// A repaint as a holder sends it: a full reset, then `text`.
     fn repaint(text: &str) -> Vec<u8> {
         [RESET_TERMINAL.as_bytes(), text.as_bytes()].concat()
@@ -448,125 +399,6 @@ mod tests {
         drawn
             .windows(needle.len())
             .position(|window| window == needle)
-    }
-
-    /// Where a test sends the events a signal would, and the session's
-    /// alarm, while the session listens.
-    type SignalSlot = Arc<Mutex<Option<(SyncSender<AttachEvent>, Arc<SessionAlarm>)>>>;
-
-    /// A signal source a test drives: it posts `preset` as soon as the
-    /// session listens, then whatever the test sends through `slot`, and
-    /// reports `late` as it is stopped, as signals arriving during teardown
-    /// would, the way the real listener does: recorded in the alarm, posted
-    /// only when there is room.
-    struct ScriptedSignals {
-        /// The session's event sender and alarm, while it listens.
-        slot: SignalSlot,
-        /// Events posted the moment the session listens.
-        preset: Vec<AttachEvent>,
-        /// Ending signals arriving while the session stops listening.
-        late: Vec<EndingSignal>,
-    }
-
-    impl SignalSource for ScriptedSignals {
-        fn listen(
-            &mut self,
-            events: SyncSender<AttachEvent>,
-            alarm: Arc<SessionAlarm>,
-        ) -> Result<(), CliError> {
-            for event in self.preset.drain(..) {
-                events.send(event).unwrap();
-            }
-            *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((events, alarm));
-            Ok(())
-        }
-
-        fn stop(&mut self) {
-            let listening = self
-                .slot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
-            if let Some((events, alarm)) = listening {
-                for signal in self.late.drain(..) {
-                    alarm.record_ending(signal);
-                    let _ = events.try_send(AttachEvent::Ended(signal));
-                }
-            }
-        }
-    }
-
-    /// A session running on a thread, with a way to send it events a signal
-    /// would.
-    struct Running {
-        /// The session's thread.
-        session: JoinHandle<Result<AttachEnd, CliError>>,
-        /// Where signal events go.
-        signals: SignalSlot,
-    }
-
-    impl Running {
-        /// Attaches to `socket` from `pty`.
-        fn start(pty: &TestPty, socket: PathBuf, read_only: bool) -> Self {
-            Self::on(pty.terminal(), socket, read_only, Vec::new(), Vec::new())
-        }
-
-        /// Attaches to `socket` from `terminal`, with `preset` signal events
-        /// already waiting and `late` ending signals arriving as signals stop.
-        fn on(
-            terminal: HostTerminal,
-            socket: PathBuf,
-            read_only: bool,
-            preset: Vec<AttachEvent>,
-            late: Vec<EndingSignal>,
-        ) -> Self {
-            let signals: SignalSlot = Arc::new(Mutex::new(None));
-            let source = ScriptedSignals {
-                slot: Arc::clone(&signals),
-                preset,
-                late,
-            };
-            let output = terminal.output().try_clone().unwrap();
-            let announce: Announce =
-                Box::new(move |line: &str| writeln!(File::from(output), "{line}"));
-            let session = AttachSession::new(name(), terminal, Box::new(source), announce);
-            let target = Located::builder()
-                .socket(socket)
-                .log(PathBuf::from("unused.log"))
-                .build();
-            let session = thread::spawn(move || session.run(target, read_only, detach()));
-            Self { session, signals }
-        }
-
-        /// The session's event sender and alarm, once it listens.
-        fn listening(&self) -> (SyncSender<AttachEvent>, Arc<SessionAlarm>) {
-            let mut listening = None;
-            wait_until("the session to listen", || {
-                listening = self
-                    .signals
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                listening.is_some()
-            });
-            listening.unwrap()
-        }
-
-        /// Sends `event` as a signal would, once the session listens.
-        fn signal(&self, event: AttachEvent) {
-            self.listening().0.send(event).unwrap();
-        }
-
-        /// The session's alarm, once it listens.
-        fn alarm(&self) -> Arc<SessionAlarm> {
-            self.listening().1
-        }
-
-        /// Waits for the session to end, answering how.
-        fn end(self) -> Result<AttachEnd, CliError> {
-            wait_until("the session to end", || self.session.is_finished());
-            self.session.join().unwrap()
-        }
     }
 
     /// Asserts the terminal behind `pty` was given back: raw mode off and
@@ -585,213 +417,6 @@ mod tests {
             position(&drawn, POP_TITLE.as_bytes()) > position(&drawn, TITLE),
             "the hint title is popped"
         );
-    }
-
-    /// A holder serving a real child on a thread, with a supervisor connected
-    /// so it collects the exit and finishes cleanly.
-    struct Holder {
-        /// The holder's config.
-        config: HolderConfig,
-        /// The holder's thread, until it is joined.
-        server: Option<JoinHandle<Result<(), HolderError>>>,
-        /// The test's supervisor connection.
-        supervisor: UnixStream,
-        /// The scratch directory, removed on drop.
-        _scratch: TempDir,
-    }
-
-    impl Holder {
-        /// Starts a holder running `command` at the test terminal's size.
-        fn start(command: &str) -> Self {
-            let scratch = scratch();
-            let dir = scratch.path();
-            let request = SpawnRequest::builder()
-                .process(name())
-                .command(CommandLine::try_new(command).unwrap())
-                .project(Some(dir.to_path_buf()))
-                .size(size(ROWS, COLS))
-                .scrollback(SCROLLBACK)
-                .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
-                .color_scheme(ColorScheme::Dark)
-                .stop(
-                    StopPolicy::builder()
-                        .signal(StopSignal::Terminate)
-                        .grace_period(StopGrace::try_new(Duration::from_secs(5)).unwrap())
-                        .build(),
-                )
-                .build();
-            let config = HolderConfig::builder()
-                .id(HolderId::generate().unwrap())
-                .request(request)
-                .socket(dir.join("sock").join("h.sock"))
-                .record_dir(dir.join("records"))
-                .log(dir.join("logs").join("api.log"))
-                .supervisor_deadline(SUPERVISOR_DEADLINE)
-                .build();
-            let server_config = config.clone();
-            let server = thread::spawn(move || HolderServer::run(server_config));
-            let mut supervisor = None;
-            wait_until("the holder socket", || {
-                supervisor = UnixStream::connect(config.socket()).ok();
-                supervisor.is_some()
-            });
-            let mut supervisor = supervisor.unwrap();
-            greet(
-                &mut supervisor,
-                config.socket(),
-                ClientRole::Supervisor,
-                WAIT,
-            )
-            .unwrap();
-            let mut drain = supervisor.try_clone().unwrap();
-            drain.set_read_timeout(None).unwrap();
-            thread::spawn(move || while HolderMessage::read_from(&mut drain).is_ok() {});
-            Self {
-                config,
-                server: Some(server),
-                supervisor,
-                _scratch: scratch,
-            }
-        }
-
-        /// The holder's socket.
-        fn socket(&self) -> PathBuf {
-            self.config.socket().clone()
-        }
-
-        /// Writes `bytes` to the child as another, writable client would.
-        fn type_as_another_client(&self, bytes: &[u8]) {
-            let mut client = UnixStream::connect(self.config.socket()).unwrap();
-            greet(
-                &mut client,
-                self.config.socket(),
-                ClientRole::Attach { read_only: false },
-                WAIT,
-            )
-            .unwrap();
-            ClientMessage::Input(bytes.to_vec())
-                .write_to(&mut client)
-                .unwrap();
-        }
-
-        /// Kills the child when it still runs, collects its exit and joins
-        /// the holder.
-        fn finish(mut self) {
-            ClientMessage::Control(HolderControl::Kill)
-                .write_to(&mut self.supervisor)
-                .unwrap();
-            let server = self.server.take().unwrap();
-            wait_until("the holder to finish", || {
-                let _ = ClientMessage::CollectExit.write_to(&mut self.supervisor);
-                thread::sleep(Duration::from_millis(20));
-                server.is_finished()
-            });
-            server.join().unwrap().unwrap();
-        }
-    }
-
-    impl Drop for Holder {
-        /// Kills the child of a holder a failed test left running.
-        fn drop(&mut self) {
-            if self.server.is_some()
-                && let Some(record) = HolderRecord::load_all(self.config.record_dir()).pop()
-            {
-                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
-            }
-        }
-    }
-
-    /// A scripted holder: it answers the hello with a repaint, then records
-    /// what the client sends and writes what a test tells it to.
-    struct FakeHolder {
-        /// Its socket.
-        socket: PathBuf,
-        /// The client connection, once the client said hello.
-        peer: Arc<Mutex<Option<UnixStream>>>,
-        /// What the client sent, in order.
-        received: mpsc::Receiver<ClientMessage>,
-        /// The scratch directory, removed on drop.
-        _scratch: TempDir,
-    }
-
-    impl FakeHolder {
-        /// A holder greeting with `repaint` at the test terminal's size.
-        fn start(repaint: &[u8]) -> Self {
-            Self::sized(repaint, size(ROWS, COLS))
-        }
-
-        /// A holder greeting with `repaint` rendered at `screen`.
-        fn sized(repaint: &[u8], screen: PtySize) -> Self {
-            let scratch = scratch();
-            let socket = scratch.path().join("f.sock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let peer: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
-            let (sender, received) = mpsc::channel();
-            let shared = Arc::clone(&peer);
-            let repaint = repaint.to_vec();
-            thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let hello = ClientMessage::read_from(&mut stream).unwrap();
-                let _ = sender.send(hello);
-                HolderMessage::Snapshot {
-                    repaint,
-                    size: screen,
-                    pid: Pid::try_new(FAKE_PID).unwrap(),
-                    attached: 0,
-                    run_start: OutputCursor::new(0),
-                }
-                .write_to(&mut stream)
-                .unwrap();
-                *shared.lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some(stream.try_clone().unwrap());
-                while let Ok(message) = ClientMessage::read_from(&mut stream) {
-                    if sender.send(message).is_err() {
-                        break;
-                    }
-                }
-            });
-            Self {
-                socket,
-                peer,
-                received,
-                _scratch: scratch,
-            }
-        }
-
-        /// The client connection, once it said hello.
-        fn peer(&self) -> UnixStream {
-            let mut peer = None;
-            wait_until("the client to say hello", || {
-                peer = self
-                    .peer
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .map(|stream| stream.try_clone().unwrap());
-                peer.is_some()
-            });
-            peer.unwrap()
-        }
-
-        /// Writes `message` to the client.
-        fn send(&self, message: HolderMessage) {
-            message.write_to(&mut self.peer()).unwrap();
-        }
-
-        /// Breaks the connection.
-        fn close(&self) {
-            self.peer().shutdown(Shutdown::Both).unwrap();
-        }
-
-        /// The next message the client sent.
-        fn next(&self) -> ClientMessage {
-            self.received.recv_timeout(WAIT).unwrap()
-        }
-
-        /// Everything else the client sent, once it closed the connection.
-        fn rest(&self) -> Vec<ClientMessage> {
-            self.received.iter().collect()
-        }
     }
 
     /// The process exiting ends the session with its outcome, and the

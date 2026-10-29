@@ -1,9 +1,12 @@
 mod add;
+mod announce;
 mod args;
 mod attach;
 mod attach_end;
 mod attach_event;
 mod attach_pump;
+#[cfg(test)]
+mod attach_testing;
 mod cli_exit;
 mod cli_ports;
 mod command_words;
@@ -13,10 +16,18 @@ mod coordination;
 mod detach_scanner;
 mod dispatch;
 mod doctor;
+#[cfg(test)]
+mod embedding;
 mod emit;
 mod ending_signal;
 mod error;
 mod export;
+mod export_view;
+#[cfg(test)]
+mod fake_holder;
+mod file_identity;
+#[cfg(test)]
+mod fixed_projects;
 mod held_sequence;
 mod held_terminal;
 mod host_signals;
@@ -24,33 +35,50 @@ mod host_terminal;
 mod import;
 mod imported_run;
 mod init;
+mod interrupt_flags;
 mod interrupt_guard;
 mod invocation;
 mod json_log_lines;
+mod kept_bytes;
+mod key_press;
 mod kv;
 mod lock;
 mod log_follower;
 mod mcp_launch;
 mod note;
 mod output;
+mod parsed;
 mod presenter;
 mod presenter_theme;
+mod probe_outcome;
 mod process;
 mod process_flags;
 mod project_log_slice;
+mod project_removal;
 mod projects;
 mod raw_mode_guard;
 mod report;
 mod rm;
+mod row;
+mod row_kind;
 mod run;
+#[cfg(test)]
+mod running_session;
 mod scan_result;
+#[cfg(test)]
+mod scripted_signals;
+#[cfg(test)]
+mod served_holder;
 mod service_stopped;
 mod session_alarm;
 mod session_thread;
 mod set;
+#[cfg(test)]
+mod signal_slot;
 mod signal_source;
 mod spinners;
 mod stack_path;
+mod stack_read;
 mod surroundings;
 mod terminal_safe;
 #[cfg(test)]
@@ -59,7 +87,10 @@ mod text_file;
 mod todo;
 mod wait;
 mod working_dir;
+#[cfg(test)]
+mod wrapped;
 
+pub use announce::*;
 pub use args::*;
 pub use attach::*;
 pub use attach_end::*;
@@ -81,6 +112,8 @@ pub use mcp_launch::*;
 pub use presenter::*;
 pub use raw_mode_guard::*;
 pub use report::*;
+pub use row::*;
+pub use row_kind::*;
 pub use scan_result::*;
 pub use service_stopped::*;
 pub use session_alarm::{SessionAlarm, hold_helper_panic};

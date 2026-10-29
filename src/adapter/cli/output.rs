@@ -15,7 +15,9 @@ use unicode_width::UnicodeWidthStr;
 use super::{
     attach_end::AttachEnd,
     error::CliError,
-    report::{Report, Row, RowKind, tally},
+    report::{Report, tally},
+    row::Row,
+    row_kind::RowKind,
 };
 use crate::{
     adapter::{

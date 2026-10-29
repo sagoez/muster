@@ -1,9 +1,7 @@
 use std::{fs, path::Path};
 
 use super::{
-    args::CoordinationCommand,
-    error::CliError,
-    report::{Row, RowKind},
+    args::CoordinationCommand, error::CliError, row::Row, row_kind::RowKind,
     text_file::write_atomically,
 };
 use crate::{

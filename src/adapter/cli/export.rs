@@ -1,22 +1,15 @@
 //! `muster export`: a project's processes written to a stack file.
 
-use std::{fs, io, path::PathBuf};
-
-use getset::{CopyGetters, Getters};
-use serde::Serialize;
-use typed_builder::TypedBuilder;
+use std::{fs, io};
 
 use super::{
-    error::CliError,
-    invocation::Invocation,
-    output::project_title,
-    report::{Report, Row, RowKind},
-    stack_path::StackPath,
+    error::CliError, export_view::ExportView, invocation::Invocation, output::project_title,
+    report::Report, row::Row, row_kind::RowKind, stack_path::StackPath,
     text_file::write_atomically,
 };
 use crate::{
     adapter::exchange::{EnvExport, ExchangeError, write_stack_file},
-    domain::{config::ConfigError, value::ProjectName},
+    domain::config::ConfigError,
 };
 
 /// The command word of `muster export`.
@@ -29,21 +22,6 @@ const TO: &str = "to";
 const PROCESS: &str = "process";
 /// Several processes, counted.
 const PROCESSES: &str = "processes";
-
-/// What `muster export` wrote, as `--json` shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
-pub struct ExportView {
-    /// The file written.
-    #[getset(get = "pub")]
-    path: PathBuf,
-    /// How many processes it holds.
-    #[getset(get_copy = "pub")]
-    processes: usize,
-    /// The project exported.
-    #[serde(skip)]
-    #[getset(get = "pub")]
-    project: ProjectName,
-}
 
 /// What `muster export` produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,8 +97,10 @@ pub fn export_rows(view: &ExportView) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use crate::adapter::cli::report::plain;
+    use crate::{adapter::cli::report::plain, domain::value::ProjectName};
 
     /// The count and file are named.
     #[test]

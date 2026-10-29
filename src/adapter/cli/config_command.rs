@@ -4,10 +4,8 @@ use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    error::CliError,
-    invocation::Invocation,
-    output::COLUMN_GAP,
-    report::{Report, Row, RowKind},
+    error::CliError, invocation::Invocation, output::COLUMN_GAP, report::Report, row::Row,
+    row_kind::RowKind,
 };
 use crate::{
     adapter::client::SettingView,

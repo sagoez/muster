@@ -8,12 +8,8 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
-    error::CliError,
-    imported_run::ImportedRun,
-    invocation::Invocation,
-    output::project_title,
-    report::{Report, Row, RowKind},
-    stack_path::StackPath,
+    error::CliError, imported_run::ImportedRun, invocation::Invocation, output::project_title,
+    report::Report, row::Row, row_kind::RowKind, stack_path::StackPath, stack_read::StackRead,
 };
 use crate::{
     adapter::{
@@ -26,7 +22,7 @@ use crate::{
     },
     application::StackEditor,
     domain::{
-        config::{ImportMode, ImportPlan, ProcessSpec, Stack},
+        config::{ImportMode, ImportPlan, Stack},
         port::{LocalState, StackStore},
         value::ProcessName,
     },
@@ -60,16 +56,6 @@ const DRY_RUN: &str = "dry run: nothing was changed";
 const STDIN_NAME: &str = "stdin";
 /// Largest stack file import reads; a real stack is a few kilobytes.
 const MAX_STACK_FILE_BYTES: u64 = 1024 * 1024;
-
-/// A stack file read and checked whole, ready to plan against a project.
-#[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct StackRead {
-    /// The project it goes into.
-    target: ProjectTarget,
-    /// The processes it defines.
-    processes: Vec<ProcessSpec>,
-}
 
 /// What `muster import` did or would do, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -363,7 +349,7 @@ mod tests {
     use crate::{
         adapter::cli::report::plain,
         domain::{
-            config::Environment,
+            config::{Environment, ProcessSpec},
             process::{RestartPolicy, StopPolicy, StopSignal},
             value::{CommandLine, ProjectName, StopGrace},
         },

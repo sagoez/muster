@@ -8,11 +8,7 @@ use serde::Serialize;
 use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
-use super::{
-    error::CliError,
-    output::action_title,
-    report::{Report, Row, RowKind},
-};
+use super::{error::CliError, output::action_title, report::Report, row::Row, row_kind::RowKind};
 use crate::{
     adapter::client::{
         Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient,

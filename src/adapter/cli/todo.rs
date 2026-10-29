@@ -1,8 +1,4 @@
-use super::{
-    args::TodoCommand,
-    error::CliError,
-    report::{Row, RowKind, attribution},
-};
+use super::{args::TodoCommand, error::CliError, report::attribution, row::Row, row_kind::RowKind};
 use crate::{
     adapter::store::now_epoch_secs,
     domain::{

@@ -9,12 +9,13 @@ use typed_builder::TypedBuilder;
 use super::{
     error::CliError,
     output::{COLUMN_GAP, action_rows, table_lines},
-    report::{Report, Row, RowKind},
+    project_removal::ProjectRemoval,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
 };
 use crate::{
-    adapter::client::{
-        ActionReport, ProjectIdentityView, ServiceClient, SettleWatch, process::down,
-    },
+    adapter::client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down},
     domain::{
         config::ConfigError,
         port::{LocalState, StateChangeNotifier},
@@ -66,29 +67,6 @@ pub struct ProjectListing {
     /// Whether it contains the current folder.
     #[getset(get_copy = "pub")]
     current: bool,
-}
-
-/// What `projects rm` did, as `--json` shows it.
-#[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]
-pub struct ProjectRemoval {
-    /// The project removed.
-    #[getset(get = "pub")]
-    project: ProjectIdentityView,
-    /// Whether it was still registered when removed.
-    #[getset(get_copy = "pub")]
-    removed: bool,
-    /// What became of its processes as they were stopped, or none when its
-    /// stored processes did not read and the service could not stop them
-    /// first.
-    #[getset(get = "pub")]
-    stopped: Option<ActionReport>,
-}
-
-impl ProjectRemoval {
-    /// Whether a process it stopped did not end up stopped.
-    pub fn failed(&self) -> bool {
-        self.stopped.as_ref().is_some_and(ActionReport::failed)
-    }
 }
 
 /// Every registered project, the one containing `cwd` marked current. A

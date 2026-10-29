@@ -1,8 +1,4 @@
-use super::{
-    args::NoteCommand,
-    error::CliError,
-    report::{Row, RowKind, attribution},
-};
+use super::{args::NoteCommand, error::CliError, report::attribution, row::Row, row_kind::RowKind};
 use crate::domain::{
     coordination::{Author, ScratchpadKey},
     port::CoordinationStore,

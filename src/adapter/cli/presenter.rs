@@ -16,7 +16,9 @@ use super::{
     error::CliError,
     interrupt_guard::InterruptGuard,
     presenter_theme::MusterTheme,
-    report::{Report, Row, RowKind, plain, print_error},
+    report::{Report, plain, print_error},
+    row::Row,
+    row_kind::RowKind,
     spinners::Spinners,
     surroundings::Surroundings,
 };

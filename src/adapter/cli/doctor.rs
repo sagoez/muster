@@ -13,7 +13,10 @@ use super::{
     completions::{CompletionShell, registration_line},
     error::CliError,
     output::COLUMN_GAP,
-    report::{Report, Row, RowKind},
+    probe_outcome::ProbeOutcome,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
 };
 use crate::{
     adapter::client::ProjectTarget,
@@ -72,17 +75,6 @@ const ELVISH_RC: &str = ".elvish/rc.elv";
 const ELVISH_XDG_RC: &str = "elvish/rc.elv";
 /// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
-
-/// Severity of a probe result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeOutcome {
-    /// Healthy.
-    Ok,
-    /// Advisory; does not fail the doctor run.
-    Warn,
-    /// Broken; the doctor run exits non-zero.
-    Fail,
-}
 
 /// One diagnostic line: what was probed, how it went, and the detail text.
 #[derive(Debug, Getters, CopyGetters, TypedBuilder)]
@@ -321,40 +313,16 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt;
-
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{
-        project::Project,
-        value::{ProjectName, ProjectRoot},
+    use crate::{
+        adapter::cli::{embedding::Embedding, fixed_projects::Projects, wrapped::Wrapped},
+        domain::{
+            project::Project,
+            value::{ProjectName, ProjectRoot},
+        },
     };
-
-    /// A store holding a fixed set of projects.
-    struct Projects(Vec<Project>);
-
-    impl ProjectStore for Projects {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.0.clone())
-        }
-
-        fn project_at(&self, _root: &ProjectRoot) -> Result<Option<Project>, ConfigError> {
-            Ok(None)
-        }
-
-        fn project_named(&self, _name: &ProjectName) -> Result<Option<Project>, ConfigError> {
-            Ok(None)
-        }
-
-        fn project_containing(&self, _dir: &Path) -> Result<Option<Project>, ConfigError> {
-            Ok(None)
-        }
-
-        fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {
-            Ok(false)
-        }
-    }
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -431,33 +399,6 @@ mod tests {
             project_probe(&Ok(ProjectTarget::Unregistered(root))).outcome(),
             ProbeOutcome::Ok
         );
-    }
-
-    /// An error whose display already embeds its source.
-    #[derive(Debug)]
-    struct Embedding(Wrapped);
-    /// A source error.
-    #[derive(Debug)]
-    struct Wrapped;
-
-    impl fmt::Display for Wrapped {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("locked")
-        }
-    }
-
-    impl Error for Wrapped {}
-
-    impl fmt::Display for Embedding {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "could not open: {}", self.0)
-        }
-    }
-
-    impl Error for Embedding {
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            Some(&self.0)
-        }
     }
 
     /// A source the message already shows is not repeated.

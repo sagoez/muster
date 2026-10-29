@@ -8,11 +8,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{
-    error::CliError,
-    output::COLUMN_GAP,
-    report::{Report, Row, RowKind},
-};
+use super::{error::CliError, output::COLUMN_GAP, report::Report, row::Row, row_kind::RowKind};
 use crate::{
     adapter::{
         detect::{Candidate, DetectSource, detect},

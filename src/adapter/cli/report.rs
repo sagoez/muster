@@ -4,6 +4,7 @@ use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
+use super::{row::Row, row_kind::RowKind};
 use crate::{
     adapter::sanitize::{printable, printable_lines},
     domain::coordination::Author,
@@ -38,7 +39,7 @@ pub(super) const FAIL_GLYPH: &str = "✗";
 /// Separator between the parts of a summary line.
 const SUMMARY_SEPARATOR: &str = " · ";
 /// Separator between a plain row's label and detail.
-const PLAIN_SEPARATOR: &str = ": ";
+pub(super) const PLAIN_SEPARATOR: &str = ": ";
 /// Summary word for passing rows.
 const SUMMARY_OK: &str = "ok";
 /// Summary words for advisory rows.
@@ -47,81 +48,6 @@ const SUMMARY_HINTS: &str = "hints";
 /// Summary words for failing rows.
 const SUMMARY_FAILURE: &str = "failure";
 const SUMMARY_FAILURES: &str = "failures";
-
-/// What a row says about its fact: how it is glyphed in the plain layout and
-/// which kind of line it becomes in the interactive one. The plain layout
-/// shows glyphs only for labeled rows, preserving the pipeable line format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowKind {
-    /// Healthy.
-    Ok,
-    /// Advisory.
-    Hint,
-    /// Broken.
-    Fail,
-    /// Unstyled content.
-    Plain,
-    /// De-emphasized content.
-    Dim,
-}
-
-impl RowKind {
-    /// The status glyph for glyphed kinds.
-    fn glyph(self) -> Option<&'static str> {
-        match self {
-            RowKind::Ok => Some(OK_GLYPH),
-            RowKind::Hint => Some(HINT_GLYPH),
-            RowKind::Fail => Some(FAIL_GLYPH),
-            RowKind::Plain | RowKind::Dim => None,
-        }
-    }
-}
-
-/// One line of command output: an optional labeled fact with a status kind.
-#[derive(Clone, Debug, Getters, CopyGetters, TypedBuilder)]
-pub struct Row {
-    /// Status kind driving glyph and color.
-    #[getset(get_copy = "pub")]
-    kind: RowKind,
-    /// Optional bold label column.
-    #[builder(default)]
-    #[getset(get = "pub")]
-    label: Option<String>,
-    /// The fact itself.
-    #[getset(get = "pub")]
-    detail: String,
-}
-
-impl Row {
-    /// An unlabeled row of the given kind, its detail made [`printable`].
-    pub fn unlabeled(kind: RowKind, detail: impl Into<String>) -> Self {
-        Row::builder()
-            .kind(kind)
-            .detail(printable(&detail.into()))
-            .build()
-    }
-
-    /// A labeled, glyphed row, its label and detail made [`printable`].
-    pub fn labeled(kind: RowKind, label: impl Into<String>, detail: impl Into<String>) -> Self {
-        Row::builder()
-            .kind(kind)
-            .label(Some(printable(&label.into())))
-            .detail(printable(&detail.into()))
-            .build()
-    }
-
-    /// The row in the plain line-per-fact layout: labeled rows keep the
-    /// `glyph label: detail` shape, unlabeled rows are the bare detail, so
-    /// piped output keeps one stable format.
-    fn plain_line(&self) -> String {
-        match (&self.label, self.kind.glyph()) {
-            (Some(label), Some(glyph)) => {
-                format!("{glyph} {label}{PLAIN_SEPARATOR}{}", self.detail)
-            },
-            _ => self.detail.clone(),
-        }
-    }
-}
 
 /// A command's full output: a titled set of rows, an optional summary the
 /// interactive layout closes with, and whether the command failed.
@@ -177,7 +103,7 @@ impl Report {
 pub fn tally(rows: &[Row]) -> Option<String> {
     let count = |kind: RowKind| {
         rows.iter()
-            .filter(|row| row.label.is_some() && row.kind == kind)
+            .filter(|row| row.label().is_some() && row.kind() == kind)
             .count()
     };
     let (ok, hints, failures) = (

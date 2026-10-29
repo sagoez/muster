@@ -896,7 +896,9 @@ impl ServiceRuntime {
     /// `environment`, the shell's own. A report sent with no environment is
     /// no entering and starts nothing. Returns the notes kept for the shell,
     /// then what entering started or refused. A report older than the
-    /// shell's last changes nothing.
+    /// shell's last, or from a shell no longer running as it was, changes
+    /// nothing: one that arrives late, after the sweep found its shell gone,
+    /// never brings it back or starts its project.
     ///
     /// # Errors
     /// Returns a busy refusal for a new shell while [`MAX_SHELLS`] are known.
@@ -906,6 +908,9 @@ impl ServiceRuntime {
         environment: Option<&LaunchEnvironment>,
     ) -> Result<Vec<ShellNote>, ServiceErrorBody> {
         let shell = *record.shell();
+        if !self.shells.is_live(&shell) {
+            return Ok(Vec::new());
+        }
         if !self.occupancy.knows(&shell) && self.occupancy.len() >= MAX_SHELLS {
             return Err(refused(
                 ServiceErrorKind::Busy,
@@ -3288,6 +3293,30 @@ mod tests {
             };
             screen.contains(&seen)
         });
+        service.stop();
+    }
+
+    /// CR-3: a report that arrives after its shell ended, its pid gone or
+    /// run by another process, is dropped: the shell is not brought back,
+    /// counted, or let start its project.
+    #[test]
+    fn a_report_from_a_shell_no_longer_running_is_dropped() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let (ended, reused) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(test_shell(501, 2));
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        for gone in [ended, reused] {
+            assert!(report(&service, gone, 1, Some(&project)).is_empty());
+        }
+
+        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
+        else {
+            panic!("ps answers a status");
+        };
+        assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
+        assert!(fixture.runner().live_records().is_empty());
         service.stop();
     }
 

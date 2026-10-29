@@ -24,8 +24,8 @@ use crate::{
             prepare_state_dir, socket_dir, state_dir,
         },
         service::{
-            Notice, ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
-            ServiceVersion,
+            Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
+            ServiceResponse, ServiceVersion,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
     },
@@ -35,10 +35,15 @@ use crate::{
 
 /// Longest to wait for a service this client started to accept requests.
 pub const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(5);
-/// Longest a service reply may take, and longest to wait for a service that
-/// is exiting to be gone. Above the 10 s a `Stop` or `Replace` waits for
-/// launches in flight, so a slow exit is not mistaken for a hung service.
-const SERVICE_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest a service reply may take.
+const SERVICE_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+/// What a client allows past the longest the service takes to exit, for a
+/// loaded machine.
+const SERVICE_EXIT_MARGIN: Duration = Duration::from_secs(5);
+/// Longest a `Stop` or `Replace` may take to be answered, and longest to wait
+/// for a service that is exiting to be gone: past every bound the service's
+/// exit waits out, so a slow exit is not mistaken for a hung service.
+const SERVICE_EXIT_TIMEOUT: Duration = SERVICE_EXIT_BOUND.saturating_add(SERVICE_EXIT_MARGIN);
 /// Pause between attempts to reach a service that is starting or exiting.
 const RETRY_INTERVAL: Duration = Duration::from_millis(20);
 /// File in the state directory whose lock lets one client at a time start
@@ -326,7 +331,7 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when the service cannot be reached or answers
     /// late.
     pub fn send(&self, request: &ServiceRequest) -> Result<ServiceResponse, ClientError> {
-        self.send_within(request, SERVICE_EXIT_TIMEOUT)
+        self.send_within(request, SERVICE_REPLY_TIMEOUT)
     }
 
     /// Sends `request`, which the service answers only after waiting up to
@@ -340,7 +345,7 @@ impl ServiceClient {
         request: &ServiceRequest,
         wait: Duration,
     ) -> Result<ServiceResponse, ClientError> {
-        self.send_within(request, wait.saturating_add(SERVICE_EXIT_TIMEOUT))
+        self.send_within(request, wait.saturating_add(SERVICE_REPLY_TIMEOUT))
     }
 
     /// Sends `request`, waiting at most `timeout` for each answer, and sends
@@ -405,7 +410,7 @@ impl ServiceClient {
     /// # Errors
     /// Returns a [`ClientError`] when the exchange fails.
     fn exchange(&self, request: &ServiceRequest) -> Result<ServiceResponse, ClientError> {
-        self.try_send(request, SERVICE_EXIT_TIMEOUT)
+        self.try_send(request, SERVICE_REPLY_TIMEOUT)
     }
 
     /// The service answering at the socket, starting one when none is, and
@@ -436,7 +441,7 @@ impl ServiceClient {
         let hello = ServiceRequest::Hello {
             version: ServiceVersion::current(),
         };
-        match self.send_once(&hello, SERVICE_EXIT_TIMEOUT) {
+        match self.send_once(&hello, SERVICE_REPLY_TIMEOUT) {
             Ok(ServiceResponse::Hello { version, binary }) => Ok(Probe::Running(
                 RunningService::builder()
                     .version(Some(version))
@@ -790,5 +795,14 @@ mod tests {
         let own_dir = scratch.path().join("run");
         let mode = fs::metadata(&own_dir).unwrap().permissions().mode();
         assert_eq!(mode & GROUP_OTHER_BITS, 0);
+    }
+
+    /// A stop or replacement waits past every bound the service's exit
+    /// waits out, so a slow but sound exit is never reported as a timeout,
+    /// while an ordinary reply is not held that long.
+    #[test]
+    fn a_stop_waits_past_the_longest_service_exit() {
+        assert!(SERVICE_EXIT_TIMEOUT > SERVICE_EXIT_BOUND);
+        assert!(SERVICE_EXIT_BOUND > SERVICE_REPLY_TIMEOUT);
     }
 }

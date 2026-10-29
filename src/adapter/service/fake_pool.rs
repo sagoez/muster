@@ -18,10 +18,13 @@ use crate::{
     adapter::holder::HolderRecord,
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
-        pty::{PtyError, SpawnRequest},
+        pty::{ProcessOutput, PtyError, SpawnRequest},
         value::{OutputCursor, Pid, ProcessName, ProjectRoot},
     },
 };
+
+/// Why a spawned handle's output stream broke.
+pub(super) const BROKEN_STREAM: &str = "the holder stream broke";
 
 /// A pool whose running holders are `records`, none of which it can
 /// adopt. Every spawn is counted and answers through a holder at `socket`
@@ -39,6 +42,13 @@ pub(super) struct FakePool {
     socket: Option<PathBuf>,
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     gate: Option<Receiver<()>>,
+    /// The child pid every spawned handle reports, whose output stream
+    /// breaks at once when one is given.
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    broken_pid: Option<Pid>,
+    /// Held, a look for a holder waits until it opens or is dropped.
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    locate_gate: Option<Receiver<()>>,
     /// Times the legacy logs were removed.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     legacy_removals: Arc<AtomicUsize>,
@@ -56,6 +66,8 @@ impl FakePool {
             kills: Arc::default(),
             socket,
             gate: None,
+            broken_pid: None,
+            locate_gate: None,
             legacy_removals: Arc::default(),
             legacy_result: Mutex::new(None),
         }
@@ -66,6 +78,17 @@ impl FakePool {
     pub(super) fn gated(self, gate: Receiver<()>) -> Self {
         Self {
             gate: Some(gate),
+            ..self
+        }
+    }
+
+    /// This pool, whose every spawn runs the child `pid` and breaks its
+    /// output stream at once, so the service looks for its holder again; that
+    /// look waits until `locate_gate` opens or is dropped, and finds none.
+    pub(super) fn breaking_streams(self, pid: Pid, locate_gate: Receiver<()>) -> Self {
+        Self {
+            broken_pid: Some(pid),
+            locate_gate: Some(locate_gate),
             ..self
         }
     }
@@ -82,14 +105,18 @@ impl ProcessRunner for FakePool {
     fn spawn(
         &self,
         _request: SpawnRequest,
-        _sink: Box<dyn OutputSink>,
+        sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
         self.wait_at_gate();
+        if self.broken_pid.is_some() {
+            sink.send(ProcessOutput::Unreadable(BROKEN_STREAM.to_string()));
+        }
         Ok(Box::new(
             StalledHandle::builder()
                 .socket(self.socket.clone())
                 .kills(Arc::clone(&self.kills))
+                .pid(self.broken_pid)
                 .build(),
         ))
     }
@@ -97,6 +124,9 @@ impl ProcessRunner for FakePool {
 
 impl HolderAdopter for FakePool {
     fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
+        if let Some(gate) = &self.locate_gate {
+            let _ = gate.recv_timeout(WAIT);
+        }
         None
     }
 

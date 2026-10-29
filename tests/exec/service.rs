@@ -760,3 +760,38 @@ fn a_held_database_lock_neither_stalls_the_service_nor_loses_a_crash() {
     });
     scratch.stop_service(service);
 }
+
+/// A terminate or a hangup stops the service as a client's stop does: it
+/// exits cleanly with its socket removed, having first stored the crash it
+/// was still waiting to record behind another writer's lock.
+#[test]
+fn a_terminate_or_hangup_stops_the_service_and_flushes_its_records() {
+    for sent in [Signal::TERM, Signal::HUP] {
+        let mut scratch = Scratch::new();
+        let project = scratch.api_project();
+        let mut service = scratch.start_service();
+        let child = scratch.up_running(&project).pid().unwrap().into_inner();
+        let writer = Connection::open(scratch.database()).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        kill_hard(child);
+        wait_until("the crash", || {
+            !scratch.api(&project).state().may_be_running()
+        });
+
+        signal(service.id(), sent);
+        thread::sleep(SETTLE);
+        writer.execute_batch("COMMIT").unwrap();
+        let mut status = None;
+        wait_until("the service to exit", || {
+            status = service.try_wait().unwrap();
+            status.is_some()
+        });
+
+        assert!(status.unwrap().success(), "{sent:?}: {status:?}");
+        assert!(!scratch.socket().exists(), "{sent:?} left the socket");
+        assert!(
+            !scratch.store().ended_runs(&project).unwrap().is_empty(),
+            "{sent:?} lost the crash"
+        );
+    }
+}

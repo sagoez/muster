@@ -1,4 +1,4 @@
-use std::{env, panic, path::Path, process, sync::Arc};
+use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
@@ -26,11 +26,18 @@ use muster::{
     },
     error::MusterError,
 };
+use signal_hook::{
+    consts::{SIGHUP, SIGTERM},
+    iterator::Signals,
+};
 
 /// What a service started beside a running one records before it exits, so
 /// each start that lost the race is visible in the service log.
 const SERVICE_ALREADY_RUNNING: &str =
     "another muster service already runs for this state directory; this one exits";
+/// The signals that stop the service as a client's stop does, its records
+/// flushed: a kill, a logout or an OS shutdown.
+const SERVICE_EXIT_SIGNALS: [c_int; 2] = [SIGTERM, SIGHUP];
 
 /// The adapters every command of this binary runs on.
 static PORTS: LocalPorts = LocalPorts;
@@ -181,6 +188,7 @@ fn run_service() -> Result<(), MusterError> {
         .raised_writes(Box::new(recorder_store))
         .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
+        .exit_signals(Some(Signals::new(SERVICE_EXIT_SIGNALS)?))
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)
 }

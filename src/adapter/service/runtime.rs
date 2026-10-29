@@ -7,6 +7,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
+use signal_hook::iterator::{Handle as SignalsHandle, Signals};
 
 use super::{
     acceptor::Acceptor,
@@ -22,6 +23,7 @@ use super::{
     located::Located,
     notice::Notice,
     notice_level::NoticeLevel,
+    notice_mirror::NOTICE_FLUSH_WAIT,
     notices::Notices,
     port_block::PortBlock,
     port_holder::PortHolder,
@@ -32,7 +34,7 @@ use super::{
     project_ports::ProjectPorts,
     project_status::ProjectStatus,
     protocol,
-    record_retry::RecordRetry,
+    record_retry::{RECORD_DRAIN_BOUND, RECORD_FLUSH_SETTLE, RecordRetry},
     reply::Reply,
     service_deps::ServiceDeps,
     service_error::ServiceError,
@@ -71,6 +73,13 @@ pub(crate) const EVENT_CAPACITY: usize = 256;
 /// flight, past the longest a launch can take: the holder ready timeout (5 s)
 /// plus the time a failed launch spends stopping its holder (2 s).
 const LAUNCH_DETACH_WAIT: Duration = Duration::from_secs(10);
+/// Longest the service takes to exit once asked, before it answers the
+/// client that asked: the wait for launches in flight, then the flush of
+/// what it records, then the flush of the notices it mirrors to its log.
+pub const SERVICE_EXIT_BOUND: Duration = LAUNCH_DETACH_WAIT
+    .saturating_add(RECORD_DRAIN_BOUND)
+    .saturating_add(RECORD_FLUSH_SETTLE)
+    .saturating_add(NOTICE_FLUSH_WAIT);
 /// Shown when a process name matches nothing in its project.
 const UNKNOWN_PROCESS: &str = "no process with that name in this project";
 /// Shown when the process has no running child.
@@ -152,16 +161,17 @@ pub struct ServiceRuntime {
 }
 
 impl ServiceRuntime {
-    /// Runs the service until a client asks it to stop or be replaced: reads
-    /// the settings, binds the socket in the singleton's state directory,
-    /// adopts every running holder into its project's supervisor, and serves.
-    /// On exit every holder keeps running, the socket is removed and the lock
+    /// Runs the service until a client, or one of its exit signals, asks it
+    /// to stop or be replaced: reads the settings, binds the socket in the
+    /// singleton's state directory, adopts every running holder into its
+    /// project's supervisor, and serves. On exit every holder keeps running,
+    /// what it records is flushed, the socket is removed and the lock
     /// released before the exiting client is answered.
     ///
     /// # Errors
     /// Returns a [`ServiceError`] when the settings cannot be read or the
     /// socket cannot be bound.
-    pub fn run(singleton: Singleton, deps: ServiceDeps) -> Result<(), ServiceError> {
+    pub fn run(singleton: Singleton, mut deps: ServiceDeps) -> Result<(), ServiceError> {
         let state_dir = singleton.state_dir().clone();
         let settings = deps.settings.load().map_err(ServiceError::Settings)?;
         let (sender, events) = bounded(EVENT_CAPACITY);
@@ -174,9 +184,16 @@ impl ServiceRuntime {
                 source,
             });
         }
+        let signals = deps
+            .exit_signals
+            .take()
+            .map(|signals| relay_exit_signals(signals, sender.clone()));
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         let exit = runtime.serve(&events);
+        if let Some(signals) = signals {
+            signals.close();
+        }
         runtime.shutdown();
         acceptor.close();
         protocol::withdraw_socket(&state_dir, &socket);
@@ -221,6 +238,7 @@ impl ServiceRuntime {
             run_writes,
             raised_writes,
             listening,
+            exit_signals: _,
         } = deps;
         let notices = Notices::shared(Some(protocol::log_path(state_dir)));
         Self {
@@ -1004,8 +1022,9 @@ impl ServiceRuntime {
     /// adoption still in flight to come back, and hands each result to its
     /// supervisor, which detaches it. Exiting first would end a worker in the
     /// middle of greeting its holder, which then gives up and kills the child
-    /// it was started for. Requests that arrive meanwhile are dropped, so
-    /// their clients hear the service is going away.
+    /// it was started for. A reconnect still looking for its holder settles
+    /// once the look comes back. Requests that arrive meanwhile are dropped,
+    /// so their clients hear the service is going away.
     fn detach_launches(&mut self, events: &Receiver<ServiceEvent>) {
         let deadline = Instant::now() + LAUNCH_DETACH_WAIT;
         while self
@@ -1017,7 +1036,8 @@ impl ServiceRuntime {
                 Ok(
                     event @ (ServiceEvent::Spawned { .. }
                     | ServiceEvent::LaunchBlocked { .. }
-                    | ServiceEvent::Adopted { .. }),
+                    | ServiceEvent::Adopted { .. }
+                    | ServiceEvent::ReconnectLocated { .. }),
                 ) => {
                     self.handle(event);
                 },
@@ -1144,6 +1164,23 @@ fn release_unrecorded(result: Result<Box<dyn ProcessHandle>, PtyError>) {
     }
 }
 
+/// Turns the first of `signals` into a stop request on `events`, on a thread
+/// of its own, so a terminate or hangup takes the same exit as a client's
+/// stop. Returns the handle that ends that thread.
+fn relay_exit_signals(mut signals: Signals, events: Sender<ServiceEvent>) -> SignalsHandle {
+    let handle = signals.handle();
+    thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            let (reply, _) = bounded(1);
+            let _ = events.send(ServiceEvent::Request {
+                request: ServiceRequest::Stop,
+                reply,
+            });
+        }
+    });
+    handle
+}
+
 /// Applies `action` to the process `name` of `supervisor`; a start or restart
 /// runs with `environment`, the environment of the client that asked.
 fn control(
@@ -1213,7 +1250,7 @@ mod tests {
             ipc,
             service::{
                 BatchOutcome, EventPage, StateGoal, WaitCondition, WaitSpec, WaitStatus,
-                fake_pool::FakePool,
+                fake_pool::{BROKEN_STREAM, FakePool},
                 null_sink::NullSink,
                 running::Running,
                 runtime_fixture::Fixture,
@@ -1697,6 +1734,45 @@ mod tests {
             );
             service.stop();
         }
+    }
+
+    /// A reconnect still looking for its holder when the service stops holds
+    /// the exit only until that look comes back, never the whole detach wait.
+    #[test]
+    fn a_reconnect_in_flight_at_stop_holds_the_exit_only_until_its_look_returns() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let orphan = Orphan::spawn();
+        let (open, gate) = bounded(0);
+        let service = fixture.start(Arc::new(
+            FakePool::new(Vec::new(), None).breaking_streams(orphan.pid(), gate),
+        ));
+        service.up(&project);
+        wait_until("the broken stream to be told", || {
+            service
+                .notices(&project)
+                .iter()
+                .any(|notice| notice.message().ends_with(BROKEN_STREAM))
+        });
+        assert_eq!(
+            *process(&service.status(&project), "api").state(),
+            ProcessState::Starting,
+            "the look for the holder is in flight"
+        );
+
+        let opener = thread::spawn(move || {
+            thread::sleep(GATE_DELAY);
+            drop(open);
+        });
+        let stopping = Instant::now();
+        service.stop();
+
+        assert!(
+            stopping.elapsed() < LAUNCH_DETACH_WAIT / 2,
+            "the exit waited {:?}",
+            stopping.elapsed()
+        );
+        opener.join().unwrap();
     }
 
     /// A stop while the adoption of a running child is in flight is kept for

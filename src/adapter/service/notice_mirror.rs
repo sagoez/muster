@@ -18,7 +18,7 @@ const SERVICE_LOG_MAX_BYTES: u64 = 1024 * 1024;
 /// Appended to the log's name for the generation rotated out.
 const ROTATED_SUFFIX: &str = ".1";
 /// Longest [`NoticeMirror::flush`] waits for the lines before it.
-const FLUSH_WAIT: Duration = Duration::from_secs(5);
+pub(super) const NOTICE_FLUSH_WAIT: Duration = Duration::from_secs(5);
 
 /// Appends lines to the service log on a thread of its own, so a slow disk
 /// never stalls the loop that raised them, rotating the log at
@@ -49,12 +49,12 @@ impl NoticeMirror {
         let _ = self.sender.send(MirrorWrite::Line(line));
     }
 
-    /// Waits, at most [`FLUSH_WAIT`], until every line appended before it
-    /// was written.
+    /// Waits, at most [`NOTICE_FLUSH_WAIT`], until every line appended before
+    /// it was written.
     pub fn flush(&self) {
         let (done, written) = bounded(1);
         if self.sender.send(MirrorWrite::Flush(done)).is_ok() {
-            let _ = written.recv_timeout(FLUSH_WAIT);
+            let _ = written.recv_timeout(NOTICE_FLUSH_WAIT);
         }
     }
 }

@@ -149,6 +149,7 @@ impl Fixture {
                 .raised_writes(Box::new(store.clone()))
                 .edits(Box::new(store))
                 .listening(None)
+                .exit_signals(None)
                 .build();
             ServiceRuntime::run(singleton, deps)
         });

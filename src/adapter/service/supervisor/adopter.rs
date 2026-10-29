@@ -249,7 +249,14 @@ impl Supervisor {
         record: Option<HolderRecord>,
     ) {
         let detaching = self.launches.is_detaching();
-        let launch = self.take_launch(pane, generation).filter(|_| !detaching);
+        let launch = match self.take_launch(pane, generation) {
+            Some(launch) => Some(launch),
+            None => {
+                self.launches.take(pane, generation);
+                None
+            },
+        }
+        .filter(|_| !detaching);
         let (Some(launch), Some(adopter)) = (
             launch,
             self.adopter.as_ref().and_then(|adopter| adopter.detached()),

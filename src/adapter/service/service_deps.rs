@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use signal_hook::iterator::Signals;
 use typed_builder::TypedBuilder;
 
 use super::{
@@ -47,4 +48,7 @@ pub struct ServiceDeps {
     /// Finds the ports running process trees listen on; absent where ports
     /// are not reported.
     pub(super) listening: Option<Box<dyn ListeningPorts + Send>>,
+    /// The signals that stop the service as a client's stop does; absent
+    /// for a service run inside another program, such as a test.
+    pub(super) exit_signals: Option<Signals>,
 }

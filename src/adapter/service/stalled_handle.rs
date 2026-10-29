@@ -22,13 +22,16 @@ use crate::{
 };
 
 /// A handle whose holder, when it has one, serves at `socket` but never
-/// answers, counting the kills it is sent.
+/// answers, counting the kills it is sent, with the child `pid` when one is
+/// given.
 #[derive(Getters, MutGetters, TypedBuilder)]
 pub(super) struct StalledHandle {
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     socket: Option<PathBuf>,
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     kills: Arc<AtomicUsize>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    pid: Option<Pid>,
 }
 
 impl ProcessHandle for StalledHandle {
@@ -69,7 +72,7 @@ impl ProcessHandle for StalledHandle {
     }
 
     fn process_id(&self) -> Option<Pid> {
-        None
+        self.pid
     }
 
     fn input(&self) -> Option<Box<dyn ProcessInput>> {

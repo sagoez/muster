@@ -292,6 +292,7 @@ fn in_process_service(
             .raised_writes(Box::new(recorder_store))
             .edits(Box::new(store))
             .listening(None)
+            .exit_signals(None)
             .build();
         ServiceRuntime::run(singleton, deps)
     });

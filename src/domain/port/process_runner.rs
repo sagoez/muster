@@ -6,7 +6,7 @@ use std::{
 use crate::domain::{
     process::StopSignal,
     pty::{ProcessOutput, PtyError, PtySize, ScreenSource, SpawnRequest},
-    value::OutputCursor,
+    value::{OutputCursor, Pid},
 };
 
 /// Sink for a single process's output events, supplied by the runtime. The
@@ -30,7 +30,7 @@ pub trait ProcessInput: Send {
 /// Handle to a spawned process: write input, resize, or terminate it.
 pub trait ProcessHandle: Send {
     /// The OS process ID of the spawned child, when the platform exposes it.
-    fn process_id(&self) -> Option<u32>;
+    fn process_id(&self) -> Option<Pid>;
 
     /// A writer onto the process's input for another thread, so a child that
     /// stops reading blocks that thread rather than the controller.

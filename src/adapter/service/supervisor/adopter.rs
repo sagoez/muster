@@ -16,7 +16,7 @@ use crate::{
         port::{OutputSink, ProcessHandle},
         process::{ExitIntent, ProcessState, RestartPolicy},
         pty::{ExitOutcome, PtyError, SpawnHistory},
-        value::PaneId,
+        value::{PaneId, Pid},
     },
 };
 
@@ -95,7 +95,7 @@ fn child_runs_or_collect(record: &HolderRecord) -> bool {
 pub trait HolderAdopter {
     /// The record of the holder running the child with `child_pid`, if a
     /// holder runs it.
-    fn locate(&self, child_pid: u32) -> Option<HolderRecord>;
+    fn locate(&self, child_pid: Pid) -> Option<HolderRecord>;
 
     /// Becomes the supervisor of the holder `record` describes, forwarding its
     /// screen, output and exit to `sink`.
@@ -118,7 +118,7 @@ pub trait HolderAdopter {
 }
 
 impl HolderAdopter for HolderRunner {
-    fn locate(&self, child_pid: u32) -> Option<HolderRecord> {
+    fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         HolderRunner::locate(self, child_pid)
     }
 
@@ -562,6 +562,8 @@ mod tests {
     };
 
     const PANE: u64 = 0;
+    /// A pid that always runs and is never a holder, standing in for one.
+    const KERNEL_THREAD_PID: u32 = 2;
     /// The command a stack change replaces the test command with.
     const OTHER_COMMAND: &str = "serve --again";
     /// A start token no running process has.
@@ -610,7 +612,7 @@ mod tests {
     struct FakeAdopter;
 
     impl HolderAdopter for FakeAdopter {
-        fn locate(&self, _child_pid: u32) -> Option<HolderRecord> {
+        fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
             None
         }
 
@@ -649,7 +651,7 @@ mod tests {
 
     /// The record a holder running `process` of this project as `child_pid`
     /// would leave, serving at `socket`.
-    fn record_at(process: &str, child_pid: u32, socket: &Path) -> HolderRecord {
+    fn record_at(process: &str, child_pid: Pid, socket: &Path) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
             .project(ProjectRoot::try_new(PathBuf::from(TEST_PROJECT)).unwrap())
@@ -658,7 +660,7 @@ mod tests {
             .stop(graceful())
             .launch_environment(vec![(OsString::from("FROM"), OsString::from("cli"))])
             .socket(socket.to_path_buf())
-            .holder_pid(1)
+            .holder_pid(Pid::try_new(KERNEL_THREAD_PID).unwrap())
             .child_pid(child_pid)
             .child_start_token(None)
             .log(PathBuf::from("/tmp/holder.log"))
@@ -667,19 +669,19 @@ mod tests {
     }
 
     /// As [`record_at`], at a socket nothing serves.
-    fn record_with_pid(process: &str, child_pid: u32) -> HolderRecord {
+    fn record_with_pid(process: &str, child_pid: Pid) -> HolderRecord {
         record_at(process, child_pid, Path::new(UNSERVED_SOCKET))
     }
 
     /// The record of `process` running as the fake launcher pid.
     fn record(process: &str) -> HolderRecord {
-        record_with_pid(process, FAKE_LAUNCHER_PID)
+        record_with_pid(process, fake_launcher_pid())
     }
 
     /// A pid that belonged to a process that has exited.
-    fn gone_pid() -> u32 {
+    fn gone_pid() -> Pid {
         let mut exited = process::Command::new("true").spawn().unwrap();
-        let pid = exited.id();
+        let pid = Pid::try_new(exited.id()).unwrap();
         exited.wait().unwrap();
         pid
     }
@@ -697,7 +699,7 @@ mod tests {
 
         let status = harness.supervisor.snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Running);
-        assert_eq!(*status.processes()[0].pid(), Some(FAKE_LAUNCHER_PID));
+        assert_eq!(*status.processes()[0].pid(), Some(fake_launcher_pid()));
         assert!(
             spawns.requests.borrow().is_empty(),
             "up leaves an adopted process running rather than starting another"
@@ -739,7 +741,7 @@ mod tests {
         let signals = Arc::new(StopSignals::default());
         struct SignalAdopter(Arc<StopSignals>);
         impl HolderAdopter for SignalAdopter {
-            fn locate(&self, _child_pid: u32) -> Option<HolderRecord> {
+            fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
                 None
             }
 
@@ -922,7 +924,7 @@ mod tests {
     }
 
     impl HolderAdopter for ReconnectingAdopter {
-        fn locate(&self, child_pid: u32) -> Option<HolderRecord> {
+        fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
             self.record
                 .clone()
                 .filter(|record| record.child_pid() == child_pid)
@@ -942,7 +944,7 @@ mod tests {
     }
 
     /// A handle that reports a fixed pid and accepts every request.
-    struct FixedPidHandle(u32);
+    struct FixedPidHandle(Pid);
 
     impl ProcessHandle for FixedPidHandle {
         fn input(&self) -> Option<Box<dyn ProcessInput>> {
@@ -957,7 +959,7 @@ mod tests {
             let _ = self.kill();
         }
 
-        fn process_id(&self) -> Option<u32> {
+        fn process_id(&self) -> Option<Pid> {
             Some(self.0)
         }
 
@@ -984,7 +986,7 @@ mod tests {
 
     /// A runner whose every process reports `pid`, counting its spawns.
     struct FixedPidRunner {
-        pid: u32,
+        pid: Pid,
         spawns: Arc<AtomicUsize>,
     }
 
@@ -1008,7 +1010,7 @@ mod tests {
     /// A harness over `p` (graceful stop, restart `Always`) whose processes
     /// report `pid` and whose holder `adopter` can reconnect to, plus its
     /// spawn count. Nothing is started.
-    fn reconnectable_over(pid: u32, adopter: ReconnectingAdopter) -> (Harness, Arc<AtomicUsize>) {
+    fn reconnectable_over(pid: Pid, adopter: ReconnectingAdopter) -> (Harness, Arc<AtomicUsize>) {
         let spawns = Arc::new(AtomicUsize::new(0));
         let harness = with_adopter(
             Harness::over(
@@ -1025,7 +1027,7 @@ mod tests {
 
     /// As [`reconnectable_over`], started, with a pid no test relies on.
     fn reconnectable(adopter: ReconnectingAdopter) -> Harness {
-        let (mut harness, _) = reconnectable_over(FAKE_LAUNCHER_PID, adopter);
+        let (mut harness, _) = reconnectable_over(fake_launcher_pid(), adopter);
         harness.up();
         harness
     }
@@ -1562,7 +1564,7 @@ mod tests {
             .command(CommandLine::try_new("true").unwrap())
             .stop(graceful())
             .socket(PathBuf::from(UNSERVED_SOCKET))
-            .holder_pid(1)
+            .holder_pid(Pid::try_new(KERNEL_THREAD_PID).unwrap())
             .child_pid(stranger.pid())
             .child_start_token(Some(StartToken::try_new(FOREIGN_TOKEN).unwrap()))
             .log(PathBuf::from("/tmp/holder.log"))
@@ -1591,7 +1593,7 @@ mod tests {
     }
 
     impl HolderAdopter for FailingWorkerAdopter {
-        fn locate(&self, child_pid: u32) -> Option<HolderRecord> {
+        fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
             self.record
                 .clone()
                 .filter(|record| record.child_pid() == child_pid)

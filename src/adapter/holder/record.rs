@@ -17,7 +17,7 @@ use crate::{
     domain::{
         process::StopPolicy,
         pty::SpawnHistory,
-        value::{CommandLine, ProcessName, ProjectRoot, StartToken},
+        value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
     },
 };
 
@@ -56,10 +56,10 @@ pub struct HolderRecord {
     socket: PathBuf,
     /// The holder process's id.
     #[getset(get_copy = "pub")]
-    holder_pid: u32,
+    holder_pid: Pid,
     /// The supervised child's id.
     #[getset(get_copy = "pub")]
-    child_pid: u32,
+    child_pid: Pid,
     /// The child's start token when the platform reports one, so a later
     /// process reusing `child_pid` is never taken for the child.
     #[getset(get_copy = "pub")]
@@ -181,8 +181,8 @@ mod tests {
             )
             .launch_environment(vec![("PATH".into(), "/usr/bin".into())])
             .socket(PathBuf::from("/tmp/h.sock"))
-            .holder_pid(10)
-            .child_pid(11)
+            .holder_pid(Pid::try_new(10).unwrap())
+            .child_pid(Pid::try_new(11).unwrap())
             .child_start_token(Some(StartToken::try_new(12).unwrap()))
             .log(PathBuf::from("/state/logs/dev.log"))
             .child_started_at(SystemTime::UNIX_EPOCH)

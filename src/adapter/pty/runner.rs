@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::CStr,
     fmt::Display,
-    io::{self, Read, Write},
+    io::{Read, Write},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -10,10 +10,12 @@ use std::{
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
 use portable_pty::{CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system};
+use rustix::process::Signal;
 use signal_hook::low_level;
 
 use super::environment::baseline_environment;
 use crate::{
+    adapter::signal_target::SignalTarget,
     constants::MUSTER_PROJECT_ENV,
     domain::{
         port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
@@ -22,6 +24,7 @@ use crate::{
             ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, ScreenSource, SignalName,
             SpawnRequest,
         },
+        value::Pid,
     },
 };
 
@@ -81,7 +84,7 @@ impl ProcessRunner for PortablePtyRunner {
         let mut child = pair.slave.spawn_command(command).map_err(system_error)?;
         let mut killer = child.clone_killer();
         let mut waiter_killer = child.clone_killer();
-        let pid = child.process_id();
+        let pid = child.process_id().and_then(|raw| Pid::try_new(raw).ok());
         drop(pair.slave);
 
         let io = pair
@@ -121,8 +124,9 @@ impl ProcessRunner for PortablePtyRunner {
             // only the short drain bound. The completion channel wakes this wait
             // immediately when cleanup finishes instead of delaying the exit event.
             let drain_grace = grace_rx.try_recv().unwrap_or(EXIT_DRAIN_GRACE);
-            if wait_for_drain(&reader_done_rx, drain_grace, || process_group_is_alive(pid))
-                == DrainStatus::TimedOut
+            if wait_for_drain(&reader_done_rx, drain_grace, || {
+                pid.is_some_and(|pid| SignalTarget::Group(pid).is_alive())
+            }) == DrainStatus::TimedOut
             {
                 let _ = terminate_group(pid, &mut waiter_killer);
                 let _ = reader_done_rx.recv();
@@ -221,17 +225,6 @@ where
     }
 }
 
-/// Reports whether any process still belongs to the spawned process group.
-fn process_group_is_alive(pid: Option<u32>) -> bool {
-    let Some(pid) = pid else {
-        return false;
-    };
-    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 /// The PTY's input writer, shared so another thread can write while the
 /// handle's owner keeps controlling the process.
 #[derive(Clone)]
@@ -259,11 +252,11 @@ struct PtyProcessHandle {
     input: PtyInput,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     grace_tx: Sender<Duration>,
-    pid: Option<u32>,
+    pid: Option<Pid>,
 }
 
 impl ProcessHandle for PtyProcessHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         self.pid
     }
 
@@ -292,11 +285,11 @@ impl ProcessHandle for PtyProcessHandle {
     }
 
     fn pause(&mut self) -> Result<(), PtyError> {
-        signal_group(self.pid, libc::SIGSTOP)
+        signal_group(self.group()?, Signal::STOP)
     }
 
     fn resume(&mut self) -> Result<(), PtyError> {
-        signal_group(self.pid, libc::SIGCONT)
+        signal_group(self.group()?, Signal::CONT)
     }
 
     fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
@@ -304,8 +297,9 @@ impl ProcessHandle for PtyProcessHandle {
         // exit immediately, its waiter still observes the intended deadline.
         let _ = self.grace_tx.try_send(grace);
         // A paused command cannot handle a shutdown signal until it resumes.
-        let _ = signal_group(self.pid, libc::SIGCONT);
-        signal_group(self.pid, unix_signal(signal))
+        let group = self.group()?;
+        let _ = signal_group(group, Signal::CONT);
+        signal_group(group, unix_signal(signal))
     }
 
     fn kill(&mut self) -> Result<(), PtyError> {
@@ -313,6 +307,18 @@ impl ProcessHandle for PtyProcessHandle {
     }
 }
 
+impl PtyProcessHandle {
+    /// The process group the child leads, which every signal reaches.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Unsupported`] when the platform gave no pid.
+    fn group(&self) -> Result<Pid, PtyError> {
+        signallable(self.pid)
+    }
+}
+
+/// Reported when a child has no pid to signal.
+const NO_PID: &str = "no pid to signal";
 /// Highest signal number tried when recovering a signal from its description.
 const MAX_SIGNAL: libc::c_int = 64;
 /// How portable-pty describes a signal `strsignal` has no text for.
@@ -320,11 +326,19 @@ const UNDESCRIBED_SIGNAL_PREFIX: &str = "Signal ";
 /// Name of a signal with no POSIX name, before its number.
 const UNNAMED_SIGNAL_PREFIX: &str = "signal-";
 
-/// Maps the domain shutdown signal to its Unix signal number.
-pub(crate) fn unix_signal(signal: StopSignal) -> libc::c_int {
+/// `pid`, when there is one to signal.
+///
+/// # Errors
+/// Returns [`PtyError::Unsupported`] when there is none.
+fn signallable(pid: Option<Pid>) -> Result<Pid, PtyError> {
+    pid.ok_or_else(|| PtyError::Unsupported(NO_PID.to_string()))
+}
+
+/// Maps the domain shutdown signal to its Unix signal.
+pub(crate) fn unix_signal(signal: StopSignal) -> Signal {
     match signal {
-        StopSignal::Terminate => libc::SIGTERM,
-        StopSignal::Interrupt => libc::SIGINT,
+        StopSignal::Terminate => Signal::TERM,
+        StopSignal::Interrupt => Signal::INT,
     }
 }
 
@@ -384,18 +398,14 @@ fn system_error<E: Display>(error: E) -> PtyError {
     PtyError::System(error.to_string())
 }
 
-/// Sends `signal` to a process's whole group (negative pid), so it reaches
+/// Sends `signal` to the whole process group `pid` leads, so it reaches
 /// backgrounded descendants and not just the direct child.
 ///
 /// # Errors
-/// Returns `Unsupported` when there is no pid to target, or the OS error when
-/// `kill` reports failure (e.g. the process has already exited, or `EPERM`).
-pub(crate) fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), PtyError> {
-    let pid = pid.ok_or_else(|| PtyError::Unsupported("no pid to signal".to_string()))?;
-    if unsafe { libc::kill(-(pid as libc::pid_t), signal) } == -1 {
-        return Err(PtyError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(())
+/// Returns the OS error when the signal is refused, such as when the group
+/// has already exited or may not be signalled.
+pub(crate) fn signal_group(pid: Pid, signal: Signal) -> Result<(), PtyError> {
+    Ok(SignalTarget::Group(pid).send(signal)?)
 }
 
 /// Terminates a spawned process: a whole-group SIGKILL, with the portable child
@@ -405,10 +415,10 @@ pub(crate) fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), 
 /// # Errors
 /// Returns a `PtyError` when neither termination mechanism succeeds.
 fn terminate_group(
-    pid: Option<u32>,
+    pid: Option<Pid>,
     killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
 ) -> Result<(), PtyError> {
-    let group_result = signal_group(pid, libc::SIGKILL);
+    let group_result = signallable(pid).and_then(|pid| signal_group(pid, Signal::KILL));
     let child_result = killer.kill().map_err(system_error);
     match (group_result, child_result) {
         (Ok(()), _) | (_, Ok(())) => Ok(()),

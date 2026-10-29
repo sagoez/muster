@@ -189,7 +189,7 @@ pub struct HolderServer {
     /// The running child.
     child: ChildGuard,
     /// The child's process id.
-    child_pid: u32,
+    child_pid: Pid,
     /// Bytes awaiting the child's input writer thread.
     input: ByteQueue<Vec<u8>>,
     /// The child's live screen.
@@ -269,13 +269,9 @@ impl HolderServer {
                     .collect(),
             )
             .socket(config.socket().clone())
-            .holder_pid(process::id())
+            .holder_pid(own_pid()?)
             .child_pid(server.child_pid)
-            .child_start_token(
-                Pid::try_new(server.child_pid)
-                    .ok()
-                    .and_then(LocalProcessIdentity::start_token),
-            )
+            .child_start_token(LocalProcessIdentity::start_token(server.child_pid))
             .log(config.log().clone())
             .child_started_at(child_started_at)
             .history(request.history().clone())
@@ -789,6 +785,15 @@ impl HolderServer {
     }
 }
 
+/// This holder's own pid, as its record names it.
+///
+/// # Errors
+/// Returns [`HolderError::UnrecordablePid`] for a pid no [`Pid`] can hold.
+fn own_pid() -> Result<Pid, HolderError> {
+    let raw = process::id();
+    Pid::try_new(raw).map_err(|_| HolderError::UnrecordablePid(raw))
+}
+
 /// Binds the holder socket so only its owner can reach it: the directory is
 /// created owner-only and refused when other users can enter it, and the
 /// socket itself is owner read and write only.
@@ -922,6 +927,7 @@ mod tests {
     };
 
     use bytesize::ByteSize as RawByteSize;
+    use rustix::process::Signal;
     use tempfile::TempDir;
 
     use super::*;
@@ -932,6 +938,7 @@ mod tests {
                 HolderRecord, RejectReason,
                 testing::{test_request, test_stop},
             },
+            signal_target::SignalTarget,
             terminal::TerminalEmulator,
         },
         domain::{
@@ -1113,11 +1120,7 @@ mod tests {
             if !self.server_finished()
                 && let Some(record) = self.record()
             {
-                // SAFETY: `kill` takes plain integers and touches no memory; a
-                // stale pid at worst signals nothing.
-                unsafe {
-                    libc::kill(-(record.child_pid() as libc::pid_t), libc::SIGKILL);
-                }
+                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
             }
         }
     }
@@ -1426,10 +1429,8 @@ mod tests {
     fn exit_outcome_is_held_until_collected() {
         let harness = Harness::start("exit 3");
         let child = harness.record().unwrap().child_pid();
-        // SAFETY: `kill` with signal 0 only probes for the pid and touches no
-        // memory.
-        wait_until("the child to exit", || unsafe {
-            libc::kill(child as libc::pid_t, 0) != 0
+        wait_until("the child to exit", || {
+            !SignalTarget::Process(child).is_alive()
         });
 
         let (mut watcher, _) = harness.connect(ClientRole::Attach { read_only: false });
@@ -1586,12 +1587,6 @@ mod tests {
     }
 
     /// Whether `pid` still exists (an unreaped zombie counts).
-    fn alive(pid: u32) -> bool {
-        // SAFETY: `kill` with signal 0 only probes for the pid and touches no
-        // memory.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-
     #[test]
     fn a_holder_no_supervisor_ever_reaches_kills_its_child_at_the_deadline() {
         let mut harness =
@@ -1603,7 +1598,9 @@ mod tests {
         harness.server.take().unwrap().join().unwrap().unwrap();
         assert!(harness.record().is_none(), "the record is removed");
         assert!(!harness.config.socket().exists(), "the socket is removed");
-        wait_until("the child to be killed", || !alive(child));
+        wait_until("the child to be killed", || {
+            !SignalTarget::Process(child).is_alive()
+        });
     }
 
     #[test]
@@ -1700,8 +1697,8 @@ mod tests {
             .command(CommandLine::try_new("true").unwrap())
             .stop(test_stop())
             .socket(scratch.path().join(SOCKET_FILE))
-            .holder_pid(process::id())
-            .child_pid(FAKE_PID)
+            .holder_pid(Pid::try_new(process::id()).unwrap())
+            .child_pid(Pid::try_new(FAKE_PID).unwrap())
             .child_start_token(None)
             .log(scratch.path().join("dev.log"))
             .child_started_at(SystemTime::now())
@@ -1755,8 +1752,8 @@ mod tests {
             let _ = self.kill();
         }
 
-        fn process_id(&self) -> Option<u32> {
-            Some(FAKE_PID)
+        fn process_id(&self) -> Option<Pid> {
+            Some(Pid::try_new(FAKE_PID).unwrap())
         }
 
         fn input(&self) -> Option<Box<dyn ProcessInput>> {

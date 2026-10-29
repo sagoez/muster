@@ -10,7 +10,7 @@ use super::{
 use crate::domain::{
     port::ListeningSocket,
     process::{ProcessState, Readiness},
-    value::{OutputCursor, ProcessName},
+    value::{OutputCursor, Pid, ProcessName},
 };
 
 /// What `ps` shows for one supervised process.
@@ -26,7 +26,7 @@ pub struct ProcessStatus {
     #[builder(default)]
     ready: Readiness,
     /// OS process id while a child is live.
-    pid: Option<u32>,
+    pid: Option<Pid>,
     /// How long the live child has run.
     #[serde(with = "humantime_serde")]
     uptime: Option<Duration>,

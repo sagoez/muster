@@ -13,7 +13,7 @@ use crate::{
     domain::{
         port::{ListeningSocket, ProcessHandle},
         pty::{ProcessOutput, PtyError},
-        value::{PaneId, ProjectRoot},
+        value::{PaneId, Pid, ProjectRoot},
     },
 };
 
@@ -96,7 +96,7 @@ pub enum ServiceEvent {
     /// The ports each running process tree listens on, keyed by root pid.
     PortsSampled {
         /// The sockets of each root pid that has any.
-        ports: HashMap<u32, Vec<ListeningSocket>>,
+        ports: HashMap<Pid, Vec<ListeningSocket>>,
     },
     /// A client's request, to be answered on `reply`.
     Request {

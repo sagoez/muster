@@ -1363,7 +1363,7 @@ mod tests {
             port::{OutputSink, ProcessInput, ProcessRunner},
             process::{Process, RestartPolicy, StopSignal},
             pty::{ExitCause, PtySize, ScreenSource},
-            value::{EnvName, EnvValue},
+            value::{EnvName, EnvValue, Pid},
         },
     };
 
@@ -1492,7 +1492,7 @@ mod tests {
         harness.supervisor.usage.insert(
             pane(),
             ProcessUsage::builder()
-                .pid(4242)
+                .pid(Pid::try_new(4242).unwrap())
                 .cpu_percent(3.0)
                 .memory_bytes(1024)
                 .build(),
@@ -2451,7 +2451,7 @@ mod tests {
         }
 
         impl ProcessHandle for AnsweringHandle {
-            fn process_id(&self) -> Option<u32> {
+            fn process_id(&self) -> Option<Pid> {
                 None
             }
 

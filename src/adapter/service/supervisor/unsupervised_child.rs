@@ -1,10 +1,10 @@
-use std::{io, time::Instant};
+use std::time::Instant;
 
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    adapter::process_identity::LocalProcessIdentity,
+    adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget},
     domain::value::{Pid, StartToken},
 };
 
@@ -14,7 +14,7 @@ use crate::{
 pub(crate) struct UnsupervisedChild {
     /// The child's process id, which also names its process group.
     #[getset(get_copy = "pub(crate)")]
-    pid: u32,
+    pid: Pid,
     /// The child's start token when the platform reports one.
     start_token: Option<StartToken>,
     /// Kills sent since the last graceful stop, bounding the wait for a child
@@ -36,12 +36,11 @@ impl UnsupervisedChild {
     /// token that cannot be read is no proof of one, so the child is kept. A
     /// child already dead and waiting to be reaped, as a holder's child is for
     /// a moment after both were killed, is gone and never recorded.
-    pub(crate) fn observe_expected(pid: u32, expected: Option<StartToken>) -> Option<Self> {
-        let exited = Pid::try_new(pid).is_ok_and(LocalProcessIdentity::has_exited);
-        if !pid_exists(pid) || exited {
+    pub(crate) fn observe_expected(pid: Pid, expected: Option<StartToken>) -> Option<Self> {
+        if !SignalTarget::Process(pid).is_alive() || LocalProcessIdentity::has_exited(pid) {
             return None;
         }
-        let current = start_token_of(pid);
+        let current = LocalProcessIdentity::start_token(pid);
         if !LocalProcessIdentity::same_start(expected, current) {
             return None;
         }
@@ -58,8 +57,7 @@ impl UnsupervisedChild {
     /// cannot be read counts as still running, so a transient read failure
     /// never lets a second copy start.
     pub(crate) fn is_running(&self) -> bool {
-        pid_exists(self.pid)
-            && LocalProcessIdentity::same_start(self.start_token, start_token_of(self.pid))
+        LocalProcessIdentity::is_same_process(self.pid, self.start_token)
     }
 
     /// Counts one more kill sent while waiting for the child to die, and
@@ -82,34 +80,6 @@ impl UnsupervisedChild {
     }
 }
 
-/// The start token of the process `pid`, when the platform reports one.
-fn start_token_of(pid: u32) -> Option<StartToken> {
-    Pid::try_new(pid)
-        .ok()
-        .and_then(LocalProcessIdentity::start_token)
-}
-
-/// The pid of init, which is never a holder's child. Its group id, negated,
-/// would signal every process, so it and every lower pid count as absent.
-const INIT_PID: libc::pid_t = 1;
-
-/// Whether a process with `pid` exists. A pid at or below [`INIT_PID`] never
-/// exists here, so it is never signalled; a process this user may not signal (`EPERM`) still
-/// exists, so uncertainty never reports a running child gone.
-fn pid_exists(pid: u32) -> bool {
-    let Ok(raw) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    if raw <= INIT_PID {
-        return false;
-    }
-    // SAFETY: signal 0 only checks the pid; no signal is delivered.
-    if unsafe { libc::kill(raw, 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 #[cfg(test)]
 mod tests {
     use std::process;
@@ -128,10 +98,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     const DEATH_POLL: Duration = Duration::from_millis(5);
 
+    /// This test process.s pid.
+    fn own_pid() -> Pid {
+        Pid::try_new(process::id()).unwrap()
+    }
+
     /// The test process itself is running and keeps its own start token.
     #[test]
     fn the_running_test_process_is_observed_and_still_running() {
-        let child = UnsupervisedChild::observe_expected(process::id(), None).unwrap();
+        let child = UnsupervisedChild::observe_expected(own_pid(), None).unwrap();
         assert!(child.is_running());
     }
 
@@ -141,7 +116,9 @@ mod tests {
     #[test]
     fn a_child_that_died_unreaped_is_not_observed() {
         let mut child = Command::new("sleep").arg(CHILD_SLEEP).spawn().unwrap();
-        assert!(UnsupervisedChild::observe_expected(child.id(), None).is_some());
+        assert!(
+            UnsupervisedChild::observe_expected(Pid::try_new(child.id()).unwrap(), None).is_some()
+        );
         child.kill().unwrap();
         let pid = Pid::try_new(child.id()).unwrap();
         let started = Instant::now();
@@ -150,24 +127,21 @@ mod tests {
             thread::sleep(DEATH_POLL);
         }
 
-        assert!(pid_exists(child.id()), "the child is not reaped yet");
-        assert!(UnsupervisedChild::observe_expected(child.id(), None).is_none());
+        assert!(
+            SignalTarget::Process(pid).is_alive(),
+            "the child is not reaped yet"
+        );
+        assert!(
+            UnsupervisedChild::observe_expected(Pid::try_new(child.id()).unwrap(), None).is_none()
+        );
         child.wait().unwrap();
-    }
-
-    /// Pids zero and one are never observed, so their negated group ids, which
-    /// reach far more than one child, are never signalled.
-    #[test]
-    fn pids_zero_and_one_are_never_observed() {
-        assert!(UnsupervisedChild::observe_expected(0, None).is_none());
-        assert!(UnsupervisedChild::observe_expected(1, None).is_none());
     }
 
     /// A different start token means the pid was reused by another process.
     #[test]
     fn a_reused_pid_is_not_the_same_child() {
         let child = UnsupervisedChild::builder()
-            .pid(process::id())
+            .pid(own_pid())
             .start_token(Some(StartToken::try_new(1).unwrap()))
             .build();
         assert!(!child.is_running());
@@ -191,9 +165,9 @@ mod tests {
     #[test]
     fn an_expected_child_whose_pid_was_reused_is_not_observed() {
         let foreign = Some(StartToken::try_new(1).unwrap());
-        assert!(UnsupervisedChild::observe_expected(process::id(), foreign).is_none());
+        assert!(UnsupervisedChild::observe_expected(own_pid(), foreign).is_none());
 
-        let own = start_token_of(process::id());
-        assert!(UnsupervisedChild::observe_expected(process::id(), own).is_some());
+        let own = LocalProcessIdentity::start_token(own_pid());
+        assert!(UnsupervisedChild::observe_expected(own_pid(), own).is_some());
     }
 }

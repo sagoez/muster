@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
+use crate::domain::value::Pid;
+
 /// A point-in-time resource-usage reading aggregated over a process subtree.
 #[derive(Clone, Copy, Debug, Getters, TypedBuilder)]
 #[getset(get = "pub")]
@@ -20,5 +22,5 @@ pub struct ProcessSample {
 pub trait ProcessMetrics {
     /// Returns a sample for each pid in `pids`, aggregated over that pid's process
     /// subtree. A pid with no live process is absent from the returned map.
-    fn sample(&mut self, pids: &[u32]) -> HashMap<u32, ProcessSample>;
+    fn sample(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessSample>;
 }

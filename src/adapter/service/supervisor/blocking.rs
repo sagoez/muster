@@ -97,7 +97,7 @@ mod tests {
             port::{ListeningSocket, PortOccupant, PortOccupants},
             process::{ReadyCheck, ReadyProbe, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
-            value::{LocalPort, PositiveDuration, ProjectName},
+            value::{LocalPort, Pid, PositiveDuration, ProjectName},
         },
     };
 
@@ -131,7 +131,7 @@ mod tests {
     /// A program muster does not run, listening on [`PORT`].
     fn outsider() -> PortOccupant {
         PortOccupant::builder()
-            .pid(OUTSIDER_PID)
+            .pid(Pid::try_new(OUTSIDER_PID).unwrap())
             .command(OUTSIDER_COMMAND.to_string())
             .build()
     }
@@ -251,11 +251,11 @@ mod tests {
     fn a_process_never_blocks_itself() {
         let mut harness = Harness::over(Box::new(PidRunner), &[on_port("api")]);
         harness.up();
-        let sample = HashMap::from([(FAKE_LAUNCHER_PID, vec![
+        let sample = HashMap::from([(fake_launcher_pid(), vec![
             ListeningSocket::builder()
                 .port(PORT)
                 .address(Ipv4Addr::LOCALHOST.into())
-                .pid(FAKE_LAUNCHER_PID)
+                .pid(fake_launcher_pid())
                 .build(),
         ])]);
         harness.supervisor.take_ports(&sample);

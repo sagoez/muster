@@ -3,7 +3,7 @@ use std::{thread, time::Duration};
 use crossbeam_channel::{Sender, bounded};
 
 use super::event::ServiceEvent;
-use crate::domain::port::ListeningPorts;
+use crate::domain::{port::ListeningPorts, value::Pid};
 
 /// How often the listening ports of running processes are resampled.
 pub const PORT_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
@@ -14,7 +14,7 @@ pub const PORT_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 /// queues behind itself. The thread ends once the sampler is dropped.
 pub struct PortSampler {
     /// Where the loop sends the root pids to sample.
-    requests: Sender<Vec<u32>>,
+    requests: Sender<Vec<Pid>>,
 }
 
 impl PortSampler {
@@ -23,7 +23,7 @@ impl PortSampler {
         mut listening: Box<dyn ListeningPorts + Send>,
         events: Sender<ServiceEvent>,
     ) -> Self {
-        let (requests, received) = bounded::<Vec<u32>>(1);
+        let (requests, received) = bounded::<Vec<Pid>>(1);
         thread::spawn(move || {
             for roots in received {
                 let ports = listening.listening(&roots);
@@ -37,7 +37,7 @@ impl PortSampler {
 
     /// Asks for a sample of the trees rooted at `roots`, unless one is in
     /// flight.
-    pub fn sample(&self, roots: Vec<u32>) {
+    pub fn sample(&self, roots: Vec<Pid>) {
         let _ = self.requests.try_send(roots);
     }
 }
@@ -59,7 +59,7 @@ mod tests {
     struct EveryRootOn3000;
 
     impl ListeningPorts for EveryRootOn3000 {
-        fn listening(&mut self, roots: &[u32]) -> HashMap<u32, Vec<ListeningSocket>> {
+        fn listening(&mut self, roots: &[Pid]) -> HashMap<Pid, Vec<ListeningSocket>> {
             roots
                 .iter()
                 .map(|root| {
@@ -67,7 +67,7 @@ mod tests {
                         ListeningSocket::builder()
                             .port(3000)
                             .address(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                            .pid(*root + 1)
+                            .pid(Pid::try_new(root.into_inner() + 1).unwrap())
                             .build(),
                     ])
                 })
@@ -80,12 +80,13 @@ mod tests {
         let (sender, events) = bounded(4);
         let sampler = PortSampler::spawn(Box::new(EveryRootOn3000), sender);
 
-        sampler.sample(vec![41]);
+        let root = Pid::try_new(41).unwrap();
+        sampler.sample(vec![root]);
 
         match events.recv_timeout(SAMPLE_WAIT).unwrap() {
             ServiceEvent::PortsSampled { ports } => {
-                assert_eq!(ports[&41][0].port(), 3000);
-                assert_eq!(ports[&41][0].pid(), 42);
+                assert_eq!(ports[&root][0].port(), 3000);
+                assert_eq!(ports[&root][0].pid(), Pid::try_new(42).unwrap());
             },
             _ => panic!("expected a sample"),
         }

@@ -17,7 +17,10 @@ use super::{
     record::HolderRecord,
 };
 use crate::{
-    adapter::{ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir},
+    adapter::{
+        ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir,
+        signal_target::SignalTarget,
+    },
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
@@ -168,7 +171,7 @@ impl HolderRunner {
     /// The record of the holder supervising the child with `child_pid`, naming
     /// its socket and log. A live holder's record wins over a stale one left
     /// for the same pid, then one whose child outlived its holder.
-    pub fn locate(&self, child_pid: u32) -> Option<HolderRecord> {
+    pub fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         let candidates: Vec<HolderRecord> = HolderRecord::load_all(self.dirs.records())
             .into_iter()
             .filter(|record| record.child_pid() == child_pid)
@@ -349,14 +352,13 @@ fn is_live(record: &HolderRecord) -> bool {
 
 /// Whether the holder process `record` names is alive.
 fn holder_runs(record: &HolderRecord) -> bool {
-    Pid::try_new(record.holder_pid()).is_ok_and(LocalProcessIdentity::is_alive)
+    SignalTarget::Process(record.holder_pid()).is_alive()
 }
 
 /// Whether the child `record` names still runs as the same process, as one
 /// that ignores the hangup does after its holder died.
 fn child_runs(record: &HolderRecord) -> bool {
-    Pid::try_new(record.child_pid())
-        .is_ok_and(|child| LocalProcessIdentity::is_same_process(child, record.child_start_token()))
+    LocalProcessIdentity::is_same_process(record.child_pid(), record.child_start_token())
 }
 
 /// Whether the file at `path` was last modified before `instant`. One whose
@@ -433,6 +435,7 @@ mod tests {
     };
 
     use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+    use rustix::process::Signal;
     use tempfile::TempDir;
 
     use super::*;
@@ -782,12 +785,8 @@ mod tests {
         /// stand-in) is never signalled.
         fn drop(&mut self) {
             for record in self.record_files() {
-                if record.child_pid() != process::id() {
-                    // SAFETY: `kill` takes plain integers and touches no
-                    // memory; a stale pid at worst signals nothing.
-                    unsafe {
-                        libc::kill(-(record.child_pid() as libc::pid_t), libc::SIGKILL);
-                    }
+                if record.child_pid().into_inner() != process::id() {
+                    let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
                 }
                 abandon(record.socket());
             }
@@ -1027,7 +1026,7 @@ mod tests {
     /// `child_pid` that started with `child_start_token`.
     fn save_reused_pid_record(
         fixture: &Fixture,
-        child_pid: u32,
+        child_pid: Pid,
         child_start_token: Option<StartToken>,
     ) -> HolderRecord {
         let id = HolderId::generate().unwrap();
@@ -1042,7 +1041,7 @@ mod tests {
             .process(ProcessName::try_new("dev server").unwrap())
             .command(CommandLine::try_new("true").unwrap())
             .stop(test_stop())
-            .holder_pid(process::id())
+            .holder_pid(Pid::try_new(process::id()).unwrap())
             .child_pid(child_pid)
             .child_start_token(child_start_token)
             .child_started_at(SystemTime::now())
@@ -1051,11 +1050,14 @@ mod tests {
         record
     }
 
+    /// The test process's own pid.
+    fn own_pid() -> Pid {
+        Pid::try_new(process::id()).unwrap()
+    }
+
     /// The test process's own start token.
     fn own_start_token() -> Option<StartToken> {
-        Pid::try_new(process::id())
-            .ok()
-            .and_then(LocalProcessIdentity::start_token)
+        LocalProcessIdentity::start_token(own_pid())
     }
 
     /// A start token the test process does not have.
@@ -1066,7 +1068,7 @@ mod tests {
     #[test]
     fn stale_record_with_reused_pid_is_removed_not_adopted() {
         let fixture = Fixture::new();
-        let record = save_reused_pid_record(&fixture, process::id(), foreign_start_token());
+        let record = save_reused_pid_record(&fixture, own_pid(), foreign_start_token());
         fixture.dirs.prepare_sockets().unwrap();
         // A datagram socket refuses every stream connect even when a child
         // another test forks inherits it; a dropped stream listener would
@@ -1084,7 +1086,7 @@ mod tests {
     fn a_record_whose_child_is_gone_and_socket_absent_is_removed() {
         let fixture = Fixture::new();
         let mut exited = process::Command::new("true").spawn().unwrap();
-        let dead_pid = exited.id();
+        let dead_pid = Pid::try_new(exited.id()).unwrap();
         exited.wait().unwrap();
         save_reused_pid_record(&fixture, dead_pid, None);
 
@@ -1101,20 +1103,20 @@ mod tests {
     #[test]
     fn a_dead_holders_record_is_kept_while_its_child_runs_and_a_live_one_wins() {
         let fixture = Fixture::new();
-        let orphaned = save_reused_pid_record(&fixture, process::id(), own_start_token());
+        let orphaned = save_reused_pid_record(&fixture, own_pid(), own_start_token());
 
         assert_eq!(fixture.runner().live_records(), vec![orphaned.clone()]);
-        assert_eq!(fixture.runner().locate(process::id()), Some(orphaned));
+        assert_eq!(fixture.runner().locate(own_pid()), Some(orphaned));
         forget_records(&fixture);
 
         let fixture = Fixture::new();
         fixture.dirs.prepare_sockets().unwrap();
-        let live = save_reused_pid_record(&fixture, process::id(), own_start_token());
+        let live = save_reused_pid_record(&fixture, own_pid(), own_start_token());
         let _serving = UnixListener::bind(live.socket()).unwrap();
         for _ in 0..STALE_RECORDS {
-            save_reused_pid_record(&fixture, process::id(), own_start_token());
+            save_reused_pid_record(&fixture, own_pid(), own_start_token());
         }
-        assert_eq!(fixture.runner().locate(process::id()), Some(live));
+        assert_eq!(fixture.runner().locate(own_pid()), Some(live));
         forget_records(&fixture);
     }
 
@@ -1125,7 +1127,7 @@ mod tests {
     fn a_holder_too_busy_to_accept_is_probed_in_bounded_time_and_kept_live() {
         let fixture = Fixture::new();
         fixture.dirs.prepare_sockets().unwrap();
-        let record = save_reused_pid_record(&fixture, process::id(), foreign_start_token());
+        let record = save_reused_pid_record(&fixture, own_pid(), foreign_start_token());
         let listener = UnixListener::bind(record.socket()).unwrap();
         // SAFETY: `listen` takes the listener's open descriptor and a plain
         // integer, and only lowers its backlog so one queued connect fills it.
@@ -1162,7 +1164,7 @@ mod tests {
         drop(UnixListener::bind(&orphan).unwrap());
         let accepting = fixture.dirs.socket_path(&HolderId::generate().unwrap());
         let _accepting = UnixListener::bind(&accepting).unwrap();
-        let served = save_reused_pid_record(&fixture, process::id(), own_start_token());
+        let served = save_reused_pid_record(&fixture, own_pid(), own_start_token());
         let _serving = UnixListener::bind(served.socket()).unwrap();
         let dead_holder = save_dead_holder_record(&fixture);
         drop(UnixListener::bind(dead_holder.socket()).unwrap());
@@ -1189,7 +1191,7 @@ mod tests {
     /// Saves a record whose holder process has exited.
     fn save_dead_holder_record(fixture: &Fixture) -> HolderRecord {
         let mut exited = process::Command::new("true").spawn().unwrap();
-        let dead_pid = exited.id();
+        let dead_pid = Pid::try_new(exited.id()).unwrap();
         exited.wait().unwrap();
         let id = HolderId::generate().unwrap();
         let name = ProcessName::try_new("dev server").unwrap();
@@ -1251,7 +1253,7 @@ mod tests {
         if let Some(pid) = pid {
             let child = Pid::try_new(pid).unwrap();
             wait_until("the abandoned child to die", || {
-                !LocalProcessIdentity::is_alive(child)
+                !SignalTarget::Process(child).is_alive()
             });
         }
     }
@@ -1278,7 +1280,7 @@ mod tests {
         });
         assert!(fixture.record_files().is_empty());
         wait_until("the child to die", || {
-            !LocalProcessIdentity::is_alive(Pid::try_new(record.child_pid()).unwrap())
+            !SignalTarget::Process(record.child_pid()).is_alive()
         });
     }
 
@@ -1309,7 +1311,7 @@ mod tests {
         });
         assert!(fixture.record_files().is_empty());
         wait_until("the child to die", || {
-            !LocalProcessIdentity::is_alive(Pid::try_new(record.child_pid()).unwrap())
+            !SignalTarget::Process(record.child_pid()).is_alive()
         });
     }
 

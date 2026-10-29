@@ -29,6 +29,9 @@ pub enum HolderError {
     /// The platform reported no pid for the spawned child.
     #[error("the spawned child has no process id")]
     MissingChildPid,
+    /// The holder runs as a pid no record can name.
+    #[error("the holder runs as pid {0}, which no holder record can name")]
+    UnrecordablePid(u32),
     /// The spawned child exposes no input writer the holder can drive.
     #[error("the spawned child has no input writer")]
     MissingChildInput,
@@ -70,6 +73,7 @@ impl HolderError {
             Self::Pty(_)
             | Self::MissingProject
             | Self::MissingChildPid
+            | Self::UnrecordablePid(_)
             | Self::MissingChildInput
             | Self::InsecureSocketDir(_)
             | Self::NotReady(_)

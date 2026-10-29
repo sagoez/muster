@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, set_open_files_limit};
 
 use super::process_tree::ProcessTree;
-use crate::domain::port::{ProcessMetrics, ProcessSample};
+use crate::domain::{
+    port::{ProcessMetrics, ProcessSample},
+    value::Pid,
+};
 
 /// How many `/proc` files `sysinfo` may keep open between refreshes. It keeps
 /// one per process it has seen otherwise, up to half the hard limit.
@@ -30,7 +33,7 @@ impl Default for SysinfoMetrics {
 }
 
 impl ProcessMetrics for SysinfoMetrics {
-    fn sample(&mut self, pids: &[u32]) -> HashMap<u32, ProcessSample> {
+    fn sample(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessSample> {
         // Nothing to measure: skip the scan entirely rather than refresh every
         // process on the host for no roots.
         if pids.is_empty() {

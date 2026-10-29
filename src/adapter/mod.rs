@@ -20,5 +20,6 @@ pub mod process_tree;
 pub mod pty;
 pub mod sanitize;
 pub mod service;
+pub mod signal_target;
 pub mod store;
 pub mod terminal;

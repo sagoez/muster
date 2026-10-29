@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::supervisor::Supervisor;
-use crate::domain::port::ProcessMetrics;
+use crate::domain::{port::ProcessMetrics, value::Pid};
 
 /// How often each running process's resource usage is resampled.
 pub const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
@@ -55,7 +55,7 @@ impl UsageSampler {
         if sampled.is_empty() {
             return false;
         }
-        let pids: Vec<u32> = sampled
+        let pids: Vec<Pid> = sampled
             .iter()
             .flat_map(|supervisor| supervisor.usage_pids())
             .collect();
@@ -88,11 +88,11 @@ mod tests {
     /// A sampler that records the pids of every call and reports a fixed load
     /// for each.
     struct FakeMetrics {
-        calls: Rc<RefCell<Vec<Vec<u32>>>>,
+        calls: Rc<RefCell<Vec<Vec<Pid>>>>,
     }
 
     impl ProcessMetrics for FakeMetrics {
-        fn sample(&mut self, pids: &[u32]) -> HashMap<u32, ProcessSample> {
+        fn sample(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessSample> {
             self.calls.borrow_mut().push(pids.to_vec());
             pids.iter()
                 .map(|pid| {
@@ -109,7 +109,7 @@ mod tests {
     }
 
     /// A sampler over [`FakeMetrics`] and the calls it records.
-    fn sampler() -> (UsageSampler, Rc<RefCell<Vec<Vec<u32>>>>) {
+    fn sampler() -> (UsageSampler, Rc<RefCell<Vec<Vec<Pid>>>>) {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let sampler = UsageSampler::new(Box::new(FakeMetrics {
             calls: calls.clone(),
@@ -144,8 +144,8 @@ mod tests {
         assert!(sampler.sample(deadline, [&mut first.supervisor, &mut second.supervisor]));
 
         assert_eq!(*calls.borrow(), vec![vec![
-            FAKE_LAUNCHER_PID,
-            FAKE_LAUNCHER_PID
+            fake_launcher_pid(),
+            fake_launcher_pid()
         ]]);
         for harness in [&first, &second] {
             let usage = harness.supervisor.snapshot().processes()[0]

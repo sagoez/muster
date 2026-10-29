@@ -1,7 +1,10 @@
 #[cfg(target_os = "linux")]
 use std::fs;
 
-use crate::domain::value::{Pid, StartToken};
+use crate::{
+    adapter::signal_target::SignalTarget,
+    domain::value::{Pid, StartToken},
+};
 
 /// The field of `/proc/<pid>/stat`, after the command name, holding the state.
 #[cfg(target_os = "linux")]
@@ -35,7 +38,8 @@ impl LocalProcessIdentity {
     /// it exists and its start token matches, which an unreadable token never
     /// disproves.
     pub fn is_same_process(process_id: Pid, expected: Option<StartToken>) -> bool {
-        Self::is_alive(process_id) && Self::same_start(expected, Self::start_token(process_id))
+        SignalTarget::Process(process_id).is_alive()
+            && Self::same_start(expected, Self::start_token(process_id))
     }
 
     /// Whether a process whose start token reads `current` may be the one
@@ -46,26 +50,6 @@ impl LocalProcessIdentity {
             (Some(recorded), Some(current)) => recorded == current,
             _ => true,
         }
-    }
-
-    /// Whether `process_id` currently exists. Returns `true` when liveness cannot be
-    /// determined, such as a failed lookup, so a caller that guards on liveness
-    /// does not fail open on uncertainty.
-    pub fn is_alive(process_id: Pid) -> bool {
-        Self::platform_is_alive(process_id)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn platform_is_alive(process_id: Pid) -> bool {
-        std::path::Path::new(&format!("/proc/{}", process_id.into_inner())).exists()
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn platform_is_alive(process_id: Pid) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &process_id.into_inner().to_string()])
-            .status()
-            .map_or(true, |status| status.success())
     }
 
     /// Whether `process_id` has exited and only waits to be reaped, so it never
@@ -156,7 +140,7 @@ mod tests {
             thread::sleep(EXIT_POLL);
         }
 
-        assert!(LocalProcessIdentity::is_alive(pid), "still unreaped");
+        assert!(SignalTarget::Process(pid).is_alive(), "still unreaped");
         child.wait().unwrap();
         assert!(!LocalProcessIdentity::has_exited(
             Pid::try_new(process::id()).unwrap()

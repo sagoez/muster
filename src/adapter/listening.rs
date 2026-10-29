@@ -4,7 +4,10 @@ use listeners::{Protocol, SocketState};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 use super::process_tree::ProcessTree;
-use crate::domain::port::{ListeningPorts, ListeningSocket};
+use crate::domain::{
+    port::{ListeningPorts, ListeningSocket},
+    value::Pid,
+};
 
 /// A [`ListeningPorts`] over the OS socket tables (`/proc` on Linux,
 /// `libproc` on macOS) through `listeners`, attributing each listener to the
@@ -26,7 +29,7 @@ impl Default for OsListeningPorts {
 impl ListeningPorts for OsListeningPorts {
     /// The listening TCP sockets under each root. A failed listing reads as
     /// none: a missed sample only delays what the next one finds.
-    fn listening(&mut self, roots: &[u32]) -> HashMap<u32, Vec<ListeningSocket>> {
+    fn listening(&mut self, roots: &[Pid]) -> HashMap<Pid, Vec<ListeningSocket>> {
         if roots.is_empty() {
             return HashMap::new();
         }
@@ -54,10 +57,12 @@ impl ListeningPorts for OsListeningPorts {
                 owners.entry(pid.as_u32()).or_insert(root);
             }
         }
-        let mut found: HashMap<u32, Vec<ListeningSocket>> = HashMap::new();
+        let mut found: HashMap<Pid, Vec<ListeningSocket>> = HashMap::new();
         for listener in tcp {
-            let pid = listener.process.pid;
-            if let Some(&root) = owners.get(&pid) {
+            let Ok(pid) = Pid::try_new(listener.process.pid) else {
+                continue;
+            };
+            if let Some(&root) = owners.get(&pid.into_inner()) {
                 found.entry(root).or_default().push(
                     ListeningSocket::builder()
                         .port(listener.socket.port())
@@ -87,7 +92,7 @@ mod tests {
     fn a_listening_socket_is_attributed_to_its_tree() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let me = process::id();
+        let me = Pid::try_new(process::id()).unwrap();
         let mut ports = OsListeningPorts::default();
 
         let found = ports.listening(&[me]);

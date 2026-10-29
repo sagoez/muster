@@ -23,7 +23,7 @@ use crate::{
     domain::{
         port::ListeningSocket,
         process::{ProcessState, Readiness, ReadyCheck, ReadyProbe},
-        value::{OutputCursor, PaneId, ProcessName},
+        value::{OutputCursor, PaneId, Pid, ProcessName},
     },
 };
 
@@ -249,7 +249,7 @@ impl Supervisor {
 
     /// Records the ports each live process tree listens on, from a sample
     /// keyed by root pid; a process missing from it listens on none.
-    pub fn take_ports(&mut self, sample: &HashMap<u32, Vec<ListeningSocket>>) {
+    pub fn take_ports(&mut self, sample: &HashMap<Pid, Vec<ListeningSocket>>) {
         self.ports = self
             .live_pids()
             .into_iter()
@@ -258,7 +258,7 @@ impl Supervisor {
     }
 
     /// The pid of every live process, to sample their ports.
-    pub fn live_root_pids(&self) -> Vec<u32> {
+    pub fn live_root_pids(&self) -> Vec<Pid> {
         self.live_pids().into_iter().map(|(_, pid)| pid).collect()
     }
 

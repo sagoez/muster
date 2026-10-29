@@ -6,6 +6,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
+        value::Pid,
     },
 };
 
@@ -38,7 +39,7 @@ impl ProcessRunner for SharedHolders {
 }
 
 impl HolderAdopter for SharedHolders {
-    fn locate(&self, child_pid: u32) -> Option<HolderRecord> {
+    fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         self.0.locate(child_pid)
     }
 

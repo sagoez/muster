@@ -4,6 +4,8 @@ use getset::CopyGetters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
+use crate::domain::value::Pid;
+
 /// One TCP socket a supervised process tree is listening on.
 #[derive(
     Debug,
@@ -27,7 +29,7 @@ pub struct ListeningSocket {
     /// The address it is bound to.
     address: IpAddr,
     /// The process in the tree that holds the socket.
-    pid: u32,
+    pid: Pid,
 }
 
 /// Finds the TCP sockets process trees listen on. A driven port so the
@@ -36,5 +38,5 @@ pub struct ListeningSocket {
 pub trait ListeningPorts {
     /// The listening sockets of each root pid's process tree, keyed by that
     /// root and sorted. A root whose tree listens on nothing is absent.
-    fn listening(&mut self, roots: &[u32]) -> HashMap<u32, Vec<ListeningSocket>>;
+    fn listening(&mut self, roots: &[Pid]) -> HashMap<Pid, Vec<ListeningSocket>>;
 }

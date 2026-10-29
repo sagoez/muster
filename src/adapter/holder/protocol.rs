@@ -15,7 +15,7 @@ use super::{
 use crate::domain::{
     process::StopSignal,
     pty::{ExitOutcome, PtySize},
-    value::OutputCursor,
+    value::{OutputCursor, Pid},
 };
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
@@ -123,7 +123,7 @@ pub enum HolderMessage {
         /// The PTY size the screen was rendered at.
         size: PtySize,
         /// The child's process id.
-        pid: u32,
+        pid: Pid,
         /// The writable attach clients connected.
         attached: u32,
         /// Where the child's run began in the process's output stream, so a
@@ -245,7 +245,7 @@ impl TryFrom<HolderMessage> for Frame {
                 run_start,
             } => {
                 let mut payload = Vec::with_capacity(SNAPSHOT_HEADER_BYTES + repaint.len());
-                payload.extend_from_slice(&pid.to_be_bytes());
+                payload.extend_from_slice(&pid.into_inner().to_be_bytes());
                 payload.extend_from_slice(&encode_size(size));
                 payload.extend_from_slice(&attached.to_be_bytes());
                 payload.extend_from_slice(&run_start.offset().to_be_bytes());
@@ -283,7 +283,9 @@ impl TryFrom<Frame> for HolderMessage {
                 let (pid, rest) = payload.split_at(PID_BYTES);
                 let (size, rest) = rest.split_at(SIZE_BYTES);
                 let (attached, run_start) = rest.split_at(ATTACHED_BYTES);
-                let pid = decode_u32(pid).ok_or(HolderError::MalformedPayload(tag))?;
+                let pid = decode_u32(pid)
+                    .and_then(|pid| Pid::try_new(pid).ok())
+                    .ok_or(HolderError::MalformedPayload(tag))?;
                 let size = decode_size(size).ok_or(HolderError::MalformedPayload(tag))?;
                 let attached = decode_u32(attached).ok_or(HolderError::MalformedPayload(tag))?;
                 let run_start =
@@ -389,7 +391,7 @@ mod tests {
             HolderMessage::Snapshot {
                 repaint: b"\x1b[2Jhi".to_vec(),
                 size: size(24, 80),
-                pid: 4242,
+                pid: Pid::try_new(4242).unwrap(),
                 attached: 2,
                 run_start: OutputCursor::new(u64::MAX - 7),
             },
@@ -445,6 +447,26 @@ mod tests {
             HolderMessage::try_from(frame),
             Err(HolderError::MalformedPayload(FrameTag::Output))
         ));
+    }
+
+    /// A snapshot naming pid 0 or init is malformed, so no client ever
+    /// signals a pid that reaches beyond one child.
+    #[test]
+    fn a_snapshot_naming_no_child_pid_is_malformed() {
+        for pid in [0_u32, 1] {
+            let mut payload = pid.to_be_bytes().to_vec();
+            payload.extend_from_slice(&[0, 24, 0, 80]);
+            payload.extend_from_slice(&0_u32.to_be_bytes());
+            payload.extend_from_slice(&0_u64.to_be_bytes());
+            let frame = Frame::builder()
+                .tag(FrameTag::Snapshot)
+                .payload(payload)
+                .build();
+            assert!(matches!(
+                HolderMessage::try_from(frame),
+                Err(HolderError::MalformedPayload(FrameTag::Snapshot))
+            ));
+        }
     }
 
     /// A resize to an empty dimension is malformed, never applied.

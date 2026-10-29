@@ -28,7 +28,7 @@ use crate::{
         project::Project,
         pty::ExitOutcome,
         settings::Settings,
-        value::{PaneId, ProcessName, ProjectRoot},
+        value::{PaneId, Pid, ProcessName, ProjectRoot},
     },
 };
 
@@ -387,7 +387,7 @@ impl Supervisor {
 
     /// The pid of the supervised child of the process named `name`, while it
     /// has a live handle.
-    pub fn live_pid(&self, name: &ProcessName) -> Option<u32> {
+    pub fn live_pid(&self, name: &ProcessName) -> Option<Pid> {
         self.pane_named(name)
             .and_then(|pane| self.panes.get(&pane))
             .and_then(|target| target.handle.as_ref())

@@ -9,7 +9,7 @@ use crate::{
     adapter::service::ProcessStatus,
     domain::{
         process::{ProcessState, Readiness},
-        value::ProcessName,
+        value::{Pid, ProcessName},
     },
 };
 
@@ -28,7 +28,7 @@ pub struct ProcessView {
     ready: Readiness,
     /// The OS process id while a child runs.
     #[getset(get_copy = "pub")]
-    pid: Option<u32>,
+    pid: Option<Pid>,
     /// Whole seconds the running child has run.
     #[getset(get_copy = "pub")]
     uptime: Option<u64>,

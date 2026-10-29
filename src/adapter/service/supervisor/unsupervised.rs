@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use rustix::process::Signal;
+
 use super::{
     config_membership::ConfigMembership, entity::Supervisor, unsupervised_child::UnsupervisedChild,
 };
@@ -10,7 +12,7 @@ use crate::{
     },
     domain::{
         process::{ExitIntent, ProcessState},
-        value::{PaneId, StartToken},
+        value::{PaneId, Pid, StartToken},
     },
 };
 
@@ -46,7 +48,7 @@ impl Supervisor {
     pub(super) fn leave_unsupervised(
         &mut self,
         pane: PaneId,
-        pid: u32,
+        pid: Pid,
         start_token: Option<StartToken>,
     ) -> bool {
         let Some(child) = UnsupervisedChild::observe_expected(pid, start_token) else {
@@ -77,7 +79,7 @@ impl Supervisor {
     }
 
     /// The pid of `pane`'s unsupervised child while that same child runs.
-    pub(super) fn running_unsupervised_pid(&self, pane: PaneId) -> Option<u32> {
+    pub(super) fn running_unsupervised_pid(&self, pane: PaneId) -> Option<Pid> {
         self.panes
             .get(&pane)
             .and_then(|target| target.unsupervised)
@@ -149,7 +151,7 @@ impl Supervisor {
                 unix_signal(*policy.signal()),
                 Some(Instant::now() + policy.grace_period().into_inner()),
             ),
-            None => (libc::SIGKILL, None),
+            None => (Signal::KILL, None),
         };
         if let Some(child) = target.unsupervised.as_mut() {
             child.begin_stop(grace_deadline);
@@ -194,13 +196,13 @@ impl Supervisor {
             );
             return;
         }
-        self.signal_unsupervised(pane, libc::SIGKILL, UNSUPERVISED_EXIT_POLL);
+        self.signal_unsupervised(pane, Signal::KILL, UNSUPERVISED_EXIT_POLL);
     }
 
     /// Sends `signal` to the unsupervised child's group while it is still the
     /// same child, then settles the exit if it is gone, or waits `wait` before
     /// checking again. A pid now held by another process is never signalled.
-    fn signal_unsupervised(&mut self, pane: PaneId, signal: libc::c_int, wait: Duration) {
+    fn signal_unsupervised(&mut self, pane: PaneId, signal: Signal, wait: Duration) {
         let Some(child) = self.panes.get(&pane).and_then(|target| target.unsupervised) else {
             return;
         };
@@ -208,7 +210,7 @@ impl Supervisor {
             self.settle_unsupervised_exit(pane);
             return;
         }
-        let delivered = signal_group(Some(child.pid()), signal).is_ok();
+        let delivered = signal_group(child.pid(), signal).is_ok();
         if !child.is_running() {
             self.settle_unsupervised_exit(pane);
             return;

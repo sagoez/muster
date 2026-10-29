@@ -16,6 +16,7 @@ use muster::{
     adapter::{
         holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderRecord, HolderRunner},
         open_files::OpenFilesLimit,
+        signal_target::SignalTarget,
     },
     domain::{
         color_scheme::ColorScheme,
@@ -25,6 +26,7 @@ use muster::{
         value::{ByteSize, CommandLine, ProcessName, StopGrace},
     },
 };
+use rustix::process::Signal;
 use tempfile::TempDir;
 
 /// The muster binary cargo built for this test.
@@ -164,11 +166,8 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         for record in HolderRecord::load_all(self.dirs.records()) {
-            if record.child_pid() != process::id() {
-                // SAFETY: `kill` takes plain integers and touches no memory.
-                unsafe {
-                    libc::kill(-(record.child_pid() as libc::pid_t), libc::SIGKILL);
-                }
+            if record.child_pid().into_inner() != process::id() {
+                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
             }
         }
         for holder in holders_under(self.root.path()) {
@@ -191,12 +190,12 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     receive_until(&outputs, "a tick", is_tick);
     let record = runner.locate(handle.process_id().unwrap()).unwrap();
     assert_ne!(
-        record.holder_pid(),
+        record.holder_pid().into_inner(),
         process::id(),
         "the holder is its own process"
     );
     assert_eq!(holders_under(scratch.root.path()), vec![
-        record.holder_pid()
+        record.holder_pid().into_inner()
     ]);
     let environ = fs::read(format!("/proc/{}/environ", record.child_pid())).unwrap();
     let environ: Vec<String> = environ

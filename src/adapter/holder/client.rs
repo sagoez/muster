@@ -15,7 +15,7 @@ use crate::{
     domain::{
         color_scheme::ColorScheme,
         pty::{PtyError, PtySize},
-        value::OutputCursor,
+        value::{OutputCursor, Pid},
     },
 };
 
@@ -39,7 +39,7 @@ pub struct Greeting {
     size: PtySize,
     /// The child's process id.
     #[getset(get_copy = "pub")]
-    pid: u32,
+    pid: Pid,
     /// The writable attach clients connected.
     #[getset(get_copy = "pub")]
     attached: u32,

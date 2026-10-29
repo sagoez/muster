@@ -646,7 +646,7 @@ mod tests {
             client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
             service::{ExitReason, LastExit, ProcessUsage, ServiceErrorKind},
         },
-        domain::value::ProjectRoot,
+        domain::value::{Pid, ProjectRoot},
     };
 
     /// The folder of the project every fixture belongs to.
@@ -689,6 +689,7 @@ mod tests {
         pid: Option<u32>,
         last_exit: Option<ExitOutcome>,
     ) -> ProcessStatus {
+        let pid = pid.map(|raw| Pid::try_new(raw).unwrap());
         ProcessStatus::builder()
             .name(name(named))
             .state(state)

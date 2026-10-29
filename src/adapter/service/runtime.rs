@@ -46,7 +46,7 @@ use crate::{
         project::Project,
         pty::PtyError,
         settings::Settings,
-        value::{ProcessName, ProjectName, ProjectRoot, StackRevision},
+        value::{Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
     },
 };
 
@@ -935,7 +935,7 @@ impl ServiceRuntime {
     }
 
     /// The pid of every live process of every loaded project.
-    fn live_root_pids(&self) -> Vec<u32> {
+    fn live_root_pids(&self) -> Vec<Pid> {
         self.supervisors
             .values()
             .flat_map(Supervisor::live_root_pids)
@@ -1043,6 +1043,7 @@ mod tests {
         thread::JoinHandle,
     };
 
+    use rustix::process::Signal;
     use tempfile::TempDir;
 
     use super::*;
@@ -1061,6 +1062,7 @@ mod tests {
                     testing::{KillCountHandle, Orphan, test_settings, test_stop},
                 },
             },
+            signal_target::SignalTarget,
         },
         domain::{
             config::{
@@ -1291,7 +1293,7 @@ mod tests {
     }
 
     impl ProcessHandle for StalledHandle {
-        fn process_id(&self) -> Option<u32> {
+        fn process_id(&self) -> Option<Pid> {
             None
         }
 
@@ -1401,7 +1403,7 @@ mod tests {
     }
 
     impl HolderAdopter for FakePool {
-        fn locate(&self, _child_pid: u32) -> Option<HolderRecord> {
+        fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
             None
         }
 
@@ -1608,12 +1610,8 @@ mod tests {
         fn drop(&mut self) {
             let dirs = self.dirs();
             for record in HolderRecord::load_all(dirs.records()) {
-                if record.child_pid() != process::id() {
-                    // SAFETY: `kill` takes plain integers and touches no
-                    // memory; a stale pid at worst signals nothing.
-                    unsafe {
-                        libc::kill(-(record.child_pid() as libc::pid_t), libc::SIGKILL);
-                    }
+                if record.child_pid().into_inner() != process::id() {
+                    let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
                 }
                 abandon(record.socket());
             }
@@ -2066,7 +2064,7 @@ mod tests {
         fixture: &Fixture,
         project: &ProjectRoot,
         name: &str,
-        child_pid: u32,
+        child_pid: Pid,
     ) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
@@ -2075,7 +2073,7 @@ mod tests {
             .command(CommandLine::try_new(SLEEPER).unwrap())
             .stop(test_stop())
             .socket(fixture.scratch.path().join("gone.sock"))
-            .holder_pid(process::id())
+            .holder_pid(Pid::try_new(process::id()).unwrap())
             .child_pid(child_pid)
             .child_start_token(None)
             .log(fixture.scratch.path().join("api.log"))
@@ -2237,12 +2235,7 @@ mod tests {
         );
         opener.join().unwrap();
         let pid = live[0].child_pid();
-        // SAFETY: signal 0 only checks that the pid exists.
-        assert_eq!(
-            unsafe { libc::kill(pid as libc::pid_t, 0) },
-            0,
-            "the child lives on"
-        );
+        assert!(SignalTarget::Process(pid).is_alive(), "the child lives on");
         let successor = fixture.start(Arc::new(fixture.runner()));
         let status = successor.wait_for(&project, "api", ProcessState::Running);
         assert_eq!(*process(&status, "api").pid(), Some(pid));

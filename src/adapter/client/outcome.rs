@@ -268,10 +268,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::value::ProcessName;
+    use crate::domain::value::{Pid, ProcessName};
 
     /// `api` listed in `state` with `pid` after `restarts` restarts.
     fn status(state: ProcessState, pid: Option<u32>, restarts: u32) -> ProcessStatus {
+        let pid = pid.map(|raw| Pid::try_new(raw).unwrap());
         ProcessStatus::builder()
             .name(ProcessName::try_new("api").unwrap())
             .state(state)

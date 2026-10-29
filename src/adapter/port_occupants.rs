@@ -1,7 +1,10 @@
 use listeners::{Protocol, SocketState};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Pid as SysinfoPid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-use crate::domain::port::{PortOccupant, PortOccupants};
+use crate::domain::{
+    port::{PortOccupant, PortOccupants},
+    value::Pid,
+};
 
 /// Between the arguments of a command line read from the process table.
 const ARGUMENT_SEPARATOR: &str = " ";
@@ -31,9 +34,9 @@ impl PortOccupants for OsPortOccupants {
                 && listener.state == SocketState::Listen
                 && listener.socket.port() == port
         })?;
-        let pid = listener.process.pid;
+        let pid = Pid::try_new(listener.process.pid).ok()?;
         self.system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            ProcessesToUpdate::Some(&[SysinfoPid::from_u32(pid.into_inner())]),
             true,
             ProcessRefreshKind::nothing()
                 .with_cmd(UpdateKind::Always)
@@ -41,7 +44,7 @@ impl PortOccupants for OsPortOccupants {
         );
         let command = self
             .system
-            .process(Pid::from_u32(pid))
+            .process(SysinfoPid::from_u32(pid.into_inner()))
             .map(|process| {
                 process
                     .cmd()
@@ -72,7 +75,7 @@ mod tests {
 
         let occupant = occupants.occupant(port).expect("this process listens");
 
-        assert_eq!(occupant.pid(), process::id());
+        assert_eq!(occupant.pid().into_inner(), process::id());
         assert!(!occupant.command().is_empty());
         drop(listener);
         assert_eq!(occupants.occupant(port), None);

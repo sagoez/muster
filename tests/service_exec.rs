@@ -29,7 +29,7 @@ use muster::{
         config::{Environment, ProcessSpec, SettingChange},
         port::{SettingsStore, StackStore},
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
-        value::{CommandLine, ProcessName, ProjectRoot, StopGrace},
+        value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
     },
 };
 use tempfile::TempDir;
@@ -257,7 +257,7 @@ impl Scratch {
             *self.api(project).state() == ProcessState::Running
         });
         let api = self.api(project);
-        self.children.push(api.pid().unwrap());
+        self.children.push(api.pid().unwrap().into_inner());
         api
     }
 
@@ -432,7 +432,7 @@ fn a_child_runs_with_the_client_environment_and_none_of_the_services() {
     let mut scratch = Scratch::new();
     let project = scratch.project_with(&[process("api", SLEEPER, RestartPolicy::Always)]);
     let service = scratch.start_service();
-    let first = scratch.up_running(&project).pid().unwrap();
+    let first = scratch.up_running(&project).pid().unwrap().into_inner();
 
     let client_entry = format!("{CLIENT_VAR}={CLIENT_VALUE}");
     let leaked = |pid: u32| {
@@ -450,9 +450,12 @@ fn a_child_runs_with_the_client_environment_and_none_of_the_services() {
 
     kill_hard(first);
     wait_until("the policy restart", || {
-        scratch.api(&project).pid().is_some_and(|pid| pid != first)
+        scratch
+            .api(&project)
+            .pid()
+            .is_some_and(|pid| pid.into_inner() != first)
     });
-    let second = scratch.api(&project).pid().unwrap();
+    let second = scratch.api(&project).pid().unwrap().into_inner();
     scratch.children.push(second);
     assert!(
         environ(second).contains(&client_entry),
@@ -471,7 +474,7 @@ fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice()
     let mut scratch = Scratch::new();
     let project = scratch.project_with(&[process("api", HUP_IGNORING, RestartPolicy::Never)]);
     let service = scratch.start_service();
-    let pid = *scratch.up_running(&project).pid();
+    let pid = scratch.up_running(&project).pid().map(Pid::into_inner);
     let holders = scratch.holders();
     assert_eq!(holders.len(), 1);
 
@@ -494,7 +497,7 @@ fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice()
     thread::sleep(SETTLE);
     assert_eq!(*scratch.api(&project).state(), ProcessState::Unsupervised);
     assert!(scratch.holders().is_empty(), "no second copy was started");
-    assert_eq!(*scratch.api(&project).pid(), pid);
+    assert_eq!(scratch.api(&project).pid().map(Pid::into_inner), pid);
 
     kill_hard(pid.unwrap());
     scratch.stop_service(successor);
@@ -507,7 +510,7 @@ fn a_holder_killed_with_its_child_is_told_as_a_crash() {
     let mut scratch = Scratch::new();
     let project = scratch.project();
     let service = scratch.start_service();
-    let child = scratch.up_running(&project).pid().unwrap();
+    let child = scratch.up_running(&project).pid().unwrap().into_inner();
     let holder = scratch.holders()[0];
 
     signal(holder, libc::SIGSTOP);
@@ -638,7 +641,7 @@ fn a_process_removed_while_the_service_was_down_is_stopped_at_start() {
     let mut scratch = Scratch::new();
     let project = scratch.project();
     let service = scratch.start_service();
-    let pid = scratch.up_running(&project).pid().unwrap();
+    let pid = scratch.up_running(&project).pid().unwrap().into_inner();
     scratch.stop_service(service);
 
     scratch
@@ -673,7 +676,7 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
         api = scratch.api(&project);
         *api.state() == ProcessState::Running
     });
-    let pid = api.pid().unwrap();
+    let pid = api.pid().unwrap().into_inner();
     scratch.children.push(pid);
 
     scratch.stop_service(service);
@@ -694,7 +697,7 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     wait_until("the adoption to settle", || {
         *scratch.api(&project).state() == ProcessState::Running
     });
-    assert_eq!(*scratch.api(&project).pid(), Some(pid));
+    assert_eq!(scratch.api(&project).pid().map(Pid::into_inner), Some(pid));
 
     scratch.control(&project, ProcessAction::Kill);
     wait_until("the kill to settle", || {
@@ -735,7 +738,7 @@ fn a_child_keeps_the_open_files_limit_the_service_started_with() {
     wait_until("the probe to run", || {
         probe = scratch
             .named(&project, "probe")
-            .and_then(|probe| *probe.pid());
+            .and_then(|probe| probe.pid().map(Pid::into_inner));
         probe.is_some()
     });
     let probe = probe.unwrap();

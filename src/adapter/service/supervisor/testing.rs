@@ -16,11 +16,15 @@ use std::{
 
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
+use rustix::process::Signal;
 
 use super::{SpawnGeneration, Supervisor, SupervisorDeps};
 use crate::{
-    adapter::service::{
-        EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
+    adapter::{
+        service::{
+            EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
+        },
+        signal_target::SignalTarget,
     },
     application::Workspace,
     domain::{
@@ -33,7 +37,7 @@ use crate::{
         pty::{PtyError, PtySize, ScreenSource, SpawnRequest},
         settings::Settings,
         value::{
-            ByteSize, CommandLine, DetachKey, LogMaxSize, PaneId, ProcessName, ProjectName,
+            ByteSize, CommandLine, DetachKey, LogMaxSize, PaneId, Pid, ProcessName, ProjectName,
             ProjectRoot, ScrollbackLines, StopGrace,
         },
     },
@@ -184,7 +188,7 @@ const ORPHAN_POLL: Duration = Duration::from_millis(10);
 /// gone rather than a zombie, and reports the signal that ended it. Dropping
 /// it kills the group, also on a panic.
 pub(crate) struct Orphan {
-    pid: u32,
+    pid: Pid,
     /// The signal that ended a reaped orphan, once it ended.
     ended_by: Option<Receiver<Option<i32>>>,
     /// An orphan nobody reaps, which stays a zombie once killed until dropped.
@@ -195,7 +199,7 @@ impl Orphan {
     /// Starts an orphan that is reaped as soon as it dies.
     pub(crate) fn spawn() -> Self {
         let mut child = Self::command().spawn().unwrap();
-        let pid = child.id();
+        let pid = Pid::try_new(child.id()).unwrap();
         let (sender, ended_by) = unbounded();
         thread::spawn(move || {
             let signal = child.wait().ok().and_then(|status| status.signal());
@@ -213,7 +217,7 @@ impl Orphan {
     pub(crate) fn unreaped() -> Self {
         let child = Self::command().spawn().unwrap();
         Self {
-            pid: child.id(),
+            pid: Pid::try_new(child.id()).unwrap(),
             ended_by: None,
             unreaped: Some(child),
         }
@@ -237,23 +241,21 @@ impl Orphan {
     }
 
     /// The orphan's process id, which also names its process group.
-    pub(crate) fn pid(&self) -> u32 {
+    pub(crate) fn pid(&self) -> Pid {
         self.pid
     }
 
     /// Whether the orphan still exists.
     pub(crate) fn alive(&self) -> bool {
-        // SAFETY: signal 0 only checks that the pid exists.
-        unsafe { libc::kill(self.pid as libc::pid_t, 0) == 0 }
+        SignalTarget::Process(self.pid).is_alive()
     }
 
     /// Sends `signal` to a reaped orphan and returns the signal that ended
     /// it, waiting at most [`ORPHAN_REAP_WAIT`]. A signal something else sent
     /// first shows up as that signal instead.
     pub(crate) fn end_with(&self, signal: i32) -> Option<i32> {
-        // SAFETY: `kill` takes plain integers; the pid is the orphan's own.
-        unsafe {
-            libc::kill(self.pid as libc::pid_t, signal);
+        if let Some(signal) = Signal::from_named_raw(signal) {
+            let _ = SignalTarget::Process(self.pid).send(signal);
         }
         self.ended_by
             .as_ref()?
@@ -266,10 +268,7 @@ impl Orphan {
 impl Drop for Orphan {
     /// Kills the orphan's group and waits, bounded, until it is gone.
     fn drop(&mut self) {
-        // SAFETY: `kill` takes plain integers; the group is the orphan's own.
-        unsafe {
-            libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL);
-        }
+        let _ = SignalTarget::Group(self.pid).send(Signal::KILL);
         if let Some(mut child) = self.unreaped.take() {
             let _ = child.wait();
             return;
@@ -338,7 +337,12 @@ impl ProcessRunner for RequestRecordingRunner {
 }
 
 /// The pid a [`PidHandle`] reports.
-pub(crate) const FAKE_LAUNCHER_PID: u32 = 4242;
+const FAKE_LAUNCHER_PID: u32 = 4242;
+
+/// The pid a [`PidHandle`] reports, as a [`Pid`].
+pub(crate) fn fake_launcher_pid() -> Pid {
+    Pid::try_new(FAKE_LAUNCHER_PID).unwrap()
+}
 
 /// A handle that reports a pid, like the real PTY handle does.
 pub(crate) struct PidHandle;
@@ -356,8 +360,8 @@ impl ProcessHandle for PidHandle {
         let _ = self.kill();
     }
 
-    fn process_id(&self) -> Option<u32> {
-        Some(FAKE_LAUNCHER_PID)
+    fn process_id(&self) -> Option<Pid> {
+        Some(fake_launcher_pid())
     }
 
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
@@ -398,7 +402,7 @@ impl ProcessRunner for PidRunner {
 pub(crate) struct FakeHandle;
 
 impl ProcessHandle for FakeHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -474,7 +478,7 @@ pub(crate) struct RecordingHandle {
 }
 
 impl ProcessHandle for RecordingHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -552,7 +556,7 @@ pub(crate) struct KillCountHandle {
 }
 
 impl ProcessHandle for KillCountHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -600,7 +604,7 @@ const WORKER_WAIT: Duration = Duration::from_secs(5);
 pub(crate) struct ConnectedHandle(Arc<AtomicUsize>);
 
 impl ProcessHandle for ConnectedHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -712,7 +716,7 @@ pub(crate) struct StopSignalHandle {
 }
 
 impl ProcessHandle for StopSignalHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -797,7 +801,7 @@ pub(crate) struct RetryStopHandle {
 }
 
 impl ProcessHandle for RetryStopHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -865,7 +869,7 @@ impl ProcessRunner for PauseFailRunner {
 pub(crate) struct PauseFailHandle;
 
 impl ProcessHandle for PauseFailHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 
@@ -925,7 +929,7 @@ pub(crate) struct AckCountHandle {
 }
 
 impl ProcessHandle for AckCountHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         None
     }
 

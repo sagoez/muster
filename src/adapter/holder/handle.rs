@@ -21,7 +21,7 @@ use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{ProcessOutput, PtyError, PtySize, ScreenSource},
-    value::OutputCursor,
+    value::{OutputCursor, Pid},
 };
 
 /// Reported when a writer panicked mid-frame, leaving the connection unusable.
@@ -59,7 +59,7 @@ pub struct HolderHandle {
     /// close it, even while a write is blocked.
     closer: UnixStream,
     /// The supervised child's process id.
-    child_pid: u32,
+    child_pid: Pid,
     /// The socket the holder serves.
     socket: PathBuf,
     /// The screen the holder sent when this handle connected, until taken.
@@ -146,7 +146,7 @@ impl HolderHandle {
 }
 
 impl ProcessHandle for HolderHandle {
-    fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<Pid> {
         Some(self.child_pid)
     }
 
@@ -448,7 +448,7 @@ mod tests {
         HolderMessage::Snapshot {
             repaint: SCREEN.to_vec(),
             size: PtySize::try_new(ROWS, COLS).unwrap(),
-            pid: CHILD_PID,
+            pid: Pid::try_new(CHILD_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
         }

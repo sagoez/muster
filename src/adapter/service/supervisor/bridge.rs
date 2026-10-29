@@ -109,7 +109,7 @@ mod tests {
             port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
             process::RestartPolicy,
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::OutputCursor,
+            value::{OutputCursor, Pid},
         },
     };
 
@@ -170,7 +170,7 @@ mod tests {
     }
 
     impl ProcessHandle for HolderRunHandle {
-        fn process_id(&self) -> Option<u32> {
+        fn process_id(&self) -> Option<Pid> {
             None
         }
 
@@ -251,7 +251,7 @@ mod tests {
             let _ = HolderMessage::Snapshot {
                 repaint: HOLDER_SCREEN.as_bytes().to_vec(),
                 size: PtySize::try_new(HOLDER_SIDE, HOLDER_SIDE).unwrap(),
-                pid: FAKE_LAUNCHER_PID,
+                pid: fake_launcher_pid(),
                 attached: 0,
                 run_start: OutputCursor::new(0),
             }

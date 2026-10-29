@@ -334,7 +334,7 @@ mod tests {
     };
 
     use bytesize::ByteSize as RawByteSize;
-    use rustix::termios::Termios;
+    use rustix::{process::Signal, termios::Termios};
     use tempfile::TempDir;
 
     use super::*;
@@ -350,13 +350,14 @@ mod tests {
                 ClientMessage, HolderConfig, HolderControl, HolderId, HolderRecord, HolderServer,
                 RejectReason,
             },
+            signal_target::SignalTarget,
             terminal::emulator::RESET_TERMINAL,
         },
         domain::{
             color_scheme::ColorScheme,
             process::{StopPolicy, StopSignal},
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, CommandLine, OutputCursor, StopGrace},
+            value::{ByteSize, CommandLine, OutputCursor, Pid, StopGrace},
         },
     };
 
@@ -687,11 +688,7 @@ mod tests {
             if self.server.is_some()
                 && let Some(record) = HolderRecord::load_all(self.config.record_dir()).pop()
             {
-                // SAFETY: `kill` takes plain integers and touches no memory; a
-                // stale pid at worst signals nothing.
-                unsafe {
-                    libc::kill(-(record.child_pid() as libc::pid_t), libc::SIGKILL);
-                }
+                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
             }
         }
     }
@@ -731,7 +728,7 @@ mod tests {
                 HolderMessage::Snapshot {
                     repaint,
                     size: screen,
-                    pid: FAKE_PID,
+                    pid: Pid::try_new(FAKE_PID).unwrap(),
                     attached: 0,
                     run_start: OutputCursor::new(0),
                 }
@@ -989,7 +986,7 @@ mod tests {
         holder.send(HolderMessage::Snapshot {
             repaint: repaint("second"),
             size: size(ROWS, COLS),
-            pid: FAKE_PID,
+            pid: Pid::try_new(FAKE_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
         });
@@ -1090,7 +1087,7 @@ mod tests {
         holder.send(HolderMessage::Snapshot {
             repaint: repaint("new-screen"),
             size: size(ROWS, COLS),
-            pid: FAKE_PID,
+            pid: Pid::try_new(FAKE_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
         });

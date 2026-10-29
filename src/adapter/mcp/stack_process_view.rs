@@ -8,7 +8,7 @@ use crate::{
     domain::{
         port::ListeningSocket,
         process::{ProcessState, Readiness},
-        value::{OutputCursor, ProcessName},
+        value::{OutputCursor, Pid, ProcessName},
     },
 };
 
@@ -29,7 +29,7 @@ pub struct StackProcessView {
     /// The OS process id while a child runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get_copy = "pub")]
-    pid: Option<u32>,
+    pid: Option<Pid>,
     /// Whole seconds the running child has run.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get_copy = "pub")]

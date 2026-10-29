@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use super::entity::Supervisor;
 use crate::{
     adapter::service::ProcessUsage,
-    domain::{port::ProcessSample, value::PaneId},
+    domain::{
+        port::ProcessSample,
+        value::{PaneId, Pid},
+    },
 };
 
 impl Supervisor {
@@ -14,14 +17,14 @@ impl Supervisor {
     }
 
     /// The pid of every live process whose usage is sampled.
-    pub fn usage_pids(&self) -> Vec<u32> {
+    pub fn usage_pids(&self) -> Vec<Pid> {
         self.live_pids().into_iter().map(|(_, pid)| pid).collect()
     }
 
     /// Takes each live process's usage from `samples`, keyed by pid, dropping
     /// usage for a process the samples no longer find. Returns whether any
     /// usage changed.
-    pub fn take_usage(&mut self, samples: &HashMap<u32, ProcessSample>) -> bool {
+    pub fn take_usage(&mut self, samples: &HashMap<Pid, ProcessSample>) -> bool {
         let updated: HashMap<PaneId, ProcessUsage> = self
             .live_pids()
             .into_iter()
@@ -44,7 +47,7 @@ impl Supervisor {
     }
 
     /// The pane and process id of every live process that reports one.
-    pub(super) fn live_pids(&self) -> Vec<(PaneId, u32)> {
+    pub(super) fn live_pids(&self) -> Vec<(PaneId, Pid)> {
         self.panes
             .iter()
             .filter_map(|(pane, target)| {
@@ -81,7 +84,7 @@ mod tests {
     }
 
     /// A sample of [`SAMPLED_CPU`] and [`SAMPLED_MEMORY`] for `pid`.
-    fn sample_of(pid: u32) -> HashMap<u32, ProcessSample> {
+    fn sample_of(pid: Pid) -> HashMap<Pid, ProcessSample> {
         HashMap::from([(
             pid,
             ProcessSample::builder()
@@ -97,13 +100,17 @@ mod tests {
         let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
         harness.up();
 
-        assert_eq!(harness.supervisor.usage_pids(), vec![FAKE_LAUNCHER_PID]);
-        assert!(harness.supervisor.take_usage(&sample_of(FAKE_LAUNCHER_PID)));
+        assert_eq!(harness.supervisor.usage_pids(), vec![fake_launcher_pid()]);
+        assert!(
+            harness
+                .supervisor
+                .take_usage(&sample_of(fake_launcher_pid()))
+        );
 
         let usage = harness.supervisor.snapshot().processes()[0]
             .usage()
             .expect("the sample reaches the snapshot");
-        assert_eq!(*usage.pid(), FAKE_LAUNCHER_PID);
+        assert_eq!(*usage.pid(), fake_launcher_pid());
         assert_eq!(*usage.memory_bytes(), SAMPLED_MEMORY);
     }
 
@@ -121,7 +128,9 @@ mod tests {
     fn a_stopped_process_drops_its_usage_at_once() {
         let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
         harness.up();
-        harness.supervisor.take_usage(&sample_of(FAKE_LAUNCHER_PID));
+        harness
+            .supervisor
+            .take_usage(&sample_of(fake_launcher_pid()));
 
         harness.supervisor.force_kill(&name("p"));
         let pane = PaneId::new(PANE);

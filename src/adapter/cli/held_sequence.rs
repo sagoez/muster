@@ -5,8 +5,6 @@ pub(super) enum HeldSequence {
     Partial,
     /// The detach key.
     Detach,
-    /// A whole sequence that is something else.
+    /// Something else, passed on as it is.
     Other,
-    /// Not a sequence the detach key could be; its last byte starts afresh.
-    Interrupted,
 }

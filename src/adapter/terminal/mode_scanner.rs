@@ -3,46 +3,27 @@
 //! first), setting the scroll region, tab stops, the active charset, and a full
 //! reset.
 
-/// Escape byte that introduces a control sequence.
-const ESC: u8 = 0x1B;
+use std::fmt;
+
+use alacritty_terminal::vte::{Params, Parser, Perform};
+
+use super::escape::{
+    ALT_SCREEN_MODES, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL, SCROLL_REGION_FINAL,
+    SET_MODE_FINAL, param_values,
+};
+
 /// Shift Out: makes G1 the active charset, even inside a sequence.
 const SHIFT_OUT: u8 = 0x0E;
 /// Shift In: makes G0 the active charset, even inside a sequence.
 const SHIFT_IN: u8 = 0x0F;
 /// Final byte of HTS (`ESC H`), which sets a tab stop at the cursor.
 const SET_TAB_FINAL: u8 = b'H';
-/// Final byte of TBC (`CSI g`), which clears tab stops.
-const CLEAR_TABS_FINAL: u8 = b'g';
+/// Final of TBC (`CSI g`), which clears tab stops.
+const CLEAR_TABS_FINAL: char = 'g';
 /// TBC parameter clearing the stop at the cursor.
 const CLEAR_CURRENT_TAB: u16 = 0;
 /// TBC parameter clearing every stop.
 const CLEAR_ALL_TABS: u16 = 3;
-/// Cancel control byte, which aborts a sequence in progress.
-const CAN: u8 = 0x18;
-/// Substitute control byte, which aborts a sequence in progress.
-const SUB: u8 = 0x1A;
-/// Second byte of the Control Sequence Introducer.
-const CSI_INTRODUCER: u8 = b'[';
-/// Final byte of a full terminal reset (`ESC c`).
-const RESET_FINAL: u8 = b'c';
-/// Marker byte of a DEC private sequence.
-const PRIVATE_MARKER: u8 = b'?';
-/// Separator between CSI parameters.
-const PARAM_SEPARATOR: u8 = b';';
-/// Final byte that sets a private mode.
-const SET_MODE_FINAL: u8 = b'h';
-/// Final byte that resets a private mode.
-const RESET_MODE_FINAL: u8 = b'l';
-/// Final byte that sets the scroll region (DECSTBM).
-const SCROLL_REGION_FINAL: u8 = b'r';
-/// Lowest intermediate byte of a CSI sequence.
-const INTERMEDIATE_MIN: u8 = 0x20;
-/// Highest intermediate byte of a CSI sequence.
-const INTERMEDIATE_MAX: u8 = 0x2F;
-/// Lowest final byte of a CSI sequence.
-const FINAL_MIN: u8 = 0x40;
-/// Highest final byte of a CSI sequence.
-const FINAL_MAX: u8 = 0x7E;
 /// The private mode that confines cursor addressing to the scroll region.
 const ORIGIN_MODE: u16 = 6;
 /// The alternate-screen mode that also saves and restores the cursor.
@@ -51,17 +32,14 @@ const SAVING_ALT_SCREEN_MODE: u16 = 1049;
 const SAVE_CURSOR_FINAL: u8 = b'7';
 /// Final byte of DECRC (`ESC 8`), which restores it.
 const RESTORE_CURSOR_FINAL: u8 = b'8';
-/// Private modes that switch to the alternate screen.
-const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
-/// Most parameters retained for one sequence.
-const MAX_PARAMS: usize = 16;
 /// Top margin assumed when DECSTBM omits it.
 const DEFAULT_TOP_MARGIN: usize = 1;
 
 /// What the scanner concluded after consuming one byte.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Observation {
     /// Nothing the emulator needs to act on.
+    #[default]
     Nothing,
     /// This byte completes a switch to the alternate screen.
     EnterAlternate,
@@ -88,30 +66,39 @@ pub enum Observation {
     ShiftIn,
 }
 
-/// Where the scanner is within an escape sequence.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum State {
-    #[default]
-    Ground,
-    Escape,
-    Csi,
+/// Byte-at-a-time recognizer for the sequences in [`Observation`], built on
+/// the same VT parser as the emulator so a split sequence is still recognized
+/// and string payloads are never read as sequences. It also follows origin
+/// mode, which a saved cursor carries: `ESC 7` and entering the alternate
+/// screen with 1049 save it, `ESC 8` and leaving with 1049 restore it.
+#[derive(Default)]
+pub struct ModeScanner {
+    /// The VT parser, kept across bytes.
+    parser: Parser,
+    /// What the parsed sequences established.
+    modes: Modes,
 }
 
-/// Byte-at-a-time recognizer for the sequences in [`Observation`]; its state
-/// carries across output chunks so a split sequence is still recognized. It
-/// also follows origin mode, which a saved cursor carries: `ESC 7` and
-/// entering the alternate screen with 1049 save it, `ESC 8` and leaving with
-/// 1049 restore it.
+/// The modes a [`ModeScanner`] follows, and what the byte it last fed
+/// completed.
 #[derive(Debug, Default)]
-pub struct ModeScanner {
-    state: State,
-    private: bool,
-    params: Vec<u16>,
-    current: Option<u16>,
+struct Modes {
     /// Whether origin mode is on.
     origin: bool,
     /// Origin mode as the saved cursor holds it.
     saved_origin: bool,
+    /// What the byte being fed completed.
+    observed: Observation,
+}
+
+impl fmt::Debug for ModeScanner {
+    /// Shows the followed modes; the parser's state is opaque.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModeScanner")
+            .field("modes", &self.modes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ModeScanner {
@@ -122,102 +109,23 @@ impl ModeScanner {
 
     /// Whether origin mode (DECOM) is on after what was fed.
     pub fn origin_mode(&self) -> bool {
-        self.origin
+        self.modes.origin
     }
 
     /// Consumes one output byte and reports what, if anything, it completed.
     pub fn feed(&mut self, byte: u8) -> Observation {
-        match byte {
-            SHIFT_OUT => return Observation::ShiftOut,
-            SHIFT_IN => return Observation::ShiftIn,
-            _ => {},
-        }
-        match self.state {
-            State::Ground => {
-                if byte == ESC {
-                    self.state = State::Escape;
-                }
-                Observation::Nothing
-            },
-            State::Escape => self.feed_escape(byte),
-            State::Csi => self.feed_csi(byte),
-        }
+        self.modes.observed = Observation::Nothing;
+        self.parser.advance(&mut self.modes, &[byte]);
+        self.modes.observed
     }
+}
 
-    /// Advances from the byte after `ESC`.
-    fn feed_escape(&mut self, byte: u8) -> Observation {
-        match byte {
-            CSI_INTRODUCER => {
-                self.state = State::Csi;
-                self.private = false;
-                self.params.clear();
-                self.current = None;
-                Observation::Nothing
-            },
-            RESET_FINAL => {
-                self.state = State::Ground;
-                self.origin = false;
-                self.saved_origin = false;
-                Observation::FullReset
-            },
-            SAVE_CURSOR_FINAL => {
-                self.state = State::Ground;
-                self.saved_origin = self.origin;
-                Observation::Nothing
-            },
-            RESTORE_CURSOR_FINAL => {
-                self.state = State::Ground;
-                self.origin = self.saved_origin;
-                Observation::Nothing
-            },
-            SET_TAB_FINAL => {
-                self.state = State::Ground;
-                Observation::SetTabStop
-            },
-            ESC => Observation::Nothing,
-            _ => {
-                self.state = State::Ground;
-                Observation::Nothing
-            },
-        }
-    }
-
-    /// Advances within a CSI sequence.
-    fn feed_csi(&mut self, byte: u8) -> Observation {
-        match byte {
-            PRIVATE_MARKER => self.private = true,
-            b'0'..=b'9' => {
-                let digit = u16::from(byte - b'0');
-                let value = self.current.unwrap_or(0);
-                self.current = Some(value.saturating_mul(10).saturating_add(digit));
-            },
-            PARAM_SEPARATOR => self.push_param(),
-            INTERMEDIATE_MIN..=INTERMEDIATE_MAX => {},
-            FINAL_MIN..=FINAL_MAX => {
-                self.state = State::Ground;
-                self.push_param();
-                return self.finish(byte);
-            },
-            ESC => self.state = State::Escape,
-            CAN | SUB => self.state = State::Ground,
-            _ => {},
-        }
-        Observation::Nothing
-    }
-
-    /// Stores the parameter being accumulated, treating an empty one as zero.
-    fn push_param(&mut self) {
-        let value = self.current.take().unwrap_or(0);
-        if self.params.len() < MAX_PARAMS {
-            self.params.push(value);
-        }
-    }
-
-    /// Applies the private modes of a completed set (`set`) or reset to
-    /// origin mode, in order: mode 6 itself, and 1049, whose entry saves the
-    /// cursor and whose exit restores it.
-    fn follow_origin(&mut self, set: bool) {
-        for &mode in &self.params {
+impl Modes {
+    /// Applies the private modes of a completed set (`set`) or reset: origin
+    /// mode, in order, with 1049's entry saving the cursor and its exit
+    /// restoring it, then any alternate-screen switch.
+    fn private_modes(&mut self, params: &Params, set: bool) {
+        for mode in param_values(params) {
             match mode {
                 ORIGIN_MODE => self.origin = set,
                 SAVING_ALT_SCREEN_MODE if set => self.saved_origin = self.origin,
@@ -225,39 +133,76 @@ impl ModeScanner {
                 _ => {},
             }
         }
+        if param_values(params).any(|mode| ALT_SCREEN_MODES.contains(&mode)) {
+            self.observed = if set {
+                Observation::EnterAlternate
+            } else {
+                Observation::LeaveAlternate
+            };
+        }
     }
 
-    /// Interprets a completed sequence ending in `final_byte`.
-    fn finish(&mut self, final_byte: u8) -> Observation {
-        if self.private && matches!(final_byte, SET_MODE_FINAL | RESET_MODE_FINAL) {
-            self.follow_origin(final_byte == SET_MODE_FINAL);
+    /// The scroll region DECSTBM with `params` assigns.
+    fn scroll_region(params: &Params) -> Observation {
+        let margin = |index: usize| {
+            param_values(params)
+                .nth(index)
+                .filter(|value| *value != 0)
+                .map(usize::from)
+        };
+        Observation::ScrollRegion {
+            top: margin(0).unwrap_or(DEFAULT_TOP_MARGIN),
+            bottom: margin(1),
         }
-        let alternate = self
-            .params
-            .iter()
-            .any(|mode| ALT_SCREEN_MODES.contains(mode));
-        match (self.private, final_byte) {
-            (true, SET_MODE_FINAL) if alternate => Observation::EnterAlternate,
-            (true, RESET_MODE_FINAL) if alternate => Observation::LeaveAlternate,
-            (false, SCROLL_REGION_FINAL) => {
-                let margin = |index: usize| {
-                    self.params
-                        .get(index)
-                        .copied()
-                        .filter(|value| *value != 0)
-                        .map(usize::from)
+    }
+}
+
+impl Perform for Modes {
+    /// Follows a charset shift, which acts even inside a sequence.
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            SHIFT_OUT => self.observed = Observation::ShiftOut,
+            SHIFT_IN => self.observed = Observation::ShiftIn,
+            _ => {},
+        }
+    }
+
+    /// Follows a full reset, a tab stop set and a cursor save or restore.
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if !intermediates.is_empty() {
+            return;
+        }
+        match byte {
+            FULL_RESET_FINAL => {
+                self.origin = false;
+                self.saved_origin = false;
+                self.observed = Observation::FullReset;
+            },
+            SAVE_CURSOR_FINAL => self.saved_origin = self.origin,
+            RESTORE_CURSOR_FINAL => self.origin = self.saved_origin,
+            SET_TAB_FINAL => self.observed = Observation::SetTabStop,
+            _ => {},
+        }
+    }
+
+    /// Follows private mode switches, DECSTBM and TBC; a sequence the parser
+    /// had to cut short is ignored, as the emulator ignores it.
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if ignore {
+            return;
+        }
+        match (intermediates, action) {
+            ([PRIVATE_MARKER], SET_MODE_FINAL) => self.private_modes(params, true),
+            ([PRIVATE_MARKER], RESET_MODE_FINAL) => self.private_modes(params, false),
+            ([], SCROLL_REGION_FINAL) => self.observed = Self::scroll_region(params),
+            ([], CLEAR_TABS_FINAL) => {
+                self.observed = match param_values(params).next() {
+                    Some(CLEAR_CURRENT_TAB) => Observation::ClearTabStop,
+                    Some(CLEAR_ALL_TABS) => Observation::ClearAllTabStops,
+                    _ => Observation::Nothing,
                 };
-                Observation::ScrollRegion {
-                    top: margin(0).unwrap_or(DEFAULT_TOP_MARGIN),
-                    bottom: margin(1),
-                }
             },
-            (false, CLEAR_TABS_FINAL) => match self.params.first().copied() {
-                Some(CLEAR_CURRENT_TAB) => Observation::ClearTabStop,
-                Some(CLEAR_ALL_TABS) => Observation::ClearAllTabStops,
-                _ => Observation::Nothing,
-            },
-            _ => Observation::Nothing,
+            _ => {},
         }
     }
 }
@@ -357,6 +302,40 @@ mod tests {
                 top: 1,
                 bottom: None
             },
+        ]);
+    }
+
+    /// A sequence carrying an intermediate is a different control: DECCARA
+    /// (`CSI ... $ r`) is not DECSTBM, `CSI ... $ g` is not TBC, `ESC # H`
+    /// is not HTS and `CSI ? ... $ h` switches no screen.
+    #[test]
+    fn a_sequence_with_an_intermediate_is_not_its_plain_namesake() {
+        let mut scanner = ModeScanner::new();
+        assert!(
+            scan(
+                &mut scanner,
+                b"\x1b[1;1;2;2;7$r\x1b[3$g\x1b#H\x1b[?1049$h\x1b[?6$h"
+            )
+            .is_empty()
+        );
+        assert!(!scanner.origin_mode());
+    }
+
+    /// Bytes inside an OSC, DCS or APC payload are payload: a shift, a
+    /// bracket sequence spelled out or an `ESC c` look-alike in it is not
+    /// acted on, and output after the string is scanned again.
+    #[test]
+    fn string_payloads_are_never_scanned_as_sequences() {
+        let mut scanner = ModeScanner::new();
+        assert!(
+            scan(
+                &mut scanner,
+                b"\x1b]2;a\x0eb\x0f[?1049h\x07\x1bPq\x0e[2;5r\x1b\\\x1b_G\x0e\x1b\\"
+            )
+            .is_empty()
+        );
+        assert_eq!(scan(&mut scanner, b"\x1b]0;title\x1b\\\x0e"), vec![
+            Observation::ShiftOut
         ]);
     }
 

@@ -1,35 +1,29 @@
-use std::{mem, str};
+use std::mem;
+
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 use super::{held_sequence::HeldSequence, scan_result::ScanResult};
-use crate::domain::value::DetachKey;
+use crate::{
+    adapter::terminal::escape::{CSI, ESC, KITTY_FINAL, param_values},
+    domain::value::DetachKey,
+};
 
-/// The escape byte that starts every sequence a key can send.
-const ESC: u8 = 0x1B;
-/// The second byte of a control sequence.
-const CSI_INTRODUCER: u8 = b'[';
-/// The lowest final byte of a control sequence.
-const CSI_FINAL_MIN: u8 = 0x40;
-/// The highest final byte of a control sequence.
-const CSI_FINAL_MAX: u8 = 0x7E;
-/// Separates a control sequence's parameters.
-const FIELD_SEPARATOR: char = ';';
-/// Separates the parts of one Kitty parameter.
-const PART_SEPARATOR: char = ':';
-/// The final byte of a Kitty key report.
-const KITTY_FINAL: u8 = b'u';
-/// The final byte of an xterm modifyOtherKeys key report.
-const MODIFY_OTHER_KEYS_FINAL: u8 = b'~';
+/// The final of an xterm modifyOtherKeys key report.
+const MODIFY_OTHER_KEYS_FINAL: char = '~';
 /// The first parameter of an xterm modifyOtherKeys key report.
-const MODIFY_OTHER_KEYS: &str = "27";
+const MODIFY_OTHER_KEYS: u16 = 27;
 /// The modifier field of a key reported with no modifiers.
-const NO_MODIFIERS: &str = "1";
+const NO_MODIFIERS: u16 = 1;
 /// The Kitty event type of a key release.
-const RELEASE_EVENT: &str = "3";
+const RELEASE_EVENT: u16 = 3;
 /// Modifier bits for Caps Lock and Num Lock, which a terminal may report
 /// with any key and which do not change which key it is.
-const LOCK_MODIFIERS: u32 = 64 | 128;
+const LOCK_MODIFIERS: u16 = 64 | 128;
 /// Longest escape sequence held while it could still be the detach key.
 const MAX_PENDING: usize = 32;
+
+/// A key press: its key code and the modifier bits held with it.
+type KeyPress = (u16, u16);
 
 /// Finds the detach key in what a person types into `muster attach`, passing
 /// every other byte on untouched.
@@ -37,22 +31,32 @@ pub struct DetachScanner {
     /// The byte the key sends without keyboard enhancement.
     legacy: u8,
     /// The key code and held modifiers of the key's enhanced press.
-    kitty: Option<(u32, u32)>,
-    /// The start of an escape sequence the chunk ended in, held until the
-    /// next chunk shows whether it is the detach key.
+    kitty: Option<KeyPress>,
+    /// Parses the escape sequence being held.
+    parser: Parser,
+    /// The start of an escape sequence, held until it shows whether it is
+    /// the detach key.
     pending: Vec<u8>,
+}
+
+/// What the parser made of the last byte of a held sequence.
+#[derive(Default)]
+struct Parsed {
+    /// Whether the byte completed anything: a sequence, a control or text.
+    completed: bool,
+    /// The key press a completed control sequence reports.
+    press: Option<KeyPress>,
 }
 
 impl DetachScanner {
     /// A scanner for `key`.
     pub fn new(key: &DetachKey) -> Self {
-        let kitty = key.kitty_sequence();
+        let mut parsed = Parsed::default();
+        Parser::new().advance(&mut parsed, &key.kitty_sequence());
         Self {
             legacy: key.legacy_byte(),
-            kitty: kitty
-                .strip_prefix(&[ESC, CSI_INTRODUCER])
-                .and_then(<[u8]>::split_last)
-                .and_then(|(&last, params)| key_press(params, last)),
+            kitty: parsed.press,
+            parser: Parser::new(),
             pending: Vec::new(),
         }
     }
@@ -62,66 +66,47 @@ impl DetachScanner {
     pub fn feed(&mut self, bytes: &[u8]) -> ScanResult {
         let mut forward = Vec::new();
         for &byte in bytes {
-            if self.pending.is_empty() {
-                if byte == self.legacy {
-                    return Self::result(forward, true);
-                }
-                if byte == ESC {
-                    self.pending.push(byte);
-                } else {
-                    forward.push(byte);
-                }
+            if byte == self.legacy {
+                forward.append(&mut self.flush());
+                return Self::result(forward, true);
+            }
+            if byte == ESC {
+                forward.append(&mut self.flush());
+            } else if self.pending.is_empty() {
+                forward.push(byte);
                 continue;
             }
             self.pending.push(byte);
-            match self.classify() {
+            match self.classify(byte) {
                 HeldSequence::Partial => {},
                 HeldSequence::Detach => {
-                    self.pending.clear();
+                    self.flush();
                     return Self::result(forward, true);
                 },
-                HeldSequence::Other => forward.append(&mut self.pending),
-                HeldSequence::Interrupted => {
-                    self.pending.pop();
-                    forward.append(&mut self.pending);
-                    if byte == self.legacy {
-                        return Self::result(forward, true);
-                    }
-                    if byte == ESC {
-                        self.pending.push(byte);
-                    } else {
-                        forward.push(byte);
-                    }
-                },
+                HeldSequence::Other => forward.append(&mut self.flush()),
             }
         }
         Self::result(forward, false)
     }
 
-    /// What the held bytes, starting with an escape, have turned out to be.
-    fn classify(&self) -> HeldSequence {
-        let Some((&last, body)) = self.pending.split_last() else {
-            return HeldSequence::Other;
-        };
-        match body {
-            [ESC] if last == CSI_INTRODUCER => HeldSequence::Partial,
-            [ESC] => HeldSequence::Interrupted,
-            [ESC, CSI_INTRODUCER, params @ ..] => {
-                if is_parameter(last) {
-                    if self.pending.len() > MAX_PENDING {
-                        HeldSequence::Other
-                    } else {
-                        HeldSequence::Partial
-                    }
-                } else if !(CSI_FINAL_MIN..=CSI_FINAL_MAX).contains(&last) {
-                    HeldSequence::Interrupted
-                } else if self.kitty.is_some() && key_press(params, last) == self.kitty {
-                    HeldSequence::Detach
-                } else {
-                    HeldSequence::Other
-                }
-            },
-            _ => HeldSequence::Other,
+    /// What the held bytes, starting with an escape and ending in `byte`,
+    /// have turned out to be. Only a control sequence can be the detach key,
+    /// so any other escape is passed on as soon as it starts.
+    fn classify(&mut self, byte: u8) -> HeldSequence {
+        let mut parsed = Parsed::default();
+        self.parser.advance(&mut parsed, &[byte]);
+        if parsed.completed {
+            if self.kitty.is_some() && parsed.press == self.kitty {
+                HeldSequence::Detach
+            } else {
+                HeldSequence::Other
+            }
+        } else if self.pending == [ESC]
+            || (self.pending.starts_with(CSI.as_bytes()) && self.pending.len() <= MAX_PENDING)
+        {
+            HeldSequence::Partial
+        } else {
+            HeldSequence::Other
         }
     }
 
@@ -142,49 +127,64 @@ impl DetachScanner {
     /// Gives up the held escape sequence, once no more input came to finish
     /// it, so a lone Escape key still reaches the process.
     pub fn flush(&mut self) -> Vec<u8> {
+        self.parser = Parser::new();
         mem::take(&mut self.pending)
     }
 }
 
-/// Whether `byte` can sit among a key report's parameters.
-fn is_parameter(byte: u8) -> bool {
-    byte.is_ascii_digit() || matches!(char::from(byte), FIELD_SEPARATOR | PART_SEPARATOR)
+impl Perform for Parsed {
+    /// Text ends a held sequence.
+    fn print(&mut self, _character: char) {
+        self.completed = true;
+    }
+
+    /// A control byte ends a held sequence.
+    fn execute(&mut self, _byte: u8) {
+        self.completed = true;
+    }
+
+    /// A string control ends a held sequence.
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        self.completed = true;
+    }
+
+    /// A completed control sequence, and the key press it reports.
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.completed = true;
+        if intermediates.is_empty() && !ignore {
+            self.press = key_press(params, action);
+        }
+    }
+
+    /// A completed escape sequence.
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+        self.completed = true;
+    }
 }
 
 /// The key code and held modifier bits of a key press reported by a control
-/// sequence with `params` and `final_byte`, in Kitty's form or xterm's
+/// sequence with `params` and `action`, in Kitty's form or xterm's
 /// modifyOtherKeys form, with lock modifiers dropped; none for a release or
 /// any other sequence.
-fn key_press(params: &[u8], final_byte: u8) -> Option<(u32, u32)> {
-    let fields: Vec<&str> = str::from_utf8(params)
-        .ok()?
-        .split(FIELD_SEPARATOR)
-        .collect();
-    let (code, modifiers) = match final_byte {
+fn key_press(params: &Params, action: char) -> Option<KeyPress> {
+    let (code, modifiers) = match action {
         KITTY_FINAL => {
-            let code = fields.first()?.split(PART_SEPARATOR).next()?;
-            let mut modifier = fields
-                .get(1)
-                .copied()
-                .unwrap_or_default()
-                .split(PART_SEPARATOR);
-            let modifiers = modifier
-                .next()
-                .filter(|modifiers| !modifiers.is_empty())
-                .unwrap_or(NO_MODIFIERS);
-            if modifier.next() == Some(RELEASE_EVENT) {
+            let mut fields = params.iter();
+            let code = *fields.next()?.first()?;
+            let modifier = fields.next().unwrap_or_default();
+            if modifier.get(1) == Some(&RELEASE_EVENT) {
                 return None;
             }
-            (code, modifiers)
+            let modifiers = modifier.first().copied().unwrap_or_default();
+            (code, modifiers.max(NO_MODIFIERS))
         },
-        MODIFY_OTHER_KEYS_FINAL => match fields.as_slice() {
-            [MODIFY_OTHER_KEYS, modifiers, code] => (*code, *modifiers),
+        MODIFY_OTHER_KEYS_FINAL => match param_values(params).collect::<Vec<_>>()[..] {
+            [MODIFY_OTHER_KEYS, modifiers, code] => (code, modifiers),
             _ => return None,
         },
         _ => return None,
     };
-    let held = modifiers.parse::<u32>().ok()?.checked_sub(1)? & !LOCK_MODIFIERS;
-    Some((code.parse().ok()?, held))
+    Some((code, modifiers.checked_sub(1)? & !LOCK_MODIFIERS))
 }
 
 #[cfg(test)]
@@ -243,7 +243,7 @@ mod tests {
     /// byte for byte.
     #[test]
     fn detach_scanner_forwards_everything_else_untouched() {
-        let others: [&[u8]; 12] = [
+        let others: [&[u8]; 15] = [
             b"plain text \xe2\x9c\x93",
             b"\x03",
             b"\x1b[A",
@@ -256,6 +256,9 @@ mod tests {
             b"\x1b[200~pasted\x1b[201~",
             b"\x1bOP",
             b"\x1b[27;5;97~",
+            b"\x1b[>92;5u",
+            b"\x1b[92;5$u",
+            b"\x1b_x\x1b]y\x1bPz",
         ];
         for other in others {
             let mut scanner = scanner("ctrl-\\");
@@ -278,5 +281,18 @@ mod tests {
         assert_eq!(scanner.feed(b"\x1b\x1b[92;5u"), scanned(b"\x1b", true));
         let mut interrupted = DetachScanner::new(&DetachKey::try_new("ctrl-\\").unwrap());
         assert_eq!(interrupted.feed(b"\x1b[\x1c"), scanned(b"\x1b[", true));
+    }
+
+    /// An Alt chord that opens a string control on the parser, such as
+    /// Alt+_ or Alt+], is passed on at once rather than held, so the keys
+    /// after it are not swallowed into a string.
+    #[test]
+    fn an_escape_that_opens_a_string_is_passed_on_at_once() {
+        for typed in [b"\x1b_".as_slice(), b"\x1b]", b"\x1bP", b"\x1bX"] {
+            let mut scanner = scanner("ctrl-\\");
+            assert_eq!(scanner.feed(typed), scanned(typed, false));
+            assert!(!scanner.has_pending());
+            assert_eq!(scanner.feed(b"ab\x1b[92;5u"), scanned(b"ab", true));
+        }
     }
 }

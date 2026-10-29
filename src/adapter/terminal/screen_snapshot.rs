@@ -8,6 +8,7 @@ use typed_builder::TypedBuilder;
 use super::{
     cursor_state::CursorState,
     emulator::{CellColor, CellFlags, CellStyle},
+    escape::{CSI, SGR_RESET},
 };
 
 /// DECSC: saves the cursor's position, pen and charsets.
@@ -21,8 +22,6 @@ const CHARSET_ASCII: char = 'B';
 /// Final byte designating the DEC special character and line drawing set.
 const CHARSET_LINE_DRAWING: char = '0';
 
-/// SGR reset, emitted before each styled run and after each row.
-pub const SGR_RESET: &str = "\x1b[0m";
 /// SGR parameter: bold.
 const SGR_BOLD: &str = "1";
 /// SGR parameter: dim.
@@ -48,8 +47,6 @@ const SGR_FOREGROUND: u8 = 38;
 /// SGR parameter prefix selecting a background color.
 const SGR_BACKGROUND: u8 = 48;
 
-/// Control Sequence Introducer.
-pub const CSI: &str = "\x1b[";
 /// Final character of the select-graphic-rendition (SGR) sequence.
 const SGR_FINAL: char = 'm';
 /// Final character of the cursor-position (CUP) sequence.

@@ -29,8 +29,9 @@ use typed_builder::TypedBuilder;
 
 use super::{
     cursor_state::CursorState,
+    escape::{CSI, SCROLL_REGION_FINAL},
     mode_scanner::{ModeScanner, Observation},
-    screen_snapshot::{CSI, ScreenSnapshot, SnapshotCell, cursor_position, push_charsets},
+    screen_snapshot::{ScreenSnapshot, SnapshotCell, cursor_position, push_charsets},
     tab_stops::TabStops,
 };
 use crate::domain::{
@@ -75,8 +76,6 @@ const CLEAR_ALL_TAB_STOPS: &str = "\x1b[3g";
 const SET_TAB_STOP: &str = "\x1bH";
 /// Final bytes of a DECSCUSR sequence (`CSI n SP q`) after its parameter.
 const CURSOR_STYLE_FINAL: &str = " q";
-/// Final character of a DECSTBM sequence.
-const SCROLL_REGION_FINAL: char = 'r';
 /// DECSCUSR parameter for a blinking block cursor; steady forms follow by one.
 const CURSOR_BLINKING_BLOCK: u8 = 1;
 /// DECSCUSR parameter for a blinking underline cursor.

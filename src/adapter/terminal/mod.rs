@@ -4,6 +4,7 @@
 
 pub mod cursor_state;
 pub mod emulator;
+pub mod escape;
 pub mod keyboard_protocol;
 pub mod keyboard_tracker;
 pub mod mode_scanner;

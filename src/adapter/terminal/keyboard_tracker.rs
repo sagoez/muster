@@ -13,45 +13,35 @@
 //! Kitty mode, and keys such as Ctrl-C would be sent as `CSI u` instead of a
 //! legacy control byte.
 
+use std::{fmt, mem};
+
+use alacritty_terminal::vte::{Params, Parser, Perform};
+
 #[cfg(test)]
 use super::keyboard_protocol::KeyboardProtocol;
-use super::keyboard_protocol::{NO_FLAGS, SUPPORTED_FLAGS};
+use super::{
+    escape::{
+        ALT_SCREEN_MODES, CSI, FULL_RESET_FINAL, KITTY_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL,
+        SET_MODE_FINAL, param_values,
+    },
+    keyboard_protocol::{NO_FLAGS, SUPPORTED_FLAGS},
+};
 
-/// Escape byte that introduces a control sequence.
-const ESC: u8 = 0x1B;
-/// Second byte of the Control Sequence Introducer, following `ESC`.
-const CSI_INTRODUCER: u8 = b'[';
-/// Second byte of a full terminal reset (RIS, `ESC c`), which clears all keyboard
-/// enhancement state just as a real terminal does.
-const RIS_FINAL: u8 = b'c';
-/// Final byte marking a Kitty keyboard control sequence (`CSI ... u`).
-const KITTY_FINAL: u8 = b'u';
-/// Final byte that sets a DEC private mode (`CSI ? n h`).
-const SET_MODE_FINAL: u8 = b'h';
-/// Final byte that resets a DEC private mode (`CSI ? n l`).
-const RESET_MODE_FINAL: u8 = b'l';
-/// Final byte of a device-attributes query (`CSI c`), including its DA1 form.
-const DEVICE_ATTRIBUTES_FINAL: u8 = b'c';
+/// Final of a device-attributes query (`CSI c`), including its DA1 form.
+const DEVICE_ATTRIBUTES_FINAL: char = 'c';
+/// The only parameter a primary device-attributes query carries, explicit or
+/// omitted.
+const PRIMARY_DEVICE_ATTRIBUTES: u16 = 0;
 /// Primary device-attributes (DA1) response muster returns: a VT100 with the
 /// Advanced Video Option, a conservative baseline that keeps children on
 /// sequences muster's VT parser handles.
 const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?1;2c";
-/// Separator between CSI parameters.
-const PARAM_SEPARATOR: u8 = b';';
-/// Leading byte of a flag push (`CSI > flags u`).
+/// Intermediate of a flag push (`CSI > flags u`).
 const PUSH_INTRODUCER: u8 = b'>';
-/// Leading byte of an absolute flag set (`CSI = flags u`).
+/// Intermediate of an absolute flag set (`CSI = flags u`).
 const SET_INTRODUCER: u8 = b'=';
-/// Leading byte of a flag pop (`CSI < number u`).
+/// Intermediate of a flag pop (`CSI < number u`).
 const POP_INTRODUCER: u8 = b'<';
-/// Leading byte of a flag query (`CSI ? u`), and of a DEC private mode.
-const PRIVATE_MARKER: u8 = b'?';
-/// Lowest byte value that terminates a CSI sequence (its "final byte" range).
-const CSI_FINAL_MIN: u8 = 0x40;
-/// Highest byte value that terminates a CSI sequence.
-const CSI_FINAL_MAX: u8 = 0x7E;
-/// Largest partial CSI prefix retained between output chunks.
-const MAX_PENDING_BYTES: usize = 64;
 /// Pop count assumed when a `CSI < u` sequence omits its number.
 const DEFAULT_POP_COUNT: u16 = 1;
 /// `CSI = flags ; mode u` mode that replaces the active flags outright (default).
@@ -64,8 +54,6 @@ const SET_MODE_AND_NOT: u16 = 3;
 /// buggy or hostile child cannot grow muster's memory without bound. Kitty
 /// itself caps the stack at this depth.
 const STACK_LIMIT: usize = 16;
-/// DEC private modes that switch to and from the alternate screen.
-const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
 
 /// One screen's keyboard-enhancement state: the active flags and the push stack.
 #[derive(Debug, Default)]
@@ -82,86 +70,53 @@ struct ScreenState {
 /// alternate-screen app leaves behind cannot leak into the restored shell. A
 /// new tracker starts on the legacy encoding, and a child's request is masked
 /// to [`SUPPORTED_FLAGS`] before it takes effect.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct KittyKeyboardTracker {
-    /// A CSI prefix split across the previous chunk boundary, awaiting more
-    /// bytes before it can be parsed.
-    pending: Vec<u8>,
+    /// The VT parser, kept across chunks so a split sequence still completes.
+    parser: Parser,
+    /// What the parsed sequences negotiated.
+    keyboard: Keyboard,
+}
+
+/// The keyboard state a [`KittyKeyboardTracker`] follows, and the replies the
+/// chunk being parsed owes the child.
+#[derive(Debug, Default)]
+struct Keyboard {
     /// Keyboard state for the primary screen.
     primary: ScreenState,
     /// Keyboard state for the alternate screen.
     alternate: ScreenState,
     /// Whether the child is currently on the alternate screen.
     on_alternate: bool,
+    /// Bytes to write back to the child, in the order its queries came.
+    reply: Vec<u8>,
+}
+
+impl fmt::Debug for KittyKeyboardTracker {
+    /// Shows the followed keyboard state; the parser's state is opaque.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KittyKeyboardTracker")
+            .field("keyboard", &self.keyboard)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KittyKeyboardTracker {
     /// Reports the protocol the child is currently using on the active screen.
     #[cfg(test)]
     pub fn protocol(&self) -> KeyboardProtocol {
-        KeyboardProtocol::from_flags(self.active().flags)
+        KeyboardProtocol::from_flags(self.keyboard.active().flags)
     }
 
     /// Scans `bytes` from the child for keyboard-protocol sequences and
     /// alternate-screen transitions, updating the tracked level and returning
     /// any bytes to write back to the child (the reply to a `CSI ? u` query).
-    /// Non-matching output is ignored, and a sequence split across calls is
-    /// buffered until it completes.
+    /// Non-matching output is ignored, and a sequence split across calls
+    /// completes in a later one.
     pub fn observe(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let combined;
-        let bytes = if self.pending.is_empty() {
-            bytes
-        } else {
-            combined = self
-                .pending
-                .iter()
-                .copied()
-                .chain(bytes.iter().copied())
-                .collect::<Vec<_>>();
-            self.pending.clear();
-            &combined
-        };
-
-        let mut reply = Vec::new();
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] != ESC {
-                index += 1;
-                continue;
-            }
-            let Some(&next) = bytes.get(index + 1) else {
-                self.store_pending(&bytes[index..]);
-                return reply;
-            };
-            // A full reset (RIS) clears all enhancement state, so a `reset` after a
-            // crashed Kitty TUI returns the restored shell to legacy input.
-            if next == RIS_FINAL {
-                self.reset();
-                index += 2;
-                continue;
-            }
-            if next != CSI_INTRODUCER {
-                index += 1;
-                continue;
-            }
-            let mut end = index + 2;
-            while end < bytes.len() && !(CSI_FINAL_MIN..=CSI_FINAL_MAX).contains(&bytes[end]) {
-                end += 1;
-            }
-            if end >= bytes.len() {
-                self.store_pending(&bytes[index..]);
-                return reply;
-            }
-            let params = &bytes[index + 2..end];
-            match bytes[end] {
-                KITTY_FINAL => self.apply(params, &mut reply),
-                SET_MODE_FINAL | RESET_MODE_FINAL => self.screen_mode(params, bytes[end]),
-                DEVICE_ATTRIBUTES_FINAL => reply_device_attributes(params, &mut reply),
-                _ => {},
-            }
-            index = end + 1;
-        }
-        reply
+        self.parser.advance(&mut self.keyboard, bytes);
+        mem::take(&mut self.keyboard.reply)
     }
 
     /// The Kitty sequences that rebuild the active screen's flags and push stack
@@ -169,7 +124,7 @@ impl KittyKeyboardTracker {
     /// level. The inactive screen is not reproduced, since reaching it means a
     /// screen switch that would disturb an already repainted grid.
     pub fn restore_sequence(&self) -> Vec<u8> {
-        let screen = self.active();
+        let screen = self.keyboard.active();
         let mut levels = screen.stack.iter().chain(std::iter::once(&screen.flags));
         let mut sequence = Vec::new();
         if let Some(&oldest) = levels.next() {
@@ -180,7 +135,9 @@ impl KittyKeyboardTracker {
         }
         sequence
     }
+}
 
+impl Keyboard {
     /// Clears all keyboard-enhancement state, as a full terminal reset (RIS) does:
     /// both screens return to legacy with empty stacks and the primary screen
     /// becomes active, so input after the reset is encoded as legacy again.
@@ -208,18 +165,8 @@ impl KittyKeyboardTracker {
         }
     }
 
-    /// Retains a partial CSI prefix for the next call, dropping anything longer
-    /// than a plausible sequence so a lone `ESC` in binary output cannot grow an
-    /// unbounded buffer.
-    fn store_pending(&mut self, bytes: &[u8]) {
-        self.pending.clear();
-        if bytes.len() <= MAX_PENDING_BYTES {
-            self.pending.extend_from_slice(bytes);
-        }
-    }
-
-    /// Applies the parameters of one `CSI ... u` sequence to the active screen,
-    /// appending a reply to `reply` when the sequence is a capability query.
+    /// Applies one `CSI <introducer> ... u` sequence to the active screen,
+    /// replying when it is a capability query.
     ///
     /// Requested flags are masked to those muster actually honors ([`SUPPORTED_FLAGS`]
     /// = disambiguate + event types). This is the behavior the Kitty protocol
@@ -231,13 +178,11 @@ impl KittyKeyboardTracker {
     /// disambiguate + event types, and honoring report-all would mean re-encoding
     /// all literal text as `CSI u`. Do not widen [`SUPPORTED_FLAGS`] to advertise
     /// flags the encoder does not produce.
-    fn apply(&mut self, params: &[u8], reply: &mut Vec<u8>) {
-        let Some((&introducer, rest)) = params.split_first() else {
-            return;
-        };
+    fn apply(&mut self, introducer: u8, params: &Params) {
+        let first = param_values(params).next().unwrap_or(NO_FLAGS);
         match introducer {
             PUSH_INTRODUCER => {
-                let flags = parse_flags(rest) & SUPPORTED_FLAGS;
+                let flags = first & SUPPORTED_FLAGS;
                 let screen = self.active_mut();
                 if screen.stack.len() >= STACK_LIMIT {
                     screen.stack.remove(0);
@@ -246,8 +191,8 @@ impl KittyKeyboardTracker {
                 screen.flags = flags;
             },
             SET_INTRODUCER => {
-                let flags = parse_flags(rest) & SUPPORTED_FLAGS;
-                let mode = parse_mode(rest);
+                let flags = first & SUPPORTED_FLAGS;
+                let mode = param_values(params).nth(1).unwrap_or(SET_MODE_REPLACE);
                 let screen = self.active_mut();
                 screen.flags = match mode {
                     SET_MODE_OR => screen.flags | flags,
@@ -256,14 +201,15 @@ impl KittyKeyboardTracker {
                 };
             },
             POP_INTRODUCER => {
-                let count = parse_flags(rest).max(DEFAULT_POP_COUNT);
+                let count = first.max(DEFAULT_POP_COUNT);
                 let screen = self.active_mut();
                 for _ in 0..count {
                     screen.flags = screen.stack.pop().unwrap_or(NO_FLAGS);
                 }
             },
             PRIVATE_MARKER => {
-                reply.extend_from_slice(format!("\x1b[?{}u", self.active().flags).as_bytes());
+                let flags = self.active().flags;
+                self.reply.extend(kitty_sequence(PRIVATE_MARKER, flags));
             },
             _ => {},
         }
@@ -276,62 +222,55 @@ impl KittyKeyboardTracker {
     /// without repushing keeps its negotiated protocol) rather than clearing it,
     /// while the primary state is left untouched so an alternate-screen app cannot
     /// leave the restored shell in Kitty mode. Only a full reset (RIS) clears both.
-    fn screen_mode(&mut self, params: &[u8], final_byte: u8) {
-        let Some((&PRIVATE_MARKER, rest)) = params.split_first() else {
-            return;
-        };
-        // A single sequence may set several private modes (`CSI ?25;1049h`), so
-        // every semicolon-separated parameter is inspected, not just the first.
-        let toggles_alternate = rest
-            .split(|byte| *byte == PARAM_SEPARATOR)
-            .filter_map(|param| std::str::from_utf8(param).ok()?.parse::<u16>().ok())
-            .any(|mode| ALT_SCREEN_MODES.contains(&mode));
-        if !toggles_alternate {
+    /// A single sequence may set several private modes (`CSI ?25;1049h`), so
+    /// every parameter is inspected.
+    fn screen_mode(&mut self, params: &Params, set: bool) {
+        if param_values(params).any(|mode| ALT_SCREEN_MODES.contains(&mode)) {
+            self.on_alternate = set;
+        }
+    }
+
+    /// Answers a primary device-attributes query (`CSI c` or `CSI 0 c`) with
+    /// muster's [`DEVICE_ATTRIBUTES`]. crossterm's `supports_keyboard_enhancement`
+    /// probe sends this alongside the Kitty query and blocks reading the reply
+    /// once it has the flags, so an unanswered DA1 hangs a crossterm child at
+    /// startup.
+    fn device_attributes(&mut self, params: &Params) {
+        if params.len() == 1 && param_values(params).next() == Some(PRIMARY_DEVICE_ATTRIBUTES) {
+            self.reply.extend_from_slice(DEVICE_ATTRIBUTES);
+        }
+    }
+}
+
+impl Perform for Keyboard {
+    /// A full reset (RIS) clears all enhancement state, so a `reset` after a
+    /// crashed Kitty TUI returns the restored shell to legacy input.
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates.is_empty() && byte == FULL_RESET_FINAL {
+            self.reset();
+        }
+    }
+
+    /// Follows the Kitty sequences, alternate-screen switches and DA1 queries;
+    /// the secondary (`CSI > c`) and tertiary (`CSI = c`) forms, any sequence
+    /// with a further intermediate, and one the parser cut short are ignored.
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if ignore {
             return;
         }
-        match final_byte {
-            SET_MODE_FINAL if !self.on_alternate => self.on_alternate = true,
-            RESET_MODE_FINAL if self.on_alternate => self.on_alternate = false,
+        match (intermediates, action) {
+            (&[introducer], KITTY_FINAL) => self.apply(introducer, params),
+            ([PRIVATE_MARKER], SET_MODE_FINAL) => self.screen_mode(params, true),
+            ([PRIVATE_MARKER], RESET_MODE_FINAL) => self.screen_mode(params, false),
+            ([], DEVICE_ATTRIBUTES_FINAL) => self.device_attributes(params),
             _ => {},
         }
     }
 }
 
-/// Answers a primary device-attributes query (`CSI c` or `CSI 0 c`) with muster's
-/// [`DEVICE_ATTRIBUTES`], ignoring the secondary (`CSI > c`) and tertiary
-/// (`CSI = c`) forms. crossterm's `supports_keyboard_enhancement` probe sends this
-/// alongside the Kitty query and blocks reading the reply once it has the flags, so
-/// an unanswered DA1 hangs a crossterm child at startup.
-fn reply_device_attributes(params: &[u8], reply: &mut Vec<u8>) {
-    if params.is_empty() || params == b"0" {
-        reply.extend_from_slice(DEVICE_ATTRIBUTES);
-    }
-}
-
 /// Encodes one Kitty keyboard sequence, `CSI <introducer> <flags> u`.
 fn kitty_sequence(introducer: u8, flags: u16) -> Vec<u8> {
-    let mut sequence = vec![ESC, CSI_INTRODUCER, introducer];
-    sequence.extend_from_slice(flags.to_string().as_bytes());
-    sequence.push(KITTY_FINAL);
-    sequence
-}
-
-/// Parses the leading numeric parameter of a Kitty sequence, defaulting to no
-/// flags when it is absent or malformed.
-fn parse_flags(bytes: &[u8]) -> u16 {
-    parse_param(bytes, 0).unwrap_or(NO_FLAGS)
-}
-
-/// Parses the second parameter of a `CSI = flags ; mode u` sequence, defaulting
-/// to the replace mode when it is absent or malformed.
-fn parse_mode(bytes: &[u8]) -> u16 {
-    parse_param(bytes, 1).unwrap_or(SET_MODE_REPLACE)
-}
-
-/// Parses the `index`-th `;`-separated numeric parameter, if present and valid.
-fn parse_param(bytes: &[u8], index: usize) -> Option<u16> {
-    let param = bytes.split(|byte| *byte == PARAM_SEPARATOR).nth(index)?;
-    std::str::from_utf8(param).ok()?.parse::<u16>().ok()
+    format!("{CSI}{}{flags}{KITTY_FINAL}", char::from(introducer)).into_bytes()
 }
 
 #[cfg(test)]
@@ -447,13 +386,39 @@ mod tests {
         assert_eq!(tracker.protocol(), KeyboardProtocol::Kitty { flags: 1 });
     }
 
+    /// A runaway sequence that never ends is dropped by the parser without
+    /// holding the bytes, and the sequence after it is still recognized.
     #[test]
     fn a_trailing_escape_does_not_grow_unbounded() {
         let mut tracker = KittyKeyboardTracker::default();
-        let mut flood = vec![ESC, CSI_INTRODUCER];
-        flood.extend(std::iter::repeat_n(b'0', MAX_PENDING_BYTES * 2));
+        let mut flood = CSI.as_bytes().to_vec();
+        flood.extend(std::iter::repeat_n(b'0', 128));
+        flood.extend(std::iter::repeat_n(b';', 128));
         tracker.observe(&flood);
-        assert!(tracker.pending.is_empty());
+        tracker.observe(b"\x1b[>1u");
+        assert_eq!(tracker.protocol(), KeyboardProtocol::Kitty { flags: 1 });
+    }
+
+    /// A Kitty-looking sequence with a further intermediate is another
+    /// control, and is not taken as a push or a query.
+    #[test]
+    fn a_kitty_sequence_with_an_intermediate_is_ignored() {
+        let mut tracker = KittyKeyboardTracker::default();
+        tracker.observe(b"\x1b[>1u");
+        assert!(tracker.observe(b"\x1b[>3$u\x1b[?$u\x1b[$c").is_empty());
+        assert_eq!(tracker.protocol(), KeyboardProtocol::Kitty { flags: 1 });
+    }
+
+    /// Bytes inside an OSC or DCS payload are payload, not sequences.
+    #[test]
+    fn string_payloads_are_never_scanned_as_sequences() {
+        let mut tracker = KittyKeyboardTracker::default();
+        assert!(
+            tracker
+                .observe(b"\x1b]2;[>1u[?u[c\x07\x1bP[>1u[c\x1b\\")
+                .is_empty()
+        );
+        assert_eq!(tracker.protocol(), KeyboardProtocol::Legacy);
     }
 
     #[test]
@@ -475,7 +440,7 @@ mod tests {
         for _ in 0..(STACK_LIMIT * 4) {
             tracker.observe(b"\x1b[>1u");
         }
-        assert!(tracker.primary.stack.len() <= STACK_LIMIT);
+        assert!(tracker.keyboard.primary.stack.len() <= STACK_LIMIT);
     }
 
     #[test]

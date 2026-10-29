@@ -7,6 +7,8 @@ use std::io::{self, Write};
 
 use vte::{Params, Parser, Perform};
 
+use crate::adapter::terminal::escape::CSI;
+
 /// The control characters that only lay text out, kept as they are: line
 /// feed, carriage return, tab and backspace.
 const LAYOUT_CONTROLS: &[u8] = b"\n\r\t\x08";
@@ -14,8 +16,6 @@ const LAYOUT_CONTROLS: &[u8] = b"\n\r\t\x08";
 /// up, down, forward and back (CUU, CUD, CUF, CUB), cursor to column (CHA),
 /// cursor position (CUP), erase in line (EL) and erase in display (ED).
 const KEPT_FINALS: &[char] = &['m', 'A', 'B', 'C', 'D', 'G', 'H', 'K', 'J'];
-/// Opens a control sequence.
-const CSI: &[u8] = b"\x1b[";
 /// Separates a control sequence's parameters.
 const PARAM_SEPARATOR: char = ';';
 /// Separates the sub-parameters of one parameter.
@@ -105,7 +105,7 @@ impl Perform for Kept {
                     .join(&SUBPARAM_SEPARATOR.to_string())
             })
             .collect();
-        self.bytes.extend_from_slice(CSI);
+        self.bytes.extend_from_slice(CSI.as_bytes());
         self.bytes
             .extend_from_slice(rebuilt.join(&PARAM_SEPARATOR.to_string()).as_bytes());
         let mut encoded = [0; 4];

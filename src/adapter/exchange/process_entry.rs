@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use getset::Getters;
 use serde::{Deserialize, Serialize};
@@ -6,11 +9,11 @@ use typed_builder::TypedBuilder;
 
 use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
-    config::{Environment, ProcessSpec, stays_under_root},
+    config::{DeclaredPorts, Environment, ProcessSpec, stays_under_root},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-        DescriptionError, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
+        DescriptionError, EnvName, EnvValue, LocalPort, ProcessName, ProjectRoot, StopGrace,
     },
 };
 
@@ -52,6 +55,10 @@ pub struct ProcessEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     ready: Option<ReadyEntry>,
+    /// The TCP ports it listens on, ascending; left out when it declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    ports: Option<Vec<u16>>,
 }
 
 impl ProcessEntry {
@@ -109,8 +116,25 @@ impl From<&ProcessSpec> for ProcessEntry {
                 .grace_period(spec.stop().grace_period().into_inner())
                 .build(),
             ready: spec.ready().as_ref().map(ReadyEntry::from),
+            ports: (!spec.ports().is_empty())
+                .then(|| spec.ports().iter().map(|port| port.into_inner()).collect()),
         }
     }
+}
+
+/// Reads the entry's ports, refusing zero, a port listed twice and more than
+/// a process may declare.
+fn declared_ports(raw: Vec<u16>) -> Result<DeclaredPorts, EntryError> {
+    let mut seen = BTreeSet::new();
+    for port in raw {
+        let port = LocalPort::try_new(port).map_err(|_| EntryError::InvalidPort { port })?;
+        if !seen.insert(port) {
+            return Err(EntryError::DuplicatePort {
+                port: port.into_inner(),
+            });
+        }
+    }
+    Ok(DeclaredPorts::of(seen)?)
 }
 
 /// Reads the entry's name, refusing a blank one and one holding a control
@@ -204,6 +228,7 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
                     .build(),
             )
             .ready(entry.ready.map(ReadyCheck::try_from).transpose()?)
+            .ports(declared_ports(entry.ports.unwrap_or_default())?)
             .build())
     }
 }

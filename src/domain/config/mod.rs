@@ -1,5 +1,6 @@
 mod applied_change;
 mod applied_settings;
+mod declared_ports;
 mod environment;
 mod error;
 mod field_edit;
@@ -20,12 +21,14 @@ mod spec;
 mod stack;
 mod stack_edit;
 mod stored_problem;
+mod too_many_ports;
 mod unconfined_dir;
 mod unreadable_project;
 mod working_dir;
 
 pub use applied_change::*;
 pub use applied_settings::*;
+pub use declared_ports::*;
 pub use environment::*;
 pub use error::*;
 pub use field_edit::*;
@@ -46,5 +49,6 @@ pub use spec::*;
 pub use stack::*;
 pub use stack_edit::*;
 pub use stored_problem::*;
+pub use too_many_ports::*;
 pub use unconfined_dir::*;
 pub use unreadable_project::*;

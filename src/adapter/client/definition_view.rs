@@ -86,7 +86,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        config::Environment,
+        config::{DeclaredPorts, Environment},
         process::{ReadyCheck, ReadyProbe, StopPolicy, StopSignal},
         value::{EnvName, EnvValue, LocalPort, PositiveDuration, StopGrace},
     };
@@ -112,10 +112,12 @@ mod tests {
                     .build(),
             )
             .ports(
-                [8080, 3000]
-                    .into_iter()
-                    .map(|port| LocalPort::try_new(port).unwrap())
-                    .collect(),
+                DeclaredPorts::of(
+                    [8080, 3000]
+                        .into_iter()
+                        .map(|port| LocalPort::try_new(port).unwrap()),
+                )
+                .unwrap(),
             )
             .build();
 

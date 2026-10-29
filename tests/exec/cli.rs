@@ -39,7 +39,7 @@ use muster::{
     },
     constants::APP_NAME,
     domain::{
-        config::{ENV_VARS_MAX, ProcessChange},
+        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
         port::{StackReader, StackStore},
         process::ProcessState,
@@ -1213,6 +1213,57 @@ fn an_export_writes_only_working_dirs_an_import_accepts() {
         scratch.exported(&copy).contains("working_dir: frontend"),
         "{}",
         scratch.exported(&copy)
+    );
+}
+
+/// Declared ports go in with an import and come back out of an export,
+/// ascending; a file declaring more than a process may is refused naming the
+/// limit and writes nothing.
+#[test]
+fn an_import_carries_declared_ports_and_refuses_too_many() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("muster.yml");
+    let declaring = |ports: &str| {
+        format!(
+            "version: 1\nprocesses:\n  - name: web\n    command: npm run dev\n    autostart: false\n    restart: never\n    stop:\n      signal: terminate\n      grace_period: 5s\n    ports: [{ports}]\n"
+        )
+    };
+
+    fs::write(&file, declaring("5173, 3000")).unwrap();
+    let import = scratch.on(&folder, &["import", file.to_str().unwrap()]);
+    assert!(import.status.success(), "{}", shown(&import));
+    let exported = scratch.exported(&folder);
+    assert!(
+        exported.contains("  ports:\n  - 3000\n  - 5173\n"),
+        "{exported}"
+    );
+
+    let too_many: Vec<String> = (1..=DECLARED_PORTS_MAX + 1)
+        .map(|port| port.to_string())
+        .collect();
+    fs::write(&file, declaring(&too_many.join(", "))).unwrap();
+    let refused = scratch.on(&folder, &["import", file.to_str().unwrap(), "--replace"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains(&format!(
+            "processes[0] (web): {} ports are more than the {DECLARED_PORTS_MAX} a process may \
+             declare",
+            DECLARED_PORTS_MAX + 1
+        )),
+        "{}",
+        shown(&refused)
+    );
+    assert_eq!(
+        scratch.exported(&folder),
+        exported,
+        "a refused import writes nothing"
     );
 }
 

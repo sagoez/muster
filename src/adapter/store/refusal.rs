@@ -39,7 +39,7 @@ const LOG_SIZE_OUT_OF_BOUNDS: &str = "it is outside the log sizes muster allows"
 /// Why a stored detach key is refused.
 const NOT_A_CHORD: &str = "it is not a Control chord muster knows";
 /// Why a stored duration is refused.
-const NOT_POSITIVE_MILLIS: &str = "it is not a positive whole number of milliseconds";
+pub(super) const NOT_POSITIVE_MILLIS: &str = "it is not a positive whole number of milliseconds";
 /// Why a stored stop grace is refused.
 const NOT_A_GRACE: &str =
     "it is not a positive whole number of milliseconds up to the longest grace";
@@ -50,7 +50,7 @@ const HOLDS_NUL: &str = "it holds a NUL character";
 /// Why a stored port is refused.
 const NOT_A_PORT: &str = "it is not a port from 1 to 65535";
 /// Why stored idle-stop columns that do not go together are refused.
-const IDLE_STOP_MISMATCHED: &str =
+pub(super) const IDLE_STOP_MISMATCHED: &str =
     "it names a kind muster does not know, or milliseconds that kind does not take";
 
 /// A refusal of a stored value, read as the sentence that follows the field

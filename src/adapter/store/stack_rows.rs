@@ -21,8 +21,8 @@ use super::{
 };
 use crate::domain::{
     config::{
-        AppliedChange, ConfigError, Environment, ImportMode, ImportPlan, ProcessChange,
-        ProcessSpec, Registration, Stack, StackEdit,
+        AppliedChange, ConfigError, DeclaredPorts, Environment, ImportMode, ImportPlan,
+        ProcessChange, ProcessSpec, Registration, Stack, StackEdit,
     },
     coordination::Author,
     port::{StackReader, StackStore},
@@ -44,6 +44,8 @@ const STOP_GRACE: &str = "stop grace";
 const READY_TIMEOUT: &str = "readiness timeout";
 /// A port a process declares, as its errors name it.
 const DECLARED_PORT: &str = "declared port";
+/// Every port a process declares, as its errors name them.
+const DECLARED_PORTS: &str = "set of declared ports";
 
 /// The text a path column holds.
 ///
@@ -62,7 +64,7 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
 fn process_from_row(
     row: &Row,
     environments: &mut HashMap<i64, Environment>,
-    ports: &mut HashMap<i64, BTreeSet<LocalPort>>,
+    ports: &mut HashMap<i64, DeclaredPorts>,
 ) -> Result<ProcessSpec, ConfigError> {
     let id: i64 = row.get("id").map_err(db_error)?;
     let name: String = row.get("name").map_err(db_error)?;
@@ -122,11 +124,11 @@ fn process_from_row(
 }
 
 /// Every declared port of the project's processes, by process row id, read in
-/// one query.
+/// one query; a process holding more than it may declare is refused.
 fn ports_of(
     conn: &Connection,
     project_id: i64,
-) -> Result<HashMap<i64, BTreeSet<LocalPort>>, ConfigError> {
+) -> Result<HashMap<i64, DeclaredPorts>, ConfigError> {
     let mut statement = conn
         .prepare(
             "SELECT pp.process_id, pp.port FROM process_ports pp \
@@ -145,7 +147,14 @@ fn ports_of(
             })?;
         ports.entry(process_id).or_default().insert(port);
     }
-    Ok(ports)
+    ports
+        .into_iter()
+        .map(|(process_id, ports)| {
+            DeclaredPorts::of(ports)
+                .map(|declared| (process_id, declared))
+                .map_err(|error| corrupt(DECLARED_PORTS, error))
+        })
+        .collect()
 }
 
 /// Writes `spec`'s declared ports for the process row `process_id`.
@@ -535,7 +544,7 @@ mod tests {
     use crate::{
         adapter::store::test_support::{fresh_store, spec},
         domain::{
-            config::{ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
+            config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
             port::{ProjectStore, SettingsReader, StackEditLog},
             process::{RestartPolicy, StopSignal},
             value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
@@ -577,7 +586,7 @@ mod tests {
             )
             .with_autostart(true)
             .with_restart(RestartPolicy::OnFailure)
-            .with_ports(BTreeSet::from([LocalPort::try_new(5173).unwrap()]))
+            .with_ports(DeclaredPorts::of([LocalPort::try_new(5173).unwrap()]).unwrap())
     }
 
     /// The names of `stack`'s processes, in stack order.
@@ -862,6 +871,39 @@ mod tests {
                 "{port}"
             );
         }
+    }
+
+    /// More declared ports than a process may have, written past muster, are
+    /// refused on read naming the limit.
+    #[test]
+    fn a_hand_edited_port_count_past_the_limit_names_it() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &full_spec(), &Author::human())
+            .unwrap();
+        let added = DECLARED_PORTS_MAX + 1;
+        store
+            .write(|conn| {
+                conn.execute(
+                    "WITH RECURSIVE n(port) AS (SELECT 1 UNION ALL SELECT port + 1 FROM n \
+                     WHERE port < ?1) INSERT INTO process_ports (process_id, port) \
+                     SELECT (SELECT id FROM processes), port FROM n",
+                    params![i64::try_from(added).unwrap()],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.stack(&root).unwrap_err().to_string(),
+            format!(
+                "stored set of declared ports is invalid: {} ports are more than the \
+                 {DECLARED_PORTS_MAX} a process may declare",
+                added + 1
+            ),
+            "the full spec's own port counts too"
+        );
     }
 
     #[test]
@@ -1329,7 +1371,7 @@ mod tests {
     fn ports_round_trip_in_order_and_go_with_their_process() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
-        let ports = BTreeSet::from([port(5173), port(3000), port(8080)]);
+        let ports = DeclaredPorts::of([port(5173), port(3000), port(8080)]).unwrap();
         store
             .add_process(
                 &root,
@@ -1340,7 +1382,7 @@ mod tests {
         store
             .add_process(
                 &root,
-                &spec("api", "cargo run").with_ports(BTreeSet::from([port(3000)])),
+                &spec("api", "cargo run").with_ports(DeclaredPorts::of([port(3000)]).unwrap()),
                 &Author::human(),
             )
             .unwrap();
@@ -1375,7 +1417,8 @@ mod tests {
         store
             .add_process(
                 &root,
-                &spec("web", "npm run dev").with_ports(BTreeSet::from([port(3000), port(5173)])),
+                &spec("web", "npm run dev")
+                    .with_ports(DeclaredPorts::of([port(3000), port(5173)]).unwrap()),
                 &agent,
             )
             .unwrap();
@@ -1386,12 +1429,15 @@ mod tests {
         };
 
         let replace = ProcessChange::builder()
-            .ports(Some(BTreeSet::from([port(8080)])))
+            .ports(Some(DeclaredPorts::of([port(8080)]).unwrap()))
             .build();
         store
             .change_process(&root, &name("web"), &replace, &agent)
             .unwrap();
-        assert_eq!(ports_of_web(&store), BTreeSet::from([port(8080)]));
+        assert_eq!(
+            ports_of_web(&store),
+            DeclaredPorts::of([port(8080)]).unwrap()
+        );
         assert_eq!(port_rows(&store), 1);
         assert_eq!(
             store.edits(&root).unwrap().last().unwrap().message(),
@@ -1399,7 +1445,7 @@ mod tests {
         );
 
         let clear = ProcessChange::builder()
-            .ports(Some(BTreeSet::new()))
+            .ports(Some(DeclaredPorts::default()))
             .build();
         store
             .change_process(&root, &name("web"), &clear, &agent)
@@ -1407,8 +1453,10 @@ mod tests {
         assert!(ports_of_web(&store).is_empty());
         assert_eq!(port_rows(&store), 0);
 
-        let imported = spec("web", "npm run dev").with_ports(BTreeSet::from([port(4000)]));
-        let added = spec("worker", "bin/worker").with_ports(BTreeSet::from([port(9000)]));
+        let imported =
+            spec("web", "npm run dev").with_ports(DeclaredPorts::of([port(4000)]).unwrap());
+        let added =
+            spec("worker", "bin/worker").with_ports(DeclaredPorts::of([port(9000)]).unwrap());
         store
             .import(&root, &[imported.clone(), added.clone()], ImportMode::Merge)
             .unwrap();

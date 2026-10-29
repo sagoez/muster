@@ -1,12 +1,12 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{FieldEdit, ProcessField},
+    config::{DeclaredPorts, FieldEdit, ProcessField},
     process::{ReadyCheck, RestartPolicy, StopSignal},
-    value::{CommandLine, Description, EnvName, EnvValue, LocalPort, StopGrace},
+    value::{CommandLine, Description, EnvName, EnvValue, StopGrace},
 };
 
 /// What `muster set` changes on one process. Every field left unset keeps the
@@ -46,7 +46,7 @@ pub struct ProcessChange {
     ready: FieldEdit<ReadyCheck>,
     /// The ports it listens on, replacing the set; an empty set clears it.
     #[builder(default)]
-    ports: Option<BTreeSet<LocalPort>>,
+    ports: Option<DeclaredPorts>,
 }
 
 impl ProcessChange {
@@ -95,6 +95,7 @@ impl ProcessChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::value::LocalPort;
 
     #[test]
     fn empty_only_when_nothing_changes() {
@@ -148,7 +149,9 @@ mod tests {
     #[test]
     fn a_ports_change_needs_no_restart_and_names_the_ports_field() {
         let change = ProcessChange::builder()
-            .ports(Some(BTreeSet::from([LocalPort::try_new(3000).unwrap()])))
+            .ports(Some(
+                DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap(),
+            ))
             .build();
 
         assert!(!change.needs_restart());
@@ -156,7 +159,7 @@ mod tests {
         assert_eq!(change.fields(), [ProcessField::Ports]);
         assert_eq!(
             ProcessChange::builder()
-                .ports(Some(BTreeSet::new()))
+                .ports(Some(DeclaredPorts::default()))
                 .build()
                 .fields(),
             [ProcessField::Ports],

@@ -1,12 +1,12 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessDefaults, ProcessSpec},
+    config::{DeclaredPorts, Environment, ProcessDefaults, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
-    value::{CommandLine, Description, LocalPort, ProcessName, StopGrace},
+    value::{CommandLine, Description, ProcessName, StopGrace},
 };
 
 /// A process as `muster add` receives it, before the `default_*` settings fill
@@ -44,7 +44,7 @@ pub struct ProcessDraft {
     ready: Option<ReadyCheck>,
     /// The TCP ports it listens on.
     #[builder(default)]
-    ports: BTreeSet<LocalPort>,
+    ports: DeclaredPorts,
 }
 
 impl ProcessDraft {
@@ -74,6 +74,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::domain::value::LocalPort;
 
     /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
@@ -127,13 +128,13 @@ mod tests {
             .autostart(Some(true))
             .restart(Some(RestartPolicy::Always))
             .stop_signal(Some(StopSignal::Interrupt))
-            .ports(BTreeSet::from([LocalPort::try_new(3000).unwrap()]))
+            .ports(DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap())
             .build()
             .complete(&defaults());
 
         assert_eq!(
             spec.ports(),
-            &BTreeSet::from([LocalPort::try_new(3000).unwrap()])
+            &DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap()
         );
         assert!(*spec.autostart());
         assert_eq!(*spec.restart(), RestartPolicy::Always);

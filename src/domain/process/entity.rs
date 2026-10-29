@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessSpec, launch_ports},
+    config::{DeclaredPorts, Environment, ProcessSpec, launch_ports},
     process::{ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, LocalPort, PaneId, ProcessName},
 };
@@ -42,7 +42,7 @@ pub struct Process {
     ready: Option<ReadyCheck>,
     /// The TCP ports it listens on, checked free before each launch.
     #[builder(default)]
-    ports: BTreeSet<LocalPort>,
+    ports: DeclaredPorts,
 }
 
 impl Process {
@@ -117,7 +117,7 @@ mod tests {
                     .grace_period(StopGrace::try_new(Duration::from_secs(3)).unwrap())
                     .build(),
             )
-            .ports(BTreeSet::from([LocalPort::try_new(5173).unwrap()]))
+            .ports(DeclaredPorts::of([LocalPort::try_new(5173).unwrap()]).unwrap())
             .build()
     }
 
@@ -136,7 +136,7 @@ mod tests {
     fn set_spec_keeps_identity_and_state() {
         let mut process = spec("npm run dev").to_process(PaneId::new(4));
         process.set_state(ProcessState::Running);
-        let changed = spec("pnpm dev").with_ports(BTreeSet::new());
+        let changed = spec("pnpm dev").with_ports(DeclaredPorts::default());
 
         process.set_spec(&changed);
 

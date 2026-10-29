@@ -232,7 +232,7 @@ impl ServiceClient {
     /// # Errors
     /// Returns a [`ClientError`] when there is no state directory, or a
     /// service holds the socket but does not answer within
-    /// [`NOTIFY_TIMEOUT`].
+    /// `NOTIFY_TIMEOUT`.
     pub fn ask_if_running(
         request: &ServiceRequest,
     ) -> Result<Option<ServiceResponse>, ClientError> {

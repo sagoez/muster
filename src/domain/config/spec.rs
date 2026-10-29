@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use getset::{Getters, WithSetters};
 use strum::IntoEnumIterator;
@@ -6,8 +6,8 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{
-        ConfigError, Environment, OverCap, ProcessChange, ProcessField, StoredProblem,
-        UnconfinedDir, stays_under_root,
+        ConfigError, DeclaredPorts, Environment, OverCap, ProcessChange, ProcessField,
+        StoredProblem, UnconfinedDir, stays_under_root,
     },
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, LocalPort, PaneId, ProcessName, ProjectRoot},
@@ -15,8 +15,8 @@ use crate::domain::{
 
 /// The ports a launch checks are free: `declared` and the port `ready` probes,
 /// each once, ascending.
-pub fn launch_ports(declared: &BTreeSet<LocalPort>, ready: Option<&ReadyCheck>) -> Vec<LocalPort> {
-    let mut ports = declared.clone();
+pub fn launch_ports(declared: &DeclaredPorts, ready: Option<&ReadyCheck>) -> Vec<LocalPort> {
+    let mut ports = declared.ports().clone();
     ports.extend(ready.and_then(|check| check.probe().port()));
     ports.into_iter().collect()
 }
@@ -58,7 +58,7 @@ pub struct ProcessSpec {
     /// The TCP ports it listens on, checked free before each launch.
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
-    ports: BTreeSet<LocalPort>,
+    ports: DeclaredPorts,
 }
 
 impl ProcessSpec {
@@ -316,18 +316,18 @@ mod tests {
 
     #[test]
     fn a_ports_change_replaces_the_set_and_an_empty_set_clears_it() {
-        let declared = spec().with_ports(BTreeSet::from([port(3000), port(5173)]));
+        let declared = spec().with_ports(DeclaredPorts::of([port(3000), port(5173)]).unwrap());
         let replace = ProcessChange::builder()
-            .ports(Some(BTreeSet::from([port(8080)])))
+            .ports(Some(DeclaredPorts::of([port(8080)]).unwrap()))
             .build();
         let clear = ProcessChange::builder()
-            .ports(Some(BTreeSet::new()))
+            .ports(Some(DeclaredPorts::default()))
             .build();
 
         let replaced = declared.clone().with_change(&replace).unwrap();
         let cleared = declared.clone().with_change(&clear).unwrap();
 
-        assert_eq!(replaced.ports(), &BTreeSet::from([port(8080)]));
+        assert_eq!(replaced.ports(), &DeclaredPorts::of([port(8080)]).unwrap());
         assert!(cleared.ports().is_empty());
         assert_eq!(
             declared
@@ -350,7 +350,7 @@ mod tests {
                     .build(),
             )
         };
-        let declared = spec().with_ports(BTreeSet::from([port(5173), port(3000)]));
+        let declared = spec().with_ports(DeclaredPorts::of([port(5173), port(3000)]).unwrap());
 
         assert_eq!(declared.clone().with_ready(ready("3000")).launch_ports(), [
             port(3000),

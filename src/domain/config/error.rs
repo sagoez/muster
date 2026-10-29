@@ -3,7 +3,7 @@ use std::{error::Error as StdError, path::PathBuf};
 use thiserror::Error;
 
 use crate::domain::{
-    config::{OverCap, PROCESSES_MAX, SettingKey},
+    config::{OverCap, PROCESSES_MAX, SettingKey, TooManyPorts},
     coordination::LOCKS_PER_SESSION_MAX,
     pty::PtyError,
     value::{ProcessName, ProjectName, refused_name},
@@ -81,6 +81,9 @@ pub enum ConfigError {
         /// The cap it would run past.
         over: OverCap,
     },
+    /// A process would declare more ports than it may.
+    #[error(transparent)]
+    TooManyPorts(#[from] TooManyPorts),
     /// A write would leave the project with more processes than it may have.
     #[error(
         "this would leave the project with {found} processes, more than the {PROCESSES_MAX} it may have; remove one first"

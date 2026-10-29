@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::domain::value::NameProblem;
+use crate::domain::{config::TooManyPorts, value::NameProblem};
 
 /// Why one process entry of a stack file is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -81,6 +81,21 @@ pub enum EntryError {
         /// What is wrong with it.
         reason: String,
     },
+    /// `ports` lists zero, which names no port.
+    #[error("ports: {port} is not a port from 1 to 65535")]
+    InvalidPort {
+        /// The port refused.
+        port: u16,
+    },
+    /// `ports` lists one port more than once.
+    #[error("port {port} is listed twice")]
+    DuplicatePort {
+        /// The port listed again.
+        port: u16,
+    },
+    /// `ports` lists more ports than a process may declare.
+    #[error(transparent)]
+    TooManyPorts(#[from] TooManyPorts),
     /// `stop.grace_period` is zero, longer than muster allows or finer than a
     /// millisecond.
     #[error("stop.grace_period must be longer than zero and at most 1h, in whole milliseconds")]

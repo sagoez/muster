@@ -170,7 +170,7 @@ impl ShellRegistry for ShellFiles {
     }
 
     /// Writes nothing for no lines, and drops the batch whole once the shell
-    /// has [`MAX_NOTE_FILES`] waiting.
+    /// has `MAX_NOTE_FILES` waiting.
     fn deliver(
         &self,
         shell: &ShellId,

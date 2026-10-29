@@ -14,6 +14,7 @@ Commands:
   start         Start a process
   stop          Stop a process through its stop policy
   restart       Restart a process
+  wait          Wait until a process prints a line, accepts a connection, answers a URL, reaches a state, or passes its readiness check
   pause         Suspend a process, leaving it alive
   resume        Resume a paused process
   kill          Kill a process at once, skipping its graceful stop
@@ -100,9 +101,11 @@ Arguments:
   [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
 
 Options:
-      --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+      --json                Print the result as JSON
+  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --wait                Wait until its new run passes its readiness check, or runs when it has none
+      --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
+  -h, --help                Print help
 
 
 $ muster stop --help
@@ -128,9 +131,33 @@ Arguments:
   [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
 
 Options:
-      --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+      --json                Print the result as JSON
+  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --wait                Wait until its new run passes its readiness check, or runs when it has none
+      --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
+  -h, --help                Print help
+
+
+$ muster wait --help
+Wait until a process prints a line, accepts a connection, answers a URL, reaches a state, or passes its readiness check
+
+Usage: muster wait [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+      --log <TEXT>          Wait for an output line containing this text
+  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --regex               Read --log as a regular expression
+      --port <PORT>         Wait until a TCP connection to this localhost port succeeds
+      --http <URL>          Wait until this localhost URL answers below 500
+      --status <CODE>       With --http, the status to wait for instead
+      --state <STATE>       Wait for a lifecycle state; `stopped` means not running at all [possible values: running, paused, exited, crashed, restarting, stopped]
+      --timeout <DURATION>  The longest to wait, such as 60s; unbounded when absent
+      --since <CURSOR>      Count output after this cursor, from an earlier wait's result, as well as output after the command started
+      --json                Print the result as JSON
+  -h, --help                Print help (see more with '--help')
 
 
 $ muster pause --help

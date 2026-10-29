@@ -7,7 +7,10 @@ use typed_builder::TypedBuilder;
 use super::exit_view::ExitView;
 use crate::{
     adapter::service::ProcessStatus,
-    domain::{process::ProcessState, value::ProcessName},
+    domain::{
+        process::{ProcessState, Readiness},
+        value::ProcessName,
+    },
 };
 
 /// One process as `--json` shows it. Uptime is whole seconds; the stop grace
@@ -20,6 +23,9 @@ pub struct ProcessView {
     /// Its lifecycle state.
     #[getset(get_copy = "pub")]
     state: ProcessState,
+    /// Whether its current run passed its readiness check.
+    #[getset(get_copy = "pub")]
+    ready: Readiness,
     /// The OS process id while a child runs.
     #[getset(get_copy = "pub")]
     pid: Option<u32>,
@@ -51,6 +57,7 @@ impl From<&ProcessStatus> for ProcessView {
         let usage = status.usage().as_ref();
         Self {
             name: status.name().clone(),
+            ready: *status.ready(),
             state: *status.state(),
             pid: *status.pid(),
             uptime: status.uptime().map(|uptime| uptime.as_secs()),
@@ -58,7 +65,10 @@ impl From<&ProcessStatus> for ProcessView {
             cpu_percent: usage.map(|usage| *usage.cpu_percent()),
             memory_bytes: usage.map(|usage| *usage.memory_bytes()),
             attached: *status.attached(),
-            last_exit: status.last_exit().as_ref().map(ExitView::from),
+            last_exit: status
+                .last_exit()
+                .as_ref()
+                .map(|exit| ExitView::from(exit.outcome())),
             stop_grace: whole_seconds_up(*status.stop_grace()),
         }
     }

@@ -20,7 +20,7 @@ use super::{
     add::{add, add_rows},
     args::{
         Args, Command, ConfigCommand, CoordinationCommand, ProcessArgs, ProjectsCommand, RunArgs,
-        ServiceCommand, SetArgs,
+        ServiceCommand, SetArgs, StartArgs, WaitArgs,
     },
     attach::{Announce, attach_named},
     attach_end::AttachEnd,
@@ -56,16 +56,17 @@ use super::{
     service_stopped::ServiceStopped,
     set::{set, set_rows},
     todo::todo,
+    wait::{condition, wait_text, wait_through},
 };
 use crate::{
     adapter::{
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectView, RunningServiceNotifier,
-            ServiceClient, SettingView, SettingsView, SettleWatch, process,
+            ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
         },
         mcp::{self, McpDeps},
         private_dir::state_dir,
-        service::{ProcessAction, ProjectStatus},
+        service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         store::SqliteStore,
     },
     constants::APP_NAME,
@@ -74,7 +75,7 @@ use crate::{
         coordination::Author,
         port::SettingsStore,
         project::Project,
-        value::{DetachKey, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -144,9 +145,10 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             Action::Down,
             |_, client, project, watch| Ok(process::down(client, project, watch)?),
         ),
-        Some(Command::Start(target)) => control(invocation, target, ProcessAction::Start),
+        Some(Command::Start(args)) => start(invocation, args, ProcessAction::Start),
         Some(Command::Stop(target)) => control(invocation, target, ProcessAction::Stop),
-        Some(Command::Restart(target)) => control(invocation, target, ProcessAction::Restart),
+        Some(Command::Restart(args)) => start(invocation, args, ProcessAction::Restart),
+        Some(Command::Wait(args)) => wait(invocation, args),
         Some(Command::Pause(target)) => control(invocation, target, ProcessAction::Pause),
         Some(Command::Resume(target)) => control(invocation, target, ProcessAction::Resume),
         Some(Command::Kill(target)) => control(invocation, target, ProcessAction::Kill),
@@ -389,6 +391,83 @@ fn control(invocation: &Invocation<'_>, target: ProcessArgs, action: ProcessActi
             process::control(client, project, pick, action, watch)
         },
     );
+}
+
+/// Starts or restarts the process `args` names, then, with `--wait`, waits
+/// for its new run to be ready.
+fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
+    let StartArgs {
+        target,
+        wait,
+        timeout,
+    } = args;
+    if !wait {
+        return control(invocation, target, action);
+    }
+    let ProcessArgs { name, json } = target;
+    let presenter = asking_first(
+        Presenter::detect(json),
+        json,
+        name.is_none(),
+        Presenter::can_choose_process,
+    );
+    let project = project_or_fail(invocation, json);
+    let result = connect().and_then(|client| {
+        let name = named_or_chosen(&project, name.as_ref(), presenter)(&process::status(
+            &client, &project,
+        )?)?;
+        Ok(wait_through(
+            None,
+            None,
+            timeout.map(PositiveDuration::into_inner),
+            |spec| process::control_waiting(&client, &project, &name, action, spec),
+            |spec| process::wait(&client, &project, &name, spec),
+        )?)
+    });
+    finish_wait(json, result);
+}
+
+/// Waits for what `args` names on its process, chosen at a terminal when it
+/// names none.
+fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
+    let json = args.json;
+    let presenter = asking_first(
+        Presenter::detect(json),
+        json,
+        args.name.is_none(),
+        Presenter::can_choose_process,
+    );
+    let until = condition(&args).unwrap_or_else(|error| fail_command(json, &error));
+    let project = project_or_fail(invocation, json);
+    let result = connect().and_then(|client| {
+        let name = named_or_chosen(&project, args.name.as_ref(), presenter)(&process::status(
+            &client, &project,
+        )?)?;
+        let send = |spec: &WaitSpec| process::wait(&client, &project, &name, spec);
+        Ok(wait_through(
+            until,
+            args.since,
+            args.timeout.map(PositiveDuration::into_inner),
+            send,
+            send,
+        )?)
+    });
+    finish_wait(json, result);
+}
+
+/// Prints how a wait ended and exits with a failure unless it matched.
+fn finish_wait(json: bool, result: Result<WaitOutcome, CliError>) {
+    match result {
+        Ok(outcome) => {
+            print_result(json, &WaitView::from(&outcome), |_| {
+                emit_line(&wait_text(&outcome));
+            });
+            if outcome.status() != WaitStatus::Matched {
+                exit(CliExit::ActionFailed.code());
+            }
+        },
+        Err(error) => fail_command(json, &error),
+    }
 }
 
 /// Prints a process's log or screen, or follows its log until interrupted;

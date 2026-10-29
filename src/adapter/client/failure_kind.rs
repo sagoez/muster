@@ -68,6 +68,7 @@ impl From<ServiceErrorKind> for FailureKind {
             ServiceErrorKind::UnknownProject => Self::UnknownProject,
             ServiceErrorKind::NotRunning => Self::NotRunning,
             ServiceErrorKind::InvalidRequest => Self::VersionMismatch,
+            ServiceErrorKind::InvalidInput => Self::InvalidInput,
             ServiceErrorKind::Busy => Self::Busy,
             ServiceErrorKind::Internal => Self::Io,
         }

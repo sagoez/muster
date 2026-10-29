@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crossbeam_channel::Sender;
 
 use super::{
+    probe_worker::ProbeTarget,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
     supervisor::{HolderScreen, ShutdownGeneration, SpawnGeneration},
@@ -8,7 +11,7 @@ use super::{
 use crate::{
     adapter::holder::HolderRecord,
     domain::{
-        port::ProcessHandle,
+        port::{ListeningSocket, ProcessHandle},
         pty::{ProcessOutput, PtyError},
         value::{PaneId, ProjectRoot},
     },
@@ -77,6 +80,23 @@ pub enum ServiceEvent {
         record: Box<HolderRecord>,
         /// The adopted process, or why its holder could not be adopted.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
+    },
+    /// A port or HTTP probe passed for one run of a process; a pass for a run
+    /// that is no longer current is ignored.
+    ProbePassed {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane of the process.
+        pane: PaneId,
+        /// The run the probe was for.
+        generation: SpawnGeneration,
+        /// What passed.
+        probe: ProbeTarget,
+    },
+    /// The ports each running process tree listens on, keyed by root pid.
+    PortsSampled {
+        /// The sockets of each root pid that has any.
+        ports: HashMap<u32, Vec<ListeningSocket>>,
     },
     /// A client's request, to be answered on `reply`.
     Request {

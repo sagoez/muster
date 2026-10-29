@@ -33,6 +33,7 @@ mod stop_view;
 mod unavailable_reason;
 mod unwatched;
 mod wait_end;
+mod wait_view;
 
 pub use action::*;
 pub use action_report::*;
@@ -62,3 +63,4 @@ pub use stop_view::*;
 pub use unavailable_reason::*;
 pub use unwatched::*;
 pub use wait_end::*;
+pub use wait_view::*;

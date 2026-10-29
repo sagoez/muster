@@ -15,7 +15,7 @@ use crate::domain::{
         Stack,
     },
     port::StackStore,
-    process::StopPolicy,
+    process::{ReadyCheck, ReadyProbe, StopPolicy},
     project::Project,
     value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot},
 };
@@ -23,7 +23,8 @@ use crate::domain::{
 /// Selects a process's definition columns in the order
 /// [`process_from_row`] reads them.
 const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description, autostart, \
-                              restart, stop_signal, stop_grace_ms FROM processes";
+                              restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
+                              ready_timeout_ms FROM processes";
 
 /// The text a path column holds.
 ///
@@ -48,6 +49,21 @@ fn process_from_row(
     let restart: String = row.get(6).map_err(db_error)?;
     let stop_signal: String = row.get(7).map_err(db_error)?;
     let stop_grace_ms: i64 = row.get(8).map_err(db_error)?;
+    let ready_kind: Option<String> = row.get(9).map_err(db_error)?;
+    let ready_target: Option<String> = row.get(10).map_err(db_error)?;
+    let ready_timeout_ms: Option<i64> = row.get(11).map_err(db_error)?;
+    let ready = match (ready_kind, ready_target, ready_timeout_ms) {
+        (Some(kind), Some(target), Some(timeout_ms)) => Some(
+            ReadyCheck::builder()
+                .probe(
+                    ReadyProbe::from_stored(&kind, &target)
+                        .map_err(|error| corrupt("readiness check", error))?,
+                )
+                .timeout(grace_from_millis("readiness timeout", timeout_ms)?)
+                .build(),
+        ),
+        _ => None,
+    };
     Ok(ProcessSpec::builder()
         .name(ProcessName::try_new(name).map_err(|error| corrupt("process name", error))?)
         .command(CommandLine::try_new(command).map_err(|error| corrupt("command", error))?)
@@ -75,6 +91,7 @@ fn process_from_row(
                 .grace_period(grace_from_millis("stop grace", stop_grace_ms)?)
                 .build(),
         )
+        .ready(ready)
         .build())
 }
 
@@ -399,6 +416,14 @@ mod tests {
             .unwrap();
     }
 
+    /// The check [`set_ready`] stores, as the stack reads it back.
+    fn port_check() -> ReadyCheck {
+        ReadyCheck::builder()
+            .probe(ReadyProbe::from_stored("port", "3000").unwrap())
+            .timeout(grace_from_millis("readiness timeout", 30_000).unwrap())
+            .build()
+    }
+
     fn ready_target(store: &SqliteStore, process: &str) -> Option<String> {
         store
             .read(|conn| {
@@ -465,7 +490,12 @@ mod tests {
 
         let changed = store.change_process(&root, &name("web"), &change).unwrap();
 
-        assert_eq!(changed, full_spec().with_change(&change));
+        assert_eq!(
+            changed,
+            full_spec()
+                .with_ready(Some(port_check()))
+                .with_change(&change)
+        );
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(names_of(&stack), ["web", "api"]);
         assert_eq!(stack.processes()[0], changed);
@@ -588,7 +618,10 @@ mod tests {
         assert_eq!(*plan.added(), vec![name("worker")]);
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(names_of(&stack), ["web", "api", "worker"]);
-        assert_eq!(stack.processes()[0], full_spec());
+        assert_eq!(
+            stack.processes()[0],
+            full_spec().with_ready(Some(port_check()))
+        );
         assert_eq!(ready_target(&store, "web").as_deref(), Some("3000"));
     }
 

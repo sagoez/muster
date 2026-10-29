@@ -1,6 +1,13 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
-use super::{launch_environment::LaunchEnvironment, process_action::ProcessAction};
+use super::{
+    launch_environment::LaunchEnvironment,
+    process_action::ProcessAction,
+    stack_event::{EventKind, EventSeq},
+    wait_condition::WaitSpec,
+};
 use crate::{
     adapter::bridge::WorkspaceRequest,
     domain::value::{ProcessName, ProjectRoot},
@@ -23,6 +30,9 @@ pub enum ServiceRequest {
         project: ProjectRoot,
         /// The client's environment, which what it starts runs with.
         environment: LaunchEnvironment,
+        /// A wait on each process it starts, answered as one batch once every
+        /// wait ended.
+        wait: Option<WaitSpec>,
     },
     /// Stops every process of the project.
     Down {
@@ -45,6 +55,32 @@ pub enum ServiceRequest {
         /// The client's environment, which a process it starts or restarts
         /// runs with.
         environment: LaunchEnvironment,
+        /// A wait on the run the action leaves, registered in the same loop
+        /// turn as the action so none of that run's output is missed; the
+        /// answer is then how the wait ended.
+        wait: Option<WaitSpec>,
+    },
+    /// Waits for a process's output, port, URL, state or readiness.
+    Wait {
+        /// The process's project.
+        project: ProjectRoot,
+        /// The process.
+        name: ProcessName,
+        /// What to wait for, and for how long.
+        wait: WaitSpec,
+    },
+    /// Reads the project's lifecycle events after a cursor, waiting for one
+    /// when there are none yet.
+    Events {
+        /// The project whose events to read.
+        project: ProjectRoot,
+        /// Events after this one count; without it, the newest few.
+        since: Option<EventSeq>,
+        /// The kinds to read, every kind when empty.
+        kinds: Vec<EventKind>,
+        /// Longest to wait for a new event when there is none.
+        #[serde(with = "humantime_serde")]
+        wait: Duration,
     },
     /// Finds where a running process's holder and log are.
     Locate {

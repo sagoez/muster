@@ -87,7 +87,10 @@ impl Stack {
         }
         let updated: Vec<&ProcessSpec> = existing
             .into_iter()
-            .filter(|spec| self.process(spec.name()) != Some(*spec))
+            .filter(|spec| {
+                self.process(spec.name())
+                    .is_none_or(|stored| stored.differs_outside_readiness(spec))
+            })
             .collect();
         let removed = match mode {
             ImportMode::Replace => {
@@ -120,7 +123,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::Environment,
-        process::{RestartPolicy, StopPolicy, StopSignal},
+        process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, PositiveDuration, ProjectName, ProjectRoot},
     };
 
@@ -266,6 +269,23 @@ mod tests {
     fn replacing_with_the_same_stack_changes_nothing() {
         let plan = current()
             .plan_import(current().processes(), ImportMode::Replace)
+            .unwrap();
+
+        assert!(plan.is_empty());
+    }
+
+    /// An import does not manage readiness checks, so a stored one never
+    /// makes an otherwise identical definition count as updated.
+    #[test]
+    fn a_stored_readiness_check_does_not_count_as_a_change() {
+        let check = ReadyCheck::builder()
+            .probe(ReadyProbe::from_stored("port", "3000").unwrap())
+            .timeout(PositiveDuration::try_new(Duration::from_secs(30)).unwrap())
+            .build();
+        let stored = stack(vec![spec("web", "npm run dev").with_ready(Some(check))]);
+
+        let plan = stored
+            .plan_import(&[spec("web", "npm run dev")], ImportMode::Merge)
             .unwrap();
 
         assert!(plan.is_empty());

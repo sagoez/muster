@@ -80,6 +80,9 @@ pub enum CliError {
         "'{0}' is not a valid environment variable; pass KEY=VALUE, where KEY has no '=' and does not start with MUSTER_"
     )]
     InvalidEnv(String),
+    /// A `--log` pattern was blank or too long.
+    #[error("'{0}' is not a valid pattern; pass 1 to 512 characters")]
+    InvalidPattern(String),
     /// A `--description` was blank.
     #[error("the description is empty; pass --no-description to clear it")]
     EmptyDescription,
@@ -223,6 +226,7 @@ impl CliError {
             | Self::EmptyCommand
             | Self::InvalidCommand
             | Self::InvalidEnv(_)
+            | Self::InvalidPattern(_)
             | Self::EmptyDescription
             | Self::NotADirectory(_)
             | Self::UnrepresentablePath(_)
@@ -289,6 +293,7 @@ fn refusal_hint(kind: ServiceErrorKind) -> String {
         ServiceErrorKind::UnknownProcess
         | ServiceErrorKind::UnknownProject
         | ServiceErrorKind::NotRunning
+        | ServiceErrorKind::InvalidInput
         | ServiceErrorKind::Internal => String::new(),
     }
 }

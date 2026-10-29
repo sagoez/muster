@@ -14,6 +14,9 @@ pub enum ServiceErrorKind {
     /// The request could not be read, as one from a client of another version
     /// would be.
     InvalidRequest,
+    /// A value in the request is not usable, such as a pattern that does not
+    /// compile or a readiness wait on a process with no check.
+    InvalidInput,
     /// The service is shutting down and takes no more requests.
     Busy,
     /// The service failed for a reason of its own, such as a store it cannot

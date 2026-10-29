@@ -235,6 +235,7 @@ impl Scratch {
         self.send(ServiceRequest::Up {
             project: project.clone(),
             environment: client_env(),
+            wait: None,
         })
     }
 
@@ -245,6 +246,7 @@ impl Scratch {
             name: ProcessName::try_new("api").unwrap(),
             action,
             environment: client_env(),
+            wait: None,
         })
     }
 

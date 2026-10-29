@@ -34,7 +34,8 @@ use crate::{
         holder::rotated_path,
         service::{
             BatchOutcome, LaunchEnvironment, Notice, ProcessAction, ProcessStatus, ProjectStatus,
-            ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+            ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse, WaitOutcome,
+            WaitSpec,
         },
     },
     domain::{
@@ -90,6 +91,7 @@ pub fn up(
         client.send(&ServiceRequest::Up {
             project: project.root().clone(),
             environment: LaunchEnvironment::current(),
+            wait: None,
         })?,
         project,
     )?;
@@ -237,10 +239,75 @@ fn send_control(
             name: name.clone(),
             action,
             environment: LaunchEnvironment::current(),
+            wait: None,
         })?,
         project,
         Some(name),
     )
+}
+
+/// Applies `action` to the process `name` of `project` and waits, as `wait`
+/// asks, on the run the action leaves; a start or restart only counts its
+/// new run.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+pub fn control_waiting(
+    client: &ServiceClient,
+    project: &Project,
+    name: &ProcessName,
+    action: ProcessAction,
+    wait: &WaitSpec,
+) -> Result<WaitOutcome, ClientError> {
+    let request = ServiceRequest::Control {
+        project: project.root().clone(),
+        name: name.clone(),
+        action,
+        environment: LaunchEnvironment::current(),
+        wait: Some(wait.clone()),
+    };
+    waited(
+        client.send_waiting(&request, *wait.timeout())?,
+        project,
+        name,
+    )
+}
+
+/// Waits, as `wait` asks, for the process `name` of `project`.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+pub fn wait(
+    client: &ServiceClient,
+    project: &Project,
+    name: &ProcessName,
+    wait: &WaitSpec,
+) -> Result<WaitOutcome, ClientError> {
+    let request = ServiceRequest::Wait {
+        project: project.root().clone(),
+        name: name.clone(),
+        wait: wait.clone(),
+    };
+    waited(
+        client.send_waiting(&request, *wait.timeout())?,
+        project,
+        name,
+    )
+}
+
+/// How the wait on the process `name` of `project` ended, from `response`.
+///
+/// # Errors
+/// Returns the [`ClientError`] for a refusal or an unexpected answer.
+fn waited(
+    response: ServiceResponse,
+    project: &Project,
+    name: &ProcessName,
+) -> Result<WaitOutcome, ClientError> {
+    match response {
+        ServiceResponse::Waited(outcome) => Ok(outcome),
+        other => Err(unexpected(other, project, Some(name))),
+    }
 }
 
 /// Waits at most `bound` for the processes `names` of `project`, removed

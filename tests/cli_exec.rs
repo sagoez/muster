@@ -487,6 +487,7 @@ fn in_process_service(
             .ports(Box::new(QuietPorts))
             .stacks(Box::new(store.clone()))
             .settings(Box::new(store))
+            .listening(None)
             .build();
         ServiceRuntime::run(singleton, deps)
     });
@@ -538,6 +539,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
         scratch.send(&ServiceRequest::Up {
             project: root(&project),
             environment: LaunchEnvironment::default(),
+            wait: None,
         }),
         ServiceResponse::Batch(_)
     ));
@@ -591,6 +593,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
     scratch.send(&ServiceRequest::Up {
         project: root(&project),
         environment: LaunchEnvironment::default(),
+        wait: None,
     });
     wait_until("the held launch to run api", || {
         let (state, running) = scratch.first_row_raw(&project);
@@ -603,6 +606,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         name: ProcessName::try_new("api").unwrap(),
         action: ProcessAction::Restart,
         environment: LaunchEnvironment::default(),
+        wait: None,
     });
     wait_until("the restart's launch to be held", || {
         scratch.first_row_raw(&project).0 == "starting"

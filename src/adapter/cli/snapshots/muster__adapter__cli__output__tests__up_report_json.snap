@@ -16,6 +16,7 @@ expression: json(&report).unwrap()
       "status": {
         "name": "dev server",
         "state": "running",
+        "ready": "none",
         "pid": 4123,
         "uptime": 3723,
         "restarts": 0,
@@ -33,6 +34,7 @@ expression: json(&report).unwrap()
       "status": {
         "name": "café",
         "state": "crashed",
+        "ready": "none",
         "pid": null,
         "uptime": null,
         "restarts": 0,

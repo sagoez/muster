@@ -53,6 +53,7 @@ mod surroundings;
 mod test_pty;
 mod text_file;
 mod todo;
+mod wait;
 mod working_dir;
 
 pub use args::*;

@@ -2,7 +2,7 @@ use nutype::nutype;
 
 /// Identity of one spawn attempt for a pane. Events from earlier generations
 /// are stale after a restart, stop cancellation, or project switch.
-#[nutype(derive(Debug, Clone, Copy, PartialEq, Eq))]
+#[nutype(derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord))]
 pub struct SpawnGeneration(u64);
 
 impl SpawnGeneration {

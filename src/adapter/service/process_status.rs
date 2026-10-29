@@ -4,8 +4,12 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::process_usage::ProcessUsage;
-use crate::domain::{process::ProcessState, pty::ExitOutcome, value::ProcessName};
+use super::{last_exit::LastExit, process_usage::ProcessUsage, stack_url::StackUrl};
+use crate::domain::{
+    port::ListeningSocket,
+    process::{ProcessState, Readiness},
+    value::{OutputCursor, ProcessName},
+};
 
 /// What `ps` shows for one supervised process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Getters, TypedBuilder)]
@@ -16,6 +20,9 @@ pub struct ProcessStatus {
     name: ProcessName,
     /// Lifecycle state.
     state: ProcessState,
+    /// Whether its current run passed its readiness check.
+    #[builder(default)]
+    ready: Readiness,
     /// OS process id while a child is live.
     pid: Option<u32>,
     /// How long the live child has run.
@@ -27,8 +34,18 @@ pub struct ProcessStatus {
     usage: Option<ProcessUsage>,
     /// Writable clients attached to its terminal.
     attached: u32,
+    /// The TCP ports its process tree was last seen listening on.
+    #[builder(default)]
+    ports: Vec<ListeningSocket>,
+    /// The URLs it serves: the one its readiness check declares, else one per
+    /// detected port.
+    #[builder(default)]
+    urls: Vec<StackUrl>,
+    /// Where its current run began in its output.
+    #[builder(default)]
+    run_start: Option<OutputCursor>,
     /// How its most recent child ended, while it is not running.
-    last_exit: Option<ExitOutcome>,
+    last_exit: Option<LastExit>,
     /// How long a graceful stop waits before it kills.
     #[serde(with = "humantime_serde")]
     stop_grace: Duration,

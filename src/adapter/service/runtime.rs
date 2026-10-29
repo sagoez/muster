@@ -11,12 +11,15 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use super::{
     acceptor::Acceptor,
     event::ServiceEvent,
+    event_log::{EventDraft, EventLog, SharedEventLog},
     holder_pool::HolderPool,
     launch_environment::LaunchEnvironment,
     located::Located,
     notice::Notice,
     notice_level::NoticeLevel,
     notices::{Notices, SharedNotices},
+    port_sampler::{PORT_SAMPLE_INTERVAL, PortSampler},
+    probe_worker::ProbeWorker,
     process_action::ProcessAction,
     project_ports::ProjectPorts,
     project_status::ProjectStatus,
@@ -29,6 +32,7 @@ use super::{
     service_response::ServiceResponse,
     shared_holders::SharedHolders,
     singleton::Singleton,
+    stack_event::{EventKind, EventSeq},
     supervisor::{HolderScreen, ScreenReply, StaleRelease, Supervisor, SupervisorDeps},
 };
 use crate::{
@@ -89,8 +93,24 @@ enum Reply {
     /// With a process's screen; one only a holder can serve is read off the
     /// loop first.
     Screen(ScreenReply),
+    /// By a wait that holds the reply and answers it when it ends.
+    Held,
     /// Once the service has exited.
     Exit,
+}
+
+/// A client waiting for a project's next lifecycle event.
+struct EventWaiter {
+    /// The project whose events it reads.
+    project: ProjectRoot,
+    /// Events after this one count.
+    since: EventSeq,
+    /// The kinds it reads, every kind when empty.
+    kinds: Vec<EventKind>,
+    /// When it is answered with no events.
+    deadline: Instant,
+    /// Where the answer goes.
+    reply: Sender<ServiceResponse>,
 }
 
 /// The one service of a user: owns every loaded project's supervisor on a
@@ -122,6 +142,16 @@ pub struct ServiceRuntime {
     /// Loaded projects that are no longer registered, kept only until the
     /// processes they still ran have stopped.
     unregistered: HashSet<ProjectRoot>,
+    /// Lifecycle events of every project and of the service.
+    event_log: SharedEventLog,
+    /// Clients waiting for a project's next event.
+    event_waiters: Vec<EventWaiter>,
+    /// Tries port and HTTP probes off the loop.
+    probes: ProbeWorker,
+    /// Samples the ports running processes listen on, when wired.
+    port_sampler: Option<PortSampler>,
+    /// When ports are next sampled.
+    ports_deadline: Instant,
 }
 
 impl ServiceRuntime {
@@ -146,6 +176,7 @@ impl ServiceRuntime {
         acceptor.close();
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
+        runtime.event_waiters.clear();
         drop(events);
         drop(singleton);
         if let Some(reply) = exit {
@@ -170,6 +201,7 @@ impl ServiceRuntime {
             ports,
             stacks,
             settings: settings_store,
+            listening,
         } = deps;
         Self {
             version,
@@ -179,10 +211,15 @@ impl ServiceRuntime {
             stacks,
             settings_store,
             settings,
+            probes: ProbeWorker::spawn(events.clone()),
+            port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
+            ports_deadline: Instant::now(),
             events,
             notices: Notices::shared(Some(protocol::log_path(state_dir))),
             supervisors: HashMap::new(),
             unregistered: HashSet::new(),
+            event_log: EventLog::shared(),
+            event_waiters: Vec::new(),
         }
     }
 
@@ -265,21 +302,38 @@ impl ServiceRuntime {
         }
     }
 
-    /// The earliest metrics deadline of any supervisor.
+    /// The earliest deadline of any supervisor's metrics, waits or readiness
+    /// checks, of any client waiting for events, and of the next port sample.
     fn next_deadline(&self) -> Option<Instant> {
-        self.supervisors
-            .values()
-            .filter_map(Supervisor::next_metrics_deadline)
-            .min()
+        let supervisors = self.supervisors.values().flat_map(|supervisor| {
+            [
+                supervisor.next_metrics_deadline(),
+                supervisor.next_wait_deadline(),
+            ]
+        });
+        let events = self
+            .event_waiters
+            .iter()
+            .map(|waiter| Some(waiter.deadline));
+        let ports = self
+            .port_sampler
+            .as_ref()
+            .filter(|_| !self.live_root_pids().is_empty())
+            .map(|_| self.ports_deadline);
+        supervisors.chain(events).chain([ports]).flatten().min()
     }
 
-    /// Acknowledges the held exits whose restart settled, samples usage where
-    /// it is due, and lets go of an unregistered project once it runs nothing.
+    /// Acknowledges the held exits whose restart settled, samples usage and
+    /// ports where due, settles waits, answers clients waiting for events,
+    /// and lets go of an unregistered project once it runs nothing.
     fn tick(&mut self, now: Instant) {
         for supervisor in self.supervisors.values_mut() {
             supervisor.release_settled_exits();
             supervisor.sample_metrics(now);
+            supervisor.settle_waits(now);
         }
+        self.sample_ports(now);
+        self.answer_event_waiters(now);
         let finished: Vec<ProjectRoot> = self
             .unregistered
             .iter()
@@ -343,6 +397,21 @@ impl ServiceRuntime {
                 Some(supervisor) => supervisor.handle_adopted(pane, generation, &record, result),
                 None => release_unrecorded(result),
             },
+            ServiceEvent::ProbePassed {
+                project,
+                pane,
+                generation,
+                probe,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_probe_passed(pane, generation, &probe);
+                }
+            },
+            ServiceEvent::PortsSampled { ports } => {
+                for supervisor in self.supervisors.values_mut() {
+                    supervisor.take_ports(&ports);
+                }
+            },
             ServiceEvent::Request { request, reply } => return self.request(request, reply),
             ServiceEvent::HolderRead {
                 screen,
@@ -358,13 +427,14 @@ impl ServiceRuntime {
     /// Answers one client request on `reply`: at once, once a worker has read
     /// a screen only a holder can serve, or after the service has exited.
     fn request(&mut self, request: ServiceRequest, reply: Sender<ServiceResponse>) -> Flow {
-        let response = match self.respond(request) {
+        let response = match self.respond(request, &reply) {
             Ok(Reply::Now(response)) => response,
             Ok(Reply::Screen(ScreenReply::Ready(screen))) => ServiceResponse::Screen(screen),
             Ok(Reply::Screen(ScreenReply::ReadHolder(screen))) => {
                 self.read_off_loop(screen, reply);
                 return Flow::Continue;
             },
+            Ok(Reply::Held) => return Flow::Continue,
             Ok(Reply::Exit) => return Flow::Exit(reply),
             Err(refusal) => ServiceResponse::Error(refusal),
         };
@@ -372,12 +442,17 @@ impl ServiceRuntime {
         Flow::Continue
     }
 
-    /// Carries out one client request.
+    /// Carries out one client request; a wait keeps a clone of `reply` to
+    /// answer on when it ends.
     ///
     /// # Errors
-    /// Returns the refusal to send when the project or process is unknown, or
-    /// the stored state cannot be read.
-    fn respond(&mut self, request: ServiceRequest) -> Result<Reply, ServiceErrorBody> {
+    /// Returns the refusal to send when the project or process is unknown, a
+    /// wait cannot be taken, or the stored state cannot be read.
+    fn respond(
+        &mut self,
+        request: ServiceRequest,
+        reply: &Sender<ServiceResponse>,
+    ) -> Result<Reply, ServiceErrorBody> {
         let response = match request {
             ServiceRequest::Replace | ServiceRequest::Stop => return Ok(Reply::Exit),
             ServiceRequest::Screen { project, name } => {
@@ -411,7 +486,33 @@ impl ServiceRuntime {
             ServiceRequest::Up {
                 project,
                 environment,
+                wait: None,
             } => ServiceResponse::Batch(self.supervisor(&project)?.up(&environment)),
+            ServiceRequest::Up {
+                project,
+                environment,
+                wait: Some(wait),
+            } => {
+                self.supervisor(&project)?
+                    .up_waiting(&environment, &wait, reply.clone())?;
+                return Ok(Reply::Held);
+            },
+            ServiceRequest::Wait {
+                project,
+                name,
+                wait,
+            } => {
+                let supervisor = self.process(&project, &name)?;
+                let prepared = supervisor.prepare_wait(&name, &wait)?;
+                supervisor.begin_wait(prepared, None, reply.clone());
+                return Ok(Reply::Held);
+            },
+            ServiceRequest::Events {
+                project,
+                since,
+                kinds,
+                wait,
+            } => return self.events_after(project, since, kinds, wait, reply),
             ServiceRequest::Down { project } => {
                 ServiceResponse::Batch(self.supervisor(&project)?.down())
             },
@@ -428,9 +529,32 @@ impl ServiceRuntime {
                 name,
                 action,
                 environment,
+                wait: None,
             } => {
                 control(self.process(&project, &name)?, &name, action, &environment);
                 ServiceResponse::Ok
+            },
+            ServiceRequest::Control {
+                project,
+                name,
+                action,
+                environment,
+                wait: Some(wait),
+            } => {
+                let supervisor = self.process(&project, &name)?;
+                let prepared = supervisor.prepare_wait(&name, &wait)?;
+                let fresh = match action {
+                    ProcessAction::Start => !supervisor.runs_or_starts(&name),
+                    ProcessAction::Restart => true,
+                    ProcessAction::Stop
+                    | ProcessAction::Pause
+                    | ProcessAction::Resume
+                    | ProcessAction::Kill => false,
+                };
+                let before = supervisor.generation_of(&name);
+                control(supervisor, &name, action, &environment);
+                supervisor.begin_wait(prepared, fresh.then_some(before), reply.clone());
+                return Ok(Reply::Held);
             },
             ServiceRequest::Locate { project, name } => {
                 ServiceResponse::Located(self.locate(&project, &name)?)
@@ -622,6 +746,8 @@ impl ServiceRuntime {
             .runner(Box::new(shared.clone()))
             .events(self.events.clone())
             .notices(Arc::clone(&self.notices))
+            .event_log(Arc::clone(&self.event_log))
+            .probes(Some(self.probes.clone()))
             .notifier(self.ports.notifier())
             .process_metrics(self.ports.process_metrics())
             .settings(self.settings.clone())
@@ -665,8 +791,98 @@ impl ServiceRuntime {
         }
     }
 
+    /// Answers a read of `project`'s events after `since` of `kinds`: at once
+    /// when there are any or `wait` is zero, otherwise when the next one
+    /// arrives or `wait` passes.
+    ///
+    /// # Errors
+    /// Returns the refusal when the project cannot be loaded.
+    fn events_after(
+        &mut self,
+        project: ProjectRoot,
+        since: Option<EventSeq>,
+        kinds: Vec<EventKind>,
+        wait: Duration,
+        reply: &Sender<ServiceResponse>,
+    ) -> Result<Reply, ServiceErrorBody> {
+        self.supervisor(&project)?;
+        let log = self
+            .event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let page = log.page(&project, since, &kinds);
+        if !page.events().is_empty() || wait.is_zero() {
+            return Ok(Reply::Now(ServiceResponse::Events(page)));
+        }
+        let since = since.unwrap_or_else(|| log.latest());
+        drop(log);
+        self.event_waiters.push(EventWaiter {
+            project,
+            since,
+            kinds,
+            deadline: Instant::now() + wait,
+            reply: reply.clone(),
+        });
+        Ok(Reply::Held)
+    }
+
+    /// Answers each client waiting for events once one arrived, or with none
+    /// once its wait passed.
+    fn answer_event_waiters(&mut self, now: Instant) {
+        if self.event_waiters.is_empty() {
+            return;
+        }
+        let log = self
+            .event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.event_waiters.retain(|waiter| {
+            let page = log.page(&waiter.project, Some(waiter.since), &waiter.kinds);
+            if page.events().is_empty() && now < waiter.deadline {
+                return true;
+            }
+            let _ = waiter.reply.send(ServiceResponse::Events(page));
+            false
+        });
+    }
+
+    /// Asks the port sampler for the ports of every live process once the
+    /// sample interval passed.
+    fn sample_ports(&mut self, now: Instant) {
+        let Some(sampler) = &self.port_sampler else {
+            return;
+        };
+        if now < self.ports_deadline {
+            return;
+        }
+        let roots = self.live_root_pids();
+        if roots.is_empty() {
+            return;
+        }
+        self.ports_deadline = now + PORT_SAMPLE_INTERVAL;
+        sampler.sample(roots);
+    }
+
+    /// The pid of every live process of every loaded project.
+    fn live_root_pids(&self) -> Vec<u32> {
+        self.supervisors
+            .values()
+            .flat_map(Supervisor::live_root_pids)
+            .collect()
+    }
+
     /// Records a notice about `project`, or the service as a whole.
     fn notify(&self, project: Option<ProjectRoot>, level: NoticeLevel, message: String) {
+        self.event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(
+                EventDraft::builder()
+                    .project(project.clone())
+                    .kind(EventKind::Notice)
+                    .detail(message.clone())
+                    .build(),
+            );
         let notice = Notice::builder()
             .at(SystemTime::now())
             .project(project)
@@ -768,7 +984,7 @@ mod tests {
             },
             ipc,
             service::{
-                BatchOutcome, ProcessStatus,
+                BatchOutcome, ProcessStatus, StateGoal, WaitCondition, WaitSpec, WaitStatus,
                 supervisor::{
                     ChannelOutputSink, HolderAdopter, SpawnGeneration,
                     testing::{KillCountHandle, Orphan, test_settings, test_stop},
@@ -781,7 +997,7 @@ mod tests {
                 SettingChange,
             },
             port::{Notifier, OutputSink, ProcessHandle, ProcessMetrics, ProcessRunner},
-            process::{ProcessState, RestartPolicy},
+            process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, SpawnRequest},
             value::{Cols, CommandLine, PaneId, Rows},
         },
@@ -1255,6 +1471,7 @@ mod tests {
                     .ports(Box::new(TestPorts))
                     .stacks(Box::new(store.clone()))
                     .settings(Box::new(store))
+                    .listening(None)
                     .build();
                 ServiceRuntime::run(singleton, deps)
             });
@@ -1313,6 +1530,7 @@ mod tests {
             self.send(ServiceRequest::Up {
                 project: project.clone(),
                 environment: no_env(),
+                wait: None,
             })
         }
 
@@ -1328,6 +1546,7 @@ mod tests {
                 name: ProcessName::try_new(name).unwrap(),
                 action,
                 environment: no_env(),
+                wait: None,
             })
         }
 
@@ -2039,6 +2258,72 @@ mod tests {
                 binary: PathBuf::from(TEST_BINARY),
             }
         );
+        service.stop();
+    }
+
+    /// A start with a wait answers once the new run prints the line, through
+    /// a real holder; its start is an event, a read after the newest event
+    /// waits and answers empty, and a stop waits for the process to stop.
+    #[test]
+    fn a_start_with_a_wait_answers_once_the_new_run_prints_and_events_follow() {
+        let fixture = Fixture::new();
+        let printer = sleeper("api", false)
+            .with_command(CommandLine::try_new("echo ready on 3000; sleep 600").unwrap());
+        let project = fixture.project(vec![printer]);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        let until = WaitCondition::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new("ready on").unwrap())
+                .kind(PatternKind::Substring)
+                .build(),
+        );
+        let wait = WaitSpec::builder().until(Some(until)).timeout(WAIT).build();
+
+        let ServiceResponse::Waited(started) = service.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action: ProcessAction::Start,
+            environment: no_env(),
+            wait: Some(wait),
+        }) else {
+            panic!("a start with a wait answers how the wait ended");
+        };
+        assert_eq!(started.status(), WaitStatus::Matched);
+        assert_eq!(started.matched().as_ref().unwrap().line(), "ready on 3000");
+
+        let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+            project: project.clone(),
+            since: None,
+            kinds: vec![EventKind::Started],
+            wait: Duration::ZERO,
+        }) else {
+            panic!("events answer with a page");
+        };
+        assert_eq!(page.events().len(), 1);
+        let ServiceResponse::Events(quiet) = service.send(ServiceRequest::Events {
+            project: project.clone(),
+            since: Some(*page.cursor()),
+            kinds: Vec::new(),
+            wait: POLL,
+        }) else {
+            panic!("events answer with a page");
+        };
+        assert!(quiet.events().is_empty() && !quiet.gap());
+
+        let stopped = WaitSpec::builder()
+            .until(Some(WaitCondition::State(StateGoal::Stopped)))
+            .timeout(WAIT)
+            .build();
+        let ServiceResponse::Waited(stop) = service.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action: ProcessAction::Stop,
+            environment: no_env(),
+            wait: Some(stopped),
+        }) else {
+            panic!("a stop with a wait answers how the wait ended");
+        };
+        assert_eq!(stop.status(), WaitStatus::Matched);
         service.stop();
     }
 

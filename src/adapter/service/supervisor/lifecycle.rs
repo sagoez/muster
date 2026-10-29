@@ -15,7 +15,10 @@ use super::{
 use crate::{
     adapter::{
         holder::abandon,
-        service::{BatchOutcome, LaunchEnvironment, NoticeLevel, Refusal, ServiceEvent},
+        service::{
+            BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, Refusal,
+            ServiceEvent, WaitStatus,
+        },
         terminal::{KittyKeyboardTracker, TerminalEmulator},
     },
     application::{ExitDecision, ProcessLifecycle},
@@ -269,10 +272,17 @@ impl Supervisor {
         if self.is_live(pane) {
             self.request_graceful_transition(pane, ExitIntent::request_stop, false);
         } else {
-            self.bump_generation(pane);
-            self.deactivate(pane);
-            self.workspace.set_state(pane, ProcessState::Exited);
+            self.settle_stopped(pane);
         }
+    }
+
+    /// Settles a stop or kill of `pane` while it runs nothing: a pending
+    /// restart is cancelled and every wait on it ends as stopped.
+    fn settle_stopped(&mut self, pane: PaneId) {
+        self.bump_generation(pane);
+        self.deactivate(pane);
+        self.workspace.set_state(pane, ProcessState::Exited);
+        self.end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
     }
 
     /// Suspends `pane`'s live process unless it is already paused. A pane
@@ -320,9 +330,7 @@ impl Supervisor {
             return;
         }
         if !self.is_live(pane) {
-            self.bump_generation(pane);
-            self.deactivate(pane);
-            self.workspace.set_state(pane, ProcessState::Exited);
+            self.settle_stopped(pane);
             return;
         }
         self.advance_shutdown_generation(pane);
@@ -407,24 +415,8 @@ impl Supervisor {
         }
         match output {
             ProcessOutput::Chunk(bytes) => {
-                let Some(target) = self.panes.get_mut(&pane) else {
-                    return;
-                };
-                let keyboard_reply = target.keyboard.observe(&bytes);
-                let reset = target.parser.process_or_reset(&bytes);
-                let terminal_reply = target.parser.take_pty_writes();
-                if let Some(handle) = target.handle.as_mut()
-                    && !handle.answers_terminal_queries()
-                {
-                    if !keyboard_reply.is_empty() {
-                        let _ = handle.write_input(&keyboard_reply);
-                    }
-                    if !terminal_reply.is_empty() {
-                        let _ = handle.write_input(&terminal_reply);
-                    }
-                }
-                if reset {
-                    self.notify(NoticeLevel::Warning, Some(pane), SCREEN_RESET_NOTICE);
+                if self.paint(pane, &bytes) {
+                    self.tap_output(pane, None, &bytes);
                 }
             },
             ProcessOutput::Warning(warning) => {
@@ -445,6 +437,32 @@ impl Supervisor {
             },
             ProcessOutput::Exited(outcome) => self.handle_exit(pane, outcome),
         }
+    }
+
+    /// Paints `bytes` onto `pane`'s terminal and answers the child's terminal
+    /// queries, unless its handle answers them itself. Returns whether the
+    /// pane has a terminal to paint on.
+    fn paint(&mut self, pane: PaneId, bytes: &[u8]) -> bool {
+        let Some(target) = self.panes.get_mut(&pane) else {
+            return false;
+        };
+        let keyboard_reply = target.keyboard.observe(bytes);
+        let reset = target.parser.process_or_reset(bytes);
+        let terminal_reply = target.parser.take_pty_writes();
+        if let Some(handle) = target.handle.as_mut()
+            && !handle.answers_terminal_queries()
+        {
+            if !keyboard_reply.is_empty() {
+                let _ = handle.write_input(&keyboard_reply);
+            }
+            if !terminal_reply.is_empty() {
+                let _ = handle.write_input(&terminal_reply);
+            }
+        }
+        if reset {
+            self.notify(NoticeLevel::Warning, Some(pane), SCREEN_RESET_NOTICE);
+        }
+        true
     }
 
     /// Respawns a pane only when its delayed restart still belongs to this
@@ -557,6 +575,7 @@ impl Supervisor {
         // A fresh process on this pane has a new pid, so drop the prior sample.
         self.usage.remove(&pane);
         let generation = self.bump_generation(pane);
+        self.begin_run(pane);
         let sink =
             ChannelOutputSink::new(self.root().clone(), pane, generation, self.events.clone());
         self.launches.insert(
@@ -659,24 +678,40 @@ impl Supervisor {
                 self.failing_spawns.remove(&pane);
                 self.release_held_exit(pane);
                 self.install_pane(pane, handle);
+                let pid = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|target| target.handle.as_ref())
+                    .and_then(|handle| handle.process_id());
+                self.record_event(
+                    Some(pane),
+                    EventKind::Started,
+                    pid.map(|pid| format!("pid {pid}")).unwrap_or_default(),
+                );
+                self.arm_probes(pane);
+                self.observe_first_screen(pane);
                 self.replay(pane, generation, early);
                 self.runs_launch(pane, generation)
             },
             Err(error) => {
                 self.deactivate(pane);
+                let message = format!("{SPAWN_FAILED_NOTICE}: {error}");
                 if self.failing_spawns.insert(pane) {
-                    let message = format!("{SPAWN_FAILED_NOTICE}: {error}");
                     self.alert_desktop(pane, &message);
-                    self.notify(NoticeLevel::Error, Some(pane), message);
+                    self.notify(NoticeLevel::Error, Some(pane), message.clone());
                 }
-                if self
+                let next = if self
                     .workspace
                     .should_restart(pane, &ExitOutcome::FAILED_UNKNOWN)
                 {
-                    self.workspace.set_state(pane, ProcessState::Restarting);
-                    self.schedule_restart(pane, Instant::now());
+                    ProcessState::Restarting
                 } else {
-                    self.workspace.set_state(pane, ProcessState::Crashed);
+                    ProcessState::Crashed
+                };
+                self.end_run(pane, generation, ExitReason::FailedToStart, next, &message);
+                self.workspace.set_state(pane, next);
+                if next == ProcessState::Restarting {
+                    self.schedule_restart(pane, Instant::now());
                 }
                 false
             },
@@ -695,14 +730,14 @@ impl Supervisor {
     }
 
     /// Supervises `handle` as `pane`'s live process on a fresh terminal,
-    /// painted first with the screen the process already had.
+    /// painted first with the screen the process already had. The screen is
+    /// a repaint, not output, so no wait or readiness check sees it.
     pub(super) fn install_pane(&mut self, pane: PaneId, mut handle: Box<dyn ProcessHandle>) {
         let screen = handle.take_initial_screen();
         if self.install_terminal(pane, Some(handle)) {
             self.workspace.set_state(pane, ProcessState::Running);
-            if let (Some(screen), Some(generation)) = (screen, self.generations.get(&pane).copied())
-            {
-                self.handle_output(pane, generation, ProcessOutput::Chunk(screen));
+            if let Some(screen) = screen {
+                self.paint(pane, &screen);
             }
         }
     }
@@ -936,6 +971,14 @@ impl Supervisor {
 
     /// Retires a process that no longer belongs in the workspace.
     pub(super) fn retire_pane(&mut self, pane: PaneId) {
+        self.end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
+        if let Some(probes) = &self.probes {
+            probes.forget(self.root(), pane);
+        }
+        self.taps.remove(&pane);
+        self.readiness.remove(&pane);
+        self.run_ends.remove(&pane);
+        self.ports.remove(&pane);
         self.panes.remove(&pane);
         // Advance the spawn generation rather than dropping it. A retired pane can
         // still have a `ForceStop` or a delayed `Respawn` queued in a timer thread;
@@ -1039,6 +1082,20 @@ impl Supervisor {
             &outcome,
         );
         self.report_unrequested_exit(pane, exit_intent, started_at, &outcome);
+        let next = match decision {
+            ExitDecision::Retire | ExitDecision::Stop => ProcessState::Exited,
+            ExitDecision::RestartNow | ExitDecision::RestartLater => ProcessState::Restarting,
+            ExitDecision::Settle(state) => state,
+        };
+        let requested = exit_intent.is_stop() || exit_intent.is_restart();
+        let generation = self.current_generation(pane);
+        self.end_run(
+            pane,
+            generation,
+            ExitReason::of(&outcome, requested),
+            next,
+            &outcome.to_string(),
+        );
         self.last_exits.insert(pane, outcome);
         match decision {
             ExitDecision::Retire => {
@@ -1272,7 +1329,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::service::{
-            ProcessUsage,
+            LastExit, ProcessUsage,
             supervisor::{entity::UNKNOWN_PROCESS_NOTICE, testing::*},
         },
         domain::{
@@ -1653,8 +1710,11 @@ mod tests {
             "one notice for the whole loop"
         );
         assert_eq!(
-            harness.supervisor.snapshot().processes()[0].last_exit(),
-            &Some(crash()),
+            harness.supervisor.snapshot().processes()[0]
+                .last_exit()
+                .as_ref()
+                .map(LastExit::outcome),
+            Some(&crash()),
             "ps still shows how it last ended"
         );
 
@@ -1748,8 +1808,11 @@ mod tests {
             );
             let status = harness.supervisor.snapshot();
             assert_eq!(
-                status.processes()[0].last_exit(),
-                &Some(ExitOutcome::Failed(ExitCause::Status(3))),
+                status.processes()[0]
+                    .last_exit()
+                    .as_ref()
+                    .map(LastExit::outcome),
+                Some(&ExitOutcome::Failed(ExitCause::Status(3))),
                 "{policy:?}"
             );
         }
@@ -1763,10 +1826,14 @@ mod tests {
         exit(&mut harness, ExitOutcome::Succeeded);
 
         assert!(harness.notice_messages().is_empty());
+        let shown = harness.supervisor.snapshot().processes()[0]
+            .last_exit()
+            .clone();
         assert_eq!(
-            harness.supervisor.snapshot().processes()[0].last_exit(),
-            &Some(ExitOutcome::Succeeded)
+            shown.as_ref().map(LastExit::outcome),
+            Some(&ExitOutcome::Succeeded)
         );
+        assert_eq!(shown.map(|exit| exit.reason()), Some(ExitReason::Exited));
     }
 
     /// A stop sends the policy's signal once, enters stopping, and escalates.

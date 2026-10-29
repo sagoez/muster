@@ -60,7 +60,7 @@ impl Supervisor {
     }
 
     /// The pane and process id of every live process that reports one.
-    fn live_pids(&self) -> Vec<(PaneId, u32)> {
+    pub(super) fn live_pids(&self) -> Vec<(PaneId, u32)> {
         self.panes
             .iter()
             .filter_map(|(pane, target)| {

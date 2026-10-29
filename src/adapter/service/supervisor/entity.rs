@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::OsString,
     sync::PoisonError,
     time::{Instant, SystemTime},
@@ -11,19 +11,20 @@ use getset::{Getters, MutGetters};
 
 use super::{
     adopter::HolderAdopter, config_membership::ConfigMembership, deps::SupervisorDeps,
-    metrics::METRICS_SAMPLE_INTERVAL, pane::Pane, pending_launch::PendingLaunch,
-    spawn_generation::SpawnGeneration,
+    metrics::METRICS_SAMPLE_INTERVAL, pane::Pane, pending_launch::PendingLaunch, run_end::RunEnd,
+    run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
 use crate::{
     adapter::service::{
-        Notice, NoticeLevel, ProcessStatus, ProcessUsage, ProjectStatus, Refusal, ServiceEvent,
-        SharedNotices,
+        EventDraft, EventKind, ExitReason, LastExit, Notice, NoticeLevel, OutputTap, ProbeWorker,
+        ProcessStatus, ProcessUsage, ProjectStatus, Refusal, ServiceEvent, SharedEventLog,
+        SharedNotices, StackUrl, UrlSource, WaitGroup, Waiter,
     },
     application::{StackSync, Workspace},
     domain::{
         config::Stack,
-        port::{Notifier, ProcessHandle, ProcessMetrics, ProcessRunner},
-        process::ProcessState,
+        port::{ListeningSocket, Notifier, ProcessHandle, ProcessMetrics, ProcessRunner},
+        process::{ProcessState, ReadyCheck, ReadyProbe},
         project::Project,
         pty::ExitOutcome,
         settings::Settings,
@@ -33,6 +34,8 @@ use crate::{
 
 /// Shown when a process name matches nothing in the project.
 pub(super) const UNKNOWN_PROCESS_NOTICE: &str = "no process with that name in this project";
+/// What a detected port's URL starts with, before the port.
+const DETECTED_URL_PREFIX: &str = "http://localhost:";
 
 /// Supervises one project's processes: spawns them, applies their stop and
 /// restart policies, adopts holders a previous service left running, follows
@@ -106,6 +109,24 @@ pub struct Supervisor {
     /// The environment of the command that last started each pane, which its
     /// policy restarts are launched with too.
     pub(super) launch_environments: HashMap<PaneId, BTreeMap<OsString, OsString>>,
+    /// Where lifecycle events are recorded.
+    pub(super) event_log: SharedEventLog,
+    /// Tries port and HTTP probes off the loop.
+    pub(super) probes: Option<ProbeWorker>,
+    /// Each pane's output as lines, across its runs.
+    pub(super) taps: HashMap<PaneId, OutputTap>,
+    /// Waits not yet answered.
+    pub(super) waiters: Vec<Waiter>,
+    /// Waits of a project-wide start, answered together, by group.
+    pub(super) wait_groups: HashMap<u64, WaitGroup>,
+    /// The id the next group of waits takes.
+    pub(super) next_wait_group: u64,
+    /// The readiness of each pane's current run that has a check.
+    pub(super) readiness: HashMap<PaneId, RunReadiness>,
+    /// How each pane's most recent run ended, while this service saw it.
+    pub(super) run_ends: HashMap<PaneId, RunEnd>,
+    /// The ports each live pane's process tree was last seen listening on.
+    pub(super) ports: HashMap<PaneId, Vec<ListeningSocket>>,
 }
 
 impl Supervisor {
@@ -116,6 +137,8 @@ impl Supervisor {
             runner,
             events,
             notices,
+            event_log,
+            probes,
             notifier,
             process_metrics,
             settings,
@@ -147,6 +170,15 @@ impl Supervisor {
             attached: HashMap::new(),
             held_exits: HashMap::new(),
             launch_environments: HashMap::new(),
+            event_log,
+            probes,
+            taps: HashMap::new(),
+            waiters: Vec::new(),
+            wait_groups: HashMap::new(),
+            next_wait_group: 0,
+            readiness: HashMap::new(),
+            run_ends: HashMap::new(),
+            ports: HashMap::new(),
         }
     }
 
@@ -218,10 +250,20 @@ impl Supervisor {
                     .panes
                     .get(&pane)
                     .filter(|target| target.handle.is_some());
+                let ports = self.ports.get(&pane).cloned().unwrap_or_default();
                 Some(
                     ProcessStatus::builder()
                         .name(process.name().clone())
                         .state(state)
+                        .ready(
+                            self.readiness
+                                .get(&pane)
+                                .map(|readiness| readiness.state)
+                                .unwrap_or_default(),
+                        )
+                        .urls(urls(process.ready().as_ref(), &ports))
+                        .ports(ports)
+                        .run_start(self.output_position(pane).1)
                         .pid(
                             live.and_then(|target| {
                                 target
@@ -237,7 +279,7 @@ impl Supervisor {
                         .attached(self.attached.get(&pane).copied().unwrap_or(0))
                         .last_exit(
                             (!state.is_active() || state == ProcessState::Restarting)
-                                .then(|| self.last_exits.get(&pane).cloned())
+                                .then(|| self.last_exit(pane))
                                 .flatten(),
                         )
                         .stop_grace(process.stop().grace_period().into_inner())
@@ -249,6 +291,23 @@ impl Supervisor {
             .project(self.project.clone())
             .processes(processes)
             .build()
+    }
+
+    /// How `pane`'s most recent run ended: why, as this service saw it, or as
+    /// its outcome tells for one an earlier service saw.
+    fn last_exit(&self, pane: PaneId) -> Option<LastExit> {
+        let end = self.run_ends.get(&pane);
+        let outcome = match end {
+            Some(end) if end.reason == ExitReason::FailedToStart => ExitOutcome::FAILED_UNKNOWN,
+            _ => self.last_exits.get(&pane)?.clone(),
+        };
+        Some(
+            LastExit::builder()
+                .reason(end.map_or_else(|| ExitReason::of(&outcome, false), |end| end.reason))
+                .outcome(outcome)
+                .at(end.map(|end| end.at))
+                .build(),
+        )
     }
 
     /// Records how many writable clients are attached to `name`'s terminal.
@@ -379,6 +438,17 @@ impl Supervisor {
                     .build(),
             );
         }
+        self.event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(
+                EventDraft::builder()
+                    .project(Some(self.root().clone()))
+                    .process(process.clone())
+                    .kind(EventKind::Notice)
+                    .detail(message.clone())
+                    .build(),
+            );
         let notice = Notice::builder()
             .at(SystemTime::now())
             .project(Some(self.root().clone()))
@@ -391,6 +461,29 @@ impl Supervisor {
             .unwrap_or_else(PoisonError::into_inner)
             .push(notice);
     }
+}
+
+/// The URLs a process serves: the one its readiness check declares, else
+/// `http://localhost:<port>` for each port it listens on.
+fn urls(check: Option<&ReadyCheck>, ports: &[ListeningSocket]) -> Vec<StackUrl> {
+    if let Some(ReadyProbe::Http(url)) = check.map(ReadyCheck::probe) {
+        return vec![
+            StackUrl::builder()
+                .url(url.to_string())
+                .source(UrlSource::Declared)
+                .build(),
+        ];
+    }
+    let distinct: BTreeSet<u16> = ports.iter().map(ListeningSocket::port).collect();
+    distinct
+        .into_iter()
+        .map(|port| {
+            StackUrl::builder()
+                .url(format!("{DETECTED_URL_PREFIX}{port}"))
+                .source(UrlSource::Detected)
+                .build()
+        })
+        .collect()
 }
 
 #[cfg(test)]

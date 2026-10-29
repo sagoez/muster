@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{Environment, ProcessChange},
-    process::{Process, RestartPolicy, StopPolicy},
+    process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
 };
 
@@ -39,6 +39,10 @@ pub struct ProcessSpec {
     /// How it is stopped.
     #[getset(get = "pub", set_with = "pub")]
     stop: StopPolicy,
+    /// What each run waits for before it counts as ready, when anything.
+    #[getset(get = "pub", set_with = "pub")]
+    #[builder(default)]
+    ready: Option<ReadyCheck>,
 }
 
 impl ProcessSpec {
@@ -70,7 +74,14 @@ impl ProcessSpec {
             autostart: change.autostart().unwrap_or(self.autostart),
             restart: change.restart().unwrap_or(self.restart),
             stop,
+            ready: self.ready,
         }
+    }
+
+    /// Whether `other` defines anything but the readiness check differently,
+    /// which an import changes while a stored check stays.
+    pub fn differs_outside_readiness(&self, other: &Self) -> bool {
+        self.clone().with_ready(other.ready.clone()) != *other
     }
 
     /// The directory the process launches in under `root`.
@@ -93,6 +104,7 @@ impl ProcessSpec {
             .restart(self.restart)
             .stop(self.stop)
             .autostart(self.autostart)
+            .ready(self.ready.clone())
             .build()
     }
 }

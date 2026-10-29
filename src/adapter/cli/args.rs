@@ -13,7 +13,9 @@ use strum::IntoEnumIterator;
 use super::{completions::CompletionShell, process_flags::ProcessFlags};
 use crate::{
     adapter::{
-        holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND, store::SqliteStore,
+        holder::HOLDER_SUBCOMMAND,
+        service::{StateGoal, protocol::SERVICE_SUBCOMMAND},
+        store::SqliteStore,
     },
     constants::APP_NAME,
     domain::{
@@ -21,7 +23,10 @@ use crate::{
         coordination::TodoStatus,
         port::ProjectStore,
         process::{RestartPolicy, StopSignal},
-        value::{CommandLine, CommandLineError, PositiveDuration, ProcessRef},
+        value::{
+            CommandLine, CommandLineError, LocalPort, LocalUrl, OutputCursor, PositiveDuration,
+            ProcessRef,
+        },
     },
 };
 
@@ -55,6 +60,8 @@ static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<Setti
 static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<RestartPolicy>);
 /// The names `--stop-signal` accepts.
 static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopSignal>);
+/// The names `muster wait --state` accepts.
+static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateGoal>);
 
 /// The kebab-case name of each variant of `T`.
 fn variant_names<T: IntoEnumIterator + Display>() -> Vec<String> {
@@ -78,6 +85,11 @@ pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
 /// Parses a `--stop-signal`.
 pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> {
     one_of(&STOP_SIGNALS)
+}
+
+/// Parses a `muster wait --state`.
+fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
+    one_of(&STATE_GOALS)
 }
 
 /// Parses a shell command, refusing a blank one.
@@ -162,11 +174,17 @@ pub enum Command {
         json: bool,
     },
     /// Start a process.
-    Start(ProcessArgs),
+    Start(StartArgs),
     /// Stop a process through its stop policy.
     Stop(ProcessArgs),
     /// Restart a process.
-    Restart(ProcessArgs),
+    Restart(StartArgs),
+    /// Wait until a process prints a line, accepts a connection, answers a
+    /// URL, reaches a state, or passes its readiness check.
+    ///
+    /// Without a condition, waits for its readiness check, or for it to run
+    /// when it has none.
+    Wait(WaitArgs),
     /// Suspend a process, leaving it alive.
     Pause(ProcessArgs),
     /// Resume a paused process.
@@ -362,6 +380,57 @@ pub struct ProcessArgs {
     /// The process, as `muster ps` lists it; quote a name with spaces.
     /// Chosen from a list at a terminal when absent.
     pub name: Option<ProcessRef>,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The process a start or restart acts on, and whether to wait for it.
+#[derive(clap::Args)]
+pub struct StartArgs {
+    /// The process and output form.
+    #[command(flatten)]
+    pub target: ProcessArgs,
+    /// Wait until its new run passes its readiness check, or runs when it has
+    /// none.
+    #[arg(long)]
+    pub wait: bool,
+    /// With --wait, the longest to wait, such as 60s; unbounded when absent.
+    #[arg(long, requires = "wait", value_name = "DURATION", value_parser = positive_duration)]
+    pub timeout: Option<PositiveDuration>,
+}
+
+/// `muster wait`: a process and what to wait for.
+#[derive(clap::Args)]
+pub struct WaitArgs {
+    /// The process, as `muster ps` lists it; quote a name with spaces.
+    /// Chosen from a list at a terminal when absent.
+    pub name: Option<ProcessRef>,
+    /// Wait for an output line containing this text.
+    #[arg(long, group = "until", value_name = "TEXT")]
+    pub log: Option<String>,
+    /// Read --log as a regular expression.
+    #[arg(long, requires = "log")]
+    pub regex: bool,
+    /// Wait until a TCP connection to this localhost port succeeds.
+    #[arg(long, group = "until", value_name = "PORT")]
+    pub port: Option<LocalPort>,
+    /// Wait until this localhost URL answers below 500.
+    #[arg(long, group = "until", value_name = "URL")]
+    pub http: Option<LocalUrl>,
+    /// With --http, the status to wait for instead.
+    #[arg(long, requires = "http", value_name = "CODE")]
+    pub status: Option<u16>,
+    /// Wait for a lifecycle state; `stopped` means not running at all.
+    #[arg(long, group = "until", value_parser = state_goal_parser())]
+    pub state: Option<StateGoal>,
+    /// The longest to wait, such as 60s; unbounded when absent.
+    #[arg(long, value_name = "DURATION", value_parser = positive_duration)]
+    pub timeout: Option<PositiveDuration>,
+    /// Count output after this cursor, from an earlier wait's result, as
+    /// well as output after the command started.
+    #[arg(long, value_name = "CURSOR")]
+    pub since: Option<OutputCursor>,
     /// Print the result as JSON.
     #[arg(long)]
     pub json: bool,

@@ -3,11 +3,11 @@ source: src/adapter/cli/output.rs
 expression: "render_status(&[shop(), blog()], true)"
 ---
 shop  /home/me/shop
-  NAME        STATE     PID   UPTIME  RESTARTS  CPU   MEM        ATTACHED  LAST EXIT
-  dev server  running   4123  1h 2m   2         2.2%  128.0 MiB  1         -
-  café        crashed   -     -       0         -     -          -         status 127
-  worker      starting  -     -       0         -     -          -         -
-  cron        crashed   -     -       0         -     -          -         signal SIGKILL
+  NAME        STATE     READY  PID   UPTIME  RESTARTS  CPU   MEM        ATTACHED  LAST EXIT
+  dev server  running   yes    4123  1h 2m   2         2.2%  128.0 MiB  1         -
+  café        crashed   -      -     -       0         -     -          -         status 127
+  worker      starting  -      -     -       0         -     -          -         -
+  cron        crashed   -      -     -       0         -     -          -         signal SIGKILL
 
 blog  /home/me/blog
   no processes; `muster add <name> -- <command>` adds one

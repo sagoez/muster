@@ -477,7 +477,9 @@ impl Supervisor {
         self.install_pane(pane, handle);
         if carried.is_none() {
             self.take_history(pane, record.history());
+            self.adopt_run(pane);
         }
+        self.arm_probes(pane);
         if let Some(carried) = carried {
             if let Some(target) = self.panes.get_mut(&pane) {
                 target.exit_intent = carried.intent;
@@ -622,11 +624,13 @@ mod tests {
             supervisor,
             events,
             notices,
+            event_log,
         } = harness;
         Harness {
             supervisor: supervisor.with_adopter(adopter),
             events,
             notices,
+            event_log,
         }
     }
 

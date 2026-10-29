@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    adapter::service::{ServiceEvent, SharedNotices},
+    adapter::service::{ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices},
     domain::{
         port::{Notifier, ProcessMetrics, ProcessRunner},
         settings::Settings,
@@ -19,6 +19,10 @@ pub struct SupervisorDeps {
     pub(super) events: Sender<ServiceEvent>,
     /// Where supervision reports what the user should know.
     pub(super) notices: SharedNotices,
+    /// Where lifecycle events are recorded for clients to read and wait on.
+    pub(super) event_log: SharedEventLog,
+    /// Tries port and HTTP probes off the loop; absent where none run.
+    pub(super) probes: Option<ProbeWorker>,
     /// Delivers desktop notifications; absent where none are shown.
     pub(super) notifier: Option<Box<dyn Notifier>>,
     /// Samples each running process's resource usage; absent where unread.

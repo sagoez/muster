@@ -106,6 +106,7 @@ fn run_service() -> Result<(), MusterError> {
         .ports(Box::new(LocalPorts))
         .stacks(Box::new(store.clone()))
         .settings(Box::new(store))
+        .listening(None)
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)
 }

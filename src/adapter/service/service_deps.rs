@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use typed_builder::TypedBuilder;
 
 use super::{holder_pool::HolderPool, project_ports::ProjectPorts};
-use crate::domain::port::{SettingsStore, StackStore};
+use crate::domain::port::{ListeningPorts, SettingsStore, StackStore};
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
 #[derive(TypedBuilder)]
@@ -21,4 +21,7 @@ pub struct ServiceDeps {
     pub(super) stacks: Box<dyn StackStore>,
     /// Reads the user's settings at start and as they change.
     pub(super) settings: Box<dyn SettingsStore>,
+    /// Finds the ports running process trees listen on; absent where ports
+    /// are not reported.
+    pub(super) listening: Option<Box<dyn ListeningPorts + Send>>,
 }

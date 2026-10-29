@@ -5,7 +5,7 @@ use strum::IntoStaticStr;
 
 use super::{
     batch_outcome::BatchOutcome, located::Located, notice::Notice, project_status::ProjectStatus,
-    service_error_body::ServiceErrorBody,
+    service_error_body::ServiceErrorBody, stack_event::EventPage, wait_outcome::WaitOutcome,
 };
 
 /// The service's answer to one [`ServiceRequest`](super::ServiceRequest), as
@@ -36,6 +36,10 @@ pub enum ServiceResponse {
     Screen(String),
     /// Recent notices, oldest first.
     Notices(Vec<Notice>),
+    /// How a wait ended.
+    Waited(WaitOutcome),
+    /// Lifecycle events after a cursor.
+    Events(EventPage),
     /// The request was refused.
     Error(ServiceErrorBody),
 }

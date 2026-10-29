@@ -189,14 +189,42 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when the service cannot be reached or answers
     /// late.
     pub fn send(&self, request: &ServiceRequest) -> Result<ServiceResponse, ClientError> {
-        match protocol::send_within(&self.socket, request, SERVICE_EXIT_TIMEOUT) {
+        self.send_within(request, SERVICE_EXIT_TIMEOUT)
+    }
+
+    /// Sends `request`, which the service answers only after waiting up to
+    /// `wait`, as [`Self::send`] does, allowing for that wait.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when the service cannot be reached or answers
+    /// late.
+    pub fn send_waiting(
+        &self,
+        request: &ServiceRequest,
+        wait: Duration,
+    ) -> Result<ServiceResponse, ClientError> {
+        self.send_within(request, wait.saturating_add(SERVICE_EXIT_TIMEOUT))
+    }
+
+    /// Sends `request`, waiting at most `timeout` for each answer, and sends
+    /// it once more to a service started afresh when it could not be taken.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when the service cannot be reached or answers
+    /// late.
+    fn send_within(
+        &self,
+        request: &ServiceRequest,
+        timeout: Duration,
+    ) -> Result<ServiceResponse, ClientError> {
+        match protocol::send_within(&self.socket, request, timeout) {
             Ok(ServiceResponse::Error(body)) if *body.kind() == ServiceErrorKind::Busy => {
                 self.reach()?;
-                self.exchange(request)
+                self.try_send(request, timeout)
             },
             Err(error) if not_listening(&error) => {
                 self.reach()?;
-                self.exchange(request)
+                self.try_send(request, timeout)
             },
             Ok(response) => Ok(response),
             Err(source) => Err(self.io_error(source)),

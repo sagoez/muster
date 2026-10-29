@@ -28,7 +28,7 @@ use crate::{
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
     },
     domain::{
-        process::ProcessState,
+        process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
         value::{ProcessName, ProjectName},
@@ -36,9 +36,10 @@ use crate::{
 };
 
 /// Column headers of the `ps` table, in order.
-const PS_HEADERS: [&str; 9] = [
+const PS_HEADERS: [&str; 10] = [
     "NAME",
     "STATE",
+    "READY",
     "PID",
     "UPTIME",
     "RESTARTS",
@@ -47,6 +48,12 @@ const PS_HEADERS: [&str; 9] = [
     "ATTACHED",
     "LAST EXIT",
 ];
+/// The READY cell of a run that passed its readiness check.
+const READY_YES: &str = "yes";
+/// The READY cell of a run still waiting on its readiness check.
+const READY_WAITING: &str = "waiting";
+/// The READY cell of a run that did not pass its readiness check in time.
+const READY_TIMEOUT: &str = "timeout";
 /// Gap between two table columns, and between a project's name and folder.
 const COLUMN_GAP: &str = "  ";
 /// Shown in a table cell with nothing to show.
@@ -188,14 +195,31 @@ fn process_cells(process: &ProcessStatus) -> Vec<String> {
     vec![
         printable(process.name().as_ref()),
         process.state().to_string(),
+        cell(ready_cell(*process.ready())),
         cell(process.pid().map(|pid| pid.to_string())),
         cell(process.uptime().map(short_duration)),
         process.restarts().to_string(),
         cell(usage.map(|usage| format!("{:.1}%", usage.cpu_percent()))),
         cell(usage.map(|usage| ByteSize::b(*usage.memory_bytes()).to_string())),
         cell((*process.attached() > 0).then(|| process.attached().to_string())),
-        cell(process.last_exit().as_ref().map(exit_cell)),
+        cell(
+            process
+                .last_exit()
+                .as_ref()
+                .map(|exit| exit_cell(exit.outcome())),
+        ),
     ]
+}
+
+/// Whether a process's run is ready, in a `ps` cell: `yes`, `waiting`,
+/// `timeout`, or nothing when it has no check.
+fn ready_cell(ready: Readiness) -> Option<String> {
+    match ready {
+        Readiness::None => None,
+        Readiness::Waiting => Some(READY_WAITING.to_string()),
+        Readiness::Ready => Some(READY_YES.to_string()),
+        Readiness::TimedOut => Some(READY_TIMEOUT.to_string()),
+    }
 }
 
 /// How a process last ended, in a `ps` cell: `status 1`, `signal SIGKILL`.
@@ -611,7 +635,7 @@ mod tests {
         adapter::{
             cli::{ending_signal::EndingSignal, report::plain},
             client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
-            service::{ProcessUsage, ServiceErrorKind},
+            service::{ExitReason, LastExit, ProcessUsage, ServiceErrorKind},
         },
         domain::value::ProjectRoot,
     };
@@ -670,7 +694,12 @@ mod tests {
                     .build()
             }))
             .attached(0)
-            .last_exit(last_exit)
+            .last_exit(last_exit.map(|outcome| {
+                LastExit::builder()
+                    .reason(ExitReason::of(&outcome, false))
+                    .outcome(outcome)
+                    .build()
+            }))
             .stop_grace(GRACE)
             .build()
     }
@@ -682,6 +711,7 @@ mod tests {
         let dev = ProcessStatus::builder()
             .name(dev.name().clone())
             .state(*dev.state())
+            .ready(Readiness::Ready)
             .pid(*dev.pid())
             .uptime(*dev.uptime())
             .restarts(2)

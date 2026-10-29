@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{Environment, ProcessSpec},
-    process::{ProcessState, RestartPolicy, StopPolicy},
+    process::{ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName},
 };
 
@@ -37,6 +37,9 @@ pub struct Process {
     stop: StopPolicy,
     /// Whether `muster up` starts this process.
     autostart: bool,
+    /// What each run waits for before it counts as ready, when anything.
+    #[builder(default)]
+    ready: Option<ReadyCheck>,
 }
 
 impl Process {
@@ -55,6 +58,7 @@ impl Process {
         self.restart = *spec.restart();
         self.stop = *spec.stop();
         self.autostart = *spec.autostart();
+        self.ready = spec.ready().clone();
     }
 
     /// The definition this process runs, without its pane or state.
@@ -68,6 +72,7 @@ impl Process {
             .autostart(self.autostart)
             .restart(self.restart)
             .stop(self.stop)
+            .ready(self.ready.clone())
             .build()
     }
 }

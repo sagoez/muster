@@ -19,7 +19,9 @@ use crossbeam_channel::{Receiver, unbounded};
 
 use super::{SpawnGeneration, Supervisor, SupervisorDeps};
 use crate::{
-    adapter::service::{LaunchEnvironment, Notices, ServiceEvent, SharedNotices},
+    adapter::service::{
+        EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
+    },
     application::Workspace,
     domain::{
         color_scheme::ColorScheme,
@@ -116,6 +118,7 @@ pub(crate) struct Harness {
     pub(crate) supervisor: Supervisor,
     pub(crate) events: Receiver<ServiceEvent>,
     pub(crate) notices: SharedNotices,
+    pub(crate) event_log: SharedEventLog,
 }
 
 impl Harness {
@@ -124,10 +127,13 @@ impl Harness {
     pub(crate) fn over(runner: Box<dyn ProcessRunner>, processes: &[ProcessSpec]) -> Self {
         let (sender, events) = unbounded();
         let notices = Notices::shared(None);
+        let event_log = EventLog::shared();
         let deps = SupervisorDeps::builder()
             .runner(runner)
             .events(sender)
             .notices(notices.clone())
+            .event_log(event_log.clone())
+            .probes(None)
             .notifier(None)
             .process_metrics(None)
             .settings(test_settings())
@@ -136,6 +142,7 @@ impl Harness {
             supervisor: Supervisor::new(test_project(), &stack(processes), deps),
             events,
             notices,
+            event_log,
         }
     }
 

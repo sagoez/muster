@@ -12,6 +12,7 @@ expression: json(&views).unwrap()
       {
         "name": "dev server",
         "state": "running",
+        "ready": "ready",
         "pid": 4123,
         "uptime": 3723,
         "restarts": 2,
@@ -24,6 +25,7 @@ expression: json(&views).unwrap()
       {
         "name": "café",
         "state": "crashed",
+        "ready": "none",
         "pid": null,
         "uptime": null,
         "restarts": 0,
@@ -39,6 +41,7 @@ expression: json(&views).unwrap()
       {
         "name": "worker",
         "state": "starting",
+        "ready": "none",
         "pid": null,
         "uptime": null,
         "restarts": 0,
@@ -51,6 +54,7 @@ expression: json(&views).unwrap()
       {
         "name": "cron",
         "state": "crashed",
+        "ready": "none",
         "pid": null,
         "uptime": null,
         "restarts": 0,

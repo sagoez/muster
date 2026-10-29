@@ -181,6 +181,7 @@ fn refusal_message(kind: ServiceErrorKind, message: &str) -> String {
         ServiceErrorKind::UnknownProcess
         | ServiceErrorKind::UnknownProject
         | ServiceErrorKind::NotRunning
+        | ServiceErrorKind::InvalidInput
         | ServiceErrorKind::Internal => message.to_string(),
     }
 }

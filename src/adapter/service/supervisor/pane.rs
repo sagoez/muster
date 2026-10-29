@@ -7,21 +7,16 @@ use super::{
     config_membership::ConfigMembership, shutdown_generation::ShutdownGeneration,
     unsupervised_child::UnsupervisedChild,
 };
-use crate::{
-    adapter::terminal::{KittyKeyboardTracker, TerminalEmulator},
-    domain::{port::ProcessHandle, process::ExitIntent},
-};
+use crate::domain::{port::ProcessHandle, process::ExitIntent};
 
-/// One supervised pane: its terminal and, while alive, its process handle. The
-/// terminal outlives the handle so a finished process keeps its last screen.
+/// One supervised pane: its last known screen and, while alive, its process
+/// handle. The screen outlives the handle so a finished process keeps it.
 #[derive(Getters, MutGetters, CopyGetters, TypedBuilder)]
 pub(crate) struct Pane {
-    /// The pane's screen and scrollback.
-    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
-    pub(super) parser: TerminalEmulator,
-    /// The Kitty keyboard protocol this child has negotiated.
+    /// The text of the last screen the process showed: as it connected, as
+    /// its holder last repainted it, or as a holder read last returned it.
     #[getset(get = "pub(crate)")]
-    pub(super) keyboard: KittyKeyboardTracker,
+    pub(super) screen: String,
     /// The live process, while there is one.
     #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
     pub(super) handle: Option<Box<dyn ProcessHandle>>,

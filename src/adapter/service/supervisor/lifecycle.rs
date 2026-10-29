@@ -13,18 +13,18 @@ use super::{
 };
 use crate::{
     adapter::{
+        holder::client::repaint_text,
         service::{
             BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, Refusal,
             ServiceEvent, WaitStatus,
         },
-        terminal::{KittyKeyboardTracker, TerminalEmulator},
     },
     application::{ExitDecision, ProcessLifecycle},
     domain::{
         notification::Notification,
         port::ProcessHandle,
         process::{ExitIntent, ProcessState, StopPolicy},
-        pty::{ExitOutcome, ProcessOutput, PtyError, SpawnHistory, SpawnRequest},
+        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnHistory, SpawnRequest},
         value::{PaneId, ProcessName},
     },
 };
@@ -59,10 +59,6 @@ const OUTPUT_UNREADABLE_NOTICE: &str =
 /// Start of the notice for an exit nobody asked for that failed, before how
 /// it ended.
 const CRASHED_NOTICE: &str = "crashed";
-/// Shown when the service's copy of a process's screen failed on its output
-/// and was reset.
-const SCREEN_RESET_NOTICE: &str =
-    "the terminal emulator failed on this process's output; its screen was reset";
 /// Shown when a handled exit cannot be acknowledged, so its holder keeps it.
 const EXIT_ACKNOWLEDGE_FAILED_NOTICE: &str =
     "could not release the finished process; a later start may report its exit again";
@@ -424,18 +420,16 @@ impl Supervisor {
         }
         match output {
             ProcessOutput::Chunk(bytes) => {
-                if self.paint(pane, &bytes) {
+                if self.panes.contains_key(&pane) {
                     self.tap_output(pane, None, &bytes);
                 }
             },
             ProcessOutput::Placed { at, bytes } => {
-                if self.paint(pane, &bytes) {
+                if self.panes.contains_key(&pane) {
                     self.tap_output(pane, Some(at), &bytes);
                 }
             },
-            ProcessOutput::Repaint(screen) => {
-                self.paint(pane, &screen);
-            },
+            ProcessOutput::Repaint { bytes, size } => self.keep_screen(pane, &bytes, size),
             ProcessOutput::Warning(warning) => {
                 self.notify(NoticeLevel::Warning, Some(pane), warning);
             },
@@ -456,30 +450,12 @@ impl Supervisor {
         }
     }
 
-    /// Paints `bytes` onto `pane`'s terminal and answers the child's terminal
-    /// queries, unless its handle answers them itself. Returns whether the
-    /// pane has a terminal to paint on.
-    fn paint(&mut self, pane: PaneId, bytes: &[u8]) -> bool {
-        let Some(target) = self.panes.get_mut(&pane) else {
-            return false;
-        };
-        let keyboard_reply = target.keyboard.observe(bytes);
-        let reset = target.parser.process_or_reset(bytes);
-        let terminal_reply = target.parser.take_pty_writes();
-        if let Some(handle) = target.handle.as_mut()
-            && !handle.answers_terminal_queries()
-        {
-            if !keyboard_reply.is_empty() {
-                let _ = handle.write_input(&keyboard_reply);
-            }
-            if !terminal_reply.is_empty() {
-                let _ = handle.write_input(&terminal_reply);
-            }
+    /// Keeps the text of the screen `repaint` rebuilds at `size` as `pane`'s
+    /// last screen, when the pane has one.
+    fn keep_screen(&mut self, pane: PaneId, repaint: &[u8], size: PtySize) {
+        if let Some(target) = self.panes.get_mut(&pane) {
+            target.screen = repaint_text(repaint, size);
         }
-        if reset {
-            self.notify(NoticeLevel::Warning, Some(pane), SCREEN_RESET_NOTICE);
-        }
-        true
     }
 
     /// Respawns a pane only when its delayed restart still belongs to this
@@ -761,11 +737,14 @@ impl Supervisor {
         *self.restarts.entry(pane).or_default() += 1;
     }
 
-    /// Supervises `handle` as `pane`'s live process on a fresh terminal,
-    /// painted first with the screen the process already had. The screen is
-    /// a repaint, not output, so no wait or readiness check sees it.
+    /// Supervises `handle` as `pane`'s live process, keeping the screen the
+    /// process already had as its last screen. The screen is a repaint, not
+    /// output, so no wait or readiness check sees it.
     pub(super) fn install_pane(&mut self, pane: PaneId, mut handle: Box<dyn ProcessHandle>) {
         let screen = handle.take_initial_screen();
+        let size = handle
+            .screen_size()
+            .unwrap_or(*self.settings.default_size());
         let run_start = handle.run_start();
         if self.install_terminal(pane, Some(handle)) {
             self.workspace.set_state(pane, ProcessState::Running);
@@ -773,7 +752,7 @@ impl Supervisor {
                 self.place_run(pane, start);
             }
             if let Some(screen) = screen {
-                self.paint(pane, &screen);
+                self.keep_screen(pane, &screen, size);
             }
         }
     }
@@ -920,9 +899,8 @@ impl Supervisor {
         }
     }
 
-    /// Gives `pane` a fresh terminal over `handle`, or over no process at all,
-    /// keeping the scrollback the current settings give a new process.
-    /// Returns whether the workspace has the pane's process.
+    /// Gives `pane` a fresh, blank pane over `handle`, or over no process at
+    /// all. Returns whether the workspace has the pane's process.
     pub(super) fn install_terminal(
         &mut self,
         pane: PaneId,
@@ -931,10 +909,6 @@ impl Supervisor {
         if self.workspace.process(pane).is_none() {
             return false;
         }
-        let size = handle
-            .as_ref()
-            .and_then(|handle| handle.screen_size())
-            .unwrap_or(*self.settings.default_size());
         let started_at = handle
             .as_ref()
             .and_then(|handle| handle.started_at())
@@ -943,17 +917,10 @@ impl Supervisor {
             .as_ref()
             .map_or(0, |handle| handle.attached_clients());
         self.set_pane_attached(pane, attached);
-        let parser = TerminalEmulator::new(
-            size.rows(),
-            size.cols(),
-            self.settings.scrollback().into_inner(),
-            *self.settings.color_scheme(),
-        );
         self.panes.insert(
             pane,
             Pane::builder()
-                .parser(parser)
-                .keyboard(KittyKeyboardTracker::default())
+                .screen(String::new())
                 .handle(handle)
                 .unsupervised(None)
                 .started_at(started_at)
@@ -1360,9 +1327,9 @@ mod tests {
         },
         domain::{
             config::{Environment, ProcessSpec},
-            port::{OutputSink, ProcessInput, ProcessRunner},
+            port::{OutputSink, ProcessRunner},
             process::{Process, RestartPolicy, StopSignal},
-            pty::{ExitCause, PtySize, ScreenSource},
+            pty::{ExitCause, PtySize},
             value::{EnvName, EnvValue, Pid},
         },
     };
@@ -1610,11 +1577,7 @@ mod tests {
         let requests = spawns.requests.borrow();
         assert_eq!(requests[0].size(), *test_settings().default_size());
         assert_eq!(requests[1].size(), bigger);
-        assert_eq!(
-            harness.supervisor.panes()[&pane()].parser().size(),
-            (24, 24),
-            "the running process keeps its terminal"
-        );
+        assert_eq!(requests.len(), 2, "the running process keeps its terminal");
     }
 
     #[test]
@@ -2091,9 +2054,7 @@ mod tests {
             .supervisor
             .handle_output(pane(), new_gen, ProcessOutput::Chunk(b"fresh".to_vec()));
 
-        let screen = harness.supervisor.panes()[&pane()].parser.screen_text();
-        assert!(screen.contains("fresh"));
-        assert!(!screen.contains("stale"));
+        assert_eq!(harness.run_tail(pane()), ["fresh"]);
     }
 
     /// An output stream that broke is reported as an error naming the process.
@@ -2440,101 +2401,29 @@ mod tests {
         assert_eq!(state(&harness), ProcessState::Crashed);
     }
 
-    /// A handle whose holder answers the child's terminal queries gets no
-    /// second reply from the supervisor; a bare PTY handle does.
+    /// A cursor position request, then a Kitty keyboard protocol query.
+    const CURSOR_AND_KEYBOARD_QUERIES: &[u8] = b"\x1b[6n\x1b[?u";
+
+    /// The supervisor writes nothing back for a child's terminal queries:
+    /// whatever runs the process owns the terminal and answers them once.
     #[test]
-    fn terminal_queries_are_answered_once() {
-        /// A recording handle that may claim to answer queries itself.
-        struct AnsweringHandle {
-            written: Arc<Mutex<Vec<u8>>>,
-            answers: bool,
-        }
+    fn the_supervisor_never_answers_terminal_queries() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = started(
+            Box::new(RecordingRunner {
+                written: written.clone(),
+            }),
+            process(RestartPolicy::Never),
+        );
+        let generation = current_gen(&harness);
 
-        impl ProcessHandle for AnsweringHandle {
-            fn process_id(&self) -> Option<Pid> {
-                None
-            }
+        harness.supervisor.handle_output(
+            pane(),
+            generation,
+            ProcessOutput::Chunk(CURSOR_AND_KEYBOARD_QUERIES.to_vec()),
+        );
 
-            fn input(&self) -> Option<Box<dyn ProcessInput>> {
-                None
-            }
-
-            fn screen_source(&self) -> ScreenSource {
-                ScreenSource::Mirror
-            }
-
-            fn abandon(mut self: Box<Self>) {
-                let _ = self.kill();
-            }
-
-            fn answers_terminal_queries(&self) -> bool {
-                self.answers
-            }
-
-            fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-                self.written.lock().unwrap().extend_from_slice(bytes);
-                Ok(())
-            }
-
-            fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
-                Ok(())
-            }
-
-            fn pause(&mut self) -> Result<(), PtyError> {
-                Ok(())
-            }
-
-            fn resume(&mut self) -> Result<(), PtyError> {
-                Ok(())
-            }
-
-            fn kill(&mut self) -> Result<(), PtyError> {
-                Ok(())
-            }
-        }
-
-        /// Spawns [`AnsweringHandle`]s.
-        struct AnsweringRunner {
-            written: Arc<Mutex<Vec<u8>>>,
-            answers: bool,
-        }
-
-        impl ProcessRunner for AnsweringRunner {
-            fn spawn(
-                &self,
-                _request: SpawnRequest,
-                _sink: Box<dyn OutputSink>,
-            ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-                Ok(Box::new(AnsweringHandle {
-                    written: self.written.clone(),
-                    answers: self.answers,
-                }))
-            }
-        }
-
-        for answers in [true, false] {
-            let written = Arc::new(Mutex::new(Vec::new()));
-            let mut harness = started(
-                Box::new(AnsweringRunner {
-                    written: written.clone(),
-                    answers,
-                }),
-                process(RestartPolicy::Never),
-            );
-            let generation = current_gen(&harness);
-
-            harness.supervisor.handle_output(
-                pane(),
-                generation,
-                ProcessOutput::Chunk(b"\x1b[6n".to_vec()),
-            );
-
-            assert_eq!(
-                written.lock().unwrap().is_empty(),
-                answers,
-                "a cursor report is written only when the handle does not answer it"
-            );
-        }
+        assert!(written.lock().unwrap().is_empty());
     }
 
     /// A runner whose launches run on a worker and always fail.
@@ -2582,12 +2471,7 @@ mod tests {
         harness.supervisor.handle_spawned(pane, generation, result);
 
         assert_eq!(state(&harness), ProcessState::Running);
-        assert!(
-            harness.supervisor.panes()[&pane]
-                .parser()
-                .screen_text()
-                .contains("first then")
-        );
+        assert_eq!(harness.run_tail(pane), ["first", "then"]);
     }
 
     /// A second `up` while the first one's launch is in flight starts nothing

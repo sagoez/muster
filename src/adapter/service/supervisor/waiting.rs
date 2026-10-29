@@ -88,7 +88,10 @@ impl Supervisor {
             WaitCondition::Log(pattern) => Some(
                 LineMatcher::compile(pattern).map_err(|error| invalid_input(error.to_string()))?,
             ),
-            _ => None,
+            WaitCondition::Port(_)
+            | WaitCondition::Http { .. }
+            | WaitCondition::State(_)
+            | WaitCondition::Ready => None,
         };
         Ok(PreparedWait {
             pane: *process.id(),
@@ -284,11 +287,7 @@ impl Supervisor {
     /// each is taken to begin at the run's start, and a run that ends at once
     /// still has them as its tail.
     pub(super) fn observe_first_screen(&mut self, pane: PaneId) {
-        let Some(text) = self
-            .panes
-            .get(&pane)
-            .map(|target| target.parser.screen_text())
-        else {
+        let Some(text) = self.panes.get(&pane).map(|target| target.screen.clone()) else {
             return;
         };
         let at = self
@@ -455,7 +454,9 @@ impl Supervisor {
             ExitReason::Crashed | ExitReason::Killed | ExitReason::FailedToStart => {
                 EventKind::Crashed
             },
-            _ if next == ProcessState::Restarting => EventKind::Restarting,
+            ExitReason::Stopped | ExitReason::Exited if next == ProcessState::Restarting => {
+                EventKind::Restarting
+            },
             ExitReason::Stopped => EventKind::Stopped,
             ExitReason::Exited => EventKind::Exited,
         };
@@ -482,7 +483,11 @@ impl Supervisor {
                 let waiter = self.waiters.remove(index);
                 let status = match waiter.until() {
                     WaitCondition::State(goal) if goal.reached(next) => WaitStatus::Matched,
-                    _ => status,
+                    WaitCondition::State(_)
+                    | WaitCondition::Log(_)
+                    | WaitCondition::Port(_)
+                    | WaitCondition::Http { .. }
+                    | WaitCondition::Ready => status,
                 };
                 self.answer(waiter, status, None);
             } else {
@@ -598,10 +603,10 @@ impl Supervisor {
                 match self.readiness.get(&pane).map(|readiness| readiness.state) {
                     Some(Readiness::Ready) => Some((WaitStatus::Matched, None)),
                     Some(Readiness::TimedOut) => Some((WaitStatus::ReadyTimeout, None)),
-                    _ => None,
+                    Some(Readiness::None | Readiness::Waiting) | None => None,
                 }
             },
-            _ => None,
+            WaitCondition::Log(_) | WaitCondition::Port(_) | WaitCondition::Http { .. } => None,
         }
     }
 
@@ -628,7 +633,7 @@ impl Supervisor {
             RunPin::From(_) if state.is_none_or(|state| !state.may_be_running()) => {
                 Some(WaitStatus::NotRunning)
             },
-            _ => None,
+            RunPin::After(_) | RunPin::From(_) => None,
         }
     }
 
@@ -693,7 +698,7 @@ impl Supervisor {
                     return;
                 },
             },
-            _ => None,
+            ReadyProbe::Port(_) | ReadyProbe::Http(_) => None,
         };
         self.readiness.insert(pane, RunReadiness {
             state: Readiness::on_spawn(Some(&check)),
@@ -750,7 +755,7 @@ fn probe_of(condition: &WaitCondition) -> Option<ProbeTarget> {
             url: url.clone(),
             status: *status,
         }),
-        _ => None,
+        WaitCondition::Log(_) | WaitCondition::State(_) | WaitCondition::Ready => None,
     }
 }
 

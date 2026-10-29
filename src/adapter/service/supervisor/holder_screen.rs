@@ -30,8 +30,8 @@ pub struct HolderScreen {
     /// The socket of the holder that serves it.
     #[getset(get = "pub")]
     socket: PathBuf,
-    /// The service's own mirror of the screen, used when the holder cannot be
-    /// read.
+    /// The last screen the service saw of the process, used when the holder
+    /// cannot be read.
     #[getset(get = "pub")]
     fallback: String,
 }

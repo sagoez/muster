@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::exit_cause::ExitCause;
+use super::{exit_cause::ExitCause, size::PtySize};
 use crate::domain::value::OutputCursor;
 
 /// What success says about how a process ended.
@@ -65,9 +65,14 @@ pub enum ProcessOutput {
         /// The bytes.
         bytes: Vec<u8>,
     },
-    /// Bytes that rebuild the process's screen in a fresh terminal: a
-    /// repaint, not output the process wrote.
-    Repaint(Vec<u8>),
+    /// Bytes that rebuild the process's screen in a fresh terminal of `size`:
+    /// a repaint, not output the process wrote.
+    Repaint {
+        /// The bytes that rebuild the screen.
+        bytes: Vec<u8>,
+        /// The size the screen was rendered at.
+        size: PtySize,
+    },
     /// The process exited with the given outcome.
     Exited(ExitOutcome),
     /// The stream carrying the process's output could not be read any further,

@@ -394,7 +394,7 @@ impl HolderServer {
                     | ProcessOutput::Warning(_)
                     | ProcessOutput::Attached(_)
                     | ProcessOutput::Placed { .. }
-                    | ProcessOutput::Repaint(_),
+                    | ProcessOutput::Repaint { .. },
                 ) => {},
                 HolderEvent::GraceElapsed if !self.child.exited => {
                     let _ = self.child.handle.kill();
@@ -419,13 +419,25 @@ impl HolderServer {
         Ok(())
     }
 
-    /// Holds the child's exit for collection and tells every client.
+    /// Holds the child's exit for collection and tells every client. The
+    /// supervisor gets the final screen first, since the service keeps no
+    /// screen of its own and shows that one once the holder is gone.
     ///
     /// # Errors
-    /// Returns a [`HolderError`] when the exit cannot be encoded.
+    /// Returns a [`HolderError`] when the screen or the exit cannot be
+    /// encoded.
     fn on_exit(&mut self, outcome: ExitOutcome) -> Result<(), HolderError> {
         self.child.exited = true;
         self.exit = Some(outcome.clone());
+        let supervisors: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, entry)| entry.role == Some(ClientRole::Supervisor))
+            .map(|(id, _)| *id)
+            .collect();
+        for client in supervisors {
+            self.send(client, self.snapshot())?;
+        }
         self.broadcast(HolderMessage::Exited(outcome))
     }
 
@@ -490,7 +502,10 @@ impl HolderServer {
                 ClientMessage::Hello { role } => {
                     self.on_hello(client, role).map(|()| Flow::Continue)
                 },
-                _ => self.reject(client, RejectReason::HelloRequired),
+                ClientMessage::Input(_)
+                | ClientMessage::Resize(_)
+                | ClientMessage::Control(_)
+                | ClientMessage::CollectExit => self.reject(client, RejectReason::HelloRequired),
             };
         };
         match message {
@@ -565,15 +580,7 @@ impl HolderServer {
     /// # Errors
     /// Returns a [`HolderError`] when the snapshot cannot be encoded.
     fn resync(&mut self, client: ClientId) -> Result<(), HolderError> {
-        let mut repaint = self.emulator.repaint();
-        repaint.extend(self.keyboard.restore_sequence());
-        let mut frames = vec![Frame::try_from(HolderMessage::Snapshot {
-            repaint,
-            size: self.size,
-            pid: self.child_pid,
-            attached: self.writable_attached(),
-            run_start: self.run_start,
-        })?];
+        let mut frames = vec![Frame::try_from(self.snapshot())?];
         if let Some(outcome) = &self.exit {
             frames.push(Frame::try_from(HolderMessage::Exited(outcome.clone()))?);
         }
@@ -589,6 +596,19 @@ impl HolderServer {
             self.drop_client(client);
         }
         Ok(())
+    }
+
+    /// The live screen and modes, as a snapshot a client rebuilds them from.
+    fn snapshot(&self) -> HolderMessage {
+        let mut repaint = self.emulator.repaint();
+        repaint.extend(self.keyboard.restore_sequence());
+        HolderMessage::Snapshot {
+            repaint,
+            size: self.size,
+            pid: self.child_pid,
+            attached: self.writable_attached(),
+            run_start: self.run_start,
+        }
     }
 
     /// Runs a supervisor's control request against the child. A graceful stop
@@ -936,6 +956,7 @@ mod tests {
             holder::{
                 ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
                 HolderRecord, RejectReason,
+                client::repaint_text,
                 testing::{test_request, test_stop},
             },
             signal_target::SignalTarget,
@@ -1565,6 +1586,39 @@ mod tests {
         harness.finish_collected();
     }
 
+    /// The supervisor is sent the final screen just before the exit, since the
+    /// service keeps no screen of its own; an attach client is not.
+    #[test]
+    fn the_supervisor_gets_the_final_screen_right_before_the_exit() {
+        let harness = Harness::start("read x; printf FINAL-SCREEN; exit 0");
+        let (mut watcher, _) = harness.connect(ClientRole::Attach { read_only: true });
+        let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
+        supervisor.send(ClientMessage::Input(b"go\n".to_vec()));
+
+        let mut last = None;
+        let exited = supervisor.recv_until(|message| {
+            let done = matches!(message, HolderMessage::Exited(_));
+            if !done {
+                last = Some(message.clone());
+            }
+            done
+        });
+        supervisor.send(ClientMessage::CollectExit);
+        let watcher_snapshots = watcher.snapshots;
+        watcher.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
+
+        assert!(matches!(
+            exited,
+            HolderMessage::Exited(ExitOutcome::Succeeded)
+        ));
+        let Some(HolderMessage::Snapshot { repaint, size, .. }) = last else {
+            panic!("the exit follows a snapshot, got {last:?}");
+        };
+        assert!(repaint_text(&repaint, size).contains("FINAL-SCREEN"));
+        assert_eq!(watcher.snapshots, watcher_snapshots, "no snapshot at exit");
+        harness.finish_collected();
+    }
+
     #[test]
     fn attach_clients_receive_the_tail_and_exit_before_the_holder_finishes() {
         let harness = Harness::start(&flood(TAIL_BYTES, 'y', "TAIL-END", "exit 0"));
@@ -1745,7 +1799,7 @@ mod tests {
 
     impl ProcessHandle for FakeChild {
         fn screen_source(&self) -> ScreenSource {
-            ScreenSource::Mirror
+            ScreenSource::Kept
         }
 
         fn abandon(mut self: Box<Self>) {

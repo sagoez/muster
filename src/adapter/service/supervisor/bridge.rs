@@ -7,10 +7,10 @@ use crate::{
     },
 };
 
-/// Prefix for a holder whose screen could not be read; the service's own copy
-/// of the screen was answered instead.
+/// Prefix for a holder whose screen could not be read; the last screen the
+/// service saw was answered instead.
 const SCREEN_READ_FAILED_NOTICE: &str =
-    "could not read this process's screen from its holder; showing the service's copy";
+    "could not read this process's screen from its holder; showing the last screen seen";
 
 impl Supervisor {
     /// The visible screen of the process `name`, or `None` when the project
@@ -22,13 +22,13 @@ impl Supervisor {
 
     /// The visible screen of the known process on `pane`. A live process
     /// whose screen is served elsewhere is answered from there, so the read
-    /// is handed to the caller; otherwise the pane's own terminal answers, and
-    /// a process that has not started its terminal yet answers empty.
+    /// is handed to the caller; otherwise the last screen the pane showed
+    /// answers, and a process that has not started yet answers empty.
     fn pane_screen(&self, pane: PaneId) -> ScreenReply {
         let Some(target) = self.panes.get(&pane) else {
             return ScreenReply::Ready(String::new());
         };
-        let fallback = target.parser.screen_text();
+        let fallback = target.screen.clone();
         let source = target.handle.as_ref().map(|handle| handle.screen_source());
         match (source, self.generations.get(&pane)) {
             (Some(ScreenSource::Served(socket)), Some(generation)) => ScreenReply::ReadHolder(
@@ -45,10 +45,11 @@ impl Supervisor {
     }
 
     /// Answers a holder screen read the caller performed: the holder's screen,
-    /// or the service's mirror when the read failed. The first failure of a
-    /// streak raises a warning; a successful read ends the streak. A read that
-    /// outlived its process (another project, or a newer spawn of the pane)
-    /// is answered as it stands and leaves the streak and the notices alone.
+    /// kept as the pane's last screen, or the last screen when the read
+    /// failed. The first failure of a streak raises a warning; a successful
+    /// read ends the streak. A read that outlived its process (another
+    /// project, or a newer spawn of the pane) is answered as it stands and
+    /// leaves the pane, the streak and the notices alone.
     pub fn settle_holder_read(
         &mut self,
         screen: HolderScreen,
@@ -64,6 +65,9 @@ impl Supervisor {
         match read {
             Ok(text) => {
                 self.failing_screen_reads.remove(&pane);
+                if let Some(target) = self.panes.get_mut(&pane) {
+                    target.screen.clone_from(&text);
+                }
                 text
             },
             Err(error) => {
@@ -124,7 +128,7 @@ mod tests {
     const SCRATCH_PREFIX: &str = "mb-";
     /// What the fake holder's screen shows.
     const HOLDER_SCREEN: &str = "drawn by the holder";
-    /// What the service's own terminal of the same process shows.
+    /// The last screen of the same process the service saw.
     const SERVICE_SCREEN: &str = "drawn by the service";
     /// Rows and columns of the fake holder's screen.
     const HOLDER_SIDE: u16 = 24;
@@ -143,13 +147,19 @@ mod tests {
         ])
     }
 
-    /// Feeds `bytes` to `pane`'s current process as output.
-    fn feed(harness: &mut Harness, bytes: &[u8]) {
+    /// Delivers `output` from [`PANE`]'s current process.
+    fn deliver(harness: &mut Harness, output: ProcessOutput) {
         let pane = PaneId::new(PANE);
         let generation = harness.supervisor.generations()[&pane];
-        harness
-            .supervisor
-            .handle_output(pane, generation, ProcessOutput::Chunk(bytes.to_vec()));
+        harness.supervisor.handle_output(pane, generation, output);
+    }
+
+    /// Repaints [`PANE`]'s current process with a screen showing `text`.
+    fn repaint(harness: &mut Harness, text: &str) {
+        deliver(harness, ProcessOutput::Repaint {
+            bytes: text.as_bytes().to_vec(),
+            size: PtySize::try_new(HOLDER_SIDE, HOLDER_SIDE).unwrap(),
+        });
     }
 
     /// The screen of the process `name` as a caller gets it: a holder read is
@@ -224,8 +234,8 @@ mod tests {
         }
     }
 
-    /// A started terminal run by a holder at `socket`, whose service-side
-    /// screen shows [`SERVICE_SCREEN`].
+    /// A started process run by a holder at `socket`, whose last screen the
+    /// service saw shows [`SERVICE_SCREEN`].
     fn holder_run(socket: &Path) -> Harness {
         let mut harness = over(
             Box::new(HolderRunRunner {
@@ -234,7 +244,7 @@ mod tests {
             true,
         );
         harness.up();
-        feed(&mut harness, SERVICE_SCREEN.as_bytes());
+        repaint(&mut harness, SERVICE_SCREEN);
         harness
     }
 
@@ -271,8 +281,9 @@ mod tests {
             .count()
     }
 
-    /// A live process returns its screen, one not started yet returns empty,
-    /// and only an unknown name returns nothing, all without a holder read.
+    /// A live process returns its last screen, one not started yet returns
+    /// empty, and only an unknown name returns nothing, all without a holder
+    /// read.
     #[test]
     fn output_is_the_screen_empty_before_a_start_and_none_for_an_unknown_name() {
         let mut harness = over(Box::new(FakeRunner), false);
@@ -282,7 +293,7 @@ mod tests {
         harness
             .supervisor
             .start(&named(NAME), &LaunchEnvironment::default());
-        feed(&mut harness, SERVICE_SCREEN.as_bytes());
+        repaint(&mut harness, SERVICE_SCREEN);
 
         let Some(ScreenReply::Ready(screen)) = harness.supervisor.screen(&named(NAME)) else {
             panic!("a process without a holder is answered at once");
@@ -290,9 +301,58 @@ mod tests {
         assert!(screen.contains(SERVICE_SCREEN));
     }
 
+    /// Output is never parsed into a screen by the service: only a repaint
+    /// from whatever runs the process changes the screen it keeps.
+    #[test]
+    fn output_alone_leaves_the_kept_screen_alone() {
+        let mut harness = over(Box::new(FakeRunner), true);
+        harness.up();
+        repaint(&mut harness, SERVICE_SCREEN);
+
+        deliver(
+            &mut harness,
+            ProcessOutput::Chunk(HOLDER_SCREEN.as_bytes().to_vec()),
+        );
+
+        let screen = output_of(&mut harness, NAME).unwrap();
+        assert!(screen.contains(SERVICE_SCREEN), "{screen:?}");
+        assert!(!screen.contains(HOLDER_SCREEN), "{screen:?}");
+    }
+
+    /// A finished process answers the screen its holder repainted as it
+    /// exited, after its handle is gone.
+    #[test]
+    fn a_finished_process_answers_its_final_screen() {
+        let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
+        repaint(&mut harness, HOLDER_SCREEN);
+
+        deliver(
+            &mut harness,
+            ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
+        );
+
+        let Some(ScreenReply::Ready(screen)) = harness.supervisor.screen(&named(NAME)) else {
+            panic!("a finished process is answered at once");
+        };
+        assert!(screen.contains(HOLDER_SCREEN), "{screen:?}");
+    }
+
+    /// A screen read from the holder becomes the fallback for a later read
+    /// that fails.
+    #[test]
+    fn a_good_holder_read_is_kept_as_the_fallback() {
+        let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
+        let screen = handed_out(&mut harness);
+        harness
+            .supervisor
+            .settle_holder_read(screen, Ok(HOLDER_SCREEN.to_string()));
+
+        assert!(handed_out(&mut harness).fallback().contains(HOLDER_SCREEN));
+    }
+
     /// The supervisor hands a holder-run process's screen to its caller to
-    /// read rather than reading the socket itself, with the service's copy as
-    /// the fallback.
+    /// read rather than reading the socket itself, with the last screen seen
+    /// as the fallback.
     #[test]
     fn a_holder_run_screen_is_handed_to_the_caller_to_read() {
         let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
@@ -305,7 +365,7 @@ mod tests {
     }
 
     /// The screen of a process a holder runs comes from that holder, whose
-    /// emulator is authoritative, not from the service's mirror of it.
+    /// emulator is authoritative, not from the last screen the service saw.
     #[test]
     fn output_of_a_holder_run_process_is_read_from_its_holder() {
         let scratch = tempfile::Builder::new()
@@ -324,7 +384,7 @@ mod tests {
         assert_eq!(warnings(&harness), 0);
     }
 
-    /// A holder that cannot be read is answered from the service's copy, with
+    /// A holder that cannot be read is answered from the last screen seen, with
     /// one warning per failure streak; a good read ends the streak.
     #[test]
     fn a_failed_holder_read_falls_back_and_warns_once_per_streak() {

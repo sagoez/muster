@@ -952,7 +952,7 @@ mod tests {
         }
 
         fn screen_source(&self) -> ScreenSource {
-            ScreenSource::Mirror
+            ScreenSource::Kept
         }
 
         fn abandon(mut self: Box<Self>) {
@@ -1172,8 +1172,9 @@ mod tests {
         harness
             .supervisor
             .handle_output(pane, current, ProcessOutput::Chunk(b"fresh".to_vec()));
-        let screen = harness.supervisor.panes()[&pane].parser().screen_text();
-        assert!(screen.contains("fresh") && !screen.contains("stale"));
+        let tail = harness.run_tail(pane);
+        assert!(tail.iter().any(|line| line.contains("fresh")), "{tail:?}");
+        assert!(!tail.iter().any(|line| line.contains("stale")), "{tail:?}");
 
         harness.supervisor.stop(&p());
         let current = generation(&harness);

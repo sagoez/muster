@@ -638,7 +638,7 @@ mod tests {
             match output {
                 ProcessOutput::Chunk(bytes)
                 | ProcessOutput::Placed { bytes, .. }
-                | ProcessOutput::Repaint(bytes) => {
+                | ProcessOutput::Repaint { bytes, .. } => {
                     self.screen.process(&bytes);
                     self.chunks.push(bytes);
                 },

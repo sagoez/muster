@@ -36,13 +36,6 @@ pub trait ProcessHandle: Send {
     /// stops reading blocks that thread rather than the controller.
     fn input(&self) -> Option<Box<dyn ProcessInput>>;
 
-    /// Whether something behind this handle already answers the child's
-    /// terminal queries, so the supervisor must not answer them a second time.
-    /// Defaults to no: a bare PTY leaves answering to its reader.
-    fn answers_terminal_queries(&self) -> bool {
-        false
-    }
-
     /// Where the process's authoritative screen is read.
     fn screen_source(&self) -> ScreenSource;
 

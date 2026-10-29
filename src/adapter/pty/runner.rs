@@ -266,7 +266,7 @@ impl ProcessHandle for PtyProcessHandle {
 
     /// A bare PTY has nothing but its reader's rendering of the output.
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     /// Kills the process group; nothing else holds the process.
@@ -508,7 +508,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_) => {},
+                | ProcessOutput::Repaint { .. } => {},
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()
@@ -592,7 +592,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -626,7 +626,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_) => Vec::new(),
+                | ProcessOutput::Repaint { .. } => Vec::new(),
             })
             .collect();
         assert!(String::from_utf8_lossy(&output).contains("hello"));
@@ -653,7 +653,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
         }
         handle
@@ -667,7 +667,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -723,7 +723,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
         }
         #[cfg(target_os = "macos")]
@@ -743,7 +743,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_)) => panic!("unexpected output: {other:?}"),
+                | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -790,7 +790,7 @@ mod tests {
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
                 | ProcessOutput::Placed { .. }
-                | ProcessOutput::Repaint(_) => 0,
+                | ProcessOutput::Repaint { .. } => 0,
             })
             .sum();
         assert_eq!(

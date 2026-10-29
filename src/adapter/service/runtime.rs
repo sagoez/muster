@@ -1325,7 +1325,7 @@ mod tests {
         fn screen_source(&self) -> ScreenSource {
             self.socket
                 .clone()
-                .map_or(ScreenSource::Mirror, ScreenSource::Served)
+                .map_or(ScreenSource::Kept, ScreenSource::Served)
         }
 
         fn abandon(mut self: Box<Self>) {
@@ -2366,7 +2366,7 @@ mod tests {
             assert!(started.elapsed() < WAIT, "timed out waiting for a resync");
             match events.recv_timeout(WAIT) {
                 Ok(ServiceEvent::Output {
-                    output: ProcessOutput::Repaint(bytes),
+                    output: ProcessOutput::Repaint { bytes, .. },
                     ..
                 }) if bytes.starts_with(RESYNC_PREFIX) => break true,
                 Ok(_) => assert!(events.len() <= EVENT_CAPACITY),

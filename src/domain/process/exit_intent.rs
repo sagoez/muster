@@ -91,7 +91,7 @@ impl ExitIntent {
         match self {
             Self::StopInFlight => Self::StopRetryable,
             Self::RestartInFlight => Self::RestartRetryable,
-            _ => self,
+            Self::FollowPolicy | Self::StopRetryable | Self::RestartRetryable => self,
         }
     }
 

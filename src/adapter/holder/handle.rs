@@ -154,11 +154,6 @@ impl ProcessHandle for HolderHandle {
         Some(Box::new(self.writer.clone()))
     }
 
-    /// The holder's own emulator and keyboard tracker answer the child.
-    fn answers_terminal_queries(&self) -> bool {
-        true
-    }
-
     /// The holder serves the screen it renders on its socket.
     fn screen_source(&self) -> ScreenSource {
         ScreenSource::Served(self.socket.clone())
@@ -335,9 +330,15 @@ fn spawn_reader(mut reader: Reader) {
         loop {
             match HolderMessage::read_from(&mut reader.stream) {
                 Ok(HolderMessage::Snapshot {
-                    repaint, attached, ..
+                    repaint,
+                    size,
+                    attached,
+                    ..
                 }) => {
-                    reader.sink.send(ProcessOutput::Repaint(repaint));
+                    reader.sink.send(ProcessOutput::Repaint {
+                        bytes: repaint,
+                        size,
+                    });
                     reader.sink.send(ProcessOutput::Attached(attached));
                 },
                 Ok(HolderMessage::Output { at, bytes }) => {

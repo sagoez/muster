@@ -172,6 +172,15 @@ impl Harness {
             .map(|notice| notice.message().clone())
             .collect()
     }
+
+    /// The lines of `pane`'s current run its output tap holds, oldest first.
+    pub(crate) fn run_tail(&self, pane: PaneId) -> Vec<String> {
+        self.supervisor
+            .taps
+            .get(&pane)
+            .map(|tap| tap.tail(usize::MAX))
+            .unwrap_or_default()
+    }
 }
 
 /// What an [`Orphan`] runs: a long sleep it never finishes on its own.
@@ -354,7 +363,7 @@ impl ProcessHandle for PidHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -412,7 +421,7 @@ impl ProcessHandle for FakeHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -488,7 +497,7 @@ impl ProcessHandle for RecordingHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -566,7 +575,7 @@ impl ProcessHandle for KillCountHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -614,7 +623,7 @@ impl ProcessHandle for ConnectedHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -726,7 +735,7 @@ impl ProcessHandle for StopSignalHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -811,7 +820,7 @@ impl ProcessHandle for RetryStopHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -879,7 +888,7 @@ impl ProcessHandle for PauseFailHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {
@@ -939,7 +948,7 @@ impl ProcessHandle for AckCountHandle {
     }
 
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Mirror
+        ScreenSource::Kept
     }
 
     fn abandon(mut self: Box<Self>) {

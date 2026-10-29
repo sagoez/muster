@@ -102,12 +102,18 @@ pub fn screen_text(socket: &Path) -> Result<String, PtyError> {
         ClientRole::Attach { read_only: true },
         SCREEN_READ_TIMEOUT,
     )?;
+    Ok(repaint_text(greeting.repaint(), greeting.size()))
+}
+
+/// The visible text of the screen `repaint` rebuilds in a fresh terminal of
+/// `size`.
+pub fn repaint_text(repaint: &[u8], size: PtySize) -> String {
     let mut screen = TerminalEmulator::new(
-        greeting.size().rows(),
-        greeting.size().cols(),
+        size.rows(),
+        size.cols(),
         SCREEN_SCROLLBACK,
         SCREEN_COLOR_SCHEME,
     );
-    screen.process(greeting.repaint());
-    Ok(screen.screen_text())
+    screen.process(repaint);
+    screen.screen_text()
 }

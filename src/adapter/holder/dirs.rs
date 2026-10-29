@@ -29,6 +29,10 @@ const LEGACY_LOGS_DIR: &str = "logs";
 const LOG_NAME_KEPT: &[u8] = b"-_ ";
 /// Longest log file stem kept as written, well inside the 255-byte limit.
 const LOG_STEM_MAX: usize = 200;
+/// Hex digits of the name's hash a log file name ends with.
+const LOG_NAME_HASH_DIGITS: usize = 8;
+/// Between a log file name's encoded process name and its hash.
+const LOG_HASH_SEPARATOR: char = '.';
 /// FNV-1a's 64-bit offset basis.
 const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
 /// FNV-1a's 64-bit prime.
@@ -120,8 +124,9 @@ fn file_in(dir: &Path, id: &HolderId, extension: &str) -> PathBuf {
 /// A file name stem for `name` that is safe on every supported file system:
 /// ASCII letters, digits, `-`, `_` and spaces are kept, and every other byte
 /// is percent-encoded, a leading dot included, so no name can climb out of
-/// its folder or hide. A name too long for a file name is replaced by its
-/// hash.
+/// its folder or hide. A short hash of the exact name follows, so names that
+/// differ only in case keep separate logs on a case-insensitive file system.
+/// A name too long for a file name is replaced by its full hash.
 fn log_file_stem(name: &ProcessName) -> String {
     let mut stem = String::new();
     for byte in name.as_ref().bytes() {
@@ -131,10 +136,14 @@ fn log_file_stem(name: &ProcessName) -> String {
             stem.push_str(&format!("%{byte:02X}"));
         }
     }
+    let hash = format!("{:016x}", fnv1a(name.as_ref().as_bytes()));
     if stem.len() > LOG_STEM_MAX {
-        return format!("{:016x}", fnv1a(name.as_ref().as_bytes()));
+        return hash;
     }
-    stem
+    format!(
+        "{stem}{LOG_HASH_SEPARATOR}{}",
+        &hash[..LOG_NAME_HASH_DIGITS]
+    )
 }
 
 /// The 64-bit FNV-1a hash of `bytes`: stable across builds and platforms,
@@ -206,7 +215,10 @@ mod tests {
 
         let log = dirs.process_log(&project, &name("dev server"));
 
-        assert_eq!(log.file_name().unwrap(), "dev server.log");
+        assert_eq!(
+            log.file_name().unwrap().to_string_lossy(),
+            format!("{}.log", log_file_stem(&name("dev server")))
+        );
         assert!(log.starts_with(scratch.path().join(LOGS_DIR)));
         assert_eq!(log, dirs.process_log(&project, &name("dev server")));
         assert_ne!(log, dirs.process_log(&project, &name("api")));
@@ -221,15 +233,42 @@ mod tests {
     /// folder, and a name too long for a file name is hashed.
     #[test]
     fn every_process_name_makes_a_safe_file_name() {
-        assert_eq!(
-            log_file_stem(&name("../etc/passwd")),
-            "%2E%2E%2Fetc%2Fpasswd"
-        );
-        assert_eq!(log_file_stem(&name("café")), "caf%C3%A9");
-        assert_eq!(log_file_stem(&name("dev_server-2")), "dev_server-2");
+        assert_eq!(encoded(&name("../etc/passwd")), "%2E%2E%2Fetc%2Fpasswd");
+        assert_eq!(encoded(&name("café")), "caf%C3%A9");
+        assert_eq!(encoded(&name("dev_server-2")), "dev_server-2");
         let long = name(&"x".repeat(LOG_STEM_MAX + 1));
         assert_eq!(log_file_stem(&long).len(), 16);
         assert_ne!(log_file_stem(&long), log_file_stem(&name(&"y".repeat(300))));
+    }
+
+    /// Names that differ only in case get different log files, which a
+    /// case-insensitive file system would otherwise merge into one.
+    #[test]
+    fn names_differing_only_in_case_get_different_logs() {
+        let scratch = TempDir::new().unwrap();
+        let dirs = HolderDirs::under(scratch.path());
+        let project = root(scratch.path().join("shop"));
+
+        let upper = dirs.process_log(&project, &name("Web"));
+        let lower = dirs.process_log(&project, &name("web"));
+
+        assert_ne!(
+            upper.to_string_lossy().to_lowercase(),
+            lower.to_string_lossy().to_lowercase()
+        );
+        assert_eq!(encoded(&name("Web")), "Web");
+        assert_eq!(
+            log_file_stem(&name("web")).len(),
+            "web".len() + 1 + LOG_NAME_HASH_DIGITS
+        );
+    }
+
+    /// The encoded name a log file stem starts with, its hash cut off.
+    fn encoded(name: &ProcessName) -> String {
+        let stem = log_file_stem(name);
+        let (encoded, hash) = stem.rsplit_once(LOG_HASH_SEPARATOR).unwrap();
+        assert_eq!(hash.len(), LOG_NAME_HASH_DIGITS);
+        encoded.to_string()
     }
 
     /// The legacy per-holder log directory is removed whole, and removing it

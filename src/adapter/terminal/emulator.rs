@@ -7,12 +7,12 @@
 use std::{
     mem,
     panic::{self, AssertUnwindSafe},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex},
 };
 
 use alacritty_terminal::{
     Term,
-    event::{Event, EventListener, VoidListener},
+    event::VoidListener,
     grid::{Cursor, Dimensions, Grid},
     index::{Column, Line},
     term::{
@@ -24,14 +24,23 @@ use alacritty_terminal::{
         self, CharsetIndex, Color as VtColor, CursorShape, NamedColor, Rgb, StandardCharset,
     },
 };
-use getset::CopyGetters;
-use typed_builder::TypedBuilder;
 
+#[cfg(test)]
+use super::render_cell::RenderCell;
 use super::{
+    cell_color::CellColor,
+    cell_flags::CellFlags,
+    cell_style::CellStyle,
     cursor_state::CursorState,
+    emulator_sink::{EmulatorSink, lock_sink},
     escape::{CSI, SCROLL_REGION_FINAL},
-    mode_scanner::{ModeScanner, Observation},
-    screen_snapshot::{ScreenSnapshot, SnapshotCell, cursor_position, push_charsets},
+    event_proxy::EventProxy,
+    mode_scanner::ModeScanner,
+    mouse_protocol_encoding::MouseProtocolEncoding,
+    mouse_protocol_mode::MouseProtocolMode,
+    observation::Observation,
+    screen_snapshot::{ScreenSnapshot, cursor_position, push_charsets},
+    snapshot_cell::SnapshotCell,
     tab_stops::TabStops,
 };
 use crate::domain::{
@@ -82,170 +91,6 @@ const CURSOR_BLINKING_BLOCK: u8 = 1;
 const CURSOR_BLINKING_UNDERLINE: u8 = 3;
 /// DECSCUSR parameter for a blinking beam cursor.
 const CURSOR_BLINKING_BEAM: u8 = 5;
-
-/// xterm mouse-reporting mode a child has requested, mapped from the terminal's
-/// private modes so pointer encoding does not depend on the emulator backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseProtocolMode {
-    /// No mouse reporting.
-    None,
-    /// Report presses and releases (mode 1000).
-    PressRelease,
-    /// Report presses, releases, and motion while a button is held (mode 1002).
-    ButtonMotion,
-    /// Report presses, releases, and all motion (mode 1003).
-    AnyMotion,
-}
-
-/// Byte encoding a child expects for mouse reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseProtocolEncoding {
-    /// Legacy single-byte encoding.
-    Default,
-    /// UTF-8 extended coordinates (mode 1005).
-    Utf8,
-    /// SGR encoding (mode 1006).
-    Sgr,
-}
-
-/// A cell color independent of any rendering frontend. Palette indices pass
-/// through so the host terminal applies its own theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CellColor {
-    /// The terminal's default foreground or background.
-    Default,
-    /// An entry of the 256-color palette.
-    Indexed(u8),
-    /// A true-color value.
-    Rgb(u8, u8, u8),
-}
-
-/// Text attributes of one cell.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, CopyGetters, TypedBuilder)]
-pub struct CellFlags {
-    /// Bold weight.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    bold: bool,
-    /// Dim intensity.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    dim: bool,
-    /// Italic slant.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    italic: bool,
-    /// Any underline style.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    underline: bool,
-    /// Inverse video.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    inverse: bool,
-    /// Concealed text.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    hidden: bool,
-    /// Struck-through text.
-    #[getset(get_copy = "pub")]
-    #[builder(default)]
-    strikeout: bool,
-}
-
-/// The resolved colors and attributes of one cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters, TypedBuilder)]
-pub struct CellStyle {
-    /// Foreground color.
-    #[getset(get_copy = "pub")]
-    fg: CellColor,
-    /// Background color.
-    #[getset(get_copy = "pub")]
-    bg: CellColor,
-    /// Text attributes.
-    #[getset(get_copy = "pub")]
-    flags: CellFlags,
-}
-
-impl Default for CellStyle {
-    /// The unstyled cell: default colors and no attributes.
-    fn default() -> Self {
-        Self::builder()
-            .fg(CellColor::Default)
-            .bg(CellColor::Default)
-            .flags(CellFlags::default())
-            .build()
-    }
-}
-
-/// One grid cell as a test compares it: its glyph, combining characters,
-/// resolved style, and whether it is the trailing half of a wide character.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderCell {
-    ch: char,
-    zerowidth: Vec<char>,
-    style: CellStyle,
-    spacer: bool,
-}
-
-#[cfg(test)]
-impl RenderCell {
-    /// The glyph in the cell.
-    pub fn ch(&self) -> char {
-        self.ch
-    }
-
-    /// Combining characters attached to the glyph.
-    pub fn zerowidth(&self) -> &[char] {
-        &self.zerowidth
-    }
-}
-
-/// Runtime state the VT event listener records for the owning emulator to drain:
-/// bytes the terminal wants written back to the child (device-status and cursor
-/// reports, primary/secondary DA, and so on).
-#[derive(Default)]
-struct EmulatorSink {
-    pty_writes: Vec<u8>,
-}
-
-/// Locks the sink, recovering the guard if a panic poisoned it: the buffer holds
-/// plain bytes, so a half-finished push is harmless.
-fn lock_sink(sink: &Mutex<EmulatorSink>) -> MutexGuard<'_, EmulatorSink> {
-    sink.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The `alacritty_terminal` event listener. It shares [`EmulatorSink`] with the
-/// emulator through `Arc<Mutex<_>>` so the emulator can move between threads.
-#[derive(Clone)]
-struct EventProxy {
-    sink: Arc<Mutex<EmulatorSink>>,
-    color_scheme: ColorScheme,
-}
-
-impl EventListener for EventProxy {
-    fn send_event(&self, event: Event) {
-        match event {
-            // Status and identity reports the terminal wants written back verbatim.
-            Event::PtyWrite(text) => lock_sink(&self.sink)
-                .pty_writes
-                .extend_from_slice(text.as_bytes()),
-            // A child querying a color (OSC 10/11 for the default foreground and
-            // background, OSC 4 for a palette entry) must get an answer, or an agent
-            // like Codex, unable to read the background, themes for a light terminal
-            // and renders white on white. Reply from a standard palette with the
-            // configured scheme's defaults, the way a real terminal does.
-            Event::ColorRequest(index, format) => {
-                let reply = format(resolve_color(index, self.color_scheme));
-                lock_sink(&self.sink)
-                    .pty_writes
-                    .extend_from_slice(reply.as_bytes());
-            },
-            _ => {},
-        }
-    }
-}
 
 /// A managed pane's terminal screen.
 pub struct TerminalEmulator {
@@ -875,7 +720,7 @@ fn scheme_colors(scheme: ColorScheme) -> (Rgb, Rgb) {
 /// Resolves a color-query index to an RGB value: the xterm 256-color palette for
 /// indices 0-255, and `scheme`'s background or foreground for the named
 /// defaults.
-fn resolve_color(index: usize, scheme: ColorScheme) -> Rgb {
+pub(super) fn resolve_color(index: usize, scheme: ColorScheme) -> Rgb {
     let (background, foreground) = scheme_colors(scheme);
     match index {
         0..=15 => ANSI_PALETTE[index],

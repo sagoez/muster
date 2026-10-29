@@ -6,9 +6,12 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{
+    cell_color::CellColor,
+    cell_flags::CellFlags,
+    cell_style::CellStyle,
     cursor_state::CursorState,
-    emulator::{CellColor, CellFlags, CellStyle},
     escape::{CSI, SGR_RESET},
+    snapshot_cell::SnapshotCell,
 };
 
 /// DECSC: saves the cursor's position, pen and charsets.
@@ -55,33 +58,6 @@ const CUP_FINAL: char = 'H';
 /// Builds the CUP sequence placing the cursor at one-based `row` and `col`.
 pub fn cursor_position(row: u16, col: u16) -> String {
     format!("{CSI}{row};{col}{CUP_FINAL}")
-}
-
-/// One captured cell.
-#[derive(Debug, Clone, Getters, CopyGetters, TypedBuilder)]
-pub struct SnapshotCell {
-    /// The base glyph.
-    #[getset(get_copy = "pub")]
-    ch: char,
-    /// Combining characters attached to the glyph.
-    #[getset(get = "pub")]
-    zerowidth: Vec<char>,
-    /// Resolved colors and attributes.
-    #[getset(get_copy = "pub")]
-    style: CellStyle,
-    /// Whether this is the trailing half of a wide character.
-    #[getset(get_copy = "pub")]
-    spacer: bool,
-}
-
-impl SnapshotCell {
-    /// Whether the cell is an unstyled blank a reset screen already shows.
-    fn is_blank_default(&self) -> bool {
-        !self.spacer
-            && self.ch == ' '
-            && self.zerowidth.is_empty()
-            && self.style == CellStyle::default()
-    }
 }
 
 /// A captured screen: its rows of cells, its cursor and its saved cursor.

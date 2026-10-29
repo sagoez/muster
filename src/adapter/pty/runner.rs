@@ -2,32 +2,33 @@ use std::{
     env,
     ffi::{CStr, c_int},
     fmt::Display,
-    io::{Read, Write},
+    io::Read,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
+use crossbeam_channel::bounded;
 use libc::strsignal;
 use portable_pty::{
-    ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize as PortablePtySize,
-    native_pty_system,
+    ChildKiller, CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system,
 };
 use rustix::process::Signal;
 use signal_hook::low_level;
 
-use super::environment::baseline_environment;
+use super::{
+    drain_status::{DrainStatus, wait_for_drain},
+    environment::baseline_environment,
+    pty_input::PtyInput,
+    pty_process_handle::PtyProcessHandle,
+};
 use crate::{
     adapter::signal_target::SignalTarget,
     constants::MUSTER_PROJECT_ENV,
     domain::{
-        port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
+        port::{OutputSink, ProcessHandle, ProcessRunner},
         process::StopSignal,
-        pty::{
-            ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, ScreenSource, SignalName,
-            SpawnRequest,
-        },
+        pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
         value::Pid,
     },
 };
@@ -54,11 +55,6 @@ const BASE_SHELL_LEVEL: &str = "0";
 /// Grace the waiter gives the reader to drain a child's final output before
 /// reporting exit. Bounded so a lingering descendant never blocks the report.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
-/// Poll interval used while a direct child has exited but its process group is
-/// still completing descendant cleanup.
-const PROCESS_GROUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Reported when a writer panicked mid-write, leaving the PTY input unusable.
-const INPUT_POISONED: &str = "pty input writer is poisoned";
 
 /// Spawns processes under a native PTY using `portable-pty`.
 #[derive(Clone, Copy, Default)]
@@ -186,141 +182,6 @@ pub fn ensure_working_dir(request: &SpawnRequest) -> Result<(), PtyError> {
     }
 }
 
-/// Outcome of waiting for both PTY output and descendant cleanup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DrainStatus {
-    Complete,
-    TimedOut,
-}
-
-/// Waits until the PTY reader finishes and the process group is empty, bounded
-/// by `grace`. The liveness callback keeps the timing logic directly testable.
-fn wait_for_drain<F>(
-    reader_done_rx: &Receiver<()>,
-    grace: Duration,
-    mut group_is_alive: F,
-) -> DrainStatus
-where
-    F: FnMut() -> bool,
-{
-    let started = Instant::now();
-    let mut reader_done = match reader_done_rx.try_recv() {
-        Ok(()) | Err(TryRecvError::Disconnected) => true,
-        Err(TryRecvError::Empty) => false,
-    };
-    loop {
-        if reader_done && !group_is_alive() {
-            return DrainStatus::Complete;
-        }
-
-        let remaining = grace.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return DrainStatus::TimedOut;
-        }
-        let poll = remaining.min(PROCESS_GROUP_POLL_INTERVAL);
-        if reader_done {
-            thread::sleep(poll);
-            continue;
-        }
-        match reader_done_rx.recv_timeout(poll) {
-            Ok(()) | Err(RecvTimeoutError::Disconnected) => reader_done = true,
-            Err(RecvTimeoutError::Timeout) => {},
-        }
-    }
-}
-
-/// The PTY's input writer, shared so another thread can write while the
-/// handle's owner keeps controlling the process.
-#[derive(Clone)]
-struct PtyInput(Arc<Mutex<Box<dyn Write + Send>>>);
-
-impl ProcessInput for PtyInput {
-    /// Writes and flushes `bytes` to the PTY.
-    ///
-    /// # Errors
-    /// Returns a `PtyError` if the write fails or a writer panicked mid-write.
-    fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-        let mut writer = self
-            .0
-            .lock()
-            .map_err(|_| PtyError::System(INPUT_POISONED.to_string()))?;
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        Ok(())
-    }
-}
-
-/// Live handle to a PTY-backed process.
-struct PtyProcessHandle {
-    master: Box<dyn MasterPty + Send>,
-    input: PtyInput,
-    killer: Box<dyn ChildKiller + Send + Sync>,
-    grace_tx: Sender<Duration>,
-    pid: Option<Pid>,
-}
-
-impl ProcessHandle for PtyProcessHandle {
-    fn process_id(&self) -> Option<Pid> {
-        self.pid
-    }
-
-    fn input(&self) -> Option<Box<dyn ProcessInput>> {
-        Some(Box::new(self.input.clone()))
-    }
-
-    /// A bare PTY has nothing but its reader's rendering of the output.
-    fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Kept
-    }
-
-    /// Kills the process group; nothing else holds the process.
-    fn abandon(mut self: Box<Self>) {
-        let _ = self.kill();
-    }
-
-    fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.input.write_input(bytes)
-    }
-
-    fn resize(&mut self, size: PtySize) -> Result<(), PtyError> {
-        self.master
-            .resize(to_portable_size(size))
-            .map_err(system_error)
-    }
-
-    fn pause(&mut self) -> Result<(), PtyError> {
-        signal_group(self.group()?, Signal::STOP)
-    }
-
-    fn resume(&mut self) -> Result<(), PtyError> {
-        signal_group(self.group()?, Signal::CONT)
-    }
-
-    fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
-        // Publish the grace before signalling: if the signal makes the direct shell
-        // exit immediately, its waiter still observes the intended deadline.
-        let _ = self.grace_tx.try_send(grace);
-        // A paused command cannot handle a shutdown signal until it resumes.
-        let group = self.group()?;
-        let _ = signal_group(group, Signal::CONT);
-        signal_group(group, unix_signal(signal))
-    }
-
-    fn kill(&mut self) -> Result<(), PtyError> {
-        terminate_group(self.pid, &mut self.killer)
-    }
-}
-
-impl PtyProcessHandle {
-    /// The process group the child leads, which every signal reaches.
-    ///
-    /// # Errors
-    /// Returns [`PtyError::Unsupported`] when the platform gave no pid.
-    fn group(&self) -> Result<Pid, PtyError> {
-        signallable(self.pid)
-    }
-}
-
 /// Reported when a child has no pid to signal.
 const NO_PID: &str = "no pid to signal";
 /// Highest signal number tried when recovering a signal from its description.
@@ -334,7 +195,7 @@ const UNNAMED_SIGNAL_PREFIX: &str = "signal-";
 ///
 /// # Errors
 /// Returns [`PtyError::Unsupported`] when there is none.
-fn signallable(pid: Option<Pid>) -> Result<Pid, PtyError> {
+pub(super) fn signallable(pid: Option<Pid>) -> Result<Pid, PtyError> {
     pid.ok_or_else(|| PtyError::Unsupported(NO_PID.to_string()))
 }
 
@@ -388,7 +249,7 @@ fn strsignal_text(number: c_int) -> Option<String> {
 }
 
 /// Converts a domain [`PtySize`] into the crate's PTY size (pixel size unused).
-fn to_portable_size(size: PtySize) -> PortablePtySize {
+pub(super) fn to_portable_size(size: PtySize) -> PortablePtySize {
     PortablePtySize {
         rows: size.rows().into_inner(),
         cols: size.cols().into_inner(),
@@ -398,7 +259,7 @@ fn to_portable_size(size: PtySize) -> PortablePtySize {
 }
 
 /// Maps a `portable-pty` error (any `Display` error) into a [`PtyError::System`].
-fn system_error<E: Display>(error: E) -> PtyError {
+pub(super) fn system_error<E: Display>(error: E) -> PtyError {
     PtyError::System(error.to_string())
 }
 
@@ -418,7 +279,7 @@ pub(crate) fn signal_group(pid: Pid, signal: Signal) -> Result<(), PtyError> {
 ///
 /// # Errors
 /// Returns a `PtyError` when neither termination mechanism succeeds.
-fn terminate_group(
+pub(super) fn terminate_group(
     pid: Option<Pid>,
     killer: &mut Box<dyn ChildKiller + Send + Sync>,
 ) -> Result<(), PtyError> {
@@ -441,10 +302,13 @@ mod tests {
     use bytesize::ByteSize as RawByteSize;
 
     use super::*;
-    use crate::domain::{
-        color_scheme::ColorScheme,
-        process::StopPolicy,
-        value::{ByteSize, CommandLine, ProcessName, StopGrace},
+    use crate::{
+        adapter::pty::channel_sink::ChannelSink,
+        domain::{
+            color_scheme::ColorScheme,
+            process::StopPolicy,
+            value::{ByteSize, CommandLine, ProcessName, StopGrace},
+        },
     };
 
     /// Name given to every test process.
@@ -464,14 +328,6 @@ mod tests {
     /// descendant takes longer than the ordinary PTY drain bound to finish. The
     /// final sleep models cleanup that remains active after its last log line.
     const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean; sleep 1' & trap 'exit 0' TERM; wait"#;
-
-    struct ChannelSink(Sender<ProcessOutput>);
-
-    impl OutputSink for ChannelSink {
-        fn send(&self, output: ProcessOutput) {
-            let _ = self.0.send(output);
-        }
-    }
 
     /// A request to run `command`, with every launch setting explicit.
     fn request(command: &str) -> SpawnRequest {

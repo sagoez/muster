@@ -5,7 +5,7 @@ use alacritty_terminal::vte::ansi::StandardCharset;
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
 
-use super::emulator::CellStyle;
+use super::cell_style::CellStyle;
 
 /// One cursor's position, pending wrap, pen and designated G0 and G1
 /// charsets.

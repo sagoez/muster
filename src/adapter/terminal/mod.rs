@@ -3,14 +3,26 @@
 //! rendering frontend.
 
 pub mod bounded_parser;
+pub mod cell_color;
+pub mod cell_flags;
+pub mod cell_style;
 pub mod cursor_state;
 pub mod emulator;
+mod emulator_sink;
 pub mod escape;
+mod event_proxy;
 pub mod fed;
 pub mod keyboard_protocol;
 pub mod keyboard_tracker;
 pub mod mode_scanner;
+pub mod mouse_protocol_encoding;
+pub mod mouse_protocol_mode;
+pub mod observation;
+#[cfg(test)]
+pub mod render_cell;
+mod scanned_modes;
 pub mod screen_snapshot;
+pub mod snapshot_cell;
 pub mod tab_stops;
 mod watched_performer;
 

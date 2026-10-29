@@ -9,8 +9,7 @@ use super::host_terminal::HostTerminal;
 use crate::adapter::{
     sanitize::printable,
     terminal::{
-        escape::SGR_RESET,
-        mode_scanner::{ModeScanner, Observation},
+        escape::SGR_RESET, mode_scanner::ModeScanner, observation::Observation,
         screen_snapshot::cursor_position,
     },
 };

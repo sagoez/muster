@@ -11,8 +11,9 @@ per-user service runs each project's dev processes (servers, workers, watchers)
 under their own holder processes, keeps their logs and screens, and restarts
 them by policy. One SQLite database, `muster.db` in the state directory, holds
 every project's stack, the machine's settings, the shared coordination state
-(notes, todos, key-value, locks) and a short log of the stack edits agents
-made. A project is a folder, registered by the first
+(notes, todos, key-value, locks), a short log of the stack edits agents
+made, and how each process last ended. A project is a folder, registered by
+the first
 process added to it. Users and agents drive muster through the CLI and an MCP
 server; `muster attach` shows a process in the user's own terminal. muster draws
 no panes, and agents and interactive terminals live in herdr.
@@ -58,7 +59,8 @@ plugs into a port.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsStore`,
-    `StackEditLog`); writers tell it what changed.
+    `StackEditLog`); writers tell it what changed. The one thing it writes is
+    `RunHistory`, how each process last ended, from a thread of its own.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service.
   - **driven adapters** `adapter/pty` (portable-pty implements

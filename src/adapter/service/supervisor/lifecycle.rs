@@ -23,7 +23,7 @@ use crate::{
     domain::{
         notification::Notification,
         port::ProcessHandle,
-        process::{ExitIntent, ProcessState, StopPolicy},
+        process::{EndedRun, ExitIntent, ProcessState, StopPolicy},
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
         value::{OutputCursor, PaneId, ProcessName},
     },
@@ -639,6 +639,7 @@ impl Supervisor {
                 self.restarts.spawned(pane);
                 self.release_held_exit(pane);
                 let backlog = self.install_pane(pane, handle);
+                self.store_end(pane, None);
                 let pid = self
                     .panes
                     .get(&pane)
@@ -669,12 +670,59 @@ impl Supervisor {
                     ProcessState::Crashed
                 };
                 self.end_run(pane, generation, ExitReason::FailedToStart, next, &message);
+                self.store_end(pane, Some(ExitOutcome::FAILED_UNKNOWN));
                 self.workspace.set_state(pane, next);
                 if next == ProcessState::Restarting {
                     self.schedule_restart(pane, Instant::now());
                 }
                 false
             },
+        }
+    }
+
+    /// Stores how `pane`'s run ended on its own, `outcome`, so a later
+    /// service shows it, or forgets it with none once the pane runs again or
+    /// was stopped on request.
+    fn store_end(&self, pane: PaneId, outcome: Option<ExitOutcome>) {
+        let (Some(runs), Some(process)) = (&self.runs, self.workspace.process(pane)) else {
+            return;
+        };
+        match outcome {
+            Some(outcome) => runs.ended(
+                self.root(),
+                EndedRun::builder()
+                    .process(process.name().clone())
+                    .outcome(outcome)
+                    .at(SystemTime::now())
+                    .build(),
+            ),
+            None => runs.cleared(self.root(), process.name()),
+        }
+    }
+
+    /// Shows each of `runs`, how a process's last run ended as an earlier
+    /// service stored it, on its pane while that pane has not run: crashed
+    /// or exited, with its last exit.
+    pub fn restore_ends(&mut self, runs: &[EndedRun]) {
+        for run in runs {
+            let Some(pane) = self.pane_named(run.process()) else {
+                continue;
+            };
+            if self
+                .workspace
+                .process(pane)
+                .is_none_or(|process| *process.state() != ProcessState::Pending)
+            {
+                continue;
+            }
+            let state = if run.outcome().is_failure() {
+                ProcessState::Crashed
+            } else {
+                ProcessState::Exited
+            };
+            self.restarts
+                .take_stored_end(pane, run.outcome().clone(), *run.at());
+            self.workspace.set_state(pane, state);
         }
     }
 
@@ -1017,6 +1065,7 @@ impl Supervisor {
             next,
             &outcome.to_string(),
         );
+        self.store_end(pane, (!requested).then(|| outcome.clone()));
         self.restarts.record_exit(pane, outcome);
         match decision {
             ExitDecision::Retire => {

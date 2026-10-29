@@ -49,6 +49,8 @@ pub mod protocol;
 mod refusal;
 mod reply;
 mod run_pin;
+mod run_record;
+mod run_recorder;
 #[cfg(test)]
 mod running;
 mod runtime;
@@ -119,6 +121,7 @@ pub use project_ports::*;
 pub use project_status::*;
 pub use refusal::*;
 pub use run_pin::*;
+pub use run_recorder::*;
 pub use runtime::*;
 pub use service_deps::*;
 pub use service_error::*;

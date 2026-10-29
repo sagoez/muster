@@ -35,6 +35,7 @@ impl Harness {
             .notifier(None)
             .port_occupants(None)
             .settings(test_settings())
+            .runs(None)
             .build();
         Self {
             supervisor: Supervisor::new(test_project(), &stack(processes), deps),

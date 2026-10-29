@@ -11,7 +11,8 @@ use crate::domain::{
         Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
-    port::{SettingsStore, StackEditLog, StackReader, StackStore},
+    port::{RunHistory, SettingsStore, StackEditLog, StackReader, StackStore},
+    process::EndedRun,
     project::Project,
     settings::Settings,
     value::{EditId, ProcessName, ProjectName, ProjectRoot, StackRevision},
@@ -27,6 +28,8 @@ pub(super) struct MemoryStore {
     settings: Arc<Mutex<Settings>>,
     /// Every agent edit kept, oldest first, with the project it belongs to.
     edits: Arc<Mutex<Vec<(ProjectRoot, RecordedEdit)>>>,
+    /// How each process last ended on its own, by project and process.
+    runs: Arc<Mutex<HashMap<(ProjectRoot, ProcessName), EndedRun>>>,
 }
 
 impl MemoryStore {
@@ -36,6 +39,7 @@ impl MemoryStore {
             revisions: Arc::default(),
             settings: Arc::new(Mutex::new(test_settings())),
             edits: Arc::default(),
+            runs: Arc::default(),
         }
     }
 
@@ -176,6 +180,35 @@ impl StackEditLog for MemoryStore {
             .filter(|(project, _)| project == root)
             .map(|(_, edit)| edit.clone())
             .collect())
+    }
+}
+
+impl RunHistory for MemoryStore {
+    fn ended_runs(&self, root: &ProjectRoot) -> Result<Vec<EndedRun>, ConfigError> {
+        Ok(self
+            .runs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((project, _), _)| project == root)
+            .map(|(_, run)| run.clone())
+            .collect())
+    }
+
+    fn record_end(&self, root: &ProjectRoot, run: &EndedRun) -> Result<(), ConfigError> {
+        self.runs
+            .lock()
+            .unwrap()
+            .insert((root.clone(), run.process().clone()), run.clone());
+        Ok(())
+    }
+
+    fn clear_end(&self, root: &ProjectRoot, process: &ProcessName) -> Result<(), ConfigError> {
+        self.runs
+            .lock()
+            .unwrap()
+            .remove(&(root.clone(), process.clone()));
+        Ok(())
     }
 }
 

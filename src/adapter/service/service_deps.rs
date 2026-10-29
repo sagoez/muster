@@ -6,7 +6,7 @@ use super::{
     holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
 };
 use crate::domain::port::{
-    ListeningPorts, ProcessMetrics, SettingsStore, StackEditLog, StackReader,
+    ListeningPorts, ProcessMetrics, RunHistory, SettingsStore, StackEditLog, StackReader,
 };
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
@@ -30,6 +30,9 @@ pub struct ServiceDeps {
     pub(super) settings: Box<dyn SettingsStore>,
     /// Reads the agent edits each project's stack took, raised as events.
     pub(super) edits: Box<dyn StackEditLog>,
+    /// Keeps how each process last ended on its own, read as a project loads
+    /// and written off the loop as runs end.
+    pub(super) runs: Arc<dyn RunHistory>,
     /// Finds the ports running process trees listen on; absent where ports
     /// are not reported.
     pub(super) listening: Option<Box<dyn ListeningPorts + Send>>,

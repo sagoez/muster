@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 
 use super::run_end::RunEnd;
 use crate::{
@@ -23,6 +26,9 @@ pub(crate) struct RestartBook {
     last_exits: HashMap<PaneId, ExitOutcome>,
     /// How each pane's most recent run ended, while this service saw it.
     run_ends: HashMap<PaneId, RunEnd>,
+    /// When each pane's most recent run ended, as an earlier service stored
+    /// it.
+    stored_ends: HashMap<PaneId, SystemTime>,
     /// Panes in a crash streak, whose first crash was told and whose later
     /// ones are not, until the streak ends.
     crash_streaks: HashSet<PaneId>,
@@ -66,6 +72,13 @@ impl RestartBook {
         self.last_exits.insert(pane, outcome);
     }
 
+    /// Takes over how `pane`'s last run ended, `outcome` at `at`, as an
+    /// earlier service stored it.
+    pub(super) fn take_stored_end(&mut self, pane: PaneId, outcome: ExitOutcome, at: SystemTime) {
+        self.last_exits.insert(pane, outcome);
+        self.stored_ends.insert(pane, at);
+    }
+
     /// Records how `pane`'s run ended, as this service saw it.
     pub(super) fn end_run(&mut self, pane: PaneId, end: RunEnd) {
         self.run_ends.insert(pane, end);
@@ -88,7 +101,9 @@ impl RestartBook {
             LastExit::builder()
                 .reason(end.map_or_else(|| ExitReason::of(&outcome, false), RunEnd::reason))
                 .outcome(outcome)
-                .at(end.map(RunEnd::at))
+                .at(end
+                    .map(RunEnd::at)
+                    .or_else(|| self.stored_ends.get(&pane).copied()))
                 .build(),
         )
     }

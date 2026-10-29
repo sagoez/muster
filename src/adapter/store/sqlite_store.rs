@@ -53,6 +53,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_stack_edit_log.sql"),
     include_str!("migrations/0005_setting_edits.sql"),
     include_str!("migrations/0006_lock_sessions.sql"),
+    include_str!("migrations/0007_process_runs.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and

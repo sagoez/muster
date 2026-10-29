@@ -501,6 +501,7 @@ fn in_process_service(
             .metrics(None)
             .stacks(Box::new(store.clone()))
             .settings(Box::new(store.clone()))
+            .runs(Arc::new(store.clone()))
             .edits(Box::new(store))
             .listening(None)
             .build();
@@ -1582,6 +1583,32 @@ fn service_stop_keeps_processes_and_the_next_command_restarts_it() {
         stopped["stopped"], false,
         "nothing was running the second time"
     );
+}
+
+/// A crash and its last exit outlive the service that saw them: the next
+/// service lists the process crashed with how it ended, and a process
+/// stopped on request is not listed crashed.
+#[test]
+fn a_crash_survives_a_service_restart() {
+    let scratch = Scratch::new();
+    let project = scratch.project(
+        "broken",
+        &stack(&[
+            entry("web", "sleep 600", true),
+            entry("broken", "echo oops; exit 3", true),
+        ]),
+    );
+    scratch.on(&project, &["up"]);
+    scratch.on(&project, &["stop", "web"]);
+    let crashed = scratch.row(&project, "broken");
+    assert_eq!(crashed["state"], "crashed", "{crashed}");
+
+    let (stop, _) = scratch.json(&["service", "stop"]);
+    assert!(stop.status.success(), "{}", shown(&stop));
+    let restored = scratch.row(&project, "broken");
+    assert_eq!(restored["state"], "crashed", "{restored}");
+    assert_eq!(restored["last_exit"], crashed["last_exit"], "{restored}");
+    assert_ne!(scratch.row(&project, "web")["state"], "crashed");
 }
 
 /// A service that cannot start, here for a database a newer muster wrote,

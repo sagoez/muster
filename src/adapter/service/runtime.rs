@@ -31,6 +31,7 @@ use super::{
     project_status::ProjectStatus,
     protocol,
     reply::Reply,
+    run_recorder::RunRecorder,
     service_deps::ServiceDeps,
     service_error::ServiceError,
     service_error_body::ServiceErrorBody,
@@ -49,7 +50,7 @@ use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        port::{ProcessHandle, SettingsStore, StackEditLog, StackReader},
+        port::{ProcessHandle, RunHistory, SettingsStore, StackEditLog, StackReader},
         project::Project,
         pty::PtyError,
         settings::Settings,
@@ -108,6 +109,10 @@ pub struct ServiceRuntime {
     settings_store: Box<dyn SettingsStore>,
     /// Reads the agent edits each project's stack took.
     edits: Box<dyn StackEditLog>,
+    /// Reads how each process last ended on its own as a project loads.
+    runs: Arc<dyn RunHistory>,
+    /// Stores how runs end, off the loop; every supervisor shares it.
+    run_recorder: RunRecorder,
     /// The settings every supervisor launches with, as last read.
     settings: Settings,
     /// Where processes, timers, workers and clients deliver events.
@@ -164,6 +169,7 @@ impl ServiceRuntime {
         acceptor.close();
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
+        runtime.run_recorder.flush();
         runtime.event_waiters.clear();
         drop(events);
         drop(singleton);
@@ -191,8 +197,10 @@ impl ServiceRuntime {
             stacks,
             settings: settings_store,
             edits,
+            runs,
             listening,
         } = deps;
+        let notices = Notices::shared(Some(protocol::log_path(state_dir)));
         Self {
             version,
             binary,
@@ -201,13 +209,15 @@ impl ServiceRuntime {
             stacks,
             settings_store,
             edits,
+            run_recorder: RunRecorder::spawn(Arc::clone(&runs), Arc::clone(&notices)),
+            runs,
             settings,
             probes: ProbeWorker::spawn(events.clone()),
             port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
             ports_deadline: Instant::now(),
             usage_sampler: metrics.map(UsageSampler::new),
             events,
-            notices: Notices::shared(Some(protocol::log_path(state_dir))),
+            notices,
             supervisors: HashMap::new(),
             stack_revisions: HashMap::new(),
             raised_edits: HashMap::new(),
@@ -851,6 +861,7 @@ impl ServiceRuntime {
             },
             None => return Err(unknown_project(project)),
         };
+        let ended = self.runs.ended_runs(project).map_err(store_refusal)?;
         self.raise_edits(project)?;
         let shared = SharedHolders::new(Arc::clone(&self.holders));
         let deps = SupervisorDeps::builder()
@@ -862,9 +873,11 @@ impl ServiceRuntime {
             .notifier(self.ports.notifier())
             .port_occupants(self.ports.port_occupants())
             .settings(self.settings.clone())
+            .runs(Some(self.run_recorder.clone()))
             .build();
         let mut supervisor =
             Supervisor::new(stack.project().clone(), &stack, deps).with_adopter(Box::new(shared));
+        supervisor.restore_ends(&ended);
         for record in held {
             supervisor.adopt(record.clone());
         }

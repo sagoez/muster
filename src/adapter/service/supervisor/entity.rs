@@ -9,7 +9,7 @@ use super::{
     run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
 use crate::{
-    adapter::service::{OutputTap, ProbeWorker, ServiceEvent, WaitGroup, Waiter},
+    adapter::service::{OutputTap, ProbeWorker, RunRecorder, ServiceEvent, WaitGroup, Waiter},
     application::{StackSync, Workspace},
     domain::{
         config::Stack,
@@ -70,6 +70,9 @@ pub struct Supervisor {
     pub(super) next_wait_group: u64,
     /// The readiness of each pane's current run that has a check.
     pub(super) readiness: HashMap<PaneId, RunReadiness>,
+    /// Stores how each run ends, so a later service shows it; absent where
+    /// nothing is stored.
+    pub(super) runs: Option<RunRecorder>,
 }
 
 impl Supervisor {
@@ -85,6 +88,7 @@ impl Supervisor {
             notifier,
             port_occupants,
             settings,
+            runs,
         } = deps;
         let empty = Workspace::builder().processes(Vec::new()).build();
         Self {
@@ -107,6 +111,7 @@ impl Supervisor {
             wait_groups: HashMap::new(),
             next_wait_group: 0,
             readiness: HashMap::new(),
+            runs,
         }
     }
 

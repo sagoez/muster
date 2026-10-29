@@ -1,3 +1,4 @@
+mod ended_run;
 mod entity;
 mod exit_intent;
 mod log_pattern;
@@ -12,6 +13,7 @@ mod state;
 mod stop;
 mod stop_signal;
 
+pub use ended_run::*;
 pub use entity::*;
 pub use exit_intent::*;
 pub use log_pattern::*;

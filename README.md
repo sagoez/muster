@@ -41,9 +41,11 @@ state directory (`~/.local/state/muster` on Linux,
 every project's stack, the machine's settings and the shared notes, todos and
 key-values. The CLI and the MCP server write it directly and tell a running
 service what changed, so an edit reaches the service at once and works without
-it. The service and each process listen on Unix sockets in that directory, so
-a state directory too deep for a socket path is refused with a hint to set a
-shorter `XDG_STATE_HOME`.
+it. The service keeps there how each process last crashed or exited, so `ps`
+after a service restart still shows it until the process starts again. The
+service and each process listen on Unix sockets in that directory, so a state
+directory too deep for a socket path is refused with a hint to set a shorter
+`XDG_STATE_HOME`.
 
 Commands act on the project given by `--project` (a registered name, or a
 folder when the value contains `/` or starts with `.` or `~`; such a value

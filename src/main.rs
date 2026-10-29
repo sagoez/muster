@@ -166,6 +166,7 @@ fn run_service() -> Result<(), MusterError> {
         .metrics(Some(Box::new(SysinfoMetrics::default())))
         .stacks(Box::new(store.clone()))
         .settings(Box::new(store.clone()))
+        .runs(Arc::new(store.clone()))
         .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
         .build();

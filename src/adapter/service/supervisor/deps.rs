@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    adapter::service::{ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices},
+    adapter::service::{ProbeWorker, RunRecorder, ServiceEvent, SharedEventLog, SharedNotices},
     domain::{
         port::{Notifier, PortOccupants, ProcessRunner},
         settings::Settings,
@@ -31,4 +31,7 @@ pub struct SupervisorDeps {
     /// The settings each launch takes its terminal, log and colors from, and
     /// that decide whether a crash reaches the desktop.
     pub(super) settings: Settings,
+    /// Stores how each run ends, so a later service shows it; absent where
+    /// nothing is stored.
+    pub(super) runs: Option<RunRecorder>,
 }

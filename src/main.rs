@@ -4,6 +4,7 @@ use muster::{
     adapter::{
         cli::{self, CliPorts},
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
+        listening::OsListeningPorts,
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         private_dir::{prepare_state_dir, state_dir},
@@ -106,7 +107,7 @@ fn run_service() -> Result<(), MusterError> {
         .ports(Box::new(LocalPorts))
         .stacks(Box::new(store.clone()))
         .settings(Box::new(store))
-        .listening(None)
+        .listening(Some(Box::new(OsListeningPorts::default())))
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)
 }

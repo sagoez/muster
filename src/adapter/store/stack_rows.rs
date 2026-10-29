@@ -44,8 +44,6 @@ const STOP_GRACE: &str = "stop grace";
 const READY_TIMEOUT: &str = "readiness timeout";
 /// A port a process declares, as its errors name it.
 const DECLARED_PORT: &str = "declared port";
-/// Every port a process declares, as its errors name them.
-const DECLARED_PORTS: &str = "set of declared ports";
 
 /// The text a path column holds.
 ///
@@ -58,7 +56,7 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
 
 /// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`
 /// and its ports from `ports`. A working directory that leaves the root, or a
-/// name or variables past a cap, read as stored, so the process can be
+/// name, variables or ports past a cap, read as stored, so the process can be
 /// changed, removed or exported; [`ProcessSpec::stored_problem`] keeps it
 /// from starting.
 fn process_from_row(
@@ -124,7 +122,7 @@ fn process_from_row(
 }
 
 /// Every declared port of the project's processes, by process row id, read in
-/// one query; a process holding more than it may declare is refused.
+/// one query; a process holding more than it may declare reads as stored.
 fn ports_of(
     conn: &Connection,
     project_id: i64,
@@ -147,14 +145,10 @@ fn ports_of(
             })?;
         ports.entry(process_id).or_default().insert(port);
     }
-    ports
+    Ok(ports
         .into_iter()
-        .map(|(process_id, ports)| {
-            DeclaredPorts::of(ports)
-                .map(|declared| (process_id, declared))
-                .map_err(|error| corrupt(DECLARED_PORTS, error))
-        })
-        .collect()
+        .map(|(process_id, ports)| (process_id, DeclaredPorts::stored(ports)))
+        .collect())
 }
 
 /// Writes `spec`'s declared ports for the process row `process_id`.
@@ -873,37 +867,45 @@ mod tests {
         }
     }
 
-    /// More declared ports than a process may have, written past muster, are
-    /// refused on read naming the limit.
+    /// More declared ports than a process may have, written past muster,
+    /// read as stored: the project still reads, only that process names the
+    /// cap, and replacing its ports repairs it.
     #[test]
-    fn a_hand_edited_port_count_past_the_limit_names_it() {
+    fn a_hand_edited_port_count_past_the_limit_refuses_only_its_process() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
-        store
-            .add_process(&root, &full_spec(), &Author::human())
-            .unwrap();
+        for spec in [full_spec(), spec("api", "cargo run")] {
+            store.add_process(&root, &spec, &Author::human()).unwrap();
+        }
         let added = DECLARED_PORTS_MAX + 1;
         store
             .write(|conn| {
                 conn.execute(
                     "WITH RECURSIVE n(port) AS (SELECT 1 UNION ALL SELECT port + 1 FROM n \
                      WHERE port < ?1) INSERT INTO process_ports (process_id, port) \
-                     SELECT (SELECT id FROM processes), port FROM n",
+                     SELECT (SELECT id FROM processes WHERE name = 'web'), port FROM n",
                     params![i64::try_from(added).unwrap()],
                 )
                 .map_err(db_error)
             })
             .unwrap();
 
+        let stack = store.stack(&root).unwrap().unwrap();
+        let over = |process: &str| stack.process(&name(process)).unwrap().over_cap();
         assert_eq!(
-            store.stack(&root).unwrap_err().to_string(),
-            format!(
-                "stored set of declared ports is invalid: {} ports are more than the \
-                 {DECLARED_PORTS_MAX} a process may declare",
-                added + 1
-            ),
+            over("web"),
+            Some(OverCap::Ports { found: added + 1 }),
             "the full spec's own port counts too"
         );
+        assert_eq!(over("api"), None);
+
+        let cleared = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::default()))
+            .build();
+        let repaired = store
+            .change_process(&root, &name("web"), &cleared, &Author::human())
+            .unwrap();
+        assert_eq!(repaired.spec().over_cap(), None);
     }
 
     #[test]

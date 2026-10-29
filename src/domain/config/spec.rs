@@ -164,9 +164,11 @@ impl ProcessSpec {
     }
 
     /// The first cap this definition runs past: its name's, then its
-    /// environment's.
+    /// environment's, then its ports'.
     pub fn over_cap(&self) -> Option<OverCap> {
-        OverCap::of_name(&self.name).or_else(|| self.environment.over_cap())
+        OverCap::of_name(&self.name)
+            .or_else(|| self.environment.over_cap())
+            .or_else(|| OverCap::of_ports(&self.ports))
     }
 
     /// Refuses a new definition past a cap; a stored one is never refused.

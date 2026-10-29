@@ -10,8 +10,8 @@ use crate::domain::value::LocalPort;
 pub const DECLARED_PORTS_MAX: usize = 16;
 
 /// The TCP ports a process declares it listens on, ascending, at most
-/// [`DECLARED_PORTS_MAX`] of them.
-/// No builder: every way in is checked against the bound.
+/// [`DECLARED_PORTS_MAX`] of them on every write. No builder: every way in
+/// but [`Self::stored`] is checked against the bound.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Getters)]
 #[getset(get = "pub")]
 pub struct DeclaredPorts {
@@ -31,6 +31,12 @@ impl DeclaredPorts {
             return Err(TooManyPorts::builder().found(ports.len()).build());
         }
         Ok(Self { ports })
+    }
+
+    /// The set as stored, unchecked: one past [`DECLARED_PORTS_MAX`] keeps
+    /// its process from starting, never its project from reading.
+    pub fn stored(ports: BTreeSet<LocalPort>) -> Self {
+        Self { ports }
     }
 
     /// The set holding `ports` as a person or agent listed them.
@@ -56,6 +62,11 @@ impl DeclaredPorts {
     /// Whether it declares no port.
     pub fn is_empty(&self) -> bool {
         self.ports.is_empty()
+    }
+
+    /// How many ports it declares.
+    pub fn len(&self) -> usize {
+        self.ports.len()
     }
 }
 

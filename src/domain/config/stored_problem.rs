@@ -1,6 +1,8 @@
 use std::fmt::{self, Display, Formatter};
 
-use super::{OverCap, UnconfinedDir, environment::ENV_VARS_MAX};
+use super::{
+    OverCap, UnconfinedDir, declared_ports::DECLARED_PORTS_MAX, environment::ENV_VARS_MAX,
+};
 use crate::domain::value::{
     ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS, EnvName, PROCESS_NAME_MAX_CHARS, ProcessName,
 };
@@ -64,6 +66,12 @@ impl Display for StoredProblem {
                  `muster set {name} --unset-env <NAME>` or {remove} fixes it",
                 extra = found - ENV_VARS_MAX
             ),
+            OverCap::Ports { found } => write!(
+                f,
+                "{name} declares {found} stored ports, more than the {DECLARED_PORTS_MAX} muster \
+                 allows, {NEVER_STARTED}; `muster set {name}` with at most {DECLARED_PORTS_MAX} \
+                 `--port`s, `muster set {name} --no-ports` or {remove} fixes it"
+            ),
         }
     }
 }
@@ -109,5 +117,16 @@ mod tests {
             found: ENV_NAME_MAX_CHARS + 1,
         });
         assert!(var_name.contains("--unset-env CERT"), "{var_name}");
+        let ports = shown(OverCap::Ports {
+            found: DECLARED_PORTS_MAX + 1,
+        });
+        assert!(
+            ports.contains(&format!(
+                "'web' declares {} stored ports",
+                DECLARED_PORTS_MAX + 1
+            )),
+            "{ports}"
+        );
+        assert!(ports.contains("`muster set 'web' --no-ports`"), "{ports}");
     }
 }

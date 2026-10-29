@@ -2489,6 +2489,45 @@ fn mcp_waits_reads_logs_and_hears_crashes() {
     mcp.result("process_stop", serde_json::json!({ "name": "api" }));
 }
 
+/// Reading events filtered to other kinds never marks a crash heard: the
+/// next stack call still alerts it.
+#[test]
+fn a_filtered_event_read_leaves_a_crash_alert_for_the_next_call() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[entry("flaky", "echo boom; exit 3", false)]),
+    );
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    mcp.result("stack_status", serde_json::json!({}));
+
+    scratch.on(&project, &["start", "flaky"]);
+    wait_until("the crash", || {
+        scratch.row(&project, "flaky")["state"] == "crashed"
+    });
+    let events = mcp.result(
+        "stack_events",
+        serde_json::json!({ "kinds": ["started"] }),
+    )["structuredContent"]
+        .clone();
+    assert!(events.get("alerts").is_none(), "{events}");
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["started"], "{events}");
+
+    let status = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
+    assert!(
+        status["alerts"]
+            .as_array()
+            .is_some_and(|alerts| alerts.iter().any(|alert| alert["kind"] == "crashed")),
+        "{status}"
+    );
+}
+
 /// An agent's MCP server in a folder that is not yet a project registers it
 /// with `process_add`, sees a running process through `process_set`, and
 /// `process_remove` stops it through the service before answering; the

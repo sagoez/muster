@@ -112,8 +112,10 @@ impl MusterMcp {
             ready-timeout, exited, crashed, restarting, stopped, blocked, notice. Without since, \
             returns the last <events-without-since>. With wait_s (at most <call-bound-s>), \
             blocks until at least one new event arrives. Returns {events: [{seq, at, process, \
-            kind, detail}], cursor, gap, alerts}; pass cursor as since next time. gap=true \
-            means older events were dropped."
+            kind, detail}], cursor, gap}; pass cursor as since next time. gap=true means events \
+            after since were missed, dropped or recorded by an earlier service, and comes back \
+            at once with every event held; re-read stack_status then. Reading events never \
+            marks alerts heard."
     )]
     pub(super) async fn stack_events(
         &self,
@@ -180,18 +182,15 @@ impl MusterMcp {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let wait = wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
-        let alerts_seen = self.alerts.clone();
-        let (page, alerts) = self
-            .ask(arg.project().clone(), move |client, project| {
-                let page = process::events(client, project, since, &kinds, wait)?;
-                alerts_seen.mark_seen(project.root(), *page.cursor());
-                Ok(page)
+        let project = arg.project().clone();
+        let page = self
+            .blocking(move |deps| {
+                let project = deps.project(project.as_deref())?;
+                let client = deps.service().connect()?;
+                Ok(process::events(&client, &project, since, &kinds, wait)?)
             })
             .await?;
-        structured(
-            with_alerts(json(&EventsView::from(&page))?, &alerts)?,
-            false,
-        )
+        structured(json(&EventsView::from(&page))?, false)
     }
 }
 

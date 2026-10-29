@@ -37,7 +37,7 @@ pub const AGENT: &str = "test";
 #[derive(Getters, MutGetters)]
 pub struct Fixture {
     /// Holds the scratch directory for the fixture's life.
-    pub _dir: TempDir,
+    _dir: TempDir,
     /// The folder the server was started in.
     #[getset(get = "pub", get_mut = "pub")]
     root: ProjectRoot,

@@ -29,11 +29,14 @@ use crate::{
 /// A running holder on a thread, with its scratch directory.
 #[derive(Getters, MutGetters)]
 pub(super) struct Harness {
+    /// The holder's configuration.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     config: HolderConfig,
+    /// The thread serving the holder, until it is joined.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     server: Option<JoinHandle<Result<(), HolderError>>>,
-    pub(super) _scratch: TempDir,
+    /// Holds the scratch directory for the harness's life.
+    _scratch: TempDir,
 }
 
 impl Harness {

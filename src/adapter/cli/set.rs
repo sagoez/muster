@@ -17,7 +17,7 @@ use crate::{
     domain::{
         config::{ConfigError, FieldEdit, ProcessChange},
         coordination::Author,
-        value::Description,
+        value::{CommandLine, Description},
     },
 };
 
@@ -87,12 +87,16 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
     if asks_nothing(&args) {
         return Err(CliError::NothingToChange);
     }
+    let command = match args.command() {
+        Some(raw) => Some(
+            CommandLine::try_new(raw.as_str()).map_err(|error| CliError::command(raw, &error))?,
+        ),
+        None if args.words().is_empty() => None,
+        None => Some(command_string(args.words())?),
+    };
     let store = invocation.store()?;
     let project = invocation.editing_project(store.as_ref())?;
     let root = project.root();
-    let words = (!args.words().is_empty())
-        .then(|| command_string(args.words()))
-        .transpose()?;
     let working_dir = match (args.cwd().clone(), args.no_cwd()) {
         (Some(dir), _) => match WorkingDirPlace::of(root, &invocation.in_cwd(&dir)?)?.stored() {
             Some(dir) => FieldEdit::Set(dir),
@@ -110,7 +114,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         (None, false) => FieldEdit::Keep,
     };
     let change = ProcessChange::builder()
-        .command(args.command().clone().or(words))
+        .command(command)
         .working_dir(working_dir)
         .description(description)
         .set_env(args.flags().environment()?)

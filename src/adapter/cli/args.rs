@@ -22,7 +22,7 @@ use crate::{
     domain::{
         config::SettingKey,
         process::{RestartPolicy, StopSignal},
-        value::{CommandLine, CommandLineError, PositiveDuration, StopGrace},
+        value::{PositiveDuration, StopGrace},
     },
 };
 
@@ -94,14 +94,6 @@ pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> 
 /// Parses a `muster wait --state`.
 pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
     one_of(&STATE_GOALS)
-}
-
-/// Parses a shell command, refusing a blank one.
-///
-/// # Errors
-/// Returns the [`CommandLineError`] of a blank command.
-pub(super) fn command_line(raw: &str) -> Result<CommandLine, CommandLineError> {
-    CommandLine::try_new(raw)
 }
 
 /// Parses a positive duration such as `5s` or `1m 30s`.

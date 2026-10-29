@@ -2,11 +2,8 @@ use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
 
-use super::{
-    args::command_line,
-    process_flags::{ProcessFlags, READY_GROUP},
-};
-use crate::domain::value::{CommandLine, ProcessRef};
+use super::process_flags::{ProcessFlags, READY_GROUP};
+use crate::domain::value::ProcessRef;
 
 /// `muster set`: the changes to a process's definition.
 #[derive(clap::Args, Getters, CopyGetters)]
@@ -15,9 +12,9 @@ pub struct SetArgs {
     #[getset(get = "pub")]
     name: ProcessRef,
     /// A new command, as one shell expression.
-    #[arg(long, value_name = "CMD", value_parser = command_line, conflicts_with = "words")]
+    #[arg(long, value_name = "CMD", conflicts_with = "words")]
     #[getset(get = "pub")]
-    command: Option<CommandLine>,
+    command: Option<String>,
     /// A new working directory, read from the current folder.
     #[arg(long, value_name = "DIR", conflicts_with = "no_cwd")]
     #[getset(get = "pub")]

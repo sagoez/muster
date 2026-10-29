@@ -3098,6 +3098,38 @@ fn agent_written_fields_are_bounded() {
         "{}",
         shown(&cli)
     );
+    for set in [
+        vec!["set", "big", "--command", &long(COMMAND_MAX_CHARS)],
+        vec!["set", "big", "--", &long(COMMAND_MAX_CHARS)],
+    ] {
+        let cli = scratch.on(&project, &set);
+        assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+        assert!(
+            stderr(&cli).contains(&format!("at most {COMMAND_MAX_CHARS}")),
+            "{}",
+            shown(&cli)
+        );
+        assert!(
+            stderr(&cli).len() < COMMAND_MAX_CHARS,
+            "the refusal echoes the command: {}",
+            shown(&cli)
+        );
+        let mut json = set.clone();
+        json.insert(2, "--json");
+        let refused = scratch.on(&project, &json);
+        assert_eq!(
+            refused.status.code(),
+            Some(INVALID_INPUT),
+            "{}",
+            shown(&refused)
+        );
+        assert_eq!(
+            parsed(&refused)["error"]["kind"],
+            "invalid-input",
+            "{}",
+            shown(&refused)
+        );
+    }
 }
 
 /// `mcp --print-config` prints the snippet alone, and a reader that closes

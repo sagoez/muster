@@ -409,9 +409,10 @@ listening sockets once and refuses the start when any declared port, or the
 readiness port, is held. The refusal names the first one held and who holds it:
 `web: port 5173 is held by project 'admin', process 'web'; \`muster down -p
 admin\` frees it` for another project (`muster stop` for this project's own
-process), and for a program muster does not run, the pid and command line. The
-process shows as `blocked` in `muster ps`, and `muster ps` prints one such line
-for each blocked process beneath its table. A start that is found blocked
+process), and for a program muster does not run, the pid and command line, cut
+to its first 256 characters and `…` wherever it is shown. The process shows as
+`blocked` in `muster ps`, and `muster ps` prints one such line for each
+blocked process beneath its table. A start that is found blocked
 after the request was answered, such as an entering shell's, shows the same
 way. The `PORTS` column lists the ports a process's tree is listening on now,
 which need not be the declared ones. With `--json` a process carries `ports`

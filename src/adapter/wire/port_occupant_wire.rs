@@ -31,3 +31,29 @@ impl WireForm for PortOccupant {
         Ok(Self::builder().pid(wire.pid).command(wire.command).build())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS};
+
+    /// An occupant read off the wire with a command line past the cap is
+    /// cut, so a client never shows more than the cap whatever it is sent.
+    #[test]
+    fn a_command_line_past_the_cap_is_cut_when_read() {
+        let wire = PortOccupantWire::builder()
+            .pid(Pid::try_new(4242).unwrap())
+            .command("y".repeat(OCCUPANT_COMMAND_MAX_CHARS + 1))
+            .build();
+
+        let occupant = PortOccupant::from_wire(wire).unwrap();
+
+        assert_eq!(
+            occupant.command(),
+            &format!(
+                "{}{OCCUPANT_COMMAND_CUT}",
+                "y".repeat(OCCUPANT_COMMAND_MAX_CHARS)
+            )
+        );
+    }
+}

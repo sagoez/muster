@@ -34,7 +34,7 @@ mod tests {
     use crate::{
         adapter::service::{PortHolder, PortOwner},
         domain::{
-            port::PortOccupant,
+            port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
             value::{LocalPort, Pid, ProcessName, ProjectName},
         },
     };
@@ -69,6 +69,31 @@ mod tests {
         assert_eq!(
             serde_json::to_value(PortBlockView::from(&other)).unwrap(),
             json!({"port": 5173, "holder": {"kind": "other", "pid": 4242, "command": "python3 -m http.server 5173"}})
+        );
+    }
+
+    /// A holder's huge command line reads in `ps --json` cut to the cap and
+    /// marked.
+    #[test]
+    fn a_huge_holder_command_line_is_cut() {
+        let block = PortBlock::builder()
+            .port(LocalPort::try_new(5173).unwrap())
+            .holder(PortOwner::Other(
+                PortOccupant::builder()
+                    .pid(Pid::try_new(4242).unwrap())
+                    .command("w".repeat(OCCUPANT_COMMAND_MAX_CHARS * 1000))
+                    .build(),
+            ))
+            .build();
+
+        let json = serde_json::to_value(PortBlockView::from(&block)).unwrap();
+
+        assert_eq!(
+            json["holder"]["command"],
+            format!(
+                "{}{OCCUPANT_COMMAND_CUT}",
+                "w".repeat(OCCUPANT_COMMAND_MAX_CHARS)
+            )
         );
     }
 }

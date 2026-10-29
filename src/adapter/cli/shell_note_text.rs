@@ -52,7 +52,7 @@ mod tests {
     use crate::{
         adapter::service::{PortBlock, PortHolder, PortOwner, Refusal},
         domain::{
-            port::PortOccupant,
+            port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
             value::{LocalPort, Pid, ProcessName, ProjectName},
         },
     };
@@ -156,5 +156,25 @@ mod tests {
             assert!(!line.contains('\u{9b}'), "{line:?}");
         }
         assert!(lines[0].contains("evil\\u{1b}]0;owned"), "{}", lines[0]);
+    }
+
+    /// A holder's command line as long as an argv may be is cut to the cap
+    /// and marked, so the note stays a short line.
+    #[test]
+    fn a_huge_holder_command_line_is_cut_in_its_note() {
+        let huge = "x".repeat(OCCUPANT_COMMAND_MAX_CHARS * 1000);
+
+        let lines = note_lines(&[blocked(outsider(&huge))]);
+
+        let shown = format!(
+            "{}{OCCUPANT_COMMAND_CUT}",
+            "x".repeat(OCCUPANT_COMMAND_MAX_CHARS)
+        );
+        assert!(lines[0].contains(&shown), "{}", lines[0]);
+        assert!(
+            lines[0].chars().count() < OCCUPANT_COMMAND_MAX_CHARS * 2,
+            "{}",
+            lines[0]
+        );
     }
 }

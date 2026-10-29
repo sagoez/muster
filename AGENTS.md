@@ -150,7 +150,7 @@ Chosen libraries (extend deliberately, same rules apply):
 
 | Concern | Crate |
 |---|---|
-| Raw mode, size and polling on a given terminal fd; rlimits, sessions, process signals | `rustix` |
+| Raw mode, size and polling on a given terminal fd; rlimits, sessions, process signals; non-blocking opens | `rustix` |
 | What rustix lacks: `strsignal` text and signal dispositions in tests | `libc` |
 | Unix signals | `signal-hook` |
 | Event loops | std threads + `crossbeam-channel` |

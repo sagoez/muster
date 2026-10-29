@@ -1,12 +1,14 @@
 //! Reading a text file someone else wrote without trusting its kind or size:
-//! a FIFO or device is never opened and waited on, and a huge file is never
+//! a FIFO or device is never waited on, and a huge file is never
 //! read into memory.
 
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{self, Read},
     path::Path,
 };
+
+use rustix::fs::{Mode, OFlags, open};
 
 /// The byte order mark an editor may put before UTF-8 text.
 const BYTE_ORDER_MARK: char = '\u{feff}';
@@ -16,22 +18,46 @@ const NOT_A_FILE: &str = "not a regular file";
 const TOO_LARGE: &str = "file is too large";
 
 /// The UTF-8 text of `path`, without a leading byte order mark, when it is a
-/// regular file of at most `max` bytes. The kind is checked before opening,
-/// so a FIFO is never opened and waited on.
+/// regular file of at most `max` bytes. The path is opened without blocking
+/// and its kind and size checked on the open handle, so a FIFO swapped in
+/// after any check is never waited on.
 ///
 /// # Errors
 /// Returns an [`io::Error`] of kind [`io::ErrorKind::InvalidInput`] for a
 /// path that is not a regular file, [`io::ErrorKind::FileTooLarge`] for one
-/// over `max` bytes, or the failure of the read itself.
+/// over `max` bytes, or the failure of the open or read itself.
 pub fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    let metadata = fs::metadata(path)?;
+    read_regular(open_nonblocking(path)?, max)
+}
+
+/// Opens `path` for reading without blocking, so opening a FIFO with no
+/// writer, or a device, returns at once instead of waiting.
+///
+/// # Errors
+/// Returns the failure of the open.
+fn open_nonblocking(path: &Path) -> io::Result<File> {
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(File::from(fd))
+}
+
+/// The text of the open `file`, checked on its own metadata to be a regular
+/// file of at most `max` bytes, and read through the cap in case it grows.
+///
+/// # Errors
+/// As [`read_bounded`].
+fn read_regular(file: File, max: u64) -> io::Result<String> {
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, NOT_A_FILE));
     }
     if metadata.len() > max {
         return Err(io::Error::new(io::ErrorKind::FileTooLarge, TOO_LARGE));
     }
-    read_capped(File::open(path)?, max)
+    read_capped(file, max)
 }
 
 /// The UTF-8 text `reader` yields, without a leading byte order mark,
@@ -57,10 +83,15 @@ pub fn read_capped(reader: impl Read, max: u64) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    use std::{fs, sync::mpsc, thread, time::Duration};
+
+    use rustix::fs::{CWD, FileType, mknodat};
     use tempfile::TempDir;
 
     use super::*;
+
+    /// How long opening a FIFO may take before the test calls it blocked.
+    const FIFO_OPEN_BOUND: Duration = Duration::from_secs(5);
 
     /// A file within the cap reads, its byte order mark dropped; one past it,
     /// a folder and a FIFO are refused without being waited on.
@@ -88,6 +119,26 @@ mod tests {
             read_bounded(&fifo, 64).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    /// A FIFO in place when the path is opened, as one swapped in after a
+    /// check would be, opens without waiting for a writer and is refused on
+    /// the open handle.
+    #[test]
+    fn a_fifo_present_at_open_never_blocks() {
+        let dir = TempDir::new().unwrap();
+        let fifo = dir.path().join("fifo");
+        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        let (sent, opened) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sent.send(open_nonblocking(&fifo).map(|file| read_regular(file, 64)));
+        });
+
+        let read = opened
+            .recv_timeout(FIFO_OPEN_BOUND)
+            .expect("opening a FIFO must not wait for a writer")
+            .unwrap();
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
     /// A stream is cut off and refused once it passes the cap.

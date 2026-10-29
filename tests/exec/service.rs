@@ -37,8 +37,11 @@ use crate::common::{Scratch, alive, processes_under, wait_until};
 
 /// The project's one process, which runs until it is killed.
 const SLEEPER: &str = "sleep 600";
-/// A process that ignores the hangup its holder's death sends.
-const HUP_IGNORING: &str = "trap '' HUP; sleep 600";
+/// A process that ignores the hangup its holder's death sends, creating
+/// [`HUP_IGNORED`] in its project once it does.
+const HUP_IGNORING: &str = "trap '' HUP; touch hup-ignored; sleep 600";
+/// The file [`HUP_IGNORING`] creates once its trap is set.
+const HUP_IGNORED: &str = "hup-ignored";
 /// The state `/proc/<pid>/stat` gives a process that died unreaped.
 const ZOMBIE_STATE: &str = "Z";
 /// A process that fails at once.
@@ -364,6 +367,9 @@ fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice()
     let pid = scratch.up_running(&project).pid().map(Pid::into_inner);
     let holders = scratch.holders();
     assert_eq!(holders.len(), 1);
+    wait_until("the child to ignore a hangup", || {
+        project.as_ref().join(HUP_IGNORED).exists()
+    });
 
     kill_hard(holders[0]);
     wait_until("the process to be unsupervised", || {

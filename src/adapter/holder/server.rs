@@ -963,10 +963,12 @@ mod tests {
 
     #[test]
     fn resize_follows_most_recent_writable_client() {
-        let harness = Harness::start("trap 'stty size' WINCH; while :; do sleep 0.05; done");
+        let harness =
+            Harness::start("trap 'stty size' WINCH; echo ready; while :; do sleep 0.05; done");
         let (mut first, _) = harness.connect(ClientRole::Attach { read_only: false });
         let (mut second, _) = harness.connect(ClientRole::Attach { read_only: false });
         let (mut watcher, _) = harness.connect(ClientRole::Attach { read_only: true });
+        first.screen_until("ready");
 
         first.send(ClientMessage::Resize(size(30, 100)));
         wait_until("the first client's size", || {

@@ -2087,6 +2087,33 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
     assert!(stop.status.success(), "{}", shown(&stop));
 }
 
+/// `ps --commands` with a database it cannot open still lists what the
+/// service runs, and says under the project's table that its stored
+/// processes could not be read and why, never dropping that silently.
+#[test]
+fn ps_commands_names_a_database_it_cannot_read() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let database = scratch.database();
+    let mode = fs::metadata(&database).unwrap().permissions().mode();
+    fs::set_permissions(&database, Permissions::from_mode(UNREADABLE_FILE_MODE)).unwrap();
+
+    let ps = scratch.on(&project, &["ps", "--all", "--commands"]);
+
+    fs::set_permissions(&database, Permissions::from_mode(mode)).unwrap();
+    assert!(ps.status.success(), "{}", shown(&ps));
+    assert!(stdout(&ps).contains("api"), "{}", shown(&ps));
+    assert!(
+        stdout(&ps).contains("could not read the stored processes"),
+        "{}",
+        shown(&ps)
+    );
+    let down = scratch.on(&project, &["down"]);
+    assert!(down.status.success(), "{}", shown(&down));
+}
+
 /// Rows written before the caps, inserted here through sqlite, keep the
 /// project usable: a variable value past 8 KiB, more than the most
 /// variables and a name past the cap each refuse only their own process,
@@ -3935,6 +3962,8 @@ const PERMISSION_BITS: u32 = 0o777;
 const SHARED_FILE_MODE: u32 = 0o644;
 /// The mode of a file only its owner can read.
 const PRIVATE_FILE_MODE: u32 = 0o600;
+/// The mode of a file nobody can read or write.
+const UNREADABLE_FILE_MODE: u32 = 0o000;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
 /// Length of a state home whose holder sockets just fit on every platform,

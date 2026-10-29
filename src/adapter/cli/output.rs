@@ -35,7 +35,7 @@ use crate::{
         process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
-        value::{ProcessName, ProjectName},
+        value::{ProcessName, ProjectName, ProjectRoot},
     },
 };
 
@@ -54,8 +54,13 @@ const PS_HEADERS: [&str; 10] = [
 ];
 /// Header of the column `ps --commands` adds.
 const COMMAND_HEADER: &str = "COMMAND";
-/// Opens the line under a `ps` table naming a process that is never started.
+/// Opens the line under a `ps` table naming a process that is never started,
+/// or why the project's stored processes could not be read.
 const NEVER_STARTED_MARK: &str = "! ";
+/// Opens the line under a `ps` table saying the project's stored processes
+/// could not be read; why follows.
+const UNREAD_STACK: &str =
+    "could not read the stored processes, so commands and stored problems are not shown: ";
 /// The READY cell of a run that passed its readiness check.
 const READY_YES: &str = "yes";
 /// The READY cell of a run still waiting on its readiness check.
@@ -167,11 +172,14 @@ const FALLBACK_FAILURE_JSON: &str =
 /// naming the project and its folder; with `all`, the tables are indented
 /// under their headings. With `commands`, each row ends in the process's
 /// command as its project's stored stack in `stacks` holds it. Each process
-/// never started for a stored problem is named below its table, with the fix.
+/// never started for a stored problem is named below its table, with the fix,
+/// and a project whose stack is in `unread` says below its table why it
+/// could not be read, so a missing command or problem is never silent.
 pub fn render_status(
     statuses: &[ProjectStatus],
     all: bool,
     stacks: &[Stack],
+    unread: &[(ProjectRoot, String)],
     commands: bool,
 ) -> String {
     if statuses.is_empty() {
@@ -181,14 +189,19 @@ pub fn render_status(
     statuses
         .iter()
         .map(|status| {
-            let stack = stacks
-                .iter()
-                .find(|stack| stack.project().root() == status.project().root());
+            let root = status.project().root();
+            let stack = stacks.iter().find(|stack| stack.project().root() == root);
             let mut rendered = format!(
                 "{}\n{}",
                 project_heading(status.project()),
                 project_table(status, indent, commands.then_some(stack))
             );
+            for (_, why) in unread.iter().filter(|(unread, _)| unread == root) {
+                rendered.push_str(&format!(
+                    "\n{indent}{NEVER_STARTED_MARK}{}",
+                    printable(&format!("{UNREAD_STACK}{why}"))
+                ));
+            }
             for problem in stack
                 .into_iter()
                 .flat_map(|stack| stack.processes())
@@ -838,12 +851,15 @@ mod tests {
 
     #[test]
     fn ps_table_snapshot() {
-        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, &[], false));
+        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, &[], &[], false));
         insta::assert_snapshot!(
             "ps_table_all",
-            render_status(&[shop(), blog()], true, &[], false)
+            render_status(&[shop(), blog()], true, &[], &[], false)
         );
-        insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true, &[], false));
+        insta::assert_snapshot!(
+            "ps_table_none_loaded",
+            render_status(&[], true, &[], &[], false)
+        );
     }
 
     /// `ps --commands` ends each row in its stored command, made printable,
@@ -869,7 +885,7 @@ mod tests {
             ])
             .build();
 
-        let rendered = render_status(&[shop()], false, &[stack], true);
+        let rendered = render_status(&[shop()], false, &[stack], &[], true);
 
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines[1].trim_end().ends_with(COMMAND_HEADER), "{rendered}");
@@ -879,14 +895,14 @@ mod tests {
             !rendered.replace('\n', "").chars().any(char::is_control),
             "{rendered:?}"
         );
-        assert!(!render_status(&[shop()], false, &[], false).contains(COMMAND_HEADER));
+        assert!(!render_status(&[shop()], false, &[], &[], false).contains(COMMAND_HEADER));
     }
 
     /// Plain `ps` names the project it lists, so a listing from a nested
     /// folder says which project it is.
     #[test]
     fn plain_ps_names_its_project() {
-        let rendered = render_status(&[shop()], false, &[], false);
+        let rendered = render_status(&[shop()], false, &[], &[], false);
 
         assert_eq!(rendered.lines().next(), Some("shop  /home/me/shop"));
     }
@@ -915,7 +931,7 @@ mod tests {
             ])
             .build();
 
-        let rendered = render_status(&[shop(), blog()], true, &[stack], false);
+        let rendered = render_status(&[shop(), blog()], true, &[stack], &[], false);
 
         let marked: Vec<&str> = rendered
             .lines()
@@ -924,6 +940,32 @@ mod tests {
         assert_eq!(marked.len(), 1, "{rendered}");
         assert!(marked[0].contains("'dev server'"), "{rendered}");
         assert!(marked[0].contains("--no-cwd"), "{rendered}");
+        assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+        assert!(
+            rendered.find(marked[0]) < rendered.find("blog"),
+            "{rendered}"
+        );
+    }
+
+    /// A project whose stored processes could not be read says so under its
+    /// own table, naming the failure escaped, so a missing command or
+    /// stored problem is never silent.
+    #[test]
+    fn ps_names_a_stack_it_could_not_read() {
+        let unread = [(
+            shop().project().root().clone(),
+            "the database is locked\u{1b}[2J".to_string(),
+        )];
+
+        let rendered = render_status(&[shop(), blog()], true, &[], &unread, true);
+
+        let marked: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.trim_start().starts_with(NEVER_STARTED_MARK))
+            .collect();
+        assert_eq!(marked.len(), 1, "{rendered}");
+        assert!(marked[0].contains(UNREAD_STACK), "{rendered}");
+        assert!(marked[0].contains("the database is locked"), "{rendered}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
         assert!(
             rendered.find(marked[0]) < rendered.find("blog"),
@@ -941,7 +983,7 @@ mod tests {
     /// character does not push its row out of line.
     #[test]
     fn ps_columns_align_by_display_width() {
-        let rendered = render_status(&[shop()], false, &[], false);
+        let rendered = render_status(&[shop()], false, &[], &[], false);
         let state_column: Vec<usize> = rendered
             .lines()
             .skip(1)

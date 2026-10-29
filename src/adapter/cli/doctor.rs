@@ -81,7 +81,7 @@ fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
 }
 
 /// `error` and each source it does not already show, joined.
-fn error_chain(error: &dyn Error) -> String {
+pub fn error_chain(error: &dyn Error) -> String {
     let mut report = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {

@@ -35,7 +35,7 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
+        any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
         processes_probe, project_probe, projects_probe,
     },
     doctor_view::DoctorView,
@@ -399,14 +399,16 @@ fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
         };
         let client = invocation.connect()?;
         let statuses = process::ps(&client, project.as_ref().map(Project::root))?;
-        let stacks = stored_stacks(invocation, &statuses);
-        Ok((statuses, stacks))
+        let (stacks, unread) = stored_stacks(invocation, &statuses);
+        Ok((statuses, stacks, unread))
     })();
     match result {
-        Ok((statuses, stacks)) => {
+        Ok((statuses, stacks, unread)) => {
             let views: Vec<ProjectView> = statuses.iter().map(ProjectView::from).collect();
             print_result(json, &views, |_| {
-                emit_line(&output::render_status(&statuses, all, &stacks, commands));
+                emit_line(&output::render_status(
+                    &statuses, all, &stacks, &unread, commands,
+                ));
             });
         },
         Err(error) => fail_command(json, &error),
@@ -414,16 +416,32 @@ fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
 }
 
 /// The stored stack of each project in `statuses` that is still registered
-/// and reads; one that does not is left out, so `ps` still shows what the
-/// service runs.
-fn stored_stacks(invocation: &Invocation<'_>, statuses: &[ProjectStatus]) -> Vec<Stack> {
-    let Ok(store) = invocation.store() else {
-        return Vec::new();
+/// and reads, then each project whose stack could not be read with why, so
+/// `ps` still shows what the service runs and says what it could not add.
+fn stored_stacks(
+    invocation: &Invocation<'_>,
+    statuses: &[ProjectStatus],
+) -> (Vec<Stack>, Vec<(ProjectRoot, String)>) {
+    let roots = statuses.iter().map(|status| status.project().root());
+    let store = match invocation.store() {
+        Ok(store) => store,
+        Err(error) => {
+            let why = error_chain(&error);
+            return (
+                Vec::new(),
+                roots.map(|root| (root.clone(), why.clone())).collect(),
+            );
+        },
     };
-    statuses
-        .iter()
-        .filter_map(|status| store.stack(status.project().root()).ok().flatten())
-        .collect()
+    let mut stacks = Vec::new();
+    let mut unread = Vec::new();
+    for root in roots {
+        match store.stack(root) {
+            Ok(stack) => stacks.extend(stack),
+            Err(error) => unread.push((root.clone(), error_chain(&error))),
+        }
+    }
+    (stacks, unread)
 }
 
 /// Prints `result` of an action into the frame `presenter` opened and exits

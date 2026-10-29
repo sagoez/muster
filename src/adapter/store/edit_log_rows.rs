@@ -11,7 +11,7 @@ use super::{
 use crate::domain::{
     config::{ConfigError, RecordedEdit, StackEdit},
     port::{RaisedEdits, StackEditLog},
-    value::{EditId, ProcessName, ProjectRoot, printable},
+    value::{EditId, ProcessName, ProcessNameError, ProjectRoot, elided_name, printable},
 };
 
 /// Most edits kept per project; recording one more drops the oldest.
@@ -38,14 +38,21 @@ fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
     Ok(RecordedEdit::builder()
         .id(EditId::new(row.get(ID).map_err(db_error)?))
         .at(UNIX_EPOCH + duration_from_millis(RECORDED_AT, at_ms)?)
-        .process(
-            process
-                .map(ProcessName::try_new)
-                .transpose()
-                .map_err(|error| refused(PROCESS, &error))?,
-        )
+        .process(process.map(edited_process).transpose()?)
         .message(printable(&message))
         .build())
+}
+
+/// The process an edit names, from its stored `raw` name. A name stored before
+/// the name cap bounded it reads as its [`elided_name`], so an
+/// old entry never makes the log unreadable; any other refused name is corrupt.
+fn edited_process(raw: String) -> Result<ProcessName, ConfigError> {
+    match ProcessName::try_new(raw.as_str()) {
+        Err(ProcessNameError::LenCharMaxViolated) => {
+            elided_name(&raw).map_err(|error| refused(PROCESS, &error))
+        },
+        read => read.map_err(|error| refused(PROCESS, &error)),
+    }
 }
 
 /// Milliseconds since the Unix epoch now, or zero if the clock predates it.
@@ -190,6 +197,7 @@ mod tests {
             config::ProcessChange,
             coordination::Author,
             port::{ProjectStore, StackReader, StackStore},
+            value::PROCESS_NAME_MAX_CHARS,
         },
     };
 
@@ -290,6 +298,46 @@ mod tests {
         let message = store.edits(&root).unwrap()[0].message().clone();
         assert!(!message.contains('\u{1b}') && !message.contains('\u{7}'));
         assert!(message.contains("\\u{1b}]0;owned\\u{7}"), "{message}");
+    }
+
+    /// An entry naming a process past the cap, kept from before the cap,
+    /// reads back with that name escaped and cut to the cap, while a process
+    /// row holding such a name is still refused.
+    #[test]
+    fn an_edit_naming_a_process_past_the_cap_still_reads() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch);
+        store
+            .add_process(&root, &spec("api", "true"), &agent())
+            .unwrap();
+        let overlong = format!("{}\u{1b}[2J", "n".repeat(PROCESS_NAME_MAX_CHARS));
+        store
+            .write(|conn| {
+                conn.execute("UPDATE stack_edits SET process = ?1", params![overlong])
+                    .map_err(db_error)
+            })
+            .unwrap();
+
+        let edits = store.edits(&root).unwrap();
+
+        let shown = edits[0].process().clone().unwrap();
+        assert_eq!(shown, elided_name(&overlong).unwrap());
+        assert_eq!(shown.as_ref().chars().count(), PROCESS_NAME_MAX_CHARS);
+        assert!(!shown.as_ref().contains('\u{1b}'), "{shown}");
+
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE processes SET name = ?1 WHERE name = 'api'",
+                    params![overlong],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+        assert_eq!(
+            store.stack(&root).unwrap_err().to_string(),
+            "stored process name is invalid: it is longer than muster allows"
+        );
     }
 
     /// The human's edits at the CLI are never kept in the log.

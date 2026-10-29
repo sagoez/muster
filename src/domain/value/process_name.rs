@@ -11,9 +11,12 @@ pub const PROCESS_NAME_MAX_CHARS: usize = 64;
 /// character such as a bidi override or a zero-width space, so printing it
 /// can neither drive a terminal nor hide or reorder the text around it.
 fn is_terminal_safe(name: &str) -> bool {
-    !name
-        .chars()
-        .any(|character| character.is_control() || steers_the_terminal(character))
+    !name.chars().any(unsafe_in_a_name)
+}
+
+/// Whether `character` is one [`is_terminal_safe`] refuses in a name.
+pub(super) fn unsafe_in_a_name(character: char) -> bool {
+    character.is_control() || steers_the_terminal(character)
 }
 
 /// A process's display name: trimmed, non-empty, at most

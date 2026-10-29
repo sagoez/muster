@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use super::{
-    process_name::{PROCESS_NAME_MAX_CHARS, ProcessNameError},
+    process_name::{PROCESS_NAME_MAX_CHARS, ProcessName, ProcessNameError, unsafe_in_a_name},
     process_ref::ProcessRefError,
 };
 
@@ -60,6 +60,29 @@ pub fn refused_name(raw: &str) -> String {
     }
 }
 
+/// `raw`, a name stored before [`PROCESS_NAME_MAX_CHARS`] bounded it, as a
+/// name to show: every character a name refuses escaped, then cut so that it
+/// ends in the elision mark within the cap.
+///
+/// # Errors
+/// Returns the [`ProcessNameError`] of a result that is still not a name,
+/// which the escape and the mark rule out.
+pub fn elided_name(raw: &str) -> Result<ProcessName, ProcessNameError> {
+    let mut escaped = String::new();
+    for character in raw.chars() {
+        if unsafe_in_a_name(character) {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    let kept: String = escaped
+        .chars()
+        .take(PROCESS_NAME_MAX_CHARS - ELIDED.chars().count())
+        .collect();
+    ProcessName::try_new(format!("{kept}{ELIDED}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +103,21 @@ mod tests {
             NameProblem::TooLong.to_string(),
             format!("is longer than {PROCESS_NAME_MAX_CHARS} characters")
         );
+    }
+
+    /// A name stored past the cap shows escaped and cut to the cap, ending
+    /// in the mark.
+    #[test]
+    fn an_overlong_stored_name_shows_escaped_within_the_cap() {
+        let shown = elided_name(&format!(
+            "\u{1b}[2J\t{}",
+            "n".repeat(PROCESS_NAME_MAX_CHARS)
+        ))
+        .unwrap();
+
+        assert_eq!(shown.as_ref().chars().count(), PROCESS_NAME_MAX_CHARS);
+        assert!(shown.as_ref().starts_with("\\u{1b}[2J\\tnnn"), "{shown}");
+        assert!(shown.as_ref().ends_with(ELIDED), "{shown}");
     }
 
     /// A refusal shows a long name cut short, and a short one whole.

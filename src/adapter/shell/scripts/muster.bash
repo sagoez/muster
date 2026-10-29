@@ -1,0 +1,37 @@
+# muster's prompt hook for bash. Load it from ~/.bashrc with:
+#   eval "$(muster shell-init bash)"
+if [[ $- == *i* && -z ${__muster_hook-} ]]; then
+    __muster_hook=1
+    __muster_bin=@MUSTER_BIN@
+    __muster_notes=@MUSTER_NOTES@
+    __muster_seq=0
+    export @MUSTER_SHELL_ENV@=$$
+
+    __muster_prompt() {
+        local status=$? note line failglob=
+        __muster_seq=$((__muster_seq + 1))
+        if shopt -q failglob; then
+            failglob=1
+            shopt -u failglob
+        fi
+        for note in "$__muster_notes"/"$$"-*.note; do
+            [[ -f $note ]] || continue
+            while IFS= read -r line || [[ -n $line ]]; do
+                printf '%s\n' "$line"
+            done < "$note"
+            command rm -f -- "$note"
+        done
+        if [[ -n $failglob ]]; then
+            shopt -s failglob
+        fi
+        (command "$__muster_bin" @MUSTER_REPORT@ --pid "$$" --seq "$__muster_seq" \
+            < /dev/null > /dev/null 2>&1 &)
+        return "$status"
+    }
+
+    if ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
+        PROMPT_COMMAND=(__muster_prompt "${PROMPT_COMMAND[@]}")
+    else
+        PROMPT_COMMAND="__muster_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+    fi
+fi

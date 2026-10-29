@@ -14,8 +14,7 @@ use crate::{
         value::{
             COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
             DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, ProcessName,
-            ProjectRoot,
-            StopGrace, ValueParseError, parse_choice, refused_name,
+            ProjectRoot, StopGrace, ValueParseError, parse_choice, refused_name,
         },
     },
 };

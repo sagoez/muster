@@ -42,8 +42,9 @@ pub fn shell_report(
     let shell = shells
         .identify(pid)
         .ok_or(ShellReportSkip::UnknownShell(pid))?;
-    if shells
-        .record(&shell)
+    let previous = shells.record(&shell);
+    if previous
+        .as_ref()
         .is_some_and(|stored| !stamp.supersedes(stored.stamp()))
     {
         return Err(ShellReportSkip::Stale);
@@ -61,8 +62,10 @@ pub fn shell_report(
         .project(project)
         .build();
     let request = ServiceRequest::ShellReport {
+        environment: record
+            .may_enter(previous.as_ref())
+            .then(LaunchEnvironment::current),
         record: record.clone(),
-        environment: LaunchEnvironment::current(),
     };
     let service = ports.service();
     let answer = match service.ask_if_running(&request)? {
@@ -324,6 +327,31 @@ mod tests {
             Some(stamp(LOAD + 1, 1))
         );
         assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
+    }
+
+    /// CR-6: the exported environment goes only with a report whose project
+    /// differs from the stored record, which may enter it; a prompt that
+    /// stays, or leaves for no project, sends none.
+    #[test]
+    fn the_environment_is_sent_only_with_a_report_that_may_enter() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+
+        for (seq, folder) in [(1, &shop), (2, &shop), (3, &scratch.path().to_path_buf())] {
+            shell_report(&ports, this_shell(), stamp(LOAD, seq), folder).unwrap();
+        }
+
+        let sent: Vec<bool> = ports
+            .fake_service()
+            .asked()
+            .iter()
+            .map(|request| {
+                matches!(request, ServiceRequest::ShellReport {
+                    environment: Some(_),
+                    ..
+                })
+            })
+            .collect();
+        assert_eq!(sent, [true, false, false]);
     }
 
     /// A report run as a user that does not own the state directory, as in

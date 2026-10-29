@@ -131,8 +131,9 @@ pub enum ServiceRequest {
         #[serde(with = "crate::adapter::wire::form")]
         record: ShellRecord,
         /// The shell's exported environment, which what entering a project
-        /// starts runs with.
-        environment: LaunchEnvironment,
+        /// starts runs with; sent only by a report that may enter one, and
+        /// without it entering starts nothing.
+        environment: Option<LaunchEnvironment>,
     },
     /// Exits so a newer service can take over; every process keeps running.
     Replace,
@@ -168,7 +169,10 @@ mod tests {
                     ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap(),
                 ))
                 .build(),
-            environment: LaunchEnvironment::from_vars([("PATH".into(), "/usr/bin".into())]),
+            environment: Some(LaunchEnvironment::from_vars([(
+                "PATH".into(),
+                "/usr/bin".into(),
+            )])),
         };
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(

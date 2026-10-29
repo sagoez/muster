@@ -885,24 +885,25 @@ impl ServiceRuntime {
             ServiceRequest::ShellReport {
                 record,
                 environment,
-            } => ServiceResponse::ShellNotes(self.shell_report(&record, &environment)?),
+            } => ServiceResponse::ShellNotes(self.shell_report(&record, environment.as_ref())?),
         };
         Ok(Reply::Now(response))
     }
 
     /// Applies `record`, a shell's report that its folder is in its project:
-    /// a project it left counts one shell fewer, and a project it is the
-    /// first to enter starts its autostart set with `environment`, the
-    /// shell's own. Returns the notes kept for the shell, then what entering
-    /// started or refused. A report older than the shell's last changes
-    /// nothing.
+    /// a project it left counts one shell fewer, and its project, when the
+    /// shell is the first in it, starts its autostart set with
+    /// `environment`, the shell's own. A report sent with no environment is
+    /// no entering and starts nothing. Returns the notes kept for the shell,
+    /// then what entering started or refused. A report older than the
+    /// shell's last changes nothing.
     ///
     /// # Errors
     /// Returns a busy refusal for a new shell while [`MAX_SHELLS`] are known.
     fn shell_report(
         &mut self,
         record: &ShellRecord,
-        environment: &LaunchEnvironment,
+        environment: Option<&LaunchEnvironment>,
     ) -> Result<Vec<ShellNote>, ServiceErrorBody> {
         let shell = *record.shell();
         if !self.occupancy.knows(&shell) && self.occupancy.len() >= MAX_SHELLS {
@@ -914,8 +915,13 @@ impl ServiceRuntime {
         let changes = self.occupancy.report(record);
         self.occupancy_changed(&changes, Instant::now());
         let mut notes = self.shell_notes.take(&shell);
+        let Some(environment) = environment else {
+            return Ok(notes);
+        };
         for change in changes {
-            if let OccupancyChange::Entered(root) = change {
+            if let OccupancyChange::Entered(root) = change
+                && record.project().as_ref() == Some(&root)
+            {
                 notes.extend(self.enter(&root, shell, environment));
             }
         }
@@ -3128,14 +3134,15 @@ mod tests {
     const HOOK_LOAD: u64 = 1;
 
     /// Sends `shell`'s report at prompt `seq` that its folder is in
-    /// `project`, with no environment, and returns the notes answered.
+    /// `project`, as one that may enter it with an empty environment, and
+    /// returns the notes answered.
     fn report(
         service: &Running,
         shell: ShellId,
         seq: u64,
         project: Option<&ProjectRoot>,
     ) -> Vec<ShellNote> {
-        report_with(service, shell, seq, project, no_env())
+        report_with(service, shell, seq, project, Some(no_env()))
     }
 
     /// `shell`'s report at prompt `seq` of [`HOOK_LOAD`] that its folder is
@@ -3148,13 +3155,14 @@ mod tests {
             .build()
     }
 
-    /// As [`report`], the shell exporting `environment`.
+    /// As [`report`], the shell exporting `environment`, or sending none as
+    /// a report that may enter no project does.
     fn report_with(
         service: &Running,
         shell: ShellId,
         seq: u64,
         project: Option<&ProjectRoot>,
-        environment: LaunchEnvironment,
+        environment: Option<LaunchEnvironment>,
     ) -> Vec<ShellNote> {
         let response = service.send(ServiceRequest::ShellReport {
             record: shell_record(shell, seq, project),
@@ -3261,7 +3269,10 @@ mod tests {
             shell,
             1,
             Some(&project),
-            LaunchEnvironment::from_vars([(SHELL_VAR.into(), SHELL_VALUE.into())]),
+            Some(LaunchEnvironment::from_vars([(
+                SHELL_VAR.into(),
+                SHELL_VALUE.into(),
+            )])),
         );
 
         let seen = format!("seen-{SHELL_VALUE}");
@@ -3274,6 +3285,25 @@ mod tests {
             };
             screen.contains(&seen)
         });
+        service.stop();
+    }
+
+    /// A report sent with no environment, as one whose project matches the
+    /// shell's record, counts the shell but is no entering: nothing starts.
+    #[test]
+    fn a_report_without_an_environment_counts_the_shell_and_starts_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        assert!(report_with(&service, shell, 1, Some(&project), None).is_empty());
+
+        let status = service.status(&project);
+        assert_eq!(status.occupancy().shells(), 1);
+        assert!(!process(&status, "api").state().may_be_running());
+        assert!(fixture.runner().live_records().is_empty());
         service.stop();
     }
 
@@ -3736,7 +3766,7 @@ mod tests {
 
         let response = service.send(ServiceRequest::ShellReport {
             record: shell_record(shells[MAX_SHELLS], 1, None),
-            environment: no_env(),
+            environment: None,
         });
 
         let ServiceResponse::Error(refusal) = response else {

@@ -53,10 +53,11 @@ const START_LOCK_FILE: &str = "service.start.lock";
 /// Mode of the start lock: its owner's alone.
 const START_LOCK_MODE: u32 = 0o600;
 /// Longest a writer waits for a running service to hear that stored state
-/// changed, a service that does not answer in time reading fresh state later,
-/// and longest each step of asking a running service without starting one
-/// may take.
+/// changed, a service that does not answer in time reading fresh state later.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest each step of asking a running service without starting one, its
+/// hello and then the request, may take.
+const ASK_TIMEOUT: Duration = Duration::from_secs(2);
 /// The folder a path with no parent is relative to.
 const CURRENT_DIR: &str = ".";
 /// What a test client names as its binary, in its state directory, so it
@@ -235,8 +236,7 @@ impl ServiceClient {
     ///
     /// # Errors
     /// Returns a [`ClientError`] when there is no state directory, or a
-    /// service holds the socket but does not answer within
-    /// `NOTIFY_TIMEOUT`.
+    /// service holds the socket but does not answer within `ASK_TIMEOUT`.
     pub fn ask_if_running(request: &ServiceRequest) -> Result<Asked, ClientError> {
         Self::local()?.ask(request)
     }
@@ -248,13 +248,13 @@ impl ServiceClient {
     /// # Errors
     /// Returns a [`ClientError`] when the socket's directory is not private
     /// to this user, or a service holds the socket but does not answer within
-    /// [`NOTIFY_TIMEOUT`].
+    /// [`ASK_TIMEOUT`].
     fn ask(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
         let ours = ServiceVersion::current();
         let hello = ServiceRequest::Hello {
             version: ours.clone(),
         };
-        match self.send_once(&hello, NOTIFY_TIMEOUT) {
+        match self.send_once(&hello, ASK_TIMEOUT) {
             Ok(ServiceResponse::Hello { version, .. }) if version == ours => {},
             Ok(ServiceResponse::Hello { .. }) => return Ok(Asked::OtherVersion),
             Ok(ServiceResponse::Error(body))
@@ -273,7 +273,7 @@ impl ServiceClient {
             },
             Err(failure) => return Err(io_error(failure)),
         }
-        self.send_once(request, NOTIFY_TIMEOUT)
+        self.send_once(request, ASK_TIMEOUT)
             .map(Asked::Answered)
             .map_err(io_error)
     }

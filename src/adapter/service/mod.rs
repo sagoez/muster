@@ -26,8 +26,10 @@ mod located;
 mod matched_line;
 #[cfg(test)]
 mod memory_store;
+mod mirror_write;
 mod notice;
 mod notice_level;
+mod notice_mirror;
 mod notices;
 #[cfg(test)]
 mod null_sink;

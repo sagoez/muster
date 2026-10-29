@@ -172,6 +172,11 @@ impl ServiceRuntime {
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
         runtime.run_recorder.flush();
+        runtime
+            .notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .flush();
         runtime.event_waiters.clear();
         drop(events);
         drop(singleton);

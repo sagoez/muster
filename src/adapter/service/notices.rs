@@ -1,26 +1,24 @@
 use std::{
     collections::VecDeque,
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use super::{notice::Notice, shared_notices::SharedNotices};
+use super::{notice::Notice, notice_mirror::NoticeMirror, shared_notices::SharedNotices};
 use crate::domain::value::ProjectRoot;
 
 /// Most notices kept in memory; the oldest is dropped to make room.
 pub const MAX_NOTICES: usize = 256;
 
 /// A bounded ring of the most recent notices across every project, each also
-/// appended as a JSON line to an optional log file.
+/// appended as a JSON line to an optional log file, off the caller's thread.
 pub struct Notices {
     /// The most recent notices, oldest first.
     ring: VecDeque<Notice>,
     /// How many notices were ever pushed, so a reader can tell new ones apart.
     pushed: u64,
-    /// File each notice is mirrored to, when there is one.
-    log: Option<PathBuf>,
+    /// Writes each notice to the log, when there is one.
+    mirror: Option<NoticeMirror>,
 }
 
 impl Notices {
@@ -29,7 +27,15 @@ impl Notices {
         Self {
             ring: VecDeque::with_capacity(MAX_NOTICES),
             pushed: 0,
-            log,
+            mirror: log.map(NoticeMirror::spawn),
+        }
+    }
+
+    /// Waits until every notice pushed so far reached the log, so one raised
+    /// as the service exits is not lost with it.
+    pub fn flush(&self) {
+        if let Some(mirror) = &self.mirror {
+            mirror.flush();
         }
     }
 
@@ -43,7 +49,12 @@ impl Notices {
     /// loses the notice itself.
     pub fn push(&mut self, notice: Notice) {
         let notice = notice.printable();
-        mirror(self.log.as_deref(), &notice);
+        if let Some(mirror) = &self.mirror
+            && let Ok(mut line) = serde_json::to_vec(&notice)
+        {
+            line.push(b'\n');
+            mirror.append(line);
+        }
         if self.ring.len() == MAX_NOTICES {
             self.ring.pop_front();
         }
@@ -64,20 +75,6 @@ impl Notices {
     /// How many notices were ever pushed.
     pub fn pushed(&self) -> u64 {
         self.pushed
-    }
-}
-
-/// Appends `notice` to `log`, when there is one, as one JSON line.
-fn mirror(log: Option<&Path>, notice: &Notice) {
-    let Some(log) = log else {
-        return;
-    };
-    let Ok(mut line) = serde_json::to_vec(notice) else {
-        return;
-    };
-    line.push(b'\n');
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log) {
-        let _ = file.write_all(&line);
     }
 }
 
@@ -177,6 +174,7 @@ mod tests {
         let stored = notices.recent(&project)[0].message().clone();
         assert!(!stored.chars().any(char::is_control), "{stored:?}");
         assert!(stored.contains("exit 1"));
+        notices.flush();
         let written = fs::read_to_string(log).unwrap();
         assert!(!written.contains('\x1b'));
     }
@@ -191,6 +189,7 @@ mod tests {
         notices.push(notice(&project, "one"));
         notices.push(notice(&project, "two"));
 
+        notices.flush();
         let written = fs::read_to_string(log).unwrap();
         let lines: Vec<Value> = written
             .lines()

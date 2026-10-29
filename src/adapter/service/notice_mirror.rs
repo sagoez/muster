@@ -1,7 +1,8 @@
 use std::{
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -9,7 +10,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
-use super::mirror_write::MirrorWrite;
+use super::{followed_stream::FollowedStream, mirror_write::MirrorWrite, state_dir::LOG_FILE_MODE};
 
 /// Size past which the log is rotated before the next line: it moves to the
 /// rotated name, replacing the older one, and a fresh log starts.
@@ -29,10 +30,17 @@ pub struct NoticeMirror {
 }
 
 impl NoticeMirror {
-    /// Starts the thread appending to `log`.
+    /// Starts the thread appending to `log`, keeping this process's stderr on
+    /// the live log across rotations when it was redirected there.
     pub fn spawn(log: PathBuf) -> Self {
+        Self::following(log, Box::new(io::stderr()))
+    }
+
+    /// Starts the thread appending to `log`, pointing `stream` at each fresh
+    /// log when it wrote to the one rotated out.
+    pub(super) fn following(log: PathBuf, mut stream: Box<dyn FollowedStream>) -> Self {
         let (sender, writes) = unbounded();
-        thread::spawn(move || write_all(&log, &writes));
+        thread::spawn(move || write_all(&log, &writes, stream.as_mut()));
         Self { sender }
     }
 
@@ -60,7 +68,7 @@ fn rotated_log(log: &Path) -> PathBuf {
 
 /// Writes each line from `writes` to `log` in order, rotating it first when
 /// the line would carry it past [`SERVICE_LOG_MAX_BYTES`].
-fn write_all(log: &Path, writes: &Receiver<MirrorWrite>) {
+fn write_all(log: &Path, writes: &Receiver<MirrorWrite>, stream: &mut dyn FollowedStream) {
     for write in writes {
         let line = match write {
             MirrorWrite::Line(line) => line,
@@ -71,19 +79,86 @@ fn write_all(log: &Path, writes: &Receiver<MirrorWrite>) {
         };
         let written = fs::metadata(log).map_or(0, |metadata| metadata.len());
         if written > 0 && written.saturating_add(line.len() as u64) > SERVICE_LOG_MAX_BYTES {
-            let _ = fs::rename(log, rotated_log(log));
+            rotate(log, stream);
         }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log) {
+        if let Ok(mut file) = open_log(log) {
             let _ = file.write_all(&line);
         }
     }
 }
 
+/// Moves `log` to its rotated name and starts a fresh one, pointing `stream`
+/// at it when the stream wrote to the log rotated out, so its writes never
+/// land in a file the next rotation unlinks.
+fn rotate(log: &Path, stream: &mut dyn FollowedStream) {
+    let followed = writes_to(stream, log);
+    if fs::rename(log, rotated_log(log)).is_err() {
+        return;
+    }
+    if let Ok(fresh) = open_log(log)
+        && followed
+    {
+        let _ = stream.repoint(&fresh);
+    }
+}
+
+/// Whether `stream` writes to the file at `log`.
+fn writes_to(stream: &dyn FollowedStream, log: &Path) -> bool {
+    let (Ok(target), Ok(log)) = (
+        stream.target().and_then(|file| file.metadata()),
+        fs::metadata(log),
+    ) else {
+        return false;
+    };
+    target.dev() == log.dev() && target.ino() == log.ino()
+}
+
+/// Opens `log` to append, creating it private to its owner.
+///
+/// # Errors
+/// Returns the I/O error from opening it.
+fn open_log(log: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(LOG_FILE_MODE)
+        .open(log)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use tempfile::TempDir;
 
     use super::*;
+    use crate::adapter::service::shared_fd::SharedFd;
+
+    /// A rotation recreates the log private to its owner and points a stream
+    /// that wrote to the old log at the fresh one, so a later stderr line
+    /// lands in the live log rather than the rotated or unlinked file.
+    #[test]
+    fn a_rotation_keeps_the_log_private_and_moves_the_stream_along() {
+        let scratch = TempDir::new().unwrap();
+        let log = scratch.path().join("service.log");
+        let stream = SharedFd::new(open_log(&log).unwrap());
+        let mirror = NoticeMirror::following(log.clone(), Box::new(stream.clone()));
+        let line = [vec![b'x'; 4096], b"\n".to_vec()].concat();
+        let lines = usize::try_from(SERVICE_LOG_MAX_BYTES).unwrap() / line.len() + 2;
+
+        for _ in 0..lines * 2 {
+            mirror.append(line.clone());
+        }
+        mirror.flush();
+        stream.write(b"after the rotation\n");
+
+        let mode = fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, LOG_FILE_MODE);
+        let live = fs::read_to_string(&log).unwrap();
+        assert!(live.ends_with("after the rotation\n"), "{}", live.len());
+        let rotated = fs::read_to_string(rotated_log(&log)).unwrap();
+        assert!(!rotated.contains("after the rotation"));
+    }
 
     /// Lines past the cap move the log to its rotated name and start a fresh
     /// one, so the log never grows without bound.

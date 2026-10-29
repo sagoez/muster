@@ -19,6 +19,7 @@ mod fake_pool;
 #[cfg(test)]
 mod fixed_listening_ports;
 mod flow;
+mod followed_stream;
 mod holder_pool;
 mod last_exit;
 mod launch_environment;
@@ -68,6 +69,8 @@ mod service_request;
 mod service_response;
 mod service_version;
 mod shared_event_log;
+#[cfg(test)]
+mod shared_fd;
 mod shared_holders;
 mod shared_notices;
 mod singleton;

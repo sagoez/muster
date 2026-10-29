@@ -3,7 +3,7 @@ use std::{fs::OpenOptions, io, os::unix::fs::OpenOptionsExt, path::Path};
 use rustix::stdio::dup2_stderr;
 
 /// Mode of the service log: its owner's alone.
-const LOG_FILE_MODE: u32 = 0o600;
+pub(super) const LOG_FILE_MODE: u32 = 0o600;
 
 /// Sends everything this process writes to standard error to the end of
 /// `log`, so a service started with no terminal still leaves its failures

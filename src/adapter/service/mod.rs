@@ -10,15 +10,27 @@ mod event_kind;
 mod event_log;
 mod event_page;
 mod event_seq;
+mod event_waiter;
 mod exit_reason;
+#[cfg(test)]
+mod fake_pool;
+mod flow;
+#[cfg(test)]
+mod gated_launcher;
 mod holder_pool;
+#[cfg(test)]
+mod holders;
 mod last_exit;
 mod launch_environment;
 mod located;
 mod matched_line;
+#[cfg(test)]
+mod memory_store;
 mod notice;
 mod notice_level;
 mod notices;
+#[cfg(test)]
+mod null_sink;
 mod output_tap;
 mod port_block;
 mod port_holder;
@@ -35,8 +47,15 @@ mod project_ports;
 mod project_status;
 pub mod protocol;
 mod refusal;
+mod reply;
 mod run_pin;
+#[cfg(test)]
+mod running;
 mod runtime;
+#[cfg(test)]
+mod runtime_fixture;
+#[cfg(test)]
+mod runtime_testing;
 mod service_deps;
 mod service_error;
 mod service_error_body;
@@ -50,10 +69,16 @@ mod shared_notices;
 mod singleton;
 mod stack_event;
 mod stack_url;
+#[cfg(test)]
+mod stalled_handle;
 mod state_dir;
 mod state_goal;
 pub mod supervisor;
 mod tap_line;
+#[cfg(test)]
+mod test_ports;
+#[cfg(test)]
+mod thread_launcher;
 mod url_source;
 mod usage_sampler;
 mod wait_condition;

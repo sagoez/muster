@@ -12,8 +12,11 @@ use std::{
 };
 
 use muster::{
-    adapter::{service::SHELL_SWEEP_INTERVAL, shell::HookShell},
-    domain::value::ProjectRoot,
+    adapter::{
+        service::SHELL_SWEEP_INTERVAL,
+        shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
+    },
+    domain::{occupancy::ReportSeq, value::ProjectRoot},
 };
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
@@ -23,16 +26,22 @@ use crate::common::{
     Scratch, ShellSession, WAIT, entry, on_path, processes_under, runnable_shell, stack, wait_until,
 };
 
-/// Longest one prompt may take, the hook included, with the service frozen.
-const PROMPT_BUDGET: Duration = Duration::from_millis(250);
+/// How many times a prompt fits in a report blocked on the frozen service:
+/// loose enough for a loaded box, while a hook that waited would take the
+/// whole block at every prompt.
+const PROMPTS_PER_BLOCK: u32 = 2;
+/// The seq of the report timed against the frozen service, newer than any
+/// the hook sends, so it is never skipped as stale.
+const BLOCKED_REPORT_SEQ: u64 = u64::MAX;
 /// Prompts timed while the service is frozen.
 const FROZEN_PROMPTS: usize = 20;
 /// The idle stop the leaving tests set, as the CLI reads it.
 const SHORT_IDLE_STOP: &str = "1s";
 /// That idle stop as a duration.
 const SHORT_IDLE_STOP_TIME: Duration = Duration::from_secs(1);
-/// Slack past the sweep and the idle stop for a stop to land.
-const STOP_SLACK: Duration = Duration::from_secs(1);
+/// Slack past the sweep and the idle stop for a stop to land on a loaded
+/// box: one more sweep, short of the next sweep but one.
+const STOP_SLACK: Duration = SHELL_SWEEP_INTERVAL;
 /// Prompts typed in the tests that count reports or look for noise.
 const PROMPTS: u64 = 5;
 /// The stack file `import` reads.
@@ -159,8 +168,24 @@ fn entering_a_project_starts_autostart_and_the_next_prompt_says_so() {
     });
 }
 
-/// With the service stopped dead, every prompt still returns within the
-/// budget: the hook never waits on the service.
+/// How long a report run in the foreground blocks on the frozen service,
+/// for the shell `session`: what every prompt would cost a hook that waited.
+fn blocked_report(scratch: &Scratch, session: &ShellSession) -> Duration {
+    let pid = session.pid().to_string();
+    let seq = BLOCKED_REPORT_SEQ.to_string();
+    let started = Instant::now();
+    scratch.muster(&[SHELL_REPORT_SUBCOMMAND, "--pid", &pid, "--seq", &seq]);
+    let blocked = started.elapsed();
+    assert_ne!(
+        session.record().map(|record| *record.seq()),
+        Some(ReportSeq::new(BLOCKED_REPORT_SEQ)),
+        "a report to a frozen service cannot land"
+    );
+    blocked
+}
+
+/// With the service stopped dead, every prompt still returns in a fraction
+/// of the time a report blocks on it: the hook never waits on the service.
 #[test]
 fn the_prompt_returns_while_the_service_is_frozen() {
     each_shell("frozen", |scratch, shell, program| {
@@ -171,11 +196,12 @@ fn the_prompt_returns_while_the_service_is_frozen() {
 
         kill_process(service, Signal::STOP).unwrap();
         let prompts: Vec<Duration> = (0..FROZEN_PROMPTS).map(|_| session.round_trip()).collect();
+        let budget = blocked_report(scratch, &session) / PROMPTS_PER_BLOCK;
         kill_process(service, Signal::CONT).unwrap();
 
         assert!(
-            prompts.iter().all(|prompt| *prompt < PROMPT_BUDGET),
-            "{shell}: {prompts:?}"
+            prompts.iter().all(|prompt| *prompt < budget),
+            "{shell}: each prompt under {budget:?}: {prompts:?}"
         );
     });
 }

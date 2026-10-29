@@ -1620,7 +1620,7 @@ mod tests {
                 },
             },
             signal_target::SignalTarget,
-            test_wait::REPLY,
+            test_wait::{REPLY, wait_within},
         },
         domain::{
             config::SettingChange,
@@ -3106,6 +3106,11 @@ mod tests {
     const SHORT_IDLE: Duration = Duration::from_millis(300);
     /// An idle stop no test outlasts.
     const LONG_IDLE: Duration = Duration::from_secs(60 * 60);
+    /// How long past [`SHELL_SWEEP_INTERVAL`] a test waits for a sweep to
+    /// land, so a loaded machine never fails one that is merely late.
+    const SWEEP_MARGIN: Duration = WAIT;
+    /// The bound on a wait for a sweep: its interval plus the margin.
+    const SWEEP_WAIT: Duration = SHELL_SWEEP_INTERVAL.saturating_add(SWEEP_MARGIN);
     /// The port the blocked process checks for readiness.
     const BLOCKED_PORT: u16 = 3000;
     /// The pid of the program muster does not run that holds every port.
@@ -3505,7 +3510,7 @@ mod tests {
 
         fixture.shells().close(&shell);
 
-        wait_until("the sweep to find the shell gone", || {
+        wait_within("the sweep to find the shell gone", SWEEP_WAIT, || {
             occupancy(&service, &project).shells() == 0
         });
         assert!(occupancy(&service, &project).stops_in().is_some());
@@ -3748,7 +3753,7 @@ mod tests {
         wait_until("the idle stop to end the child", || {
             !SignalTarget::Process(pid).is_alive()
         });
-        wait_until("the sweep to forget the closed shell", || {
+        wait_within("the sweep to forget the closed shell", SWEEP_WAIT, || {
             fixture.shells().forgotten() == [closing]
         });
         service.stop();

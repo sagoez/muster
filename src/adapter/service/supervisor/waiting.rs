@@ -1260,6 +1260,44 @@ mod tests {
         );
     }
 
+    /// A wait with no cursor, asked while an adopted run still replays its
+    /// log, never matches a replayed line printed before it was asked, only
+    /// one past where the replay ends.
+    #[test]
+    fn a_wait_asked_during_a_replay_skips_the_replayed_lines() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        let replay_end = OutputCursor::new(64);
+        harness.supervisor_mut().replays.insert(pane, replay_end);
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("listening")), None),
+            None,
+        );
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, ProcessOutput::Placed {
+                at: OutputCursor::new(0),
+                bytes: b"listening before\n".to_vec(),
+            });
+        assert!(answered(&answers).is_none(), "a replayed line is older");
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, ProcessOutput::Placed {
+                at: replay_end,
+                bytes: b"listening after\n".to_vec(),
+            });
+
+        let matched = answered(&answers).unwrap();
+        assert_eq!(*matched.matched().as_ref().unwrap().at(), replay_end);
+    }
+
     /// A cursor past what the tap holds while the launch or adoption that
     /// catches it up from the log is in flight, as after a restart, is
     /// accepted, and matches the caught-up output from where it points.

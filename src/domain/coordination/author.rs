@@ -1,5 +1,7 @@
 use std::fmt;
 
+use super::BlankAuthor;
+
 /// Stored label for a write the human made through the CLI.
 pub(crate) const HUMAN_LABEL: &str = "human";
 /// Fallback label for an agent that did not name itself.
@@ -45,14 +47,19 @@ impl Author {
         matches!(self, Author::Human)
     }
 
-    /// Reconstructs an author from a stored flat label - the inverse of
-    /// [`Author::label`], for reading back persisted entries.
-    #[must_use]
-    pub fn from_label(label: &str) -> Self {
-        if label == HUMAN_LABEL {
-            Author::Human
+    /// Reconstructs an author from a stored or imported label - the inverse of
+    /// [`Author::label`]. The label is trimmed and `human` matches in any case.
+    ///
+    /// # Errors
+    /// Returns [`BlankAuthor`] when the label is blank once trimmed.
+    pub fn from_label(label: &str) -> Result<Self, BlankAuthor> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            Err(BlankAuthor)
+        } else if trimmed.eq_ignore_ascii_case(HUMAN_LABEL) {
+            Ok(Author::Human)
         } else {
-            Author::agent(label)
+            Ok(Author::agent(trimmed))
         }
     }
 
@@ -81,7 +88,7 @@ mod tests {
     fn the_human_round_trips() {
         assert_eq!(Author::human().label(), "human");
         assert_eq!(Author::Human.to_string(), "human");
-        assert_eq!(Author::from_label("human"), Author::Human);
+        assert_eq!(Author::from_label("human"), Ok(Author::Human));
     }
 
     /// A named agent trims and round-trips.
@@ -89,7 +96,21 @@ mod tests {
     fn an_agent_name_trims_and_round_trips() {
         let author = Author::agent("  claude  ");
         assert_eq!(author.label(), "claude");
-        assert_eq!(Author::from_label(&author.to_string()), author);
+        assert_eq!(Author::from_label(&author.to_string()), Ok(author));
+    }
+
+    /// A label is trimmed and `human` matches in any case.
+    #[test]
+    fn a_respelt_human_label_reads_as_the_human() {
+        assert_eq!(Author::from_label(" HUMAN "), Ok(Author::Human));
+        assert_eq!(Author::from_label(" claude "), Ok(Author::agent("claude")));
+    }
+
+    /// A blank label names nobody and is refused.
+    #[test]
+    fn a_blank_label_is_refused() {
+        assert_eq!(Author::from_label(""), Err(BlankAuthor));
+        assert_eq!(Author::from_label("  \t"), Err(BlankAuthor));
     }
 
     /// A blank name, or one impersonating the human, collapses to the generic

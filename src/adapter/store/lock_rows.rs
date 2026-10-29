@@ -1,15 +1,15 @@
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use super::{
-    coordination_rows::collect,
+    coordination_rows::{author_from, collect},
     sqlite_store::{corrupt, db_error, epoch_from_secs, epoch_param},
     store_error::StoreError,
 };
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, LOCK_TTL_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
-        LockTtl, SessionId,
+        LOCK_TTL_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl,
+        SessionId,
     },
     value::EpochSeconds,
 };
@@ -38,7 +38,7 @@ fn lock_from_row(row: &Row) -> Result<Lock, ConfigError> {
     let expires_at: i64 = row.get("expires_at").map_err(db_error)?;
     Ok(Lock::builder()
         .name(LockName::try_new(name).map_err(|error| corrupt("lock name", error))?)
-        .owner(Author::from_label(&owner))
+        .owner(author_from(&owner)?)
         .note(
             note.map(LockNote::try_new)
                 .transpose()

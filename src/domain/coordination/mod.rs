@@ -1,5 +1,6 @@
 mod agent_id;
 mod author;
+mod blank_author;
 mod claim;
 mod claim_state;
 mod kv;
@@ -30,6 +31,7 @@ mod todo_update;
 
 pub use agent_id::*;
 pub use author::*;
+pub use blank_author::*;
 pub use claim::*;
 pub use claim_state::*;
 pub use kv::*;

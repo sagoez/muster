@@ -1,9 +1,6 @@
 use super::WireForm;
 use crate::domain::coordination::Author;
 
-/// Why a blank author label is refused: it names nobody.
-const BLANK_AUTHOR: &str = "author label must not be empty";
-
 impl WireForm for Author {
     type Wire = String;
 
@@ -14,16 +11,14 @@ impl WireForm for Author {
 
     /// The author a label names, read as the store reads it.
     fn from_wire(wire: String) -> Result<Self, String> {
-        if wire.trim().is_empty() {
-            return Err(BLANK_AUTHOR.to_string());
-        }
-        Ok(Self::from_label(&wire))
+        Self::from_label(&wire).map_err(|error| error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::coordination::BlankAuthor;
 
     /// The human and a named agent round-trip through their labels.
     #[test]
@@ -38,17 +33,17 @@ mod tests {
     fn a_blank_label_is_refused() {
         assert_eq!(
             Author::from_wire("  ".to_string()).unwrap_err(),
-            BLANK_AUTHOR
+            BlankAuthor.to_string()
         );
     }
 
-    /// A label that only spells the human differently reads as an agent, as
-    /// the store reads it, so an imported entry cannot pass for the human.
+    /// A label that spells the human in another case, padded, reads as the
+    /// human, as the store reads it.
     #[test]
-    fn a_respelt_human_label_reads_as_an_agent() {
+    fn a_respelt_human_label_reads_as_the_human() {
         assert_eq!(
             Author::from_wire(" HUMAN ".to_string()).unwrap(),
-            Author::agent("agent")
+            Author::Human
         );
     }
 }

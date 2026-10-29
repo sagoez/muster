@@ -54,6 +54,11 @@ fn updated_at(row: &Row) -> Result<EpochSeconds, ConfigError> {
     epoch_from_secs("write time", row.get("updated_at").map_err(db_error)?)
 }
 
+/// The author a stored label names; a blank one is a corrupt row.
+pub(super) fn author_from(label: &str) -> Result<Author, ConfigError> {
+    Author::from_label(label).map_err(|error| corrupt("author", error))
+}
+
 /// Serializes a todo's dependency ids to the JSON stored in `deps`.
 fn deps_json(deps: &[TodoId]) -> Result<String, ConfigError> {
     Ok(serde_json::to_string(deps).map_err(StoreError::Encode)?)
@@ -67,7 +72,7 @@ fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
     Ok(Scratchpad::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error))?)
         .body(body)
-        .author(Author::from_label(&author))
+        .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
 }
@@ -84,7 +89,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
     let claim = match owner.zip(claimed_until) {
         Some((owner, until)) => Some(
             TodoClaim::builder()
-                .owner(Author::from_label(&owner))
+                .owner(author_from(&owner)?)
                 .claimed_until(epoch_from_secs("todo lease", until)?)
                 .build(),
         ),
@@ -100,7 +105,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
         )
         .deps(serde_json::from_str(&deps).map_err(|error| corrupt("todo deps", error))?)
         .claim(claim)
-        .author(Author::from_label(&author))
+        .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
 }
@@ -113,7 +118,7 @@ fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
     Ok(KeyValue::builder()
         .key(KvKey::try_new(key).map_err(|error| corrupt("kv key", error))?)
         .value(value)
-        .author(Author::from_label(&author))
+        .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
 }
@@ -875,6 +880,41 @@ mod tests {
 
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].title().as_ref(), long);
+    }
+
+    /// A stored author label is trimmed and `human` reads in any case; a
+    /// blank one is a corrupt row, not an agent.
+    #[test]
+    fn a_stored_author_label_reads_trimmed_and_a_blank_one_is_corrupt() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        store
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("plan"),
+                &NoteBody::try_new("b").unwrap(),
+            )
+            .unwrap();
+        let relabel = |label: &str| {
+            store
+                .write(|conn| {
+                    conn.execute("UPDATE scratchpads SET author = ?1", params![label])
+                        .map_err(db_error)
+                })
+                .unwrap();
+        };
+
+        relabel(" HUMAN ");
+        let read = store.scratchpad(&root, &key("plan")).unwrap().unwrap();
+        assert_eq!(read.author(), &Author::Human);
+
+        relabel("   ");
+        let refused = store.scratchpad(&root, &key("plan")).unwrap_err();
+        assert!(
+            matches!(refused, ConfigError::CorruptRow { ref what, .. } if what == "author"),
+            "{refused:?}"
+        );
     }
 
     /// The todo `claim` took, or a panic naming what it came to.

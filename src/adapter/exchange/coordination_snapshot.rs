@@ -86,6 +86,24 @@ mod tests {
         );
     }
 
+    /// An imported author label is trimmed and `human` reads in any case; a
+    /// blank one is refused.
+    #[test]
+    fn an_imported_author_reads_trimmed_and_a_blank_one_is_refused() {
+        let file = |author: &str| {
+            format!(
+                "version: 1\nscratchpads:\n- key: plan\n  body: b\n  author: '{author}'\n  updated_at: 1970-01-01T00:00:01Z\ntodos: []\nvalues: []\n"
+            )
+        };
+
+        let read = serde_yaml_ng::from_str::<CoordinationSnapshot>(&file(" HUMAN ")).unwrap();
+        assert_eq!(read.scratchpads()[0].author(), &Author::Human);
+        let blank = serde_yaml_ng::from_str::<CoordinationSnapshot>(&file("  "))
+            .unwrap_err()
+            .to_string();
+        assert!(blank.contains("author label must not be empty"), "{blank}");
+    }
+
     /// A snapshot with a field this muster does not know is refused.
     #[test]
     fn an_unknown_field_is_refused() {

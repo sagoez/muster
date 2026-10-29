@@ -15,7 +15,7 @@ use super::{
 use crate::domain::{
     process::StopSignal,
     pty::{ExitOutcome, PtySize},
-    value::{Cols, Rows},
+    value::{Cols, OutputCursor, Rows},
 };
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
@@ -24,6 +24,8 @@ const SIZE_BYTES: usize = 4;
 const PID_BYTES: usize = 4;
 /// Bytes an encoded attach-client count occupies.
 const ATTACHED_BYTES: usize = 4;
+/// Bytes an encoded output offset occupies, ahead of the output it places.
+const OFFSET_BYTES: usize = 8;
 /// Bytes of a snapshot payload before its repaint: the pid, the size, then
 /// the attach-client count.
 const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES;
@@ -125,8 +127,14 @@ pub enum HolderMessage {
         /// The writable attach clients connected.
         attached: u32,
     },
-    /// Bytes the child wrote.
-    Output(Vec<u8>),
+    /// Bytes the child wrote, with the output offset of the first, so a
+    /// client that missed frames sees the gap.
+    Output {
+        /// Where `bytes` start in the process's output stream.
+        at: OutputCursor,
+        /// The bytes.
+        bytes: Vec<u8>,
+    },
     /// The child exited; repeated to each client until a supervisor collects it.
     Exited(ExitOutcome),
     /// A client message was refused.
@@ -239,7 +247,12 @@ impl TryFrom<HolderMessage> for Frame {
                 payload.extend(repaint);
                 (FrameTag::Snapshot, payload)
             },
-            HolderMessage::Output(bytes) => (FrameTag::Output, bytes),
+            HolderMessage::Output { at, bytes } => {
+                let mut payload = Vec::with_capacity(OFFSET_BYTES + bytes.len());
+                payload.extend_from_slice(&at.offset().to_be_bytes());
+                payload.extend(bytes);
+                (FrameTag::Output, payload)
+            },
             HolderMessage::Exited(outcome) => (FrameTag::Exited, serde_json::to_vec(&outcome)?),
             HolderMessage::Rejected(reason) => (FrameTag::Rejected, serde_json::to_vec(&reason)?),
             HolderMessage::Warning(text) => (FrameTag::Warning, serde_json::to_vec(&text)?),
@@ -274,7 +287,18 @@ impl TryFrom<Frame> for HolderMessage {
                     attached,
                 })
             },
-            FrameTag::Output => Ok(Self::Output(payload)),
+            FrameTag::Output => {
+                if payload.len() < OFFSET_BYTES {
+                    return Err(HolderError::MalformedPayload(tag));
+                }
+                let bytes = payload.split_off(OFFSET_BYTES);
+                let at = <[u8; OFFSET_BYTES]>::try_from(payload.as_slice())
+                    .map_err(|_| HolderError::MalformedPayload(tag))?;
+                Ok(Self::Output {
+                    at: OutputCursor::new(u64::from_be_bytes(at)),
+                    bytes,
+                })
+            },
             FrameTag::Exited => Ok(Self::Exited(serde_json::from_slice(&payload)?)),
             FrameTag::Rejected => Ok(Self::Rejected(serde_json::from_slice(&payload)?)),
             FrameTag::Warning => Ok(Self::Warning(serde_json::from_slice(&payload)?)),
@@ -359,7 +383,14 @@ mod tests {
                 pid: 4242,
                 attached: 2,
             },
-            HolderMessage::Output(b"out".to_vec()),
+            HolderMessage::Output {
+                at: OutputCursor::new(u64::MAX - 3),
+                bytes: b"out".to_vec(),
+            },
+            HolderMessage::Output {
+                at: OutputCursor::new(0),
+                bytes: Vec::new(),
+            },
             HolderMessage::Exited(ExitOutcome::Failed(ExitCause::Signal(
                 SignalName::try_new("sigkill").unwrap(),
             ))),
@@ -381,12 +412,28 @@ mod tests {
     #[test]
     fn a_frame_for_the_other_direction_is_refused() {
         let mut wire = Vec::new();
-        HolderMessage::Output(b"x".to_vec())
-            .write_to(&mut wire)
-            .unwrap();
+        HolderMessage::Output {
+            at: OutputCursor::new(0),
+            bytes: b"x".to_vec(),
+        }
+        .write_to(&mut wire)
+        .unwrap();
         assert!(matches!(
             ClientMessage::read_from(&mut Cursor::new(wire)),
             Err(HolderError::UnexpectedFrame(FrameTag::Output))
+        ));
+    }
+
+    /// Output too short to hold its offset is malformed.
+    #[test]
+    fn output_without_its_offset_is_malformed() {
+        let frame = Frame::builder()
+            .tag(FrameTag::Output)
+            .payload(b"short".to_vec())
+            .build();
+        assert!(matches!(
+            HolderMessage::try_from(frame),
+            Err(HolderError::MalformedPayload(FrameTag::Output))
         ));
     }
 

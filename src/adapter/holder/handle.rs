@@ -319,7 +319,9 @@ fn spawn_reader(mut reader: Reader) {
                     reader.sink.send(ProcessOutput::Chunk(repaint));
                     reader.sink.send(ProcessOutput::Attached(attached));
                 },
-                Ok(HolderMessage::Output(bytes)) => reader.sink.send(ProcessOutput::Chunk(bytes)),
+                Ok(HolderMessage::Output { bytes, .. }) => {
+                    reader.sink.send(ProcessOutput::Chunk(bytes));
+                },
                 Ok(HolderMessage::Exited(outcome)) => {
                     reader.exit_held.store(true, Ordering::SeqCst);
                     reader.sink.send(ProcessOutput::Exited(outcome));

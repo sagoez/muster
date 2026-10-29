@@ -447,6 +447,7 @@ impl HolderServer {
             let length = replies.len();
             self.input.try_push(replies, length);
         }
+        let at = self.log.end();
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
         let _ = self.log.append(&bytes);
@@ -454,7 +455,7 @@ impl HolderServer {
             self.resync_all()?;
             return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
         }
-        self.broadcast(HolderMessage::Output(bytes))
+        self.broadcast(HolderMessage::Output { at, bytes })
     }
 
     /// Registers a new connection and starts its writer thread.
@@ -932,7 +933,7 @@ mod tests {
         domain::{
             color_scheme::ColorScheme,
             pty::{ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, ProcessName, Rows},
+            value::{ByteSize, Cols, CommandLine, OutputCursor, ProcessName, Rows},
         },
     };
 
@@ -1125,6 +1126,7 @@ mod tests {
     struct TestClient {
         stream: UnixStream,
         output: Vec<u8>,
+        frames: Vec<(OutputCursor, usize)>,
         screen: Option<TerminalEmulator>,
         snapshots: usize,
     }
@@ -1141,6 +1143,7 @@ mod tests {
             let mut client = Self {
                 stream,
                 output: Vec::new(),
+                frames: Vec::new(),
                 screen: None,
                 snapshots: 0,
             };
@@ -1156,7 +1159,8 @@ mod tests {
         fn recv(&mut self) -> HolderMessage {
             let message = HolderMessage::read_from(&mut self.stream).unwrap();
             match &message {
-                HolderMessage::Output(bytes) => {
+                HolderMessage::Output { at, bytes } => {
+                    self.frames.push((*at, bytes.len()));
                     self.output.extend_from_slice(bytes);
                     if let Some(screen) = self.screen.as_mut() {
                         screen.process(bytes);
@@ -1245,6 +1249,33 @@ mod tests {
 
         client.send(ClientMessage::Input(b"\n".to_vec()));
         client.output_until("after");
+        harness.finish();
+    }
+
+    /// Each output frame names where it starts in the log, so the frames tile
+    /// the log with no gap or overlap and end where the log ends.
+    #[test]
+    fn output_frames_carry_their_log_offsets() {
+        let harness = Harness::start("read x; seq 1 2000; read y");
+        let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
+        supervisor.send(ClientMessage::Input(b"\n".to_vec()));
+        supervisor.output_until("2000\r\n");
+
+        let frames = &supervisor.frames;
+        assert_eq!(frames[0].0, OutputCursor::new(0));
+        for pair in frames.windows(2) {
+            assert_eq!(
+                pair[1].0,
+                pair[0].0.advanced(pair[0].1 as u64),
+                "{frames:?}"
+            );
+        }
+        let (last_at, last_len) = *frames.last().unwrap();
+        let log_len = fs::metadata(harness.config.log()).unwrap().len();
+        assert_eq!(
+            last_at.advanced(last_len as u64),
+            OutputCursor::new(log_len)
+        );
         harness.finish();
     }
 

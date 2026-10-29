@@ -158,7 +158,7 @@ impl<'a> AttachPump<'a> {
                     return Ok(Some((repaint, size)));
                 },
                 Ok(AttachEvent::Holder(HolderMessage::Rejected(_))) => return Ok(None),
-                Ok(AttachEvent::Holder(HolderMessage::Output(_))) => {},
+                Ok(AttachEvent::Holder(HolderMessage::Output { .. })) => {},
                 Ok(AttachEvent::HolderLost(source)) => return Err(self.lost(source)),
                 Ok(event) => self.backlog.push_back(event),
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
@@ -256,7 +256,7 @@ impl<'a> AttachPump<'a> {
                 Ok(scanned.detached().then_some(AttachEnd::Detached))
             },
             AttachEvent::InputClosed => Ok(Some(await_hangup(inbox))),
-            AttachEvent::Holder(HolderMessage::Output(bytes)) => {
+            AttachEvent::Holder(HolderMessage::Output { bytes, .. }) => {
                 self.screen.write(&bytes).map_err(CliError::Terminal)?;
                 Ok(None)
             },

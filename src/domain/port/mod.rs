@@ -1,4 +1,5 @@
 mod coordination_store;
+mod listening_ports;
 mod notifier;
 mod process_metrics;
 mod process_runner;
@@ -8,6 +9,7 @@ mod stack_store;
 mod state_change_notifier;
 
 pub use coordination_store::*;
+pub use listening_ports::*;
 pub use notifier::*;
 pub use process_metrics::*;
 pub use process_runner::*;

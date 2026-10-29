@@ -356,12 +356,20 @@ mod tests {
             color_scheme::ColorScheme,
             process::{StopPolicy, StopSignal},
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, PositiveDuration, Rows},
+            value::{ByteSize, Cols, CommandLine, OutputCursor, PositiveDuration, Rows},
         },
     };
 
     /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
     const SHORT_TEMP_ROOT: &str = "/tmp";
+
+    /// Output a fake holder sends; an attach client ignores where it lies.
+    fn live_output(bytes: &[u8]) -> HolderMessage {
+        HolderMessage::Output {
+            at: OutputCursor::new(0),
+            bytes: bytes.to_vec(),
+        }
+    }
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "ma-";
     /// Rows of the test terminal.
@@ -979,7 +987,7 @@ mod tests {
         let running = Running::start(&pty, holder.socket.clone(), false);
 
         pty.wait_for(b"first");
-        holder.send(HolderMessage::Output(b"live".to_vec()));
+        holder.send(live_output(b"live"));
         holder.send(HolderMessage::Snapshot {
             repaint: repaint("second"),
             size: size(ROWS, COLS),
@@ -1010,7 +1018,7 @@ mod tests {
         let running = Running::start(&pty, holder.socket.clone(), false);
 
         pty.wait_for(b"screen");
-        holder.send(HolderMessage::Output(b"\x1b(0lqk".to_vec()));
+        holder.send(live_output(b"\x1b(0lqk"));
         pty.wait_for(b"lqk");
         pty.type_keys(DETACH_BYTE);
         assert_eq!(running.end().unwrap(), AttachEnd::Detached);
@@ -1226,9 +1234,7 @@ mod tests {
         let still = Arc::clone(&streaming);
         let streamer = thread::spawn(move || {
             while still.load(Ordering::Relaxed)
-                && HolderMessage::Output(b"tick".to_vec())
-                    .write_to(&mut stream)
-                    .is_ok()
+                && live_output(b"tick").write_to(&mut stream).is_ok()
             {
                 thread::sleep(STREAM_INTERVAL);
             }

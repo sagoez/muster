@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
+use super::process_tree::ProcessTree;
 use crate::domain::port::{ProcessMetrics, ProcessSample};
 
 /// A [`ProcessMetrics`] backed by `sysinfo`, aggregating CPU and memory over each
@@ -43,30 +44,17 @@ impl ProcessMetrics for SysinfoMetrics {
                 .without_tasks(),
         );
         let processes = self.system.processes();
-        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-        for (pid, process) in processes {
-            if let Some(parent) = process.parent() {
-                children.entry(parent).or_default().push(*pid);
-            }
-        }
+        let tree = ProcessTree::of(&self.system);
         let mut samples = HashMap::new();
         for &root in pids {
             let mut cpu_percent = 0.0_f32;
             let mut memory_bytes = 0_u64;
             let mut found = false;
-            let mut seen = HashSet::new();
-            let mut stack = vec![Pid::from(root as usize)];
-            while let Some(pid) = stack.pop() {
-                if !seen.insert(pid) {
-                    continue;
-                }
+            for pid in tree.subtree(root) {
                 if let Some(process) = processes.get(&pid) {
                     found = true;
                     cpu_percent += process.cpu_usage();
                     memory_bytes += process.memory();
-                }
-                if let Some(kids) = children.get(&pid) {
-                    stack.extend(kids);
                 }
             }
             if found {

@@ -3,7 +3,7 @@ use std::{io, path::PathBuf};
 use thiserror::Error;
 
 use super::frame::FrameTag;
-use crate::domain::pty::PtyError;
+use crate::domain::{pty::PtyError, value::OutputCursor};
 
 /// Errors from running a holder or speaking its protocol.
 #[derive(Debug, Error)]
@@ -50,6 +50,14 @@ pub enum HolderError {
         /// The error the holder reported.
         reason: String,
     },
+    /// A log read was given a cursor past the end of the process's output.
+    #[error("cursor {cursor} is past the end of the output, {end}")]
+    CursorAhead {
+        /// The cursor given.
+        cursor: OutputCursor,
+        /// The end of the output.
+        end: OutputCursor,
+    },
 }
 
 impl HolderError {
@@ -66,7 +74,8 @@ impl HolderError {
             | Self::InsecureSocketDir(_)
             | Self::NotReady(_)
             | Self::NoSnapshot(_)
-            | Self::FailedToStart { .. } => false,
+            | Self::FailedToStart { .. }
+            | Self::CursorAhead { .. } => false,
         }
     }
 }

@@ -3,13 +3,10 @@
 //! bringing the project up, following stack and settings changes, exiting
 //! with its holder still running, and a second service adopting that holder.
 
-#![cfg(target_os = "linux")]
-
 use std::{
     ffi::OsString,
     fs,
     os::unix::{net::UnixStream, process::CommandExt},
-    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -20,39 +17,24 @@ use muster::{
         holder::HOLDER_SUBCOMMAND,
         service::{
             LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
-            ServiceResponse,
-            protocol::{self, SERVICE_SUBCOMMAND},
+            ServiceResponse, protocol::SERVICE_SUBCOMMAND,
         },
-        store::SqliteStore,
     },
     domain::{
-        config::{Environment, ProcessSpec, SettingChange},
+        config::{Environment, ProcessSpec},
         coordination::Author,
-        port::{RunHistory, SettingsStore, StackStore},
+        port::{RunHistory, StackStore},
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
     },
 };
 use rusqlite::Connection;
 use rustix::process::{
-    Pid as RawPid, Resource, Rlimit, Signal, getrlimit, kill_process, kill_process_group, setrlimit,
+    Pid as RawPid, Resource, Rlimit, Signal, getrlimit, kill_process, setrlimit,
 };
-use tempfile::{Builder, TempDir};
 
-/// The muster binary cargo built for this test.
-const BINARY: &str = env!("CARGO_BIN_EXE_muster");
-/// Bound on every wait; reaching it fails the test.
-const WAIT: Duration = Duration::from_secs(10);
-/// Interval between checks of a polled condition.
-const POLL: Duration = Duration::from_millis(10);
-/// Short root for test sockets, inside `sun_path`.
-const SHORT_TEMP_ROOT: &str = "/tmp";
-/// Prefix of the scratch directory.
-const SCRATCH_PREFIX: &str = "mv-";
-/// Directory muster keeps its state under, inside the XDG state root.
-const APP_DIR: &str = "muster";
-/// The database file inside muster's state directory.
-const DATABASE_FILE: &str = "muster.db";
+use crate::common::{Scratch, alive, processes_under, wait_until};
+
 /// The project's one process, which runs until it is killed.
 const SLEEPER: &str = "sleep 600";
 /// A process that ignores the hangup its holder's death sends.
@@ -97,34 +79,6 @@ const PS_REPEATS: usize = 4;
 /// Longest a `ps` may take while another writer holds the database.
 const QUICK_ANSWER: Duration = Duration::from_secs(1);
 
-/// Polls `condition` until it holds, failing at [`WAIT`].
-fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
-}
-
-/// Pids of processes whose command line names `subcommand` and mentions
-/// `root`.
-fn processes_under(subcommand: &str, root: &Path) -> Vec<u32> {
-    let root = root.to_string_lossy().into_owned();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            let environ = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-            String::from_utf8_lossy(&cmdline).contains(subcommand)
-                && String::from_utf8_lossy(&environ).contains(&root)
-        })
-        .collect()
-}
-
 /// This process's soft and hard limits on open files.
 fn open_files_limits() -> Rlimit {
     getrlimit(Resource::Nofile)
@@ -139,11 +93,6 @@ fn soft_open_files(pid: u32) -> String {
         .and_then(|limits| limits.split_whitespace().next())
         .unwrap()
         .to_string()
-}
-
-/// Whether the process `pid` exists.
-fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// The environment of the process `pid`, as `NAME=value` entries.
@@ -178,66 +127,16 @@ fn client_env() -> LaunchEnvironment {
     LaunchEnvironment::from_vars([(OsString::from(CLIENT_VAR), OsString::from(CLIENT_VALUE))])
 }
 
-/// Isolated XDG roots, a database and a project; dropping it kills every
-/// service, holder and child the test left there, even on panic.
-struct Scratch {
-    root: TempDir,
-    children: Vec<u32>,
-}
-
+/// What the service suite does over a [`Scratch`].
 impl Scratch {
-    /// A fresh scratch directory short enough to bind sockets in, whose
-    /// database has desktop notifications off.
-    fn new() -> Self {
-        let root = Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
-        let scratch = Self {
-            root,
-            children: Vec::new(),
-        };
-        scratch
-            .store()
-            .apply(
-                &SettingChange::DesktopNotifications(false),
-                &Author::human(),
-            )
-            .unwrap();
-        scratch
-    }
-
-    /// The XDG state root the services run under.
-    fn state_root(&self) -> PathBuf {
-        self.root.path().join("state")
-    }
-
-    /// The database the services read.
-    fn store(&self) -> SqliteStore {
-        SqliteStore::open(&self.state_root().join(APP_DIR).join(DATABASE_FILE)).unwrap()
-    }
-
-    /// The XDG runtime directory the services run under.
-    fn runtime_root(&self) -> PathBuf {
-        self.root.path().join("run")
-    }
-
-    /// The socket a service over this scratch listens on.
-    fn socket(&self) -> PathBuf {
-        protocol::socket_path(
-            &self.runtime_root().join(APP_DIR),
-            &self.state_root().join(APP_DIR),
-        )
-    }
-
     /// Registers the project with one process `api` running [`SLEEPER`].
-    fn project(&self) -> ProjectRoot {
+    fn api_project(&self) -> ProjectRoot {
         self.project_with(&[process("api", SLEEPER, RestartPolicy::Never)])
     }
 
     /// Registers the project with `processes` and returns its folder.
     fn project_with(&self, processes: &[ProcessSpec]) -> ProjectRoot {
-        let dir = self.root.path().join("project");
+        let dir = self.root().join("project");
         fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::try_new(fs::canonicalize(dir).unwrap()).unwrap();
         let store = self.store();
@@ -249,7 +148,7 @@ impl Scratch {
 
     /// The pids of the holders running under this scratch.
     fn holders(&self) -> Vec<u32> {
-        processes_under(HOLDER_SUBCOMMAND, self.root.path())
+        processes_under(HOLDER_SUBCOMMAND, self.root())
     }
 
     /// The status `ps` reports for the process `name` of `project`.
@@ -274,13 +173,13 @@ impl Scratch {
             *self.api(project).state() == ProcessState::Running
         });
         let api = self.api(project);
-        self.children.push(api.pid().unwrap().into_inner());
+        self.keep_child(api.pid().unwrap().into_inner());
         api
     }
 
     /// Brings `project` up as a client with [`client_env`].
     fn up(&self, project: &ProjectRoot) -> ServiceResponse {
-        self.send(ServiceRequest::Up {
+        self.send(&ServiceRequest::Up {
             project: project.clone(),
             environment: client_env(),
             wait: None,
@@ -289,7 +188,7 @@ impl Scratch {
 
     /// Sends `action` for `api` in `project`.
     fn control(&self, project: &ProjectRoot, action: ProcessAction) -> ServiceResponse {
-        self.send(ServiceRequest::Control {
+        self.send(&ServiceRequest::Control {
             project: project.clone(),
             name: ProcessName::try_new("api").unwrap(),
             action,
@@ -300,7 +199,7 @@ impl Scratch {
 
     /// The recent notices of `project`, as `(process, message)`.
     fn notices(&self, project: &ProjectRoot) -> Vec<(Option<String>, String)> {
-        let ServiceResponse::Notices(notices) = self.send(ServiceRequest::Notices {
+        let ServiceResponse::Notices(notices) = self.send(&ServiceRequest::Notices {
             project: project.clone(),
         }) else {
             panic!("notices answer notices");
@@ -324,13 +223,8 @@ impl Scratch {
 
     /// The `muster __service` command [`Self::spawn_service`] runs.
     fn service_command(&self) -> Command {
-        let mut command = Command::new(BINARY);
+        let mut command = self.command(&[SERVICE_SUBCOMMAND]);
         command
-            .arg(SERVICE_SUBCOMMAND)
-            .env("XDG_STATE_HOME", self.state_root())
-            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
-            .env("XDG_DATA_HOME", self.root.path().join("data"))
-            .env("XDG_RUNTIME_DIR", self.runtime_root())
             .env(LEAKED_VAR, "leaked")
             .env(INHERITED_VAR, "leaked")
             .stdin(Stdio::null())
@@ -373,14 +267,9 @@ impl Scratch {
         child
     }
 
-    /// Sends `request` to the running service and returns the answer.
-    fn send(&self, request: ServiceRequest) -> ServiceResponse {
-        protocol::send(&self.socket(), &request).unwrap()
-    }
-
     /// The one project status a `ps` of `project` reports.
     fn status(&self, project: &ProjectRoot) -> ProjectStatus {
-        let ServiceResponse::Status(mut statuses) = self.send(ServiceRequest::Ps {
+        let ServiceResponse::Status(mut statuses) = self.send(&ServiceRequest::Ps {
             project: Some(project.clone()),
         }) else {
             panic!("ps answers a status");
@@ -390,31 +279,13 @@ impl Scratch {
 
     /// Stops the service `child` and waits until it has exited cleanly.
     fn stop_service(&self, mut child: Child) {
-        assert_eq!(self.send(ServiceRequest::Stop), ServiceResponse::Ok);
+        assert_eq!(self.send(&ServiceRequest::Stop), ServiceResponse::Ok);
         let mut status = None;
         wait_until("the service to exit", || {
             status = child.try_wait().unwrap();
             status.is_some()
         });
         assert!(status.unwrap().success());
-    }
-}
-
-impl Drop for Scratch {
-    /// Kills every service, holder and recorded child left under this scratch.
-    fn drop(&mut self) {
-        for pid in self
-            .children
-            .iter()
-            .copied()
-            .chain(processes_under(SERVICE_SUBCOMMAND, self.root.path()))
-            .chain(processes_under(HOLDER_SUBCOMMAND, self.root.path()))
-        {
-            if let Some(pid) = RawPid::from_raw(pid as i32) {
-                let _ = kill_process_group(pid, Signal::KILL);
-                let _ = kill_process(pid, Signal::KILL);
-            }
-        }
     }
 }
 
@@ -472,7 +343,7 @@ fn a_child_runs_with_the_client_environment_and_none_of_the_services() {
             .is_some_and(|pid| pid.into_inner() != first)
     });
     let second = scratch.api(&project).pid().unwrap().into_inner();
-    scratch.children.push(second);
+    scratch.keep_child(second);
     assert!(
         environ(second).contains(&client_entry),
         "kept for the restart"
@@ -525,7 +396,7 @@ fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice()
 #[test]
 fn an_unadoptable_live_holder_stays_unsupervised_and_a_stop_ends_its_child() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     let child = scratch.up_running(&project).pid().unwrap().into_inner();
     let holder = scratch.holders()[0];
@@ -561,7 +432,7 @@ fn an_unadoptable_live_holder_stays_unsupervised_and_a_stop_ends_its_child() {
 #[test]
 fn a_holder_killed_with_its_child_is_told_as_a_crash() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     let child = scratch.up_running(&project).pid().unwrap().into_inner();
     let holder = scratch.holders()[0];
@@ -625,7 +496,7 @@ fn a_restart_pending_at_service_stop_is_carried_out_by_the_successor() {
 #[test]
 fn an_adopted_process_keeps_its_uptime() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     scratch.up_running(&project);
     thread::sleep(UPTIME_BEFORE_STOP);
@@ -678,7 +549,7 @@ fn a_stack_change_adds_updates_and_stops_live() {
         )
         .unwrap();
     assert_eq!(
-        scratch.send(ServiceRequest::StackChanged {
+        scratch.send(&ServiceRequest::StackChanged {
             project: project.clone()
         }),
         ServiceResponse::Ok
@@ -700,7 +571,7 @@ fn a_stack_change_adds_updates_and_stops_live() {
 #[test]
 fn a_process_removed_while_the_service_was_down_is_stopped_at_start() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     let pid = scratch.up_running(&project).pid().unwrap().into_inner();
     scratch.stop_service(service);
@@ -729,7 +600,7 @@ fn a_process_removed_while_the_service_was_down_is_stopped_at_start() {
 #[test]
 fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
 
     let ServiceResponse::Batch(up) = scratch.up(&project) else {
@@ -742,7 +613,7 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
         *api.state() == ProcessState::Running
     });
     let pid = api.pid().unwrap().into_inner();
-    scratch.children.push(pid);
+    scratch.keep_child(pid);
 
     scratch.stop_service(service);
 
@@ -751,7 +622,8 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     assert_eq!(scratch.holders().len(), 1);
 
     let successor = scratch.start_service();
-    let ServiceResponse::Status(loaded) = scratch.send(ServiceRequest::Ps { project: None }) else {
+    let ServiceResponse::Status(loaded) = scratch.send(&ServiceRequest::Ps { project: None })
+    else {
         panic!("ps answers a status");
     };
     assert_eq!(
@@ -792,7 +664,7 @@ fn a_child_keeps_the_open_files_limit_the_service_started_with() {
     scratch.up_running(&project);
     wait_until("a usage sample", || scratch.api(&project).usage().is_some());
 
-    scratch.send(ServiceRequest::Control {
+    scratch.send(&ServiceRequest::Control {
         project: project.clone(),
         name: ProcessName::try_new("probe").unwrap(),
         action: ProcessAction::Start,
@@ -807,10 +679,10 @@ fn a_child_keeps_the_open_files_limit_the_service_started_with() {
         probe.is_some()
     });
     let probe = probe.unwrap();
-    scratch.children.push(probe);
+    scratch.keep_child(probe);
 
     assert_eq!(soft_open_files(probe), SERVICE_OPEN_FILES.to_string());
-    scratch.send(ServiceRequest::Down {
+    scratch.send(&ServiceRequest::Down {
         project: project.clone(),
     });
     scratch.stop_service(service);
@@ -821,7 +693,7 @@ fn a_child_keeps_the_open_files_limit_the_service_started_with() {
 #[test]
 fn a_stack_write_whose_notice_was_missed_reaches_the_next_request() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     scratch.up_running(&project);
     let store = scratch.store();
@@ -857,10 +729,10 @@ fn a_stack_write_whose_notice_was_missed_reaches_the_next_request() {
 #[test]
 fn a_held_database_lock_neither_stalls_the_service_nor_loses_a_crash() {
     let mut scratch = Scratch::new();
-    let project = scratch.project();
+    let project = scratch.api_project();
     let service = scratch.start_service();
     let child = scratch.up_running(&project).pid().unwrap().into_inner();
-    let writer = Connection::open(scratch.state_root().join(APP_DIR).join(DATABASE_FILE)).unwrap();
+    let writer = Connection::open(scratch.database()).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
 
     kill_hard(child);

@@ -1,44 +1,31 @@
 //! The real holder round trip: the built `muster` binary launched detached as
 //! `__holder`, outliving its runner, adopted by a new one and stopped.
 
-#![cfg(target_os = "linux")]
-
 use std::{
     fs,
-    path::{Path, PathBuf},
-    process, thread,
+    path::PathBuf,
+    process,
     time::{Duration, Instant},
 };
 
 use bytesize::ByteSize as RawByteSize;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use muster::{
     adapter::{
-        holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderRecord, HolderRunner},
+        holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRecord, HolderRunner},
         open_files::OpenFilesLimit,
-        signal_target::SignalTarget,
     },
     domain::{
         color_scheme::ColorScheme,
-        port::{OutputSink, ProcessRunner},
+        port::ProcessRunner,
         process::{StopPolicy, StopSignal},
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
         value::{ByteSize, CommandLine, ProcessName, StopGrace},
     },
 };
-use rustix::process::{Pid, Signal, kill_process};
-use tempfile::{Builder, TempDir};
 
-/// The muster binary cargo built for this test.
-const BINARY: &str = env!("CARGO_BIN_EXE_muster");
-/// Bound on every wait; reaching it fails the test.
-const WAIT: Duration = Duration::from_secs(10);
-/// Interval between checks of a polled condition.
-const POLL: Duration = Duration::from_millis(10);
-/// Short root for test sockets, inside `sun_path`.
-const SHORT_TEMP_ROOT: &str = "/tmp";
-/// Prefix of the scratch directory.
-const SCRATCH_PREFIX: &str = "mx-";
+use crate::common::{BINARY, ChannelSink, Scratch, WAIT, processes_under, wait_until};
+
 /// Log cap of the test runners.
 const LOG_CAP_MIB: u64 = 4;
 /// Scrollback lines of the test runners' holders.
@@ -55,15 +42,6 @@ const LAUNCH_ENTRY: (&str, &str) = ("FROM_CLIENT", "client");
 const OWN_ENTRY: (&str, &str) = ("PORT", "5173");
 /// A variable the test process has, which cargo sets, and the ticker must not.
 const INHERITED_VAR: &str = "CARGO_PKG_NAME";
-
-/// Forwards a handle's output into a channel.
-struct ChannelSink(Sender<ProcessOutput>);
-
-impl OutputSink for ChannelSink {
-    fn send(&self, output: ProcessOutput) {
-        let _ = self.0.send(output);
-    }
-}
 
 /// Receives outputs until `wanted` returns true for one, failing at [`WAIT`].
 fn receive_until(
@@ -87,61 +65,21 @@ fn is_tick(output: &ProcessOutput) -> bool {
     matches!(output, ProcessOutput::Placed { bytes, .. } if String::from_utf8_lossy(bytes).contains(TICK))
 }
 
-/// Polls `condition` until it holds, failing at [`WAIT`].
-fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
+/// Pids of holder processes serving a socket under `scratch`.
+fn holders(scratch: &Scratch) -> Vec<u32> {
+    processes_under(HOLDER_SUBCOMMAND, scratch.root())
 }
 
-/// Pids of holder processes serving a socket under `root`.
-fn holders_under(root: &Path) -> Vec<u32> {
-    let root = root.to_string_lossy().into_owned();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            let cmdline = String::from_utf8_lossy(&cmdline);
-            cmdline.contains(HOLDER_SUBCOMMAND) && cmdline.contains(&root)
-        })
-        .collect()
-}
-
-/// Holder dirs in a scratch directory; dropping it SIGKILLs every child and
-/// holder process the test left there, even on panic.
-struct Scratch {
-    dirs: HolderDirs,
-    root: TempDir,
-}
-
+/// What the holder suite does over a [`Scratch`].
 impl Scratch {
-    /// Holder dirs in a fresh scratch directory short enough to bind in.
-    fn new() -> Self {
-        let root = Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
-        let dirs = HolderDirs::builder()
-            .sockets(root.path().join("sock"))
-            .records(root.path().join("records"))
-            .logs(root.path().join("logs"))
-            .build();
-        Self { dirs, root }
-    }
-
-    /// A runner launching real holders from the built binary into these dirs.
+    /// A runner launching real holders from the built binary into the
+    /// scratch's holder dirs.
     fn runner(&self) -> HolderRunner {
         let launcher = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
             .open_files(OpenFilesLimit::current())
             .build();
-        HolderRunner::new(Box::new(launcher), self.dirs.clone())
+        HolderRunner::new(Box::new(launcher), self.holder_dirs())
     }
 
     /// A request to run the ticker as a process of the scratch project.
@@ -149,7 +87,7 @@ impl Scratch {
         SpawnRequest::builder()
             .process(ProcessName::try_new("ticker").unwrap())
             .command(CommandLine::try_new(TICKER).unwrap())
-            .project(Some(self.root.path().to_path_buf()))
+            .project(Some(self.root().to_path_buf()))
             .launch_environment([(LAUNCH_ENTRY.0.into(), LAUNCH_ENTRY.1.into())].into())
             .environment([(OWN_ENTRY.0.into(), OWN_ENTRY.1.into())].into())
             .size(PtySize::try_new(24, 80).unwrap())
@@ -166,28 +104,13 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for record in HolderRecord::load_all(self.dirs.records()) {
-            if record.child_pid().into_inner() != process::id() {
-                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
-            }
-        }
-        for holder in holders_under(self.root.path()) {
-            if let Some(holder) = Pid::from_raw(holder as i32) {
-                let _ = kill_process(holder, Signal::KILL);
-            }
-        }
-    }
-}
-
 #[test]
 fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_behind() {
     let scratch = Scratch::new();
     let runner = scratch.runner();
     let (sender, outputs) = unbounded();
     let handle = runner
-        .spawn(scratch.request(), Box::new(ChannelSink(sender)))
+        .spawn(scratch.request(), Box::new(ChannelSink::new(sender)))
         .unwrap();
     receive_until(&outputs, "a tick", is_tick);
     let record = runner.locate(handle.process_id().unwrap()).unwrap();
@@ -196,9 +119,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
         process::id(),
         "the holder is its own process"
     );
-    assert_eq!(holders_under(scratch.root.path()), vec![
-        record.holder_pid().into_inner()
-    ]);
+    assert_eq!(holders(&scratch), vec![record.holder_pid().into_inner()]);
     let environ = fs::read(format!("/proc/{}/environ", record.child_pid())).unwrap();
     let environ: Vec<String> = environ
         .split(|byte| *byte == 0)
@@ -221,7 +142,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     assert_eq!(runner.live_records(), vec![record.clone()]);
     let (sender, outputs) = unbounded();
     let mut adopted = runner
-        .adopt(&record, None, Box::new(ChannelSink(sender)))
+        .adopt(&record, None, Box::new(ChannelSink::new(sender)))
         .unwrap();
     assert_eq!(adopted.process_id(), Some(record.child_pid()));
     receive_until(&outputs, "output after adoption", |output| {
@@ -234,8 +155,6 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
         matches!(output, ProcessOutput::Exited(ExitOutcome::Failed(_)))
     });
     adopted.acknowledge_exit().unwrap();
-    wait_until("the holder process to end", || {
-        holders_under(scratch.root.path()).is_empty()
-    });
-    assert!(HolderRecord::load_all(scratch.dirs.records()).is_empty());
+    wait_until("the holder process to end", || holders(&scratch).is_empty());
+    assert!(HolderRecord::load_all(scratch.holder_dirs().records()).is_empty());
 }

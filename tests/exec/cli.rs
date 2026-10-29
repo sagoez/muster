@@ -4,41 +4,33 @@
 //! replacing an older service, refusing a newer one, and reporting what
 //! happened to processes.
 
-#![cfg(target_os = "linux")]
-
 use std::{
     fs::{self, Permissions},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
-    os::{
-        fd::OwnedFd,
-        unix::{
-            fs::{OpenOptionsExt, PermissionsExt, symlink},
-            net::{UnixListener, UnixStream},
-            process::CommandExt,
-        },
+    os::unix::{
+        fs::{PermissionsExt, symlink},
+        net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
     sync::{Arc, Mutex, PoisonError},
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
-use crossbeam_channel::{Receiver, unbounded};
-use libc::O_NOCTTY;
+use crossbeam_channel::unbounded;
 use muster::{
     adapter::{
         holder::{
-            ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderConfig, HolderDirs,
-            HolderLauncher, HolderRunner, client::greet,
+            ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderLauncher,
+            HolderRunner, client::greet,
         },
         open_files::OpenFilesLimit,
         service::{
             BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-            ProcessAction, ProcessStatus, ProjectPorts, ProjectStatus, Refusal, ServiceDeps,
-            ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion,
-            Singleton,
+            ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps, ServiceError,
+            ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
@@ -46,37 +38,21 @@ use muster::{
     domain::{
         config::ProcessChange,
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-        port::{Notifier, PortOccupants, StackStore},
+        port::StackStore,
         process::ProcessState,
         project::Project,
-        pty::{PtyError, PtySize},
+        pty::PtySize,
         value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName, ProjectName, ProjectRoot},
     },
 };
 use rusqlite::Connection;
-use rustix::{
-    process::{Pid, Signal, ioctl_tiocsctty, kill_process, kill_process_group, setsid},
-    pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
-    stdio::stdin,
-    termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize},
-};
 use serde_json::Value;
-use tempfile::{Builder, TempDir};
 
-/// The muster binary cargo built for this test.
-const BINARY: &str = env!("CARGO_BIN_EXE_muster");
-/// Bound on every wait; reaching it fails the test.
-const WAIT: Duration = Duration::from_secs(30);
-/// Interval between checks of a polled condition.
-const POLL: Duration = Duration::from_millis(20);
-/// Short root for test sockets, inside `sun_path`.
-const SHORT_TEMP_ROOT: &str = "/tmp";
-/// Prefix of the scratch directory.
-const SCRATCH_PREFIX: &str = "mc-";
-/// Directory muster keeps its state under, inside the XDG state root.
-const APP_DIR: &str = "muster";
-/// muster's database inside its state directory.
-const DATABASE_FILE: &str = "muster.db";
+use crate::common::{
+    APP_DIR, BINARY, HeldLauncher, McpSession, Pty, QuietPorts, Scratch, WAIT, alive, entry,
+    processes_under, result_text, stack, wait_until,
+};
+
 /// The stack file `export` and `import` use by default.
 const STACK_FILE: &str = "muster.yml";
 /// Exit code of an action that failed.
@@ -99,62 +75,14 @@ const OLD_VERSION: &str = "0.0.1-old";
 const NEWER_VERSION: &str = "99.0.0";
 /// The binary an in-process service reports running.
 const IN_PROCESS_BINARY: &str = "/opt/other/muster";
-/// How long the gated launcher holds a launch, so a replacement waits on it.
-const GATE_HOLD: Duration = Duration::from_millis(1500);
 /// What a service that lost the start race writes to its log.
 const LOST_RACE_LINE: &str = "another muster service already runs";
-/// The default stop grace every test process has unless it says otherwise.
-const GRACE: &str = "5s";
 /// Why the scripted service leaves `api` alone on `up`.
 const REFUSAL_REASON: &str = "cannot start: an earlier run may still be running as pid 4242";
 /// The variable a started process reads from the command that started it.
 const CALLER_VARIABLE: &str = "CLI_EXEC_CALLER_MARK";
 /// The schema version a newer muster would have written.
 const FUTURE_SCHEMA: u32 = 999;
-
-/// One process of a stack file.
-struct Entry<'a> {
-    /// Its name.
-    name: &'a str,
-    /// The shell command it runs.
-    command: &'a str,
-    /// Whether `muster up` starts it.
-    autostart: bool,
-    /// Its restart policy, as the file spells it.
-    restart: &'a str,
-    /// Its stop grace, as the file spells it.
-    grace: &'a str,
-}
-
-/// A process that autostarts unless `autostart` says otherwise, never
-/// restarts, and stops with the default grace.
-const fn entry<'a>(name: &'a str, command: &'a str, autostart: bool) -> Entry<'a> {
-    Entry {
-        name,
-        command,
-        autostart,
-        restart: "never",
-        grace: GRACE,
-    }
-}
-
-/// The stack file holding `entries`, every value quoted so commands with
-/// shell punctuation read back as they are.
-fn stack(entries: &[Entry<'_>]) -> String {
-    let quoted = |text: &str| serde_json::to_string(text).unwrap();
-    let mut file = String::from("version: 1\nprocesses:\n");
-    for entry in entries {
-        file.push_str(&format!(
-            "  - name: {}\n    command: {}\n    autostart: {}\n    restart: {}\n    stop:\n      signal: terminate\n      grace_period: {}\n",
-            quoted(entry.name),
-            quoted(entry.command),
-            entry.autostart,
-            entry.restart,
-            entry.grace,
-        ));
-    }
-    file
-}
 
 /// Two long runners with a space and an accent in their names, and a third
 /// that does not autostart.
@@ -189,23 +117,18 @@ fn crash_loop() -> String {
             "trap 'touch stopping; sleep 1; exit 0' TERM; while :; do sleep 0.1; done",
             true,
         ),
-        Entry {
-            restart: "always",
-            ..entry(
-                "flaky",
-                "while [ ! -e stopping ]; do sleep 0.05; done; exit 1",
-                true,
-            )
-        },
+        entry(
+            "flaky",
+            "while [ ! -e stopping ]; do sleep 0.05; done; exit 1",
+            true,
+        )
+        .with_restart("always"),
     ])
 }
 
 /// A process that ignores the stop signal for its one-second grace.
 fn slow_stop() -> String {
-    stack(&[Entry {
-        grace: "1s",
-        ..entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true)
-    }])
+    stack(&[entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true).with_grace("1s")])
 }
 
 /// A process that writes a line every tenth of a second.
@@ -217,94 +140,8 @@ fn ticking() -> String {
     )])
 }
 
-/// Polls `condition` until it holds, failing at [`WAIT`].
-fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
-}
-
-/// Pids of processes running `subcommand` whose command line or environment
-/// mentions `root`.
-fn processes_under(subcommand: &str, root: &Path) -> Vec<u32> {
-    let root = root.to_string_lossy().into_owned();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| alive(*pid))
-        .filter(|pid| {
-            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            let environ = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-            let cmdline = String::from_utf8_lossy(&cmdline);
-            cmdline.contains(subcommand)
-                && (cmdline.contains(&root) || String::from_utf8_lossy(&environ).contains(&root))
-        })
-        .collect()
-}
-
-/// Whether the process `pid` exists and is not a zombie.
-fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        !stat
-            .rsplit_once(") ")
-            .is_some_and(|(_, rest)| rest.starts_with('Z'))
-    })
-}
-
-/// Isolated XDG roots and projects; dropping it kills every service, holder
-/// and child the test left there, even on panic.
-struct Scratch {
-    root: TempDir,
-    children: Vec<u32>,
-}
-
+/// What the CLI suite does over a [`Scratch`].
 impl Scratch {
-    /// A fresh scratch directory short enough to bind sockets in, with
-    /// desktop notifications turned off in its database.
-    fn new() -> Self {
-        let root = Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
-        let scratch = Self {
-            root,
-            children: Vec::new(),
-        };
-        let quiet = scratch.muster(&["config", "set", "desktop-notifications", "false"]);
-        assert!(quiet.status.success(), "{}", shown(&quiet));
-        scratch
-    }
-
-    /// The scratch directory, which is no project.
-    fn path(&self) -> PathBuf {
-        self.root.path().canonicalize().unwrap()
-    }
-
-    /// The state directory every service over this scratch owns.
-    fn state_dir(&self) -> PathBuf {
-        self.root.path().join("state").join(APP_DIR)
-    }
-
-    /// The runtime directory every command over this scratch is given.
-    fn runtime_dir(&self) -> PathBuf {
-        self.root.path().join("run")
-    }
-
-    /// The socket every service over this scratch listens on.
-    fn socket(&self) -> PathBuf {
-        protocol::socket_path(&self.runtime_dir().join(APP_DIR), &self.state_dir())
-    }
-
-    /// The database every command over this scratch reads and writes.
-    fn database(&self) -> PathBuf {
-        self.state_dir().join(DATABASE_FILE)
-    }
-
     /// The project in `folder`, registered with the processes of the stack
     /// file `stack` through `muster import`; returns its folder.
     fn project(&self, folder: &str, stack: &str) -> PathBuf {
@@ -314,25 +151,6 @@ impl Scratch {
         let import = self.muster(&["-p", dir.to_str().unwrap(), "import"]);
         assert!(import.status.success(), "{}", shown(&import));
         dir
-    }
-
-    /// `muster <args>` over this scratch's XDG roots, run from its root.
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(BINARY);
-        command
-            .args(args)
-            .current_dir(self.root.path())
-            .env("XDG_STATE_HOME", self.root.path().join("state"))
-            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
-            .env("XDG_DATA_HOME", self.root.path().join("data"))
-            .env("XDG_RUNTIME_DIR", self.runtime_dir())
-            .env_remove("MUSTER_PROJECT");
-        command
-    }
-
-    /// Runs `muster <args>` and returns its output.
-    fn muster(&self, args: &[&str]) -> Output {
-        self.command(args).output().unwrap()
     }
 
     /// Runs `muster <args>` on the project in `project`.
@@ -377,12 +195,6 @@ impl Scratch {
         String::from_utf8(export.stdout).unwrap()
     }
 
-    /// Sends `request` straight to the service socket, as an in-process
-    /// client.
-    fn send(&self, request: &ServiceRequest) -> ServiceResponse {
-        protocol::send(&self.socket(), request).unwrap()
-    }
-
     /// The state and pid of the first process of `project`, as the service
     /// lists it.
     fn first_row_raw(&self, project: &Path) -> (String, Option<u64>) {
@@ -400,24 +212,6 @@ impl Scratch {
     /// What the services over this scratch wrote to their log.
     fn service_log(&self) -> String {
         fs::read_to_string(protocol::log_path(&self.state_dir())).unwrap_or_default()
-    }
-}
-
-impl Drop for Scratch {
-    /// Kills every service, holder and recorded child left under this scratch.
-    fn drop(&mut self) {
-        for pid in self
-            .children
-            .iter()
-            .copied()
-            .chain(processes_under(SERVICE_SUBCOMMAND, self.root.path()))
-            .chain(processes_under(HOLDER_SUBCOMMAND, self.root.path()))
-        {
-            if let Some(pid) = Pid::from_raw(pid as i32) {
-                let _ = kill_process_group(pid, Signal::KILL);
-                let _ = kill_process(pid, Signal::KILL);
-            }
-        }
     }
 }
 
@@ -453,32 +247,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// The ports of a service run in the test process: nothing of the user's
-/// desktop or process table.
-struct QuietPorts;
-
-impl ProjectPorts for QuietPorts {
-    fn notifier(&self) -> Option<Box<dyn Notifier>> {
-        None
-    }
-
-    fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
-        None
-    }
-}
-
-/// Launches real holders from the built binary, but only after holding each
-/// launch for [`GATE_HOLD`], so a launch is in flight when the service is
-/// asked to make way.
-struct HeldLauncher(ExecHolderLauncher);
-
-impl HolderLauncher for HeldLauncher {
-    fn launch(&self, config: HolderConfig) -> Result<(), PtyError> {
-        thread::sleep(GATE_HOLD);
-        self.0.launch(config)
-    }
-}
-
 /// Runs a service reporting `version` in this process over `scratch`'s state
 /// directory and database, launching real holders from the built binary,
 /// held by [`GATE_HOLD`] when `held` is set.
@@ -499,7 +267,7 @@ fn in_process_service(
             .open_files(OpenFilesLimit::current())
             .build();
         let launcher: Box<dyn HolderLauncher> = if held {
-            Box::new(HeldLauncher(exec))
+            Box::new(HeldLauncher::new(exec))
         } else {
             Box::new(exec)
         };
@@ -551,7 +319,7 @@ fn concurrent_connects_start_exactly_one_service() {
         assert!(output.status.success(), "{}", shown(&output));
     }
 
-    let services = processes_under(SERVICE_SUBCOMMAND, scratch.root.path());
+    let services = processes_under(SERVICE_SUBCOMMAND, scratch.root());
     assert_eq!(services.len(), 1, "one service runs: {services:?}");
     assert!(
         !scratch.service_log().contains(LOST_RACE_LINE),
@@ -585,7 +353,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
         pid.is_some()
     });
     let pid = pid.unwrap() as u32;
-    scratch.children.push(pid);
+    scratch.keep_child(pid);
 
     let (output, status) = scratch.json(&["service", "status"]);
     assert!(output.status.success(), "{}", shown(&output));
@@ -601,19 +369,13 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
 
     let (_, status) = scratch.json(&["service", "status"]);
     assert_eq!(status["version"], status["client_version"]);
-    assert_eq!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).len(),
-        1
-    );
+    assert_eq!(processes_under(SERVICE_SUBCOMMAND, scratch.root()).len(), 1);
     assert!(alive(pid), "the process outlived the replacement");
     wait_until("the new service to adopt api", || {
         let row = scratch.row(&project, "api");
         row["state"] == "running" && row["pid"] == pid
     });
-    assert_eq!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root.path()).len(),
-        1
-    );
+    assert_eq!(processes_under(HOLDER_SUBCOMMAND, scratch.root()).len(), 1);
 }
 
 /// A second command arriving while an older service waits out a launch
@@ -635,7 +397,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         pid = running.filter(|_| state == "running");
         pid.is_some()
     });
-    scratch.children.push(pid.unwrap() as u32);
+    scratch.keep_child(pid.unwrap() as u32);
     scratch.send(&ServiceRequest::Control {
         project: root(&project),
         name: ProcessName::try_new("api").unwrap(),
@@ -667,10 +429,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         "at most one extra service was spawned: {}",
         scratch.service_log()
     );
-    assert_eq!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).len(),
-        1
-    );
+    assert_eq!(processes_under(SERVICE_SUBCOMMAND, scratch.root()).len(), 1);
 }
 
 /// An older command meeting a newer service refuses, naming both versions
@@ -1022,7 +781,7 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
         shown(&blank)
     );
     assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "a bad command line starts no service"
     );
 
@@ -1112,7 +871,7 @@ fn add_up_set_rm_against_a_real_service() {
     assert_eq!(added["process"]["autostart"], true);
     assert_eq!(added["process"]["restart"], "never", "the default setting");
     assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "add starts nothing"
     );
     let taken = scratch.muster(&["-p", dir, "add", "web", "--", "true"]);
@@ -2023,7 +1782,7 @@ fn input_errors_fail_before_the_service_starts() {
         shown(&import)
     );
     assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "no service was started"
     );
 
@@ -2187,7 +1946,7 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
         shown(&start)
     );
     assert!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
         "nothing was launched"
     );
 }
@@ -2352,38 +2111,26 @@ fn values_past_their_bounds_are_invalid_input() {
 /// Completing `--project` reads an existing database and never creates one.
 #[test]
 fn completing_a_project_never_creates_the_database() {
-    let root = Builder::new()
-        .prefix(SCRATCH_PREFIX)
-        .tempdir_in(SHORT_TEMP_ROOT)
-        .unwrap();
-    let complete = |root: &Path| {
-        Command::new(BINARY)
-            .args(["--", "muster", "--project", ""])
-            .current_dir(root)
+    let complete = |scratch: &Scratch| {
+        scratch
+            .command(&["--", "muster", "--project", ""])
             .env("COMPLETE", "fish")
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("XDG_DATA_HOME", root.join("data"))
-            .env("XDG_RUNTIME_DIR", root.join("run"))
             .output()
             .unwrap()
     };
+    let bare = Scratch::empty();
 
-    let empty = complete(root.path());
+    let empty = complete(&bare);
     assert!(empty.status.success(), "{}", shown(&empty));
-    assert!(!root.path().join("state").exists());
+    assert!(!bare.state_root().exists());
 
     let scratch = Scratch::new();
     scratch.project("shop", &single());
-    let listed = complete(scratch.root.path());
+    let listed = complete(&scratch);
     assert!(listed.status.success(), "{}", shown(&listed));
     assert!(stdout(&listed).contains("shop"), "{}", shown(&listed));
 }
 
-/// The MCP protocol version the test client speaks.
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-/// The JSON-RPC version every MCP message carries.
-const JSON_RPC_VERSION: &str = "2.0";
 /// The tools that act on one process, each of which takes its `name`.
 const PROCESS_TOOLS: [&str; 7] = [
     "process_screen",
@@ -2402,123 +2149,6 @@ fn mcp_project() -> String {
         entry("echo box", "cat", false),
         entry("café", "echo café-ready; sleep 600", false),
     ])
-}
-
-/// A `muster mcp` server run over stdio, spoken to as an agent would. Each
-/// line it prints is a JSON message, or the raw line when it is not one.
-struct McpSession {
-    child: Child,
-    lines: Receiver<Result<Value, String>>,
-    next_id: u64,
-}
-
-impl McpSession {
-    /// Starts `muster mcp` for `project` over `scratch` and initializes it.
-    fn start(scratch: &mut Scratch, project: &Path) -> Self {
-        let mut child = scratch
-            .command(&["-p", project.to_str().unwrap(), "mcp", "--as", "test-agent"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        scratch.children.push(child.id());
-        let out = child.stdout.take().unwrap();
-        let (sender, lines) = unbounded();
-        thread::spawn(move || {
-            for line in BufReader::new(out).lines() {
-                let Ok(line) = line else { return };
-                let message = serde_json::from_str::<Value>(&line).map_err(|_| line);
-                if sender.send(message).is_err() {
-                    return;
-                }
-            }
-        });
-        let mut session = Self {
-            child,
-            lines,
-            next_id: 0,
-        };
-        session.request(
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "cli-exec", "version": "0" },
-            }),
-        );
-        session.write(&serde_json::json!({
-            "jsonrpc": JSON_RPC_VERSION,
-            "method": "notifications/initialized",
-        }));
-        session
-    }
-
-    /// Writes one message to the server.
-    fn write(&mut self, message: &Value) {
-        let stdin = self.child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{message}").unwrap();
-        stdin.flush().unwrap();
-    }
-
-    /// Sends `method` with `params` and returns the whole response.
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.write(&serde_json::json!({
-            "jsonrpc": JSON_RPC_VERSION,
-            "id": id,
-            "method": method,
-            "params": params,
-        }));
-        loop {
-            let message = self
-                .lines
-                .recv_timeout(WAIT)
-                .unwrap_or_else(|_| panic!("no answer to {method}"))
-                .unwrap_or_else(|line| panic!("stdout carried a non-JSON line: {line:?}"));
-            if message["id"] == id {
-                return message;
-            }
-        }
-    }
-
-    /// Calls the tool `name` with `arguments` and returns the response.
-    fn call(&mut self, name: &str, arguments: Value) -> Value {
-        self.request(
-            "tools/call",
-            serde_json::json!({ "name": name, "arguments": arguments }),
-        )
-    }
-
-    /// Calls the tool `name` with `arguments` and returns its result,
-    /// failing on an error.
-    fn result(&mut self, name: &str, arguments: Value) -> Value {
-        let response = self.call(name, arguments);
-        assert!(response["error"].is_null(), "{name} failed: {response}");
-        response["result"].clone()
-    }
-
-    /// The text of the first content block of the tool call's result.
-    fn text(&mut self, name: &str, arguments: Value) -> String {
-        result_text(&self.result(name, arguments))
-    }
-
-    /// Calls the tool `name` with `arguments`, which the caller got wrong,
-    /// and returns its result, failing unless it is flagged as an error.
-    fn mistake(&mut self, name: &str, arguments: Value) -> Value {
-        let result = self.result(name, arguments);
-        assert_eq!(result["isError"], true, "{name} succeeded: {result}");
-        result
-    }
-}
-
-/// The text of the first content block of a tool result.
-fn result_text(result: &Value) -> String {
-    result["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// Pids of the zombie children of `parent`: exited, never reaped.
@@ -2544,14 +2174,6 @@ fn zombie_children(parent: u32) -> Vec<u32> {
         .collect()
 }
 
-impl Drop for McpSession {
-    /// Closes the server's input, which ends it, and reaps it.
-    fn drop(&mut self) {
-        drop(self.child.stdin.take());
-        let _ = self.child.wait();
-    }
-}
-
 /// With no service and no other muster running, an agent's MCP server starts
 /// the service and drives the project's processes by name: it lists them,
 /// starts, types into, reads, restarts and stops them, and an unknown name
@@ -2560,7 +2182,7 @@ impl Drop for McpSession {
 fn mcp_tools_work_with_the_service_autostarted() {
     let mut scratch = Scratch::new();
     let project = scratch.project("shop", &mcp_project());
-    assert!(processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty());
+    assert!(processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty());
     let mut mcp = McpSession::start(&mut scratch, &project);
 
     let tools = mcp.request("tools/list", serde_json::json!({}))["result"]["tools"].clone();
@@ -2594,7 +2216,7 @@ fn mcp_tools_work_with_the_service_autostarted() {
         .collect();
     assert_eq!(names, ["echo box", "café"]);
     assert!(
-        !processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        !processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "the first live tool started the service"
     );
 
@@ -2667,7 +2289,7 @@ fn mcp_tools_work_with_the_service_autostarted() {
 
     let stop = scratch.muster(&["service", "stop"]);
     assert!(stop.status.success(), "{}", shown(&stop));
-    let server = mcp.child.id();
+    let server = mcp.pid();
     wait_until("the stopped service to be reaped", || {
         zombie_children(server).is_empty()
     });
@@ -2815,10 +2437,10 @@ fn a_waited_start_reports_a_child_that_dies_at_once() {
     let mut scratch = Scratch::new();
     let project = scratch.project(
         "shop",
-        &stack(&[entry("bad", "sleep 0.2; exit 3", false), Entry {
-            restart: "on-failure",
-            ..entry("ronfail", "sleep 0.2; exit 3", false)
-        }]),
+        &stack(&[
+            entry("bad", "sleep 0.2; exit 3", false),
+            entry("ronfail", "sleep 0.2; exit 3", false).with_restart("on-failure"),
+        ]),
     );
 
     let (started, report) = scratch.json_on(&project, &["start", "bad", "--wait"]);
@@ -2927,7 +2549,7 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
         "unknown-project"
     );
     assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "a folder that is not a project starts no service"
     );
 
@@ -2951,7 +2573,7 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     let pid = started["structuredContent"]["status"]["pid"]
         .as_u64()
         .unwrap();
-    scratch.children.push(pid as u32);
+    scratch.keep_child(pid as u32);
     wait_until("the launch to carry the server's environment", || {
         mcp.text("process_screen", serde_json::json!({ "name": "web" }))
             .contains("home-/")
@@ -3156,205 +2778,12 @@ fn mcp_print_config_is_plain_data() {
     assert!(output.stderr.is_empty(), "{}", shown(&output));
 }
 
-/// Rows of the pseudo-terminal a prompting command runs on.
-const PTY_ROWS: u16 = 40;
-/// Columns of that pseudo-terminal.
-const PTY_COLS: u16 = 120;
-/// Bytes read from a pseudo-terminal's master at a time.
-const PTY_CHUNK: usize = 4096;
-/// A terminal type that draws color, so the interactive layout is chosen.
-const COLOR_TERM: &str = "xterm-256color";
-/// Keys a person types at a prompt.
+/// The Enter key, as a person types it at a prompt.
 const ENTER: &[u8] = b"\r";
+/// The down-arrow key, as a person types it at a prompt.
 const ARROW_DOWN: &[u8] = b"\x1b[B";
-const CTRL_C: &[u8] = b"\x03";
 /// The default detach key, `ctrl-\`.
 const DETACH: &[u8] = b"\x1c";
-
-/// A pseudo-terminal a command runs on as a person's terminal: the test
-/// types on its master side and collects everything drawn there, so no test
-/// touches a real terminal.
-struct Pty {
-    master: fs::File,
-    slave: OwnedFd,
-    drawn: Arc<Mutex<Vec<u8>>>,
-}
-
-impl Pty {
-    /// Opens a pseudo-terminal and starts collecting what is drawn on it.
-    fn open() -> Self {
-        Self::open_sized(PTY_ROWS, PTY_COLS)
-    }
-
-    /// Opens a `rows` by `cols` pseudo-terminal and starts collecting what is
-    /// drawn on it.
-    fn open_sized(rows: u16, cols: u16) -> Self {
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
-        grantpt(&master).unwrap();
-        unlockpt(&master).unwrap();
-        let path = ptsname(&master, Vec::new()).unwrap();
-        let slave: OwnedFd = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(O_NOCTTY)
-            .open(path.to_str().unwrap())
-            .unwrap()
-            .into();
-        tcsetwinsize(&master, Winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        })
-        .unwrap();
-        let pty = Self {
-            master: fs::File::from(master),
-            slave,
-            drawn: Arc::new(Mutex::new(Vec::new())),
-        };
-        let mut reader = pty.master.try_clone().unwrap();
-        let drawn = Arc::clone(&pty.drawn);
-        thread::spawn(move || {
-            let mut chunk = [0; PTY_CHUNK];
-            while let Ok(read) = reader.read(&mut chunk)
-                && read > 0
-            {
-                drawn
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .extend_from_slice(&chunk[..read]);
-            }
-        });
-        pty
-    }
-
-    /// Runs `muster <args>` over `scratch` from `folder`, with this terminal
-    /// as its input, output and error.
-    fn spawn(&self, scratch: &mut Scratch, folder: &Path, args: &[&str]) -> Child {
-        let stdio = || Stdio::from(self.slave.try_clone().unwrap());
-        let child = scratch
-            .command(args)
-            .current_dir(folder)
-            .env("TERM", COLOR_TERM)
-            .env_remove("NO_COLOR")
-            .stdin(stdio())
-            .stdout(stdio())
-            .stderr(stdio())
-            .spawn()
-            .unwrap();
-        scratch.children.push(child.id());
-        child
-    }
-
-    /// Types `keys` as a person would, once the command reads keys raw, so a
-    /// Ctrl-C reaches it as a key rather than as a signal.
-    fn type_keys(&self, keys: &[u8]) {
-        wait_until("the terminal to read keys raw", || {
-            !tcgetattr(&self.slave)
-                .unwrap()
-                .local_modes
-                .contains(LocalModes::ICANON)
-        });
-        (&self.master).write_all(keys).unwrap();
-    }
-
-    /// Runs `muster <args>` like [`Pty::spawn`], but as the leader of its
-    /// own session with this terminal as its controlling one, so a Ctrl-C
-    /// typed while it is not reading keys reaches it as `SIGINT`.
-    fn spawn_controlling(&self, scratch: &mut Scratch, folder: &Path, args: &[&str]) -> Child {
-        let stdio = || Stdio::from(self.slave.try_clone().unwrap());
-        let mut command = scratch.command(args);
-        command
-            .current_dir(folder)
-            .env("TERM", COLOR_TERM)
-            .env_remove("NO_COLOR")
-            .stdin(stdio())
-            .stdout(stdio())
-            .stderr(stdio());
-        // SAFETY: the hook runs between fork and exec and only makes the
-        // `setsid` and `TIOCSCTTY` system calls, which are async-signal-safe
-        // and touch only the child's own session and its standard input.
-        unsafe {
-            command.pre_exec(|| {
-                setsid()?;
-                ioctl_tiocsctty(stdin())?;
-                Ok(())
-            });
-        }
-        let child = command.spawn().unwrap();
-        scratch.children.push(child.id());
-        child
-    }
-
-    /// Types Ctrl-C at once, whether or not the command reads keys raw.
-    fn interrupt(&self) {
-        (&self.master).write_all(CTRL_C).unwrap();
-    }
-
-    /// Everything drawn so far, escape sequences included.
-    fn raw(&self) -> String {
-        let bytes = self
-            .drawn
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        String::from_utf8_lossy(&bytes).into_owned()
-    }
-
-    /// Everything drawn so far, as text with the styling sequences removed.
-    fn drawn(&self) -> String {
-        unstyled(&self.raw())
-    }
-
-    /// Waits until `needle` has been drawn `times` times in all.
-    fn wait_for(&self, needle: &str, times: usize) {
-        wait_until(&format!("{needle:?} drawn {times} times"), || {
-            self.drawn().matches(needle).count() >= times
-        });
-    }
-
-    /// Waits for `child` to exit and returns its exit code.
-    fn exit_code(child: &mut Child) -> Option<i32> {
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                return status.code();
-            }
-            assert!(started.elapsed() < WAIT, "the command did not exit");
-            thread::sleep(POLL);
-        }
-    }
-}
-
-/// `text` with its CSI and OSC escape sequences removed.
-fn unstyled(text: &str) -> String {
-    let mut plain = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            plain.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            },
-            Some(']') => {
-                for c in chars.by_ref() {
-                    if c == '\x07' {
-                        break;
-                    }
-                }
-            },
-            _ => {},
-        }
-    }
-    plain
-}
 
 /// Without a terminal to ask on, a command that needs a name fails as
 /// invalid input naming what to pass, also in JSON, and changes nothing; a
@@ -3371,7 +2800,7 @@ fn a_question_nobody_can_answer_names_the_argument_to_pass() {
         shown(&unnamed)
     );
     assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        processes_under(SERVICE_SUBCOMMAND, scratch.root()).is_empty(),
         "a missing name is refused before the service starts"
     );
     let up = scratch.on(&project, &["up"]);
@@ -3404,10 +2833,10 @@ fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
     let mut scratch = Scratch::new();
     let project = scratch.project(
         "shop",
-        &stack(&[entry("api", "sleep 600", true), Entry {
-            grace: "1s",
-            ..entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true)
-        }]),
+        &stack(&[
+            entry("api", "sleep 600", true),
+            entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true).with_grace("1s"),
+        ]),
     );
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));

@@ -1109,7 +1109,7 @@ mod tests {
     /// made printable.
     #[test]
     fn ps_names_each_blocked_process_and_what_frees_its_port() {
-        let rendered = render_status(&[shop(), blog()], true, &[], false);
+        let rendered = render_status(&[shop(), blog()], true, &[], &[], false);
         let lines: Vec<&str> = rendered.lines().map(str::trim_start).collect();
 
         assert!(

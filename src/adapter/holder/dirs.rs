@@ -164,6 +164,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::domain::value::PROCESS_NAME_MAX_CHARS;
 
     /// A directory mode other users can enter.
     const SHARED_DIR_MODE: u32 = 0o755;
@@ -237,9 +238,10 @@ mod tests {
         assert_eq!(encoded(&name("../etc/passwd")), "%2E%2E%2Fetc%2Fpasswd");
         assert_eq!(encoded(&name("café")), "caf%C3%A9");
         assert_eq!(encoded(&name("dev_server-2")), "dev_server-2");
-        let long = name(&"x".repeat(LOG_STEM_MAX + 1));
+        let encodes_long = |accent: &str| name(&accent.repeat(PROCESS_NAME_MAX_CHARS));
+        let long = encodes_long("\u{e9}");
         assert_eq!(log_file_stem(&long).len(), 16);
-        assert_ne!(log_file_stem(&long), log_file_stem(&name(&"y".repeat(300))));
+        assert_ne!(log_file_stem(&long), log_file_stem(&encodes_long("\u{e8}")));
     }
 
     /// Names that differ only in case get different log files, which a

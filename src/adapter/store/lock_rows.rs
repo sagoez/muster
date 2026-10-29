@@ -8,8 +8,8 @@ use super::{
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        LOCK_TTL_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl,
-        SessionId,
+        LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote,
+        LockRelease, LockTtl, SessionId,
     },
     value::EpochSeconds,
 };
@@ -66,12 +66,39 @@ fn has_ended(conn: &Connection, session: &SessionId) -> Result<bool, ConfigError
         .map_err(db_error)
 }
 
+/// How many live locks `me`'s session holds at `now` in any project, the
+/// lock `name` of project `project_id` aside, so renewing it never counts.
+fn other_live_locks(
+    conn: &Connection,
+    project_id: i64,
+    me: &LockHolder,
+    name: &LockName,
+    now: EpochSeconds,
+) -> Result<usize, ConfigError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM locks WHERE session = :session AND expires_at >= :now \
+             AND NOT (project_id = :project AND name = :name)",
+            named_params! {
+                ":session": me.session().as_ref(),
+                ":now": epoch_param(now),
+                ":project": project_id,
+                ":name": name.as_ref(),
+            },
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    usize::try_from(count).map_err(|error| corrupt("lock count", error))
+}
+
 /// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`,
 /// unless `me`'s session already ended: an acquire still running when its
 /// connection closed can then never commit a lock nobody releases.
 ///
 /// # Errors
-/// Returns a [`ConfigError`] when SQLite fails or a stored row is invalid.
+/// Returns [`ConfigError::TooManyLocks`] when the session already holds
+/// [`LOCKS_PER_SESSION_MAX`] other live locks, and a [`ConfigError`] when
+/// SQLite fails or a stored row is invalid.
 pub(super) fn acquire(
     conn: &Connection,
     project_id: i64,
@@ -83,6 +110,9 @@ pub(super) fn acquire(
 ) -> Result<LockAttempt, ConfigError> {
     if has_ended(conn, me.session())? {
         return Ok(LockAttempt::SessionEnded);
+    }
+    if other_live_locks(conn, project_id, me, name, now)? >= LOCKS_PER_SESSION_MAX {
+        return Err(ConfigError::TooManyLocks);
     }
     let until = now.after(*ttl.as_ref());
     let taken: Option<i64> = conn

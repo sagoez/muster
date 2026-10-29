@@ -5,7 +5,7 @@ use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessChange, ProcessField},
+    config::{Environment, ProcessChange, ProcessField, TooManyVars},
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
 };
@@ -49,24 +49,19 @@ pub struct ProcessSpec {
 impl ProcessSpec {
     /// This definition with `change` applied; variables are set before they are
     /// unset, so a name in both ends up unset.
-    pub fn with_change(self, change: &ProcessChange) -> Self {
-        let environment = change
-            .set_env()
-            .iter()
-            .fold(self.environment, |environment, (name, value)| {
-                environment.with_var(name.clone(), value.clone())
-            });
-        let environment = change
-            .unset_env()
-            .iter()
-            .fold(environment, |environment, name| {
-                environment.without_var(name)
-            });
+    ///
+    /// # Errors
+    /// Returns [`TooManyVars`] when the changed environment would hold more
+    /// variables than a process may have.
+    pub fn with_change(self, change: &ProcessChange) -> Result<Self, TooManyVars> {
+        let environment = self
+            .environment
+            .changed(change.set_env().iter().cloned(), change.unset_env())?;
         let stop = self
             .stop
             .with_signal(change.stop_signal().unwrap_or(*self.stop.signal()))
             .with_grace_period(change.stop_grace().unwrap_or(*self.stop.grace_period()));
-        Self {
+        Ok(Self {
             name: self.name,
             command: change.command().clone().unwrap_or(self.command),
             working_dir: change.working_dir().clone().apply(self.working_dir),
@@ -76,7 +71,7 @@ impl ProcessSpec {
             restart: change.restart().unwrap_or(self.restart),
             stop,
             ready: change.ready().clone().apply(self.ready),
-        }
+        })
     }
 
     /// The fields `after` holds a different value in, in definition order.
@@ -155,9 +150,11 @@ mod tests {
             .working_dir(Some(PathBuf::from("frontend")))
             .description(Some(Description::try_new("Vite").unwrap()))
             .environment(
-                Environment::empty()
-                    .with_var(name("PORT"), value("5173"))
-                    .with_var(name("HOST"), value("localhost")),
+                Environment::of([
+                    (name("PORT"), value("5173")),
+                    (name("HOST"), value("localhost")),
+                ])
+                .unwrap(),
             )
             .autostart(true)
             .restart(RestartPolicy::OnFailure)
@@ -178,7 +175,9 @@ mod tests {
     #[test]
     fn an_empty_change_keeps_everything() {
         assert_eq!(
-            spec().with_change(&ProcessChange::builder().build()),
+            spec()
+                .with_change(&ProcessChange::builder().build())
+                .unwrap(),
             spec()
         );
     }
@@ -199,7 +198,7 @@ mod tests {
             .stop_grace(Some(grace(9)))
             .build();
 
-        let changed = spec().with_change(&change);
+        let changed = spec().with_change(&change).unwrap();
 
         assert_eq!(changed.name(), spec().name());
         assert_eq!(changed.command().as_ref(), "pnpm dev");
@@ -207,9 +206,7 @@ mod tests {
         assert_eq!(changed.description().as_ref().unwrap().as_ref(), "Dev");
         assert_eq!(
             changed.environment(),
-            &Environment::empty()
-                .with_var(name("PORT"), value("8080"))
-                .with_var(name("NEW"), value("1"))
+            &Environment::of([(name("PORT"), value("8080")), (name("NEW"), value("1"))]).unwrap()
         );
         assert!(!*changed.autostart());
         assert_eq!(*changed.restart(), RestartPolicy::Always);
@@ -224,7 +221,7 @@ mod tests {
             .unset_env(vec![name("PORT")])
             .build();
 
-        let changed = spec().with_change(&change);
+        let changed = spec().with_change(&change).unwrap();
 
         assert!(!changed.environment().vars().contains_key(&name("PORT")));
     }

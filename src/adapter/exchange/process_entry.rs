@@ -10,7 +10,8 @@ use crate::domain::{
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-        DescriptionError, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
+        DescriptionError, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS, EnvName, EnvNameError, EnvValue,
+        EnvValueError, ProcessName, ProjectRoot, StopGrace,
     },
 };
 
@@ -18,6 +19,10 @@ use crate::domain::{
 const COMMAND_KEY: &str = "command";
 /// The key of an entry's description.
 const DESCRIPTION_KEY: &str = "description";
+/// What a refusal calls a variable's name.
+const ENV_NAME: &str = "an environment variable name";
+/// What a refusal calls a variable's value.
+const ENV_VALUE: &str = "an environment variable value";
 
 /// One process of a stack file. Optional keys are written only when set, and
 /// a variable whose value is `None` is the export's placeholder.
@@ -159,12 +164,28 @@ fn working_dir(dir: PathBuf) -> Result<PathBuf, EntryError> {
     Ok(dir)
 }
 
-/// Reads one variable, refusing an unfilled placeholder.
+/// Reads one variable, refusing an unfilled placeholder and a name or value
+/// past its maximum.
 fn variable(raw: String, value: Option<String>) -> Result<(EnvName, EnvValue), EntryError> {
-    let name = EnvName::try_new(raw.clone())
-        .map_err(|_| EntryError::InvalidEnvName { name: raw.clone() })?;
+    let name_chars = raw.chars().count();
+    let name = EnvName::try_new(raw.clone()).map_err(|error| match error {
+        EnvNameError::LenCharMaxViolated => EntryError::TooLong {
+            field: ENV_NAME,
+            max: ENV_NAME_MAX_CHARS,
+            found: name_chars,
+        },
+        EnvNameError::PredicateViolated => EntryError::InvalidEnvName { name: raw.clone() },
+    })?;
     let value = value.ok_or_else(|| EntryError::MissingEnvValue { name: raw.clone() })?;
-    let value = EnvValue::try_new(value).map_err(|_| EntryError::InvalidEnvValue { name: raw })?;
+    let value_chars = value.chars().count();
+    let value = EnvValue::try_new(value).map_err(|error| match error {
+        EnvValueError::LenCharMaxViolated => EntryError::TooLong {
+            field: ENV_VALUE,
+            max: ENV_VALUE_MAX_CHARS,
+            found: value_chars,
+        },
+        EnvValueError::PredicateViolated => EntryError::InvalidEnvValue { name: raw },
+    })?;
     Ok((name, value))
 }
 
@@ -176,12 +197,14 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
     /// # Errors
     /// Returns the [`EntryError`] naming the first invalid field.
     fn try_from(entry: ProcessEntry) -> Result<Self, Self::Error> {
-        let environment = entry
-            .environment
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, value)| variable(name, value))
-            .collect::<Result<Environment, EntryError>>()?;
+        let environment = Environment::of(
+            entry
+                .environment
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| variable(name, value))
+                .collect::<Result<Vec<_>, EntryError>>()?,
+        )?;
         Ok(ProcessSpec::builder()
             .name(process_name(entry.name)?)
             .command(command(entry.command)?)

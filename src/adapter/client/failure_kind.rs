@@ -98,10 +98,13 @@ impl From<&ConfigError> for FailureKind {
             ConfigError::UnknownProcess { .. } => Self::UnknownProcess,
             ConfigError::DuplicateProcessName { .. }
             | ConfigError::ImportConflict { .. }
-            | ConfigError::HoldsProject { .. } => Self::Conflict,
+            | ConfigError::HoldsProject { .. }
+            | ConfigError::TooManyProcesses { .. }
+            | ConfigError::TooManyLocks => Self::Conflict,
             ConfigError::InvalidSetting { .. }
             | ConfigError::InvalidDefaultSize { .. }
             | ConfigError::TooLarge { .. }
+            | ConfigError::TooManyVars(_)
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,

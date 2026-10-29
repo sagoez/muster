@@ -11,7 +11,7 @@ use super::{
 use crate::domain::{
     config::{ConfigError, RecordedEdit, StackEdit},
     port::{RaisedEdits, StackEditLog},
-    value::{EditId, ProcessName, ProjectRoot},
+    value::{EditId, ProcessName, ProjectRoot, printable},
 };
 
 /// Most edits kept per project; recording one more drops the oldest.
@@ -29,10 +29,12 @@ const RECORDED_AT: &str = "edit time";
 /// What the retention bound is called in a refusal.
 const RETENTION: &str = "edit log retention";
 
-/// Reads one `stack_edits` row.
+/// Reads one `stack_edits` row, its text made [`printable`] since it quotes
+/// a command an agent wrote.
 fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
     let at_ms: i64 = row.get(AT_MS).map_err(db_error)?;
     let process: Option<String> = row.get(PROCESS).map_err(db_error)?;
+    let message: String = row.get(MESSAGE).map_err(db_error)?;
     Ok(RecordedEdit::builder()
         .id(EditId::new(row.get(ID).map_err(db_error)?))
         .at(UNIX_EPOCH + duration_from_millis(RECORDED_AT, at_ms)?)
@@ -42,7 +44,7 @@ fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
                 .transpose()
                 .map_err(|error| corrupt(PROCESS, error))?,
         )
-        .message(row.get(MESSAGE).map_err(db_error)?)
+        .message(printable(&message))
         .build())
 }
 
@@ -270,6 +272,22 @@ mod tests {
         );
         assert!(edits[0].id() < edits[1].id() && edits[1].id() < edits[2].id());
         assert!(*edits[0].at() >= before);
+    }
+
+    /// An agent's command carrying an escape reads back from the log as
+    /// text, so a notice quoting it cannot drive the terminal it is shown on.
+    #[test]
+    fn an_edit_reads_back_escaped() {
+        let (store, scratch) = fresh_store();
+        let root = folder(&scratch);
+
+        store
+            .add_process(&root, &spec("web", "echo \u{1b}]0;owned\u{7}"), &agent())
+            .unwrap();
+
+        let message = store.edits(&root).unwrap()[0].message().clone();
+        assert!(!message.contains('\u{1b}') && !message.contains('\u{7}'));
+        assert!(message.contains("\\u{1b}]0;owned\\u{7}"), "{message}");
     }
 
     /// The human's edits at the CLI are never kept in the log.

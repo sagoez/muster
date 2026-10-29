@@ -74,7 +74,9 @@ pub struct ProcessSetArg {
     /// null removes it.
     #[builder(default)]
     description: Option<Option<String>>,
-    /// Environment variables to add or replace, by name.
+    /// Environment variables to add or replace, by name; the process keeps
+    /// at most <env-vars-max>, each name at most <env-name-max-chars>
+    /// characters and each value at most <env-value-max-chars>.
     #[builder(default)]
     environment_set: Option<BTreeMap<String, String>>,
     /// Names of environment variables to remove.

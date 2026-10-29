@@ -108,7 +108,7 @@ impl StackStore for EditorFakes {
         author: &Author,
     ) -> Result<ProcessSpec, ConfigError> {
         self.write_for(author)?;
-        Ok(spec().with_change(change))
+        Ok(spec().with_change(change)?)
     }
 
     fn remove_process(

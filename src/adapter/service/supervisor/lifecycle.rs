@@ -1513,10 +1513,14 @@ mod tests {
         let spawns = SpawnRecorder::default();
         let own = spec("p", "npm run dev", RestartPolicy::Always)
             .with_working_dir(Some("web".into()))
-            .with_environment(Environment::empty().with_var(
-                EnvName::try_new("PORT").unwrap(),
-                EnvValue::try_new("5173").unwrap(),
-            ));
+            .with_environment(
+                Environment::empty()
+                    .with_var(
+                        EnvName::try_new("PORT").unwrap(),
+                        EnvValue::try_new("5173").unwrap(),
+                    )
+                    .unwrap(),
+            );
         let mut harness = Harness::over(
             Box::new(
                 RequestRecordingRunner::builder()

@@ -17,6 +17,7 @@ mod setting_key;
 mod spec;
 mod stack;
 mod stack_edit;
+mod too_many_vars;
 mod unreadable_project;
 mod working_dir;
 
@@ -39,4 +40,5 @@ pub use setting_key::*;
 pub use spec::*;
 pub use stack::*;
 pub use stack_edit::*;
+pub use too_many_vars::*;
 pub use unreadable_project::*;

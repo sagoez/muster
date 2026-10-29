@@ -190,7 +190,9 @@ pub trait CoordinationStore {
     /// the same session, it renews and takes `note`.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    /// Returns [`ConfigError::TooManyLocks`] when `me`'s session already
+    /// holds the most live locks it may, and a [`ConfigError`] if the store
+    /// cannot be read or written.
     fn acquire_lock(
         &self,
         project: &ProjectRoot,

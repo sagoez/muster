@@ -8,7 +8,7 @@ use typed_builder::TypedBuilder;
 use super::{
     process_fields::{
         ENVIRONMENT_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command, description,
-        env_vars, process_name, stop_grace, working_dir,
+        environment, process_name, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
@@ -32,7 +32,9 @@ pub struct ProcessAddArg {
     /// which this registers.
     #[builder(default)]
     project: Option<String>,
-    /// The process's name, unique in this project.
+    /// The process's name, unique in this project, at most
+    /// <process-name-max-chars> characters. A project holds at most
+    /// <processes-max> processes.
     name: String,
     /// The shell command it runs, at most <command-max-chars> characters.
     command: String,
@@ -42,7 +44,9 @@ pub struct ProcessAddArg {
     /// A one-line note about it, at most <description-max-chars> characters.
     #[builder(default)]
     description: Option<String>,
-    /// Environment variables it runs with, by name.
+    /// Environment variables it runs with, by name: at most <env-vars-max>,
+    /// each name at most <env-name-max-chars> characters and each value at
+    /// most <env-value-max-chars>.
     #[builder(default)]
     environment: Option<BTreeMap<String, String>>,
     /// Whether `muster up` starts it.
@@ -73,7 +77,7 @@ impl ProcessAddArg {
     /// value.
     pub fn draft(&self, root: &ProjectRoot) -> Result<ProcessDraft, ToolError> {
         let environment = match &self.environment {
-            Some(vars) => env_vars(ENVIRONMENT_FIELD, vars)?.into_iter().collect(),
+            Some(vars) => environment(ENVIRONMENT_FIELD, vars)?,
             None => Environment::empty(),
         };
         Ok(ProcessDraft::builder()

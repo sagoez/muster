@@ -94,10 +94,14 @@ mod tests {
             .command(CommandLine::try_new(command).unwrap())
             .working_dir(Some(PathBuf::from("frontend")))
             .description(None)
-            .environment(Environment::empty().with_var(
-                EnvName::try_new("PORT").unwrap(),
-                EnvValue::try_new("5173").unwrap(),
-            ))
+            .environment(
+                Environment::empty()
+                    .with_var(
+                        EnvName::try_new("PORT").unwrap(),
+                        EnvValue::try_new("5173").unwrap(),
+                    )
+                    .unwrap(),
+            )
             .autostart(true)
             .restart(RestartPolicy::OnFailure)
             .stop(

@@ -37,13 +37,16 @@ use muster::{
         store::SqliteStore,
     },
     domain::{
-        config::ProcessChange,
+        config::{ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
         port::StackStore,
         process::ProcessState,
         project::Project,
         pty::PtySize,
-        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName, ProjectName, ProjectRoot},
+        value::{
+            COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
+            PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
+        },
     },
 };
 use rusqlite::Connection;
@@ -2878,6 +2881,123 @@ fn agent_written_fields_are_bounded() {
             shown(&refused)
         );
     }
+}
+
+/// A process name, a variable's name and value, and the variable count each
+/// have a named maximum: past it, MCP, the CLI and import refuse naming the
+/// limit without echoing the text, and after a maximal add `stack_status`
+/// and `stack_events` stay bounded.
+#[test]
+fn process_names_and_environments_are_bounded() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    let long = |max: usize| "x".repeat(max + 1);
+    let many = |count: usize, chars: usize| -> serde_json::Map<String, Value> {
+        (0..count)
+            .map(|index| (format!("{index:0>chars$}"), Value::from("1")))
+            .collect()
+    };
+
+    for (arguments, limit) in [
+        (
+            serde_json::json!({ "name": long(PROCESS_NAME_MAX_CHARS), "command": "true" }),
+            format!("longer than {PROCESS_NAME_MAX_CHARS} characters"),
+        ),
+        (
+            serde_json::json!({
+                "name": "big",
+                "command": "true",
+                "environment": { long(ENV_NAME_MAX_CHARS): "1" },
+            }),
+            format!("at most {ENV_NAME_MAX_CHARS} characters"),
+        ),
+        (
+            serde_json::json!({
+                "name": "big",
+                "command": "true",
+                "environment": { "BIG": long(ENV_VALUE_MAX_CHARS) },
+            }),
+            format!("at most {ENV_VALUE_MAX_CHARS} characters"),
+        ),
+        (
+            serde_json::json!({
+                "name": "big",
+                "command": "true",
+                "environment": many(ENV_VARS_MAX + 1, 4),
+            }),
+            format!("at most {ENV_VARS_MAX} variables"),
+        ),
+    ] {
+        let refused = result_text(&mcp.mistake("process_add", arguments));
+        assert!(refused.contains(&limit), "{refused}");
+        assert!(
+            refused.len() < 1024,
+            "the refusal echoes the text: {refused}"
+        );
+    }
+    let refused = result_text(&mcp.mistake(
+        "process_set",
+        serde_json::json!({ "name": "web", "environment_set": many(ENV_VARS_MAX + 1, 4) }),
+    ));
+    assert!(
+        refused.contains(&format!("at most {ENV_VARS_MAX} variables")),
+        "{refused}"
+    );
+
+    let name = "n".repeat(PROCESS_NAME_MAX_CHARS);
+    mcp.result(
+        "process_add",
+        serde_json::json!({
+            "name": name,
+            "command": format!("true {}", "#".repeat(COMMAND_MAX_CHARS - 5)),
+            "description": "d".repeat(DESCRIPTION_MAX_CHARS),
+            "environment": many(ENV_VARS_MAX, ENV_NAME_MAX_CHARS),
+        }),
+    );
+    let one = PROCESS_NAME_MAX_CHARS
+        + COMMAND_MAX_CHARS
+        + DESCRIPTION_MAX_CHARS
+        + ENV_VARS_MAX * ENV_NAME_MAX_CHARS;
+    let bound = 4 * one * EVENTS_WITHOUT_SINCE;
+    for tool in ["stack_status", "stack_events"] {
+        let size = mcp.result(tool, serde_json::json!({})).to_string().len();
+        assert!(size < bound, "{tool} answered {size} bytes");
+    }
+
+    let cli = scratch.on(&project, &[
+        "add",
+        &long(PROCESS_NAME_MAX_CHARS),
+        "--",
+        "true",
+    ]);
+    assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+    assert!(
+        stderr(&cli).contains(&format!("longer than {PROCESS_NAME_MAX_CHARS} characters")),
+        "{}",
+        shown(&cli)
+    );
+    let flags: Vec<String> = (0..=ENV_VARS_MAX)
+        .flat_map(|index| ["--env".to_string(), format!("V{index}=1")])
+        .collect();
+    let mut add: Vec<&str> = vec!["add", "wide"];
+    add.extend(flags.iter().map(String::as_str));
+    add.extend(["--", "true"]);
+    let cli = scratch.on(&project, &add);
+    assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+    assert!(
+        stderr(&cli).contains(&format!("the {ENV_VARS_MAX} a process may have")),
+        "{}",
+        shown(&cli)
+    );
+    let value = format!("V={}", long(ENV_VALUE_MAX_CHARS));
+    let cli = scratch.on(&project, &["set", "web", "--env", &value]);
+    assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+    assert!(
+        stderr(&cli).contains(&format!("at most {ENV_VALUE_MAX_CHARS} are allowed")),
+        "{}",
+        shown(&cli)
+    );
 }
 
 /// `mcp --print-config` prints the snippet alone, and a reader that closes

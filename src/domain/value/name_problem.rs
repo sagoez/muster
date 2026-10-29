@@ -1,24 +1,42 @@
-use strum::Display;
+use std::fmt::{self, Display, Formatter};
 
-use super::{process_name::ProcessNameError, process_ref::ProcessRefError};
+use super::{
+    process_name::{PROCESS_NAME_MAX_CHARS, ProcessNameError},
+    process_ref::ProcessRefError,
+};
+
+/// Marks a refused name cut short where a refusal shows it.
+const ELIDED: &str = "...";
 
 /// Why a process name is refused, phrased to follow the name or "it"; the CLI,
 /// MCP and import all refuse a name with it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameProblem {
     /// Nothing but whitespace.
-    #[strum(to_string = "is empty")]
     Empty,
+    /// More than [`PROCESS_NAME_MAX_CHARS`] characters.
+    TooLong,
     /// A control character, such as a newline or an escape, or a format
     /// character, such as a bidi override or a zero-width space.
-    #[strum(to_string = "holds a control or format character")]
     UnsafeCharacter,
+}
+
+impl Display for NameProblem {
+    /// The reason, naming the limit a name ran past.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("is empty"),
+            Self::TooLong => write!(f, "is longer than {PROCESS_NAME_MAX_CHARS} characters"),
+            Self::UnsafeCharacter => f.write_str("holds a control or format character"),
+        }
+    }
 }
 
 impl From<ProcessNameError> for NameProblem {
     fn from(error: ProcessNameError) -> Self {
         match error {
             ProcessNameError::NotEmptyViolated => Self::Empty,
+            ProcessNameError::LenCharMaxViolated => Self::TooLong,
             ProcessNameError::PredicateViolated => Self::UnsafeCharacter,
         }
     }
@@ -28,7 +46,17 @@ impl From<ProcessRefError> for NameProblem {
     fn from(error: ProcessRefError) -> Self {
         match error {
             ProcessRefError::NotEmptyViolated => Self::Empty,
+            ProcessRefError::LenCharMaxViolated => Self::TooLong,
         }
+    }
+}
+
+/// `raw` as a refusal shows it: cut to [`PROCESS_NAME_MAX_CHARS`] characters
+/// and marked when longer, so refusing a huge name never echoes it whole.
+pub fn refused_name(raw: &str) -> String {
+    match raw.char_indices().nth(PROCESS_NAME_MAX_CHARS) {
+        Some((cut, _)) => format!("{}{ELIDED}", &raw[..cut]),
+        None => raw.to_string(),
     }
 }
 
@@ -43,6 +71,25 @@ mod tests {
         let problem = |raw: &str| NameProblem::from(ProcessName::try_new(raw).unwrap_err());
         assert_eq!(problem("  "), NameProblem::Empty);
         assert_eq!(problem("a\u{1b}]0;x\u{7}"), NameProblem::UnsafeCharacter);
+        assert_eq!(
+            problem(&"n".repeat(PROCESS_NAME_MAX_CHARS + 1)),
+            NameProblem::TooLong
+        );
         assert_eq!(NameProblem::Empty.to_string(), "is empty");
+        assert_eq!(
+            NameProblem::TooLong.to_string(),
+            format!("is longer than {PROCESS_NAME_MAX_CHARS} characters")
+        );
+    }
+
+    /// A refusal shows a long name cut short, and a short one whole.
+    #[test]
+    fn a_refused_name_is_shown_bounded() {
+        assert_eq!(refused_name("web"), "web");
+        let shown = refused_name(&"\u{e9}".repeat(PROCESS_NAME_MAX_CHARS * 1000));
+        assert_eq!(
+            shown,
+            format!("{}{ELIDED}", "\u{e9}".repeat(PROCESS_NAME_MAX_CHARS))
+        );
     }
 }

@@ -83,13 +83,15 @@ muster rm worker
 taken as a shell expression; several are joined as shell words. Each process
 has:
 
-- a name, unique within the project and free of control and format
-  characters (such as bidi overrides and zero-width spaces), that
-  every command addresses it by;
+- a name, unique within the project, at most 64 characters and free of
+  control and format characters (such as bidi overrides and zero-width
+  spaces), that every command addresses it by; a project holds at most 100
+  processes;
 - a command, run by the shell;
 - `--cwd`, where it runs, stored relative to the project folder when inside it;
   the project folder when left out;
-- `--env KEY=VALUE`, repeatable, the variables it runs with;
+- `--env KEY=VALUE`, repeatable, the variables it runs with: at most 64, each
+  name at most 128 characters and each value at most 8192;
 - `--description`, a one-line note;
 - `--autostart` or `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`; restarts back off;
@@ -435,8 +437,12 @@ with the user's rights at the next start:
   a symlink leading out of it, is refused. A stored one that climbs out of the
   root, as only a hand edit of the database can make, is refused when read,
   naming the process, and the process is never started.
-- A command holds at most 8192 characters and a description 300, over MCP,
-  the CLI and `muster import`.
+- A command holds at most 8192 characters, a description 300 and a name 64; a
+  process has at most 64 variables, each name at most 128 characters and
+  each value 8192; a project holds at most 100 processes. A longer or larger
+  one is refused naming the limit over MCP, the CLI and `muster import`.
+- One MCP connection holds at most 32 live locks; the next `lock_acquire` is
+  refused until it releases one or one expires.
 - A definition an agent reads back lists its `environment` by variable name
   alone, never a value.
 

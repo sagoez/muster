@@ -16,12 +16,16 @@ use crate::{
         service::{EVENTS_WITHOUT_SINCE, supervisor::FAILURE_TAIL_LINES},
     },
     domain::{
+        config::{ENV_VARS_MAX, PROCESSES_MAX},
         coordination::{
             KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT,
-            LOCK_TTL_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
-            TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
+            LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
+            TODO_DEPS_MAX, TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
         },
-        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, MAX_STOP_GRACE},
+        value::{
+            COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
+            MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
+        },
     },
 };
 
@@ -29,8 +33,17 @@ use crate::{
 const DESCRIPTION_KEY: &str = "description";
 
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 25] {
+fn placeholders() -> [(&'static str, String); 31] {
     [
+        (
+            "<process-name-max-chars>",
+            PROCESS_NAME_MAX_CHARS.to_string(),
+        ),
+        ("<processes-max>", PROCESSES_MAX.to_string()),
+        ("<env-vars-max>", ENV_VARS_MAX.to_string()),
+        ("<env-name-max-chars>", ENV_NAME_MAX_CHARS.to_string()),
+        ("<env-value-max-chars>", ENV_VALUE_MAX_CHARS.to_string()),
+        ("<locks-per-session-max>", LOCKS_PER_SESSION_MAX.to_string()),
         ("<max-stop-grace-s>", MAX_STOP_GRACE.as_secs().to_string()),
         ("<listed-value-chars>", LISTED_VALUE_CHARS.to_string()),
         ("<note-key-max-chars>", NOTE_KEY_MAX_CHARS.to_string()),

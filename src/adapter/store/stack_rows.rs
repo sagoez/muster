@@ -151,7 +151,8 @@ fn environments_of(
         let environment = environments
             .remove(&process_id)
             .unwrap_or_else(Environment::empty)
-            .with_var(name, value);
+            .with_var(name, value)
+            .map_err(|error| corrupt("environment", error))?;
         environments.insert(process_id, environment);
     }
     Ok(environments)
@@ -174,6 +175,18 @@ fn stack_of(conn: &Connection, (project_id, project): ProjectRow) -> Result<Stac
         .project(project)
         .processes(processes)
         .build())
+}
+
+/// How many processes the project `project_id` holds, readable or not.
+fn process_count(conn: &Connection, project_id: i64) -> Result<usize, ConfigError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM processes WHERE project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    usize::try_from(count).map_err(|error| corrupt("process count", error))
 }
 
 /// Writes `spec`'s variables for the process row `process_id`.
@@ -369,6 +382,7 @@ impl StackStore for SqliteStore {
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
             let (project_id, registration) = register(conn, root)?;
+            Stack::check_count(process_count(conn, project_id)? + 1)?;
             insert_process(conn, project_id, spec)?;
             bump_revision(conn, project_id)?;
             record_edit(conn, project_id, &StackEdit::Added {
@@ -390,7 +404,7 @@ impl StackStore for SqliteStore {
             let project = require_project(conn, root)?;
             let project_id = project.0;
             let before = stack_of(conn, project)?.require(name)?.clone();
-            let changed = before.clone().with_change(change);
+            let changed = before.clone().with_change(change)?;
             let fields = before.differing_fields(&changed);
             if fields.is_empty() {
                 return Ok(changed);
@@ -465,7 +479,7 @@ mod tests {
     use crate::{
         adapter::store::test_support::{fresh_store, spec},
         domain::{
-            config::FieldEdit,
+            config::{FieldEdit, PROCESSES_MAX},
             port::{ProjectStore, StackEditLog},
             process::{RestartPolicy, StopSignal},
             value::PositiveDuration,
@@ -500,10 +514,12 @@ mod tests {
                         EnvName::try_new("PORT").unwrap(),
                         EnvValue::try_new("5173").unwrap(),
                     )
+                    .unwrap()
                     .with_var(
                         EnvName::try_new("EMPTY").unwrap(),
                         EnvValue::try_new("").unwrap(),
-                    ),
+                    )
+                    .unwrap(),
             )
             .with_autostart(true)
             .with_restart(RestartPolicy::OnFailure)
@@ -641,6 +657,7 @@ mod tests {
             full_spec()
                 .with_ready(Some(port_check()))
                 .with_change(&change)
+                .unwrap()
         );
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(names_of(&stack), ["web", "api"]);
@@ -794,6 +811,46 @@ mod tests {
             matches!(error, ConfigError::ImportConflict { names } if names == vec![name("web")])
         );
         assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), ["web"]);
+    }
+
+    /// A project holds at most the maximum processes: one more add, or an
+    /// import that would leave more, is refused naming the count, and nothing
+    /// is written; a replace that leaves fewer still lands.
+    #[test]
+    fn a_project_holds_at_most_the_maximum_processes() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let numbered = |index: usize| spec(&format!("p{index}"), "true");
+        for index in 0..PROCESSES_MAX {
+            store
+                .add_process(&root, &numbered(index), &Author::human())
+                .unwrap();
+        }
+
+        let added = store
+            .add_process(&root, &numbered(PROCESSES_MAX), &Author::human())
+            .unwrap_err();
+        let imported = store
+            .import(&root, &[numbered(PROCESSES_MAX)], ImportMode::Merge)
+            .unwrap_err();
+
+        for refused in [&added, &imported] {
+            assert!(
+                matches!(refused, ConfigError::TooManyProcesses { found } if *found == PROCESSES_MAX + 1),
+                "{refused}"
+            );
+            assert!(refused.to_string().contains(&PROCESSES_MAX.to_string()));
+        }
+        assert_eq!(
+            store.stack(&root).unwrap().unwrap().processes().len(),
+            PROCESSES_MAX
+        );
+        store
+            .import(&root, &[numbered(PROCESSES_MAX)], ImportMode::Replace)
+            .unwrap();
+        assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), [format!(
+            "p{PROCESSES_MAX}"
+        )]);
     }
 
     #[test]

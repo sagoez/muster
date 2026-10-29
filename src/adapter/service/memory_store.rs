@@ -142,7 +142,7 @@ impl StackStore for MemoryStore {
             .get_mut(root)
             .and_then(|processes| processes.iter_mut().find(|spec| spec.name() == name))
             .ok_or_else(|| ConfigError::Storage(name.to_string().into()))?;
-        *spec = spec.clone().with_change(change);
+        *spec = spec.clone().with_change(change)?;
         let changed = spec.clone();
         self.bump(root);
         Ok(changed)

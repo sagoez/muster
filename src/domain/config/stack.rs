@@ -9,6 +9,9 @@ use crate::domain::{
     value::ProcessName,
 };
 
+/// Most processes one project holds, so its stack listing stays bounded.
+pub const PROCESSES_MAX: usize = 100;
+
 /// A project and the processes defined in it, in insertion order.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
@@ -69,13 +72,26 @@ impl Stack {
         }
     }
 
+    /// Refuses a project that would hold `count` processes, past
+    /// [`PROCESSES_MAX`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::TooManyProcesses`] naming the count.
+    pub fn check_count(count: usize) -> Result<(), ConfigError> {
+        if count > PROCESSES_MAX {
+            return Err(ConfigError::TooManyProcesses { found: count });
+        }
+        Ok(())
+    }
+
     /// What importing `incoming` under `mode` adds, updates and removes. An
     /// incoming definition equal to the stored one is neither added nor updated.
     ///
     /// # Errors
     /// Returns [`ConfigError::DuplicateProcessName`] when `incoming` repeats a
     /// name, and [`ConfigError::ImportConflict`] listing every already-defined
-    /// name under [`ImportMode::Strict`].
+    /// name under [`ImportMode::Strict`], and [`ConfigError::TooManyProcesses`]
+    /// when the project would end up past [`PROCESSES_MAX`].
     pub fn plan_import(
         &self,
         incoming: &[ProcessSpec],
@@ -105,6 +121,7 @@ impl Stack {
             },
             ImportMode::Strict | ImportMode::Merge => Vec::new(),
         };
+        Self::check_count(self.processes.len() + added.len() - removed.len())?;
         Ok(ImportPlan::builder()
             .added(names_of(&added))
             .updated(names_of(&updated))

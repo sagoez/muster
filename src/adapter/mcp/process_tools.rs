@@ -44,7 +44,7 @@ use crate::{
         config::ConfigError,
         process::PatternKind,
         project::Project,
-        value::{OutputCursor, ProcessName, ProcessRef},
+        value::{OutputCursor, ProcessName, ProcessRef, refused_name},
     },
 };
 
@@ -88,7 +88,7 @@ const PROCESS_SEND: &str = "process_send";
 /// Returns the caller's mistake for a blank name.
 fn reference(name: &str) -> Result<ProcessRef, ToolError> {
     ProcessRef::try_new(name.to_string()).map_err(|error| ToolError::InvalidName {
-        name: name.to_string(),
+        name: refused_name(name),
         problem: error.into(),
     })
 }

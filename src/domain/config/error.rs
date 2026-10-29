@@ -3,7 +3,8 @@ use std::{error::Error as StdError, path::PathBuf};
 use thiserror::Error;
 
 use crate::domain::{
-    config::SettingKey,
+    config::{PROCESSES_MAX, SettingKey, TooManyVars},
+    coordination::LOCKS_PER_SESSION_MAX,
     pty::PtyError,
     value::{ProcessName, ProjectName},
 };
@@ -72,6 +73,22 @@ pub enum ConfigError {
         /// The names the project defines.
         valid: Vec<ProcessName>,
     },
+    /// A process would be given more variables than it may have.
+    #[error(transparent)]
+    TooManyVars(#[from] TooManyVars),
+    /// A write would leave the project with more processes than it may have.
+    #[error(
+        "this would leave the project with {found} processes, more than the {PROCESSES_MAX} it may have; remove one first"
+    )]
+    TooManyProcesses {
+        /// How many processes the project would hold.
+        found: usize,
+    },
+    /// A connection would hold more live locks than it may.
+    #[error(
+        "this connection already holds {LOCKS_PER_SESSION_MAX} locks, the most it may; release one first"
+    )]
+    TooManyLocks,
     /// A process of that name, by NFC key, already exists in the project.
     #[error("a process named '{name}' already exists in this project")]
     DuplicateProcessName {

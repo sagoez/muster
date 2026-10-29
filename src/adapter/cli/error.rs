@@ -15,7 +15,7 @@ use crate::{
         coordination::Author,
         value::{
             COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
-            NameProblem, ProcessName, ProcessNameError, ProjectName,
+            NameProblem, ProcessName, ProcessNameError, ProjectName, refused_name,
         },
     },
 };
@@ -309,10 +309,11 @@ impl From<WorkingDirError> for CliError {
 }
 
 impl CliError {
-    /// The refusal of `raw` as a process name, escaped so it prints as text.
+    /// The refusal of `raw` as a process name, cut short and escaped so it
+    /// prints as text.
     pub fn invalid_name(raw: &str, error: ProcessNameError) -> Self {
         Self::InvalidName {
-            name: printable(raw),
+            name: printable(&refused_name(raw)),
             problem: error.into(),
         }
     }

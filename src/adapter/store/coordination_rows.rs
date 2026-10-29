@@ -728,7 +728,7 @@ mod tests {
     use crate::{
         adapter::store::test_support::{database, fresh_store, spec},
         domain::{
-            coordination::{TODO_TITLE_MAX_CHARS, claimable},
+            coordination::{LOCKS_PER_SESSION_MAX, TODO_TITLE_MAX_CHARS, claimable},
             port::StackStore,
         },
     };
@@ -1391,6 +1391,54 @@ mod tests {
         ));
         assert_eq!(store.release_locks_of(first.session()).unwrap(), 0);
         assert_eq!(store.locks(&root).unwrap().len(), 1);
+    }
+
+    /// One connection holds at most the maximum live locks across projects:
+    /// one more is refused naming the limit, while renewing a held lock,
+    /// another connection's lock and one taken after a release all land.
+    #[test]
+    fn a_connection_holds_at_most_the_maximum_locks() {
+        let (store, scratch) = fresh_store();
+        let shop = project(&store, &scratch, "shop");
+        let blog = project(&store, &scratch, "blog");
+        let me = LockHolder::fresh("claude");
+        let ttl = LockTtl::DEFAULT;
+        let lock = |index: usize| LockName::try_new(format!("l{index}")).unwrap();
+        for index in 0..LOCKS_PER_SESSION_MAX {
+            let root = if index % 2 == 0 { &shop } else { &blog };
+            store
+                .acquire_lock(root, &me, &lock(index), ttl, None)
+                .unwrap();
+        }
+
+        let refused = store
+            .acquire_lock(&shop, &me, &lock(LOCKS_PER_SESSION_MAX), ttl, None)
+            .unwrap_err();
+
+        assert!(matches!(refused, ConfigError::TooManyLocks), "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains(&LOCKS_PER_SESSION_MAX.to_string())
+        );
+        assert!(matches!(
+            store.acquire_lock(&shop, &me, &lock(0), ttl, None).unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        let other = LockHolder::fresh("claude");
+        assert!(matches!(
+            store
+                .acquire_lock(&shop, &other, &lock(LOCKS_PER_SESSION_MAX), ttl, None)
+                .unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        store.release_lock(&shop, &me, &lock(0)).unwrap();
+        assert!(matches!(
+            store
+                .acquire_lock(&blog, &me, &lock(LOCKS_PER_SESSION_MAX + 1), ttl, None)
+                .unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
     }
 
     /// Runs every lock out, as if their holders went away an hour ago.

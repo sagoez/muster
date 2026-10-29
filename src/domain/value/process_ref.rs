@@ -1,14 +1,17 @@
 use nutype::nutype;
 use unicode_normalization::UnicodeNormalization;
 
-use super::{process_name::ProcessName, unresolved_process::UnresolvedProcess};
+use super::{
+    process_name::{PROCESS_NAME_MAX_CHARS, ProcessName},
+    unresolved_process::UnresolvedProcess,
+};
 
-/// A process name as a person typed it: trimmed, non-empty and in Unicode
-/// normal form C, so `café` typed with a combining accent still names the
-/// process configured with a precomposed one.
+/// A process name as a person typed it: trimmed, non-empty, no longer than a
+/// name may be, and in Unicode normal form C, so `café` typed with a
+/// combining accent still names the process configured with a precomposed one.
 #[nutype(
     sanitize(trim, with = |typed: String| typed.nfc().collect()),
-    validate(not_empty),
+    validate(not_empty, len_char_max = PROCESS_NAME_MAX_CHARS),
     derive(Debug, Clone, PartialEq, Eq, AsRef, Display, FromStr)
 )]
 pub struct ProcessRef(String);

@@ -95,10 +95,14 @@ mod tests {
             .name(ProcessName::try_new("web").unwrap())
             .command(CommandLine::try_new("npm run dev").unwrap())
             .working_dir(Some(PathBuf::from("frontend")))
-            .environment(Environment::empty().with_var(
-                EnvName::try_new("PORT").unwrap(),
-                EnvValue::try_new("5173").unwrap(),
-            ))
+            .environment(
+                Environment::empty()
+                    .with_var(
+                        EnvName::try_new("PORT").unwrap(),
+                        EnvValue::try_new("5173").unwrap(),
+                    )
+                    .unwrap(),
+            )
             .autostart(true)
             .restart(RestartPolicy::OnFailure)
             .stop(

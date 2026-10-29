@@ -8,12 +8,19 @@ use crate::{
     adapter::holder::LineMatcher,
     domain::{
         process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
-        value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
+        value::{
+            ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS, EnvName, EnvNameError, EnvValue,
+            EnvValueError, LocalPort, LocalUrl, PositiveDuration, StopGrace,
+        },
     },
 };
 
 /// Separates a variable's name from its value in `--env KEY=VALUE`.
 const ENV_SEPARATOR: char = '=';
+/// What a refusal calls a variable's name.
+const ENV_NAME: &str = "environment variable name";
+/// What a refusal calls a variable's value.
+const ENV_VALUE: &str = "environment variable value";
 /// The clap group of the `--ready-*` probe flags, at most one of which is
 /// given.
 pub const READY_GROUP: &str = "ready";
@@ -120,23 +127,38 @@ impl ProcessFlags {
 /// One `KEY=VALUE` assignment.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidEnv`] when it has no `=`, or its name or value
-/// is not allowed.
+/// Returns [`CliError::TooLong`] for a name or value past its maximum, and
+/// [`CliError::InvalidEnv`] when it has no `=`, or its name or value is not
+/// allowed.
 fn env_assignment(raw: &str) -> Result<(EnvName, EnvValue), CliError> {
-    let invalid = || CliError::InvalidEnv(raw.to_string());
-    let (name, value) = raw.split_once(ENV_SEPARATOR).ok_or_else(invalid)?;
-    Ok((
-        EnvName::try_new(name).map_err(|_| invalid())?,
-        EnvValue::try_new(value).map_err(|_| invalid())?,
-    ))
+    let (name, value) = raw
+        .split_once(ENV_SEPARATOR)
+        .ok_or_else(|| CliError::InvalidEnv(raw.to_string()))?;
+    let value = EnvValue::try_new(value).map_err(|error| match error {
+        EnvValueError::LenCharMaxViolated => CliError::TooLong {
+            what: ENV_VALUE,
+            max: ENV_VALUE_MAX_CHARS,
+            found: value.chars().count(),
+        },
+        EnvValueError::PredicateViolated => CliError::InvalidEnv(raw.to_string()),
+    })?;
+    Ok((env_name(name)?, value))
 }
 
 /// The variable name `raw`, as `--unset-env` gives it.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidEnv`] when it is not a usable name.
+/// Returns [`CliError::TooLong`] past the maximum, and
+/// [`CliError::InvalidEnv`] when it is not a usable name.
 pub fn env_name(raw: &str) -> Result<EnvName, CliError> {
-    EnvName::try_new(raw).map_err(|_| CliError::InvalidEnv(raw.to_string()))
+    EnvName::try_new(raw).map_err(|error| match error {
+        EnvNameError::LenCharMaxViolated => CliError::TooLong {
+            what: ENV_NAME,
+            max: ENV_NAME_MAX_CHARS,
+            found: raw.chars().count(),
+        },
+        EnvNameError::PredicateViolated => CliError::InvalidEnv(raw.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -156,5 +178,33 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    /// A name or value past its maximum is refused naming the limit, never
+    /// echoing the text.
+    #[test]
+    fn an_overlong_name_or_value_names_the_limit() {
+        let long_name = format!("{}=1", "N".repeat(ENV_NAME_MAX_CHARS + 1));
+        let long_value = format!("V={}", "v".repeat(ENV_VALUE_MAX_CHARS + 1));
+
+        let refused = env_assignment(&long_name).unwrap_err();
+        assert!(matches!(refused, CliError::TooLong {
+            what: ENV_NAME,
+            max: ENV_NAME_MAX_CHARS,
+            ..
+        }));
+        assert!(
+            refused
+                .to_string()
+                .contains(&ENV_NAME_MAX_CHARS.to_string())
+        );
+        assert!(matches!(
+            env_assignment(&long_value).unwrap_err(),
+            CliError::TooLong {
+                what: ENV_VALUE,
+                max: ENV_VALUE_MAX_CHARS,
+                ..
+            }
+        ));
     }
 }

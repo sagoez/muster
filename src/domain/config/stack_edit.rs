@@ -145,10 +145,14 @@ mod tests {
             .name(ProcessName::try_new("web").unwrap())
             .command(CommandLine::try_new("npm run dev").unwrap())
             .working_dir(Some(PathBuf::from("frontend")))
-            .environment(Environment::empty().with_var(
-                EnvName::try_new("TOKEN").unwrap(),
-                EnvValue::try_new("s3cret").unwrap(),
-            ))
+            .environment(
+                Environment::empty()
+                    .with_var(
+                        EnvName::try_new("TOKEN").unwrap(),
+                        EnvValue::try_new("s3cret").unwrap(),
+                    )
+                    .unwrap(),
+            )
             .autostart(false)
             .restart(RestartPolicy::Never)
             .stop(

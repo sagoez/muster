@@ -490,7 +490,8 @@ impl MusterMcp {
             work that two agents must not do at once. Expires after ttl_s (default \
             <default-ttl-s>, at most <max-ttl-s>); acquiring it again renews it. The lock belongs \
             to this connection: another connection under the same label cannot renew or release \
-            it, and it is released when this connection ends. With wait_s (at most \
+            it, and it is released when this connection ends. One connection holds at most \
+            <locks-per-session-max> live locks. With wait_s (at most \
             <call-bound-s>), waits for it to free up. Returns {acquired: true, expires_in_s}, or \
             {acquired: false, owner, note, expires_in_s}."
     )]
@@ -774,7 +775,7 @@ mod tests {
                 },
             },
         },
-        domain::port::CoordinationStore,
+        domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore},
     };
 
     /// The key a `todo_list` page holds its todos under.
@@ -1116,6 +1117,36 @@ mod tests {
             assert_eq!(freed[RELEASED], true);
             let retaken = content(other.acquire(acquire("migrations", None)).await);
             assert_eq!(retaken[ACQUIRED], true);
+        });
+    }
+
+    /// One connection's locks stop at the maximum: the next acquire is the
+    /// agent's mistake naming the limit, and another connection still takes
+    /// that lock.
+    #[test]
+    fn a_connection_takes_at_most_the_maximum_locks() {
+        let fixture = fixture();
+        register(&fixture);
+        let other = server_as(&fixture, "other");
+        let acquire = |index: usize| LockAcquireArg::builder().name(format!("l{index}")).build();
+
+        runtime().block_on(async {
+            for index in 0..LOCKS_PER_SESSION_MAX {
+                let taken = content(fixture.server().acquire(acquire(index)).await);
+                assert_eq!(taken[ACQUIRED], true);
+            }
+            let refused = refusal(
+                fixture
+                    .server()
+                    .acquire(acquire(LOCKS_PER_SESSION_MAX))
+                    .await,
+            );
+            assert!(
+                refused.contains(&format!("holds {LOCKS_PER_SESSION_MAX} locks")),
+                "{refused}"
+            );
+            let taken = content(other.acquire(acquire(LOCKS_PER_SESSION_MAX)).await);
+            assert_eq!(taken[ACQUIRED], true);
         });
     }
 

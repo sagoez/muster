@@ -3,6 +3,10 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::steers_the_terminal;
 
+/// Most characters a process name holds: it labels tables, titles and
+/// notices, so one name cannot flood every listing that shows it.
+pub const PROCESS_NAME_MAX_CHARS: usize = 64;
+
 /// Whether `name` holds no control character, tab included, and no format
 /// character such as a bidi override or a zero-width space, so printing it
 /// can neither drive a terminal nor hide or reorder the text around it.
@@ -12,11 +16,11 @@ fn is_terminal_safe(name: &str) -> bool {
         .any(|character| character.is_control() || steers_the_terminal(character))
 }
 
-/// A process's display name: trimmed, non-empty and free of control and
-/// format characters.
+/// A process's display name: trimmed, non-empty, at most
+/// [`PROCESS_NAME_MAX_CHARS`] long and free of control and format characters.
 #[nutype(
     sanitize(trim),
-    validate(not_empty, predicate = is_terminal_safe),
+    validate(not_empty, len_char_max = PROCESS_NAME_MAX_CHARS, predicate = is_terminal_safe),
     derive(
         Debug,
         Clone,
@@ -81,6 +85,16 @@ mod tests {
     fn trims_surrounding_whitespace() {
         let name = ProcessName::try_new("  Claude Code  ").unwrap();
         assert_eq!(name.as_ref(), "Claude Code");
+    }
+
+    /// A name up to the maximum is kept; one past it is refused.
+    #[test]
+    fn a_name_is_bounded() {
+        assert!(ProcessName::try_new("n".repeat(PROCESS_NAME_MAX_CHARS)).is_ok());
+        assert_eq!(
+            ProcessName::try_new("n".repeat(PROCESS_NAME_MAX_CHARS + 1)),
+            Err(ProcessNameError::LenCharMaxViolated)
+        );
     }
 
     #[test]

@@ -8,10 +8,14 @@ use strum::IntoEnumIterator;
 use super::{seconds_arg::SecondsArg, tool_error::ToolError};
 use crate::{
     adapter::client::WorkingDirPlace,
-    domain::value::{
-        COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-        DescriptionError, EnvName, EnvValue, MAX_STOP_GRACE, ProcessName, ProjectRoot, StopGrace,
-        ValueParseError, parse_choice,
+    domain::{
+        config::{ENV_VARS_MAX, Environment},
+        value::{
+            COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
+            DescriptionError, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS, EnvName, EnvNameError,
+            EnvValue, EnvValueError, MAX_STOP_GRACE, ProcessName, ProjectRoot, StopGrace,
+            ValueParseError, parse_choice, refused_name,
+        },
     },
 };
 
@@ -66,7 +70,7 @@ pub(super) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolE
 /// control character.
 pub(super) fn process_name(raw: &str) -> Result<ProcessName, ToolError> {
     ProcessName::try_new(raw.to_string()).map_err(|error| ToolError::InvalidName {
-        name: raw.to_string(),
+        name: refused_name(raw),
         problem: error.into(),
     })
 }
@@ -115,25 +119,53 @@ pub(super) fn description(raw: &str) -> Result<Description, ToolError> {
 /// Returns the refusal of a name the environment cannot hold or muster
 /// reserves.
 pub(super) fn env_name(field: &'static str, raw: &str) -> Result<EnvName, ToolError> {
-    EnvName::try_new(raw.to_string()).map_err(|_| invalid(field, ENV_NAME_FORM, raw))
+    EnvName::try_new(raw.to_string()).map_err(|error| match error {
+        EnvNameError::LenCharMaxViolated => too_long(field, ENV_NAME_MAX_CHARS, raw),
+        EnvNameError::PredicateViolated => invalid(field, ENV_NAME_FORM, raw),
+    })
 }
 
 /// The variables an agent passed as `vars` in `field`, in name order.
 ///
 /// # Errors
-/// Returns the refusal of the first name or value the environment cannot
-/// hold.
+/// Returns the refusal of more variables than a process may have, or of the
+/// first name or value the environment cannot hold.
 pub(super) fn env_vars(
     field: &'static str,
     vars: &BTreeMap<String, String>,
 ) -> Result<Vec<(EnvName, EnvValue)>, ToolError> {
+    if vars.len() > ENV_VARS_MAX {
+        return Err(too_many_vars(field, vars.len()));
+    }
     vars.iter()
         .map(|(name, value)| {
-            let value = EnvValue::try_new(value.clone())
-                .map_err(|_| invalid(field, ENV_VALUE_FORM, value))?;
+            let value = EnvValue::try_new(value.clone()).map_err(|error| match error {
+                EnvValueError::LenCharMaxViolated => too_long(field, ENV_VALUE_MAX_CHARS, value),
+                EnvValueError::PredicateViolated => invalid(field, ENV_VALUE_FORM, value),
+            })?;
             Ok((env_name(field, name)?, value))
         })
         .collect()
+}
+
+/// The environment an agent passed as `vars` in `field`.
+///
+/// # Errors
+/// Returns the refusals of [`env_vars`].
+pub(super) fn environment(
+    field: &'static str,
+    vars: &BTreeMap<String, String>,
+) -> Result<Environment, ToolError> {
+    Environment::of(env_vars(field, vars)?).map_err(|error| too_many_vars(field, error.found()))
+}
+
+/// The refusal of `found` variables in `field`, past [`ENV_VARS_MAX`].
+fn too_many_vars(field: &'static str, found: usize) -> ToolError {
+    invalid(
+        field,
+        &format!("{LENGTH_FORM}{ENV_VARS_MAX} variables"),
+        &format!("{found} variables"),
+    )
 }
 
 /// `raw` read as one of `T`'s kebab-case names in `field`.

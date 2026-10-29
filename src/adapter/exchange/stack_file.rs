@@ -144,11 +144,12 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        config::Environment,
+        config::{ENV_VARS_MAX, Environment},
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
-            COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, EnvName, EnvValue,
-            PositiveDuration, ProcessName, StopGrace,
+            COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, ENV_NAME_MAX_CHARS,
+            ENV_VALUE_MAX_CHARS, EnvName, EnvValue, PROCESS_NAME_MAX_CHARS, PositiveDuration,
+            ProcessName, StopGrace,
         },
     };
 
@@ -202,10 +203,14 @@ processes:
                 .command(CommandLine::try_new("npm run dev").unwrap())
                 .working_dir(Some(PathBuf::from("frontend")))
                 .description(Some(Description::try_new("Vite dev server").unwrap()))
-                .environment(Environment::empty().with_var(
-                    EnvName::try_new("PORT").unwrap(),
-                    EnvValue::try_new("5173").unwrap(),
-                ))
+                .environment(
+                    Environment::empty()
+                        .with_var(
+                            EnvName::try_new("PORT").unwrap(),
+                            EnvValue::try_new("5173").unwrap(),
+                        )
+                        .unwrap(),
+                )
                 .autostart(true)
                 .restart(RestartPolicy::OnFailure)
                 .stop(
@@ -400,6 +405,48 @@ processes:
                 DESCRIPTION_MAX_CHARS + 1
             )
         );
+    }
+
+    /// A name, a variable's name or value, or a variable count past its
+    /// maximum is refused naming the limit; at the maximum each is read.
+    #[test]
+    fn an_overlong_name_or_environment_is_refused() {
+        let named = |length: usize| {
+            entry_with("").replace("name: web", &format!("name: {}", "n".repeat(length)))
+        };
+        assert!(read_stack_file(&named(PROCESS_NAME_MAX_CHARS)).is_ok());
+        assert!(
+            refusal(&named(PROCESS_NAME_MAX_CHARS + 1)).ends_with(&format!(
+                "name is longer than {PROCESS_NAME_MAX_CHARS} characters"
+            ))
+        );
+        let vars = |count: usize, name_chars: usize, value_chars: usize| {
+            let width = name_chars - 1;
+            let lines: String = (0..count)
+                .map(|index| format!("\n  V{index:0>width$}: {}", "v".repeat(value_chars)))
+                .collect();
+            entry_with(&format!("environment:{lines}"))
+        };
+        assert!(
+            read_stack_file(&vars(ENV_VARS_MAX, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS)).is_ok()
+        );
+        for (refused, limit) in [
+            (
+                vars(1, ENV_NAME_MAX_CHARS + 1, 1),
+                format!("at most {ENV_NAME_MAX_CHARS} are allowed"),
+            ),
+            (
+                vars(1, 1, ENV_VALUE_MAX_CHARS + 1),
+                format!("at most {ENV_VALUE_MAX_CHARS} are allowed"),
+            ),
+            (
+                vars(ENV_VARS_MAX + 1, 4, 1),
+                format!("more than the {ENV_VARS_MAX} a process may have"),
+            ),
+        ] {
+            let reason = refusal(&refused);
+            assert!(reason.contains(&limit), "{reason}");
+        }
     }
 
     /// The example the README points at reads as a stack.

@@ -27,10 +27,10 @@ use crate::{
         color_scheme::ColorScheme,
         config::{Environment, ProcessSpec, Stack},
         notification::Notification,
-        port::{Notifier, OutputSink, ProcessHandle, ProcessRunner},
+        port::{Notifier, OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         process::{Process, RestartPolicy, StopPolicy, StopSignal},
         project::Project,
-        pty::{PtyError, PtySize, SpawnRequest},
+        pty::{PtyError, PtySize, ScreenSource, SpawnRequest},
         settings::Settings,
         value::{
             ByteSize, CommandLine, DetachKey, LogMaxSize, PaneId, ProcessName, ProjectName,
@@ -344,6 +344,18 @@ pub(crate) const FAKE_LAUNCHER_PID: u32 = 4242;
 pub(crate) struct PidHandle;
 
 impl ProcessHandle for PidHandle {
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn process_id(&self) -> Option<u32> {
         Some(FAKE_LAUNCHER_PID)
     }
@@ -386,6 +398,22 @@ impl ProcessRunner for PidRunner {
 pub(crate) struct FakeHandle;
 
 impl ProcessHandle for FakeHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
         Ok(())
     }
@@ -446,6 +474,22 @@ pub(crate) struct RecordingHandle {
 }
 
 impl ProcessHandle for RecordingHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
         self.written.lock().unwrap().extend_from_slice(bytes);
         Ok(())
@@ -508,6 +552,22 @@ pub(crate) struct KillCountHandle {
 }
 
 impl ProcessHandle for KillCountHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
         Ok(())
     }
@@ -540,6 +600,22 @@ const WORKER_WAIT: Duration = Duration::from_secs(5);
 pub(crate) struct ConnectedHandle(Arc<AtomicUsize>);
 
 impl ProcessHandle for ConnectedHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
         Some(FIRST_SCREEN.to_vec())
     }
@@ -636,6 +712,22 @@ pub(crate) struct StopSignalHandle {
 }
 
 impl ProcessHandle for StopSignalHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
         Ok(())
     }
@@ -705,6 +797,22 @@ pub(crate) struct RetryStopHandle {
 }
 
 impl ProcessHandle for RetryStopHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
         Ok(())
     }
@@ -757,6 +865,22 @@ impl ProcessRunner for PauseFailRunner {
 pub(crate) struct PauseFailHandle;
 
 impl ProcessHandle for PauseFailHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
         Ok(())
     }
@@ -801,6 +925,22 @@ pub(crate) struct AckCountHandle {
 }
 
 impl ProcessHandle for AckCountHandle {
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
+    }
+
     fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
         self.acks.fetch_add(1, Ordering::SeqCst);
         Ok(())

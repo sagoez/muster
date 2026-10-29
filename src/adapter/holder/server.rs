@@ -936,7 +936,7 @@ mod tests {
         },
         domain::{
             color_scheme::ColorScheme,
-            pty::{ExitOutcome, PtySize, SpawnRequest},
+            pty::{ExitOutcome, PtySize, ScreenSource, SpawnRequest},
             value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
         },
     };
@@ -1747,6 +1747,14 @@ mod tests {
     }
 
     impl ProcessHandle for FakeChild {
+        fn screen_source(&self) -> ScreenSource {
+            ScreenSource::Mirror
+        }
+
+        fn abandon(mut self: Box<Self>) {
+            let _ = self.kill();
+        }
+
         fn process_id(&self) -> Option<u32> {
             Some(FAKE_PID)
         }

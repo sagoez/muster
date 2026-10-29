@@ -3,7 +3,7 @@ use std::{sync::Arc, thread};
 use super::{
     carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
     config_membership::ConfigMembership, entity::Supervisor, launch_purpose::LaunchPurpose,
-    lifecycle::discard, pending_intent::PendingIntent, pending_launch::PendingLaunch,
+    pending_intent::PendingIntent, pending_launch::PendingLaunch,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
 use crate::{
@@ -444,7 +444,7 @@ impl Supervisor {
         } = launch;
         let LaunchPurpose::Adopt { carried, .. } = purpose else {
             if let Ok(handle) = result {
-                discard(handle);
+                handle.abandon();
             }
             return;
         };
@@ -554,9 +554,9 @@ mod tests {
             },
         },
         domain::{
-            port::ProcessRunner,
+            port::{ProcessInput, ProcessRunner},
             process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
-            pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
+            pty::{ExitOutcome, ProcessOutput, PtySize, ScreenSource, SpawnRequest},
             value::{CommandLine, ProcessName, ProjectRoot, StartToken, StopGrace},
         },
     };
@@ -945,6 +945,18 @@ mod tests {
     struct FixedPidHandle(u32);
 
     impl ProcessHandle for FixedPidHandle {
+        fn input(&self) -> Option<Box<dyn ProcessInput>> {
+            None
+        }
+
+        fn screen_source(&self) -> ScreenSource {
+            ScreenSource::Mirror
+        }
+
+        fn abandon(mut self: Box<Self>) {
+            let _ = self.kill();
+        }
+
         fn process_id(&self) -> Option<u32> {
             Some(self.0)
         }

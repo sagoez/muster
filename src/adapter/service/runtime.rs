@@ -1067,9 +1067,11 @@ mod tests {
                 Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
                 SettingChange,
             },
-            port::{Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessRunner},
+            port::{
+                Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessInput, ProcessRunner,
+            },
             process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
-            pty::{ProcessOutput, PtySize, SpawnRequest},
+            pty::{ProcessOutput, PtySize, ScreenSource, SpawnRequest},
             value::{CommandLine, PaneId},
         },
     };
@@ -1289,8 +1291,29 @@ mod tests {
     }
 
     impl ProcessHandle for StalledHandle {
-        fn holder_socket(&self) -> Option<&Path> {
-            self.socket.as_deref()
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        fn input(&self) -> Option<Box<dyn ProcessInput>> {
+            None
+        }
+
+        fn screen_source(&self) -> ScreenSource {
+            self.socket
+                .clone()
+                .map_or(ScreenSource::Mirror, ScreenSource::Served)
+        }
+
+        fn abandon(mut self: Box<Self>) {
+            match self.socket.take() {
+                Some(socket) => {
+                    thread::spawn(move || abandon(&socket));
+                },
+                None => {
+                    let _ = self.kill();
+                },
+            }
         }
 
         fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {

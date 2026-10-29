@@ -2,7 +2,7 @@ use super::{entity::Supervisor, holder_screen::HolderScreen, screen_reply::Scree
 use crate::{
     adapter::service::NoticeLevel,
     domain::{
-        pty::PtyError,
+        pty::{PtyError, ScreenSource},
         value::{PaneId, ProcessName},
     },
 };
@@ -21,25 +21,22 @@ impl Supervisor {
     }
 
     /// The visible screen of the known process on `pane`. A live process
-    /// whose handle names a holder is answered by that holder, so the read is
-    /// handed to the caller; otherwise the pane's own terminal answers, and a
-    /// process that has not started its terminal yet answers empty.
+    /// whose screen is served elsewhere is answered from there, so the read
+    /// is handed to the caller; otherwise the pane's own terminal answers, and
+    /// a process that has not started its terminal yet answers empty.
     fn pane_screen(&self, pane: PaneId) -> ScreenReply {
         let Some(target) = self.panes.get(&pane) else {
             return ScreenReply::Ready(String::new());
         };
         let fallback = target.parser.screen_text();
-        let socket = target
-            .handle
-            .as_ref()
-            .and_then(|handle| handle.holder_socket());
-        match (socket, self.generations.get(&pane)) {
-            (Some(socket), Some(generation)) => ScreenReply::ReadHolder(
+        let source = target.handle.as_ref().map(|handle| handle.screen_source());
+        match (source, self.generations.get(&pane)) {
+            (Some(ScreenSource::Served(socket)), Some(generation)) => ScreenReply::ReadHolder(
                 HolderScreen::builder()
                     .project(self.root().clone())
                     .pane(pane)
                     .generation(*generation)
-                    .socket(socket.to_path_buf())
+                    .socket(socket)
                     .fallback(fallback)
                     .build(),
             ),
@@ -109,7 +106,7 @@ mod tests {
             service::{LaunchEnvironment, supervisor::testing::*},
         },
         domain::{
-            port::{OutputSink, ProcessHandle, ProcessRunner},
+            port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
             process::RestartPolicy,
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
             value::OutputCursor,
@@ -173,8 +170,20 @@ mod tests {
     }
 
     impl ProcessHandle for HolderRunHandle {
-        fn holder_socket(&self) -> Option<&Path> {
-            Some(&self.socket)
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        fn input(&self) -> Option<Box<dyn ProcessInput>> {
+            None
+        }
+
+        fn screen_source(&self) -> ScreenSource {
+            ScreenSource::Served(self.socket.clone())
+        }
+
+        fn abandon(mut self: Box<Self>) {
+            let _ = self.kill();
         }
 
         fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {

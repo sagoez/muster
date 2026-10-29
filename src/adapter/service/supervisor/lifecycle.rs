@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsString,
-    path::Path,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -14,7 +13,6 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::abandon,
         service::{
             BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, Refusal,
             ServiceEvent, WaitStatus,
@@ -685,7 +683,7 @@ impl Supervisor {
         } = launch;
         let LaunchPurpose::Spawn { restarting } = purpose else {
             if let Ok(handle) = result {
-                discard(handle);
+                handle.abandon();
             }
             return;
         };
@@ -1331,22 +1329,6 @@ impl Supervisor {
     }
 }
 
-/// Lets go of a process whose launch or adoption a later action superseded,
-/// stopping it so nothing is left running unsupervised: a holder is reached
-/// afresh, its child killed and the exit collected, off the loop, so the
-/// holder finishes; any other process is killed.
-pub(super) fn discard(mut handle: Box<dyn ProcessHandle>) {
-    match handle.holder_socket().map(Path::to_path_buf) {
-        Some(socket) => {
-            drop(handle);
-            thread::spawn(move || abandon(&socket));
-        },
-        None => {
-            let _ = handle.kill();
-        },
-    }
-}
-
 /// The instant that was `started` on the wall clock, so a process that started
 /// before this service keeps its uptime; one in the future reads as now.
 fn instant_of(started: SystemTime) -> Instant {
@@ -1363,6 +1345,7 @@ mod tests {
     use std::{
         cell::RefCell,
         collections::VecDeque,
+        path::Path,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -1377,9 +1360,9 @@ mod tests {
         },
         domain::{
             config::{Environment, ProcessSpec},
-            port::{OutputSink, ProcessRunner},
+            port::{OutputSink, ProcessInput, ProcessRunner},
             process::{Process, RestartPolicy, StopSignal},
-            pty::{ExitCause, PtySize},
+            pty::{ExitCause, PtySize, ScreenSource},
             value::{EnvName, EnvValue},
         },
     };
@@ -2468,6 +2451,22 @@ mod tests {
         }
 
         impl ProcessHandle for AnsweringHandle {
+            fn process_id(&self) -> Option<u32> {
+                None
+            }
+
+            fn input(&self) -> Option<Box<dyn ProcessInput>> {
+                None
+            }
+
+            fn screen_source(&self) -> ScreenSource {
+                ScreenSource::Mirror
+            }
+
+            fn abandon(mut self: Box<Self>) {
+                let _ = self.kill();
+            }
+
             fn answers_terminal_queries(&self) -> bool {
                 self.answers
             }

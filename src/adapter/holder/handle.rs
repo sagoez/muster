@@ -15,11 +15,12 @@ use super::{
     client::greet,
     error::HolderError,
     protocol::{ClientMessage, ClientRole, HolderControl, HolderMessage},
+    runner::abandon,
 };
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
     process::StopSignal,
-    pty::{ProcessOutput, PtyError, PtySize},
+    pty::{ProcessOutput, PtyError, PtySize, ScreenSource},
     value::OutputCursor,
 };
 
@@ -158,8 +159,17 @@ impl ProcessHandle for HolderHandle {
         true
     }
 
-    fn holder_socket(&self) -> Option<&Path> {
-        Some(&self.socket)
+    /// The holder serves the screen it renders on its socket.
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Served(self.socket.clone())
+    }
+
+    /// Disconnects, then reaches the holder afresh off the caller's thread,
+    /// kills its child and collects the exit, so the holder finishes.
+    fn abandon(self: Box<Self>) {
+        let socket = self.socket.clone();
+        drop(self);
+        thread::spawn(move || abandon(&socket));
     }
 
     /// The holder's screen at connect time, a repaint from a reset. It is kept
@@ -538,7 +548,7 @@ mod tests {
         let (sender, outputs) = unbounded();
         let mut handle =
             HolderHandle::supervise(service, &socket, Box::new(ChannelSink(sender)), WAIT).unwrap();
-        assert_eq!(handle.holder_socket(), Some(socket.as_path()));
+        assert_eq!(handle.screen_source(), ScreenSource::Served(socket.clone()));
         assert_eq!(
             handle.take_initial_screen(),
             Some(SCREEN.to_vec()),

@@ -1,4 +1,3 @@
-use super::lifecycle::discard;
 use crate::domain::port::ProcessHandle;
 
 /// How the process of a launch or adoption result that came back stale is
@@ -18,7 +17,7 @@ impl StaleRelease {
     pub fn release(self, handle: Box<dyn ProcessHandle>) {
         match self {
             Self::Detach => drop(handle),
-            Self::Discard => discard(handle),
+            Self::Discard => handle.abandon(),
         }
     }
 }

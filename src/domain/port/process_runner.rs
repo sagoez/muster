@@ -1,12 +1,11 @@
 use std::{
-    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use crate::domain::{
     process::StopSignal,
-    pty::{ProcessOutput, PtyError, PtySize, SpawnRequest},
+    pty::{ProcessOutput, PtyError, PtySize, ScreenSource, SpawnRequest},
     value::OutputCursor,
 };
 
@@ -31,17 +30,11 @@ pub trait ProcessInput: Send {
 /// Handle to a spawned process: write input, resize, or terminate it.
 pub trait ProcessHandle: Send {
     /// The OS process ID of the spawned child, when the platform exposes it.
-    /// Defaults to unknown so simple test doubles need not invent one.
-    fn process_id(&self) -> Option<u32> {
-        None
-    }
+    fn process_id(&self) -> Option<u32>;
 
     /// A writer onto the process's input for another thread, so a child that
-    /// stops reading blocks that thread rather than the controller. Defaults to
-    /// none so simple test doubles need not provide one.
-    fn input(&self) -> Option<Box<dyn ProcessInput>> {
-        None
-    }
+    /// stops reading blocks that thread rather than the controller.
+    fn input(&self) -> Option<Box<dyn ProcessInput>>;
 
     /// Whether something behind this handle already answers the child's
     /// terminal queries, so the supervisor must not answer them a second time.
@@ -50,11 +43,12 @@ pub trait ProcessHandle: Send {
         false
     }
 
-    /// The socket of the holder running this process, which serves its
-    /// authoritative screen. Defaults to none: a bare PTY has no holder.
-    fn holder_socket(&self) -> Option<&Path> {
-        None
-    }
+    /// Where the process's authoritative screen is read.
+    fn screen_source(&self) -> ScreenSource;
+
+    /// Lets go of the process for good, stopping it so nothing is left
+    /// running unsupervised. It never blocks the caller.
+    fn abandon(self: Box<Self>);
 
     /// The screen the process already had when this handle connected, to paint
     /// before any output that follows. Taken once; later calls return none.

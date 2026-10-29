@@ -449,7 +449,7 @@ mod tests {
         domain::{
             color_scheme::ColorScheme,
             process::StopSignal,
-            pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize},
+            pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
             value::{Cols, CommandLine, ProcessName, Rows, StartToken},
         },
     };
@@ -1268,6 +1268,37 @@ mod tests {
         drop(handle);
 
         abandon(record.socket());
+        wait_until("the holder to finish", || {
+            fixture
+                .holders
+                .lock()
+                .unwrap()
+                .iter()
+                .all(JoinHandle::is_finished)
+        });
+        assert!(fixture.record_files().is_empty());
+        wait_until("the child to die", || {
+            !LocalProcessIdentity::is_alive(Pid::try_new(record.child_pid()).unwrap())
+        });
+    }
+
+    /// Abandoning a holder's handle through the port stops its child and lets
+    /// the holder finish, without the caller waiting on either.
+    #[test]
+    fn abandoning_a_holder_handle_stops_its_child_and_lets_it_finish() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let (sink, _watch) = Watch::new();
+        let handle = runner
+            .spawn(fixture.request("while :; do sleep 0.05; done"), sink)
+            .unwrap();
+        let record = runner.locate(handle.process_id().unwrap()).unwrap();
+        assert_eq!(
+            handle.screen_source(),
+            ScreenSource::Served(record.socket().clone())
+        );
+
+        handle.abandon();
         wait_until("the holder to finish", || {
             fixture
                 .holders

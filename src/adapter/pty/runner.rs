@@ -18,7 +18,10 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         process::StopSignal,
-        pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
+        pty::{
+            ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, ScreenSource, SignalName,
+            SpawnRequest,
+        },
     },
 };
 
@@ -266,6 +269,16 @@ impl ProcessHandle for PtyProcessHandle {
 
     fn input(&self) -> Option<Box<dyn ProcessInput>> {
         Some(Box::new(self.input.clone()))
+    }
+
+    /// A bare PTY has nothing but its reader's rendering of the output.
+    fn screen_source(&self) -> ScreenSource {
+        ScreenSource::Mirror
+    }
+
+    /// Kills the process group; nothing else holds the process.
+    fn abandon(mut self: Box<Self>) {
+        let _ = self.kill();
     }
 
     fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {

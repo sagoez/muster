@@ -14,7 +14,7 @@ use super::{
     error::HolderError,
     server::HolderServer,
 };
-use crate::domain::pty::PtyError;
+use crate::{adapter::open_files::OpenFilesLimit, domain::pty::PtyError};
 
 /// Hidden subcommand that runs one holder in the current process.
 pub const HOLDER_SUBCOMMAND: &str = "__holder";
@@ -38,6 +38,10 @@ pub struct ExecHolderLauncher {
     /// The muster executable to run.
     #[getset(get = "pub")]
     binary: PathBuf,
+    /// The open-files soft limit the service started with, which each holder,
+    /// and so its child, starts back at.
+    #[getset(get = "pub")]
+    open_files: OpenFilesLimit,
 }
 
 impl HolderLauncher for ExecHolderLauncher {
@@ -52,7 +56,7 @@ impl HolderLauncher for ExecHolderLauncher {
         config.write_private(&path)?;
         let mut command = Command::new(&self.binary);
         command.arg(HOLDER_SUBCOMMAND).arg(SPEC_FLAG).arg(&path);
-        match detached(&mut command).spawn() {
+        match self.open_files.restore_in(detached(&mut command)).spawn() {
             Ok(holder) => {
                 reap(holder);
                 Ok(())

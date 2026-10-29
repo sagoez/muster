@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, set_open_files_limit};
 
 use super::process_tree::ProcessTree;
 use crate::domain::port::{ProcessMetrics, ProcessSample};
+
+/// How many `/proc` files `sysinfo` may keep open between refreshes. It keeps
+/// one per process it has seen otherwise, up to half the hard limit.
+const SYSINFO_OPEN_FILES: usize = 0;
 
 /// A [`ProcessMetrics`] backed by `sysinfo`, aggregating CPU and memory over each
 /// process subtree so a shell's real workload (its children) is counted, not just
@@ -14,7 +18,11 @@ pub struct SysinfoMetrics {
 }
 
 impl Default for SysinfoMetrics {
+    /// A sampler that keeps no `/proc` file open between samples. Building one
+    /// raises this process's open-files soft limit to the hard limit, so a
+    /// service reads its own limit first.
     fn default() -> Self {
+        set_open_files_limit(SYSINFO_OPEN_FILES);
         Self {
             system: System::new(),
         }

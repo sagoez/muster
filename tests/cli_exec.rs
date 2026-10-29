@@ -31,6 +31,7 @@ use muster::{
             ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderConfig, HolderDirs,
             HolderLauncher, HolderRunner, client::greet,
         },
+        open_files::OpenFilesLimit,
         service::{
             BatchOutcome, LaunchEnvironment, Notice, NoticeLevel, ProcessAction, ProcessStatus,
             ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest,
@@ -40,7 +41,7 @@ use muster::{
         store::SqliteStore,
     },
     domain::{
-        port::{Notifier, ProcessMetrics},
+        port::Notifier,
         process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
@@ -436,10 +437,6 @@ impl ProjectPorts for QuietPorts {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
         None
     }
-
-    fn process_metrics(&self) -> Option<Box<dyn ProcessMetrics>> {
-        None
-    }
 }
 
 /// Launches real holders from the built binary, but only after holding each
@@ -470,6 +467,7 @@ fn in_process_service(
         let singleton = Singleton::acquire(&state_dir)?.expect("no other service runs");
         let exec = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
+            .open_files(OpenFilesLimit::current().expect("the open-files limit reads"))
             .build();
         let launcher: Box<dyn HolderLauncher> = if held {
             Box::new(HeldLauncher(exec))
@@ -485,6 +483,7 @@ fn in_process_service(
                 HolderDirs::under(&state_dir),
             )))
             .ports(Box::new(QuietPorts))
+            .metrics(None)
             .stacks(Box::new(store.clone()))
             .settings(Box::new(store))
             .listening(None)

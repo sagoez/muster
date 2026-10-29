@@ -3,16 +3,16 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::OsString,
     sync::PoisonError,
-    time::{Instant, SystemTime},
+    time::SystemTime,
 };
 
 use crossbeam_channel::Sender;
 use getset::{Getters, MutGetters};
 
 use super::{
-    adopter::HolderAdopter, config_membership::ConfigMembership, deps::SupervisorDeps,
-    metrics::METRICS_SAMPLE_INTERVAL, pane::Pane, pending_launch::PendingLaunch, run_end::RunEnd,
-    run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
+    adopter::HolderAdopter, config_membership::ConfigMembership, deps::SupervisorDeps, pane::Pane,
+    pending_launch::PendingLaunch, run_end::RunEnd, run_readiness::RunReadiness,
+    spawn_generation::SpawnGeneration,
 };
 use crate::{
     adapter::service::{
@@ -23,7 +23,7 @@ use crate::{
     application::{StackSync, Workspace},
     domain::{
         config::Stack,
-        port::{ListeningSocket, Notifier, ProcessHandle, ProcessMetrics, ProcessRunner},
+        port::{ListeningSocket, Notifier, ProcessHandle, ProcessRunner},
         process::{ProcessState, ReadyCheck, ReadyProbe},
         project::Project,
         pty::ExitOutcome,
@@ -88,10 +88,6 @@ pub struct Supervisor {
     /// Latest sampled resource usage of every running pane.
     #[getset(get = "pub(crate)")]
     pub(super) usage: HashMap<PaneId, ProcessUsage>,
-    /// Samples each running process's resource usage.
-    pub(super) process_metrics: Option<Box<dyn ProcessMetrics>>,
-    /// When usage is next resampled.
-    pub(super) metrics_deadline: Instant,
     /// Delivers desktop notifications.
     pub(super) notifier: Option<Box<dyn Notifier>>,
     /// The settings launches take their terminal, log and colors from, and
@@ -145,7 +141,6 @@ impl Supervisor {
             event_log,
             probes,
             notifier,
-            process_metrics,
             settings,
         } = deps;
         let empty = Workspace::builder().processes(Vec::new()).build();
@@ -167,8 +162,6 @@ impl Supervisor {
             launches: HashMap::new(),
             detaching: false,
             usage: HashMap::new(),
-            process_metrics,
-            metrics_deadline: Instant::now() + METRICS_SAMPLE_INTERVAL,
             notifier,
             settings,
             failing_screen_reads: HashSet::new(),
@@ -210,12 +203,6 @@ impl Supervisor {
     #[cfg(test)]
     pub(crate) fn set_notifier(&mut self, notifier: Box<dyn Notifier>) {
         self.notifier = Some(notifier);
-    }
-
-    /// Swaps in a resource-usage sampler, for a test to inject a fake.
-    #[cfg(test)]
-    pub(crate) fn set_process_metrics(&mut self, metrics: Box<dyn ProcessMetrics>) {
-        self.process_metrics = Some(metrics);
     }
 
     /// The project's processes, for a test to arrange state directly.

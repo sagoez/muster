@@ -4,7 +4,7 @@ use typed_builder::TypedBuilder;
 use crate::{
     adapter::service::{ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices},
     domain::{
-        port::{Notifier, ProcessMetrics, ProcessRunner},
+        port::{Notifier, ProcessRunner},
         settings::Settings,
     },
 };
@@ -25,8 +25,6 @@ pub struct SupervisorDeps {
     pub(super) probes: Option<ProbeWorker>,
     /// Delivers desktop notifications; absent where none are shown.
     pub(super) notifier: Option<Box<dyn Notifier>>,
-    /// Samples each running process's resource usage; absent where unread.
-    pub(super) process_metrics: Option<Box<dyn ProcessMetrics>>,
     /// The settings each launch takes its terminal, log and colors from, and
     /// that decide whether a crash reaches the desktop.
     pub(super) settings: Settings,

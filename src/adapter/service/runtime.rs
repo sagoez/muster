@@ -35,6 +35,7 @@ use super::{
     singleton::Singleton,
     stack_event::{EventKind, EventSeq},
     supervisor::{HolderScreen, ScreenReply, StaleRelease, Supervisor, SupervisorDeps},
+    usage_sampler::UsageSampler,
 };
 use crate::{
     adapter::{bridge::WorkspaceRequest, holder::HolderRecord},
@@ -153,6 +154,8 @@ pub struct ServiceRuntime {
     port_sampler: Option<PortSampler>,
     /// When ports are next sampled.
     ports_deadline: Instant,
+    /// Samples every project's resource usage, when wired.
+    usage_sampler: Option<UsageSampler>,
 }
 
 impl ServiceRuntime {
@@ -200,6 +203,7 @@ impl ServiceRuntime {
             binary,
             holders,
             ports,
+            metrics,
             stacks,
             settings: settings_store,
             listening,
@@ -215,6 +219,7 @@ impl ServiceRuntime {
             probes: ProbeWorker::spawn(events.clone()),
             port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
             ports_deadline: Instant::now(),
+            usage_sampler: metrics.map(UsageSampler::new),
             events,
             notices: Notices::shared(Some(protocol::log_path(state_dir))),
             supervisors: HashMap::new(),
@@ -303,15 +308,17 @@ impl ServiceRuntime {
         }
     }
 
-    /// The earliest deadline of any supervisor's metrics, waits or readiness
-    /// checks, of any client waiting for events, and of the next port sample.
+    /// The earliest deadline of any supervisor's waits or readiness checks, of
+    /// any client waiting for events, and of the next usage and port sample.
     fn next_deadline(&self) -> Option<Instant> {
-        let supervisors = self.supervisors.values().flat_map(|supervisor| {
-            [
-                supervisor.next_metrics_deadline(),
-                supervisor.next_wait_deadline(),
-            ]
-        });
+        let supervisors = self
+            .supervisors
+            .values()
+            .map(Supervisor::next_wait_deadline);
+        let usage = self
+            .usage_sampler
+            .as_ref()
+            .and_then(|sampler| sampler.next_deadline(self.supervisors.values()));
         let events = self
             .event_waiters
             .iter()
@@ -321,7 +328,11 @@ impl ServiceRuntime {
             .as_ref()
             .filter(|_| !self.live_root_pids().is_empty())
             .map(|_| self.ports_deadline);
-        supervisors.chain(events).chain([ports]).flatten().min()
+        supervisors
+            .chain(events)
+            .chain([usage, ports])
+            .flatten()
+            .min()
     }
 
     /// Acknowledges the held exits whose restart settled, samples usage and
@@ -330,8 +341,10 @@ impl ServiceRuntime {
     fn tick(&mut self, now: Instant) {
         for supervisor in self.supervisors.values_mut() {
             supervisor.release_settled_exits();
-            supervisor.sample_metrics(now);
             supervisor.settle_waits(now);
+        }
+        if let Some(sampler) = &mut self.usage_sampler {
+            sampler.sample(now, self.supervisors.values_mut());
         }
         self.sample_ports(now);
         self.answer_event_waiters(now);
@@ -770,7 +783,6 @@ impl ServiceRuntime {
             .event_log(Arc::clone(&self.event_log))
             .probes(Some(self.probes.clone()))
             .notifier(self.ports.notifier())
-            .process_metrics(self.ports.process_metrics())
             .settings(self.settings.clone())
             .build();
         let mut supervisor =
@@ -1017,7 +1029,7 @@ mod tests {
                 Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
                 SettingChange,
             },
-            port::{Notifier, OutputSink, ProcessHandle, ProcessMetrics, ProcessRunner},
+            port::{Notifier, OutputSink, ProcessHandle, ProcessRunner},
             process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, SpawnRequest},
             value::{Cols, CommandLine, PaneId, Rows},
@@ -1201,10 +1213,6 @@ mod tests {
 
     impl ProjectPorts for TestPorts {
         fn notifier(&self) -> Option<Box<dyn Notifier>> {
-            None
-        }
-
-        fn process_metrics(&self) -> Option<Box<dyn ProcessMetrics>> {
             None
         }
     }
@@ -1490,6 +1498,7 @@ mod tests {
                     .binary(PathBuf::from(TEST_BINARY))
                     .holders(pool)
                     .ports(Box::new(TestPorts))
+                    .metrics(None)
                     .stacks(Box::new(store.clone()))
                     .settings(Box::new(store))
                     .listening(None)

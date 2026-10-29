@@ -13,8 +13,9 @@ use std::{
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use muster::{
-    adapter::holder::{
-        ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderRecord, HolderRunner,
+    adapter::{
+        holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderRecord, HolderRunner},
+        open_files::OpenFilesLimit,
     },
     domain::{
         color_scheme::ColorScheme,
@@ -134,6 +135,7 @@ impl Scratch {
     fn runner(&self) -> HolderRunner {
         let launcher = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
+            .open_files(OpenFilesLimit::current().unwrap())
             .build();
         HolderRunner::new(Box::new(launcher), self.dirs.clone())
     }

@@ -10,6 +10,7 @@ pub mod listening;
 pub mod mcp;
 pub mod metrics;
 pub mod notifier;
+pub mod open_files;
 pub mod path;
 pub mod private_dir;
 pub mod probe;

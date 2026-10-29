@@ -7,6 +7,7 @@ use muster::{
         listening::OsListeningPorts,
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
+        open_files::OpenFilesLimit,
         private_dir::{prepare_state_dir, state_dir},
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton, protocol,
@@ -15,10 +16,7 @@ use muster::{
         store::SqliteStore,
     },
     constants::APP_VERSION,
-    domain::{
-        config::ConfigError,
-        port::{Notifier, ProcessMetrics},
-    },
+    domain::{config::ConfigError, port::Notifier},
     error::MusterError,
 };
 
@@ -73,22 +71,20 @@ impl ProjectPorts for LocalPorts {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
         Some(Box::new(DesktopNotifier::new()))
     }
-
-    fn process_metrics(&self) -> Option<Box<dyn ProcessMetrics>> {
-        Some(Box::new(SysinfoMetrics::default()))
-    }
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one
 /// already runs, in which case it returns at once. Its own stderr goes to the
 /// service log first, so a failure to start is recorded even when it was
 /// spawned with no terminal. Every process runs under a holder launched from
-/// this binary, with its logs under the state directory.
+/// this binary, with its logs under the state directory, and starts at the
+/// open-files limit the service started with, read before `sysinfo` raises it.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when the state directory, database or service
 /// cannot be set up.
 fn run_service() -> Result<(), MusterError> {
+    let open_files = OpenFilesLimit::current()?;
     let state_dir = state_dir().ok_or(ServiceError::NoStateDir)?;
     prepare_state_dir(&state_dir)?;
     redirect_stderr(&protocol::log_path(&state_dir))?;
@@ -98,13 +94,17 @@ fn run_service() -> Result<(), MusterError> {
     };
     let store = SqliteStore::open_default()?;
     let binary = env::current_exe()?;
-    let launcher = ExecHolderLauncher::builder().binary(binary.clone()).build();
+    let launcher = ExecHolderLauncher::builder()
+        .binary(binary.clone())
+        .open_files(open_files)
+        .build();
     let runner = HolderRunner::new(Box::new(launcher), HolderDirs::under(&state_dir));
     let deps = ServiceDeps::builder()
         .version(APP_VERSION.to_string())
         .binary(binary)
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))
+        .metrics(Some(Box::new(SysinfoMetrics::default())))
         .stacks(Box::new(store.clone()))
         .settings(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))

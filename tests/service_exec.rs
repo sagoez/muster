@@ -7,8 +7,8 @@
 
 use std::{
     ffi::OsString,
-    fs,
-    os::unix::net::UnixStream,
+    fs, io,
+    os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -75,6 +75,11 @@ const CLIENT_VAR: &str = "FROM_CLIENT";
 const CLIENT_VALUE: &str = "client-value";
 /// The notice of a holder found running whose process left the project.
 const REMOVED_NOTICE: &str = "stopped: removed from the project";
+/// The row of `/proc/<pid>/limits` for open files.
+const OPEN_FILES_ROW: &str = "Max open files";
+/// The open-files soft limit a service is started with, below the hard limit
+/// `sysinfo` would raise it to.
+const SERVICE_OPEN_FILES: libc::rlim_t = 1000;
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -102,6 +107,30 @@ fn processes_under(subcommand: &str, root: &Path) -> Vec<u32> {
                 && String::from_utf8_lossy(&environ).contains(&root)
         })
         .collect()
+}
+
+/// This process's soft and hard limits on open files.
+fn open_files_limits() -> libc::rlimit {
+    let mut limits = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` only writes the struct it is handed.
+    unsafe {
+        libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits);
+    }
+    limits
+}
+
+/// The soft limit on open files of the process `pid`.
+fn soft_open_files(pid: u32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/limits"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix(OPEN_FILES_ROW))
+        .and_then(|limits| limits.split_whitespace().next())
+        .unwrap()
+        .to_string()
 }
 
 /// Whether the process `pid` exists.
@@ -271,7 +300,13 @@ impl Scratch {
     /// Spawns `muster __service` over this scratch's XDG roots with no
     /// terminal, as a client starts it, carrying variables no child may see.
     fn spawn_service(&self) -> Child {
-        Command::new(BINARY)
+        self.service_command().spawn().unwrap()
+    }
+
+    /// The `muster __service` command [`Self::spawn_service`] runs.
+    fn service_command(&self) -> Command {
+        let mut command = Command::new(BINARY);
+        command
             .arg(SERVICE_SUBCOMMAND)
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
@@ -280,15 +315,37 @@ impl Scratch {
             .env(INHERITED_VAR, "leaked")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+            .stderr(Stdio::null());
+        command
     }
 
     /// Starts `muster __service` over this scratch's XDG roots and waits until
     /// it accepts.
     fn start_service(&self) -> Child {
-        let child = self.spawn_service();
+        self.accepting(self.spawn_service())
+    }
+
+    /// Starts `muster __service` with an open-files soft limit of `soft`, as
+    /// a user's own `ulimit` would leave it, and waits until it accepts.
+    fn start_service_with_open_files(&self, soft: libc::rlim_t) -> Child {
+        let mut command = self.service_command();
+        // SAFETY: the hook only calls `getrlimit` and `setrlimit`, which are
+        // async-signal-safe and touch only the stack value they are given.
+        unsafe {
+            command.pre_exec(move || {
+                let mut limits = open_files_limits();
+                limits.rlim_cur = soft;
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        self.accepting(command.spawn().unwrap())
+    }
+
+    /// Waits until the service `child` accepts, and returns it.
+    fn accepting(&self, child: Child) -> Child {
         let socket = self.socket();
         wait_until("the service to accept", || {
             UnixStream::connect(&socket).is_ok()
@@ -625,4 +682,47 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     scratch.stop_service(successor);
     wait_until("the holder to finish", || scratch.holders().is_empty());
     assert!(!alive(pid));
+}
+
+/// A child started after the service has sampled usage runs with the
+/// open-files soft limit the service started with, not the hard limit
+/// `sysinfo` raised the service's own to.
+#[test]
+fn a_child_keeps_the_open_files_limit_the_service_started_with() {
+    let hard = open_files_limits().rlim_max;
+    assert!(
+        hard > SERVICE_OPEN_FILES,
+        "the hard limit leaves room to raise"
+    );
+    let mut scratch = Scratch::new();
+    let project = scratch.project_with(&[
+        process("api", SLEEPER, RestartPolicy::Never),
+        process("probe", SLEEPER, RestartPolicy::Never).with_autostart(false),
+    ]);
+    let service = scratch.start_service_with_open_files(SERVICE_OPEN_FILES);
+    scratch.up_running(&project);
+    wait_until("a usage sample", || scratch.api(&project).usage().is_some());
+
+    scratch.send(ServiceRequest::Control {
+        project: project.clone(),
+        name: ProcessName::try_new("probe").unwrap(),
+        action: ProcessAction::Start,
+        environment: client_env(),
+        wait: None,
+    });
+    let mut probe = None;
+    wait_until("the probe to run", || {
+        probe = scratch
+            .named(&project, "probe")
+            .and_then(|probe| *probe.pid());
+        probe.is_some()
+    });
+    let probe = probe.unwrap();
+    scratch.children.push(probe);
+
+    assert_eq!(soft_open_files(probe), SERVICE_OPEN_FILES.to_string());
+    scratch.send(ServiceRequest::Down {
+        project: project.clone(),
+    });
+    scratch.stop_service(service);
 }

@@ -1,45 +1,29 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
 
 use super::entity::Supervisor;
-use crate::{adapter::service::ProcessUsage, domain::value::PaneId};
-
-/// How often each running process's resource usage is resampled.
-pub(super) const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+use crate::{
+    adapter::service::ProcessUsage,
+    domain::{port::ProcessSample, value::PaneId},
+};
 
 impl Supervisor {
-    /// When usage is next resampled, if a sampler is wired and there is
-    /// anything to sample. `None` when no process is live and no usage is
-    /// cached, so an idle caller sleeps instead of waking every interval; a
-    /// later spawn re-arms it.
-    pub fn next_metrics_deadline(&self) -> Option<Instant> {
-        self.process_metrics.as_ref()?;
-        if self.live_pids().is_empty() && self.usage.is_empty() {
-            return None;
-        }
-        Some(self.metrics_deadline)
+    /// Whether a usage sample means anything here: a process is live, or
+    /// usage is still cached for one that is no longer sampled.
+    pub fn wants_usage(&self) -> bool {
+        !self.live_pids().is_empty() || !self.usage.is_empty()
     }
 
-    /// Resamples every live process's resource usage once the metrics deadline
-    /// has passed. Returns whether any usage changed.
-    pub fn sample_metrics(&mut self, now: Instant) -> bool {
-        if self.process_metrics.is_none() || now < self.metrics_deadline {
-            return false;
-        }
-        self.metrics_deadline = now + METRICS_SAMPLE_INTERVAL;
-        let live = self.live_pids();
-        if live.is_empty() && self.usage.is_empty() {
-            return false;
-        }
-        let pids: Vec<u32> = live.iter().map(|(_, pid)| *pid).collect();
-        let samples = self
-            .process_metrics
-            .as_mut()
-            .map(|metrics| metrics.sample(&pids))
-            .unwrap_or_default();
-        let updated: HashMap<PaneId, ProcessUsage> = live
+    /// The pid of every live process whose usage is sampled.
+    pub fn usage_pids(&self) -> Vec<u32> {
+        self.live_pids().into_iter().map(|(_, pid)| pid).collect()
+    }
+
+    /// Takes each live process's usage from `samples`, keyed by pid, dropping
+    /// usage for a process the samples no longer find. Returns whether any
+    /// usage changed.
+    pub fn take_usage(&mut self, samples: &HashMap<u32, ProcessSample>) -> bool {
+        let updated: HashMap<PaneId, ProcessUsage> = self
+            .live_pids()
             .into_iter()
             .filter_map(|(pane, pid)| {
                 samples.get(&pid).map(|sample| {
@@ -76,86 +60,45 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
-
     use super::*;
     use crate::{
         adapter::service::supervisor::testing::*,
         domain::{
-            port::{ProcessMetrics, ProcessSample},
             process::{Process, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
         },
     };
 
     const PANE: u64 = 0;
-    /// CPU load the fake sampler reports for every pid.
+    /// CPU load the sample reports.
     const SAMPLED_CPU: f32 = 12.5;
-    /// Memory the fake sampler reports for every pid.
+    /// Memory the sample reports.
     const SAMPLED_MEMORY: u64 = 4096;
-
-    /// A sampler that counts its calls and reports a fixed load for every pid.
-    struct FakeMetrics {
-        calls: Rc<RefCell<usize>>,
-    }
-
-    impl ProcessMetrics for FakeMetrics {
-        fn sample(&mut self, pids: &[u32]) -> HashMap<u32, ProcessSample> {
-            *self.calls.borrow_mut() += 1;
-            pids.iter()
-                .map(|pid| {
-                    (
-                        *pid,
-                        ProcessSample::builder()
-                            .cpu_percent(SAMPLED_CPU)
-                            .memory_bytes(SAMPLED_MEMORY)
-                            .build(),
-                    )
-                })
-                .collect()
-        }
-    }
-
-    /// A supervisor over one terminal, with a counting sampler wired.
-    fn sampled(processes: Vec<Process>) -> (Harness, Rc<RefCell<usize>>) {
-        let mut harness = Harness::new(Box::new(PidRunner), processes);
-        let calls = Rc::new(RefCell::new(0));
-        harness
-            .supervisor
-            .set_process_metrics(Box::new(FakeMetrics {
-                calls: calls.clone(),
-            }));
-        (harness, calls)
-    }
 
     /// One process `p` on [`PANE`].
     fn terminal() -> Process {
         spec("p", "sh", RestartPolicy::Never).to_process(PaneId::new(PANE))
     }
 
-    /// Usage is resampled only once the metrics deadline has passed, and then
-    /// reaches the snapshot.
-    #[test]
-    fn metrics_are_sampled_only_after_the_deadline() {
-        let (mut harness, calls) = sampled(vec![terminal()]);
-        harness.up();
-        let deadline = harness
-            .supervisor
-            .next_metrics_deadline()
-            .expect("a live process arms the sampler");
+    /// A sample of [`SAMPLED_CPU`] and [`SAMPLED_MEMORY`] for `pid`.
+    fn sample_of(pid: u32) -> HashMap<u32, ProcessSample> {
+        HashMap::from([(
+            pid,
+            ProcessSample::builder()
+                .cpu_percent(SAMPLED_CPU)
+                .memory_bytes(SAMPLED_MEMORY)
+                .build(),
+        )])
+    }
 
-        assert!(
-            !harness
-                .supervisor
-                .sample_metrics(deadline - Duration::from_millis(1))
-        );
-        assert_eq!(*calls.borrow(), 0);
-        assert!(harness.supervisor.sample_metrics(deadline));
-        assert_eq!(
-            *calls.borrow(),
-            1,
-            "sampling happens once the deadline passes"
-        );
+    /// A live process's sample reaches the snapshot, keyed by its pid.
+    #[test]
+    fn a_sample_reaches_the_snapshot() {
+        let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
+        harness.up();
+
+        assert_eq!(harness.supervisor.usage_pids(), vec![FAKE_LAUNCHER_PID]);
+        assert!(harness.supervisor.take_usage(&sample_of(FAKE_LAUNCHER_PID)));
 
         let usage = harness.supervisor.snapshot().processes()[0]
             .usage()
@@ -164,27 +107,21 @@ mod tests {
         assert_eq!(*usage.memory_bytes(), SAMPLED_MEMORY);
     }
 
-    /// With no live process and no cached usage there is nothing to sample, so
-    /// the timer is disarmed and the caller sleeps instead of waking every
-    /// interval to no-op.
+    /// With no live process and no cached usage, a sample means nothing.
     #[test]
-    fn metrics_timer_is_disarmed_when_nothing_is_live() {
-        let (harness, _) = sampled(Vec::new());
+    fn an_idle_project_wants_no_usage() {
+        let harness = Harness::new(Box::new(PidRunner), Vec::new());
 
-        assert!(
-            harness.supervisor.next_metrics_deadline().is_none(),
-            "an idle project with nothing to sample disarms the metrics timer"
-        );
+        assert!(!harness.supervisor.wants_usage());
     }
 
     /// The exit of the last live process drops its sampled usage at once, so
-    /// the timer disarms without waiting for another sample.
+    /// the project stops wanting samples without waiting for another one.
     #[test]
-    fn a_stopped_process_disarms_the_timer_once_its_usage_is_gone() {
-        let (mut harness, _) = sampled(vec![terminal()]);
+    fn a_stopped_process_drops_its_usage_at_once() {
+        let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
         harness.up();
-        let deadline = harness.supervisor.next_metrics_deadline().unwrap();
-        harness.supervisor.sample_metrics(deadline);
+        harness.supervisor.take_usage(&sample_of(FAKE_LAUNCHER_PID));
 
         harness.supervisor.force_kill(&name("p"));
         let pane = PaneId::new(PANE);
@@ -195,6 +132,6 @@ mod tests {
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
 
-        assert!(harness.supervisor.next_metrics_deadline().is_none());
+        assert!(!harness.supervisor.wants_usage());
     }
 }

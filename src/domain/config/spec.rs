@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use getset::{Getters, WithSetters};
 use strum::IntoEnumIterator;
@@ -10,8 +10,16 @@ use crate::domain::{
         UnconfinedDir, stays_under_root,
     },
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
+    value::{CommandLine, Description, LocalPort, PaneId, ProcessName, ProjectRoot},
 };
+
+/// The ports a launch checks are free: `declared` and the port `ready` probes,
+/// each once, ascending.
+pub fn launch_ports(declared: &BTreeSet<LocalPort>, ready: Option<&ReadyCheck>) -> Vec<LocalPort> {
+    let mut ports = declared.clone();
+    ports.extend(ready.and_then(|check| check.probe().port()));
+    ports.into_iter().collect()
+}
 
 /// The stored definition of one process in a project's stack.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]
@@ -47,6 +55,10 @@ pub struct ProcessSpec {
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on, checked free before each launch.
+    #[getset(get = "pub", set_with = "pub")]
+    #[builder(default)]
+    ports: BTreeSet<LocalPort>,
 }
 
 impl ProcessSpec {
@@ -94,7 +106,14 @@ impl ProcessSpec {
             restart: change.restart().unwrap_or(self.restart),
             stop,
             ready: change.ready().clone().apply(self.ready),
+            ports: change.ports().clone().unwrap_or(self.ports),
         })
+    }
+
+    /// The ports a launch checks are free: those declared and the readiness
+    /// port, each once, ascending.
+    pub fn launch_ports(&self) -> Vec<LocalPort> {
+        launch_ports(&self.ports, self.ready.as_ref())
     }
 
     /// The fields `after` holds a different value in, in definition order.
@@ -110,6 +129,7 @@ impl ProcessSpec {
                 ProcessField::StopSignal => self.stop.signal() != after.stop.signal(),
                 ProcessField::StopGrace => self.stop.grace_period() != after.stop.grace_period(),
                 ProcessField::Ready => self.ready != after.ready,
+                ProcessField::Ports => self.ports != after.ports,
             })
             .collect()
     }
@@ -189,6 +209,7 @@ impl ProcessSpec {
             .stop(self.stop)
             .autostart(self.autostart)
             .ready(self.ready.clone())
+            .ports(self.ports.clone())
             .build()
     }
 }
@@ -200,7 +221,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::{ENV_VARS_MAX, FieldEdit},
-        process::{ProcessState, StopSignal},
+        process::{ProcessState, ReadyProbe, StopSignal},
         value::{ENV_VALUE_MAX_CHARS, EnvName, EnvValue, PROCESS_NAME_MAX_CHARS, StopGrace},
     };
 
@@ -286,6 +307,63 @@ mod tests {
         assert_eq!(*changed.restart(), RestartPolicy::Always);
         assert_eq!(*changed.stop().signal(), StopSignal::Terminate);
         assert_eq!(*changed.stop().grace_period(), grace(9));
+    }
+
+    /// The port `raw`.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
+
+    #[test]
+    fn a_ports_change_replaces_the_set_and_an_empty_set_clears_it() {
+        let declared = spec().with_ports(BTreeSet::from([port(3000), port(5173)]));
+        let replace = ProcessChange::builder()
+            .ports(Some(BTreeSet::from([port(8080)])))
+            .build();
+        let clear = ProcessChange::builder()
+            .ports(Some(BTreeSet::new()))
+            .build();
+
+        let replaced = declared.clone().with_change(&replace);
+        let cleared = declared.clone().with_change(&clear);
+
+        assert_eq!(replaced.ports(), &BTreeSet::from([port(8080)]));
+        assert!(cleared.ports().is_empty());
+        assert_eq!(
+            declared
+                .clone()
+                .with_change(&ProcessChange::builder().build()),
+            declared,
+            "a change naming no ports keeps them"
+        );
+        assert_eq!(declared.differing_fields(&replaced), [ProcessField::Ports]);
+    }
+
+    #[test]
+    fn launch_ports_join_declared_and_readiness_ports_once_in_order() {
+        let ready = |target: &str| {
+            Some(
+                ReadyCheck::builder()
+                    .probe(ReadyProbe::from_stored("port", target).unwrap())
+                    .timeout("30s".parse().unwrap())
+                    .build(),
+            )
+        };
+        let declared = spec().with_ports(BTreeSet::from([port(5173), port(3000)]));
+
+        assert_eq!(declared.clone().with_ready(ready("3000")).launch_ports(), [
+            port(3000),
+            port(5173)
+        ]);
+        assert_eq!(declared.clone().with_ready(ready("4000")).launch_ports(), [
+            port(3000),
+            port(4000),
+            port(5173)
+        ]);
+        assert_eq!(spec().with_ready(ready("4000")).launch_ports(), [port(
+            4000
+        )]);
+        assert!(spec().launch_ports().is_empty());
     }
 
     #[test]

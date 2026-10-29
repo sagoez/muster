@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::{Environment, ProcessDefaults, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
-    value::{CommandLine, Description, ProcessName, StopGrace},
+    value::{CommandLine, Description, LocalPort, ProcessName, StopGrace},
 };
 
 /// A process as `muster add` receives it, before the `default_*` settings fill
@@ -42,6 +42,9 @@ pub struct ProcessDraft {
     /// What each run waits for before it counts as ready, when anything.
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on.
+    #[builder(default)]
+    ports: BTreeSet<LocalPort>,
 }
 
 impl ProcessDraft {
@@ -61,6 +64,7 @@ impl ProcessDraft {
             .restart(self.restart.unwrap_or(*defaults.restart()))
             .stop(stop)
             .ready(self.ready)
+            .ports(self.ports)
             .build()
     }
 }
@@ -123,9 +127,14 @@ mod tests {
             .autostart(Some(true))
             .restart(Some(RestartPolicy::Always))
             .stop_signal(Some(StopSignal::Interrupt))
+            .ports(BTreeSet::from([LocalPort::try_new(3000).unwrap()]))
             .build()
             .complete(&defaults());
 
+        assert_eq!(
+            spec.ports(),
+            &BTreeSet::from([LocalPort::try_new(3000).unwrap()])
+        );
         assert!(*spec.autostart());
         assert_eq!(*spec.restart(), RestartPolicy::Always);
         assert_eq!(*spec.stop().signal(), StopSignal::Interrupt);

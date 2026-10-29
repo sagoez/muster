@@ -55,6 +55,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_lock_sessions.sql"),
     include_str!("migrations/0007_service_records.sql"),
     include_str!("migrations/0008_ended_sessions.sql"),
+    include_str!("migrations/0009_idle_stop_and_ports.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and
@@ -379,6 +380,9 @@ mod tests {
     /// The schema version the stack edit log shipped at, the last before the
     /// setting edits, lock sessions and service records.
     const EDIT_LOG_SCHEMA: usize = 4;
+    /// The schema version the ended sessions shipped at, the last before idle
+    /// stop and declared ports.
+    const ENDED_SESSIONS_SCHEMA: usize = 8;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -528,6 +532,53 @@ mod tests {
         assert_eq!(store.locks(&root).unwrap().len(), 1);
         assert_eq!(store.raised_through(&root).unwrap(), None);
         assert!(store.ended_runs(&root).unwrap().is_empty());
+    }
+
+    /// A database at the schema before idle stop and ports, holding a
+    /// changed setting and a project with a process, migrates to an idle
+    /// stop of 30 minutes, keeps every row, and leaves the project following
+    /// the setting with no ports declared.
+    #[test]
+    fn the_idle_stop_migration_seeds_30m_and_keeps_existing_rows() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        let dir = scratch.path().join("shop");
+        fs::create_dir(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        let shipped = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..ENDED_SESSIONS_SCHEMA] {
+            shipped.execute_batch(migration).unwrap();
+        }
+        shipped
+            .pragma_update(None, USER_VERSION, ENDED_SESSIONS_SCHEMA as u32)
+            .unwrap();
+        shipped
+            .execute(
+                "INSERT INTO projects (root, name, created_at) VALUES (?1, 'shop', 0)",
+                [root.as_ref().to_str().unwrap()],
+            )
+            .unwrap();
+        shipped
+            .execute_batch(
+                "UPDATE settings SET scrollback_lines = 5;
+                 INSERT INTO processes (project_id, name_key, name, command, autostart, \
+                     restart, stop_signal, stop_grace_ms) \
+                     VALUES (1, 'web', 'web', 'npm run dev', 1, 'never', 'terminate', 5000);",
+            )
+            .unwrap();
+        drop(shipped);
+
+        let store = SqliteStore::open(&path).unwrap();
+
+        assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
+        let settings = store.load().unwrap();
+        assert_eq!(settings.idle_stop().to_string(), "30m");
+        assert_eq!(settings.scrollback().into_inner(), 5);
+        let project = store.project_at(&root).unwrap().unwrap();
+        assert_eq!(*project.idle_stop(), None);
+        let stack = store.stack(&root).unwrap().unwrap();
+        assert_eq!(stack.processes().len(), 1);
+        assert!(stack.processes()[0].ports().is_empty());
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

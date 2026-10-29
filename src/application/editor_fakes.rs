@@ -12,8 +12,9 @@ use crate::domain::{
     },
     coordination::Author,
     port::{SettingsReader, SettingsStore, StackReader, StackStore, StateChangeNotifier},
+    project::Project,
     settings::Settings,
-    value::{ProcessName, ProjectRoot, StackRevision},
+    value::{IdleStop, ProcessName, ProjectRoot, StackRevision},
 };
 
 /// What a refused write reports.
@@ -137,6 +138,20 @@ impl StackStore for EditorFakes {
             .processes(Vec::new())
             .build();
         Ok((registration(), stack.plan_import(processes, mode)?))
+    }
+
+    fn set_idle_stop(
+        &self,
+        _root: &ProjectRoot,
+        idle_stop: Option<IdleStop>,
+    ) -> Result<Project, ConfigError> {
+        self.write()?;
+        let project = registration().project().clone();
+        Ok(Project::builder()
+            .root(project.root().clone())
+            .name(project.name().clone())
+            .idle_stop(idle_stop)
+            .build())
     }
 }
 

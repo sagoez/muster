@@ -26,6 +26,8 @@ pub enum SettingKey {
     DefaultStopGrace,
     /// Whether an agent over MCP may edit the stack.
     McpStackEdits,
+    /// How long a project with no shell in it keeps running.
+    IdleStop,
 }
 
 impl SettingKey {
@@ -43,7 +45,8 @@ impl SettingKey {
             | Self::LogMaxSize
             | Self::Scrollback
             | Self::ColorScheme
-            | Self::McpStackEdits => false,
+            | Self::McpStackEdits
+            | Self::IdleStop => false,
         }
     }
 }
@@ -65,6 +68,7 @@ mod tests {
             "default-stop-grace"
         );
         assert_eq!(SettingKey::McpStackEdits.to_string(), "mcp-stack-edits");
+        assert_eq!(SettingKey::IdleStop.to_string(), "idle-stop");
     }
 
     /// An agent sets exactly the `default-*` keys.

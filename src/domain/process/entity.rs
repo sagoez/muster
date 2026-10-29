@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessSpec},
+    config::{Environment, ProcessSpec, launch_ports},
     process::{ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, PaneId, ProcessName},
+    value::{CommandLine, Description, LocalPort, PaneId, ProcessName},
 };
 
 /// A process managed by a project's supervisor: its definition plus its pane
@@ -40,6 +40,9 @@ pub struct Process {
     /// What each run waits for before it counts as ready, when anything.
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on, checked free before each launch.
+    #[builder(default)]
+    ports: BTreeSet<LocalPort>,
 }
 
 impl Process {
@@ -59,6 +62,13 @@ impl Process {
         self.stop = *spec.stop();
         self.autostart = *spec.autostart();
         self.ready = spec.ready().clone();
+        self.ports = spec.ports().clone();
+    }
+
+    /// The ports a launch checks are free: those declared and the readiness
+    /// port, each once, ascending.
+    pub fn launch_ports(&self) -> Vec<LocalPort> {
+        launch_ports(&self.ports, self.ready.as_ref())
     }
 
     /// The definition this process runs, without its pane or state.
@@ -73,6 +83,7 @@ impl Process {
             .restart(self.restart)
             .stop(self.stop)
             .ready(self.ready.clone())
+            .ports(self.ports.clone())
             .build()
     }
 }
@@ -106,6 +117,7 @@ mod tests {
                     .grace_period(StopGrace::try_new(Duration::from_secs(3)).unwrap())
                     .build(),
             )
+            .ports(BTreeSet::from([LocalPort::try_new(5173).unwrap()]))
             .build()
     }
 
@@ -116,6 +128,7 @@ mod tests {
 
         assert_eq!(*process.state(), ProcessState::Pending);
         assert_eq!(process.spec(), original);
+        assert_eq!(process.launch_ports(), original.launch_ports());
     }
 
     /// A changed definition keeps the pane and its state.
@@ -123,7 +136,7 @@ mod tests {
     fn set_spec_keeps_identity_and_state() {
         let mut process = spec("npm run dev").to_process(PaneId::new(4));
         process.set_state(ProcessState::Running);
-        let changed = spec("pnpm dev");
+        let changed = spec("pnpm dev").with_ports(BTreeSet::new());
 
         process.set_spec(&changed);
 

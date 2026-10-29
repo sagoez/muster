@@ -4,7 +4,8 @@ use rusqlite::{Connection, Row, params};
 use super::{
     edit_log_rows::record_edit_everywhere,
     sqlite_store::{
-        SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
+        SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
+        positive_from_millis, refused,
     },
     store_error::StoreError,
 };
@@ -14,14 +15,59 @@ use crate::domain::{
     port::{SettingsReader, SettingsStore},
     pty::PtySize,
     settings::Settings,
-    value::{ByteSize, DetachKey, LogMaxSize, ScrollbackLines},
+    value::{ByteSize, DetachKey, IdleStop, LogMaxSize, ScrollbackLines},
 };
 
 /// Selects the settings columns [`settings_from_row`] reads by name.
 const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, default_cols, \
                                detach_key, log_max_size_bytes, scrollback_lines, color_scheme, \
                                default_autostart, default_restart, default_stop_signal, \
-                               default_stop_grace_ms, mcp_stack_edits FROM settings WHERE id = 1";
+                               default_stop_grace_ms, mcp_stack_edits, idle_stop_kind, \
+                               idle_stop_ms FROM settings WHERE id = 1";
+/// The stored kind of an idle stop that waits `idle_stop_ms`.
+const IDLE_STOP_AFTER: &str = "after";
+/// The stored kind of an idle stop that never comes.
+const IDLE_STOP_NEVER: &str = "never";
+/// An idle stop, as its errors name it.
+const IDLE_STOP: &str = "idle stop";
+
+/// The `idle_stop_kind` and `idle_stop_ms` columns `idle_stop` is stored as,
+/// in the settings row and a project's row alike.
+///
+/// # Errors
+/// Returns [`ConfigError::TooLarge`] for a duration too long to store.
+pub(super) fn idle_stop_columns(
+    idle_stop: &IdleStop,
+) -> Result<(&'static str, Option<i64>), ConfigError> {
+    match idle_stop {
+        IdleStop::After(duration) => Ok((
+            IDLE_STOP_AFTER,
+            Some(duration_millis(IDLE_STOP, duration.into_inner())?),
+        )),
+        IdleStop::Never => Ok((IDLE_STOP_NEVER, None)),
+    }
+}
+
+/// The idle stop the `idle_stop_kind` and `idle_stop_ms` columns hold.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] for an unknown kind, a duration that is
+/// not positive, or milliseconds that do not match the kind.
+pub(super) fn idle_stop_from_columns(
+    kind: &str,
+    millis: Option<i64>,
+) -> Result<IdleStop, ConfigError> {
+    match (kind, millis) {
+        (IDLE_STOP_AFTER, Some(millis)) => {
+            positive_from_millis(IDLE_STOP, millis).map(IdleStop::After)
+        },
+        (IDLE_STOP_NEVER, None) => Ok(IdleStop::Never),
+        _ => Err(corrupt(
+            IDLE_STOP,
+            format!("kind {kind} does not go with {millis:?} milliseconds"),
+        )),
+    }
+}
 
 /// Reads a [`SELECT_SETTINGS`] row, validating each value through the domain
 /// so a hand edit cannot smuggle in a value a write would refuse.
@@ -36,6 +82,8 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
     let default_stop_signal: String = row.get("default_stop_signal").map_err(db_error)?;
     let default_stop_grace_ms: i64 = row.get("default_stop_grace_ms").map_err(db_error)?;
     let mcp_stack_edits: String = row.get("mcp_stack_edits").map_err(db_error)?;
+    let idle_stop_kind: String = row.get("idle_stop_kind").map_err(db_error)?;
+    let idle_stop_ms: Option<i64> = row.get("idle_stop_ms").map_err(db_error)?;
     let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
@@ -80,6 +128,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
                 .parse()
                 .map_err(|error| refused("MCP stack edits", &error))?,
         )
+        .idle_stop(idle_stop_from_columns(&idle_stop_kind, idle_stop_ms)?)
         .build())
 }
 
@@ -95,11 +144,13 @@ fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
 
 /// Overwrites the settings row with `settings`.
 fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigError> {
+    let (idle_stop_kind, idle_stop_ms) = idle_stop_columns(settings.idle_stop())?;
     conn.execute(
         "UPDATE settings SET desktop_notifications = ?1, default_rows = ?2, default_cols = ?3, \
          detach_key = ?4, log_max_size_bytes = ?5, scrollback_lines = ?6, color_scheme = ?7, \
          default_autostart = ?8, default_restart = ?9, default_stop_signal = ?10, \
-         default_stop_grace_ms = ?11, mcp_stack_edits = ?12 WHERE id = 1",
+         default_stop_grace_ms = ?11, mcp_stack_edits = ?12, idle_stop_kind = ?13, \
+         idle_stop_ms = ?14 WHERE id = 1",
         params![
             *settings.desktop_notifications(),
             settings.default_size().rows().into_inner(),
@@ -116,6 +167,8 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
                 settings.default_stop_grace().into_inner()
             )?,
             settings.mcp_stack_edits().to_string(),
+            idle_stop_kind,
+            idle_stop_ms,
         ],
     )
     .map_err(db_error)?;
@@ -194,6 +247,61 @@ mod tests {
         assert_eq!(*settings.default_stop_signal(), StopSignal::Terminate);
         assert_eq!(settings.default_stop_grace().to_string(), "5s");
         assert_eq!(*settings.mcp_stack_edits(), McpStackEdits::Allow);
+        assert_eq!(settings.idle_stop().to_string(), "30m");
+    }
+
+    /// `never` and a duration are each stored and read back, through another
+    /// connection too.
+    #[test]
+    fn idle_stop_never_and_a_duration_round_trip_through_settings() {
+        let (store, scratch) = fresh_store();
+
+        for raw in ["never", "1h 30m", "250ms"] {
+            let change = parsed(SettingKey::IdleStop, raw);
+            store.apply(&change, &Author::human()).unwrap();
+
+            let reopened = SqliteStore::open(&database(&scratch)).unwrap();
+            assert_eq!(
+                reopened.load().unwrap().value_text(SettingKey::IdleStop),
+                raw
+            );
+        }
+    }
+
+    /// A hand edit that leaves the idle stop's kind and milliseconds at odds,
+    /// or its duration zero, is refused by the schema, in the settings row
+    /// and in a project's.
+    #[test]
+    fn a_hand_edited_idle_stop_kind_without_ms_is_refused_by_the_schema() {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let edit = |sql: &str| store.write(|conn| conn.execute(sql, []).map_err(db_error));
+
+        for refused in [
+            "UPDATE settings SET idle_stop_ms = NULL",
+            "UPDATE settings SET idle_stop_kind = 'never'",
+            "UPDATE settings SET idle_stop_ms = 0",
+            "UPDATE settings SET idle_stop_kind = 'soon'",
+            "UPDATE projects SET idle_stop_kind = 'after'",
+            "UPDATE projects SET idle_stop_ms = 5000",
+            "UPDATE projects SET idle_stop_kind = 'never', idle_stop_ms = 5000",
+            "UPDATE projects SET idle_stop_kind = 'after', idle_stop_ms = 0",
+        ] {
+            assert!(edit(refused).is_err(), "{refused}");
+        }
+        for accepted in [
+            "UPDATE settings SET idle_stop_kind = 'never', idle_stop_ms = NULL",
+            "UPDATE projects SET idle_stop_kind = 'never'",
+            "UPDATE projects SET idle_stop_kind = 'after', idle_stop_ms = 5000",
+        ] {
+            assert!(edit(accepted).is_ok(), "{accepted}");
+        }
+        assert_eq!(*store.load().unwrap().idle_stop(), IdleStop::Never);
     }
 
     /// Every setting written reads back, through another connection too.
@@ -212,6 +320,7 @@ mod tests {
             parsed(SettingKey::DefaultStopSignal, "interrupt"),
             parsed(SettingKey::DefaultStopGrace, "1m 30s"),
             parsed(SettingKey::McpStackEdits, "read-only"),
+            parsed(SettingKey::IdleStop, "never"),
         ];
 
         let mut expected = store.load().unwrap();

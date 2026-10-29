@@ -17,8 +17,8 @@ use crate::{
         pty::{PtyError, PtySize},
         settings::Settings,
         value::{
-            ByteSize, CommandLine, DetachKey, LogMaxSize, PaneId, Pid, ProcessName, ProjectName,
-            ProjectRoot, ScrollbackLines, StopGrace,
+            ByteSize, CommandLine, DetachKey, IdleStop, LogMaxSize, PaneId, Pid, PositiveDuration,
+            ProcessName, ProjectName, ProjectRoot, ScrollbackLines, StopGrace,
         },
     },
 };
@@ -33,6 +33,8 @@ const TEST_SCROLLBACK: usize = 100;
 const TEST_LOG_CAP_MIB: u64 = 4;
 /// Grace of every harness process's stop policy.
 pub(crate) const TEST_STOP_GRACE: Duration = Duration::from_secs(7);
+/// How long a harness project stays up with no shell in it.
+const TEST_IDLE_STOP: Duration = Duration::from_secs(30 * 60);
 /// The pid a [`PidHandle`](super::pid_handle::PidHandle) reports.
 const FAKE_LAUNCHER_PID: u32 = 4242;
 /// The screen a [`ConnectedHandle`](super::connected_handle::ConnectedHandle)
@@ -115,6 +117,9 @@ pub(crate) fn test_settings() -> Settings {
         .default_stop_signal(StopSignal::Terminate)
         .default_stop_grace(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
         .mcp_stack_edits(McpStackEdits::Allow)
+        .idle_stop(IdleStop::After(
+            PositiveDuration::try_new(TEST_IDLE_STOP).unwrap(),
+        ))
         .build()
 }
 

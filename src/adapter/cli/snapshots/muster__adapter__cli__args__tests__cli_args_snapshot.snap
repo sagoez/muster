@@ -397,7 +397,7 @@ Print one setting's value
 Usage: muster config get [OPTIONS] <KEY>
 
 Arguments:
-  <KEY>  The setting [possible values: desktop-notifications, default-size, detach-key, log-max-size, scrollback, color-scheme, default-autostart, default-restart, default-stop-signal, default-stop-grace, mcp-stack-edits]
+  <KEY>  The setting [possible values: desktop-notifications, default-size, detach-key, log-max-size, scrollback, color-scheme, default-autostart, default-restart, default-stop-signal, default-stop-grace, mcp-stack-edits, idle-stop]
 
 Options:
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
@@ -411,7 +411,7 @@ Change one setting
 Usage: muster config set [OPTIONS] <KEY> <VALUE>
 
 Arguments:
-  <KEY>    The setting [possible values: desktop-notifications, default-size, detach-key, log-max-size, scrollback, color-scheme, default-autostart, default-restart, default-stop-signal, default-stop-grace, mcp-stack-edits]
+  <KEY>    The setting [possible values: desktop-notifications, default-size, detach-key, log-max-size, scrollback, color-scheme, default-autostart, default-restart, default-stop-signal, default-stop-grace, mcp-stack-edits, idle-stop]
   <VALUE>  Its new value, in the form `muster config get` prints
 
 Options:

@@ -6,6 +6,7 @@ mod author_wire;
 mod epoch_seconds_wire;
 mod exit_cause_wire;
 mod exit_outcome_wire;
+mod idle_stop_wire;
 mod listening_socket_wire;
 mod log_pattern_wire;
 mod port_occupant_wire;

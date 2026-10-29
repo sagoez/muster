@@ -104,6 +104,7 @@ mod tests {
             .default_stop_signal(StopSignal::Terminate)
             .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
             .mcp_stack_edits(McpStackEdits::Allow)
+            .idle_stop("30m".parse().unwrap())
             .build()
     }
 

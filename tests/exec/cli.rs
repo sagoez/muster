@@ -652,6 +652,34 @@ fn up_ps_logs_and_down_report_what_happened() {
     }
 }
 
+/// A second `up` names what it found running already, so an agent can tell
+/// "everything is up" from "nothing autostarts": `stack_up` lists it under
+/// `already_running`, and `up --json` with that outcome.
+#[test]
+fn a_second_up_names_what_was_already_running() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut mcp = McpSession::start(&mut scratch, &project);
+
+    let first = mcp.result("stack_up", serde_json::json!({}))["structuredContent"].clone();
+    let second = mcp.result("stack_up", serde_json::json!({}))["structuredContent"].clone();
+    let (up, report) = scratch.json_on(&project, &["up"]);
+
+    assert_eq!(first["started"], serde_json::json!(["api"]), "{first}");
+    assert_eq!(second["started"], serde_json::json!([]), "{second}");
+    assert_eq!(
+        second["already_running"],
+        serde_json::json!(["api"]),
+        "{second}"
+    );
+    assert!(up.status.success(), "{}", shown(&up));
+    assert_eq!(report["processes"][0]["name"], "api", "{report}");
+    assert_eq!(
+        report["processes"][0]["outcome"], "already-running",
+        "{report}"
+    );
+}
+
 /// A neighbour crash-looping while the command runs is context, not a
 /// reason for the command to fail.
 #[test]

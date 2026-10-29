@@ -16,6 +16,10 @@ pub struct BatchOutcome {
     acted: Vec<ProcessName>,
     /// The processes it would have acted on but could not.
     refused: Vec<Refusal>,
+    /// The processes `Up` found running or starting already, in config
+    /// section order.
+    #[builder(default)]
+    already_running: Vec<ProcessName>,
     /// How the wait on each process it started ended, in the order of
     /// `acted`, when it was asked to wait.
     #[builder(default)]
@@ -23,6 +27,15 @@ pub struct BatchOutcome {
 }
 
 impl BatchOutcome {
+    /// This outcome with `already_running`.
+    #[must_use]
+    pub fn with_already_running(self, already_running: Vec<ProcessName>) -> Self {
+        Self {
+            already_running,
+            ..self
+        }
+    }
+
     /// Whether it acted on nothing and refused nothing.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {

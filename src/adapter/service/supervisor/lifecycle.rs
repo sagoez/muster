@@ -68,7 +68,8 @@ const EXIT_ACKNOWLEDGE_FAILED_NOTICE: &str =
 impl Supervisor {
     /// Starts every autostart process that is not already running, each with
     /// `environment`, the environment of the command that brought the project
-    /// up. Returns what it started and what it left stopped, with why.
+    /// up. Returns what it started, the autostart processes already running
+    /// or starting, and what it left stopped, with why.
     pub fn up(&mut self, environment: &LaunchEnvironment) -> BatchOutcome {
         let before: HashSet<PaneId> = self
             .workspace
@@ -76,6 +77,16 @@ impl Supervisor {
             .iter()
             .map(|process| *process.id())
             .filter(|pane| self.is_live(*pane) || self.is_starting(*pane))
+            .collect();
+        let already_running: Vec<ProcessName> = self
+            .workspace
+            .processes()
+            .iter()
+            .filter(|process| {
+                let pane = *process.id();
+                *process.autostart() && before.contains(&pane) && !self.is_unsupervised(pane)
+            })
+            .map(|process| process.name().clone())
             .collect();
         self.attention.begin_batch();
         for pane in self.autostart_panes() {
@@ -101,6 +112,7 @@ impl Supervisor {
             .filter_map(|process| self.unsupervised_refusal(*process.id()))
             .collect();
         self.finish_batch(acted, left_unsupervised)
+            .with_already_running(already_running)
     }
 
     /// Ends a project-wide request that acted on `acted`: every error it

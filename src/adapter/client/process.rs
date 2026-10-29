@@ -156,8 +156,27 @@ fn up_sending(
         .bound(bound)
         .build();
     let report = report(client, project, settling, watch)?;
+    let report = with_already_running(report, &batch, &before);
     let report = with_refusals(report, &batch, client, project)?;
     Ok((report, batch.waits().clone()))
+}
+
+/// `report` with each autostart process `batch` found running or starting
+/// already listed as such, with how `ps` listed it before the request.
+fn with_already_running(
+    report: ActionReport,
+    batch: &BatchOutcome,
+    before: &ProjectStatus,
+) -> ActionReport {
+    let running = batch.already_running().iter().map(|name| {
+        ProcessOutcome::builder()
+            .name(name.clone())
+            .outcome(Outcome::AlreadyRunning)
+            .reason(None)
+            .status(find(before, name).map(ProcessView::from))
+            .build()
+    });
+    report.with_more(running)
 }
 
 /// Lets the caller send its request, unless `watch` says it was interrupted

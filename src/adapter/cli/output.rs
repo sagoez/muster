@@ -317,7 +317,8 @@ pub(super) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
 
 /// The human report of `report`: one row per process saying what became of
 /// it, with what supervision said about it, then any other notices as
-/// context.
+/// context. An `up` leaves out what it found running already, which only its
+/// JSON lists, and says so when that is everything.
 pub fn action_rows(report: &ActionReport) -> Report {
     let mut rows = vec![Row::unlabeled(
         RowKind::Dim,
@@ -326,6 +327,12 @@ pub fn action_rows(report: &ActionReport) -> Report {
     let acted: Vec<Row> = report
         .processes()
         .iter()
+        .filter(|process| {
+            !matches!(
+                (report.action(), process.outcome()),
+                (Action::Up, Outcome::AlreadyRunning)
+            )
+        })
         .map(|process| {
             Row::labeled(
                 outcome_kind(process.outcome()),

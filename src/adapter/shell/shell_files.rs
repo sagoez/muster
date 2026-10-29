@@ -41,7 +41,9 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// The shells running muster's hook, kept as files under
 /// `<state dir>/shells/`: `<pid>.json` holds a shell's last report, and
-/// `<pid>-<load>-<seq>.note` the lines its hook prints at its next prompt.
+/// `<pid>-<start>-<load>-<seq>.note` the lines its hook prints at its next
+/// prompt, named by the whole shell so a later shell on a reused pid never
+/// has its notes taken for an earlier one's.
 #[derive(Debug, Clone)]
 pub struct ShellFiles {
     /// The folder every shell's files live in.
@@ -61,11 +63,11 @@ impl ShellFiles {
         self.dir.join(format!("{pid}{RECORD_SUFFIX}"))
     }
 
-    /// The note file of the shell running as `pid` for the report stamped
-    /// `stamp`.
-    fn note_path(&self, pid: Pid, stamp: ReportStamp) -> PathBuf {
+    /// The note file of `shell` for the report stamped `stamp`.
+    fn note_path(&self, shell: &ShellId, stamp: ReportStamp) -> PathBuf {
         self.dir.join(format!(
-            "{pid}{NOTE_SEPARATOR}{:0width$}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
+            "{}{:0width$}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
+            note_prefix(shell),
             stamp.load().into_inner(),
             stamp.seq().into_inner(),
             width = STAMP_WIDTH
@@ -78,9 +80,9 @@ impl ShellFiles {
         read_record(&self.record_path(pid))
     }
 
-    /// The note files waiting for the shell running as `pid`.
-    fn notes_of(&self, pid: Pid) -> Vec<PathBuf> {
-        let prefix = format!("{pid}{NOTE_SEPARATOR}");
+    /// The note files waiting for `shell`.
+    fn notes_of(&self, shell: &ShellId) -> Vec<PathBuf> {
+        let prefix = note_prefix(shell);
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return Vec::new();
         };
@@ -180,28 +182,23 @@ impl ShellRegistry for ShellFiles {
         stamp: ReportStamp,
         lines: &[String],
     ) -> Result<(), ShellRegistryError> {
-        if lines.is_empty() || self.notes_of(shell.pid()).len() >= MAX_NOTE_FILES {
+        if lines.is_empty() || self.notes_of(shell).len() >= MAX_NOTE_FILES {
             return Ok(());
         }
         let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-        self.write(
-            shell.pid(),
-            &self.note_path(shell.pid(), stamp),
-            text.as_bytes(),
-        )
+        self.write(shell.pid(), &self.note_path(shell, stamp), text.as_bytes())
     }
 
-    /// A record a later shell on the same pid wrote is that shell's, so it
-    /// and the notes are left alone.
+    /// A record a later shell on the same pid wrote is that shell's, and it
+    /// stays, as do that shell's notes: only `shell`'s own go.
     fn forget(&self, shell: &ShellId) {
         if self
             .stored(shell.pid())
-            .is_some_and(|stored| stored.shell() != shell)
+            .is_none_or(|stored| stored.shell() == shell)
         {
-            return;
+            let _ = fs::remove_file(self.record_path(shell.pid()));
         }
-        let _ = fs::remove_file(self.record_path(shell.pid()));
-        for note in self.notes_of(shell.pid()) {
+        for note in self.notes_of(shell) {
             let _ = fs::remove_file(note);
         }
     }
@@ -209,6 +206,16 @@ impl ShellRegistry for ShellFiles {
     fn notes_dir(&self) -> PathBuf {
         self.dir.clone()
     }
+}
+
+/// What every note file of `shell` is named from: its pid, which the hook
+/// globs on, then its start token.
+fn note_prefix(shell: &ShellId) -> String {
+    format!(
+        "{}{NOTE_SEPARATOR}{}{NOTE_SEPARATOR}",
+        shell.pid(),
+        shell.start()
+    )
 }
 
 /// The record in the file at `path`, none when it cannot be read or parsed.
@@ -428,24 +435,25 @@ mod tests {
         files.deliver(&shell, stamp(LOAD, 3), &lines).unwrap();
         files.deliver(&shell, stamp(LOAD, 4), &[]).unwrap();
 
-        let first = files.note_path(shell.pid(), stamp(LOAD, 3));
+        let first = files.note_path(&shell, stamp(LOAD, 3));
         assert_eq!(fs::read_to_string(&first).unwrap(), "one\ntwo\n");
         assert_eq!(
             first.file_name().unwrap().to_string_lossy(),
             format!(
-                "{}-00000000000000000007-00000000000000000003.note",
-                shell.pid()
+                "{}-{}-00000000000000000007-00000000000000000003.note",
+                shell.pid(),
+                shell.start()
             )
         );
-        assert_eq!(files.notes_of(shell.pid()).len(), 1, "no lines, no file");
+        assert_eq!(files.notes_of(&shell).len(), 1, "no lines, no file");
 
         for seq in 10..10 + MAX_NOTE_FILES as u64 {
             files.deliver(&shell, stamp(LOAD, seq), &lines).unwrap();
         }
-        assert_eq!(files.notes_of(shell.pid()).len(), MAX_NOTE_FILES);
+        assert_eq!(files.notes_of(&shell).len(), MAX_NOTE_FILES);
         assert!(
             !files
-                .note_path(shell.pid(), stamp(LOAD, 10 + MAX_NOTE_FILES as u64 - 1))
+                .note_path(&shell, stamp(LOAD, 10 + MAX_NOTE_FILES as u64 - 1))
                 .exists(),
             "the batch past the cap is dropped"
         );
@@ -469,13 +477,14 @@ mod tests {
         files.forget(&shell);
 
         assert_eq!(files.record(&shell), None);
-        assert!(files.notes_of(shell.pid()).is_empty());
+        assert!(files.notes_of(&shell).is_empty());
         assert_eq!(files.record(&other), Some(record(other, 1, None)));
-        assert_eq!(files.notes_of(other.pid()).len(), 1);
+        assert_eq!(files.notes_of(&other).len(), 1);
     }
 
-    /// Forgetting a shell gone since leaves the record a later shell on its
-    /// pid wrote.
+    /// Concurrency M3: forgetting a shell gone since leaves the record and
+    /// the notes a later shell on its pid wrote, even notes written before
+    /// that shell's first record, and still takes the earlier one's notes.
     #[test]
     fn forget_leaves_a_later_shell_on_the_same_pid_alone() {
         let (_scratch, files) = files();
@@ -484,10 +493,21 @@ mod tests {
             .pid(shell.pid())
             .start(StartToken::try_new(WRONG_START).unwrap())
             .build();
-        files.save_if_newer(&record(shell, 1, None)).unwrap();
+        files
+            .deliver(&earlier, stamp(LOAD, 9), &["stale".to_string()])
+            .unwrap();
+        files
+            .deliver(&shell, stamp(LOAD, 1), &["fresh".to_string()])
+            .unwrap();
 
         files.forget(&earlier);
 
+        assert!(files.notes_of(&earlier).is_empty());
+        assert_eq!(files.notes_of(&shell).len(), 1, "the later shell's note");
+
+        files.save_if_newer(&record(shell, 1, None)).unwrap();
+        files.forget(&earlier);
         assert_eq!(files.record(&shell), Some(record(shell, 1, None)));
+        assert_eq!(files.notes_of(&shell).len(), 1);
     }
 }

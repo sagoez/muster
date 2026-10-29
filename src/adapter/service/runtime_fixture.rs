@@ -138,6 +138,7 @@ impl Fixture {
                 .stacks(Box::new(store.clone()))
                 .settings(Box::new(store.clone()))
                 .runs(Arc::new(store.clone()))
+                .raised(Arc::new(store.clone()))
                 .edits(Box::new(store))
                 .listening(None)
                 .build();

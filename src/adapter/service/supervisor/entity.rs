@@ -9,7 +9,7 @@ use super::{
     run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
 use crate::{
-    adapter::service::{OutputTap, ProbeWorker, RunRecorder, ServiceEvent, WaitGroup, Waiter},
+    adapter::service::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter},
     application::{StackSync, Workspace},
     domain::{
         config::Stack,
@@ -72,7 +72,7 @@ pub struct Supervisor {
     pub(super) readiness: HashMap<PaneId, RunReadiness>,
     /// Stores how each run ends, so a later service shows it; absent where
     /// nothing is stored.
-    pub(super) runs: Option<RunRecorder>,
+    pub(super) runs: Option<StoreRecorder>,
 }
 
 impl Supervisor {

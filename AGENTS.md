@@ -59,8 +59,9 @@ plugs into a port.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsStore`,
-    `StackEditLog`); writers tell it what changed. The one thing it writes is
-    `RunHistory`, how each process last ended, from a thread of its own.
+    `StackEditLog`); writers tell it what changed. What it writes, through
+    `RunHistory` and `RaisedEdits` from a thread of its own, is how each
+    process last ended and which agent edits it raised.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service.
   - **driven adapters** `adapter/pty` (portable-pty implements

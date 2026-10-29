@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    adapter::service::{ProbeWorker, RunRecorder, ServiceEvent, SharedEventLog, SharedNotices},
+    adapter::service::{ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices, StoreRecorder},
     domain::{
         port::{Notifier, PortOccupants, ProcessRunner},
         settings::Settings,
@@ -33,5 +33,5 @@ pub struct SupervisorDeps {
     pub(super) settings: Settings,
     /// Stores how each run ends, so a later service shows it; absent where
     /// nothing is stored.
-    pub(super) runs: Option<RunRecorder>,
+    pub(super) runs: Option<StoreRecorder>,
 }

@@ -427,8 +427,8 @@ Event cursors, such as `e:3141592:9921`, name the service that numbered them.
 `stack_events` with a cursor from an earlier service, after a restart, or past
 the newest event answers at once with `gap: true` and every event held, never
 waiting; so does one whose events were dropped from the 1024 kept. A gap means
-re-reading `stack_status`. The edits an agent made before the service started
-are not raised again as events.
+re-reading `stack_status`. An agent edit one service raised as an event is
+never raised again by the next.
 
 No call blocks longer than 45 seconds; a wait that has not finished answers with
 status `waiting` and a cursor to continue from, and a request carrying a

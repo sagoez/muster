@@ -11,7 +11,7 @@ use crate::domain::{
         Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
-    port::{RunHistory, SettingsStore, StackEditLog, StackReader, StackStore},
+    port::{RaisedEdits, RunHistory, SettingsStore, StackEditLog, StackReader, StackStore},
     process::EndedRun,
     project::Project,
     settings::Settings,
@@ -30,6 +30,8 @@ pub(super) struct MemoryStore {
     edits: Arc<Mutex<Vec<(ProjectRoot, RecordedEdit)>>>,
     /// How each process last ended on its own, by project and process.
     runs: Arc<Mutex<HashMap<(ProjectRoot, ProcessName), EndedRun>>>,
+    /// The newest agent edit of each project a service raised.
+    raised: Arc<Mutex<HashMap<ProjectRoot, EditId>>>,
 }
 
 impl MemoryStore {
@@ -40,6 +42,7 @@ impl MemoryStore {
             settings: Arc::new(Mutex::new(test_settings())),
             edits: Arc::default(),
             runs: Arc::default(),
+            raised: Arc::default(),
         }
     }
 
@@ -208,6 +211,19 @@ impl RunHistory for MemoryStore {
             .lock()
             .unwrap()
             .remove(&(root.clone(), process.clone()));
+        Ok(())
+    }
+}
+
+impl RaisedEdits for MemoryStore {
+    fn raised_through(&self, root: &ProjectRoot) -> Result<Option<EditId>, ConfigError> {
+        Ok(self.raised.lock().unwrap().get(root).copied())
+    }
+
+    fn mark_raised(&self, root: &ProjectRoot, edit: EditId) -> Result<(), ConfigError> {
+        let mut raised = self.raised.lock().unwrap();
+        let mark = raised.entry(root.clone()).or_insert(edit);
+        *mark = (*mark).max(edit);
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{
     project_rows::find_project,
@@ -10,7 +10,7 @@ use super::{
 };
 use crate::domain::{
     config::{ConfigError, RecordedEdit, StackEdit},
-    port::StackEditLog,
+    port::{RaisedEdits, StackEditLog},
     value::{EditId, ProcessName, ProjectRoot},
 };
 
@@ -138,6 +138,39 @@ impl StackEditLog for SqliteStore {
                 edits.push(edit_from_row(row)?);
             }
             Ok(edits)
+        })
+    }
+}
+
+impl RaisedEdits for SqliteStore {
+    fn raised_through(&self, root: &ProjectRoot) -> Result<Option<EditId>, ConfigError> {
+        self.read(|conn| {
+            let Some((project_id, _)) = find_project(conn, root)? else {
+                return Ok(None);
+            };
+            conn.query_row(
+                "SELECT edit_id FROM raised_edits WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_error)
+            .map(|edit| edit.map(EditId::new))
+        })
+    }
+
+    fn mark_raised(&self, root: &ProjectRoot, edit: EditId) -> Result<(), ConfigError> {
+        self.write(|conn| {
+            let Some((project_id, _)) = find_project(conn, root)? else {
+                return Ok(());
+            };
+            conn.execute(
+                "INSERT INTO raised_edits (project_id, edit_id) VALUES (?1, ?2) \
+                 ON CONFLICT (project_id) DO UPDATE SET edit_id = max(edit_id, excluded.edit_id)",
+                params![project_id, edit.into_inner()],
+            )
+            .map_err(db_error)?;
+            Ok(())
         })
     }
 }
@@ -332,5 +365,24 @@ mod tests {
             .add_process(&root, &spec("web", "true"), &Author::human())
             .unwrap();
         assert!(store.edits(&root).unwrap().is_empty());
+    }
+
+    /// The raised mark only moves forward, and a project registered again
+    /// starts without one.
+    #[test]
+    fn the_raised_mark_only_moves_forward() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch);
+
+        assert_eq!(store.raised_through(&root).unwrap(), None);
+        store.mark_raised(&root, EditId::new(4)).unwrap();
+        store.mark_raised(&root, EditId::new(2)).unwrap();
+        assert_eq!(store.raised_through(&root).unwrap(), Some(EditId::new(4)));
+
+        store.remove_project(&root).unwrap();
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        assert_eq!(store.raised_through(&root).unwrap(), None);
     }
 }

@@ -9,3 +9,10 @@ CREATE TABLE process_runs (
     ended_at_ms INTEGER NOT NULL,
     CHECK (exit_status IS NULL OR exit_signal IS NULL)
 );
+
+-- The newest agent edit of each project a service raised as an event, so a
+-- later service raises only the edits no service did.
+CREATE TABLE raised_edits (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    edit_id    INTEGER NOT NULL
+);

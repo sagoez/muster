@@ -2,6 +2,7 @@ mod coordination_rows;
 mod edit_log_rows;
 mod lock_rows;
 mod project_rows;
+mod refusal;
 mod run_rows;
 mod settings_rows;
 mod sqlite_store;

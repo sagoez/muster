@@ -42,7 +42,7 @@ fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
             process
                 .map(ProcessName::try_new)
                 .transpose()
-                .map_err(|error| refused(PROCESS, error))?,
+                .map_err(|error| refused(PROCESS, &error))?,
         )
         .message(printable(&message))
         .build())

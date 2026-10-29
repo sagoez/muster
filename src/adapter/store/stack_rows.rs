@@ -78,30 +78,30 @@ fn process_from_row(
         ),
         _ => None,
     };
-    let name = ProcessName::try_new(name).map_err(|error| refused("process name", error))?;
+    let name = ProcessName::try_new(name).map_err(|error| refused("process name", &error))?;
     Ok(ProcessSpec::builder()
         .name(name)
-        .command(CommandLine::try_new(command).map_err(|error| refused("command", error))?)
+        .command(CommandLine::try_new(command).map_err(|error| refused("command", &error))?)
         .working_dir(working_dir.map(PathBuf::from))
         .description(
             description
                 .map(Description::try_new)
                 .transpose()
-                .map_err(|error| refused("description", error))?,
+                .map_err(|error| refused("description", &error))?,
         )
         .environment(environments.remove(&id).unwrap_or_else(Environment::empty))
         .autostart(autostart)
         .restart(
             restart
                 .parse()
-                .map_err(|error| refused("restart policy", error))?,
+                .map_err(|error| refused("restart policy", &error))?,
         )
         .stop(
             StopPolicy::builder()
                 .signal(
                     stop_signal
                         .parse()
-                        .map_err(|error| refused("stop signal", error))?,
+                        .map_err(|error| refused("stop signal", &error))?,
                 )
                 .grace_period(grace_from_millis(STOP_GRACE, stop_grace_ms)?)
                 .build(),
@@ -128,8 +128,8 @@ fn environments_of(
         let process_id: i64 = row.get("process_id").map_err(db_error)?;
         let name: String = row.get("name").map_err(db_error)?;
         let value: String = row.get("value").map_err(db_error)?;
-        let name = EnvName::try_new(name).map_err(|error| refused("variable name", error))?;
-        let value = EnvValue::try_new(value).map_err(|error| refused("variable value", error))?;
+        let name = EnvName::try_new(name).map_err(|error| refused("variable name", &error))?;
+        let value = EnvValue::try_new(value).map_err(|error| refused("variable value", &error))?;
         let environment = environments
             .remove(&process_id)
             .unwrap_or_else(Environment::empty)
@@ -168,7 +168,7 @@ fn process_count(conn: &Connection, project_id: i64) -> Result<usize, ConfigErro
             |row| row.get(0),
         )
         .map_err(db_error)?;
-    usize::try_from(count).map_err(|error| refused("process count", error))
+    usize::try_from(count).map_err(|error| refused("process count", &error))
 }
 
 /// Writes `spec`'s variables for the process row `process_id`.
@@ -617,6 +617,33 @@ mod tests {
             .remove_process(&root, &name("web"), &Author::human())
             .unwrap();
         assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), ["api"]);
+    }
+
+    /// A hand-edited row a validator's own rule refuses names that rule in
+    /// words when the stack is read.
+    #[test]
+    fn a_hand_edited_row_names_the_rule_it_breaks() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &full_spec(), &Author::human())
+            .unwrap();
+        let read_after = |sql: &str| {
+            store
+                .write(|conn| conn.execute_batch(sql).map_err(db_error))
+                .unwrap();
+            store.stack(&root).unwrap_err().to_string()
+        };
+
+        assert_eq!(
+            read_after("UPDATE process_env SET name = 'MUSTER_' || name"),
+            "stored variable name is invalid: it is empty, holds '=' or NUL, or starts with \
+             MUSTER_"
+        );
+        assert_eq!(
+            read_after("DELETE FROM process_env; UPDATE processes SET name = 'web' || char(7)"),
+            "stored process name is invalid: it holds a control or format character"
+        );
     }
 
     #[test]

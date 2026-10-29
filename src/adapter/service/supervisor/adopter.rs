@@ -240,7 +240,8 @@ impl Supervisor {
     /// on a worker, keeping what was asked meanwhile, or settles the
     /// reconnect as failed when no holder runs that child, then applies what
     /// was asked. A reconnect a later action or a shutdown superseded adopts
-    /// nothing; a child it found still running is said so.
+    /// nothing; a child a later action's look found still running is left
+    /// unsupervised, as [`Self::settle_superseded_search`] says.
     pub fn handle_reconnect_located(
         &mut self,
         pane: PaneId,
@@ -253,14 +254,8 @@ impl Supervisor {
             launch,
             self.adopter.as_ref().and_then(|adopter| adopter.detached()),
         ) else {
-            if let Some(record) = record.filter(|_| !detaching)
-                && child_runs_or_collect(&record)
-            {
-                self.notify_process(
-                    NoticeLevel::Error,
-                    Some(record.process().clone()),
-                    with_pids(&format!("{ADOPT_FAILED_NOTICE}{LEFT_RUNNING}"), &record),
-                );
+            if let Some(record) = record.filter(|_| !detaching) {
+                self.settle_superseded_search(pane, &record);
             }
             return;
         };
@@ -298,6 +293,29 @@ impl Supervisor {
                 result,
             });
         });
+    }
+
+    /// Settles what the superseded look for `pane`'s holder found in
+    /// `record`. A child still running is left unsupervised on `pane` when
+    /// the pane is its process's and holds nothing else, so a stop reaches
+    /// it and a timed retry adopts its holder again, and is said so either
+    /// way; a gone child has its holder's exit collected.
+    fn settle_superseded_search(&mut self, pane: PaneId, record: &HolderRecord) {
+        if !child_runs_or_collect(record) {
+            return;
+        }
+        let unclaimed =
+            self.pane_named(record.process()) == Some(pane) && !self.holds_process(pane);
+        if unclaimed
+            && self.leave_unsupervised(pane, record.child_pid(), record.child_start_token())
+        {
+            self.schedule_adoption_retry(pane);
+        }
+        self.notify_process(
+            NoticeLevel::Error,
+            Some(record.process().clone()),
+            with_pids(&format!("{ADOPT_FAILED_NOTICE}{LEFT_RUNNING}"), record),
+        );
     }
 
     /// Tries again, as a start asks, to adopt the holder of `pane`'s child
@@ -1872,6 +1890,38 @@ mod tests {
 
         assert_eq!(adoptions.load(Ordering::SeqCst), 1);
         assert_eq!(state(&harness), ProcessState::Stopping);
+    }
+
+    /// A look for the holder of a broken stream that a later action
+    /// superseded, and that finds the child still running, leaves that child
+    /// unsupervised rather than only saying so, so a stop reaches and ends it.
+    #[test]
+    fn a_superseded_reconnect_that_finds_a_live_child_leaves_it_unsupervised() {
+        let orphan = Orphan::spawn();
+        let (open, gate) = crossbeam_channel::unbounded();
+        let adoptions = Arc::new(AtomicUsize::new(0));
+        let (mut harness, _) = reconnectable_over(
+            orphan.pid(),
+            GatedLocateAdopter::builder()
+                .record(record_with_pid("p", orphan.pid()))
+                .gate(gate)
+                .adoptions(adoptions.clone())
+                .build(),
+        );
+        harness.up();
+        break_stream(&mut harness);
+        assert_eq!(state(&harness), ProcessState::Starting);
+
+        harness.supervisor_mut().bump_generation(PaneId::new(PANE));
+        open.send(()).unwrap();
+        located(&mut harness);
+
+        assert_eq!(adoptions.load(Ordering::SeqCst), 0, "nothing was adopted");
+        assert_eq!(state(&harness), ProcessState::Unsupervised);
+        assert!(orphan.alive());
+        harness.supervisor_mut().stop(&p());
+        drive_until_exited(&mut harness);
+        assert!(!orphan.alive(), "the stop reached the child");
     }
 
     /// A removed process whose adoption fails on a worker while its child runs

@@ -188,8 +188,10 @@ pub trait CoordinationStore {
         name: &LockName,
     ) -> Result<Option<Lock>, ConfigError>;
 
-    /// Releases every lock taken through `session` in any project, as an MCP
-    /// server does when its connection ends. Returns how many went.
+    /// Ends `session`, as an MCP server does when its connection ends:
+    /// releases every lock taken through it in any project, and in the same
+    /// write marks it ended, so [`Self::acquire_lock`] through it answers
+    /// [`LockAttempt::SessionEnded`] from then on. Returns how many locks went.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be written.

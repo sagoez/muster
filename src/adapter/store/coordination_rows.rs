@@ -561,7 +561,7 @@ impl CoordinationStore for SqliteStore {
     }
 
     fn release_locks_of(&self, session: &SessionId) -> Result<usize, ConfigError> {
-        self.write(|conn| lock_rows::release_all_of(conn, session))
+        self.write(|conn| lock_rows::release_all_of(conn, session, epoch_now()))
     }
 
     fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
@@ -1195,6 +1195,7 @@ mod tests {
         let name = LockName::try_new("migrations").unwrap();
         let first = LockHolder::fresh("claude");
         let second = LockHolder::fresh("claude");
+        let ended = LockHolder::fresh("claude");
         let ttl = LockTtl::DEFAULT;
 
         store.acquire_lock(&root, &first, &name, ttl, None).unwrap();
@@ -1208,7 +1209,7 @@ mod tests {
             store.release_lock(&root, &second, &name).unwrap(),
             LockRelease::HeldBy { .. }
         ));
-        assert_eq!(store.release_locks_of(second.session()).unwrap(), 0);
+        assert_eq!(store.release_locks_of(ended.session()).unwrap(), 0);
         assert_eq!(store.locks(&root).unwrap().len(), 1);
 
         assert_eq!(store.release_locks_of(first.session()).unwrap(), 1);
@@ -1269,6 +1270,52 @@ mod tests {
         let broken = store.break_lock(&two, &name).unwrap().unwrap();
         assert_eq!(broken.owner(), codex.author());
         assert_eq!(store.break_lock(&two, &name).unwrap(), None);
+    }
+
+    /// An acquire that commits after its session ended and released its
+    /// locks, as one still running when its connection closed would, takes
+    /// nothing; another session still acquires, and an ended session is
+    /// forgotten once no lock could outlive it.
+    #[test]
+    fn an_ended_session_takes_no_lock() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let name = LockName::try_new("migrations").unwrap();
+        let gone = LockHolder::fresh("claude");
+        let ttl = LockTtl::DEFAULT;
+
+        store.release_locks_of(gone.session()).unwrap();
+
+        assert_eq!(
+            store.acquire_lock(&root, &gone, &name, ttl, None).unwrap(),
+            LockAttempt::SessionEnded
+        );
+        assert!(store.locks(&root).unwrap().is_empty());
+        assert!(matches!(
+            store
+                .acquire_lock(&root, &LockHolder::fresh("claude"), &name, ttl, None)
+                .unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+
+        let ended = |store: &SqliteStore| -> i64 {
+            store
+                .read(|conn| {
+                    conn.query_row("SELECT count(*) FROM ended_sessions", [], |row| row.get(0))
+                        .map_err(db_error)
+                })
+                .unwrap()
+        };
+        store
+            .write(|conn| {
+                conn.execute("UPDATE ended_sessions SET ended_at = 0", [])
+                    .map_err(db_error)
+            })
+            .unwrap();
+        store
+            .release_locks_of(LockHolder::fresh("codex").session())
+            .unwrap();
+        assert_eq!(ended(&store), 1, "only the fresh end is kept");
     }
 
     #[test]

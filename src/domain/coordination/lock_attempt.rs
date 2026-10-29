@@ -19,4 +19,7 @@ pub enum LockAttempt {
         /// How long it has left.
         expires_in: Duration,
     },
+    /// The caller's session already ended and released its locks, so it
+    /// takes no more.
+    SessionEnded,
 }

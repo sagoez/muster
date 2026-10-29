@@ -8,7 +8,8 @@ use super::{
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, SessionId,
+        Author, LOCK_TTL_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
+        LockTtl, SessionId,
     },
     value::EpochSeconds,
 };
@@ -58,7 +59,16 @@ fn find(conn: &Connection, project_id: i64, name: &LockName) -> Result<Option<Lo
     .pop())
 }
 
-/// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`.
+/// Whether `session` already ended and had its locks released.
+fn has_ended(conn: &Connection, session: &SessionId) -> Result<bool, ConfigError> {
+    conn.prepare_cached("SELECT 1 FROM ended_sessions WHERE session = ?1")
+        .and_then(|mut statement| statement.exists(params![session.as_ref()]))
+        .map_err(db_error)
+}
+
+/// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`,
+/// unless `me`'s session already ended: an acquire still running when its
+/// connection closed can then never commit a lock nobody releases.
 ///
 /// # Errors
 /// Returns a [`ConfigError`] when SQLite fails or a stored row is invalid.
@@ -71,6 +81,9 @@ pub(super) fn acquire(
     note: Option<&LockNote>,
     now: EpochSeconds,
 ) -> Result<LockAttempt, ConfigError> {
+    if has_ended(conn, me.session())? {
+        return Ok(LockAttempt::SessionEnded);
+    }
     let until = now.after(*ttl.as_ref());
     let taken: Option<i64> = conn
         .query_row(
@@ -155,12 +168,28 @@ pub(super) fn break_lock(
     .pop())
 }
 
-/// Removes every lock taken through `session` in any project. Returns how
-/// many went.
+/// Ends `session` at `now`: removes every lock taken through it in any
+/// project and records it as ended, so no acquire still in flight takes
+/// another; sessions ended longer ago than any lock lives are forgotten.
+/// Returns how many locks went.
 ///
 /// # Errors
 /// Returns a [`ConfigError`] when SQLite fails.
-pub(super) fn release_all_of(conn: &Connection, session: &SessionId) -> Result<usize, ConfigError> {
+pub(super) fn release_all_of(
+    conn: &Connection,
+    session: &SessionId,
+    now: EpochSeconds,
+) -> Result<usize, ConfigError> {
+    let kept = i64::try_from(LOCK_TTL_MAX.as_secs()).unwrap_or(i64::MAX);
+    conn.execute("DELETE FROM ended_sessions WHERE ended_at < ?1", params![
+        epoch_param(now).saturating_sub(kept)
+    ])
+    .map_err(db_error)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO ended_sessions (session, ended_at) VALUES (?1, ?2)",
+        params![session.as_ref(), epoch_param(now)],
+    )
+    .map_err(db_error)?;
     conn.execute("DELETE FROM locks WHERE session = ?1", params![
         session.as_ref()
     ])

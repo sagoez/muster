@@ -749,6 +749,9 @@ impl MusterMcp {
                     NOTE: note.as_ref().map(ToString::to_string),
                     EXPIRES_IN_S: expires_in.as_secs(),
                 }),
+                LockAttempt::SessionEnded => {
+                    return structured(object_of!({ ACQUIRED: false }), false);
+                },
             };
             if Instant::now() + LOCK_RETRY > deadline {
                 return structured(held, false);
@@ -1153,6 +1156,31 @@ mod tests {
             release_session_locks(&earlier.deps, &earlier.identity);
         });
         assert_eq!(fixture.store().locks(fixture.root()).unwrap().len(), 1);
+    }
+
+    /// A `lock_acquire` still running when its connection ended and released
+    /// its locks takes nothing, so no lock outlives its connection.
+    #[test]
+    fn an_acquire_after_the_connection_ended_takes_nothing() {
+        let fixture = fixture();
+        register(&fixture);
+        let server = fixture.server();
+        release_session_locks(&server.deps, &server.identity);
+
+        let attempt = runtime().block_on(async {
+            content(
+                server
+                    .acquire(
+                        LockAcquireArg::builder()
+                            .name("migrations".to_string())
+                            .build(),
+                    )
+                    .await,
+            )
+        });
+
+        assert_eq!(attempt[ACQUIRED], false, "{attempt}");
+        assert!(fixture.store().locks(fixture.root()).unwrap().is_empty());
     }
 
     /// A note body, value or title past its maximum is refused naming the

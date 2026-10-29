@@ -1465,6 +1465,52 @@ fn export_and_import_move_a_stack_between_projects() {
     assert!(!scratch.exported(&copy).contains("dev server"));
 }
 
+/// `import --replace --dry-run` says a running process it would remove
+/// would be stopped, and one not running would not, as the real run
+/// reports; it stops nothing.
+#[test]
+fn a_replace_dry_run_says_which_removed_processes_it_would_stop() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &shop());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let smaller = scratch.path().join("smaller.yml");
+    fs::write(&smaller, stack(&[entry("café", "sleep 600", true)])).unwrap();
+
+    let (dry, planned) = scratch.json_on(&project, &[
+        "import",
+        smaller.to_str().unwrap(),
+        "--replace",
+        "--dry-run",
+    ]);
+
+    assert!(dry.status.success(), "{}", shown(&dry));
+    let stopped: Vec<(&str, bool)> = planned["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|removed| {
+            (
+                removed["name"].as_str().unwrap(),
+                removed["stopped"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(stopped, [("dev server", true), ("api", false)], "{planned}");
+    assert_eq!(scratch.row(&project, "dev server")["state"], "running");
+    let text = scratch.on(&project, &[
+        "import",
+        smaller.to_str().unwrap(),
+        "--replace",
+        "--dry-run",
+    ]);
+    assert!(
+        stdout(&text).contains("- dev server (would stop)"),
+        "{}",
+        shown(&text)
+    );
+}
+
 /// `init` reads what the folder offers: listed without a terminal and
 /// nothing written, the suggested ones added with `--yes`.
 #[test]

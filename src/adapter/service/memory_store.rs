@@ -39,8 +39,9 @@ impl MemoryStore {
         }
     }
 
-    /// Keeps an agent edit to `process` of `root` reading `message`,
-    /// moving the stack's revision with it as the real store's write does.
+    /// Keeps an agent edit to `process` of `root` reading `message`, made
+    /// now, moving the stack's revision with it as the real store's write
+    /// does.
     pub(super) fn record_edit(&self, root: &ProjectRoot, process: &str, message: &str) {
         let mut edits = self.edits.lock().unwrap();
         let id = i64::try_from(edits.len()).unwrap() + 1;
@@ -48,7 +49,7 @@ impl MemoryStore {
             root.clone(),
             RecordedEdit::builder()
                 .id(EditId::new(id))
-                .at(SystemTime::UNIX_EPOCH)
+                .at(SystemTime::now())
                 .process(Some(ProcessName::try_new(process).unwrap()))
                 .message(message.to_string())
                 .build(),

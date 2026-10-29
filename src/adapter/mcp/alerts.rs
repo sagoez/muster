@@ -37,26 +37,24 @@ impl Alerts {
     }
 
     /// Records that every event of `project` up to `cursor` was seen, never
-    /// moving backwards.
-    pub fn mark_seen(&self, project: &ProjectRoot, cursor: EventSeq) {
+    /// moving backwards within one service's log; a cursor of a newer
+    /// service's log replaces the mark.
+    fn mark_seen(&self, project: &ProjectRoot, cursor: EventSeq) {
         if let Ok(mut seen) = self.seen.lock() {
             let entry = seen.entry(project.clone()).or_insert(cursor);
-            *entry = (*entry).max(cursor);
+            if cursor.is_after(*entry) || cursor.epoch() != entry.epoch() {
+                *entry = cursor;
+            }
         }
     }
 
     /// The alerts `page` holds for `project`, read after [`Alerts::since`],
     /// marking it seen. The first page of a project only sets where alerts
-    /// start, so history from before the connection is never replayed.
+    /// start, so history from before the connection is never replayed; a page
+    /// read with a cursor of an earlier service holds that service's
+    /// successor's events, every one of them new to the connection.
     pub fn take(&self, project: &ProjectRoot, page: &EventPage) -> AlertsView {
         let since = self.since(project);
-        if since.is_some_and(|since| *page.cursor() < since)
-            && let Ok(mut seen) = self.seen.lock()
-        {
-            // A service started afresh numbers its events from zero again.
-            seen.insert(project.clone(), *page.cursor());
-            return AlertsView::default();
-        }
         self.mark_seen(project, *page.cursor());
         if since.is_none() {
             return AlertsView::default();
@@ -87,14 +85,28 @@ mod tests {
         ProjectRoot::try_new(PathBuf::from("/shop")).unwrap()
     }
 
+    /// The epoch of the service most pages here come from.
+    const EPOCH: u32 = 3;
+
+    /// The cursor of the `seq`th event of the log under `epoch`.
+    fn cursor(epoch: u32, seq: u64) -> EventSeq {
+        EventSeq::builder().epoch(epoch).seq(seq).build()
+    }
+
     /// A page of events of `kinds`, numbered from `first`.
     fn page(first: u64, kinds: &[EventKind]) -> EventPage {
+        page_of(EPOCH, first, kinds)
+    }
+
+    /// A page of the log under `epoch` of events of `kinds`, numbered from
+    /// `first`.
+    fn page_of(epoch: u32, first: u64, kinds: &[EventKind]) -> EventPage {
         let events: Vec<StackEvent> = kinds
             .iter()
             .zip(first..)
             .map(|(kind, seq)| {
                 StackEvent::builder()
-                    .seq(EventSeq::new(seq))
+                    .seq(cursor(epoch, seq))
                     .at(SystemTime::UNIX_EPOCH)
                     .project(Some(shop()))
                     .process(Some(ProcessName::try_new("api").unwrap()))
@@ -107,7 +119,7 @@ mod tests {
         let last = first + kinds.len() as u64;
         EventPage::builder()
             .events(events)
-            .cursor(EventSeq::new(last))
+            .cursor(cursor(epoch, last))
             .gap(false)
             .build()
     }
@@ -121,7 +133,7 @@ mod tests {
             alerts.take(&shop(), &page(1, &[EventKind::Crashed])),
             AlertsView::default()
         );
-        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(2)));
+        assert_eq!(alerts.since(&shop()), Some(cursor(EPOCH, 2)));
 
         let view = alerts.take(&shop(), &page(2, &[EventKind::Started, EventKind::Crashed]));
         assert_eq!(view.alerts().len(), 1);
@@ -133,34 +145,35 @@ mod tests {
     #[test]
     fn a_flood_keeps_the_newest_and_counts_the_rest() {
         let alerts = Alerts::default();
-        alerts.mark_seen(&shop(), EventSeq::new(0));
+        alerts.mark_seen(&shop(), cursor(EPOCH, 0));
 
         let view = alerts.take(&shop(), &page(1, &[EventKind::Crashed; 8]));
 
         assert_eq!(view.alerts().len(), MAX_ALERTS);
-        assert_eq!(view.alerts().last().unwrap().seq(), "e:8");
+        assert_eq!(view.alerts().last().unwrap().seq(), "e:3:8");
         assert_eq!(view.alerts_omitted(), Some(3));
     }
 
-    /// A page older than the mark comes from a service started afresh, so
-    /// the mark restarts there and later crashes still alert.
+    /// A page of a service started afresh moves the mark to its log, and its
+    /// crashes alert even though its count starts below the old mark.
     #[test]
-    fn a_restarted_service_resets_the_mark() {
+    fn a_restarted_service_moves_the_mark_to_its_log() {
         let alerts = Alerts::default();
-        alerts.mark_seen(&shop(), EventSeq::new(500));
+        alerts.mark_seen(&shop(), cursor(EPOCH, 500));
 
-        assert_eq!(alerts.take(&shop(), &page(1, &[])), AlertsView::default());
-        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(1)));
-        let view = alerts.take(&shop(), &page(2, &[EventKind::Crashed]));
+        let view = alerts.take(&shop(), &page_of(EPOCH + 1, 1, &[EventKind::Crashed]));
         assert_eq!(view.alerts().len(), 1);
+        assert_eq!(alerts.since(&shop()), Some(cursor(EPOCH + 1, 2)));
+        let later = alerts.take(&shop(), &page_of(EPOCH + 1, 2, &[EventKind::Crashed]));
+        assert_eq!(later.alerts().len(), 1);
     }
 
     /// The seen mark never moves backwards.
     #[test]
     fn the_seen_mark_only_advances() {
         let alerts = Alerts::default();
-        alerts.mark_seen(&shop(), EventSeq::new(9));
-        alerts.mark_seen(&shop(), EventSeq::new(4));
-        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(9)));
+        alerts.mark_seen(&shop(), cursor(EPOCH, 9));
+        alerts.mark_seen(&shop(), cursor(EPOCH, 4));
+        assert_eq!(alerts.since(&shop()), Some(cursor(EPOCH, 9)));
     }
 }

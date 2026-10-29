@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, PoisonError},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
@@ -122,6 +122,9 @@ pub struct ServiceRuntime {
     /// The newest stored agent edit of each loaded project already raised as
     /// an event.
     raised_edits: HashMap<ProjectRoot, EditId>,
+    /// When this service started: edits stored before then belonged to an
+    /// earlier service's cursors, so they are never raised again.
+    started: SystemTime,
     /// Loaded projects that are no longer registered, kept only until the
     /// processes they still ran have stopped.
     unregistered: HashSet<ProjectRoot>,
@@ -208,6 +211,7 @@ impl ServiceRuntime {
             supervisors: HashMap::new(),
             stack_revisions: HashMap::new(),
             raised_edits: HashMap::new(),
+            started: millisecond_floor(SystemTime::now()),
             unregistered: HashSet::new(),
             event_log: EventLog::shared(),
             event_waiters: Vec::new(),
@@ -639,9 +643,12 @@ impl ServiceRuntime {
     }
 
     /// Raises each agent edit stored for `project` since the newest one
-    /// already raised as a `notice` event, at the time it was recorded. A
-    /// project no longer registered has none, and starts afresh if it is
-    /// registered again.
+    /// already raised as a `notice` event, at the time it was recorded or
+    /// the newest event's when that is later. Only edits stored since this
+    /// service started are raised: an older one predates every cursor of
+    /// this log, so raising it would wake an agent to a stale edit. A project
+    /// no longer registered has none, and starts afresh if it is registered
+    /// again.
     ///
     /// # Errors
     /// Returns the refusal when the edit log cannot be read.
@@ -652,10 +659,9 @@ impl ServiceRuntime {
             .event_log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        for edit in edits
-            .iter()
-            .filter(|edit| raised.is_none_or(|raised| *edit.id() > raised))
-        {
+        for edit in edits.iter().filter(|edit| {
+            raised.is_none_or(|raised| *edit.id() > raised) && *edit.at() >= self.started
+        }) {
             log.record_at(
                 EventDraft::builder()
                     .project(Some(project.clone()))
@@ -898,8 +904,9 @@ impl ServiceRuntime {
     }
 
     /// Answers a read of `project`'s events after `since` of `kinds`: at once
-    /// when there are any or `wait` is zero, otherwise when the next one
-    /// arrives or `wait` passes.
+    /// when there are any, `wait` is zero or the page has a gap, as a cursor
+    /// of an earlier service's log has, otherwise when the next one arrives
+    /// or `wait` passes.
     ///
     /// # Errors
     /// Returns the refusal when the project cannot be loaded.
@@ -917,7 +924,7 @@ impl ServiceRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let page = log.page(&project, since, &kinds);
-        if !page.events().is_empty() || wait.is_zero() {
+        if !page.events().is_empty() || wait.is_zero() || *page.gap() {
             return Ok(Reply::Now(ServiceResponse::Events(page)));
         }
         let since = since.unwrap_or_else(|| log.latest());
@@ -1066,6 +1073,14 @@ fn store_refusal(error: ConfigError) -> ServiceErrorBody {
     )
 }
 
+/// `time` cut to the whole millisecond, the precision the edit log records
+/// times at, so an edit stored in the same millisecond is never older.
+fn millisecond_floor(time: SystemTime) -> SystemTime {
+    time.duration_since(UNIX_EPOCH).map_or(UNIX_EPOCH, |since| {
+        UNIX_EPOCH + Duration::from_millis(u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1116,6 +1131,9 @@ mod tests {
     /// How long a gated holder waits after the service is told to stop,
     /// well inside the holder ready timeout.
     const GATE_DELAY: Duration = Duration::from_millis(300);
+    /// Past the edit log's millisecond, so an edit stored before a service
+    /// starts is older than its start.
+    const EDIT_CLOCK_STEP: Duration = Duration::from_millis(2);
     /// A child that writes output as fast as it can.
     const FLOOD: &str = "yes muster-flood-line";
     /// How long a flood runs while nothing reads the queue.
@@ -2110,26 +2128,31 @@ mod tests {
             .collect()
     }
 
-    /// Every stored agent edit is a `notice` event on its process, at the
-    /// time it was recorded and in cursor order with the other events: one
-    /// stored before the project loads arrives as it loads, a later one with
-    /// the writer's stack change, and one whose change notice was missed with
-    /// the next read; none is raised twice.
+    /// Every agent edit stored since the service started is a `notice` event
+    /// on its process, in cursor order with the other events and times that
+    /// never go back: one stored before the project loads arrives as it
+    /// loads, a later one with the writer's stack change, and one whose change
+    /// notice was missed with the next read; none is raised twice, and one
+    /// stored before the service started, which an earlier service raised, is
+    /// never raised again.
     #[test]
     fn a_stored_agent_edit_is_a_notice_event_in_cursor_order() {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("api", false)]));
         fixture
             .store
-            .record_edit(&project, "api", "agent claude added 'api'");
+            .record_edit(&project, "api", "agent claude added 'old'");
+        thread::sleep(EDIT_CLOCK_STEP);
         let service = fixture.start(Arc::new(fixture.runner()));
+        fixture
+            .store
+            .record_edit(&project, "api", "agent claude added 'api'");
 
         let loaded = edit_events(&service, &project, None);
         assert_eq!(told(&loaded), [(
             "agent claude added 'api'".to_string(),
             Some("api".to_string())
         )]);
-        assert_eq!(*loaded.events()[0].at(), SystemTime::UNIX_EPOCH);
 
         fixture
             .store
@@ -2147,7 +2170,8 @@ mod tests {
             "agent claude changed autostart of 'api'".to_string(),
             Some("api".to_string())
         )]);
-        assert!(changed.events()[0].seq() > loaded.events()[0].seq());
+        assert!(changed.events()[0].seq().is_after(loaded.events()[0].seq()));
+        assert!(changed.events()[0].at() >= loaded.events()[0].at());
 
         fixture
             .store
@@ -2192,6 +2216,48 @@ mod tests {
             None
         )]);
         service.stop();
+    }
+
+    /// A cursor of an earlier service's log, read plain or with a wait, gets
+    /// at once a gap and every event the new service holds, never a long
+    /// poll; so does a cursor past the newest event.
+    #[test]
+    fn a_cursor_from_an_earlier_service_gets_a_gap_at_once() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+        let read = |service: &Running, since: Option<EventSeq>, wait: Duration| {
+            let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+                project: project.clone(),
+                since,
+                kinds: Vec::new(),
+                wait,
+            }) else {
+                panic!("events answer with a page");
+            };
+            page
+        };
+        let before = *read(&service, None, Duration::ZERO).cursor();
+        service.stop();
+
+        let successor = fixture.start(Arc::new(fixture.runner()));
+        successor.wait_for(&project, "api", ProcessState::Running);
+        let held = read(&successor, None, Duration::ZERO);
+        let future = EventSeq::builder()
+            .epoch(held.cursor().epoch())
+            .seq(held.cursor().seq() + 5)
+            .build();
+        for (since, wait) in [(before, Duration::ZERO), (before, WAIT), (future, WAIT)] {
+            let asked = Instant::now();
+            let page = read(&successor, Some(since), wait);
+            assert!(asked.elapsed() < PROMPT_ANSWER, "{since} waited");
+            assert!(page.gap(), "{since}");
+            assert_eq!(page.events(), held.events(), "{since}");
+            assert_ne!(page.cursor().epoch(), before.epoch());
+        }
+        successor.stop();
     }
 
     /// A holder found at start whose process is no longer in the project is

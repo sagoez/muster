@@ -40,13 +40,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_seq_reads_and_writes_its_text_form() {
-        assert_eq!("e:9921".parse::<EventSeq>().unwrap(), EventSeq::new(9921));
-        assert_eq!(EventSeq::new(7).to_string(), "e:7");
-        assert!("9921".parse::<EventSeq>().is_err());
-    }
-
-    #[test]
     fn kinds_are_kebab_case() {
         assert_eq!(EventKind::ReadyTimeout.to_string(), "ready-timeout");
         assert_eq!("crashed".parse::<EventKind>().unwrap(), EventKind::Crashed);

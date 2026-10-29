@@ -413,6 +413,13 @@ process's readiness, the ports its process tree listens on, its URLs, how it
 last exited and why, and `blocked_on` when its start was refused because
 another process holds its readiness port.
 
+Event cursors, such as `e:3141592:9921`, name the service that numbered them.
+`stack_events` with a cursor from an earlier service, after a restart, or past
+the newest event answers at once with `gap: true` and every event held, never
+waiting; so does one whose events were dropped from the 1024 kept. A gap means
+re-reading `stack_status`. The edits an agent made before the service started
+are not raised again as events.
+
 No call blocks longer than 45 seconds; a wait that has not finished answers with
 status `waiting` and a cursor to continue from, and a request carrying a
 progress token hears progress every 5 seconds. A value outside its bound is
@@ -420,7 +427,8 @@ refused, never cut to fit: a `timeout_s` or `wait_s` past 45, a `limit` of 0 or
 past 200, and a wait whose `since` lies past the output written so far. Output is stripped of terminal
 escapes and capped, saying what it dropped. Every stack and process result
 carries `alerts`: crashes, readiness timeouts and blocked starts since the
-agent's last call, so it learns of a crash without polling.
+agent's last call, so it learns of a crash without polling. `stack_events`
+carries none and never marks an alert heard.
 
 A mistake in a call, such as an unknown name, a malformed cursor or an invalid
 value, comes back as a result flagged `isError` whose text says what to do and

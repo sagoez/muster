@@ -712,12 +712,12 @@ mod tests {
         adapter::{
             cli::{ending_signal::EndingSignal, report::plain},
             client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
-            service::{ExitReason, LastExit, ProcessUsage, ServiceErrorKind},
+            service::{ExitReason, LastExit, OccupancyStatus, ProcessUsage, ServiceErrorKind},
         },
         domain::{
             config::{Environment, ProcessSpec},
             process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, Pid, ProjectRoot, StopGrace},
+            value::{CommandLine, IdleStop, Pid, ProjectRoot, StopGrace},
         },
     };
 
@@ -822,6 +822,7 @@ mod tests {
                     ))),
                 ),
             ])
+            .occupancy(no_shells())
             .build()
     }
 
@@ -830,6 +831,16 @@ mod tests {
         ProjectStatus::builder()
             .project(project_at("blog", OTHER_PROJECT))
             .processes(vec![])
+            .occupancy(no_shells())
+            .build()
+    }
+
+    /// No shell in a project, and no idle stop pending.
+    fn no_shells() -> OccupancyStatus {
+        OccupancyStatus::builder()
+            .shells(0)
+            .idle_stop(IdleStop::Never)
+            .stops_in(None)
             .build()
     }
 

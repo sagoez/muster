@@ -1,33 +1,41 @@
 use std::{path::Path, sync::Arc};
 
+use tempfile::TempDir;
+
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
 use crate::{
     adapter::{
         client::{ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier},
+        no_state_dir::NoStateDir,
+        shell::ShellFiles,
         store::SqliteStore,
     },
     domain::{
         config::ConfigError,
-        port::{LocalState, StateChangeNotifier},
+        port::{LocalState, ShellRegistry, StateChangeNotifier},
     },
     error::MusterError,
 };
 
-/// Ports over a scratch database, a [`FakeService`] and a
-/// [`RecordingNotifier`], serving nothing.
+/// Ports over a scratch database, a [`FakeService`], a
+/// [`RecordingNotifier`] and shell files in a scratch state directory,
+/// serving nothing.
 pub(super) struct FakePorts {
     store: SqliteStore,
     service: Arc<FakeService>,
     notifier: Arc<RecordingNotifier>,
+    state_dir: TempDir,
 }
 
 impl FakePorts {
-    /// Ports over `store`, a fresh [`FakeService`] and a fresh notifier.
+    /// Ports over `store`, a fresh [`FakeService`], a fresh notifier and a
+    /// fresh scratch state directory.
     pub(super) fn new(store: SqliteStore) -> Self {
         Self {
             store,
             service: Arc::new(FakeService::default()),
             notifier: Arc::new(RecordingNotifier::default()),
+            state_dir: TempDir::new().unwrap(),
         }
     }
 
@@ -62,6 +70,10 @@ impl CliPorts for FakePorts {
 
     fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
         self.notifier.clone()
+    }
+
+    fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
+        Ok(Arc::new(ShellFiles::under(self.state_dir.path())))
     }
 
     fn serve_mcp(&self, _launch: McpLaunch) -> Result<(), MusterError> {

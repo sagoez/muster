@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    time::Instant,
 };
 
 use crossbeam_channel::Sender;
@@ -97,6 +98,10 @@ pub struct Supervisor {
     /// Stores how each run ends, so a later service shows it; absent where
     /// nothing is stored.
     pub(super) runs: Option<StoreRecorder>,
+    /// Live shells whose folder is in the project.
+    pub(super) occupants: u32,
+    /// When its last shell left, while its idle stop is pending.
+    pub(super) left_at: Option<Instant>,
 }
 
 impl Supervisor {
@@ -144,6 +149,8 @@ impl Supervisor {
             next_wait_group: 0,
             readiness: HashMap::new(),
             runs,
+            occupants: 0,
+            left_at: None,
         }
     }
 

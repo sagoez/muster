@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     adapter::workspace_request::WorkspaceRequest,
-    domain::value::{ProcessName, ProjectRoot},
+    domain::{
+        occupancy::{ReportSeq, ShellId},
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
 /// One request a client sends the service, as one JSON line. A `project` is
@@ -121,8 +124,86 @@ pub enum ServiceRequest {
     },
     /// The stored settings changed; later launches use them.
     SettingsChanged,
+    /// A shell's hook reports the project its folder is in at a prompt.
+    ShellReport {
+        /// The shell that reports.
+        #[serde(with = "crate::adapter::wire::form")]
+        shell: ShellId,
+        /// The prompt it reports at, rising, so an older report is dropped.
+        seq: ReportSeq,
+        /// The project its folder is in, or none outside every project.
+        project: Option<ProjectRoot>,
+        /// The shell's exported environment, which what entering a project
+        /// starts runs with.
+        environment: LaunchEnvironment,
+    },
     /// Exits so a newer service can take over; every process keeps running.
     Replace,
     /// Exits; every process keeps running.
     Stop,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        adapter::service::{PortBlock, PortHolder, PortOwner, Refusal, ServiceResponse, ShellNote},
+        domain::value::{LocalPort, Pid, ProjectName, StartToken},
+    };
+
+    #[test]
+    fn shell_report_and_notes_round_trip_as_json() {
+        let report = ServiceRequest::ShellReport {
+            shell: ShellId::builder()
+                .pid(Pid::try_new(4242).unwrap())
+                .start(StartToken::try_new(77).unwrap())
+                .build(),
+            seq: ReportSeq::new(3),
+            project: Some(ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()),
+            environment: LaunchEnvironment::from_vars([("PATH".into(), "/usr/bin".into())]),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            json,
+            r#"{"shell-report":{"shell":{"pid":4242,"start":77},"seq":3,"project":"/home/me/shop","environment":{"PATH":"/usr/bin"}}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ServiceRequest>(&json).unwrap(),
+            report
+        );
+
+        let shop = ProjectName::try_new("shop").unwrap();
+        let block = PortBlock::builder()
+            .port(LocalPort::try_new(5173).unwrap())
+            .holder(PortOwner::Supervised(
+                PortHolder::builder()
+                    .project(ProjectName::try_new("admin").unwrap())
+                    .process(ProcessName::try_new("web").unwrap())
+                    .build(),
+            ))
+            .build();
+        let notes = ServiceResponse::ShellNotes(vec![
+            ShellNote::Started {
+                project: shop.clone(),
+                names: vec![ProcessName::try_new("api").unwrap()],
+            },
+            ShellNote::Refused {
+                project: shop,
+                refusal: Refusal::builder()
+                    .name(ProcessName::try_new("web").unwrap())
+                    .reason(block.to_string())
+                    .block(Some(block))
+                    .build(),
+            },
+        ]);
+        let json = serde_json::to_string(&notes).unwrap();
+        assert!(json.starts_with(r#"{"shell-notes":[{"started":"#), "{json}");
+        assert!(json.contains(r#"{"refused":"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ServiceResponse>(&json).unwrap(),
+            notes
+        );
+    }
 }

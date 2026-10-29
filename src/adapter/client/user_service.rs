@@ -3,7 +3,7 @@ use super::{
     service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{Notice, ProjectStatus, ServiceRequest},
+    adapter::service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
     domain::value::ProjectRoot,
 };
 
@@ -34,5 +34,12 @@ impl ServiceAccess for UserService {
 
     fn notify(&self, request: &ServiceRequest) {
         ServiceClient::notify_if_running(request);
+    }
+
+    fn ask_if_running(
+        &self,
+        request: &ServiceRequest,
+    ) -> Result<Option<ServiceResponse>, ClientError> {
+        ServiceClient::ask_if_running(request)
     }
 }

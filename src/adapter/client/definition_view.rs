@@ -44,6 +44,9 @@ pub struct DefinitionView {
     /// What each run waits for before it counts as ready.
     #[getset(get = "pub")]
     ready: Option<ReadyView>,
+    /// The TCP ports it declares it listens on, ascending.
+    #[getset(get = "pub")]
+    ports: Vec<u16>,
 }
 
 impl From<&ProcessSpec> for DefinitionView {
@@ -72,6 +75,7 @@ impl DefinitionView {
             restart: *spec.restart(),
             stop: StopView::from(spec.stop()),
             ready: spec.ready().as_ref().map(ReadyView::from),
+            ports: spec.ports().iter().map(|port| port.into_inner()).collect(),
         }
     }
 }
@@ -84,7 +88,7 @@ mod tests {
     use crate::domain::{
         config::Environment,
         process::{ReadyCheck, ReadyProbe, StopPolicy, StopSignal},
-        value::{EnvName, EnvValue, PositiveDuration, StopGrace},
+        value::{EnvName, EnvValue, LocalPort, PositiveDuration, StopGrace},
     };
 
     /// The definition reads as the documented JSON: snake_case keys,
@@ -107,6 +111,12 @@ mod tests {
                     .grace_period(StopGrace::try_new(Duration::from_millis(5_500)).unwrap())
                     .build(),
             )
+            .ports(
+                [8080, 3000]
+                    .into_iter()
+                    .map(|port| LocalPort::try_new(port).unwrap())
+                    .collect(),
+            )
             .build();
 
         assert_eq!(
@@ -115,7 +125,7 @@ mod tests {
                 "name": "web", "command": "npm run dev", "working_dir": "frontend",
                 "description": null, "environment": {"PORT": "5173"}, "autostart": true,
                 "restart": "on-failure", "stop": {"signal": "terminate", "grace": 5.5},
-                "ready": null
+                "ready": null, "ports": [3000, 8080]
             })
         );
         let regex = spec.with_ready(Some(

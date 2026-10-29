@@ -53,7 +53,9 @@ const START_LOCK_FILE: &str = "service.start.lock";
 /// Mode of the start lock: its owner's alone.
 const START_LOCK_MODE: u32 = 0o600;
 /// Longest a writer waits for a running service to hear that stored state
-/// changed; a service that does not answer in time reads fresh state later.
+/// changed, a service that does not answer in time reading fresh state later,
+/// and longest each step of asking a running service without starting one
+/// may take.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The folder a path with no parent is relative to.
 const CURRENT_DIR: &str = ".";
@@ -127,6 +129,7 @@ impl ServiceClient {
                 | ServiceResponse::Log(_)
                 | ServiceResponse::Located(_)
                 | ServiceResponse::Screen(_)
+                | ServiceResponse::ShellNotes(_)
                 | ServiceResponse::Notices(_)
                 | ServiceResponse::Waited(_)
                 | ServiceResponse::Events(_)
@@ -176,6 +179,7 @@ impl ServiceClient {
             | ServiceResponse::Log(_)
             | ServiceResponse::Located(_)
             | ServiceResponse::Screen(_)
+            | ServiceResponse::ShellNotes(_)
             | ServiceResponse::Notices(_)
             | ServiceResponse::Waited(_)
             | ServiceResponse::Events(_)
@@ -205,6 +209,7 @@ impl ServiceClient {
             | ServiceResponse::Status(_)
             | ServiceResponse::Located(_)
             | ServiceResponse::Screen(_)
+            | ServiceResponse::ShellNotes(_)
             | ServiceResponse::Waited(_)
             | ServiceResponse::Events(_)
             | ServiceResponse::Error(_)) => Err(ClientError::UnexpectedAnswer((&other).into())),
@@ -218,6 +223,43 @@ impl ServiceClient {
         if let Ok(client) = Self::local() {
             let _ = client.send_once(request, NOTIFY_TIMEOUT);
         }
+    }
+
+    /// Sends `request` to a running service of this version and returns its
+    /// answer, never starting or replacing one; none when no service runs
+    /// or it runs another version.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when there is no state directory, or a
+    /// service holds the socket but does not answer within
+    /// [`NOTIFY_TIMEOUT`].
+    pub fn ask_if_running(
+        request: &ServiceRequest,
+    ) -> Result<Option<ServiceResponse>, ClientError> {
+        Self::local()?.ask(request)
+    }
+
+    /// [`Self::ask_if_running`] on the socket [`Self::socket`] trusts.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when the socket's directory is not private
+    /// to this user, or a service holds the socket but does not answer within
+    /// [`NOTIFY_TIMEOUT`].
+    fn ask(&self, request: &ServiceRequest) -> Result<Option<ServiceResponse>, ClientError> {
+        let ours = ServiceVersion::current();
+        let hello = ServiceRequest::Hello {
+            version: ours.clone(),
+        };
+        match self.send_once(&hello, NOTIFY_TIMEOUT) {
+            Ok(ServiceResponse::Hello { version, .. }) if version == ours => {},
+            Ok(ServiceResponse::Hello { .. } | ServiceResponse::Error(_)) => return Ok(None),
+            Ok(other) => return Err(ClientError::UnexpectedAnswer((&other).into())),
+            Err(error) if not_listening(&error) || gone(&error) => return Ok(None),
+            Err(source) => return Err(self.io_error(source)),
+        }
+        self.send_once(request, NOTIFY_TIMEOUT)
+            .map(Some)
+            .map_err(|source| self.io_error(source))
     }
 
     /// The client of the service under this user's state directory, started
@@ -732,13 +774,16 @@ mod tests {
     use std::{
         fs::{self, Permissions},
         os::unix::{fs::PermissionsExt, net::UnixListener},
+        thread::JoinHandle,
     };
 
     use super::*;
-    use crate::adapter::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
+    use crate::adapter::{ipc, private_dir::prepare_socket_dir, test_scratch::short_scratch};
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";
+    /// A version no build of this crate runs.
+    const OTHER_VERSION: &str = "0.0.1";
     /// A directory mode every user may enter and write.
     const OPEN_DIR_MODE: u32 = 0o777;
 
@@ -860,5 +905,76 @@ mod tests {
     fn a_stop_waits_past_the_longest_service_exit() {
         assert!(SERVICE_EXIT_TIMEOUT > SERVICE_EXIT_BOUND);
         assert!(SERVICE_EXIT_BOUND > SERVICE_REPLY_TIMEOUT);
+    }
+
+    /// A service at `socket`, in a directory private to this user, that
+    /// answers a hello as `version` and every other request with no notes,
+    /// for `connections` connections.
+    fn serving(
+        socket: &Path,
+        version: &str,
+        connections: usize,
+    ) -> JoinHandle<Vec<ServiceRequest>> {
+        prepare_socket_dir(parent_dir(socket)).unwrap();
+        let listener = ipc::bind(socket).unwrap();
+        let version: ServiceVersion = version.parse().unwrap();
+        thread::spawn(move || {
+            let mut asked = Vec::new();
+            for stream in listener.incoming().take(connections) {
+                ipc::serve_connection(stream.unwrap(), |request: ServiceRequest| {
+                    asked.push(request.clone());
+                    match request {
+                        ServiceRequest::Hello { .. } => ServiceResponse::Hello {
+                            version: version.clone(),
+                            binary: PathBuf::new(),
+                        },
+                        _ => ServiceResponse::ShellNotes(Vec::new()),
+                    }
+                })
+                .unwrap();
+            }
+            asked
+        })
+    }
+
+    /// Asking with no service running answers none and starts nothing:
+    /// no socket is bound and the state directory stays empty.
+    #[test]
+    fn ask_if_running_never_starts_a_service() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let client = client_in(scratch.path());
+
+        assert!(matches!(
+            client.ask(&ServiceRequest::SettingsChanged),
+            Ok(None)
+        ));
+
+        assert!(!client.own_socket.exists(), "no socket was created");
+        assert_eq!(fs::read_dir(&client.state_dir).unwrap().count(), 0);
+    }
+
+    /// A running service of this version is asked; one of another version
+    /// is only greeted, never asked nor replaced.
+    #[test]
+    fn ask_if_running_asks_only_a_service_of_this_version() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let client = client_in(scratch.path());
+        let ours = serving(&client.own_socket, APP_VERSION, 2);
+
+        let answer = client.ask(&ServiceRequest::SettingsChanged).unwrap();
+
+        assert_eq!(answer, Some(ServiceResponse::ShellNotes(Vec::new())));
+        let asked = ours.join().unwrap();
+        assert!(matches!(asked[..], [
+            ServiceRequest::Hello { .. },
+            ServiceRequest::SettingsChanged
+        ]));
+
+        fs::remove_file(&client.own_socket).unwrap();
+        let theirs = serving(&client.own_socket, OTHER_VERSION, 1);
+
+        assert_eq!(client.ask(&ServiceRequest::SettingsChanged).unwrap(), None);
+        let asked = theirs.join().unwrap();
+        assert!(matches!(asked[..], [ServiceRequest::Hello { .. }]));
     }
 }

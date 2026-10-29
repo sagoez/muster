@@ -2,7 +2,7 @@ use super::{
     client_error::ClientError, service_client::ServiceClient, service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{Notice, ProjectStatus, ServiceRequest},
+    adapter::service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
     domain::value::ProjectRoot,
 };
 
@@ -50,4 +50,16 @@ pub trait ServiceAccess: Send + Sync {
     /// Sends `request` to a service that is running, best effort, never
     /// starting one.
     fn notify(&self, request: &ServiceRequest);
+
+    /// Sends `request` to a running service of this version and returns its
+    /// answer, never starting or replacing one; none when no service runs or
+    /// it runs another version.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when a service holds the socket but does
+    /// not answer in time.
+    fn ask_if_running(
+        &self,
+        request: &ServiceRequest,
+    ) -> Result<Option<ServiceResponse>, ClientError>;
 }

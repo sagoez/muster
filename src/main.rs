@@ -8,6 +8,7 @@ use muster::{
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
+        no_state_dir::NoStateDir,
         notifier::DesktopNotifier,
         open_files::OpenFilesLimit,
         path::home_dir,
@@ -18,11 +19,12 @@ use muster::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
             protocol, redirect_stderr,
         },
+        shell::ShellFiles,
         store::SqliteStore,
     },
     domain::{
         config::ConfigError,
-        port::{LocalState, Notifier, PortOccupants, StateChangeNotifier},
+        port::{LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier},
     },
     error::MusterError,
 };
@@ -86,6 +88,10 @@ impl CliPorts for LocalPorts {
 
     fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
         Arc::new(RunningServiceNotifier::new(CliPorts::service(self)))
+    }
+
+    fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
+        Ok(Arc::new(ShellFiles::under(&state_dir()?)))
     }
 
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {

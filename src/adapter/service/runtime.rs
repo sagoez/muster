@@ -610,6 +610,7 @@ impl ServiceRuntime {
             | ServiceRequest::Workspace { .. }
             | ServiceRequest::StackChanged { .. }
             | ServiceRequest::SettingsChanged
+            | ServiceRequest::ShellReport { .. }
             | ServiceRequest::Replace
             | ServiceRequest::Stop => {},
         }
@@ -737,6 +738,7 @@ impl ServiceRuntime {
                 self.settings_changed()?;
                 ServiceResponse::Ok
             },
+            ServiceRequest::ShellReport { .. } => ServiceResponse::ShellNotes(Vec::new()),
         };
         Ok(Reply::Now(response))
     }

@@ -12,6 +12,8 @@ mod log_pattern_wire;
 mod port_occupant_wire;
 mod project_wire;
 mod pty_size_wire;
+mod shell_id_wire;
+mod shell_record_wire;
 mod spawn_history_wire;
 mod stop_policy_wire;
 #[cfg(test)]
@@ -26,6 +28,8 @@ pub use log_pattern_wire::*;
 pub use port_occupant_wire::*;
 pub use project_wire::*;
 pub use pty_size_wire::*;
+pub use shell_id_wire::*;
+pub use shell_record_wire::*;
 pub use spawn_history_wire::*;
 pub use stop_policy_wire::*;
 pub use text_form::*;

@@ -28,4 +28,21 @@ pub enum EventKind {
     Blocked,
     /// A warning or error notice was raised.
     Notice,
+    /// The project was stopped because no shell was in it for its idle stop.
+    IdleStopped,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_stopped_is_kebab_case() {
+        assert_eq!(EventKind::IdleStopped.to_string(), "idle-stopped");
+        assert_eq!(
+            serde_json::to_string(&EventKind::IdleStopped).unwrap(),
+            r#""idle-stopped""#
+        );
+        assert_eq!("idle-stopped".parse(), Ok(EventKind::IdleStopped));
+    }
 }

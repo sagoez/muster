@@ -6,7 +6,7 @@ use strum::IntoStaticStr;
 use super::{
     batch_outcome::BatchOutcome, event_page::EventPage, located::Located, notice::Notice,
     project_status::ProjectStatus, service_error_body::ServiceErrorBody,
-    service_version::ServiceVersion, wait_outcome::WaitOutcome,
+    service_version::ServiceVersion, shell_note::ShellNote, wait_outcome::WaitOutcome,
 };
 
 /// The service's answer to one [`ServiceRequest`](super::ServiceRequest), as
@@ -31,6 +31,8 @@ pub enum ServiceResponse {
     Log(PathBuf),
     /// Each requested project's processes.
     Status(Vec<ProjectStatus>),
+    /// What a shell's hook prints at its next prompt, oldest first.
+    ShellNotes(Vec<ShellNote>),
     /// Where a running process can be reached.
     Located(Located),
     /// A process's visible screen.

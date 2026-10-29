@@ -30,8 +30,9 @@ use muster::{
         private_dir::RUNTIME_DIR_ENV,
         service::{
             BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-            ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps, ServiceError,
-            ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
+            OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
+            ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion,
+            Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
@@ -46,7 +47,7 @@ use muster::{
         pty::PtySize,
         value::{
             COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
-            PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
+            IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
         },
     },
 };
@@ -1692,6 +1693,13 @@ fn pending_api_status(project: &Path) -> ProjectStatus {
                 .stop_grace(Duration::from_secs(5))
                 .build(),
         ])
+        .occupancy(
+            OccupancyStatus::builder()
+                .shells(0)
+                .idle_stop(IdleStop::Never)
+                .stops_in(None)
+                .build(),
+        )
         .build()
 }
 

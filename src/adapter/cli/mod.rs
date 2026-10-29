@@ -9,6 +9,7 @@ mod attach_event;
 mod attach_pump;
 #[cfg(test)]
 mod attach_testing;
+mod block_hint;
 mod cli_exit;
 mod cli_ports;
 mod command;
@@ -120,6 +121,7 @@ pub use args::*;
 pub use attach::*;
 pub use attach_end::*;
 pub use attach_event::*;
+pub use block_hint::*;
 pub use cli_exit::*;
 pub use cli_ports::*;
 pub use command::*;

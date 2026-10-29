@@ -33,9 +33,21 @@ pub struct ActionReport {
     #[builder(default = WaitEnd::Settled)]
     #[getset(get_copy = "pub")]
     wait_ended: WaitEnd,
+    /// Whether the project has no process `up` starts, as the person reads
+    /// an `up` that started nothing.
+    #[serde(skip)]
+    #[builder(default)]
+    #[getset(get_copy = "pub")]
+    none_autostart: bool,
 }
 
 impl ActionReport {
+    /// The report saying whether the project has no process `up` starts.
+    pub fn with_none_autostart(mut self, none_autostart: bool) -> Self {
+        self.none_autostart = none_autostart;
+        self
+    }
+
     /// The report with `more` processes listed after its own.
     pub fn with_more(mut self, more: impl IntoIterator<Item = ProcessOutcome>) -> Self {
         self.processes.extend(more);

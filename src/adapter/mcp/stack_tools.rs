@@ -72,7 +72,12 @@ impl MusterMcp {
                     .map(StackProcessView::from)
                     .collect(),
             )
-            .notices(notices[recent..].iter().map(NoticeView::from).collect())
+            .notices(
+                notices[recent..]
+                    .iter()
+                    .map(|notice| NoticeView::for_project(notice, status.project()))
+                    .collect(),
+            )
             .locks(locks.iter().map(|lock| LockView::at(lock, now)).collect())
             .events_cursor(
                 self.alerts

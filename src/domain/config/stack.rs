@@ -39,6 +39,11 @@ impl Stack {
             })
     }
 
+    /// Whether `up` starts any of its processes.
+    pub fn autostarts_any(&self) -> bool {
+        self.processes.iter().any(|spec| *spec.autostart())
+    }
+
     /// Every defined name, in stack order.
     pub fn names(&self) -> Vec<ProcessName> {
         self.processes

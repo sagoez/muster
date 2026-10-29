@@ -70,6 +70,10 @@ pub struct SetView {
     /// for its next start.
     #[getset(get_copy = "pub")]
     running: bool,
+    /// Whether a running process only takes the change at its next start.
+    #[serde(skip)]
+    #[getset(get_copy = "pub")]
+    needs_restart: bool,
     /// What changed, in words.
     #[serde(skip)]
     #[getset(get = "pub")]
@@ -90,7 +94,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         return Err(CliError::NothingToChange);
     }
     let store = invocation.store()?;
-    let project = invocation.project(&store)?;
+    let project = invocation.editing_project(&store)?;
     let root = project.root();
     let words = (!args.words.is_empty())
         .then(|| command_string(&args.words))
@@ -143,6 +147,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         .project(ProjectIdentityView::from(&project))
         .process(DefinitionView::from(&spec))
         .running(running)
+        .needs_restart(change.needs_restart())
         .changes(change_words(&change))
         .build())
 }
@@ -217,7 +222,7 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
 }
 
 /// The human report of `view`: what changed, and how a running process
-/// takes the change.
+/// takes a change that needs a restart.
 pub fn set_rows(view: &SetView) -> Report {
     let name = view.process().name();
     let mut rows = vec![Row::unlabeled(
@@ -227,7 +232,7 @@ pub fn set_rows(view: &SetView) -> Report {
             view.changes().join(CHANGE_SEPARATOR)
         ),
     )];
-    if view.running() {
+    if view.running() && view.needs_restart() {
         rows.push(Row::unlabeled(
             RowKind::Dim,
             format!(
@@ -241,13 +246,69 @@ pub fn set_rows(view: &SetView) -> Report {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
 
     use super::*;
-    use crate::domain::{
-        process::RestartPolicy,
-        value::{EnvName, EnvValue, StopGrace},
+    use crate::{
+        adapter::cli::report::plain,
+        domain::{
+            config::{Environment, ProcessSpec},
+            process::{RestartPolicy, StopPolicy, StopSignal},
+            value::{CommandLine, EnvName, EnvValue, ProcessName, ProjectName, StopGrace},
+        },
     };
+
+    /// The view of a change to the running `api`, `needs_restart` or not.
+    fn running_view(change: &ProcessChange) -> SetView {
+        let spec = ProcessSpec::builder()
+            .name(ProcessName::try_new("api").unwrap())
+            .command(CommandLine::try_new("bin/api").unwrap())
+            .environment(Environment::empty())
+            .autostart(true)
+            .restart(RestartPolicy::Never)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(StopGrace::try_new(Duration::from_secs(5)).unwrap())
+                    .build(),
+            )
+            .build();
+        SetView::builder()
+            .project(
+                ProjectIdentityView::builder()
+                    .name(ProjectName::try_new("shop").unwrap())
+                    .root(PathBuf::from("/p"))
+                    .build(),
+            )
+            .process(DefinitionView::from(&spec))
+            .running(true)
+            .needs_restart(change.needs_restart())
+            .changes(change_words(change))
+            .build()
+    }
+
+    /// A running process is told to restart only for a change it reads at
+    /// launch, never for its description or autostart.
+    #[test]
+    fn the_restart_hint_follows_what_changed() {
+        let quiet = ProcessChange::builder()
+            .description(FieldEdit::Clear)
+            .autostart(Some(false))
+            .build();
+        assert_eq!(
+            plain(&set_rows(&running_view(&quiet))),
+            "updated api  description cleared, autostart off"
+        );
+
+        let command = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("bin/api --v2").unwrap()))
+            .build();
+        assert!(
+            plain(&set_rows(&running_view(&command))).contains("`muster restart 'api'`"),
+            "{}",
+            plain(&set_rows(&running_view(&command)))
+        );
+    }
 
     /// Each kind of change is named in the summary, variables by name only.
     #[test]

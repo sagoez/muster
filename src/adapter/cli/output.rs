@@ -91,6 +91,9 @@ const PROJECT_LABEL: &str = "project";
 const NOTHING_TO_START: &str = "nothing to start: every process set to autostart is running";
 /// How to start what `up` leaves alone.
 const UP_HINT: &str = "`muster start <name>` starts a process that does not autostart";
+/// The `up` report of a project with no process set to autostart, and how
+/// to make `up` start one.
+const NONE_AUTOSTART: &str = "no process starts on up; `muster set <name> --autostart` adds one";
 /// The report of an action that stopped nothing.
 const NOTHING_RUNNING: &str = "nothing was running";
 /// The report of an action that touched no process.
@@ -296,7 +299,7 @@ pub fn action_rows(report: &ActionReport) -> Report {
         .collect();
     let summary = tally(&acted);
     if acted.is_empty() {
-        rows.extend(nothing_done(report.action()));
+        rows.extend(nothing_done(report));
     }
     rows.extend(acted);
     if !report.other_notices().is_empty() {
@@ -366,9 +369,10 @@ fn command_word(action: Action) -> &'static str {
     }
 }
 
-/// What to say when an action touched no process.
-fn nothing_done(action: Action) -> Vec<Row> {
-    match action {
+/// What to say when the action of `report` touched no process.
+fn nothing_done(report: &ActionReport) -> Vec<Row> {
+    match report.action() {
+        Action::Up if report.none_autostart() => vec![Row::unlabeled(RowKind::Ok, NONE_AUTOSTART)],
         Action::Up => vec![
             Row::unlabeled(RowKind::Ok, NOTHING_TO_START),
             Row::unlabeled(RowKind::Dim, UP_HINT),
@@ -517,7 +521,7 @@ pub fn notices_rows(project: &Project, notices: &[Notice], now: SystemTime) -> R
             .duration_since(*notice.at())
             .map(short_duration)
             .unwrap_or_else(|_| EMPTY_CELL.to_string());
-        let view = NoticeView::from(notice);
+        let view = NoticeView::for_project(notice, project);
         Row::labeled(
             level_kind(*notice.level()),
             notice_label(&view),
@@ -771,6 +775,11 @@ mod tests {
             .build()
     }
 
+    /// [`notice`] as `--json` shows it.
+    fn notice_view(process: Option<&str>, level: NoticeLevel, message: &str) -> NoticeView {
+        NoticeView::for_project(&notice(process, level, message), &shop_project())
+    }
+
     #[test]
     fn ps_table_snapshot() {
         insta::assert_snapshot!("ps_table", render_status(&[shop()], false));
@@ -878,16 +887,16 @@ mod tests {
                     .status(None)
                     .build(),
             ])
-            .notices(vec![NoticeView::from(&notice(
+            .notices(vec![notice_view(
                 Some("café"),
                 NoticeLevel::Error,
                 "crashed: exited with status 127",
-            ))])
-            .other_notices(vec![NoticeView::from(&notice(
+            )])
+            .other_notices(vec![notice_view(
                 Some("cron"),
                 NoticeLevel::Error,
                 "crashed: ended by signal: Killed",
-            ))])
+            )])
             .build()
     }
 
@@ -970,11 +979,7 @@ mod tests {
                     .build(),
             ])
             .notices(vec![])
-            .other_notices(vec![NoticeView::from(&notice(
-                Some("api"),
-                NoticeLevel::Error,
-                reason,
-            ))])
+            .other_notices(vec![notice_view(Some("api"), NoticeLevel::Error, reason)])
             .build()
             .claiming_notices_about(&[name("api")]);
 
@@ -993,11 +998,11 @@ mod tests {
             .action(Action::Stop)
             .processes(vec![outcome("api", Outcome::Stopped, None)])
             .notices(vec![])
-            .other_notices(vec![NoticeView::from(&notice(
+            .other_notices(vec![notice_view(
                 Some("cron"),
                 NoticeLevel::Error,
                 "crashed: exited with status 1",
-            ))])
+            )])
             .build();
 
         assert!(!report.failed());
@@ -1016,6 +1021,27 @@ mod tests {
             .build();
         assert!(!report.failed());
         insta::assert_snapshot!("up_nothing", plain(&action_rows(&report)));
+    }
+
+    /// An `up` of a project where nothing autostarts says so and how to
+    /// change it, never that every autostart process is running.
+    #[test]
+    fn an_up_with_nothing_set_to_autostart_says_so() {
+        let report = ActionReport::builder()
+            .project(shop_view())
+            .action(Action::Up)
+            .processes(vec![])
+            .notices(vec![])
+            .other_notices(vec![])
+            .build()
+            .with_none_autostart(true);
+
+        let rendered = plain(&action_rows(&report));
+        assert!(
+            rendered.contains("no process starts on up; `muster set <name> --autostart` adds one"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("every process"), "{rendered}");
     }
 
     /// A pause of a process that is not running says it was not paused and
@@ -1087,7 +1113,10 @@ mod tests {
             "notices_none",
             plain(&notices_rows(&shop_project(), &[], now))
         );
-        let views: Vec<NoticeView> = notices.iter().map(NoticeView::from).collect();
+        let views: Vec<NoticeView> = notices
+            .iter()
+            .map(|notice| NoticeView::for_project(notice, &shop_project()))
+            .collect();
         insta::assert_snapshot!("notices_json", json(&views).unwrap());
     }
 

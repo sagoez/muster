@@ -57,7 +57,7 @@ pub fn follow_logs(
         .log(Some(log.clone()))
         .bytes(Vec::new())
         .build()
-        .text_in(project.root());
+        .text_in(project);
     follow(&log, &mut JsonLogLines::new(out, template))
 }
 

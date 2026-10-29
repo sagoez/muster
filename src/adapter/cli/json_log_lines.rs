@@ -134,16 +134,27 @@ mod tests {
     use std::{path::PathBuf, thread};
 
     use super::*;
-    use crate::domain::value::ProcessName;
+    use crate::{
+        adapter::client::ProjectIdentityView,
+        domain::value::{ProcessName, ProjectName},
+    };
 
     /// How far past the idle wait the prompt test looks.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);
+
+    /// The project every template names.
+    fn shop() -> ProjectIdentityView {
+        ProjectIdentityView::builder()
+            .name(ProjectName::try_new("shop").unwrap())
+            .root(PathBuf::from("/p"))
+            .build()
+    }
 
     /// The texts of the JSON lines `writes` produce, written one after
     /// another.
     fn texts(writes: &[&[u8]]) -> Vec<String> {
         let template = LogText::builder()
-            .project(PathBuf::from("/p/muster.yml"))
+            .project(shop())
             .name(ProcessName::try_new("café").unwrap())
             .log(Some(PathBuf::from("/s/api.log")))
             .text(String::new())
@@ -247,7 +258,7 @@ mod tests {
     #[test]
     fn a_flushed_prompt_ending_adds_no_empty_line() {
         let template = LogText::builder()
-            .project(PathBuf::from("/p/muster.yml"))
+            .project(shop())
             .name(ProcessName::try_new("db").unwrap())
             .log(None)
             .text(String::new())
@@ -269,7 +280,7 @@ mod tests {
     #[test]
     fn a_prompt_is_written_after_the_idle_wait() {
         let template = LogText::builder()
-            .project(PathBuf::from("/p/muster.yml"))
+            .project(shop())
             .name(ProcessName::try_new("db").unwrap())
             .log(None)
             .text(String::new())

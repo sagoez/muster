@@ -1,12 +1,11 @@
-use std::path::PathBuf;
-
 use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
+use super::project_identity_view::ProjectIdentityView;
 use crate::{
     adapter::service::{Notice, NoticeLevel},
-    domain::value::ProcessName,
+    domain::{project::Project, value::ProcessName},
 };
 
 /// One notice as `--json` shows it.
@@ -15,8 +14,8 @@ use crate::{
 pub struct NoticeView {
     /// When it was raised, as RFC 3339 UTC to the second.
     at: String,
-    /// The folder of the project it concerns, or none for the service.
-    project: Option<PathBuf>,
+    /// The project it concerns, or none for the service.
+    project: Option<ProjectIdentityView>,
     /// The process it concerns.
     process: Option<ProcessName>,
     /// How serious it is.
@@ -25,14 +24,16 @@ pub struct NoticeView {
     message: String,
 }
 
-impl From<&Notice> for NoticeView {
-    fn from(notice: &Notice) -> Self {
+impl NoticeView {
+    /// `notice`, one the service held for `project`: it concerns that
+    /// project or the service as a whole.
+    pub fn for_project(notice: &Notice, project: &Project) -> Self {
         Self {
             at: humantime::format_rfc3339_seconds(*notice.at()).to_string(),
             project: notice
                 .project()
                 .as_ref()
-                .map(|project| project.as_ref().clone()),
+                .map(|_| ProjectIdentityView::from(project)),
             process: notice.process().clone(),
             level: *notice.level(),
             message: notice.message().clone(),

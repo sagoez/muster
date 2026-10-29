@@ -60,6 +60,20 @@ impl ProcessChange {
             && self.stop_grace.is_none()
             && self.ready.is_keep()
     }
+
+    /// Whether a running process only takes this change when it next starts:
+    /// a new command, working directory, environment, stop policy or
+    /// readiness check. A description, autostart or restart policy needs no
+    /// restart.
+    pub fn needs_restart(&self) -> bool {
+        self.command.is_some()
+            || !self.working_dir.is_keep()
+            || !self.set_env.is_empty()
+            || !self.unset_env.is_empty()
+            || self.stop_signal.is_some()
+            || self.stop_grace.is_some()
+            || !self.ready.is_keep()
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +100,39 @@ mod tests {
                 .ready(FieldEdit::Clear)
                 .build()
                 .is_empty()
+        );
+    }
+
+    /// What a process reads at launch needs a restart; its description,
+    /// autostart and restart policy do not.
+    #[test]
+    fn only_launch_fields_need_a_restart() {
+        let unset = vec![EnvName::try_new("PORT").unwrap()];
+        assert!(
+            ProcessChange::builder()
+                .unset_env(unset)
+                .build()
+                .needs_restart()
+        );
+        assert!(
+            ProcessChange::builder()
+                .working_dir(FieldEdit::Clear)
+                .build()
+                .needs_restart()
+        );
+        assert!(
+            ProcessChange::builder()
+                .ready(FieldEdit::Clear)
+                .build()
+                .needs_restart()
+        );
+        assert!(
+            !ProcessChange::builder()
+                .description(FieldEdit::Clear)
+                .autostart(Some(true))
+                .restart(Some(RestartPolicy::Always))
+                .build()
+                .needs_restart()
         );
     }
 }

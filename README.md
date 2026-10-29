@@ -42,9 +42,12 @@ service what changed, so an edit reaches the service at once and works without
 it.
 
 Commands act on the project given by `--project` (a registered name, or a
-folder when the value contains `/` or starts with `.` or `~`), then
+folder when the value contains `/` or starts with `.` or `~`; such a value
+names a registered project when no such folder exists), then
 `$MUSTER_PROJECT` (set inside every process muster runs), then the deepest
-registered folder containing the current directory. Bare `muster` is
+registered folder containing the current directory. When `$MUSTER_PROJECT`
+points `add`, `set`, `rm`, `init` or `import` away from the project the current
+directory is in, the command says which project it acts on. Bare `muster` is
 `muster ps` inside a project and `muster ps --all` outside one.
 
 ### Adding and changing processes
@@ -85,7 +88,9 @@ that value, so changing a default later changes only processes added after it.
 `muster set <name>` changes the fields it is given: `--command` or a new command
 after `--`, `--no-cwd`, `--no-description` and `--no-ready` to clear, `--env` to
 add or replace a variable and `--unset-env` to remove one. A running process keeps its
-current run; `muster restart <name>` applies the change. `muster rm <name>...`
+current run; `muster restart <name>` applies a change to its command, working
+directory, environment, stop policy or readiness check, and `set` says so when
+one needs it. `muster rm <name>...`
 stops each process it removes and waits for it to end. A name cannot be
 changed: remove the process and add it again.
 
@@ -98,7 +103,10 @@ folder, or to `FILE` (`-` for stdout), and refuses to overwrite a file without
 into the current folder, registering it when needed. By default it refuses
 names the project already defines; `--merge` replaces those, `--replace` makes
 the stack exactly the file and stops what it removes, and `--dry-run` prints
-the plan. An import refuses a file whose environment still holds a placeholder.
+the plan. Both the plan and the report show the command and working directory
+of each process added or changed. An import reads only a regular file of at
+most 1 MiB, and refuses a file whose environment still holds a placeholder or
+whose `working_dir` is empty, absolute or climbs out of the project with `..`.
 
 ```yaml
 # muster stack: `muster import` loads it into a project.
@@ -126,11 +134,13 @@ never names the project: the folder that imports it is the project.
 
 ### Detecting a stack
 
-`muster init` reads `package.json` scripts, `Procfile`, `justfile`, `Makefile`
-and compose files in the folder and offers what it finds, with the likely dev
-commands preselected. It only reads files and never runs them. At a terminal it
-asks which to add; elsewhere it prints the candidates, and `muster init --yes`
-adds the suggested ones.
+`muster init` reads `package.json` scripts, `Procfile.dev` and `Procfile` (the
+first wins a shared name), public `justfile` recipes, `Makefile` targets and
+compose files in the project's folder and offers what it finds, with the likely
+dev commands preselected. It names the folder it scanned, and from a subfolder
+with files of its own it points at `muster init --project .`. It only reads
+files and never runs them. At a terminal it asks which to add; elsewhere it
+prints the candidates, and `muster init --yes` adds the suggested ones.
 
 ## Settings
 
@@ -250,7 +260,9 @@ reads:
  "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": "30s"}}
 ```
 
-`muster logs -f --json` prints one object per line.
+A project is named as `{"name": "shop", "root": "/home/me/shop"}`, in the
+output of every command and in each notice. `muster logs -f --json` prints one
+object per line.
 
 ## Attach
 
@@ -265,7 +277,10 @@ process; `--read-only` watches without typing or resizing.
 
 Each process writes its raw output to a log under the state directory, across
 restarts and after it exits. A log rotates at `log-max-size`, keeping one older
-file. `muster logs` prints it byte for byte; `muster logs --screen` prints what
+file. `muster logs` and `muster logs -f` write it byte for byte to a pipe or
+file; on a terminal they keep text, line breaks and colours and drop every
+other escape sequence and control character, so a log cannot retitle the
+terminal, write its clipboard or query it. `muster logs --screen` prints what
 the terminal shows now.
 
 Every byte of a process's output has an offset that runs on across restarts

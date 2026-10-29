@@ -60,7 +60,7 @@ pub struct AddView {
 /// not usable.
 pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliError> {
     let store = invocation.store()?;
-    let target = invocation.target(&store)?;
+    let target = invocation.editing_target(&store)?;
     let root = target.root().clone();
     let name =
         ProcessName::try_new(args.name.clone()).map_err(|_| CliError::InvalidName(args.name))?;

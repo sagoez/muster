@@ -4,6 +4,7 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
+use super::project_identity_view::ProjectIdentityView;
 use crate::domain::value::ProcessName;
 
 /// What `muster logs` shows of one process: the `--json` output of `logs`,
@@ -11,8 +12,8 @@ use crate::domain::value::ProcessName;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct LogText {
-    /// The project's folder.
-    project: PathBuf,
+    /// The project.
+    project: ProjectIdentityView,
     /// The process.
     name: ProcessName,
     /// The log file the text was read from, or none for the live screen.

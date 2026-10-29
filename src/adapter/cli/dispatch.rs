@@ -6,7 +6,7 @@ use std::{
     cell::Cell,
     env,
     error::Error,
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
     sync::Arc,
@@ -33,14 +33,15 @@ use super::{
         any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
         processes_probe, project_probe, projects_probe,
     },
-    emit::{emit, emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
+    emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
     export::{Exported, export, export_rows},
     host_terminal::HostTerminal,
     import::{apply, dry_run_view, import_mode, import_rows, plan, read},
     init::{
-        AUTOSTART_ASKED, AUTOSTART_QUESTION, INIT_TITLE, InitView, NOTHING_ADDED, add_chosen,
-        added_outro, added_rows, candidate_rows, found_in, nothing_found, offered, suggested,
+        AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, INIT_TITLE, InitView, NOTHING_ADDED,
+        add_chosen, added_outro, added_rows, candidate_rows, found_in, nothing_found, offered,
+        offers_here, scanned, suggested,
     },
     invocation::Invocation,
     kv::kv,
@@ -55,6 +56,7 @@ use super::{
     run::RunPlan,
     service_stopped::ServiceStopped,
     set::{set, set_rows},
+    terminal_safe::TerminalSafe,
     todo::todo,
     wait::{condition, wait_text, wait_through},
 };
@@ -75,7 +77,7 @@ use crate::{
     domain::{
         config::ImportMode,
         coordination::Author,
-        port::SettingsStore,
+        port::{SettingsStore, StackStore},
         project::Project,
         value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
@@ -103,6 +105,8 @@ const SHELL_ENV: &str = "SHELL";
 const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 /// XDG configuration root under home when the environment does not override.
 const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
+/// Ends a log printed on a terminal that did not end its last line.
+const LINE_BREAK: &[u8] = b"\n";
 
 /// The command line, parsed. A shell's completion hook is answered here and
 /// the process exits; a command line that does not parse exits as a usage
@@ -139,7 +143,13 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             Presenter::detect(json),
             json,
             Action::Up,
-            |_, client, project, watch| Ok(process::up(client, project, watch)?),
+            |_, client, project, watch| {
+                let none_autostart = !invocation
+                    .store()?
+                    .stack(project.root())?
+                    .is_some_and(|stack| stack.autostarts_any());
+                Ok(process::up(client, project, watch)?.with_none_autostart(none_autostart))
+            },
         ),
         Some(Command::Down { json }) => act(
             invocation,
@@ -482,7 +492,8 @@ fn finish_wait(json: bool, result: Result<WaitOutcome, CliError>) {
 
 /// Prints a process's log or screen, or follows its log until interrupted;
 /// the process is chosen at a terminal when `name` names none. A log printed
-/// to anything but a terminal is written byte for byte.
+/// to anything but a terminal is written byte for byte; on a terminal only
+/// its text, layout and colours are.
 fn logs(
     invocation: &Invocation<'_>,
     name: Option<ProcessRef>,
@@ -509,9 +520,16 @@ fn logs(
         }
         Ok::<_, CliError>(chosen)
     };
+    let on_terminal = !json && io::stdout().is_terminal();
     let result = connect().and_then(|client| {
         if follow {
-            match follow_logs(&client, &project, pick, json, &mut io::stdout().lock())? {}
+            let followed = if on_terminal {
+                let mut out = TerminalSafe::new(anstream::stdout());
+                follow_logs(&client, &project, pick, json, &mut out)
+            } else {
+                follow_logs(&client, &project, pick, json, &mut io::stdout().lock())
+            };
+            match followed? {}
         }
         process::logs(&client, &project, pick, screen)
     });
@@ -521,18 +539,25 @@ fn logs(
         Presenter::Plain
     };
     match result {
-        Ok(read) if json => print_result(json, &read.text_in(project.root()), |_| {}),
-        Ok(read) if !io::stdout().is_terminal() => emit_bytes(read.bytes()),
-        Ok(read) => {
-            let text = read.text_in(project.root());
-            if text.text().is_empty() || text.text().ends_with('\n') {
-                emit(text.text());
-            } else {
-                emit_line(text.text());
-            }
-        },
+        Ok(read) if json => print_result(json, &read.text_in(&project), |_| {}),
+        Ok(read) if on_terminal => written(print_safely(read.bytes())),
+        Ok(read) => emit_bytes(read.bytes()),
         Err(error) => fail_framed(framing, json, &error),
     }
+}
+
+/// Prints `bytes` on this terminal through [`TerminalSafe`], ending on a
+/// line break.
+///
+/// # Errors
+/// Returns the [`io::Error`] of a failed write.
+fn print_safely(bytes: &[u8]) -> io::Result<()> {
+    let mut out = TerminalSafe::new(anstream::stdout());
+    out.write_all(bytes)?;
+    if !bytes.is_empty() && !bytes.ends_with(LINE_BREAK) {
+        out.write_all(LINE_BREAK)?;
+    }
+    out.flush()
 }
 
 /// Prints the lines of a process's log that `filter` asks for, escapes
@@ -652,7 +677,10 @@ fn notices(invocation: &Invocation<'_>, json: bool) {
     let result = connect().and_then(|client| Ok(process::notices(&client, &project)?));
     match result {
         Ok(notices) => {
-            let views: Vec<NoticeView> = notices.iter().map(NoticeView::from).collect();
+            let views: Vec<NoticeView> = notices
+                .iter()
+                .map(|notice| NoticeView::for_project(notice, &project))
+                .collect();
             print_result(json, &views, |_| {
                 show(&output::notices_rows(&project, &notices, SystemTime::now()));
             });
@@ -702,7 +730,7 @@ fn change(invocation: &Invocation<'_>, args: SetArgs) {
 fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let project = invocation.project(&store)?;
+        let project = invocation.editing_project(&store)?;
         let resolved = removable(&store, &project, names)?;
         Ok((store, project, resolved))
     });
@@ -778,7 +806,10 @@ fn import(
         Err(error) => fail_command(json, &error),
     };
     if dry_run {
-        let view = dry_run_view(&stack, &planned);
+        let view = match dry_run_view(&store, &stack, &planned) {
+            Ok(view) => view,
+            Err(error) => fail_command(json, &error),
+        };
         print_result(json, &view, |view| {
             written(presenter.show(&import_rows(view)))
         });
@@ -809,11 +840,12 @@ fn import(
 fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let target = invocation.target(&store)?;
+        let target = invocation.editing_target(&store)?;
         let candidates = offered(&store, target.root())?;
-        Ok((store, target, candidates))
+        let here = !invocation.names_project() && offers_here(&invocation.cwd()?, target.root());
+        Ok((store, target, candidates, here))
     });
-    let (store, target, candidates) = match prepared {
+    let (store, target, candidates, offered_here) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => fail_command(json, &error),
     };
@@ -828,14 +860,16 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             Vec::new()
         };
         let view = InitView::builder()
+            .folder(root.as_ref().clone())
             .candidates(candidates)
             .added(added)
+            .offered_here(offered_here)
             .build();
         print_result(json, &view, |view| {
             let report = match (view.candidates().is_empty(), yes) {
-                (true, _) => nothing_found(),
-                (false, true) => added_rows(view.added()),
-                (false, false) => candidate_rows(view.candidates()),
+                (true, _) => nothing_found(view),
+                (false, true) => added_rows(view),
+                (false, false) => candidate_rows(view),
             };
             written(presenter.show(&report));
         });
@@ -843,6 +877,12 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     }
     written(presenter.open(INIT_TITLE));
     let result = (|| {
+        presenter
+            .step(&scanned(root.as_ref()))
+            .map_err(CliError::Terminal)?;
+        if offered_here {
+            presenter.step(HERE_HINT).map_err(CliError::Terminal)?;
+        }
         presenter
             .step(&found_in(&candidates))
             .map_err(CliError::Terminal)?;

@@ -25,6 +25,8 @@ pub(crate) fn attribution(author: &Author) -> String {
 
 /// Style of the glyph that opens a failure on stderr.
 const FAIL_STYLE: Style = AnsiColor::Red.on_default();
+/// Style of the glyph that opens a note on stderr.
+const NOTE_STYLE: Style = AnsiColor::Yellow.on_default();
 
 /// Glyph of a passing row.
 pub(super) const OK_GLYPH: &str = "●";
@@ -215,6 +217,13 @@ pub fn print_error(context: &str, error: &dyn Error) {
     anstream::eprintln!(
         "{FAIL_STYLE}{FAIL_GLYPH}{FAIL_STYLE:#} {context}{PLAIN_SEPARATOR}{message}"
     );
+}
+
+/// Prints a note to stderr in the CLI's voice, made printable, so a command
+/// whose output is data still says something the person should know.
+pub fn print_note(context: &str, note: &str) {
+    let note = printable(note);
+    anstream::eprintln!("{NOTE_STYLE}{HINT_GLYPH}{NOTE_STYLE:#} {context}{PLAIN_SEPARATOR}{note}");
 }
 
 /// The plain layout: one unstyled line per row.

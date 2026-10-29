@@ -669,7 +669,7 @@ fn report(
     let (notices, other_notices): (Vec<NoticeView>, Vec<NoticeView>) = notices(client, project)?
         .iter()
         .filter(|notice| *notice.at() >= sent)
-        .map(NoticeView::from)
+        .map(|notice| NoticeView::for_project(notice, project))
         .partition(|notice| {
             notice
                 .process()

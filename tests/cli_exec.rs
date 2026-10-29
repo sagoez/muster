@@ -1084,6 +1084,13 @@ fn add_up_set_rm_against_a_real_service() {
         "a change waits for the next start"
     );
     let human = scratch.on(&folder, &["set", "web", "--description", "the site"]);
+    assert!(human.status.success(), "{}", shown(&human));
+    assert!(
+        !stdout(&human).contains("muster restart"),
+        "a description needs no restart: {}",
+        shown(&human)
+    );
+    let human = scratch.on(&folder, &["set", "web", "--env", "MODE=dev"]);
     assert!(
         stdout(&human).contains("`muster restart 'web'` applies the change"),
         "{}",
@@ -3046,4 +3053,165 @@ fn init_offers_what_the_folder_defines() {
     assert!(exported.contains("npm run dev"), "{exported}");
     assert!(!exported.contains("npm run build"), "{exported}");
     assert!(exported.contains("autostart: true"), "{exported}");
+}
+
+/// A process that prints colour, a window title, a clipboard write, a
+/// device query and a DCS, then `done`.
+const NOISY: &str = "printf '\\033[31mred\\033[0m \\033]0;pwned\\007 \\033]52;c;aGk=\\007 \\033[6n \\033P1$qm\\033\\\\ done\\n'; sleep 600";
+
+/// Whether `haystack` holds `needle`.
+fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// On a terminal, `logs` and `logs -f` show a process's text and colours
+/// but nothing that could retitle the terminal, write its clipboard or query
+/// it; a pipe still receives every byte the process wrote.
+#[test]
+fn logs_on_a_terminal_drop_what_could_drive_it() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &stack(&[entry("noisy", NOISY, true)]));
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    wait_until("the noisy output to be logged", || {
+        stdout(&scratch.on(&project, &["logs", "noisy"])).contains("done")
+    });
+
+    let piped = scratch.on(&project, &["logs", "noisy"]);
+    assert!(
+        holds(&piped.stdout, b"\x1b]0;pwned\x07"),
+        "{}",
+        shown(&piped)
+    );
+    assert!(holds(&piped.stdout, b"\x1b[6n"), "{}", shown(&piped));
+
+    for args in [&["logs", "noisy"][..], &["logs", "-f", "noisy"][..]] {
+        let pty = Pty::open();
+        let mut logs = pty.spawn(&mut scratch, &project, args);
+        pty.wait_for("done", 1);
+        let _ = logs.kill();
+        let _ = logs.wait();
+        let raw = pty.raw();
+        assert!(raw.contains("\x1b[31mred\x1b[0m"), "{args:?}: {raw:?}");
+        for driving in ["pwned", "\x1b]", "aGk=", "\x1b[6n", "\x1bP", "1$qm"] {
+            assert!(
+                !raw.contains(driving),
+                "{args:?} let {driving:?} through: {raw:?}"
+            );
+        }
+    }
+}
+
+/// `import` reads only a regular file of bounded size, refuses a working
+/// directory outside the project, and shows what each process will run
+/// and where before anything is written.
+#[test]
+fn import_shows_what_it_runs_and_refuses_a_hostile_file() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let import = |file: &Path, extra: &[&str]| {
+        let mut args = vec!["import", file.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        scratch.on(&folder, &args)
+    };
+
+    let fifo = folder.join("fifo.yml");
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    let refused = import(&fifo, &[]);
+    assert!(!refused.status.success(), "{}", shown(&refused));
+    assert!(
+        stderr(&refused).contains("not a regular file"),
+        "{}",
+        shown(&refused)
+    );
+
+    let large = folder.join("large.yml");
+    fs::write(&large, "#".repeat(2 * 1024 * 1024)).unwrap();
+    let refused = import(&large, &[]);
+    assert!(
+        stderr(&refused).contains("too large"),
+        "{}",
+        shown(&refused)
+    );
+
+    let entry = |dir: &str| {
+        format!(
+            "version: 1\nprocesses:\n  - name: web\n    command: npm run dev\n    working_dir: '{dir}'\n    autostart: true\n    restart: never\n    stop:\n      signal: terminate\n      grace_period: 5s\n"
+        )
+    };
+    let file = folder.join("muster.yml");
+    for dir in ["/etc", "../elsewhere"] {
+        fs::write(&file, entry(dir)).unwrap();
+        let refused = import(&file, &[]);
+        assert!(
+            stderr(&refused).contains(&format!(
+                "processes[0] (web): working_dir {dir} must be a folder under the project root"
+            )),
+            "{}",
+            shown(&refused)
+        );
+    }
+
+    fs::write(&file, entry("frontend")).unwrap();
+    let dry = import(&file, &["--dry-run"]);
+    assert!(dry.status.success(), "{}", shown(&dry));
+    let shown_dry = stdout(&dry);
+    assert!(shown_dry.contains("would register"), "{shown_dry}");
+    assert!(
+        shown_dry.contains("+ web  npm run dev  in frontend"),
+        "{shown_dry}"
+    );
+    let listed = scratch.muster(&["projects", "--json"]);
+    assert!(!stdout(&listed).contains("shop"), "{}", shown(&listed));
+
+    fs::write(&file, "version: 1\nprocesses: []\n").unwrap();
+    let empty = import(&file, &[]);
+    assert!(empty.status.success(), "{}", shown(&empty));
+    assert!(stdout(&empty).contains("registered"), "{}", shown(&empty));
+    assert!(
+        !stdout(&empty).contains("nothing to change"),
+        "{}",
+        shown(&empty)
+    );
+}
+
+/// When `MUSTER_PROJECT` makes an editing command act on a project other
+/// than the one the current folder is in, the command says so on stderr;
+/// inside that same project it says nothing.
+#[test]
+fn an_overriding_muster_project_is_noted() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let blog = scratch.project("blog", &single());
+    let in_folder = |folder: &Path, args: &[&str]| {
+        scratch
+            .command(args)
+            .current_dir(folder)
+            .env("MUSTER_PROJECT", &shop)
+            .output()
+            .unwrap()
+    };
+
+    let added = in_folder(&blog, &["add", "worker", "--", "sleep", "1"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert!(
+        stderr(&added).contains("MUSTER_PROJECT names shop")
+            && stderr(&added).contains("not on blog"),
+        "{}",
+        shown(&added)
+    );
+    assert!(scratch.exported(&shop).contains("worker"));
+    assert!(!scratch.exported(&blog).contains("worker"));
+
+    let quiet = in_folder(&shop, &["set", "worker", "--description", "a worker"]);
+    assert!(quiet.status.success(), "{}", shown(&quiet));
+    assert!(
+        !stderr(&quiet).contains("MUSTER_PROJECT"),
+        "{}",
+        shown(&quiet)
+    );
 }

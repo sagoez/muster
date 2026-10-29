@@ -2,7 +2,9 @@
 //! to add. Detection only reads files; what is chosen is added in one
 //! transaction, registering the folder.
 
-use getset::Getters;
+use std::path::{Path, PathBuf};
+
+use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -14,6 +16,7 @@ use super::{
 use crate::{
     adapter::{
         detect::{Candidate, DetectSource, detect},
+        path::project_root,
         store::SqliteStore,
     },
     domain::{
@@ -59,14 +62,51 @@ pub const AUTOSTART_QUESTION: &str = "Start them with `muster up`?";
 /// What the plain layout says it could not ask.
 pub const AUTOSTART_ASKED: &str = "whether `muster up` starts them";
 
+/// Opens the line naming the folder scanned.
+const SCANNED: &str = "scanned";
+/// Said when the current folder, not the one scanned, has processes of its
+/// own to offer.
+pub const HERE_HINT: &str =
+    "this folder has processes of its own; `muster init --project .` offers them";
+
 /// What `muster init` offered and added, as `--json` shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
-#[getset(get = "pub")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct InitView {
+    /// The folder whose files were scanned.
+    #[getset(get = "pub")]
+    folder: PathBuf,
     /// Every process offered.
+    #[getset(get = "pub")]
     candidates: Vec<Candidate>,
     /// The ones added.
+    #[getset(get = "pub")]
     added: Vec<ProcessName>,
+    /// Whether the current folder, not the one scanned, offers processes of
+    /// its own.
+    #[serde(skip)]
+    #[getset(get_copy = "pub")]
+    offered_here: bool,
+}
+
+/// Whether `cwd`, a folder other than the scanned `root`, has files that
+/// offer processes of their own.
+pub fn offers_here(cwd: &Path, root: &ProjectRoot) -> bool {
+    project_root(cwd).is_ok_and(|here| here != *root && !detect(&here).is_empty())
+}
+
+/// The line naming the folder `root` that was scanned.
+pub fn scanned(root: &Path) -> String {
+    format!("{SCANNED} {}", root.display())
+}
+
+/// The rows every `init` report opens with: the folder scanned, and when
+/// the current folder offers processes of its own, how to scan it instead.
+fn scan_rows(view: &InitView) -> Vec<Row> {
+    let mut rows = vec![Row::unlabeled(RowKind::Dim, scanned(view.folder()))];
+    if view.offered_here() {
+        rows.push(Row::unlabeled(RowKind::Hint, HERE_HINT));
+    }
+    rows
 }
 
 /// The candidates found under `root`, leaving out names the project
@@ -126,41 +166,38 @@ pub fn add_chosen(
     Ok(plan.added().clone())
 }
 
-/// The plain list of `candidates`, the suggested ones checked, and how to
-/// add them.
-pub fn candidate_rows(candidates: &[Candidate]) -> Report {
-    if candidates.is_empty() {
-        return nothing_found();
+/// The plain list of the candidates of `view`, the suggested ones checked,
+/// and how to add them.
+pub fn candidate_rows(view: &InitView) -> Report {
+    if view.candidates().is_empty() {
+        return nothing_found(view);
     }
-    let mut rows: Vec<Row> = candidates
-        .iter()
-        .map(|candidate| {
-            let mark = if candidate.suggested() {
-                CHOSEN_MARK
-            } else {
-                UNCHOSEN_MARK
-            };
-            Row::unlabeled(
-                RowKind::Plain,
-                format!(
-                    "{mark} {}{COLUMN_GAP}{}{COLUMN_GAP}{}",
-                    candidate.name(),
-                    candidate.command(),
-                    candidate.source()
-                ),
-            )
-        })
-        .collect();
+    let mut rows = scan_rows(view);
+    rows.extend(view.candidates().iter().map(|candidate| {
+        let mark = if candidate.suggested() {
+            CHOSEN_MARK
+        } else {
+            UNCHOSEN_MARK
+        };
+        Row::unlabeled(
+            RowKind::Plain,
+            format!(
+                "{mark} {}{COLUMN_GAP}{}{COLUMN_GAP}{}",
+                candidate.name(),
+                candidate.command(),
+                candidate.source()
+            ),
+        )
+    }));
     rows.push(Row::unlabeled(RowKind::Dim, YES_HINT));
     Report::new(INIT_TITLE, rows)
 }
 
-/// The report when nothing was found to offer.
-pub fn nothing_found() -> Report {
-    Report::new(INIT_TITLE, vec![Row::unlabeled(
-        RowKind::Hint,
-        NOTHING_FOUND,
-    )])
+/// The report of `view` when nothing was found to offer.
+pub fn nothing_found(view: &InitView) -> Report {
+    let mut rows = scan_rows(view);
+    rows.push(Row::unlabeled(RowKind::Hint, NOTHING_FOUND));
+    Report::new(INIT_TITLE, rows)
 }
 
 /// The step naming the sources `candidates` came from.
@@ -175,18 +212,18 @@ pub fn found_in(candidates: &[Candidate]) -> String {
     format!("{FOUND_IN} {}", names.join(SOURCE_SEPARATOR))
 }
 
-/// The report of `added`: one line per process.
-pub fn added_rows(added: &[ProcessName]) -> Report {
-    if added.is_empty() {
-        return Report::new(INIT_TITLE, vec![Row::unlabeled(RowKind::Ok, NOTHING_ADDED)]);
+/// The report of what `view` added: one line per process.
+pub fn added_rows(view: &InitView) -> Report {
+    let mut rows = scan_rows(view);
+    if view.added().is_empty() {
+        rows.push(Row::unlabeled(RowKind::Ok, NOTHING_ADDED));
     }
-    Report::new(
-        INIT_TITLE,
-        added
+    rows.extend(
+        view.added()
             .iter()
-            .map(|name| Row::unlabeled(RowKind::Ok, format!("{ADDED_MARK} {name}")))
-            .collect(),
-    )
+            .map(|name| Row::unlabeled(RowKind::Ok, format!("{ADDED_MARK} {name}"))),
+    );
+    Report::new(INIT_TITLE, rows)
 }
 
 /// How an interactive `init` ends once `added` were added, `autostart` or
@@ -200,6 +237,10 @@ pub fn added_outro(added: &[ProcessName], autostart: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::*;
     use crate::{adapter::cli::report::plain, domain::value::CommandLine};
 
@@ -213,43 +254,83 @@ mod tests {
             .build()
     }
 
-    /// The plain list checks the suggested candidates, names each command
-    /// and source, and says how to add them; it writes nothing.
+    /// The view of scanning `/p/shop` and offering `candidates`, the current
+    /// folder offering its own or not.
+    fn scan(candidates: Vec<Candidate>, offered_here: bool) -> InitView {
+        InitView::builder()
+            .folder(PathBuf::from("/p/shop"))
+            .candidates(candidates)
+            .added(Vec::new())
+            .offered_here(offered_here)
+            .build()
+    }
+
+    /// The plain list names the folder scanned, checks the suggested
+    /// candidates, names each command and source, and says how to add them;
+    /// it writes nothing.
     #[test]
     fn the_plain_list_checks_the_suggested_ones() {
-        let found = [
+        let found = vec![
             candidate("dev", "npm run dev", DetectSource::PackageJson, true),
             candidate("lint", "npm run lint", DetectSource::PackageJson, false),
         ];
 
         assert_eq!(
-            plain(&candidate_rows(&found)),
+            plain(&candidate_rows(&scan(found.clone(), false))),
             format!(
-                "[x] dev  npm run dev  package-json\n[ ] lint  npm run lint  package-json\n{YES_HINT}"
+                "scanned /p/shop\n[x] dev  npm run dev  package-json\n[ ] lint  npm run lint  package-json\n{YES_HINT}"
             )
         );
         assert_eq!(suggested(&found), vec![found[0].clone()]);
         assert_eq!(found_in(&found), "found processes in package-json");
     }
 
-    /// With nothing found, it says how to add a process by hand.
+    /// With nothing found, it names the folder scanned and says how to add
+    /// a process by hand, and how to scan the current folder when it offers
+    /// its own.
     #[test]
     fn nothing_found_says_how_to_add_one() {
-        assert!(plain(&candidate_rows(&[])).contains("muster add"));
+        let rendered = plain(&candidate_rows(&scan(Vec::new(), false)));
+        assert!(rendered.starts_with("scanned /p/shop\n"), "{rendered}");
+        assert!(rendered.contains("muster add"), "{rendered}");
+        assert!(!rendered.contains(HERE_HINT), "{rendered}");
+
+        let rendered = plain(&nothing_found(&scan(Vec::new(), true)));
+        assert!(rendered.contains("`muster init --project .`"), "{rendered}");
     }
 
-    /// The JSON lists each candidate with its source and whether it is
-    /// suggested, and what was added.
+    /// The current folder is pointed at only when it is not the folder
+    /// scanned and its files offer processes.
+    #[test]
+    fn the_current_folder_is_offered_only_with_files_of_its_own() {
+        let scratch = TempDir::new().unwrap();
+        let shop = scratch.path().canonicalize().unwrap();
+        let web = shop.join("web");
+        fs::create_dir(&web).unwrap();
+        let root = ProjectRoot::try_new(shop.clone()).unwrap();
+
+        assert!(!offers_here(&web, &root));
+        fs::write(web.join("Procfile"), "web: puma\n").unwrap();
+        assert!(offers_here(&web, &root));
+        fs::write(shop.join("Procfile"), "api: rails s\n").unwrap();
+        assert!(!offers_here(&shop, &root));
+    }
+
+    /// The JSON names the folder scanned, lists each candidate with its
+    /// source and whether it is suggested, and what was added.
     #[test]
     fn the_json_lists_candidates_and_additions() {
         let view = InitView::builder()
+            .folder(PathBuf::from("/p/shop"))
             .candidates(vec![candidate("web", "puma", DetectSource::Procfile, true)])
             .added(vec![ProcessName::try_new("web").unwrap()])
+            .offered_here(false)
             .build();
 
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
             serde_json::json!({
+                "folder": "/p/shop",
                 "candidates": [{"name": "web", "command": "puma", "source": "procfile", "suggested": true}],
                 "added": ["web"]
             })

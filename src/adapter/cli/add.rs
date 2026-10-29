@@ -8,17 +8,18 @@ use typed_builder::TypedBuilder;
 use super::{
     args::AddArgs,
     command_words::command_string,
-    definition_view::DefinitionView,
     error::CliError,
     invocation::{Invocation, stack_editor},
     output::project_title,
-    project_identity_view::ProjectIdentityView,
     report::{Report, Row, RowKind},
     working_dir::stored_working_dir,
 };
-use crate::domain::{
-    config::{Environment, ProcessDraft},
-    value::{Description, ProcessName},
+use crate::{
+    adapter::client::{DefinitionView, ProjectIdentityView},
+    domain::{
+        config::{Environment, ProcessDraft},
+        value::{Description, ProcessName},
+    },
 };
 
 /// The command word of `muster add`.

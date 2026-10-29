@@ -1,5 +1,6 @@
 //! The one place text from a process, the service or stored state is made
-//! safe to show on a person's terminal.
+//! safe to show on a person's terminal: the service applies it to what it
+//! stores, the CLI to what it prints.
 
 /// Separates the lines [`printable_lines`] keeps.
 const LINE_BREAK: char = '\n';

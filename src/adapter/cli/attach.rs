@@ -24,16 +24,17 @@ use rustix::{
 use super::{
     attach_end::AttachEnd, attach_event::AttachEvent, attach_pump::AttachPump,
     detach_scanner::DetachScanner, error::CliError, host_signals::HostSignals,
-    host_terminal::HostTerminal, process::unexpected, raw_mode_guard::RawModeGuard,
-    sanitize::printable, service_client::ServiceClient, session_alarm::SessionAlarm,
+    host_terminal::HostTerminal, raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
 };
 use crate::{
     adapter::{
+        client::{ClientError, ServiceClient, process::unexpected},
         holder::{
             ClientRole, HolderError, HolderMessage,
             client::{Greeting, greet},
         },
+        sanitize::printable,
         service::{Located, ServiceRequest, ServiceResponse},
     },
     domain::{
@@ -72,7 +73,7 @@ pub type Announce = Box<dyn FnOnce(&str) -> io::Result<()> + Send>;
 /// process is reached and before the terminal is taken over.
 ///
 /// # Errors
-/// Returns [`CliError::NotRunning`] when the process does not run, or the
+/// Returns [`ClientError::NotRunning`] when the process does not run, or the
 /// session's failure.
 pub fn attach_named(
     client: ServiceClient,
@@ -88,7 +89,7 @@ pub fn attach_named(
         name: name.clone(),
     })? {
         ServiceResponse::Located(located) => located,
-        other => return Err(unexpected(other, project, Some(&name))),
+        other => return Err(unexpected(other, project, Some(&name)).into()),
     };
     AttachSession::new(name, terminal, Box::new(HostSignals::default()), announce)
         .run(target, read_only, detach)
@@ -138,7 +139,7 @@ impl AttachSession {
     /// ends it either way.
     ///
     /// # Errors
-    /// Returns [`CliError::NotRunning`] when the holder is gone,
+    /// Returns [`ClientError::NotRunning`] when the holder is gone,
     /// [`CliError::AttachLost`] when the connection breaks, or
     /// [`CliError::Terminal`] when the terminal cannot be driven.
     pub fn run(
@@ -217,7 +218,7 @@ impl AttachSession {
 /// Connects to the holder at `socket` and reads its screen.
 ///
 /// # Errors
-/// Returns [`CliError::NotRunning`] when no holder serves the socket, or
+/// Returns [`ClientError::NotRunning`] when no holder serves the socket, or
 /// [`CliError::AttachLost`] when the exchange fails otherwise.
 fn connect(
     name: &ProcessName,
@@ -231,9 +232,9 @@ fn connect(
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            CliError::NotRunning(name.clone())
+            ClientError::NotRunning(name.clone()).into()
         },
-        HolderError::NoSnapshot(_) => CliError::NotRunning(name.clone()),
+        HolderError::NoSnapshot(_) => ClientError::NotRunning(name.clone()).into(),
         _ => CliError::AttachLost {
             name: name.clone(),
             source,
@@ -353,8 +354,9 @@ mod tests {
         },
         domain::{
             color_scheme::ColorScheme,
+            process::{StopPolicy, StopSignal},
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, Rows},
+            value::{ByteSize, Cols, CommandLine, PositiveDuration, Rows},
         },
     };
 
@@ -597,6 +599,12 @@ mod tests {
                 .scrollback(SCROLLBACK)
                 .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
                 .color_scheme(ColorScheme::Dark)
+                .stop(
+                    StopPolicy::builder()
+                        .signal(StopSignal::Terminate)
+                        .grace_period(PositiveDuration::try_new(Duration::from_secs(5)).unwrap())
+                        .build(),
+                )
                 .build();
             let config = HolderConfig::builder()
                 .id(HolderId::generate().unwrap())
@@ -604,9 +612,6 @@ mod tests {
                 .socket(dir.join("sock").join("h.sock"))
                 .record_dir(dir.join("records"))
                 .log(dir.join("logs").join("api.log"))
-                .log_cap(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
-                .scrollback(SCROLLBACK)
-                .color_scheme(ColorScheme::Dark)
                 .supervisor_deadline(SUPERVISOR_DEADLINE)
                 .build();
             let server_config = config.clone();
@@ -1385,7 +1390,10 @@ mod tests {
 
         let end = running.end();
 
-        assert!(matches!(end, Err(CliError::NotRunning(_))), "got {end:?}");
+        assert!(
+            matches!(end, Err(CliError::Client(ClientError::NotRunning(_)))),
+            "got {end:?}"
+        );
         assert!(same_settings(&pty.settings(), &cooked));
     }
 }

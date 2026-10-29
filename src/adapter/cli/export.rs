@@ -1,6 +1,6 @@
 //! `muster export`: a project's processes written to a stack file.
 
-use std::{fs, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
@@ -15,7 +15,7 @@ use super::{
     text_file::write_atomically,
 };
 use crate::{
-    adapter::exchange::write_stack_file,
+    adapter::exchange::{EnvExport, write_stack_file},
     domain::{config::ConfigError, port::StackStore, value::ProjectName},
 };
 
@@ -80,7 +80,13 @@ pub fn export(
         .ok_or_else(|| ConfigError::UnknownProject {
             root: project.root().as_ref().clone(),
         })?;
-    let text = write_stack_file(stack.processes(), with_env);
+    let env = if with_env {
+        EnvExport::Values
+    } else {
+        EnvExport::Placeholders
+    };
+    let text = write_stack_file(stack.processes(), env)
+        .map_err(|error| CliError::Output(io::Error::other(error)))?;
     let path = match StackPath::of(invocation, project.root().as_ref(), file)? {
         StackPath::Stdio => return Ok(Exported::Text(text)),
         StackPath::File(path) => path,

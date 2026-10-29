@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod cli;
+pub mod client;
 pub mod detect;
 pub mod exchange;
 pub mod holder;
@@ -11,6 +12,7 @@ pub mod path;
 pub mod private_dir;
 pub mod process_identity;
 pub mod pty;
+pub mod sanitize;
 pub mod service;
 pub mod store;
 pub mod terminal;

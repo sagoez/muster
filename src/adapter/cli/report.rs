@@ -4,8 +4,10 @@ use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use super::sanitize::{printable, printable_lines};
-use crate::domain::coordination::Author;
+use crate::{
+    adapter::sanitize::{printable, printable_lines},
+    domain::coordination::Author,
+};
 
 /// Columns before an author attribution suffix on a listed line.
 const ATTRIBUTION_GAP: &str = "  ";

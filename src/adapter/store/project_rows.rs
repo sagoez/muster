@@ -19,12 +19,12 @@ pub(super) type ProjectRow = (i64, Project);
 /// The text a project root is stored as.
 ///
 /// # Errors
-/// Returns [`ConfigError::RootNotADirectory`] for a root that is not UTF-8,
-/// which `path::project_root` never builds.
+/// Returns [`ConfigError::RootNotUtf8`] for a root that is not UTF-8, which
+/// `path::project_root` never builds.
 pub(super) fn root_text(root: &ProjectRoot) -> Result<&str, ConfigError> {
     root.as_ref()
         .to_str()
-        .ok_or_else(|| ConfigError::RootNotADirectory {
+        .ok_or_else(|| ConfigError::RootNotUtf8 {
             path: root.as_ref().clone(),
         })
 }

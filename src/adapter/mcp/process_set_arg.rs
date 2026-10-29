@@ -13,7 +13,7 @@ use super::{
     },
 };
 use crate::{
-    adapter::cli::CliError,
+    adapter::mcp::tool_error::ToolError,
     domain::{
         config::{FieldEdit, ProcessChange},
         value::{Description, ProjectRoot},
@@ -66,7 +66,7 @@ impl ProcessSetArg {
     /// # Errors
     /// Returns the refusal of the first field that does not read as its
     /// value.
-    pub fn change(&self, root: &ProjectRoot) -> Result<ProcessChange, CliError> {
+    pub fn change(&self, root: &ProjectRoot) -> Result<ProcessChange, ToolError> {
         let unset_env = self
             .environment_unset
             .iter()
@@ -104,7 +104,7 @@ impl ProcessSetArg {
     ///
     /// # Errors
     /// Returns the refusal of a path that is not an existing directory.
-    fn working_dir_edit(&self, root: &ProjectRoot) -> Result<FieldEdit<PathBuf>, CliError> {
+    fn working_dir_edit(&self, root: &ProjectRoot) -> Result<FieldEdit<PathBuf>, ToolError> {
         Ok(match &self.working_dir {
             None => FieldEdit::Keep,
             Some(None) => FieldEdit::Clear,
@@ -119,7 +119,7 @@ impl ProcessSetArg {
     ///
     /// # Errors
     /// Returns the refusal of a blank description.
-    fn description_edit(&self) -> Result<FieldEdit<Description>, CliError> {
+    fn description_edit(&self) -> Result<FieldEdit<Description>, ToolError> {
         Ok(match &self.description {
             None => FieldEdit::Keep,
             Some(None) => FieldEdit::Clear,

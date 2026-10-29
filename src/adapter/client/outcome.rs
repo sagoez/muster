@@ -274,7 +274,7 @@ mod tests {
             .usage(None)
             .attached(0)
             .last_exit(None)
-            .stop_grace(None)
+            .stop_grace(Duration::from_secs(5))
             .build()
     }
 

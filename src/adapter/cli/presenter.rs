@@ -17,12 +17,15 @@ use super::{
     interrupt_guard::InterruptGuard,
     presenter_theme::MusterTheme,
     report::{Report, Row, RowKind, plain, print_error},
-    sanitize::{printable, printable_lines},
     spinners::Spinners,
     surroundings::Surroundings,
 };
 use crate::{
-    adapter::{detect::Candidate, service::ProcessStatus},
+    adapter::{
+        detect::Candidate,
+        sanitize::{printable, printable_lines},
+        service::ProcessStatus,
+    },
     constants::APP_NAME,
     domain::value::{ProcessName, ProjectName},
 };
@@ -384,7 +387,7 @@ fn framed_text(row: &Row, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::cli::{cli_exit::CliExit, failure_kind::FailureKind};
+    use crate::adapter::{cli::cli_exit::CliExit, client::FailureKind};
 
     /// Labels pad to the widest one so the details line up.
     #[test]

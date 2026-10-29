@@ -1,13 +1,14 @@
-use humantime::format_duration;
 use rmcp::{
     ErrorData,
     handler::server::tool::IntoCallToolResult,
     model::{CallToolResponse, CallToolResult, ContentBlock},
 };
+use serde_json::Value;
 
+use super::tool_error::ToolError;
 use crate::{
     adapter::{
-        cli::{CliError, output},
+        client::{ClientError, FailureView},
         service::ServiceErrorKind,
     },
     domain::config::ConfigError,
@@ -31,7 +32,7 @@ const CHOOSE_ANOTHER_NAME: &str = "choose another name";
 #[derive(Debug)]
 pub enum ToolFailure {
     /// The request was wrong, such as an unknown name or a blank key.
-    Caller(CliError),
+    Caller(ToolError),
     /// muster could not answer it.
     Server(ErrorData),
 }
@@ -46,8 +47,7 @@ impl ToolFailure {
         match self {
             Self::Caller(error) => {
                 let message = agent_message(&error);
-                let mut result =
-                    CallToolResult::structured_error(output::failure(&error, &message));
+                let mut result = CallToolResult::structured_error(failure(&error, &message));
                 result.content = vec![ContentBlock::text(message)];
                 Ok(result)
             },
@@ -56,22 +56,28 @@ impl ToolFailure {
     }
 }
 
-impl From<CliError> for ToolFailure {
-    fn from(error: CliError) -> Self {
+impl From<ToolError> for ToolFailure {
+    fn from(error: ToolError) -> Self {
         if error.kind().is_caller_fault() {
             return Self::Caller(error);
         }
         let message = agent_message(&error);
-        let data = output::failure(&error, &message);
+        let data = failure(&error, &message);
         Self::Server(ErrorData::internal_error(message, Some(data)))
     }
 }
 
+impl From<ClientError> for ToolFailure {
+    fn from(error: ClientError) -> Self {
+        ToolError::from(error).into()
+    }
+}
+
 impl From<ConfigError> for ToolFailure {
-    /// Classifies a store's refusal as a [`CliError`] does, so a wrong name
-    /// or value is the caller's mistake and an unreadable database muster's.
+    /// Classifies a store's refusal by its cause, so a wrong name or value is
+    /// the caller's mistake and an unreadable database muster's.
     fn from(error: ConfigError) -> Self {
-        CliError::from(error).into()
+        ToolError::from(error).into()
     }
 }
 
@@ -87,99 +93,54 @@ impl IntoCallToolResult for ToolFailure {
     }
 }
 
+/// `error` as the JSON object a failure is reported as, with `message`.
+fn failure(error: &ToolError, message: &str) -> Value {
+    FailureView::builder()
+        .kind(error.kind())
+        .message(message.to_string())
+        .candidates(error.candidates().to_vec())
+        .build()
+        .to_json()
+}
+
 /// `error` worded for an agent: what to do names a tool to call, never a
 /// command line, and a version skew asks for the MCP server to be restarted.
-/// Every variant is matched, so a new one must be worded here before it
-/// compiles. The variants passed through as they are say what went wrong and
-/// name no command; `Usage` is only built by this server, never by the
-/// command-line parser.
-pub fn agent_message(error: &CliError) -> String {
+pub fn agent_message(error: &ToolError) -> String {
     match error {
-        CliError::NotRunning(name) => {
-            format!(
-                "{} is not running; {CALL_PROCESS_START}",
-                name.shell_quoted()
-            )
-        },
-        CliError::ServiceNewer { ours, theirs, .. } => format!(
-            "the running muster service is version {theirs}, newer than this MCP server's {ours}; {RESTART_SERVER}"
-        ),
-        CliError::VersionMismatch { ours, theirs } => format!(
-            "the muster service runs version {theirs}, not this MCP server's {ours}; {RESTART_SERVER}"
-        ),
-        CliError::UnexpectedAnswer(answer) => format!(
-            "the muster service answered with `{answer}`, which this MCP server does not expect; {RESTART_SERVER}"
-        ),
-        CliError::Refused { kind, message } => refusal_message(*kind, message),
-        CliError::Config(config) => config_message(config),
-        CliError::NotAProject { dir } => format!(
-            "no muster project in {} or above; {CALL_PROCESS_ADD}",
-            dir.display()
-        ),
-        CliError::ProcessNameTaken { name, project } => format!(
-            "a process named {} already exists in {}; {CHOOSE_ANOTHER_NAME}",
-            name.shell_quoted(),
-            project.display()
-        ),
-        CliError::NotPickedUp {
-            name,
-            project,
-            waited,
-        } => format!(
-            "{} was added to {}, but the muster service did not pick it up within {}; {CALL_PROCESS_START}",
-            name.shell_quoted(),
-            project.display(),
-            format_duration(*waited)
-        ),
-        CliError::NotATerminal => {
-            "attaching needs a terminal; call process_output to read the process instead"
-                .to_string()
-        },
-        CliError::AttachLost { name, source } => format!(
-            "lost the connection to {}: {source}; call process_list to see whether it still runs",
-            name.shell_quoted()
-        ),
-        CliError::CannotAsk { question, .. } => {
-            format!("cannot ask {question} here; give it in the tool's arguments")
-        },
-        CliError::NothingRunning(project) => format!(
-            "no process of {} is running; {CALL_PROCESS_START}",
-            project.display()
-        ),
-        CliError::NothingToChoose(_)
-        | CliError::Cancelled
-        | CliError::Interrupted
-        | CliError::InterruptedUnsent
-        | CliError::UnknownProject(_)
-        | CliError::InvalidNoteKey(_)
-        | CliError::UnknownNote(_)
-        | CliError::InvalidTodoTitle(_)
-        | CliError::InvalidTodoId(_)
-        | CliError::UnknownTodo(_)
-        | CliError::InvalidKvKey(_)
-        | CliError::UnknownValue(_)
-        | CliError::InvalidName(_)
-        | CliError::EmptyCommand
-        | CliError::InvalidCommand
-        | CliError::NothingToChange
-        | CliError::ImportConflict { .. }
-        | CliError::StackFile { .. }
-        | CliError::UnsupportedStackVersion { .. }
-        | CliError::FileExists { .. }
-        | CliError::InvalidSetting { .. }
-        | CliError::UnrepresentablePath(_)
-        | CliError::InvalidProjectFolder(_)
-        | CliError::UnknownProjectAmong { .. }
-        | CliError::AmbiguousProject { .. }
-        | CliError::NoStateDir
-        | CliError::ServiceUnavailable { .. }
-        | CliError::ServiceIo { .. }
-        | CliError::Usage(_)
-        | CliError::UnknownProcess { .. }
-        | CliError::AmbiguousProcess { .. }
-        | CliError::Log { .. }
-        | CliError::Output(_)
-        | CliError::Terminal(_) => error.to_string(),
+        ToolError::Client(client) => client_message(client),
+        ToolError::Config(config) => config_message(config),
+        ToolError::InvalidName(_)
+        | ToolError::EmptyCommand
+        | ToolError::InvalidField { .. }
+        | ToolError::NothingToChange
+        | ToolError::InvalidNoteKey(_)
+        | ToolError::UnknownNote(_)
+        | ToolError::InvalidTodoTitle(_)
+        | ToolError::InvalidTodoId(_)
+        | ToolError::UnknownTodo(_)
+        | ToolError::InvalidKvKey(_)
+        | ToolError::UnknownValue(_) => error.to_string(),
+    }
+}
+
+/// A failure reaching the service worded for an agent. Every variant is
+/// matched, so a new one must be worded here before it compiles.
+fn client_message(error: &ClientError) -> String {
+    match error {
+        ClientError::NotRunning(_) => format!("{error}; {CALL_PROCESS_START}"),
+        ClientError::ServiceNewer { .. }
+        | ClientError::VersionMismatch { .. }
+        | ClientError::UnexpectedAnswer(_) => format!("{error}; {RESTART_SERVER}"),
+        ClientError::Refused { kind, message } => refusal_message(*kind, message),
+        ClientError::Config(config) => config_message(config),
+        ClientError::NoStateDir
+        | ClientError::ServiceUnavailable { .. }
+        | ClientError::ServiceIo { .. }
+        | ClientError::UnknownProcess { .. }
+        | ClientError::AmbiguousProcess { .. }
+        | ClientError::Log { .. }
+        | ClientError::InterruptedUnsent
+        | ClientError::Interrupted => error.to_string(),
     }
 }
 
@@ -204,7 +165,8 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::ImportConflict { .. }
         | ConfigError::InvalidSetting { .. }
         | ConfigError::InvalidDefaultSize { .. }
-        | ConfigError::RootNotADirectory { .. } => error.to_string(),
+        | ConfigError::RootNotADirectory { .. }
+        | ConfigError::RootNotUtf8 { .. } => error.to_string(),
     }
 }
 
@@ -218,80 +180,64 @@ fn refusal_message(kind: ServiceErrorKind, message: &str) -> String {
         ServiceErrorKind::Busy => format!("{message}; {CALL_AGAIN}"),
         ServiceErrorKind::UnknownProcess
         | ServiceErrorKind::UnknownProject
-        | ServiceErrorKind::InvalidConfig
         | ServiceErrorKind::NotRunning
-        | ServiceErrorKind::Refused
         | ServiceErrorKind::Internal => message.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::value::ProcessName;
+    use crate::domain::value::{ProcessName, ProjectName};
 
-    /// Failures whose command-line message names a muster command or flag.
-    fn command_naming_failures() -> Vec<CliError> {
+    /// Failures whose command-line wording names a muster command or flag.
+    fn command_naming_failures() -> Vec<ToolError> {
         let api = ProcessName::try_new("api").unwrap();
         vec![
-            CliError::NotRunning(api.clone()),
-            CliError::NotAProject {
-                dir: PathBuf::from("/repo"),
-            },
-            CliError::ProcessNameTaken {
-                name: api.clone(),
-                project: PathBuf::from("/repo"),
-            },
-            CliError::Config(ConfigError::UnknownProject {
+            ClientError::NotRunning(api).into(),
+            ConfigError::UnknownProject {
                 root: PathBuf::from("/repo"),
-            }),
-            CliError::NotPickedUp {
-                name: api,
-                project: PathBuf::from("/repo"),
-                waited: Duration::from_secs(5),
-            },
-            CliError::NotATerminal,
-            CliError::ServiceNewer {
+            }
+            .into(),
+            ClientError::ServiceNewer {
                 ours: "0.9.1".to_string(),
                 theirs: "9.0.0".to_string(),
                 binary: None,
-            },
-            CliError::VersionMismatch {
+            }
+            .into(),
+            ClientError::VersionMismatch {
                 ours: "0.9.1".to_string(),
                 theirs: "0.9.0".to_string(),
-            },
-            CliError::UnexpectedAnswer("ok"),
-            CliError::Refused {
+            }
+            .into(),
+            ClientError::UnexpectedAnswer("ok").into(),
+            ClientError::Refused {
                 kind: ServiceErrorKind::InvalidRequest,
                 message: "unknown request".to_string(),
-            },
+            }
+            .into(),
         ]
     }
 
-    /// A failure whose command-line message names a muster command or flag
-    /// is reworded for an agent: a not-running process names the tool to
-    /// call, and a version skew asks for a restart of the MCP server.
+    /// A failure is worded for an agent: a not-running process names the
+    /// tool to call, a version skew asks for a restart of the MCP server,
+    /// and no message names a command line.
     #[test]
     fn agent_messages_name_tools_never_commands() {
         for error in command_naming_failures() {
-            let cli = error.to_string();
-            assert!(
-                cli.contains("`muster") || cli.contains("--"),
-                "the command line names a command: {cli}"
-            );
             let message = agent_message(&error);
             assert!(!message.contains("`muster"), "{message}");
             assert!(!message.contains("--"), "{message}");
         }
         let api = ProcessName::try_new("api").unwrap();
-        assert!(agent_message(&CliError::NotRunning(api)).contains("call process_start"));
+        assert!(agent_message(&ClientError::NotRunning(api).into()).contains("call process_start"));
         assert!(
-            agent_message(&CliError::UnexpectedAnswer("ok")).contains(RESTART_SERVER),
+            agent_message(&ClientError::UnexpectedAnswer("ok").into()).contains(RESTART_SERVER),
             "a version skew is fixed by a restart"
         );
-        let outside = CliError::Config(ConfigError::UnknownProject {
+        let outside = ToolError::from(ConfigError::UnknownProject {
             root: PathBuf::from("/repo"),
         });
         assert!(
@@ -327,9 +273,9 @@ mod tests {
     /// protocol error.
     #[test]
     fn a_wrong_name_is_an_error_result_and_an_unreachable_service_a_protocol_error() {
-        let unknown = CliError::UnknownProcess {
+        let unknown = ClientError::UnknownProcess {
             name: "echo".to_string(),
-            project: PathBuf::from("/repo"),
+            project: ProjectName::try_new("repo").unwrap(),
             valid: vec![
                 ProcessName::try_new("echo box").unwrap(),
                 ProcessName::try_new("api").unwrap(),
@@ -347,7 +293,7 @@ mod tests {
         assert_eq!(error["kind"], "unknown-process");
         assert_eq!(error["candidates"], serde_json::json!(["echo box", "api"]));
 
-        let unreachable = ToolFailure::from(CliError::NoStateDir)
+        let unreachable = ToolFailure::from(ClientError::NoStateDir)
             .answer()
             .unwrap_err();
         assert_eq!(unreachable.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
@@ -361,7 +307,7 @@ mod tests {
     /// protocol error rather than a mistake for the agent to fix.
     #[test]
     fn an_unreadable_store_is_a_protocol_error() {
-        let unreadable = CliError::Refused {
+        let unreadable = ClientError::Refused {
             kind: ServiceErrorKind::Internal,
             message: "could not read this project's stack".to_string(),
         };

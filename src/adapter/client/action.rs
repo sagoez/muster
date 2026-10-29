@@ -69,16 +69,6 @@ impl From<ProcessAction> for Action {
 }
 
 impl Action {
-    /// Whether the action launches processes.
-    pub fn launches(self) -> bool {
-        match self {
-            Self::Up | Self::Start | Self::Restart | Self::Run => true,
-            Self::Down | Self::Stop | Self::Pause | Self::Resume | Self::Kill | Self::Remove => {
-                false
-            },
-        }
-    }
-
     /// Whether the action ends processes.
     pub fn halts(self) -> bool {
         match self {
@@ -161,12 +151,10 @@ mod tests {
         assert_eq!(Action::Start.settle_timeout(grace), LAUNCH_SETTLE_TIMEOUT);
     }
 
-    /// No action both launches and halts, and every action has the one word
-    /// a spinner shows while it is under way.
+    /// Every action has the one word a spinner shows while it is under way.
     #[test]
-    fn each_action_has_a_word_and_one_direction() {
+    fn each_action_has_a_word() {
         for action in Action::iter() {
-            assert!(!(action.launches() && action.halts()), "{action}");
             assert!(action.get_message().is_some(), "{action}");
         }
         assert_eq!(Action::Up.get_message(), Some("starting"));

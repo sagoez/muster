@@ -1,6 +1,5 @@
 //! `muster config`: list, read and change the settings.
 
-use serde_json::{Map, Value, json};
 use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
@@ -8,12 +7,14 @@ use super::{
     error::CliError,
     invocation::{Invocation, stack_editor},
     report::{Report, Row, RowKind},
-    setting_view::SettingView,
 };
-use crate::domain::{
-    config::{SettingChange, SettingKey},
-    port::SettingsStore,
-    settings::Settings,
+use crate::{
+    adapter::client::SettingView,
+    domain::{
+        config::{SettingChange, SettingKey},
+        port::SettingsStore,
+        settings::Settings,
+    },
 };
 
 /// Title of the `config set` report.
@@ -22,10 +23,6 @@ const CONFIG_TITLE: &str = "muster config";
 const COLUMN_GAP: &str = "  ";
 /// Between a key and its new value in the `set` line.
 const ASSIGNS: &str = " = ";
-/// Separates the words of a kebab-case key, replaced for a JSON key.
-const KEBAB: char = '-';
-/// Separates the words of a JSON key.
-const SNAKE: &str = "_";
 
 /// Every setting.
 ///
@@ -70,40 +67,6 @@ pub fn settings_table(settings: &Settings) -> String {
         .join("\n")
 }
 
-/// Every setting as one JSON object: snake_case keys, and each value typed,
-/// a boolean, a number of lines, bytes or seconds, or the text
-/// `config get` prints.
-pub fn settings_json(settings: &Settings) -> Value {
-    Value::Object(
-        SettingKey::iter()
-            .map(|key| {
-                (
-                    key.to_string().replace(KEBAB, SNAKE),
-                    typed_value(settings, key),
-                )
-            })
-            .collect::<Map<String, Value>>(),
-    )
-}
-
-/// The value of `key` in `settings`, typed for JSON.
-fn typed_value(settings: &Settings, key: SettingKey) -> Value {
-    match key {
-        SettingKey::DesktopNotifications => json!(settings.desktop_notifications()),
-        SettingKey::DefaultAutostart => json!(settings.default_autostart()),
-        SettingKey::Scrollback => json!(settings.scrollback()),
-        SettingKey::LogMaxSize => json!(settings.log_max_size().bytes()),
-        SettingKey::DefaultStopGrace => {
-            json!(settings.default_stop_grace().into_inner().as_secs_f64())
-        },
-        SettingKey::DefaultSize
-        | SettingKey::DetachKey
-        | SettingKey::ColorScheme
-        | SettingKey::DefaultRestart
-        | SettingKey::DefaultStopSignal => json!(settings.value_text(key)),
-    }
-}
-
 /// The framed line `config set` prints: `detach-key = ctrl-]`.
 pub fn set_rows(view: &SettingView) -> Report {
     Report::new(CONFIG_TITLE, vec![Row::unlabeled(
@@ -117,11 +80,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{
-        color_scheme::ColorScheme,
-        process::{RestartPolicy, StopSignal},
-        pty::PtySize,
-        value::{ByteSize, DetachKey, PositiveDuration},
+    use crate::{
+        adapter::client::SettingsView,
+        domain::{
+            color_scheme::ColorScheme,
+            process::{RestartPolicy, StopSignal},
+            pty::PtySize,
+            value::{ByteSize, DetachKey, PositiveDuration},
+        },
     };
 
     /// Settings as the initial migration seeds them.
@@ -151,17 +117,17 @@ mod tests {
         assert!(table.contains("default-stop-grace     5s"), "{table}");
     }
 
-    /// The JSON keys are snake_case and the values typed.
+    /// The JSON lists every setting under snake_case object keys, each by
+    /// its kebab-case key with the value `config set` reads back.
     #[test]
-    fn the_json_is_typed() {
-        let value = settings_json(&seeded());
+    fn the_json_lists_each_setting_by_key() {
+        let value = serde_json::to_value(SettingsView::from(&seeded())).unwrap();
+        let settings = value["settings"].as_array().unwrap();
 
-        assert_eq!(value["desktop_notifications"], true);
-        assert_eq!(value["scrollback"], 1000);
-        assert_eq!(value["log_max_size"], 10 * 1024 * 1024);
-        assert_eq!(value["default_stop_grace"], 5.0);
-        assert_eq!(value["default_size"], "24x80");
-        assert_eq!(value["detach_key"], "ctrl-\\");
-        assert_eq!(value.as_object().unwrap().len(), SettingKey::iter().count());
+        assert_eq!(settings.len(), SettingKey::iter().count());
+        assert!(settings.contains(&serde_json::json!({"key": "detach-key", "value": "ctrl-\\"})));
+        assert!(
+            settings.contains(&serde_json::json!({"key": "default-stop-grace", "value": "5s"}))
+        );
     }
 }

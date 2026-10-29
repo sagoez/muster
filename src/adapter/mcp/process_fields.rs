@@ -11,12 +11,10 @@ use std::{
 
 use strum::IntoEnumIterator;
 
-use crate::{
-    adapter::cli::CliError,
-    domain::value::{
-        CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName, ProjectRoot,
-        ValueParseError,
-    },
+use super::tool_error::ToolError;
+use crate::domain::value::{
+    CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName, ProjectRoot,
+    ValueParseError, parse_choice,
 };
 
 /// The `working_dir` field.
@@ -45,39 +43,40 @@ const DESCRIPTION_FORM: &str = "non-blank text";
 const ENV_NAME_FORM: &str = "a non-empty name without '=' that does not start with MUSTER_";
 /// The form an environment variable value is written in.
 const ENV_VALUE_FORM: &str = "text without NUL bytes";
-/// Separates the accepted names of an enumerated field.
-const CHOICE_SEPARATOR: &str = ", ";
 
 /// The refusal of `found` as the field `field`, which accepts `expected`.
-pub(super) fn invalid(field: &str, expected: &str, found: &str) -> CliError {
-    let reason = ValueParseError::builder()
-        .expected(expected)
-        .found(found)
-        .build();
-    CliError::Usage(format!("invalid {field}: {reason}"))
+pub(super) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolError {
+    ToolError::InvalidField {
+        field,
+        reason: ValueParseError::builder()
+            .expected(expected)
+            .found(found)
+            .build(),
+    }
 }
 
 /// The process name an agent typed as `raw`.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidName`] for a blank name.
-pub(super) fn process_name(raw: &str) -> Result<ProcessName, CliError> {
-    ProcessName::try_new(raw.to_string()).map_err(|_| CliError::InvalidName(raw.to_string()))
+/// Returns [`ToolError::InvalidName`] for a blank name or one holding a
+/// control character.
+pub(super) fn process_name(raw: &str) -> Result<ProcessName, ToolError> {
+    ProcessName::try_new(raw.to_string()).map_err(|_| ToolError::InvalidName(raw.to_string()))
 }
 
 /// The command an agent typed as `raw`.
 ///
 /// # Errors
-/// Returns [`CliError::EmptyCommand`] for a blank command.
-pub(super) fn command(raw: &str) -> Result<CommandLine, CliError> {
-    CommandLine::try_new(raw.to_string()).map_err(|_| CliError::EmptyCommand)
+/// Returns [`ToolError::EmptyCommand`] for a blank command.
+pub(super) fn command(raw: &str) -> Result<CommandLine, ToolError> {
+    CommandLine::try_new(raw.to_string()).map_err(|_| ToolError::EmptyCommand)
 }
 
 /// The description an agent typed as `raw`.
 ///
 /// # Errors
 /// Returns the refusal of a blank description.
-pub(super) fn description(raw: &str) -> Result<Description, CliError> {
+pub(super) fn description(raw: &str) -> Result<Description, ToolError> {
     Description::try_new(raw.to_string())
         .map_err(|_| invalid(DESCRIPTION_FIELD, DESCRIPTION_FORM, raw))
 }
@@ -87,7 +86,7 @@ pub(super) fn description(raw: &str) -> Result<Description, CliError> {
 /// # Errors
 /// Returns the refusal of a name the environment cannot hold or muster
 /// reserves.
-pub(super) fn env_name(field: &str, raw: &str) -> Result<EnvName, CliError> {
+pub(super) fn env_name(field: &'static str, raw: &str) -> Result<EnvName, ToolError> {
     EnvName::try_new(raw.to_string()).map_err(|_| invalid(field, ENV_NAME_FORM, raw))
 }
 
@@ -97,9 +96,9 @@ pub(super) fn env_name(field: &str, raw: &str) -> Result<EnvName, CliError> {
 /// Returns the refusal of the first name or value the environment cannot
 /// hold.
 pub(super) fn env_vars(
-    field: &str,
+    field: &'static str,
     vars: &BTreeMap<String, String>,
-) -> Result<Vec<(EnvName, EnvValue)>, CliError> {
+) -> Result<Vec<(EnvName, EnvValue)>, ToolError> {
     vars.iter()
         .map(|(name, value)| {
             let value = EnvValue::try_new(value.clone())
@@ -113,23 +112,22 @@ pub(super) fn env_vars(
 ///
 /// # Errors
 /// Returns the refusal listing every accepted name.
-pub(super) fn choice<T>(field: &str, raw: &str) -> Result<T, CliError>
+pub(super) fn choice<T>(field: &'static str, raw: &str) -> Result<T, ToolError>
 where
     T: FromStr + IntoEnumIterator + Display,
 {
-    raw.trim().parse().map_err(|_| {
-        let choices: Vec<String> = T::iter().map(|choice| choice.to_string()).collect();
-        invalid(field, &choices.join(CHOICE_SEPARATOR), raw)
-    })
+    parse_choice(raw).map_err(|reason| ToolError::InvalidField { field, reason })
 }
 
 /// The stop grace an agent typed as `raw`, a humantime duration.
 ///
 /// # Errors
 /// Returns the refusal of unreadable text or a zero duration.
-pub(super) fn stop_grace(raw: &str) -> Result<PositiveDuration, CliError> {
-    raw.parse()
-        .map_err(|reason: ValueParseError| invalid(STOP_GRACE_FIELD, reason.expected(), raw))
+pub(super) fn stop_grace(raw: &str) -> Result<PositiveDuration, ToolError> {
+    raw.parse().map_err(|reason| ToolError::InvalidField {
+        field: STOP_GRACE_FIELD,
+        reason,
+    })
 }
 
 /// Where a process of the project at `root` runs when an agent typed `raw`:
@@ -138,7 +136,7 @@ pub(super) fn stop_grace(raw: &str) -> Result<PositiveDuration, CliError> {
 ///
 /// # Errors
 /// Returns the refusal of a path that is not an existing directory.
-pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBuf>, CliError> {
+pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBuf>, ToolError> {
     let typed = Path::new(raw);
     let joined = if typed.is_absolute() {
         typed.to_path_buf()

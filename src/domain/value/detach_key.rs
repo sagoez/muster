@@ -12,12 +12,17 @@ const KITTY_CTRL_MODIFIER: u8 = 5;
 /// every terminal escape sequence; `^`, `_` and `@` need Shift, which the
 /// Kitty encoding would report.
 const DETACH_PUNCTUATION: &[char] = &['\\', ']'];
+/// Letters whose Control chord is a key terminals send on their own: Enter
+/// (`m`), line feed (`j`), Tab (`i`), Backspace (`h`) and interrupt (`c`).
+/// Detaching on one would end a session on an ordinary keystroke.
+const RESERVED_KEYS: &[char] = &['m', 'j', 'i', 'h', 'c'];
 
 /// The key of `chord` (`ctrl-<key>`), when it names one a detach chord may use.
 fn chord_key(chord: &str) -> Option<char> {
     let mut chars = chord.strip_prefix(CTRL_PREFIX)?.chars();
     let key = chars.next()?;
-    let usable = key.is_ascii_lowercase() || DETACH_PUNCTUATION.contains(&key);
+    let usable = (key.is_ascii_lowercase() && !RESERVED_KEYS.contains(&key))
+        || DETACH_PUNCTUATION.contains(&key);
     (chars.next().is_none() && usable).then_some(key)
 }
 
@@ -86,6 +91,7 @@ mod tests {
     fn a_detach_key_must_be_one_usable_control_chord() {
         for refused in [
             "", "a", "ctrl-", "ctrl-ab", "alt-a", "ctrl-[", "ctrl-1", "ctrl-^", "ctrl-_", "ctrl-@",
+            "ctrl-m", "ctrl-j", "ctrl-i", "ctrl-h", "ctrl-c", "Ctrl-M",
         ] {
             assert!(
                 DetachKey::try_new(refused).is_err(),

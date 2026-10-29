@@ -8,18 +8,18 @@ use typed_builder::TypedBuilder;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    action_report::ActionReport,
     error::CliError,
     output::action_rows,
-    process::down,
-    project_identity_view::ProjectIdentityView,
     report::{Report, Row, RowKind},
-    running_service_notifier::RunningServiceNotifier,
-    service_client::ServiceClient,
-    settle_watch::SettleWatch,
 };
 use crate::{
-    adapter::store::SqliteStore,
+    adapter::{
+        client::{
+            ActionReport, ProjectIdentityView, RunningServiceNotifier, ServiceClient, SettleWatch,
+            process::down,
+        },
+        store::SqliteStore,
+    },
     domain::{
         port::{ProjectStore, StackStore, StateChangeNotifier},
         project::Project,

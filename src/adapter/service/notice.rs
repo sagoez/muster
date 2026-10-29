@@ -4,8 +4,11 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::{notice_level::NoticeLevel, printable::printable};
-use crate::domain::value::{ProcessName, ProjectRoot};
+use super::notice_level::NoticeLevel;
+use crate::{
+    adapter::sanitize::printable,
+    domain::value::{ProcessName, ProjectRoot},
+};
 
 /// One thing supervision has to tell the user, such as a failed start or a
 /// forced stop, kept in place of a transient on-screen message.

@@ -1,10 +1,17 @@
 use nutype::nutype;
 use unicode_normalization::UnicodeNormalization;
 
-/// A process's display name: trimmed and non-empty.
+/// Whether `name` holds no control character, so printing it cannot drive a
+/// terminal.
+fn has_no_control_characters(name: &str) -> bool {
+    !name.chars().any(char::is_control)
+}
+
+/// A process's display name: trimmed, non-empty and free of control
+/// characters.
 #[nutype(
     sanitize(trim),
-    validate(not_empty),
+    validate(not_empty, predicate = has_no_control_characters),
     derive(
         Debug,
         Clone,
@@ -75,5 +82,13 @@ mod tests {
     fn rejects_empty_and_whitespace_only() {
         assert!(ProcessName::try_new("").is_err());
         assert!(ProcessName::try_new("   ").is_err());
+    }
+
+    /// A name carrying an escape, a bell or an inner line break is refused.
+    #[test]
+    fn rejects_control_characters() {
+        for refused in ["\u{1b}[2Japi", "a\u{7}b", "web\nworker", "x\u{9b}"] {
+            assert!(ProcessName::try_new(refused).is_err(), "{refused:?}");
+        }
     }
 }

@@ -41,10 +41,9 @@ pub struct ProcessView {
     /// How its last child ended, while it is not running.
     #[getset(get = "pub")]
     last_exit: Option<ExitView>,
-    /// Seconds, rounded up, a graceful stop waits before it kills, or none
-    /// when a stop kills at once.
+    /// Seconds, rounded up, a graceful stop waits before it kills.
     #[getset(get_copy = "pub")]
-    stop_grace: Option<u64>,
+    stop_grace: u64,
 }
 
 impl From<&ProcessStatus> for ProcessView {
@@ -60,7 +59,7 @@ impl From<&ProcessStatus> for ProcessView {
             memory_bytes: usage.map(|usage| *usage.memory_bytes()),
             attached: *status.attached(),
             last_exit: status.last_exit().as_ref().map(ExitView::from),
-            stop_grace: status.stop_grace().map(whole_seconds_up),
+            stop_grace: whole_seconds_up(*status.stop_grace()),
         }
     }
 }

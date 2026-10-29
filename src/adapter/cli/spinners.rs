@@ -5,8 +5,11 @@ use console::Term;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
 
-use super::{action::Action, interrupt_guard::InterruptGuard, settle_watch::SettleWatch};
-use crate::adapter::service::ProcessStatus;
+use super::interrupt_guard::InterruptGuard;
+use crate::adapter::{
+    client::{Action, SettleWatch},
+    service::ProcessStatus,
+};
 
 /// Between the processes a spinner names.
 const PROCESS_SEPARATOR: &str = ", ";

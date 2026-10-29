@@ -1,8 +1,6 @@
 use std::{
-    collections::BTreeMap,
     path::Path,
-    thread,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime},
 };
 
 use rmcp::{
@@ -13,7 +11,6 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Serialize;
-use strum::IntoEnumIterator;
 use tokio::task;
 
 use super::{
@@ -28,28 +25,29 @@ use super::{
     process_add_arg::ProcessAddArg,
     process_fields::{KEY_FIELD, choice, process_name},
     process_set_arg::ProcessSetArg,
-    removed_process::RemovedProcess,
     scratchpad_entry::ScratchpadEntry,
     scratchpad_set_arg::ScratchpadSetArg,
     send_input_arg::SendInputArg,
-    setting_entry::SettingEntry,
     todo_add_arg::TodoAddArg,
     todo_id_arg::TodoIdArg,
     todo_status_arg::TodoStatusArg,
+    tool_error::ToolError,
     tool_failure::ToolFailure,
 };
 use crate::{
     adapter::{
         bridge::WorkspaceRequest,
-        cli::{
-            ActionReport, CliError, DefinitionView, ProjectView, ServiceClient, Unwatched, process,
+        client::{
+            ActionReport, ClientError, DefinitionView, ProjectView, RemovedView, ServiceClient,
+            SettingView, SettingsView, Unwatched, process,
         },
         service::{ProcessAction, ServiceRequest},
     },
     domain::{
         config::{ConfigError, SettingChange, SettingKey},
         coordination::{KvKey, ScratchpadKey, TodoId, TodoStatus, TodoTitle},
-        value::{ProcessName, ProcessRef, ProjectRoot},
+        project::Project,
+        value::{ProcessRef, ProjectRoot, ValueParseError},
     },
 };
 
@@ -81,8 +79,8 @@ const MAX_LIST_LIMIT: usize = 200;
 /// Longest a lifecycle tool waits for its process to settle, under the 60
 /// seconds many MCP clients give a call.
 const SETTLE_BOUND: Duration = Duration::from_secs(45);
-/// Pause between looks at a removed process while it stops.
-const REMOVAL_POLL: Duration = Duration::from_millis(50);
+/// How a removal whose report names no process is described.
+const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 /// Acknowledgement of input written to a process's terminal.
 const SENT: &str = "sent";
 /// Carriage return that submits a line typed into a terminal.
@@ -97,10 +95,10 @@ const ENTRIES: &str = "entries";
 const PROCESS: &str = "process";
 /// Key of whether the process runs in `process_set`'s result.
 const RUNNING: &str = "running";
-/// Why a status given to `todo_set_status` was refused.
-const INVALID_STATUS: &str = "is not a valid status; use pending, in-progress or done";
-/// Why a `process_set` call that changes nothing was refused.
-const NOTHING_TO_CHANGE: &str = "process_set changed nothing; pass at least one field besides name";
+/// The `status` field of `todo_set_status`.
+const STATUS_FIELD: &str = "status";
+/// The statuses `todo_set_status` accepts.
+const STATUS_FORM: &str = "pending, in-progress or done";
 
 /// What a tool answers: its result, or why it has none.
 type ToolResult = Result<CallToolResult, ToolFailure>;
@@ -161,7 +159,7 @@ pub struct CoordinationMcp {
 /// Returns the caller's mistake for a blank name.
 fn reference(name: &str) -> Result<ProcessRef, ToolFailure> {
     ProcessRef::try_new(name.to_string())
-        .map_err(|_| CliError::InvalidName(name.to_string()).into())
+        .map_err(|_| ToolError::InvalidName(name.to_string()).into())
 }
 
 /// `report` as a tool result, flagged as an error when a process did not end
@@ -176,79 +174,26 @@ fn action_result(report: &ActionReport) -> ToolResult {
     })
 }
 
-/// Types `data` into the terminal of the process `name` of the project at
-/// `root`.
+/// Types `data` into the terminal of the process `name` of `project`.
 ///
 /// # Errors
-/// Returns a [`CliError`] when the name matches no process, the process is
-/// not running, or the service cannot be reached.
+/// Returns a [`ClientError`] when the name matches no process, the process
+/// is not running, or the service cannot be reached.
 fn send_input(
     client: &ServiceClient,
-    root: &ProjectRoot,
+    project: &Project,
     name: &ProcessRef,
     data: String,
-) -> Result<(), CliError> {
-    let name = process::resolve(&process::status(client, root)?, root, name)?;
+) -> Result<(), ClientError> {
+    let name = process::resolve(&process::status(client, project)?, project, name)?;
     let request = ServiceRequest::Workspace {
-        project: root.clone(),
+        project: project.root().clone(),
         request: WorkspaceRequest::SendInput {
             name: name.clone(),
             data,
         },
     };
-    process::expect_ok(client.send(&request)?, root, Some(&name))
-}
-
-/// Whether the process `name` of the project at `root` may have a run
-/// alive, as the service lists it.
-///
-/// # Errors
-/// Returns a [`CliError`] when the service cannot be reached or refuses.
-fn alive(client: &ServiceClient, root: &ProjectRoot, name: &ProcessName) -> Result<bool, CliError> {
-    Ok(process::status(client, root)?
-        .processes()
-        .iter()
-        .any(|process| process.name() == name && process.state().may_be_running()))
-}
-
-/// Whether a service that already runs has the project at `root` loaded and
-/// lists `name` as running. It never starts the service, and an answer it
-/// cannot get reads as not running, since the edit it reports on is already
-/// committed.
-fn runs(root: &ProjectRoot, name: &ProcessName) -> bool {
-    let loaded = ServiceClient::status().is_ok_and(|service| {
-        *service.running()
-            && service
-                .projects()
-                .iter()
-                .any(|project| project == root.as_ref())
-    });
-    loaded
-        && ServiceClient::connect()
-            .and_then(|client| alive(&client, root, name))
-            .unwrap_or(false)
-}
-
-/// Waits until the removed process `name` no longer runs, at most
-/// [`SETTLE_BOUND`], and tells whether it still ran when the wait ended.
-///
-/// # Errors
-/// Returns a [`CliError`] when the service cannot be reached.
-fn settle_removal(
-    client: &ServiceClient,
-    root: &ProjectRoot,
-    name: &ProcessName,
-) -> Result<bool, CliError> {
-    let deadline = Instant::now() + SETTLE_BOUND;
-    loop {
-        if !alive(client, root, name)? {
-            return Ok(false);
-        }
-        if Instant::now() >= deadline {
-            return Ok(true);
-        }
-        thread::sleep(REMOVAL_POLL);
-    }
+    process::expect_ok(client.send(&request)?, project, Some(&name))
 }
 
 /// A successful tool result carrying a single text block.
@@ -282,7 +227,7 @@ fn listing<T: Serialize>(key: &str, items: &[T]) -> ToolResult {
 /// # Errors
 /// Returns the caller's mistake for a key that names no setting, listing
 /// every key.
-fn setting_key(raw: &str) -> Result<SettingKey, CliError> {
+fn setting_key(raw: &str) -> Result<SettingKey, ToolError> {
     choice(KEY_FIELD, raw)
 }
 
@@ -329,7 +274,7 @@ impl CoordinationMcp {
             .scratchpad(self.deps.root(), &key)?
         {
             Some(note) => structured(&note),
-            None => Err(CliError::UnknownNote(key.as_ref().to_string()).into()),
+            None => Err(ToolError::UnknownNote(key.as_ref().to_string()).into()),
         }
     }
 
@@ -389,7 +334,7 @@ impl CoordinationMcp {
         let id = todo_id(arg.id())?;
         match self.deps.coordination().todo(self.deps.root(), &id)? {
             Some(todo) => structured(&todo),
-            None => Err(CliError::UnknownTodo(id.as_ref().to_string()).into()),
+            None => Err(ToolError::UnknownTodo(id.as_ref().to_string()).into()),
         }
     }
 
@@ -401,7 +346,7 @@ impl CoordinationMcp {
     )]
     async fn todo_add(&self, Parameters(arg): Parameters<TodoAddArg>) -> ToolResult {
         let title = TodoTitle::try_new(arg.title().clone())
-            .map_err(|_| CliError::InvalidTodoTitle(arg.title().clone()))?;
+            .map_err(|_| ToolError::InvalidTodoTitle(arg.title().clone()))?;
         let deps = arg
             .deps()
             .iter()
@@ -426,7 +371,13 @@ impl CoordinationMcp {
         let status = arg
             .status()
             .parse::<TodoStatus>()
-            .map_err(|_| CliError::Usage(format!("'{}' {INVALID_STATUS}", arg.status())))?;
+            .map_err(|_| ToolError::InvalidField {
+                field: STATUS_FIELD,
+                reason: ValueParseError::builder()
+                    .expected(STATUS_FORM)
+                    .found(arg.status().as_str())
+                    .build(),
+            })?;
         if self.deps.coordination().set_todo_status(
             self.deps.root(),
             self.deps.author(),
@@ -435,7 +386,7 @@ impl CoordinationMcp {
         )? {
             Ok(text(format!("{id} is {status}")))
         } else {
-            Err(CliError::UnknownTodo(id.as_ref().to_string()).into())
+            Err(ToolError::UnknownTodo(id.as_ref().to_string()).into())
         }
     }
 
@@ -477,7 +428,7 @@ impl CoordinationMcp {
         let key = kv_key(arg.key())?;
         match self.deps.coordination().value(self.deps.root(), &key)? {
             Some(entry) => structured(&entry),
-            None => Err(CliError::UnknownValue(key.as_ref().to_string()).into()),
+            None => Err(ToolError::UnknownValue(key.as_ref().to_string()).into()),
         }
     }
 
@@ -528,7 +479,9 @@ impl CoordinationMcp {
             no value right now. Use a process's name with the other process_* tools."
     )]
     async fn process_list(&self) -> ToolResult {
-        let status = self.ask(process::status).await?;
+        let status = self
+            .ask(|client, project| Ok(process::status(client, project)?))
+            .await?;
         structured(&ProjectView::from(&status))
     }
 
@@ -542,9 +495,11 @@ impl CoordinationMcp {
     async fn process_output(&self, Parameters(arg): Parameters<NameArg>) -> ToolResult {
         let name = reference(arg.name())?;
         let screen = self
-            .ask(move |client, root| process::logs(client, root, process::named(root, &name), true))
+            .ask(move |client, project| {
+                process::logs(client, project, process::named(project, &name), true)
+            })
             .await?;
-        Ok(text(screen.text().trim_end()))
+        Ok(text(String::from_utf8_lossy(screen.bytes()).trim_end()))
     }
 
     /// Starts a process.
@@ -610,7 +565,7 @@ impl CoordinationMcp {
         } else {
             arg.text().clone()
         };
-        self.ask(move |client, root| send_input(client, root, &name, data))
+        self.ask(move |client, project| Ok(send_input(client, project, &name, data)?))
             .await?;
         Ok(text(SENT))
     }
@@ -655,10 +610,10 @@ impl CoordinationMcp {
                 let name = process_name(arg.name())?;
                 let change = arg.change(deps.root())?;
                 if change.is_empty() {
-                    return Err(CliError::Usage(NOTHING_TO_CHANGE.to_string()));
+                    return Err(ToolError::NothingToChange);
                 }
                 let spec = deps.editor().change(deps.root(), &name, &change)?;
-                let running = runs(deps.root(), spec.name());
+                let running = process::runs_now(deps.root(), spec.name());
                 Ok((spec, running))
             })
             .await?;
@@ -687,15 +642,28 @@ impl CoordinationMcp {
                     }
                 })?;
                 let name = stack.require(&typed)?.name().clone();
+                let project = stack.project();
                 let client = ServiceClient::connect()?;
-                let was_alive = alive(&client, deps.root(), &name)?;
+                let before = process::status(&client, project)?;
+                let sent = SystemTime::now();
                 deps.editor().remove(deps.root(), &name)?;
-                let still_alive = was_alive && settle_removal(&client, deps.root(), &name)?;
-                Ok(RemovedProcess::builder()
-                    .name(name)
-                    .stopped(was_alive && !still_alive)
-                    .still_stopping(still_alive)
-                    .build())
+                let names = [name];
+                let report = process::settle_removed(
+                    &client,
+                    project,
+                    &before,
+                    &names,
+                    sent,
+                    SETTLE_BOUND,
+                    &mut Unwatched,
+                )?;
+                report
+                    .processes()
+                    .first()
+                    .map(RemovedView::from)
+                    .ok_or(ToolError::Client(ClientError::UnexpectedAnswer(
+                        REMOVAL_UNREPORTED,
+                    )))
             })
             .await?;
         structured(&removed)
@@ -704,7 +672,7 @@ impl CoordinationMcp {
     /// Reads one setting, or all of them.
     #[tool(
         description = "Read the machine's muster settings. Takes key (optional). With key, \
-            returns {key, value}; without, an object of every setting's key to its value. \
+            returns {key, value}; without, {settings: [{key, value}]} listing every setting. \
             Values are written as config_set reads them. An unknown key is a result flagged \
             isError that lists the valid keys."
     )]
@@ -712,12 +680,8 @@ impl CoordinationMcp {
         let key = arg.key().as_deref().map(setting_key).transpose()?;
         let settings = self.deps.settings().load()?;
         match key {
-            Some(key) => structured(&SettingEntry::read(&settings, key)),
-            None => structured(
-                &SettingKey::iter()
-                    .map(|key| (key.to_string(), settings.value_text(key)))
-                    .collect::<BTreeMap<_, _>>(),
-            ),
+            Some(key) => structured(&SettingView::of(&settings, key)),
+            None => structured(&SettingsView::from(&settings)),
         }
     }
 
@@ -736,7 +700,7 @@ impl CoordinationMcp {
         let settings = self
             .blocking(move |deps| Ok(deps.editor().configure(&change)?))
             .await?;
-        structured(&SettingEntry::read(&settings, key))
+        structured(&SettingView::of(&settings, key))
     }
 }
 
@@ -750,7 +714,7 @@ impl CoordinationMcp {
     async fn blocking<T, Work>(&self, work: Work) -> Result<T, ToolFailure>
     where
         T: Send + 'static,
-        Work: FnOnce(&McpDeps) -> Result<T, CliError> + Send + 'static,
+        Work: FnOnce(&McpDeps) -> Result<T, ToolError> + Send + 'static,
     {
         let deps = self.deps.clone();
         task::spawn_blocking(move || work(&deps))
@@ -760,7 +724,8 @@ impl CoordinationMcp {
     }
 
     /// Runs `query` against this project through the service, starting or
-    /// replacing the service as the CLI does.
+    /// replacing the service as the CLI does. A folder that is not yet a
+    /// project is refused before the service is reached.
     ///
     /// # Errors
     /// Returns the caller's mistake, such as an unknown name, or the fault of
@@ -768,10 +733,12 @@ impl CoordinationMcp {
     async fn ask<T, Query>(&self, query: Query) -> Result<T, ToolFailure>
     where
         T: Send + 'static,
-        Query: FnOnce(&ServiceClient, &ProjectRoot) -> Result<T, CliError> + Send + 'static,
+        Query: FnOnce(&ServiceClient, &Project) -> Result<T, ToolError> + Send + 'static,
     {
         self.blocking(move |deps| {
-            ServiceClient::connect().and_then(|client| query(&client, deps.root()))
+            let project = deps.project()?;
+            let client = ServiceClient::connect()?;
+            query(&client, &project)
         })
         .await
     }
@@ -785,11 +752,11 @@ impl CoordinationMcp {
     async fn control(&self, name: &str, action: ProcessAction) -> ToolResult {
         let name = reference(name)?;
         let report = self
-            .ask(move |client, root| {
+            .ask(move |client, project| {
                 process::control_within(
                     client,
-                    root,
-                    process::named(root, &name),
+                    project,
+                    process::named(project, &name),
                     action,
                     SETTLE_BOUND,
                     &mut Unwatched,
@@ -806,7 +773,7 @@ impl CoordinationMcp {
 /// Returns the caller's mistake for a blank key.
 fn scratchpad_key(key: &str) -> Result<ScratchpadKey, ToolFailure> {
     ScratchpadKey::try_new(key.to_string())
-        .map_err(|_| CliError::InvalidNoteKey(key.to_string()).into())
+        .map_err(|_| ToolError::InvalidNoteKey(key.to_string()).into())
 }
 
 /// The todo id an agent typed as `id`.
@@ -814,7 +781,7 @@ fn scratchpad_key(key: &str) -> Result<ScratchpadKey, ToolFailure> {
 /// # Errors
 /// Returns the caller's mistake for a blank id.
 fn todo_id(id: &str) -> Result<TodoId, ToolFailure> {
-    TodoId::try_new(id.to_string()).map_err(|_| CliError::InvalidTodoId(id.to_string()).into())
+    TodoId::try_new(id.to_string()).map_err(|_| ToolError::InvalidTodoId(id.to_string()).into())
 }
 
 /// The key-value key an agent typed as `key`.
@@ -822,7 +789,7 @@ fn todo_id(id: &str) -> Result<TodoId, ToolFailure> {
 /// # Errors
 /// Returns the caller's mistake for a blank key.
 fn kv_key(key: &str) -> Result<KvKey, ToolFailure> {
-    KvKey::try_new(key.to_string()).map_err(|_| CliError::InvalidKvKey(key.to_string()).into())
+    KvKey::try_new(key.to_string()).map_err(|_| ToolError::InvalidKvKey(key.to_string()).into())
 }
 
 #[tool_handler]
@@ -847,17 +814,19 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use strum::IntoEnumIterator;
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
         adapter::{
-            cli::{Action, Outcome, ProcessOutcome, WaitEnd},
+            client::{Action, Outcome, ProcessOutcome, ProjectIdentityView, WaitEnd},
             store::SqliteStore,
         },
         domain::{
             coordination::{Author, Todo},
             port::{ProjectStore, StackStore, StateChangeNotifier},
+            value::{ProcessName, ProjectName},
         },
     };
 
@@ -905,6 +874,7 @@ mod tests {
         let deps = McpDeps::builder()
             .root(root.clone())
             .author(Author::agent("test"))
+            .projects(Arc::new(store.clone()))
             .coordination(Arc::new(store.clone()))
             .stacks(Arc::new(store.clone()))
             .settings(Arc::new(store.clone()))
@@ -989,7 +959,12 @@ mod tests {
     /// ended as `wait_ended`.
     fn report(outcome: Outcome, wait_ended: WaitEnd) -> ActionReport {
         ActionReport::builder()
-            .project(PathBuf::from("/repo"))
+            .project(
+                ProjectIdentityView::builder()
+                    .name(ProjectName::try_new("repo").unwrap())
+                    .root(PathBuf::from("/repo"))
+                    .build(),
+            )
             .action(Action::Start)
             .processes(vec![
                 ProcessOutcome::builder()
@@ -1278,8 +1253,13 @@ mod tests {
                 .unwrap()
                 .structured_content
                 .expect("structured");
+            let listed = all["settings"].as_array().expect("a list of settings");
+            assert_eq!(listed.len(), SettingKey::iter().count());
             for key in SettingKey::iter() {
-                assert!(all.get(key.to_string()).is_some(), "{key} is listed");
+                assert!(
+                    listed.iter().any(|entry| entry["key"] == key.to_string()),
+                    "{key} is listed"
+                );
             }
 
             let one = fixture

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::log_text::LogText;
+use crate::adapter::client::LogText;
 
 /// End of a log line.
 const NEWLINE: u8 = b'\n';

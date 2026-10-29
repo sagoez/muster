@@ -8,21 +8,23 @@ use typed_builder::TypedBuilder;
 use super::{
     args::SetArgs,
     command_words::command_string,
-    definition_view::DefinitionView,
     error::CliError,
     invocation::{Invocation, stack_editor},
     output::project_title,
-    process::resolve_among,
     process_flags::env_name,
-    project_identity_view::ProjectIdentityView,
     report::{Report, Row, RowKind},
-    service_client::ServiceClient,
     working_dir::stored_working_dir,
 };
-use crate::domain::{
-    config::{ConfigError, FieldEdit, ProcessChange},
-    port::StackStore,
-    value::Description,
+use crate::{
+    adapter::client::{
+        DefinitionView, ProjectIdentityView,
+        process::{resolve_among, runs_now},
+    },
+    domain::{
+        config::{ConfigError, FieldEdit, ProcessChange},
+        port::StackStore,
+        value::Description,
+    },
 };
 
 /// The command word of `muster set`.
@@ -129,17 +131,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         })?;
     let name = resolve_among(stack.names(), &project, &args.name)?;
     let spec = stack_editor(&store).change(root, &name, &change)?;
-    let running = ServiceClient::loaded_status(root)
-        .ok()
-        .flatten()
-        .and_then(|status| {
-            status
-                .processes()
-                .iter()
-                .find(|process| process.name().key() == name.key())
-                .map(|process| process.state().may_be_running())
-        })
-        .unwrap_or(false);
+    let running = runs_now(root, spec.name());
     Ok(SetView::builder()
         .project(ProjectIdentityView::from(&project))
         .process(DefinitionView::from(&spec))

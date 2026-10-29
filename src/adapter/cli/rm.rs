@@ -9,21 +9,20 @@ use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
 use super::{
-    action::Action,
-    action_report::ActionReport,
     error::CliError,
     invocation::stack_editor,
-    outcome::Outcome,
     output::action_title,
-    process::{ready_to_send, resolve_among, settle_removed, status},
-    project_identity_view::ProjectIdentityView,
-    removed_view::RemovedView,
     report::{Report, Row, RowKind},
-    service_client::ServiceClient,
-    settle_watch::SettleWatch,
 };
 use crate::{
-    adapter::store::SqliteStore,
+    adapter::{
+        client::{
+            Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient,
+            SettleWatch, UNBOUNDED,
+            process::{ready_to_send, resolve_among, settle_removed, status},
+        },
+        store::SqliteStore,
+    },
     domain::{
         config::ConfigError,
         port::StackStore,
@@ -105,21 +104,10 @@ pub fn remove(
     for name in names {
         editor.remove(project.root(), name)?;
     }
-    let report = settle_removed(client, project, &before, names, sent, watch)?;
+    let report = settle_removed(client, project, &before, names, sent, UNBOUNDED, watch)?;
     Ok(RmView::builder()
         .project(ProjectIdentityView::from(project))
-        .removed(
-            report
-                .processes()
-                .iter()
-                .map(|process| {
-                    RemovedView::builder()
-                        .name(process.name().clone())
-                        .stopped(process.outcome() == Outcome::Stopped)
-                        .build()
-                })
-                .collect(),
-        )
+        .removed(report.processes().iter().map(RemovedView::from).collect())
         .failed(report.failed())
         .report(report)
         .build())

@@ -4,10 +4,11 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, TransactionBehavior};
 
 use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
@@ -21,6 +22,9 @@ pub const DATABASE_FILE: &str = "muster.db";
 /// How long a connection waits for another process's write lock before
 /// failing.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+/// Pause before switching a fresh file to WAL again after another opener
+/// held its lock.
+const BUSY_RETRY: Duration = Duration::from_millis(10);
 /// Mode of the database file, which SQLite gives its `-wal` and `-shm` too:
 /// its owner's alone.
 const PRIVATE_DB_MODE: u32 = 0o600;
@@ -84,10 +88,8 @@ impl SqliteStore {
                 source,
             })?;
         let mut conn = Connection::open(path).map_err(db_error)?;
-        // The timeout comes first so switching a fresh file to WAL waits for a
-        // concurrent opener instead of failing busy.
         conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
-        conn.execute_batch(CONNECTION_PRAGMAS).map_err(db_error)?;
+        switch_to_wal(&conn).map_err(db_error)?;
         migrate(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -167,6 +169,28 @@ fn migrate(conn: &mut Connection) -> Result<(), ConfigError> {
             .map_err(db_error)?;
     }
     transaction.commit().map_err(db_error)
+}
+
+/// Runs [`CONNECTION_PRAGMAS`], retrying while another opener holds the lock
+/// for at most [`BUSY_TIMEOUT`]. Two connections switching one fresh file to
+/// WAL at once deadlock on its lock, so SQLite fails one of them busy at once
+/// rather than calling the busy handler.
+///
+/// # Errors
+/// Returns the driver's error, or the busy error once the time is up.
+fn switch_to_wal(conn: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.execute_batch(CONNECTION_PRAGMAS) {
+            Err(error)
+                if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(BUSY_RETRY);
+            },
+            outcome => return outcome,
+        }
+    }
 }
 
 /// Maps a driver error to the domain error, keeping `rusqlite` out of the

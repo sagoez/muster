@@ -7,10 +7,11 @@ use super::{
     cli_ports::CliPorts,
     error::CliError,
     project_target::{ProjectTarget, env_project, resolve_project},
-    running_service_notifier::RunningServiceNotifier,
 };
 use crate::{
-    adapter::store::SqliteStore, application::StackEditor, constants::MUSTER_PROJECT_ENV,
+    adapter::{client::RunningServiceNotifier, store::SqliteStore},
+    application::StackEditor,
+    constants::MUSTER_PROJECT_ENV,
     domain::project::Project,
 };
 

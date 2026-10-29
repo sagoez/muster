@@ -5,19 +5,21 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use super::{
-    action_report::ActionReport,
     args::RunArgs,
     command_words::command_string,
     error::{CliError, RUN_NAME_HINT},
     invocation::{Invocation, stack_editor},
-    process::{ready_to_send, start_added},
     project_target::ProjectTarget,
-    service_client::ServiceClient,
-    settle_watch::SettleWatch,
     working_dir::stored_working_dir,
 };
 use crate::{
-    adapter::store::SqliteStore,
+    adapter::{
+        client::{
+            ActionReport, ServiceClient, SettleWatch,
+            process::{ready_to_send, start_added},
+        },
+        store::SqliteStore,
+    },
     domain::{
         config::ProcessDraft,
         port::StackStore,

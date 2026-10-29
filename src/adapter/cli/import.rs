@@ -15,19 +15,20 @@ use typed_builder::TypedBuilder;
 use super::{
     error::CliError,
     invocation::{Invocation, stack_editor},
-    outcome::Outcome,
     output::project_title,
-    process::{settle_removed, status},
-    project_identity_view::ProjectIdentityView,
     project_target::ProjectTarget,
-    removed_view::RemovedView,
     report::{Report, Row, RowKind},
-    service_client::ServiceClient,
-    settle_watch::SettleWatch,
     stack_path::StackPath,
 };
 use crate::{
-    adapter::{exchange::read_stack_file, store::SqliteStore},
+    adapter::{
+        client::{
+            ProjectIdentityView, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
+            process::{settle_removed, status},
+        },
+        exchange::read_stack_file,
+        store::SqliteStore,
+    },
     domain::{
         config::{ImportMode, ImportPlan, ProcessSpec, Stack},
         port::StackStore,
@@ -192,6 +193,7 @@ fn unstopped(names: &[ProcessName]) -> Vec<RemovedView> {
             RemovedView::builder()
                 .name(name.clone())
                 .stopped(false)
+                .still_stopping(false)
                 .build()
         })
         .collect()
@@ -235,17 +237,16 @@ pub fn apply(
     let project = registration.project();
     let (removed, failed) = match (client, before) {
         (Some(client), Some(before)) if !plan.removed().is_empty() => {
-            let report = settle_removed(client, project, &before, plan.removed(), sent, watch)?;
-            let removed = report
-                .processes()
-                .iter()
-                .map(|process| {
-                    RemovedView::builder()
-                        .name(process.name().clone())
-                        .stopped(process.outcome() == Outcome::Stopped)
-                        .build()
-                })
-                .collect();
+            let report = settle_removed(
+                client,
+                project,
+                &before,
+                plan.removed(),
+                sent,
+                UNBOUNDED,
+                watch,
+            )?;
+            let removed = report.processes().iter().map(RemovedView::from).collect();
             (removed, report.failed())
         },
         (Some(_) | None, Some(_) | None) => (unstopped(plan.removed()), false),
@@ -319,6 +320,7 @@ mod tests {
                 RemovedView::builder()
                     .name(name("worker"))
                     .stopped(true)
+                    .still_stopping(false)
                     .build(),
             ])
             .dry_run(true)

@@ -10,7 +10,7 @@ use super::process_fields::{
     process_name, stop_grace, working_dir,
 };
 use crate::{
-    adapter::cli::CliError,
+    adapter::mcp::tool_error::ToolError,
     domain::{
         config::{Environment, ProcessDraft},
         value::ProjectRoot,
@@ -56,7 +56,7 @@ impl ProcessAddArg {
     /// # Errors
     /// Returns the refusal of the first field that does not read as its
     /// value.
-    pub fn draft(&self, root: &ProjectRoot) -> Result<ProcessDraft, CliError> {
+    pub fn draft(&self, root: &ProjectRoot) -> Result<ProcessDraft, ToolError> {
         let environment = match &self.environment {
             Some(vars) => env_vars(ENVIRONMENT_FIELD, vars)?.into_iter().collect(),
             None => Environment::empty(),

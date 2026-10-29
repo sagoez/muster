@@ -95,6 +95,12 @@ pub enum ConfigError {
         /// The path refused.
         path: PathBuf,
     },
+    /// A project folder's path is not UTF-8, so the database cannot store it.
+    #[error("{} is not valid UTF-8 and cannot be a project folder", path.display())]
+    RootNotUtf8 {
+        /// The path refused.
+        path: PathBuf,
+    },
 }
 
 /// `names` joined for an error message.

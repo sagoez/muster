@@ -1,13 +1,9 @@
-use std::{fmt::Display, str::FromStr};
-
-use strum::IntoEnumIterator;
-
 use crate::domain::{
     color_scheme::ColorScheme,
     config::{ConfigError, SettingKey},
     process::{RestartPolicy, StopSignal},
     pty::PtySize,
-    value::{ByteSize, DetachKey, PositiveDuration, ValueParseError},
+    value::{ByteSize, DetachKey, PositiveDuration, parse_as, parse_choice},
 };
 
 /// The form a boolean setting is written in.
@@ -16,8 +12,6 @@ const BOOLEAN_FORM: &str = "true or false";
 const LINE_COUNT_FORM: &str = "a whole number of lines such as 1000";
 /// The form a detach key is written in.
 const DETACH_KEY_FORM: &str = "a Control chord such as ctrl-\\ or ctrl-a";
-/// Separates the accepted names of an enumerated setting.
-const CHOICE_SEPARATOR: &str = ", ";
 
 /// A new value for one setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,28 +81,6 @@ impl SettingChange {
             Self::DefaultStopGrace(_) => SettingKey::DefaultStopGrace,
         }
     }
-}
-
-/// Reads `raw` as `T`, describing a refusal with `expected`.
-///
-/// # Errors
-/// Returns [`ValueParseError`] when `T` refuses `raw`.
-fn parse_as<T: FromStr>(raw: &str, expected: &str) -> Result<T, ValueParseError> {
-    raw.parse().map_err(|_| {
-        ValueParseError::builder()
-            .expected(expected)
-            .found(raw)
-            .build()
-    })
-}
-
-/// Reads `raw` as one of `T`'s kebab-case names, listing them on a refusal.
-///
-/// # Errors
-/// Returns [`ValueParseError`] when `raw` names no variant.
-fn parse_choice<T: FromStr + IntoEnumIterator + Display>(raw: &str) -> Result<T, ValueParseError> {
-    let choices: Vec<String> = T::iter().map(|choice| choice.to_string()).collect();
-    parse_as(raw, &choices.join(CHOICE_SEPARATOR))
 }
 
 #[cfg(test)]

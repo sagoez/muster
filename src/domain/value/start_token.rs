@@ -1,7 +1,8 @@
 use nutype::nutype;
 
-/// A process's creation marker: paired with its [`Pid`](super::Pid), it tells a
-/// live process from a later one that reused the id.
+/// A process's creation marker: paired with its
+/// [`Pid`](crate::domain::value::Pid), it tells a live process from a later
+/// one that reused the id.
 #[nutype(
     validate(greater = 0),
     derive(

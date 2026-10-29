@@ -13,8 +13,8 @@ use std::{
 use semver::Version;
 
 use super::{
-    error::CliError, probe::Probe, running_service::RunningService, service_log::ServiceLog,
-    service_start::ServiceStart, service_status::ServiceStatus,
+    client_error::ClientError, probe::Probe, running_service::RunningService,
+    service_log::ServiceLog, service_start::ServiceStart, service_status::ServiceStatus,
     unavailable_reason::UnavailableReason,
 };
 use crate::{
@@ -64,10 +64,10 @@ impl ServiceClient {
     /// version. Processes keep running across a replacement.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the service cannot be started, does not
+    /// Returns a [`ClientError`] when the service cannot be started, does not
     /// answer, runs a newer version, or still runs another version after
     /// being replaced.
-    pub fn connect() -> Result<Self, CliError> {
+    pub fn connect() -> Result<Self, ClientError> {
         let client = Self::local()?;
         let ours = ours();
         let running = client.reach()?;
@@ -80,7 +80,7 @@ impl ServiceClient {
         if replacement.compared_with(&ours) == Ordering::Equal {
             return Ok(client);
         }
-        Err(CliError::VersionMismatch {
+        Err(ClientError::VersionMismatch {
             ours: APP_VERSION.to_string(),
             theirs: replacement.version().clone().unwrap_or_default(),
         })
@@ -90,9 +90,9 @@ impl ServiceClient {
     /// without starting or replacing it.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when a service holds the socket but does not
+    /// Returns a [`ClientError`] when a service holds the socket but does not
     /// answer.
-    pub fn status() -> Result<ServiceStatus, CliError> {
+    pub fn status() -> Result<ServiceStatus, ClientError> {
         let client = Self::local()?;
         let running = match client.probe()? {
             Probe::Running(running) => Some(running),
@@ -104,7 +104,7 @@ impl ServiceClient {
                     .iter()
                     .map(|status| status.project().root().as_ref().clone())
                     .collect(),
-                other => return Err(CliError::UnexpectedAnswer((&other).into())),
+                other => return Err(ClientError::UnexpectedAnswer((&other).into())),
             },
             None => Vec::new(),
         };
@@ -131,9 +131,9 @@ impl ServiceClient {
     /// starting the service or loading the project.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when a service holds the socket but does not
+    /// Returns a [`ClientError`] when a service holds the socket but does not
     /// answer.
-    pub fn loaded_status(project: &ProjectRoot) -> Result<Option<ProjectStatus>, CliError> {
+    pub fn loaded_status(project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
         let client = Self::local()?;
         if !matches!(client.probe()?, Probe::Running(_)) {
             return Ok(None);
@@ -142,7 +142,7 @@ impl ServiceClient {
             ServiceResponse::Status(statuses) => Ok(statuses
                 .into_iter()
                 .find(|status| status.project().root() == project)),
-            other => Err(CliError::UnexpectedAnswer((&other).into())),
+            other => Err(ClientError::UnexpectedAnswer((&other).into())),
         }
     }
 
@@ -159,12 +159,12 @@ impl ServiceClient {
     /// from this binary.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when there is no state directory or the binary
+    /// Returns a [`ClientError`] when there is no state directory or the binary
     /// cannot be found.
-    fn local() -> Result<Self, CliError> {
-        let state_dir = state_dir().ok_or(CliError::NoStateDir)?;
+    fn local() -> Result<Self, ClientError> {
+        let state_dir = state_dir().ok_or(ClientError::NoStateDir)?;
         let socket = protocol::socket_path(&state_dir);
-        let binary = env::current_exe().map_err(|error| CliError::ServiceUnavailable {
+        let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),
             log: protocol::log_path(&state_dir),
             tail: Vec::new(),
@@ -186,9 +186,9 @@ impl ServiceClient {
     /// to a service started afresh.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the service cannot be reached or answers
+    /// Returns a [`ClientError`] when the service cannot be reached or answers
     /// late.
-    pub fn send(&self, request: &ServiceRequest) -> Result<ServiceResponse, CliError> {
+    pub fn send(&self, request: &ServiceRequest) -> Result<ServiceResponse, ClientError> {
         match protocol::send_within(&self.socket, request, SERVICE_EXIT_TIMEOUT) {
             Ok(ServiceResponse::Error(body)) if *body.kind() == ServiceErrorKind::Busy => {
                 self.reach()?;
@@ -208,13 +208,13 @@ impl ServiceClient {
     /// socket, with no hello first, so a service of any version is stopped.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the service does not exit in time.
-    pub fn stop() -> Result<bool, CliError> {
+    /// Returns a [`ClientError`] when the service does not exit in time.
+    pub fn stop() -> Result<bool, ClientError> {
         let client = Self::local()?;
         match protocol::send_within(&client.socket, &ServiceRequest::Stop, SERVICE_EXIT_TIMEOUT) {
             Ok(ServiceResponse::Ok) => Ok(true),
             Ok(ServiceResponse::Error(body)) if *body.kind() == ServiceErrorKind::Busy => Ok(true),
-            Ok(other) => Err(CliError::UnexpectedAnswer((&other).into())),
+            Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) => Ok(false),
             Err(error) if gone(&error) => Ok(true),
             Err(source) => Err(client.io_error(source)),
@@ -225,12 +225,12 @@ impl ServiceClient {
     /// no service started or waited out.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the exchange fails.
+    /// Returns a [`ClientError`] when the exchange fails.
     fn try_send(
         &self,
         request: &ServiceRequest,
         timeout: Duration,
-    ) -> Result<ServiceResponse, CliError> {
+    ) -> Result<ServiceResponse, ClientError> {
         protocol::send_within(&self.socket, request, timeout)
             .map_err(|source| self.io_error(source))
     }
@@ -238,8 +238,8 @@ impl ServiceClient {
     /// Sends `request` once.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the exchange fails.
-    fn exchange(&self, request: &ServiceRequest) -> Result<ServiceResponse, CliError> {
+    /// Returns a [`ClientError`] when the exchange fails.
+    fn exchange(&self, request: &ServiceRequest) -> Result<ServiceResponse, ClientError> {
         self.try_send(request, SERVICE_EXIT_TIMEOUT)
     }
 
@@ -247,8 +247,8 @@ impl ServiceClient {
     /// waiting out one that is exiting.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when no service answers in time.
-    fn reach(&self) -> Result<RunningService, CliError> {
+    /// Returns a [`ClientError`] when no service answers in time.
+    fn reach(&self) -> Result<RunningService, ClientError> {
         let deadline = Instant::now() + SERVICE_EXIT_TIMEOUT;
         loop {
             match self.probe()? {
@@ -266,8 +266,8 @@ impl ServiceClient {
     /// What answers at the socket.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when something accepts but does not answer.
-    fn probe(&self) -> Result<Probe, CliError> {
+    /// Returns a [`ClientError`] when something accepts but does not answer.
+    fn probe(&self) -> Result<Probe, ClientError> {
         let hello = ServiceRequest::Hello {
             version: APP_VERSION.to_string(),
         };
@@ -288,7 +288,7 @@ impl ServiceClient {
                     RunningService::builder().version(None).binary(None).build(),
                 ))
             },
-            Ok(other) => Err(CliError::UnexpectedAnswer((&other).into())),
+            Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) => Ok(Probe::Absent),
             Err(error) if gone(&error) => Ok(Probe::Exiting),
             Err(source) => Err(self.io_error(source)),
@@ -303,9 +303,9 @@ impl ServiceClient {
     /// gone, and only once that wait ends with no answer starts one more.
     ///
     /// # Errors
-    /// Returns a [`CliError`], with what the service logged since it was
+    /// Returns a [`ClientError`], with what the service logged since it was
     /// started, when it exits with a failure or does not answer in time.
-    fn start(&self) -> Result<RunningService, CliError> {
+    fn start(&self) -> Result<RunningService, ClientError> {
         prepare_state_dir(&self.state_dir).map_err(|source| {
             self.unavailable(
                 UnavailableReason::StateDir {
@@ -337,9 +337,9 @@ impl ServiceClient {
     /// and waits until it answers or exits.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the service exits with a failure, does not
+    /// Returns a [`ClientError`] when the service exits with a failure, does not
     /// answer by [`SERVICE_READY_TIMEOUT`], or cannot be spawned.
-    fn start_once(&self) -> Result<ServiceStart, CliError> {
+    fn start_once(&self) -> Result<ServiceStart, ClientError> {
         let _lock = self.start_lock()?;
         if let Probe::Running(running) = self.probe()? {
             return Ok(ServiceStart::Running(running));
@@ -379,8 +379,8 @@ impl ServiceClient {
     /// Starts `<binary> __service` detached from this terminal and session.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when it cannot be started.
-    fn spawn_service(&self) -> Result<Child, CliError> {
+    /// Returns a [`ClientError`] when it cannot be started.
+    fn spawn_service(&self) -> Result<Child, ClientError> {
         let mut command = Command::new(&self.binary);
         command.arg(SERVICE_SUBCOMMAND);
         detached(&mut command).spawn().map_err(|source| {
@@ -399,9 +399,9 @@ impl ServiceClient {
     /// the file releases it.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when the lock cannot be opened or is still held
+    /// Returns a [`ClientError`] when the lock cannot be opened or is still held
     /// after [`SERVICE_EXIT_TIMEOUT`].
-    fn start_lock(&self) -> Result<File, CliError> {
+    fn start_lock(&self) -> Result<File, ClientError> {
         let path = self.state_dir.join(START_LOCK_FILE);
         let lock = OpenOptions::new()
             .create(true)
@@ -444,12 +444,12 @@ impl ServiceClient {
     /// over, and waits until it has.
     ///
     /// # Errors
-    /// Returns a [`CliError`] when it does not exit in time.
-    fn replace(&self, running: &RunningService) -> Result<(), CliError> {
+    /// Returns a [`ClientError`] when it does not exit in time.
+    fn replace(&self, running: &RunningService) -> Result<(), ClientError> {
         match protocol::send_within(&self.socket, &ServiceRequest::Replace, SERVICE_EXIT_TIMEOUT) {
             Ok(ServiceResponse::Ok) => Ok(()),
             Ok(ServiceResponse::Error(body)) if *body.kind() == ServiceErrorKind::Busy => Ok(()),
-            Ok(other) => Err(CliError::UnexpectedAnswer((&other).into())),
+            Ok(other) => Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) || gone(&error) => Ok(()),
             Err(source) => Err(self.unavailable(
                 UnavailableReason::DidNotMakeWay {
@@ -465,10 +465,10 @@ impl ServiceClient {
     /// The failure of a service that is not available for `reason`, with
     /// what the service logged since `attempt`, the log's end when this
     /// client started it.
-    fn unavailable(&self, reason: UnavailableReason, attempt: Option<u64>) -> CliError {
+    fn unavailable(&self, reason: UnavailableReason, attempt: Option<u64>) -> ClientError {
         let log = self.log();
         let tail = attempt.map(|from| log.tail_since(from)).unwrap_or_default();
-        CliError::ServiceUnavailable {
+        ClientError::ServiceUnavailable {
             reason,
             log: log.path().clone(),
             tail,
@@ -476,8 +476,8 @@ impl ServiceClient {
     }
 
     /// The failure of an exchange that failed with `source`.
-    fn io_error(&self, source: io::Error) -> CliError {
-        CliError::ServiceIo {
+    fn io_error(&self, source: io::Error) -> ClientError {
+        ClientError::ServiceIo {
             socket: self.socket.clone(),
             source,
         }
@@ -490,8 +490,8 @@ fn ours() -> Version {
 }
 
 /// The refusal to use the newer service `running`.
-fn newer(running: RunningService) -> CliError {
-    CliError::ServiceNewer {
+fn newer(running: RunningService) -> ClientError {
+    ClientError::ServiceNewer {
         ours: APP_VERSION.to_string(),
         theirs: running.version().clone().unwrap_or_default(),
         binary: running.binary().clone(),

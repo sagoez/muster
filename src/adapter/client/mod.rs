@@ -1,0 +1,64 @@
+//! What the CLI and the MCP server share to drive the muster service: the
+//! service client, the process use cases and the reports and views they
+//! answer with. Each driver maps [`ClientError`] to its own surface.
+
+mod action;
+mod action_report;
+mod client_error;
+mod definition_view;
+mod exit_view;
+mod failure_kind;
+mod failure_view;
+mod log_read;
+mod log_text;
+mod notice_view;
+mod outcome;
+mod probe;
+pub mod process;
+mod process_outcome;
+mod process_view;
+mod project_identity_view;
+mod project_view;
+mod removed_view;
+mod running_service;
+mod running_service_notifier;
+mod service_client;
+mod service_log;
+mod service_start;
+mod service_status;
+mod setting_view;
+mod settle_watch;
+mod settling;
+mod stop_view;
+mod unavailable_reason;
+mod unwatched;
+mod wait_end;
+
+pub use action::*;
+pub use action_report::*;
+pub use client_error::*;
+pub use definition_view::*;
+pub use exit_view::*;
+pub use failure_kind::*;
+pub use failure_view::*;
+pub use log_read::*;
+pub use log_text::*;
+pub use notice_view::*;
+pub use outcome::*;
+pub use process_outcome::*;
+pub use process_view::*;
+pub use project_identity_view::*;
+pub use project_view::*;
+pub use removed_view::*;
+pub use running_service::*;
+pub use running_service_notifier::*;
+pub use service_client::*;
+pub use service_log::*;
+pub use service_status::*;
+pub use setting_view::*;
+pub use settle_watch::*;
+pub use settling::UNBOUNDED;
+pub use stop_view::*;
+pub use unavailable_reason::*;
+pub use unwatched::*;
+pub use wait_end::*;

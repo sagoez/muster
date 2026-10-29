@@ -1,13 +1,14 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use super::{failure_kind::FailureKind, unavailable_reason::UnavailableReason};
 use crate::{
-    adapter::{exchange::ExchangeError, holder::HolderError, service::ServiceErrorKind},
+    adapter::{
+        client::{ClientError, FailureKind},
+        exchange::ExchangeError,
+        holder::HolderError,
+        service::ServiceErrorKind,
+    },
     domain::{
         config::ConfigError,
         value::{ProcessName, ProjectName},
@@ -18,8 +19,13 @@ use crate::{
 /// message.
 const BUSY_HINT: &str = "the muster service is shutting down; run the command again";
 const INVALID_REQUEST_HINT: &str = "the running service may be another muster version; `muster service stop` and run the command again";
-/// Shown in place of the valid names when a project has no processes.
-const NO_PROCESSES: &str = "the project has no processes";
+/// What a person does about a service that runs another version.
+const STOP_SERVICE_HINT: &str = "`muster service stop` and run the command again";
+/// What a person does about a service newer than this binary.
+const NEWER_SERVICE_HINT: &str =
+    "run the newer muster, or `muster service stop` to let this one start its own";
+/// Where a person sees how interrupted processes end.
+const INTERRUPTED_HINT: &str = "`muster ps` shows how they end";
 /// What `muster run` suggests after a taken name.
 pub const RUN_NAME_HINT: &str = "; pass --name to choose another";
 
@@ -59,7 +65,8 @@ pub enum CliError {
     /// No value is stored under the requested key.
     #[error("no value '{0}'")]
     UnknownValue(String),
-    /// The derived or given process name was empty.
+    /// The derived or given process name was empty or held a control
+    /// character.
     #[error("'{0}' is not a valid process name")]
     InvalidName(String),
     /// The command was blank.
@@ -85,6 +92,9 @@ pub enum CliError {
     /// Stored state could not be read or written.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// Talking to the service failed.
+    #[error("{}", client_message(.0))]
+    Client(#[from] ClientError),
     /// A process of the project already has the name being added.
     #[error(
         "a process named {} already exists in {project}{hint}",
@@ -130,104 +140,9 @@ pub enum CliError {
     /// `muster export` would overwrite a file.
     #[error("{} already exists; pass --force to overwrite it", .0.display())]
     FileExists(PathBuf),
-    /// muster has no state directory to find the service in.
-    #[error("cannot find muster's state directory; set HOME or XDG_STATE_HOME")]
-    NoStateDir,
-    /// The service could not be started, or did not answer.
-    #[error("{}", unavailable(reason, log, tail))]
-    ServiceUnavailable {
-        /// What went wrong.
-        #[source]
-        reason: UnavailableReason,
-        /// The service log, where the service records why it stopped.
-        log: PathBuf,
-        /// The last lines of that log.
-        tail: Vec<String>,
-    },
-    /// The exchange with a running service failed.
-    #[error("could not talk to the muster service at {socket}: {source}")]
-    ServiceIo {
-        /// The service socket.
-        socket: PathBuf,
-        /// What failed.
-        #[source]
-        source: io::Error,
-    },
-    /// The service answered with a kind of answer the command cannot use.
-    #[error(
-        "the muster service answered with `{0}`, which this command does not expect; `muster service stop` and run the command again"
-    )]
-    UnexpectedAnswer(&'static str),
-    /// The running service is a newer muster than this binary, which does
-    /// not replace it.
-    #[error(
-        "the running muster service is version {theirs}{}, newer than this muster ({ours}); run the newer muster, or `muster service stop` to let this one start its own",
-        binary.as_ref().map(|binary| format!(" from {}", binary.display())).unwrap_or_default()
-    )]
-    ServiceNewer {
-        /// This binary's version.
-        ours: String,
-        /// The service's version.
-        theirs: String,
-        /// The binary the service runs.
-        binary: Option<PathBuf>,
-    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
-    /// A replacement service still runs another version than this binary.
-    #[error(
-        "the muster service runs version {theirs} after being replaced for this binary's {ours}; `muster service stop` and run the command again"
-    )]
-    VersionMismatch {
-        /// This binary's version.
-        ours: String,
-        /// The service's version.
-        theirs: String,
-    },
-    /// The project has no process by the name typed.
-    #[error("no process '{name}' in {project}; {}", valid_names(valid))]
-    UnknownProcess {
-        /// The name as typed.
-        name: String,
-        /// The project's name.
-        project: ProjectName,
-        /// Every process name the project has.
-        valid: Vec<ProcessName>,
-    },
-    /// The name typed matches several processes only by Unicode encoding.
-    #[error(
-        "'{name}' matches several processes in {project} that differ only in how their accents are encoded: {}; remove one of them",
-        quoted(candidates)
-    )]
-    AmbiguousProcess {
-        /// The name as typed.
-        name: String,
-        /// The project's name.
-        project: ProjectName,
-        /// The processes it matches.
-        candidates: Vec<ProcessName>,
-    },
-    /// The process has nothing running to reach.
-    #[error("{} is not running; `muster start {}` starts it", .0.shell_quoted(), .0.shell_quoted())]
-    NotRunning(ProcessName),
-    /// The service refused the request.
-    #[error("{message}{}", refusal_hint(*kind))]
-    Refused {
-        /// Why, as a kind.
-        kind: ServiceErrorKind,
-        /// Why, for a person to read.
-        message: String,
-    },
-    /// Reading or following a log failed.
-    #[error("could not read the log {path}: {source}")]
-    Log {
-        /// The log file.
-        path: PathBuf,
-        /// What failed.
-        #[source]
-        source: io::Error,
-    },
     /// Writing the command's output failed.
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
@@ -264,14 +179,6 @@ pub enum CliError {
     /// The person cancelled a question with Esc or Ctrl-C.
     #[error("cancelled; nothing was changed")]
     Cancelled,
-    /// The person pressed Ctrl-C before the command sent its request.
-    #[error("cancelled; nothing was changed")]
-    InterruptedUnsent,
-    /// The person pressed Ctrl-C while the command waited for its processes.
-    #[error(
-        "interrupted; the muster service keeps settling the processes, `muster ps` shows how they end"
-    )]
-    Interrupted,
     /// The connection to a process's holder broke while attached.
     #[error(
         "lost the connection to {}: {source}; `muster ps` shows whether it still runs",
@@ -290,20 +197,11 @@ impl CliError {
     /// The kind of failure, for `--json` output and the exit code.
     pub fn kind(&self) -> FailureKind {
         match self {
-            Self::NoStateDir | Self::ServiceUnavailable { .. } | Self::ServiceIo { .. } => {
-                FailureKind::ServiceUnavailable
-            },
-            Self::UnexpectedAnswer(_)
-            | Self::VersionMismatch { .. }
-            | Self::ServiceNewer { .. } => FailureKind::VersionMismatch,
             Self::UnknownProject(_) | Self::NotAProject { .. } => FailureKind::UnknownProject,
-            Self::Config(error) => config_kind(error),
-            Self::UnknownProcess { .. } => FailureKind::UnknownProcess,
-            Self::AmbiguousProcess { .. } => FailureKind::Ambiguous,
-            Self::NotRunning(_) | Self::NothingRunning(_) => FailureKind::NotRunning,
-            Self::Refused { kind, .. } => FailureKind::from(*kind),
-            Self::Log { .. }
-            | Self::Output(_)
+            Self::Config(error) => FailureKind::from(error),
+            Self::Client(error) => error.kind(),
+            Self::NothingRunning(_) => FailureKind::NotRunning,
+            Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
             | Self::ReadFile { .. }
@@ -311,7 +209,6 @@ impl CliError {
             Self::Usage(_) | Self::Cancelled | Self::NothingToChange | Self::NeedsYes(_) => {
                 FailureKind::Usage
             },
-            Self::Interrupted | Self::InterruptedUnsent => FailureKind::Interrupted,
             Self::NotATerminal
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
@@ -339,9 +236,8 @@ impl CliError {
     /// The process names a person could have meant, for `--json` output.
     pub fn candidates(&self) -> &[ProcessName] {
         match self {
-            Self::UnknownProcess { valid, .. }
-            | Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
-            Self::AmbiguousProcess { candidates, .. } => candidates,
+            Self::Client(error) => error.candidates(),
+            Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
             _ => &[],
         }
     }
@@ -360,57 +256,28 @@ impl CliError {
     }
 }
 
-/// The kind of a stored-state failure: the caller's mistake for a wrong
-/// name, value or file, muster's own for a store that cannot be used.
-fn config_kind(error: &ConfigError) -> FailureKind {
+/// `error` worded for a person at a terminal: what to run about it, where
+/// the client's own message leaves that out.
+fn client_message(error: &ClientError) -> String {
     match error {
-        ConfigError::UnknownProject { .. } => FailureKind::UnknownProject,
-        ConfigError::UnknownProcess { .. } => FailureKind::UnknownProcess,
-        ConfigError::DuplicateProcessName { .. }
-        | ConfigError::ImportConflict { .. }
-        | ConfigError::InvalidSetting { .. }
-        | ConfigError::InvalidDefaultSize { .. }
-        | ConfigError::RootNotADirectory { .. } => FailureKind::InvalidInput,
-        ConfigError::UnsupportedSchema { .. } => FailureKind::InvalidConfig,
-        ConfigError::Write { .. }
-        | ConfigError::NoStateDir
-        | ConfigError::CoordinationId(_)
-        | ConfigError::Database(_) => FailureKind::Io,
+        ClientError::NotRunning(name) => {
+            format!("{error}; `muster start {}` starts it", name.shell_quoted())
+        },
+        ClientError::UnexpectedAnswer(_) | ClientError::VersionMismatch { .. } => {
+            format!("{error}; {STOP_SERVICE_HINT}")
+        },
+        ClientError::ServiceNewer { .. } => format!("{error}; {NEWER_SERVICE_HINT}"),
+        ClientError::Refused { kind, .. } => format!("{error}{}", refusal_hint(*kind)),
+        ClientError::Interrupted => format!("{error}, {INTERRUPTED_HINT}"),
+        ClientError::NoStateDir
+        | ClientError::ServiceUnavailable { .. }
+        | ClientError::ServiceIo { .. }
+        | ClientError::UnknownProcess { .. }
+        | ClientError::AmbiguousProcess { .. }
+        | ClientError::Config(_)
+        | ClientError::Log { .. }
+        | ClientError::InterruptedUnsent => error.to_string(),
     }
-}
-
-/// The message of [`CliError::ServiceUnavailable`]: the reason, then the
-/// log's last lines or where the log is.
-fn unavailable(reason: &UnavailableReason, log: &Path, tail: &[String]) -> String {
-    if tail.is_empty() {
-        return format!(
-            "the muster service is not available: {reason}; its log is {}",
-            log.display()
-        );
-    }
-    let lines: Vec<String> = tail.iter().map(|line| format!("  {line}")).collect();
-    format!(
-        "the muster service is not available: {reason}\nlast lines of {}:\n{}",
-        log.display(),
-        lines.join("\n")
-    )
-}
-
-/// The valid names after an unknown one, each quoted so spaces show.
-fn valid_names(valid: &[ProcessName]) -> String {
-    if valid.is_empty() {
-        return NO_PROCESSES.to_string();
-    }
-    format!("valid names: {}", quoted(valid))
-}
-
-/// `names` each quoted for a shell and joined by commas.
-fn quoted(names: &[ProcessName]) -> String {
-    names
-        .iter()
-        .map(ProcessName::shell_quoted)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// What to try after a refusal of `kind`, or nothing when its message says
@@ -421,9 +288,7 @@ fn refusal_hint(kind: ServiceErrorKind) -> String {
         ServiceErrorKind::InvalidRequest => format!("; {INVALID_REQUEST_HINT}"),
         ServiceErrorKind::UnknownProcess
         | ServiceErrorKind::UnknownProject
-        | ServiceErrorKind::InvalidConfig
         | ServiceErrorKind::NotRunning
-        | ServiceErrorKind::Refused
         | ServiceErrorKind::Internal => String::new(),
     }
 }
@@ -485,6 +350,20 @@ mod tests {
         });
 
         assert_eq!(error.candidates(), [name("web")]);
+    }
+
+    /// A client failure gains the command a person runs about it.
+    #[test]
+    fn a_client_failure_names_the_command_to_run() {
+        let stopped = CliError::from(ClientError::NotRunning(name("api")));
+        let skewed = CliError::from(ClientError::UnexpectedAnswer("ok"));
+
+        assert_eq!(
+            stopped.to_string(),
+            "'api' is not running; `muster start 'api'` starts it"
+        );
+        assert!(skewed.to_string().ends_with(STOP_SERVICE_HINT), "{skewed}");
+        assert_eq!(stopped.kind(), FailureKind::NotRunning);
     }
 
     /// Only the name being added is reported as taken, with the hint of

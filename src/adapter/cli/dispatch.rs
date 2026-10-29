@@ -9,6 +9,7 @@ use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     process::exit,
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -16,8 +17,6 @@ use clap::{CommandFactory, Parser};
 use directories::{BaseDirs, ProjectDirs};
 
 use super::{
-    action::Action,
-    action_report::ActionReport,
     add::{add, add_rows},
     args::{
         Args, Command, ConfigCommand, CoordinationCommand, ProcessArgs, ProjectsCommand, RunArgs,
@@ -28,9 +27,7 @@ use super::{
     cli_exit::CliExit,
     cli_ports::CliPorts,
     completions::{CompletionShell, registration},
-    config_command::{
-        set_rows as setting_rows, set_setting, settings, settings_json, settings_table,
-    },
+    config_command::{set_rows as setting_rows, set_setting, settings, settings_table},
     coordination::coordination,
     doctor::{
         any_failed, completions_probe, database_probe, doctor_report, legacy_probe, project_probe,
@@ -48,26 +45,25 @@ use super::{
     invocation::Invocation,
     kv::kv,
     note::note,
-    notice_view::NoticeView,
     output,
     presenter::Presenter,
-    process,
+    process::{follow_logs, named_or_chosen, running_named_or_chosen},
     project_target::{ProjectTarget, resolve_project},
-    project_view::ProjectView,
     projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
     report::{Report, Row, RowKind, print_error},
     rm::{removable, remove as remove_processes, rm_rows},
     run::RunPlan,
-    service_client::ServiceClient,
     service_stopped::ServiceStopped,
     set::{set, set_rows},
-    setting_view::SettingView,
-    settle_watch::SettleWatch,
     todo::todo,
 };
 use crate::{
     adapter::{
-        mcp,
+        client::{
+            Action, ActionReport, ClientError, NoticeView, ProjectView, RunningServiceNotifier,
+            ServiceClient, SettingView, SettingsView, SettleWatch, process,
+        },
+        mcp::{self, McpDeps},
         private_dir::state_dir,
         service::{ProcessAction, ProjectStatus},
         store::SqliteStore,
@@ -139,14 +135,14 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             Presenter::detect(json),
             json,
             Action::Up,
-            |_, client, project, watch| process::up(client, project, watch),
+            |_, client, project, watch| Ok(process::up(client, project, watch)?),
         ),
         Some(Command::Down { json }) => act(
             invocation,
             Presenter::detect(json),
             json,
             Action::Down,
-            |_, client, project, watch| process::down(client, project, watch),
+            |_, client, project, watch| Ok(process::down(client, project, watch)?),
         ),
         Some(Command::Start(target)) => control(invocation, target, ProcessAction::Start),
         Some(Command::Stop(target)) => control(invocation, target, ProcessAction::Stop),
@@ -296,8 +292,8 @@ fn ps(invocation: &Invocation<'_>, all: bool, json: bool) {
             let store = invocation.store()?;
             Some(invocation.project(&store)?)
         };
-        let client = ServiceClient::connect()?;
-        process::ps(&client, project.as_ref().map(Project::root))
+        let client = connect()?;
+        Ok(process::ps(&client, project.as_ref().map(Project::root))?)
     })();
     match result {
         Ok(statuses) => {
@@ -345,10 +341,17 @@ fn act(
     let project = project_or_fail(invocation, json);
     written(presenter.open(&output::action_title(action, project.name())));
     let mut spinners = presenter.spinners();
-    let result = ServiceClient::connect()
-        .and_then(|client| run(presenter, &client, &project, &mut spinners));
+    let result = connect().and_then(|client| run(presenter, &client, &project, &mut spinners));
     drop(spinners);
     finish_action(presenter, json, result);
+}
+
+/// This user's service, started or replaced as needed.
+///
+/// # Errors
+/// Returns the [`CliError`] of a service that cannot be reached.
+fn connect() -> Result<ServiceClient, CliError> {
+    Ok(ServiceClient::connect()?)
 }
 
 /// `presenter`, once `check` says it can ask the question a command needs
@@ -382,7 +385,7 @@ fn control(invocation: &Invocation<'_>, target: ProcessArgs, action: ProcessActi
         json,
         action.into(),
         |presenter, client, project, watch| {
-            let pick = process::named_or_chosen(project, name.as_ref(), presenter);
+            let pick = named_or_chosen(project, name.as_ref(), presenter);
             process::control(client, project, pick, action, watch)
         },
     );
@@ -411,15 +414,15 @@ fn logs(
     }
     let frame_open = Cell::new(asking);
     let pick = |status: &ProjectStatus| {
-        let chosen = process::named_or_chosen(&project, name.as_ref(), presenter)(status)?;
+        let chosen = named_or_chosen(&project, name.as_ref(), presenter)(status)?;
         if frame_open.replace(false) {
             written(presenter.conclude(chosen.as_ref()));
         }
-        Ok(chosen)
+        Ok::<_, CliError>(chosen)
     };
-    let result = ServiceClient::connect().and_then(|client| {
+    let result = connect().and_then(|client| {
         if follow {
-            match process::follow_logs(&client, &project, pick, json, &mut io::stdout().lock())? {}
+            match follow_logs(&client, &project, pick, json, &mut io::stdout().lock())? {}
         }
         process::logs(&client, &project, pick, screen)
     });
@@ -476,8 +479,8 @@ fn attach(invocation: &Invocation<'_>, name: Option<&ProcessRef>, read_only: boo
         Err(error) => fail_command(json, &error),
     };
     written(presenter.open(&output::attach_title(project.name())));
-    let result = ServiceClient::connect().and_then(|client| {
-        let name = process::running_named_or_chosen(&client, &project, name, presenter)?;
+    let result = connect().and_then(|client| {
+        let name = running_named_or_chosen(&client, &project, name, presenter)?;
         attach_named(
             client,
             &project,
@@ -517,7 +520,7 @@ fn finish_attach(presenter: Presenter, name: &ProcessName, end: &AttachEnd) {
 /// Prints the current project's recent notices and the service's.
 fn notices(invocation: &Invocation<'_>, json: bool) {
     let project = project_or_fail(invocation, json);
-    let result = ServiceClient::connect().and_then(|client| process::notices(&client, &project));
+    let result = connect().and_then(|client| Ok(process::notices(&client, &project)?));
     match result {
         Ok(notices) => {
             let views: Vec<NoticeView> = notices.iter().map(NoticeView::from).collect();
@@ -536,7 +539,7 @@ fn service(command: ServiceCommand) {
             Ok(status) => {
                 print_result(json, &status, |status| show(&output::service_rows(status)));
             },
-            Err(error) => fail_command(json, &error),
+            Err(error) => fail_command(json, &error.into()),
         },
         ServiceCommand::Stop { json } => {
             let presenter = Presenter::detect(json);
@@ -548,7 +551,7 @@ fn service(command: ServiceCommand) {
                         written(presenter.finish(&output::service_stop_rows(was_running)));
                     });
                 },
-                Err(error) => fail_framed(presenter, json, &error),
+                Err(error) => fail_framed(presenter, json, &error.into()),
             }
         },
     }
@@ -580,7 +583,7 @@ fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
     };
     written(presenter.open(&output::action_title(Action::Remove, project.name())));
     let mut spinners = presenter.spinners();
-    let result = ServiceClient::connect()
+    let result = connect()
         .and_then(|client| remove_processes(&client, &store, &project, &resolved, &mut spinners));
     drop(spinners);
     match result {
@@ -600,7 +603,7 @@ fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
 fn config(invocation: &Invocation<'_>, command: Option<ConfigCommand>, json: bool) {
     match command {
         None | Some(ConfigCommand::List) => match settings(invocation) {
-            Ok(settings) => print_result(json, &settings_json(&settings), |_| {
+            Ok(settings) => print_result(json, &SettingsView::from(&settings), |_| {
                 emit_line(&settings_table(&settings));
             }),
             Err(error) => fail_command(json, &error),
@@ -656,8 +659,7 @@ fn import(
     let result = if planned.removed().is_empty() {
         apply(&store, &stack, mode, None, &mut spinners)
     } else {
-        ServiceClient::connect()
-            .and_then(|client| apply(&store, &stack, mode, Some(&client), &mut spinners))
+        connect().and_then(|client| apply(&store, &stack, mode, Some(&client), &mut spinners))
     };
     drop(spinners);
     match result {
@@ -763,7 +765,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     }
     let name = plan.draft().name().clone();
     let mut spinners = presenter.spinners();
-    let started = ServiceClient::connect().and_then(|client| {
+    let started = connect().and_then(|client| {
         plan.carry_out(&store, &client, &mut spinners)
             .map(|(project, report)| (client, project, report))
     });
@@ -787,7 +789,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
         announcer(presenter),
     ) {
         Ok(end) => finish_attach(presenter, &name, &end),
-        Err(CliError::NotRunning(_)) => written(presenter.close(&rows)),
+        Err(CliError::Client(ClientError::NotRunning(_))) => written(presenter.close(&rows)),
         Err(error) => fail_framed(presenter, json, &error),
     }
 }
@@ -837,8 +839,7 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
         }
     }
     let mut spinners = presenter.spinners();
-    let result = ServiceClient::connect()
-        .and_then(|client| remove(&client, &store, &project, &mut spinners));
+    let result = connect().and_then(|client| remove(&client, &store, &project, &mut spinners));
     drop(spinners);
     match result {
         Ok(removal) => {
@@ -916,8 +917,16 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, author: Option<Str
         Ok(runtime) => runtime,
         Err(error) => fail_with(&MusterError::Io(error)),
     };
-    let author = Author::agent(author.as_deref().unwrap_or_default());
-    if let Err(error) = runtime.block_on(mcp::serve_stdio(store, target, author)) {
+    let deps = McpDeps::builder()
+        .root(target.root().clone())
+        .author(Author::agent(author.as_deref().unwrap_or_default()))
+        .projects(Arc::new(store.clone()))
+        .coordination(Arc::new(store.clone()))
+        .stacks(Arc::new(store.clone()))
+        .settings(Arc::new(store))
+        .notifier(Arc::new(RunningServiceNotifier))
+        .build();
+    if let Err(error) = runtime.block_on(mcp::serve_stdio(deps)) {
         fail_with(&error);
     }
 }

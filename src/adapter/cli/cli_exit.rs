@@ -1,6 +1,6 @@
 use strum::EnumIter;
 
-use super::failure_kind::FailureKind;
+use crate::adapter::client::FailureKind;
 
 /// What a command's exit code says about how it ended, so a script can tell
 /// a failed action from an unreachable service or a typo.
@@ -48,10 +48,9 @@ impl From<FailureKind> for CliExit {
             | FailureKind::UnknownProcess
             | FailureKind::Ambiguous
             | FailureKind::InvalidInput => Self::InvalidInput,
-            FailureKind::NotRunning
-            | FailureKind::Refused
-            | FailureKind::ProcessFailed
-            | FailureKind::Io => Self::ActionFailed,
+            FailureKind::NotRunning | FailureKind::ProcessFailed | FailureKind::Io => {
+                Self::ActionFailed
+            },
             FailureKind::Usage => Self::Usage,
             FailureKind::Interrupted => Self::Interrupted,
         }

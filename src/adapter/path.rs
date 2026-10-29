@@ -27,15 +27,19 @@ pub fn expand_home(path: &Path) -> PathBuf {
 /// roots as text.
 ///
 /// # Errors
-/// Returns [`ConfigError::RootNotADirectory`] when `dir` is missing, is not a
-/// directory, or its canonical path is not UTF-8.
+/// Returns [`ConfigError::RootNotADirectory`] when `dir` is missing or is not
+/// a directory, and [`ConfigError::RootNotUtf8`] when its canonical path is
+/// not UTF-8.
 pub fn project_root(dir: &Path) -> Result<ProjectRoot, ConfigError> {
     let refused = || ConfigError::RootNotADirectory {
         path: dir.to_path_buf(),
     };
     let canonical = expand_home(dir).canonicalize().map_err(|_| refused())?;
-    if !canonical.is_dir() || canonical.to_str().is_none() {
+    if !canonical.is_dir() {
         return Err(refused());
+    }
+    if canonical.to_str().is_none() {
+        return Err(ConfigError::RootNotUtf8 { path: canonical });
     }
     ProjectRoot::try_new(canonical).map_err(|_| refused())
 }
@@ -189,6 +193,23 @@ mod tests {
                 Err(ConfigError::RootNotADirectory { path }) if path == refused
             ));
         }
+    }
+
+    /// A folder whose path is not UTF-8 is refused as such, since the store
+    /// keeps roots as text.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn project_root_refuses_a_path_that_is_not_utf8() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        let folder = scratch.path().join(OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir(&folder).unwrap();
+
+        assert!(matches!(
+            project_root(&folder),
+            Err(ConfigError::RootNotUtf8 { .. })
+        ));
     }
 
     /// An absolute location retains a symlink alias.

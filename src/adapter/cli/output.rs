@@ -10,25 +10,23 @@ use std::{
 use bytesize::ByteSize;
 use semver::Version;
 use serde::Serialize;
-use serde_json::{Value, json};
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    action::Action,
-    action_report::ActionReport,
     attach_end::AttachEnd,
     error::CliError,
-    notice_view::NoticeView,
-    outcome::Outcome,
-    process_outcome::ProcessOutcome,
     report::{Report, Row, RowKind, tally},
-    running_service::RunningService,
-    sanitize::printable,
-    service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+    adapter::{
+        client::{
+            Action, ActionReport, FailureView, NoticeView, Outcome, ProcessOutcome, RunningService,
+            ServiceStatus,
+        },
+        sanitize::printable,
+        service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+    },
     domain::{
         process::ProcessState,
         project::Project,
@@ -595,20 +593,13 @@ pub fn json<T: Serialize>(value: &T) -> Result<String, CliError> {
 /// `error` as the JSON object a `--json` command prints when it fails: its
 /// kind, its message and the process names the person could have meant.
 pub fn failure_json(error: &CliError) -> String {
-    serde_json::to_string_pretty(&failure(error, &error.to_string()))
+    let failure = FailureView::builder()
+        .kind(error.kind())
+        .message(error.to_string())
+        .candidates(error.candidates().to_vec())
+        .build();
+    serde_json::to_string_pretty(&failure.to_json())
         .unwrap_or_else(|_| FALLBACK_FAILURE_JSON.to_string())
-}
-
-/// `error` as the JSON object a failure is reported as: its kind, `message`
-/// and the process names the caller could have meant.
-pub fn failure(error: &CliError, message: &str) -> Value {
-    json!({
-        "error": {
-            "kind": error.kind(),
-            "message": message,
-            "candidates": error.candidates(),
-        }
-    })
 }
 
 #[cfg(test)]
@@ -618,11 +609,8 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
-            cli::{
-                ending_signal::EndingSignal, failure_kind::FailureKind, process_view::ProcessView,
-                project_identity_view::ProjectIdentityView, project_view::ProjectView,
-                report::plain,
-            },
+            cli::{ending_signal::EndingSignal, report::plain},
+            client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
             service::{ProcessUsage, ServiceErrorKind},
         },
         domain::value::ProjectRoot,
@@ -683,7 +671,7 @@ mod tests {
             }))
             .attached(0)
             .last_exit(last_exit)
-            .stop_grace(Some(GRACE))
+            .stop_grace(GRACE)
             .build()
     }
 
@@ -700,7 +688,7 @@ mod tests {
             .usage(*dev.usage())
             .attached(1)
             .last_exit(None)
-            .stop_grace(Some(Duration::from_millis(500)))
+            .stop_grace(Duration::from_millis(500))
             .build();
         ProjectStatus::builder()
             .project(shop_project())
@@ -766,17 +754,13 @@ mod tests {
         insta::assert_snapshot!("ps_json", json(&views).unwrap());
     }
 
-    /// A process name or exit carrying control characters is shown as text.
+    /// A project name carrying control characters is shown as text; a
+    /// process name cannot carry any.
     #[test]
     fn ps_never_prints_control_characters() {
         let hostile = ProjectStatus::builder()
             .project(project_at("evil\u{1b}]0;x\u{7}", PROJECT))
-            .processes(vec![process(
-                "a\u{1b}[2Jb",
-                ProcessState::Exited,
-                None,
-                None,
-            )])
+            .processes(vec![process("api", ProcessState::Exited, None, None)])
             .build();
         let rendered = render_status(&[hostile], true);
 
@@ -1072,11 +1056,11 @@ mod tests {
     /// show, and `--json` carries them as candidates.
     #[test]
     fn unknown_name_prints_valid_names() {
-        let error = CliError::UnknownProcess {
+        let error = CliError::from(ClientError::UnknownProcess {
             name: "dev".to_string(),
             project: ProjectName::try_new("shop").unwrap(),
             valid: vec![name("dev server"), name("café"), name("it's")],
-        };
+        });
 
         insta::assert_snapshot!("unknown_name", error.to_string());
         insta::assert_snapshot!("unknown_name_json", failure_json(&error));
@@ -1084,10 +1068,10 @@ mod tests {
 
     #[test]
     fn a_refusal_names_what_to_try() {
-        let busy = CliError::Refused {
+        let busy = CliError::from(ClientError::Refused {
             kind: ServiceErrorKind::Busy,
             message: "the service is shutting down".to_string(),
-        };
+        });
         assert!(busy.to_string().contains("run the command again"));
         assert_eq!(busy.kind(), FailureKind::Busy);
     }
@@ -1096,7 +1080,7 @@ mod tests {
     /// shell as that name.
     #[test]
     fn a_hint_quotes_a_name_for_the_shell() {
-        let error = CliError::NotRunning(name("it's"));
+        let error = CliError::from(ClientError::NotRunning(name("it's")));
         let message = error.to_string();
         let command = message.split('`').nth(1).expect("the hint names a command");
 

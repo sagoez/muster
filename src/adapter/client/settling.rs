@@ -7,7 +7,7 @@ use super::action::Action;
 use crate::{adapter::service::ProjectStatus, domain::value::ProcessName};
 
 /// A wait with no bound beyond the action's own timeout.
-pub(super) const UNBOUNDED: Duration = Duration::MAX;
+pub const UNBOUNDED: Duration = Duration::MAX;
 
 /// What a command waits for once it asked the service to act: the
 /// processes `names` it acted on with `action`, listed as `before` when the

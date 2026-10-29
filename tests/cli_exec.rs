@@ -7,7 +7,6 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    collections::BTreeMap,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::{
@@ -33,9 +32,9 @@ use muster::{
             HolderLauncher, HolderRunner, client::greet,
         },
         service::{
-            BatchOutcome, Notice, NoticeLevel, ProcessAction, ProcessStatus, ProjectPorts,
-            ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest, ServiceResponse,
-            ServiceRuntime, Singleton,
+            BatchOutcome, LaunchEnvironment, Notice, NoticeLevel, ProcessAction, ProcessStatus,
+            ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest,
+            ServiceResponse, ServiceRuntime, Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
@@ -538,7 +537,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
     assert!(matches!(
         scratch.send(&ServiceRequest::Up {
             project: root(&project),
-            environment: BTreeMap::new(),
+            environment: LaunchEnvironment::default(),
         }),
         ServiceResponse::Batch(_)
     ));
@@ -591,7 +590,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
     let mut pid = None;
     scratch.send(&ServiceRequest::Up {
         project: root(&project),
-        environment: BTreeMap::new(),
+        environment: LaunchEnvironment::default(),
     });
     wait_until("the held launch to run api", || {
         let (state, running) = scratch.first_row_raw(&project);
@@ -603,7 +602,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         project: root(&project),
         name: ProcessName::try_new("api").unwrap(),
         action: ProcessAction::Restart,
-        environment: BTreeMap::new(),
+        environment: LaunchEnvironment::default(),
     });
     wait_until("the restart's launch to be held", || {
         scratch.first_row_raw(&project).0 == "starting"
@@ -1001,7 +1000,7 @@ fn add_up_set_rm_against_a_real_service() {
     fs::create_dir_all(folder.join("frontend")).unwrap();
     let dir = folder.to_str().unwrap();
 
-    let (add, added) = scratch.json(&[
+    let add = scratch.muster(&[
         "-p",
         dir,
         "add",
@@ -1011,10 +1010,13 @@ fn add_up_set_rm_against_a_real_service() {
         folder.join("frontend").to_str().unwrap(),
         "--env",
         "PORT=5173",
+        "--json",
         "--",
         "echo port-$PORT; sleep 600",
     ]);
     assert!(add.status.success(), "{}", shown(&add));
+    let added = parsed(&add);
+    assert_eq!(added["process"]["command"], "echo port-$PORT; sleep 600");
     assert_eq!(added["registered"], true);
     assert_eq!(added["project"]["name"], "shop");
     assert_eq!(added["project"]["root"], dir);
@@ -1074,7 +1076,7 @@ fn add_up_set_rm_against_a_real_service() {
     assert!(rm.status.success(), "{}", shown(&rm));
     assert_eq!(
         removed["removed"],
-        serde_json::json!([{ "name": "web", "stopped": true }])
+        serde_json::json!([{ "name": "web", "stopped": true, "still_stopping": false }])
     );
     let (_, statuses) = scratch.json_on(&folder, &["ps"]);
     assert_eq!(statuses[0]["processes"], serde_json::json!([]));
@@ -1106,8 +1108,15 @@ fn config_lists_reads_and_changes_settings() {
     assert!(get.status.success(), "{}", shown(&get));
     assert_eq!(stdout(&get), "5s\n");
     let (_, listed) = scratch.json(&["config"]);
-    assert_eq!(listed["desktop_notifications"], false);
-    assert_eq!(listed["default_stop_grace"], 5.0);
+    let settings = listed["settings"].as_array().unwrap();
+    assert!(settings.contains(&serde_json::json!({
+        "key": "desktop-notifications",
+        "value": "false",
+    })));
+    assert!(settings.contains(&serde_json::json!({
+        "key": "default-stop-grace",
+        "value": "5s",
+    })));
 
     let (set, changed) = scratch.json(&["config", "set", "detach-key", "ctrl-]"]);
     assert!(set.status.success(), "{}", shown(&set));
@@ -1416,7 +1425,7 @@ fn pending_api_status(project: &Path) -> ProjectStatus {
                 .usage(None)
                 .attached(0)
                 .last_exit(None)
-                .stop_grace(None)
+                .stop_grace(Duration::from_secs(5))
                 .build(),
         ])
         .build()
@@ -1971,6 +1980,65 @@ fn mcp_tools_work_with_the_service_autostarted() {
     wait_until("the stopped service to be reaped", || {
         zombie_children(server).is_empty()
     });
+}
+
+/// An agent's MCP server in a folder that is not yet a project registers it
+/// with `process_add`, sees a running process through `process_set`, and
+/// `process_remove` stops it through the service before answering; the
+/// launch carries the server's own environment.
+#[test]
+fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
+    let mut scratch = Scratch::new();
+    let folder = scratch.path().join("fresh");
+    fs::create_dir_all(&folder).unwrap();
+    let mut mcp = McpSession::start(&mut scratch, &folder);
+
+    let outside = mcp.mistake("process_list", serde_json::json!({}));
+    assert!(result_text(&outside).contains("process_add"), "{outside}");
+    assert!(
+        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        "a folder that is not a project starts no service"
+    );
+
+    let added = mcp.result(
+        "process_add",
+        serde_json::json!({ "name": "web", "command": "echo home-$HOME; sleep 600" }),
+    );
+    assert_eq!(added["structuredContent"]["name"], "web", "{added}");
+    let started = mcp.result("process_start", serde_json::json!({ "name": "web" }));
+    assert_eq!(
+        started["structuredContent"]["processes"][0]["outcome"], "started",
+        "{started}"
+    );
+    let pid = started["structuredContent"]["processes"][0]["status"]["pid"]
+        .as_u64()
+        .unwrap();
+    scratch.children.push(pid as u32);
+    wait_until("the launch to carry the server's environment", || {
+        mcp.text("process_output", serde_json::json!({ "name": "web" }))
+            .contains("home-/")
+    });
+
+    let changed = mcp.result(
+        "process_set",
+        serde_json::json!({ "name": "web", "restart": "on-failure" }),
+    );
+    assert_eq!(changed["structuredContent"]["running"], true, "{changed}");
+
+    let removed = mcp.result("process_remove", serde_json::json!({ "name": "web" }));
+    assert_eq!(
+        removed["structuredContent"],
+        serde_json::json!({ "name": "web", "stopped": true, "still_stopping": false })
+    );
+    assert!(!alive(pid as u32), "the removed process was stopped");
+    let listed = mcp.result("process_list", serde_json::json!({}));
+    assert_eq!(
+        listed["structuredContent"]["processes"],
+        serde_json::json!([])
+    );
+
+    let stop = scratch.muster(&["service", "stop"]);
+    assert!(stop.status.success(), "{}", shown(&stop));
 }
 
 /// `mcp --print-config` prints the snippet alone, and a reader that closes

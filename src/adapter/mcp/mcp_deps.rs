@@ -6,8 +6,10 @@ use typed_builder::TypedBuilder;
 use crate::{
     application::StackEditor,
     domain::{
+        config::ConfigError,
         coordination::Author,
-        port::{CoordinationStore, SettingsStore, StackStore, StateChangeNotifier},
+        port::{CoordinationStore, ProjectStore, SettingsStore, StackStore, StateChangeNotifier},
+        project::Project,
         value::ProjectRoot,
     },
 };
@@ -23,6 +25,8 @@ pub struct McpDeps {
     root: ProjectRoot,
     /// Who coordination writes are attributed to.
     author: Author,
+    /// The registered projects.
+    projects: Arc<dyn ProjectStore + Send + Sync>,
     /// The shared notes, todos and key-values.
     coordination: Arc<dyn CoordinationStore + Send + Sync>,
     /// Each project's stack definition.
@@ -41,5 +45,18 @@ impl McpDeps {
             .settings(self.settings.as_ref())
             .notifier(self.notifier.as_ref())
             .build()
+    }
+
+    /// The project at the served root.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::UnknownProject`] while the folder is not yet a
+    /// project, or the store's failure.
+    pub fn project(&self) -> Result<Project, ConfigError> {
+        self.projects
+            .project_at(&self.root)?
+            .ok_or_else(|| ConfigError::UnknownProject {
+                root: self.root.as_ref().clone(),
+            })
     }
 }

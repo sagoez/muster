@@ -9,7 +9,7 @@ use super::{
     store_error::StoreError,
 };
 use crate::domain::{
-    config::{ConfigError, SettingChange, StackEdit},
+    config::{AppliedSettings, ConfigError, SettingChange, StackEdit},
     coordination::Author,
     port::{SettingsReader, SettingsStore},
     pty::PtySize,
@@ -129,18 +129,28 @@ impl SettingsReader for SqliteStore {
 }
 
 impl SettingsStore for SqliteStore {
-    fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
+    fn apply(
+        &self,
+        change: &SettingChange,
+        author: &Author,
+    ) -> Result<AppliedSettings, ConfigError> {
         self.write(|conn| {
-            let settings = load_settings(conn)?.with_change(change);
-            store_settings(conn, &settings)?;
+            let before = load_settings(conn)?;
+            store_settings(conn, &before.clone().with_change(change))?;
             let stored = load_settings(conn)?;
-            let key = change.key();
-            record_edit_everywhere(conn, &StackEdit::Configured {
-                author: author.clone(),
-                key,
-                value: stored.value_text(key),
-            })?;
-            Ok(stored)
+            let changed = stored != before;
+            if changed {
+                let key = change.key();
+                record_edit_everywhere(conn, &StackEdit::Configured {
+                    author: author.clone(),
+                    key,
+                    value: stored.value_text(key),
+                })?;
+            }
+            Ok(AppliedSettings::builder()
+                .settings(stored)
+                .changed(changed)
+                .build())
         })
     }
 }
@@ -207,8 +217,8 @@ mod tests {
         for change in &changes {
             expected = expected.with_change(change);
             assert_eq!(
-                store.apply(change, &Author::human()).unwrap(),
-                expected,
+                store.apply(change, &Author::human()).unwrap().settings(),
+                &expected,
                 "{}",
                 change.key()
             );
@@ -280,15 +290,48 @@ mod tests {
     fn a_change_answers_with_the_stored_value() {
         let (store, _scratch) = fresh_store();
 
-        let settings = store
+        let applied = store
             .apply(
                 &parsed(SettingKey::DefaultStopGrace, "1500us"),
                 &Author::human(),
             )
             .unwrap();
 
+        assert!(applied.changed());
+        let settings = applied.settings();
         assert_eq!(settings.value_text(SettingKey::DefaultStopGrace), "2ms");
-        assert_eq!(settings, store.load().unwrap());
+        assert_eq!(settings, &store.load().unwrap());
+    }
+
+    /// An agent's change to the value already stored, even one written in
+    /// another form that stores the same, changes and logs nothing.
+    #[test]
+    fn a_change_to_the_stored_value_is_not_logged() {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let agent = Author::agent("claude");
+
+        for raw in ["never", "never"] {
+            let applied = store
+                .apply(&parsed(SettingKey::DefaultRestart, raw), &agent)
+                .unwrap();
+            assert!(!applied.changed());
+        }
+        let first = store
+            .apply(&parsed(SettingKey::DefaultStopGrace, "1500us"), &agent)
+            .unwrap();
+        let again = store
+            .apply(&parsed(SettingKey::DefaultStopGrace, "2ms"), &agent)
+            .unwrap();
+
+        assert!(first.changed());
+        assert!(!again.changed());
+        assert_eq!(store.edits(&root).unwrap().len(), 1);
     }
 
     /// An agent's change is kept, with the value stored, in every project's

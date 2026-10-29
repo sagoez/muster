@@ -7,8 +7,8 @@ use std::{
 use super::supervisor::testing::test_settings;
 use crate::domain::{
     config::{
-        ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, RecordedEdit,
-        Registration, SettingChange, Stack, StackEdit,
+        AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec,
+        RecordedEdit, Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
     port::{
@@ -239,8 +239,13 @@ impl SettingsReader for MemoryStore {
 }
 
 impl SettingsStore for MemoryStore {
-    fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
+    fn apply(
+        &self,
+        change: &SettingChange,
+        author: &Author,
+    ) -> Result<AppliedSettings, ConfigError> {
         let mut settings = self.settings.lock().unwrap();
+        let before = settings.clone();
         *settings = settings.clone().with_change(change);
         let key = change.key();
         let edit = StackEdit::Configured {
@@ -248,7 +253,8 @@ impl SettingsStore for MemoryStore {
             key,
             value: settings.value_text(key),
         };
-        if edit.is_logged() {
+        let changed = *settings != before;
+        if changed && edit.is_logged() {
             let roots: Vec<ProjectRoot> = self.stacks.lock().unwrap().keys().cloned().collect();
             let mut edits = self.edits.lock().unwrap();
             for root in roots {
@@ -264,6 +270,9 @@ impl SettingsStore for MemoryStore {
                 ));
             }
         }
-        Ok(settings.clone())
+        Ok(AppliedSettings::builder()
+            .settings(settings.clone())
+            .changed(changed)
+            .build())
     }
 }

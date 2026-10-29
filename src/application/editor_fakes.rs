@@ -7,8 +7,8 @@ use super::{
 };
 use crate::domain::{
     config::{
-        ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-        SettingChange, Stack,
+        AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec,
+        Registration, SettingChange, Stack,
     },
     coordination::Author,
     port::{SettingsReader, SettingsStore, StackReader, StackStore, StateChangeNotifier},
@@ -143,11 +143,19 @@ impl SettingsReader for EditorFakes {
 }
 
 impl SettingsStore for EditorFakes {
-    fn apply(&self, change: &SettingChange, _author: &Author) -> Result<Settings, ConfigError> {
+    fn apply(
+        &self,
+        change: &SettingChange,
+        _author: &Author,
+    ) -> Result<AppliedSettings, ConfigError> {
         self.write()?;
-        let changed = self.settings.borrow().clone().with_change(change);
-        *self.settings.borrow_mut() = changed.clone();
-        Ok(changed)
+        let before = self.settings.borrow().clone();
+        let after = before.clone().with_change(change);
+        *self.settings.borrow_mut() = after.clone();
+        Ok(AppliedSettings::builder()
+            .changed(after != before)
+            .settings(after)
+            .build())
     }
 }
 

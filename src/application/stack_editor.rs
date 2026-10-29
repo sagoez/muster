@@ -96,7 +96,8 @@ impl StackEditor<'_> {
         Ok(imported)
     }
 
-    /// Applies `change` for `author` to the settings and returns the result.
+    /// Applies `change` for `author` to the settings and returns the result,
+    /// telling the notifier only when the stored settings changed.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the value is refused or the store cannot
@@ -106,9 +107,11 @@ impl StackEditor<'_> {
         change: &SettingChange,
         author: &Author,
     ) -> Result<Settings, ConfigError> {
-        let settings = self.settings.apply(change, author)?;
-        self.notifier.settings_changed();
-        Ok(settings)
+        let applied = self.settings.apply(change, author)?;
+        if applied.changed() {
+            self.notifier.settings_changed();
+        }
+        Ok(applied.settings().clone())
     }
 }
 
@@ -214,6 +217,22 @@ mod tests {
         assert_eq!(fakes.steps(), [
             EditorStep::Wrote,
             EditorStep::SettingsChanged
+        ]);
+    }
+
+    /// A change to the value already stored is never announced.
+    #[test]
+    fn configure_to_the_stored_value_notifies_nothing() {
+        let fakes = EditorFakes::new(false);
+        let change = SettingChange::Scrollback(ScrollbackLines::try_new(50).unwrap());
+        fakes.editor().configure(&change, &agent()).unwrap();
+
+        fakes.editor().configure(&change, &agent()).unwrap();
+
+        assert_eq!(fakes.steps(), [
+            EditorStep::Wrote,
+            EditorStep::SettingsChanged,
+            EditorStep::Wrote
         ]);
     }
 

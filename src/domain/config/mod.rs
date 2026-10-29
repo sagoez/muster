@@ -1,3 +1,4 @@
+mod applied_settings;
 mod environment;
 mod error;
 mod field_edit;
@@ -17,6 +18,7 @@ mod stack;
 mod stack_edit;
 mod working_dir;
 
+pub use applied_settings::*;
 pub use environment::*;
 pub use error::*;
 pub use field_edit::*;

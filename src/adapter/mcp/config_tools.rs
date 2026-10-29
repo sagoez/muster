@@ -78,7 +78,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::mcp::test_support::{add, content, edits, fixture, refusal, runtime},
+        adapter::mcp::test_support::{add, content, edits, fixture, refusal, register, runtime},
         domain::{config::McpStackEdits, port::SettingsReader},
     };
 
@@ -172,7 +172,7 @@ mod tests {
                     .config_set(Parameters(
                         ConfigSetArg::builder()
                             .key("default-autostart".to_string())
-                            .value("false".to_string())
+                            .value("true".to_string())
                             .build(),
                     ))
                     .await,
@@ -181,8 +181,36 @@ mod tests {
         assert_eq!(*fixture.notifier().settings().lock().unwrap(), 2);
         assert_eq!(
             edits(&fixture).last().map(String::as_str),
-            Some("agent test set default-autostart to false")
+            Some("agent test set default-autostart to true")
         );
+    }
+
+    /// A `config_set` to the value already stored answers it, but writes,
+    /// logs and announces nothing.
+    #[test]
+    fn a_config_set_to_the_stored_value_changes_nothing() {
+        let fixture = fixture();
+        register(&fixture);
+        let before = edits(&fixture);
+        runtime().block_on(async {
+            let answered = content(
+                fixture
+                    .server()
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-restart".to_string())
+                            .value("never".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(
+                answered,
+                serde_json::json!({ "key": "default-restart", "value": "never" })
+            );
+        });
+        assert_eq!(*fixture.notifier().settings().lock().unwrap(), 0);
+        assert_eq!(edits(&fixture), before);
     }
 
     /// `config_set` refuses every key but the `default-*` ones, so an agent

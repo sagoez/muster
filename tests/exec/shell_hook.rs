@@ -56,6 +56,10 @@ const SERVICE_SUBCOMMAND: &str = "__service";
 const JOB_NOISE: [&str; 4] = ["[1]", "Done", "Job", "has ended"];
 /// The program that holds a port in another project.
 const PERL: &str = "perl";
+/// Where the process table is, on Linux.
+const PROC_ROOT: &str = "/proc";
+/// The link in a process's entry naming its working folder.
+const PROC_CWD: &str = "cwd";
 
 /// Runs `body` once for each shell installed, printing which are skipped.
 fn each_shell(test: &str, body: impl Fn(&mut Scratch, HookShell, &Path)) {
@@ -372,6 +376,26 @@ fn add_autostart(folder: &Path, name: &str) -> String {
     let binary = shlex::try_quote(BINARY).unwrap();
     let folder = shlex::try_quote(folder.to_str().unwrap()).unwrap();
     format!("{binary} -p {folder} add {name} --autostart -- sleep 600")
+}
+
+/// Security M3: the service a report starts on entering a project runs in
+/// the state directory, never in the folder of the shell that started it.
+#[test]
+fn a_service_started_by_a_report_runs_in_the_state_dir() {
+    each_shell("service folder", |scratch, shell, program| {
+        let shop = shop(scratch);
+        let session = ShellSession::start(scratch, shell, program);
+        enter(scratch, &session, &shop);
+
+        let link = PathBuf::from(PROC_ROOT)
+            .join(service_pid(scratch).as_raw_nonzero().to_string())
+            .join(PROC_CWD);
+        let Ok(cwd) = fs::read_link(&link) else {
+            eprintln!("no {PROC_ROOT} here: the service folder check is skipped");
+            return;
+        };
+        assert_eq!(cwd, scratch.state_dir().canonicalize().unwrap(), "{shell}");
+    });
 }
 
 /// The hook hands the last command's exit status on to the next one.

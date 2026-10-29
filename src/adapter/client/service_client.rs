@@ -654,13 +654,15 @@ impl ServiceClient {
         }
     }
 
-    /// Starts `<binary> __service` detached from this terminal and session.
+    /// Starts `<binary> __service` detached from this terminal and session,
+    /// in the state directory, so it never holds on to the folder of the
+    /// command or shell that started it.
     ///
     /// # Errors
     /// Returns a [`ClientError`] when it cannot be started.
     fn spawn_service(&self) -> Result<Child, ClientError> {
         let mut command = Command::new(&self.binary);
-        command.arg(SERVICE_SUBCOMMAND);
+        command.arg(SERVICE_SUBCOMMAND).current_dir(&self.state_dir);
         detached(&mut command).spawn().map_err(|source| {
             self.unavailable(
                 UnavailableReason::Spawn {

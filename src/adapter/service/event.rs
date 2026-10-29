@@ -122,6 +122,20 @@ pub enum ServiceEvent {
         /// this rare event does not size every other one.
         record: Option<Box<HolderRecord>>,
     },
+    /// A worker looked for the holder of a process whose output stream broke;
+    /// adopt it again, or settle the reconnect as failed, unless a later
+    /// action superseded it.
+    ReconnectLocated {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane of the process.
+        pane: PaneId,
+        /// Spawn generation the reconnect belongs to.
+        generation: SpawnGeneration,
+        /// The record of the holder running the child, if one does, boxed so
+        /// this rare event does not size every other one.
+        record: Option<Box<HolderRecord>>,
+    },
     /// A worker read the end of the log of a process this service never saw
     /// run; answer the waits held on it.
     LogTailRead {

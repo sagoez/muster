@@ -451,6 +451,20 @@ impl ServiceRuntime {
                     supervisor.handle_adoption_retry_due(pane, attempt);
                 }
             },
+            ServiceEvent::ReconnectLocated {
+                project,
+                pane,
+                generation,
+                record,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_reconnect_located(
+                        pane,
+                        generation,
+                        record.map(|record| *record),
+                    );
+                }
+            },
             ServiceEvent::LogTailRead {
                 project,
                 pane,

@@ -186,8 +186,10 @@ impl Supervisor {
     /// the holder cannot be adopted and the child still runs, the process is
     /// left unsupervised, as an unadoptable holder is at startup; a child that
     /// is gone settles as a failed exit under the pane's policy. A failed
-    /// reconnect always raises a notice. The adoption runs off the loop when
-    /// the adopter allows it, and settles in [`Self::handle_adopted`].
+    /// reconnect always raises a notice. When the adopter allows it, finding
+    /// the holder and adopting it both run off the loop: the pane is
+    /// `Starting` meanwhile, keeps what is asked of it, and settles in
+    /// [`Self::handle_reconnect_located`] and then [`Self::handle_adopted`].
     pub(super) fn reconnect(&mut self, pane: PaneId) {
         let state = self.workspace.process(pane).map(|process| *process.state());
         let Some(carried) = self
@@ -197,6 +199,30 @@ impl Supervisor {
         else {
             return;
         };
+        let detached = self.adopter.as_ref().and_then(|adopter| adopter.detached());
+        if let (Some(pid), Some(detached)) = (carried.pid(), detached) {
+            let generation = self.bump_generation(pane);
+            let prior_state = state.unwrap_or(ProcessState::Pending);
+            self.launches.begin(
+                pane,
+                PendingLaunch::new(generation, prior_state, LaunchPurpose::Adopt {
+                    carried: Some(carried),
+                }),
+            );
+            self.workspace.set_state(pane, ProcessState::Starting);
+            let events = self.events.clone();
+            let project = self.root().clone();
+            thread::spawn(move || {
+                let record = detached.locate(pid).map(Box::new);
+                let _ = events.send(ServiceEvent::ReconnectLocated {
+                    project,
+                    pane,
+                    generation,
+                    record,
+                });
+            });
+            return;
+        }
         let record = carried
             .pid()
             .and_then(|pid| self.adopter.as_ref()?.locate(pid));
@@ -207,6 +233,71 @@ impl Supervisor {
                 self.reconnect_failed(pane, carried, None, None);
             },
         }
+    }
+
+    /// Settles a worker's look for the holder of `pane`'s process, whose
+    /// stream broke, for the reconnect at `generation`: adopts `record` again
+    /// on a worker, keeping what was asked meanwhile, or settles the
+    /// reconnect as failed when no holder runs that child, then applies what
+    /// was asked. A reconnect a later action or a shutdown superseded adopts
+    /// nothing; a child it found still running is said so.
+    pub fn handle_reconnect_located(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        record: Option<HolderRecord>,
+    ) {
+        let detaching = self.launches.is_detaching();
+        let launch = self.take_launch(pane, generation).filter(|_| !detaching);
+        let (Some(launch), Some(adopter)) = (
+            launch,
+            self.adopter.as_ref().and_then(|adopter| adopter.detached()),
+        ) else {
+            if let Some(record) = record.filter(|_| !detaching)
+                && child_runs_or_collect(&record)
+            {
+                self.notify_process(
+                    NoticeLevel::Error,
+                    Some(record.process().clone()),
+                    with_pids(&format!("{ADOPT_FAILED_NOTICE}{LEFT_RUNNING}"), &record),
+                );
+            }
+            return;
+        };
+        let LaunchPurpose::Adopt {
+            carried: Some(carried),
+        } = launch.purpose()
+        else {
+            return;
+        };
+        let record = record.filter(|record| {
+            self.pane_named(record.process()) == Some(pane) && !self.holds_process(pane)
+        });
+        let Some(record) = record else {
+            let membership = launch.membership();
+            let intent = launch.intent();
+            self.workspace.set_state(pane, launch.prior_state());
+            self.reconnect_failed(pane, carried.with_membership(membership), None, None);
+            if self.workspace.process(pane).is_some() {
+                self.apply_pending(pane, membership, None, intent);
+            }
+            return;
+        };
+        let since = Some(self.output_position(pane).0);
+        let project = self.root().clone();
+        let events = self.events.clone();
+        let sink = ChannelOutputSink::new(project.clone(), pane, generation, events.clone());
+        self.launches.begin(pane, launch);
+        thread::spawn(move || {
+            let result = adopter.adopt(&record, since, Box::new(sink));
+            let _ = events.send(ServiceEvent::Adopted {
+                project,
+                pane,
+                generation,
+                record: Box::new(record),
+                result,
+            });
+        });
     }
 
     /// Tries again, as a start asks, to adopt the holder of `pane`'s child
@@ -1718,6 +1809,71 @@ mod tests {
         }
     }
 
+    /// Hands the supervisor of `harness` the holder a worker looked for after
+    /// a stream broke, failing the test after [`SETTLE_WAIT`].
+    fn located(harness: &mut Harness) {
+        let deadline = Instant::now() + SETTLE_WAIT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match harness.events().recv_timeout(remaining) {
+                Ok(ServiceEvent::ReconnectLocated {
+                    pane,
+                    generation,
+                    record,
+                    ..
+                }) => {
+                    harness.supervisor_mut().handle_reconnect_located(
+                        pane,
+                        generation,
+                        record.map(|record| *record),
+                    );
+                    return;
+                },
+                Ok(_) => {},
+                Err(_) => panic!("the worker posts the holder it looked for"),
+            }
+        }
+    }
+
+    /// Looking for the holder of a broken stream runs on a worker: the
+    /// supervisor answers at once while the look blocks, keeps a stop asked
+    /// meanwhile, and applies it once the holder is adopted again.
+    #[test]
+    fn a_reconnect_looks_for_its_holder_off_the_loop() {
+        let pid = fake_launcher_pid();
+        let (open, gate) = crossbeam_channel::unbounded();
+        let adoptions = Arc::new(AtomicUsize::new(0));
+        let (mut harness, _) = reconnectable_over(
+            pid,
+            GatedLocateAdopter::builder()
+                .record(record_with_pid("p", pid))
+                .gate(gate)
+                .adoptions(adoptions.clone())
+                .build(),
+        );
+        harness.up();
+
+        let broke = Instant::now();
+        break_stream(&mut harness);
+        assert!(
+            broke.elapsed() < LOCATE_GATE_LIMIT,
+            "the reconnect waited for the look"
+        );
+        assert_eq!(state(&harness), ProcessState::Starting);
+        harness.supervisor_mut().stop(&p());
+        assert_eq!(adoptions.load(Ordering::SeqCst), 0);
+
+        open.send(()).unwrap();
+        located(&mut harness);
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+
+        assert_eq!(adoptions.load(Ordering::SeqCst), 1);
+        assert_eq!(state(&harness), ProcessState::Stopping);
+    }
+
     /// A removed process whose adoption fails on a worker while its child runs
     /// is still stopped: the child is left unsupervised, signalled, killed
     /// once it ignores the signal, and its row retires once it is gone.
@@ -1769,6 +1925,7 @@ mod tests {
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
         harness.supervisor_mut().restart(&p(), &no_env());
+        located(&mut harness);
         let (pane, generation, record, result) = adopted(&harness);
         harness
             .supervisor_mut()
@@ -1803,6 +1960,7 @@ mod tests {
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
         harness.supervisor_mut().pause(&p());
+        located(&mut harness);
         let (pane, generation, record, result) = adopted(&harness);
         harness
             .supervisor_mut()

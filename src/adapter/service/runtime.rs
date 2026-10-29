@@ -651,10 +651,13 @@ impl ServiceRuntime {
                 wait: Some(wait),
             } => {
                 let supervisor = self.process(&project, &name)?;
-                let prepared = supervisor.prepare_wait(&name, &wait)?;
+                let mut prepared = supervisor.prepare_wait(&name, &wait)?;
                 let fresh = match action {
-                    ProcessAction::Start => !supervisor.runs_or_starts(&name),
-                    ProcessAction::Restart => true,
+                    ProcessAction::Start if supervisor.runs_or_starts(&name) => {
+                        prepared = prepared.on_a_running_process();
+                        false
+                    },
+                    ProcessAction::Start | ProcessAction::Restart => true,
                     ProcessAction::Stop
                     | ProcessAction::Pause
                     | ProcessAction::Resume
@@ -1902,6 +1905,23 @@ mod tests {
         };
         assert_eq!(started.status(), WaitStatus::Matched);
         assert_eq!(started.matched().as_ref().unwrap().line(), "ready on 3000");
+        assert!(!started.already_running());
+
+        let running = WaitSpec::builder()
+            .until(Some(WaitCondition::State(StateGoal::Running)))
+            .timeout(WAIT)
+            .build();
+        let ServiceResponse::Waited(again) = service.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action: ProcessAction::Start,
+            environment: no_env(),
+            wait: Some(running),
+        }) else {
+            panic!("a start with a wait answers how the wait ended");
+        };
+        assert_eq!(again.status(), WaitStatus::Matched);
+        assert!(again.already_running(), "{again:?}");
 
         let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
             project: project.clone(),

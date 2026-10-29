@@ -42,6 +42,11 @@ pub struct WaitOutcome {
     #[getset(get = "pub")]
     #[builder(default)]
     scanned_from: Option<OutputCursor>,
+    /// Whether the start this wait rode on found the process already
+    /// running or starting, so it started nothing.
+    #[getset(get_copy = "pub")]
+    #[builder(default)]
+    already_running: bool,
 }
 
 impl WaitOutcome {

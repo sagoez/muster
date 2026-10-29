@@ -48,6 +48,10 @@ pub struct Waiter {
     #[getset(get_copy = "pub")]
     #[builder(default)]
     since: Option<OutputCursor>,
+    /// Whether the start it rides on found the process already running.
+    #[getset(get_copy = "pub")]
+    #[builder(default)]
+    already_running: bool,
 }
 
 impl Waiter {

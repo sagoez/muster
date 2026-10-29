@@ -55,6 +55,17 @@ pub struct PreparedWait {
     since: Option<OutputCursor>,
     /// How long it waits.
     timeout: Duration,
+    /// Whether the start it rides on found the process already running.
+    already_running: bool,
+}
+
+impl PreparedWait {
+    /// This wait as riding on a start that found its process already running
+    /// or starting, which its answer then says.
+    pub fn on_a_running_process(mut self) -> Self {
+        self.already_running = true;
+        self
+    }
 }
 
 impl Supervisor {
@@ -110,6 +121,7 @@ impl Supervisor {
             matcher,
             since: *spec.since(),
             timeout: *spec.timeout(),
+            already_running: false,
         })
     }
 
@@ -673,6 +685,7 @@ impl Supervisor {
             matcher,
             since,
             timeout,
+            already_running,
         } = prepared;
         let current = self.current_generation(pane);
         let pin = after.map_or(RunPin::From(current), RunPin::After);
@@ -698,6 +711,7 @@ impl Supervisor {
             .reply(reply)
             .scanned_from(scanned_from)
             .since(since)
+            .already_running(already_running)
             .build();
         let settled = match matched {
             Some(line) => Some((WaitStatus::Matched, Some(line))),
@@ -798,6 +812,7 @@ impl Supervisor {
             .elapsed(waiter.started().elapsed())
             .tail(tail)
             .scanned_from(waiter.scanned_from())
+            .already_running(waiter.already_running())
             .build();
         match waiter.into_reply() {
             WaitReply::Direct(reply) => {

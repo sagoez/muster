@@ -42,7 +42,7 @@ use crate::{
     },
     domain::{
         config::ConfigError,
-        process::{PatternKind, ProcessState},
+        process::PatternKind,
         project::Project,
         value::{OutputCursor, ProcessName, ProcessRef},
     },
@@ -144,8 +144,8 @@ impl MusterMcp {
             (its readiness check, or running when it has none); wait can also be a condition, \
             as in process_wait. Without wait, waits at most <call-bound-s> seconds for it to \
             settle. Returns {project, process, outcome, reason, status, notices, wait_ended, \
-            alerts}, or with wait {process, wait, alerts}, plus outcome already-running when it \
-            was running before the call. outcome is started, already-running, \
+            alerts}, or with wait {process, wait, alerts}, plus outcome already-running when the \
+            service found it running or starting and started nothing. outcome is started, already-running, \
             refused (with reason), crashed, exited, not-started, still-starting or \
             unsupervised. Flagged isError when it failed, crashed or exited while waiting; a \
             wait that ran out of time is status waiting, not an error: continue with \
@@ -490,26 +490,16 @@ impl MusterMcp {
             .map(|wait| wait.spec(bound))
             .transpose()?
             .flatten();
-        let ((report, outcome, already_running), alerts) = self
+        let ((report, outcome), alerts) = self
             .ask(arg.project().clone(), move |client, project| {
-                let answer: (Option<ActionReport>, Option<WaitOutcome>, bool) = match &wait {
+                let answer: (Option<ActionReport>, Option<WaitOutcome>) = match &wait {
                     Some(spec) => {
-                        let before = process::status(client, project)?;
-                        let name = process::resolve(&before, project, &name)?;
-                        let already_running = action == ProcessAction::Start
-                            && before.processes().iter().any(|process| {
-                                process.name().key() == name.key()
-                                    && matches!(
-                                        process.state(),
-                                        ProcessState::Running | ProcessState::Paused
-                                    )
-                            });
+                        let name = resolved(client, project, &name)?;
                         (
                             None,
                             Some(process::control_waiting(
                                 client, project, &name, action, spec,
                             )?),
-                            already_running,
                         )
                     },
                     None => (
@@ -522,7 +512,6 @@ impl MusterMcp {
                             &mut Unwatched,
                         )?),
                         None,
-                        false,
                     ),
                 };
                 Ok(answer)
@@ -534,7 +523,7 @@ impl MusterMcp {
                 WAIT,
                 json(&AgentWaitView::from(&outcome))?,
             );
-            if already_running {
+            if outcome.already_running() {
                 value = with_field(value, OUTCOME, json(&Outcome::AlreadyRunning)?);
             }
             return waited(value, &outcome, &alerts);

@@ -43,6 +43,10 @@ impl HolderAdopter for SharedHolders {
         self.0.locate(child_pid)
     }
 
+    fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
+        self.0.serving(child_pid)
+    }
+
     fn adopt(
         &self,
         record: &HolderRecord,

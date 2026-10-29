@@ -89,6 +89,10 @@ impl HolderAdopter for FakePool {
         None
     }
 
+    fn serving(&self, _child_pid: Pid) -> Option<HolderRecord> {
+        None
+    }
+
     fn adopt(
         &self,
         _record: &HolderRecord,

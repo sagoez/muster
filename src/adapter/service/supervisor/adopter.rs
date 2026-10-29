@@ -88,6 +88,10 @@ pub trait HolderAdopter {
     /// holder runs it.
     fn locate(&self, child_pid: Pid) -> Option<HolderRecord>;
 
+    /// The record of a holder that runs the child with `child_pid` and serves
+    /// a supervisor now, if one does.
+    fn serving(&self, child_pid: Pid) -> Option<HolderRecord>;
+
     /// Becomes the supervisor of the holder `record` describes, forwarding its
     /// screen, output and exit to `sink`, with the output it logged after
     /// `since`, or since its run began, as the handle's backlog.
@@ -113,6 +117,10 @@ pub trait HolderAdopter {
 impl HolderAdopter for HolderRunner {
     fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         HolderRunner::locate(self, child_pid)
+    }
+
+    fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
+        HolderRunner::serving(self, child_pid)
     }
 
     fn adopt(
@@ -179,6 +187,38 @@ impl Supervisor {
                 self.bump_generation(pane);
                 self.reconnect_failed(pane, carried, None, None);
             },
+        }
+    }
+
+    /// Adopts again the holder of `pane`'s child left running unsupervised
+    /// after an adoption failed, once a holder serves that child. Returns
+    /// whether an adoption began; one that fails again leaves the child
+    /// unsupervised as before.
+    pub(super) fn retry_adoption(&mut self, pane: PaneId) -> bool {
+        let Some(record) = self
+            .running_unsupervised_pid(pane)
+            .and_then(|pid| self.adopter.as_ref()?.serving(pid))
+        else {
+            return false;
+        };
+        if let Some(target) = self.panes.get_mut(&pane) {
+            target.set_unsupervised(None);
+        }
+        self.begin_adoption(&record, None);
+        true
+    }
+
+    /// Retries the adoption of every child left running unsupervised whose
+    /// holder serves again, as a `ps` finds them.
+    pub fn retry_adoptions(&mut self) {
+        let unsupervised: Vec<PaneId> = self
+            .panes
+            .keys()
+            .copied()
+            .filter(|pane| self.is_unsupervised(*pane))
+            .collect();
+        for pane in unsupervised {
+            self.retry_adoption(pane);
         }
     }
 
@@ -794,7 +834,10 @@ mod tests {
     /// A harness over `p` (graceful stop, restart `Always`) whose processes
     /// report `pid` and whose holder `adopter` can reconnect to, plus its
     /// spawn count. Nothing is started.
-    fn reconnectable_over(pid: Pid, adopter: ReconnectingAdopter) -> (Harness, Arc<AtomicUsize>) {
+    fn reconnectable_over(
+        pid: Pid,
+        adopter: impl HolderAdopter + 'static,
+    ) -> (Harness, Arc<AtomicUsize>) {
         let spawns = Arc::new(AtomicUsize::new(0));
         let harness = with_adopter(
             Harness::over(
@@ -1025,6 +1068,36 @@ mod tests {
                     .any(|message| message.starts_with(ADOPT_FAILED_NOTICE))
             );
             assert_unsupervised_until_gone(&mut harness, &spawns, &orphan);
+        }
+    }
+
+    /// A child left unsupervised by a failed adoption is adopted again once
+    /// its holder serves: a `ps` retries it, and so does a start, which then
+    /// launches no second copy.
+    #[test]
+    fn a_failed_adoption_is_retried_once_the_holder_serves() {
+        for retry_by_start in [false, true] {
+            let orphan = Orphan::spawn();
+            let record = record_with_pid("p", orphan.pid());
+            let attempts = Rc::new(Cell::new(0));
+            let (mut harness, spawns) = reconnectable_over(orphan.pid(), RecoveringAdopter {
+                record: record.clone(),
+                attempts: Rc::clone(&attempts),
+            });
+            harness.supervisor.adopt(record);
+            assert_eq!(state(&harness), ProcessState::Unsupervised);
+
+            if retry_by_start {
+                harness.supervisor.start(&p(), &no_env());
+            } else {
+                harness.supervisor.retry_adoptions();
+            }
+
+            assert_eq!(state(&harness), ProcessState::Running, "{retry_by_start}");
+            assert_eq!(attempts.get(), 2);
+            assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
+            harness.supervisor.retry_adoptions();
+            assert_eq!(attempts.get(), 2, "a supervised child is left alone");
         }
     }
 

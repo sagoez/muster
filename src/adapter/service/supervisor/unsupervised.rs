@@ -101,15 +101,19 @@ impl Supervisor {
     }
 
     /// Refuses a launch of `pane` while its child may still run unsupervised,
-    /// which would put a second copy beside it. A recorded child found gone
-    /// is settled first and no longer blocks, unless settling it retired a
-    /// row already removed from the project. Returns whether the launch was
+    /// which would put a second copy beside it; when a holder serves that
+    /// child again, it is adopted instead. A recorded child found gone is
+    /// settled first and no longer blocks, unless settling it retired a row
+    /// already removed from the project. Returns whether the launch was
     /// refused.
     pub(super) fn refuse_unsupervised_launch(&mut self, pane: PaneId) -> bool {
         if !self.is_unsupervised(pane) {
             return false;
         }
         if let Some(pid) = self.running_unsupervised_pid(pane) {
+            if self.retry_adoption(pane) {
+                return true;
+            }
             self.notify(
                 NoticeLevel::Error,
                 Some(pane),

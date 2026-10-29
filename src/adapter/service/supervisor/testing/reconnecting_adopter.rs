@@ -25,6 +25,10 @@ impl HolderAdopter for ReconnectingAdopter {
             .filter(|record| record.child_pid() == child_pid)
     }
 
+    fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
+        self.locate(child_pid).filter(|_| !self.refuses)
+    }
+
     fn adopt(
         &self,
         record: &HolderRecord,

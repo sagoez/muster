@@ -592,8 +592,17 @@ impl ServiceRuntime {
             },
             ServiceRequest::Ps {
                 project: Some(project),
-            } => ServiceResponse::Status(vec![self.supervisor(&project)?.snapshot()]),
-            ServiceRequest::Ps { project: None } => ServiceResponse::Status(self.statuses()),
+            } => {
+                let supervisor = self.supervisor(&project)?;
+                supervisor.retry_adoptions();
+                ServiceResponse::Status(vec![supervisor.snapshot()])
+            },
+            ServiceRequest::Ps { project: None } => {
+                for supervisor in self.supervisors.values_mut() {
+                    supervisor.retry_adoptions();
+                }
+                ServiceResponse::Status(self.statuses())
+            },
             ServiceRequest::Control {
                 project,
                 name,

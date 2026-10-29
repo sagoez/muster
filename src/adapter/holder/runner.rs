@@ -188,6 +188,14 @@ impl HolderRunner {
             .and_then(|index| candidates.into_iter().nth(index))
     }
 
+    /// The record of a live holder supervising the child with `child_pid`,
+    /// one a supervisor can adopt now.
+    pub fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
+        HolderRecord::load_all(self.dirs.records())
+            .into_iter()
+            .find(|record| record.child_pid() == child_pid && is_live(record))
+    }
+
     /// Deletes the holder sockets no running holder serves: what a holder that
     /// died without unlinking its socket left behind. A socket is kept while a
     /// record names it and that record's holder process is alive, and while

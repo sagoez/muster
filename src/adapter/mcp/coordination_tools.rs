@@ -17,7 +17,6 @@ use super::{
     lock_name_arg::LockNameArg,
     note_entry::NoteEntry,
     note_write_arg::NoteWriteArg,
-    pending::{self, Claim, LockAttempt, LockName, LockRelease, TodoChange, TodoUpdate},
     process_fields::invalid,
     progress::with_progress,
     read_arg::ReadArg,
@@ -31,19 +30,15 @@ use super::{
     tool_error::ToolError,
 };
 use crate::domain::{
-    coordination::{KvKey, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle},
+    coordination::{
+        Claim, KvKey, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
+        ScratchpadKey, TODO_LEASE_MAX, TodoChange, TodoId, TodoLease, TodoStatus, TodoTitle,
+        TodoUpdate, claimable,
+    },
     port::CoordinationStore,
     value::ProjectRoot,
 };
 
-/// How long a claim lasts when the call does not say.
-const TODO_LEASE_DEFAULT: Duration = Duration::from_secs(30 * 60);
-/// Longest a claim lasts.
-const TODO_LEASE_MAX: Duration = Duration::from_secs(8 * 60 * 60);
-/// How long a lock lasts when the call does not say.
-const LOCK_TTL_DEFAULT: Duration = Duration::from_secs(5 * 60);
-/// Longest a lock lasts.
-const LOCK_TTL_MAX: Duration = Duration::from_secs(60 * 60);
 /// Pause between attempts at a lock someone else holds.
 const LOCK_RETRY: Duration = Duration::from_millis(250);
 /// What `owner` takes to mean the calling agent.
@@ -51,10 +46,20 @@ const OWNER_ME: &str = "me";
 /// The fields the coordination tools name in a refusal.
 const STATUS_FIELD: &str = "status";
 const NAME_FIELD: &str = "name";
+const NOTE_FIELD: &str = "note";
+const LEASE_FIELD: &str = "lease_s";
+const TTL_FIELD: &str = "ttl_s";
+const RELEASE_FIELD: &str = "release";
 /// The statuses a todo takes.
 const STATUS_FORM: &str = "pending, in-progress or done";
 /// The form a lock name is written in.
 const LOCK_NAME_FORM: &str = "1 to 64 of a-z, 0-9, '.', '_' and '-'";
+/// The form a lock note is written in.
+const LOCK_NOTE_FORM: &str = "one line of 1 to 200 characters";
+/// The form a lease or a TTL is written in, followed by its maximum.
+const SECONDS_FORM: &str = "whole seconds from 1 to ";
+/// What `release` cannot be combined with.
+const RELEASE_FORM: &str = "release only without a status other than pending";
 /// The tool `todo_update`'s refusal names.
 const TODO_UPDATE: &str = "todo_update";
 /// Keys of the results built here.
@@ -115,11 +120,44 @@ fn todo_status(raw: &str) -> Result<TodoStatus, ToolError> {
         .map_err(|_| invalid(STATUS_FIELD, STATUS_FORM, raw))
 }
 
-/// `seconds`, or `default` when absent, within one second and `max`.
-fn lasting(seconds: Option<u64>, default: Duration, max: Duration) -> Duration {
-    seconds
-        .map_or(default, Duration::from_secs)
-        .clamp(Duration::from_secs(1), max)
+/// The lock note an agent typed as `note`.
+///
+/// # Errors
+/// Returns the caller's mistake for a blank, multi-line or overlong note.
+fn lock_note(note: &str) -> Result<LockNote, ToolError> {
+    LockNote::try_new(note).map_err(|_| invalid(NOTE_FIELD, LOCK_NOTE_FORM, note))
+}
+
+/// The claim lease `seconds` asks for, the default when absent.
+///
+/// # Errors
+/// Returns the caller's mistake for a lease out of range.
+fn todo_lease(seconds: Option<u64>) -> Result<TodoLease, ToolError> {
+    seconds.map_or(Ok(TodoLease::DEFAULT), |seconds| {
+        TodoLease::try_new(Duration::from_secs(seconds)).map_err(|_| {
+            invalid(
+                LEASE_FIELD,
+                &format!("{SECONDS_FORM}{}", TODO_LEASE_MAX.as_secs()),
+                &seconds.to_string(),
+            )
+        })
+    })
+}
+
+/// The lock time-to-live `seconds` asks for, the default when absent.
+///
+/// # Errors
+/// Returns the caller's mistake for a TTL out of range.
+fn lock_ttl(seconds: Option<u64>) -> Result<LockTtl, ToolError> {
+    seconds.map_or(Ok(LockTtl::DEFAULT), |seconds| {
+        LockTtl::try_new(Duration::from_secs(seconds)).map_err(|_| {
+            invalid(
+                TTL_FIELD,
+                &format!("{SECONDS_FORM}{}", LOCK_TTL_MAX.as_secs()),
+                &seconds.to_string(),
+            )
+        })
+    })
 }
 
 /// The refusal of the unknown todo `id`, listing the project's ids.
@@ -131,16 +169,6 @@ fn unknown_todo(store: &dyn CoordinationStore, root: &ProjectRoot, id: &TodoId) 
             .map(|todos| todos.iter().map(|todo| todo.id().to_string()).collect())
             .unwrap_or_default(),
     }
-}
-
-/// Whether `todo` is pending with every dependency in `todos` done.
-fn claimable(todo: &Todo, todos: &[Todo]) -> bool {
-    *todo.status() == TodoStatus::Pending
-        && todo.deps().iter().all(|dep| {
-            todos
-                .iter()
-                .any(|other| other.id() == dep && *other.status() == TodoStatus::Done)
-        })
 }
 
 #[tool_router(router = coordination_router, vis = "pub(super)")]
@@ -172,9 +200,13 @@ impl MusterMcp {
             })
             .await?;
         let now = unix_now();
-        let page: Vec<TodoView> = todos
-            .iter()
-            .filter(|todo| !only_claimable || claimable(todo, &todos))
+        let listed: Vec<_> = if only_claimable {
+            claimable(&todos, now).collect()
+        } else {
+            todos.iter().collect()
+        };
+        let page: Vec<TodoView> = listed
+            .into_iter()
             .map(|todo| TodoView::at(todo, now))
             .filter(|view| status.is_none_or(|status| *view.status() == status))
             .filter(|view| {
@@ -229,28 +261,33 @@ impl MusterMcp {
     )]
     pub(super) async fn todo_claim(&self, Parameters(arg): Parameters<TodoClaimArg>) -> ToolResult {
         let id = arg.id().as_deref().map(todo_id).transpose()?;
-        let lease = lasting(arg.lease_s(), TODO_LEASE_DEFAULT, TODO_LEASE_MAX);
+        let lease = todo_lease(arg.lease_s())?;
         let me = self.identity.author().clone();
         let claim = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
-                pending::claim_todo(
-                    deps.coordination().as_ref(),
-                    project.root(),
-                    &me,
-                    id.as_ref(),
-                    lease,
-                )
+                let store = deps.coordination().as_ref();
+                match store.claim_todo(project.root(), &me, id.as_ref(), lease)? {
+                    Claim::Missing => match &id {
+                        Some(id) => Err(unknown_todo(store, project.root(), id)),
+                        None => Ok(Claim::NothingClaimable),
+                    },
+                    claim => Ok(claim),
+                }
             })
             .await?;
+        let now = unix_now();
         let value = match claim {
             Claim::Claimed(todo) => {
-                object_of!({ CLAIMED: true, TODO: json(&TodoView::at(&todo, unix_now()))? })
+                object_of!({ CLAIMED: true, TODO: json(&TodoView::at(&todo, now))? })
             },
             Claim::HeldBy { owner, expires_in } => {
                 object_of!({ CLAIMED: false, OWNER: owner, EXPIRES_IN_S: expires_in.as_secs() })
             },
-            Claim::NothingClaimable => object_of!({ CLAIMED: false }),
+            Claim::Unavailable(todo) => {
+                object_of!({ CLAIMED: false, TODO: json(&TodoView::at(&todo, now))? })
+            },
+            Claim::NothingClaimable | Claim::Missing => object_of!({ CLAIMED: false }),
         };
         structured(self.introduced(value), false)
     }
@@ -275,14 +312,19 @@ impl MusterMcp {
                     .map_err(|_| ToolError::InvalidTodoTitle(title.clone()))
             })
             .transpose()?;
-        let release = arg.release().unwrap_or(false);
-        if status.is_none() && title.is_none() && !release {
+        let status = match (arg.release().unwrap_or(false), status) {
+            (false, status) => status,
+            (true, None | Some(TodoStatus::Pending)) => Some(TodoStatus::Pending),
+            (true, Some(other)) => {
+                return Err(invalid(RELEASE_FIELD, RELEASE_FORM, &other.to_string()).into());
+            },
+        };
+        if status.is_none() && title.is_none() {
             return Err(ToolError::NothingToChange(TODO_UPDATE).into());
         }
         let change = TodoChange::builder()
             .status(status)
             .title(title)
-            .release(release)
             .force(arg.force().unwrap_or(false))
             .build();
         let me = self.identity.author().clone();
@@ -290,7 +332,7 @@ impl MusterMcp {
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
                 let store = deps.coordination().as_ref();
-                match pending::update_todo(store, project.root(), &me, &id, &change)? {
+                match store.update_todo(project.root(), &me, &id, &change)? {
                     TodoUpdate::Updated(todo) => Ok(todo),
                     TodoUpdate::HeldBy { owner, expires_in } => Err(ToolError::HeldByOther {
                         id: id.to_string(),
@@ -354,7 +396,9 @@ impl MusterMcp {
         let release = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
-                pending::release_lock(deps.coordination().as_ref(), project.root(), &me, &name)
+                Ok(deps
+                    .coordination()
+                    .release_lock(project.root(), &me, &name)?)
             })
             .await?;
         structured(
@@ -510,7 +554,8 @@ impl MusterMcp {
     /// Returns the caller's mistake for a bad name, or a fault of muster's.
     pub(super) async fn acquire(&self, arg: LockAcquireArg) -> ToolResult {
         let name = lock_name(arg.name())?;
-        let ttl = lasting(arg.ttl_s(), LOCK_TTL_DEFAULT, LOCK_TTL_MAX);
+        let ttl = lock_ttl(arg.ttl_s())?;
+        let note = arg.note().as_deref().map(lock_note).transpose()?;
         let deadline = Instant::now()
             + arg
                 .wait_s()
@@ -518,21 +563,19 @@ impl MusterMcp {
                 .min(CALL_BOUND);
         let me = self.identity.author().clone();
         let project = arg.project().clone();
-        let note = arg.note().clone();
         loop {
             let (name, me, project, note) =
                 (name.clone(), me.clone(), project.clone(), note.clone());
             let attempt = self
                 .blocking(move |deps| {
                     let project = deps.project(project.as_deref())?;
-                    pending::acquire_lock(
-                        deps.coordination().as_ref(),
+                    Ok(deps.coordination().acquire_lock(
                         project.root(),
                         &me,
                         &name,
                         ttl,
-                        note.as_deref(),
-                    )
+                        note.as_ref(),
+                    )?)
                 })
                 .await?;
             let held = match attempt {
@@ -547,7 +590,7 @@ impl MusterMcp {
                 } => object_of!({
                     ACQUIRED: false,
                     OWNER: owner,
-                    NOTE: note,
+                    NOTE: note.as_ref().map(ToString::to_string),
                     EXPIRES_IN_S: expires_in.as_secs(),
                 }),
             };
@@ -562,9 +605,8 @@ impl MusterMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::mcp::{
-        pending::lease_of,
-        test_support::{AGENT, content, fixture, refusal, register, result_text, runtime},
+    use crate::adapter::mcp::test_support::{
+        AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
     };
 
     /// A note written through the tool reads back by key and in the index,
@@ -761,40 +803,144 @@ mod tests {
         });
     }
 
-    /// A lease or a TTL is held between a second and its cap.
+    /// A lease or a TTL is the default when absent, and refused naming its
+    /// field when out of range.
     #[test]
     fn leases_and_ttls_are_bounded() {
-        assert_eq!(
-            lasting(None, TODO_LEASE_DEFAULT, TODO_LEASE_MAX),
-            TODO_LEASE_DEFAULT
+        assert_eq!(todo_lease(None).unwrap(), TodoLease::DEFAULT);
+        assert_eq!(lock_ttl(None).unwrap(), LockTtl::DEFAULT);
+        assert!(
+            lock_ttl(Some(0))
+                .unwrap_err()
+                .to_string()
+                .contains(TTL_FIELD)
         );
-        assert_eq!(
-            lasting(Some(0), LOCK_TTL_DEFAULT, LOCK_TTL_MAX),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            lasting(Some(1_000_000), LOCK_TTL_DEFAULT, LOCK_TTL_MAX),
-            LOCK_TTL_MAX
+        assert!(
+            todo_lease(Some(TODO_LEASE_MAX.as_secs() + 1))
+                .unwrap_err()
+                .to_string()
+                .contains(LEASE_FIELD)
         );
     }
 
-    /// The claim stand-in holds no lease, so no todo reads as owned yet.
+    /// A claim holds the todo against a second agent, who sees the owner and
+    /// is refused a change unless it forces; releasing hands it back.
     #[test]
-    fn no_todo_is_owned_before_claims_land() {
+    fn a_claim_holds_the_todo_against_another_agent() {
         let fixture = fixture();
         register(&fixture);
-        let todos = runtime().block_on(async {
-            content(
+        let other = server_as(&fixture, "other");
+
+        runtime().block_on(async {
+            let added = content(
                 fixture
                     .server
                     .todo_add(Parameters(
-                        TodoAddArg::builder().title("t".to_string()).build(),
+                        TodoAddArg::builder().title("schema".to_string()).build(),
                     ))
                     .await,
-            )
+            );
+            let id = added[ID].as_str().unwrap().to_string();
+
+            let claimed = content(
+                fixture
+                    .server
+                    .todo_claim(Parameters(TodoClaimArg::builder().build()))
+                    .await,
+            );
+            assert_eq!(claimed[CLAIMED], true);
+            assert_eq!(claimed[TODO][OWNER], AGENT);
+            assert_eq!(claimed[TODO]["status"], "in-progress");
+
+            let held = content(
+                other
+                    .todo_claim(Parameters(
+                        TodoClaimArg::builder().id(Some(id.clone())).build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(held[CLAIMED], false);
+            assert_eq!(held[OWNER], AGENT);
+            assert!(held[EXPIRES_IN_S].as_u64().unwrap() > 0);
+
+            let refused = refusal(
+                other
+                    .todo_update(Parameters(
+                        TodoUpdateArg::builder()
+                            .id(id.clone())
+                            .status(Some("done".to_string()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(
+                refused.contains("held by") && refused.contains(AGENT),
+                "{refused}"
+            );
+
+            let released = content(
+                fixture
+                    .server
+                    .todo_update(Parameters(
+                        TodoUpdateArg::builder()
+                            .id(id.clone())
+                            .release(Some(true))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(released["status"], "pending");
+            assert!(released.get(OWNER).is_none());
+
+            let unknown = refusal(
+                other
+                    .todo_claim(Parameters(
+                        TodoClaimArg::builder().id(Some("nope".to_string())).build(),
+                    ))
+                    .await,
+            );
+            assert!(unknown.contains("todo_list"), "{unknown}");
         });
-        assert!(todos.get(OWNER).is_none());
-        let stored = fixture.store.todos(&fixture.root).unwrap();
-        assert!(lease_of(&stored[0]).is_none());
+    }
+
+    /// A lock is exclusive between agents, names its holder and note to the
+    /// other, and frees on release; a second agent cannot release it.
+    #[test]
+    fn a_lock_is_exclusive_between_agents() {
+        let fixture = fixture();
+        register(&fixture);
+        let other = server_as(&fixture, "other");
+        let acquire = |name: &str, note: Option<&str>| {
+            LockAcquireArg::builder()
+                .name(name.to_string())
+                .note(note.map(str::to_string))
+                .build()
+        };
+        let release =
+            |name: &str| Parameters(LockNameArg::builder().name(name.to_string()).build());
+
+        runtime().block_on(async {
+            let taken = content(
+                fixture
+                    .server
+                    .acquire(acquire("migrations", Some("adding users")))
+                    .await,
+            );
+            assert_eq!(taken[ACQUIRED], true);
+
+            let held = content(other.acquire(acquire("migrations", None)).await);
+            assert_eq!(held[ACQUIRED], false);
+            assert_eq!(held[OWNER], AGENT);
+            assert_eq!(held[NOTE], "adding users");
+
+            let not_theirs = content(other.lock_release(release("migrations")).await);
+            assert_eq!(not_theirs[RELEASED], false);
+            assert_eq!(not_theirs[OWNER], AGENT);
+
+            let freed = content(fixture.server.lock_release(release("migrations")).await);
+            assert_eq!(freed[RELEASED], true);
+            let retaken = content(other.acquire(acquire("migrations", None)).await);
+            assert_eq!(retaken[ACQUIRED], true);
+        });
     }
 }

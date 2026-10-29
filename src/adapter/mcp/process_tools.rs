@@ -9,6 +9,7 @@ use rmcp::{
 use serde_json::Value;
 
 use super::{
+    agent_wait_view::AgentWaitView,
     alerts_view::AlertsView,
     bounds::{CALL_BOUND, wait_bound},
     condition_arg::{ConditionArg, log_pattern},
@@ -16,7 +17,6 @@ use super::{
     control_view::ControlView,
     logs_view::LogsView,
     name_arg::NameArg,
-    pending::{self, LineFilter, LineMatcher, LogQuery, OutputCursor, WaitOutcome, WaitSpec},
     process_add_arg::ProcessAddArg,
     process_fields::{invalid, process_name},
     process_logs_arg::ProcessLogsArg,
@@ -29,7 +29,6 @@ use super::{
         MusterMcp, ToolResult, json, object, rendered, structured, unheard, with_alerts, with_field,
     },
     tool_error::ToolError,
-    wait_view::WaitView,
 };
 use crate::{
     adapter::{
@@ -38,24 +37,19 @@ use crate::{
             ActionReport, ClientError, DefinitionView, ProjectIdentityView, RemovedView,
             ServiceClient, Unwatched, process,
         },
-        holder::HolderError,
-        service::{ProcessAction, ServiceRequest},
+        holder::{
+            ByteLimit, HolderError, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES,
+            MAX_LOG_LINES, read_log,
+        },
+        service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
     },
     domain::{
-        config::{ConfigError, FieldEdit},
+        config::ConfigError,
         project::Project,
-        value::{ProcessName, ProcessRef},
+        value::{OutputCursor, ProcessName, ProcessRef},
     },
 };
 
-/// Lines `process_logs` returns when the call does not say.
-const DEFAULT_LOG_LINES: usize = 100;
-/// Most lines `process_logs` returns.
-const MAX_LOG_LINES: usize = 2000;
-/// Bytes `process_logs` returns when the call does not say.
-const DEFAULT_LOG_BYTES: usize = 16 * 1024;
-/// Most bytes `process_logs` returns.
-const MAX_LOG_BYTES: usize = 64 * 1024;
 /// Carriage return that submits a line typed into a terminal.
 const ENTER: char = '\r';
 /// The fields the process tools name in a refusal.
@@ -63,6 +57,8 @@ const UNTIL_FIELD: &str = "until";
 const SINCE_FIELD: &str = "since";
 const GREP_FIELD: &str = "grep";
 const REGEX_FIELD: &str = "regex";
+const LINES_FIELD: &str = "lines";
+const MAX_BYTES_FIELD: &str = "max_bytes";
 /// What `regex` needs beside it.
 const REGEX_NEEDS_GREP: &str = "regex only together with grep";
 /// What `grep` cannot be combined with.
@@ -78,8 +74,8 @@ const WAIT: &str = "wait";
 const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 /// How a control answer carrying neither a report nor a wait is described.
 const CONTROL_UNREPORTED: &str = "a control answer with no report";
-/// The form a grep regex is written in.
-const GREP_REGEX_FORM: &str = "a valid regex";
+/// The form a line or byte limit is written in, followed by its maximum.
+const LIMIT_FORM: &str = "a number from 1 to ";
 /// The tool `process_set`'s refusal names.
 const PROCESS_SET: &str = "process_set";
 
@@ -134,13 +130,14 @@ fn waited(value: Value, outcome: &WaitOutcome, alerts: &AlertsView) -> ToolResul
     structured(with_alerts(value, alerts)?, failed)
 }
 
-/// The failure of reading the log at `log` with the log reader.
+/// The failure of reading the log at `log` with the log reader: a cursor
+/// past its end is the caller's mistake, anything else a fault reading it.
 fn log_failure(log: &Path, error: HolderError) -> ToolError {
-    let source = match error {
-        HolderError::Io(source) => source,
-        other => io::Error::other(other.to_string()),
-    };
-    ToolError::Client(process::log_error(log, source))
+    match error {
+        HolderError::CursorAhead { cursor, end } => ToolError::CursorAhead { cursor, end },
+        HolderError::Io(source) => ToolError::Client(process::log_error(log, source)),
+        other => ToolError::Client(process::log_error(log, io::Error::other(other.to_string()))),
+    }
 }
 
 #[tool_router(router = process_router, vis = "pub(super)")]
@@ -236,22 +233,7 @@ impl MusterMcp {
         Parameters(arg): Parameters<ProcessLogsArg>,
     ) -> ToolResult {
         let name = reference(arg.name())?;
-        let since = output_cursor(SINCE_FIELD, arg.since().as_deref())?;
-        let filter = log_filter(&arg)?;
-        let query = LogQuery::builder()
-            .since(since)
-            .lines(
-                arg.lines()
-                    .unwrap_or(DEFAULT_LOG_LINES)
-                    .clamp(1, MAX_LOG_LINES),
-            )
-            .filter(filter)
-            .max_bytes(
-                arg.max_bytes()
-                    .unwrap_or(DEFAULT_LOG_BYTES)
-                    .clamp(1, MAX_LOG_BYTES),
-            )
-            .build();
+        let query = log_query(&arg)?;
         let ((name, slice, run_start), alerts) = self
             .ask(arg.project().clone(), move |client, project| {
                 let status = process::status(client, project)?;
@@ -260,10 +242,9 @@ impl MusterMcp {
                     .processes()
                     .iter()
                     .find(|process| process.name() == &name)
-                    .and_then(pending::run_start);
+                    .and_then(|process| *process.run_start());
                 let log = process::log_path(client, project, &name)?;
-                let slice =
-                    pending::read_log(&log, &query).map_err(|error| log_failure(&log, error))?;
+                let slice = read_log(&log, &query).map_err(|error| log_failure(&log, error))?;
                 Ok((name, slice, run_start))
             })
             .await?;
@@ -366,9 +347,6 @@ impl MusterMcp {
             .blocking(move |deps| {
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
-                if let Some(ready) = arg.ready() {
-                    pending::store_ready(Some(&ready.check()?))?;
-                }
                 let (registration, spec) = deps.editor().add(&root, draft)?;
                 Ok((registration.project().clone(), spec))
             })
@@ -407,12 +385,6 @@ impl MusterMcp {
                 let project = deps.project(arg.project().as_deref())?;
                 let name = process_name(arg.name())?;
                 let change = arg.change(project.root())?;
-                let ready = arg.ready_edit()?;
-                match &ready {
-                    FieldEdit::Keep => {},
-                    FieldEdit::Set(check) => pending::store_ready(Some(check))?,
-                    FieldEdit::Clear => pending::store_ready(None)?,
-                }
                 if change.is_empty() {
                     return Err(ToolError::NothingToChange(PROCESS_SET));
                 }
@@ -522,7 +494,7 @@ impl MusterMcp {
                         let name = resolved(client, project, &name)?;
                         (
                             None,
-                            Some(pending::control_and_wait(
+                            Some(process::control_waiting(
                                 client, project, &name, action, spec,
                             )?),
                         )
@@ -546,7 +518,7 @@ impl MusterMcp {
             let value = with_field(
                 with_field(object(), PROCESS, json(outcome.process())?),
                 WAIT,
-                json(&WaitView::from(&outcome))?,
+                json(&AgentWaitView::from(&outcome))?,
             );
             return waited(value, &outcome, &alerts);
         }
@@ -579,11 +551,51 @@ impl MusterMcp {
         let (outcome, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
                 let name = resolved(client, project, &name)?;
-                pending::wait(client, project, &name, &spec)
+                Ok(process::wait(client, project, &name, &spec)?)
             })
             .await?;
-        waited(json(&WaitView::from(&outcome))?, &outcome, &alerts)
+        waited(json(&AgentWaitView::from(&outcome))?, &outcome, &alerts)
     }
+}
+
+/// The log read `arg` asks for.
+///
+/// # Errors
+/// Returns the caller's mistake for a malformed cursor, a limit out of
+/// range, or a filter out of form.
+fn log_query(arg: &ProcessLogsArg) -> Result<LogQuery, ToolError> {
+    let lines = arg
+        .lines()
+        .map(|lines| {
+            LineLimit::try_new(lines).map_err(|_| {
+                invalid(
+                    LINES_FIELD,
+                    &format!("{LIMIT_FORM}{MAX_LOG_LINES}"),
+                    &lines.to_string(),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let max_bytes = arg
+        .max_bytes()
+        .map(|bytes| {
+            ByteLimit::try_new(bytes).map_err(|_| {
+                invalid(
+                    MAX_BYTES_FIELD,
+                    &format!("{LIMIT_FORM}{MAX_LOG_BYTES}"),
+                    &bytes.to_string(),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(LogQuery::builder()
+        .since(output_cursor(SINCE_FIELD, arg.since().as_deref())?)
+        .lines(lines)
+        .filter(log_filter(arg)?)
+        .max_bytes(max_bytes)
+        .build())
 }
 
 /// The lines `arg` keeps.
@@ -598,8 +610,11 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
         Some(grep) if errors_only => Err(invalid(GREP_FIELD, GREP_OR_ERRORS, grep)),
         Some(grep) => {
             let pattern = log_pattern(GREP_FIELD, grep, regex)?;
-            let matcher = LineMatcher::compile(&pattern)
-                .map_err(|_| invalid(GREP_FIELD, GREP_REGEX_FORM, grep))?;
+            let matcher =
+                LineMatcher::compile(&pattern).map_err(|source| ToolError::InvalidPattern {
+                    field: GREP_FIELD,
+                    source,
+                })?;
             Ok(LineFilter::Grep(matcher))
         },
         None if regex => Err(invalid(REGEX_FIELD, REGEX_NEEDS_GREP, "true")),

@@ -5,11 +5,13 @@ use typed_builder::TypedBuilder;
 
 use super::{
     condition_arg::{local_port, local_url, log_pattern},
-    pending::{ReadyCheck, ReadyProbe},
     process_fields::invalid,
     tool_error::ToolError,
 };
-use crate::domain::value::PositiveDuration;
+use crate::domain::{
+    process::{ReadyCheck, ReadyProbe},
+    value::PositiveDuration,
+};
 
 /// The `ready` field of `process_add` and `process_set`.
 const READY_FIELD: &str = "ready";

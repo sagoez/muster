@@ -10,7 +10,10 @@ use clap::{
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use strum::IntoEnumIterator;
 
-use super::{completions::CompletionShell, process_flags::ProcessFlags};
+use super::{
+    completions::CompletionShell,
+    process_flags::{ProcessFlags, READY_GROUP},
+};
 use crate::{
     adapter::{
         holder::HOLDER_SUBCOMMAND,
@@ -488,6 +491,9 @@ pub struct SetArgs {
     /// left alone.
     #[arg(long = "unset-env", value_name = "KEY")]
     pub unset_env: Vec<String>,
+    /// Remove the readiness check.
+    #[arg(long, conflicts_with = READY_GROUP)]
+    pub no_ready: bool,
     #[command(flatten)]
     pub flags: ProcessFlags,
     /// Print the result as JSON.

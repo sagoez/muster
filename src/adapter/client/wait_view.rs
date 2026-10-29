@@ -2,6 +2,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
+use super::condition_view::ConditionView;
 use crate::{
     adapter::service::{WaitOutcome, WaitStatus},
     domain::value::{OutputCursor, ProcessName},
@@ -27,9 +28,9 @@ pub struct WaitView {
     /// How the wait ended.
     #[getset(get_copy = "pub")]
     status: WaitStatus,
-    /// What was waited for.
+    /// What was waited for, in the shape a wait condition is written.
     #[getset(get = "pub")]
-    until: String,
+    until: ConditionView,
     /// Whole milliseconds it waited.
     #[getset(get_copy = "pub")]
     elapsed_ms: u64,
@@ -56,7 +57,7 @@ impl From<&WaitOutcome> for WaitView {
         Self {
             process: outcome.process().clone(),
             status: outcome.status(),
-            until: outcome.until().to_string(),
+            until: ConditionView::from(outcome.until()),
             elapsed_ms: u64::try_from(outcome.elapsed().as_millis()).unwrap_or(u64::MAX),
             cursor: *outcome.cursor(),
             matched: outcome.matched().as_ref().map(|matched| MatchView {

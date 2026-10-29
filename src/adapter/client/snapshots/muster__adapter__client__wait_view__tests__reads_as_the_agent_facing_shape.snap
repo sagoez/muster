@@ -5,7 +5,9 @@ expression: "serde_json::to_string_pretty(&WaitView::from(&outcome)).unwrap()"
 {
   "process": "api",
   "status": "matched",
-  "until": "state running",
+  "until": {
+    "state": "running"
+  },
   "elapsed_ms": 2140,
   "cursor": "o:18234",
   "match": {

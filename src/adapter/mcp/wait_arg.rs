@@ -3,7 +3,8 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{condition_arg::ConditionArg, pending::WaitSpec, tool_error::ToolError};
+use super::{condition_arg::ConditionArg, tool_error::ToolError};
+use crate::adapter::service::WaitSpec;
 
 /// The `wait` field of a start or restart.
 const WAIT_FIELD: &str = "wait";
@@ -43,7 +44,7 @@ impl WaitArg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::mcp::pending::WaitCondition;
+    use crate::adapter::service::WaitCondition;
 
     /// The bound every wait here takes.
     const BOUND: Duration = Duration::from_secs(30);
@@ -63,7 +64,7 @@ mod tests {
         assert_eq!(read(serde_json::json!(false)), None);
         let default = read(serde_json::json!(true)).expect("a wait");
         assert_eq!(default.until(), &None);
-        assert_eq!(default.timeout(), BOUND);
+        assert_eq!(*default.timeout(), BOUND);
         let state = read(serde_json::json!({ "state": "running" })).expect("a wait");
         assert!(matches!(state.until(), Some(WaitCondition::State(_))));
     }

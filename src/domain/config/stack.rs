@@ -87,10 +87,7 @@ impl Stack {
         }
         let updated: Vec<&ProcessSpec> = existing
             .into_iter()
-            .filter(|spec| {
-                self.process(spec.name())
-                    .is_none_or(|stored| stored.differs_outside_readiness(spec))
-            })
+            .filter(|spec| self.process(spec.name()) != Some(*spec))
             .collect();
         let removed = match mode {
             ImportMode::Replace => {
@@ -274,10 +271,9 @@ mod tests {
         assert!(plan.is_empty());
     }
 
-    /// An import does not manage readiness checks, so a stored one never
-    /// makes an otherwise identical definition count as updated.
+    /// The file carries readiness, so dropping a stored check is a change.
     #[test]
-    fn a_stored_readiness_check_does_not_count_as_a_change() {
+    fn a_dropped_readiness_check_counts_as_a_change() {
         let check = ReadyCheck::builder()
             .probe(ReadyProbe::from_stored("port", "3000").unwrap())
             .timeout(PositiveDuration::try_new(Duration::from_secs(30)).unwrap())
@@ -288,7 +284,7 @@ mod tests {
             .plan_import(&[spec("web", "npm run dev")], ImportMode::Merge)
             .unwrap();
 
-        assert!(plan.is_empty());
+        assert_eq!(*plan.updated(), names(&["web"]));
     }
 
     #[test]

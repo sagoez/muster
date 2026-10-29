@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(texts(&second), [
             "starting",
             "Listening on :3000",
-            "prompt> "
+            "prompt>"
         ]);
         assert_eq!(second[0].at(), OutputCursor::new(100));
         assert_eq!(second[1].at(), OutputCursor::new(115));

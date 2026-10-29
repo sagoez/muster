@@ -121,11 +121,12 @@ pub fn agent_message(error: &ToolError) -> String {
         ToolError::UnknownTodo { .. } => format!("{error}; {CALL_TODO_LIST}"),
         ToolError::UnknownValue { .. } => format!("{error}; {CALL_KV_READ}"),
         ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
-        ToolError::Pending(_) => format!("{error}; {RESTART_SERVER}"),
         ToolError::NoProjectHere { .. }
         | ToolError::InvalidName(_)
         | ToolError::EmptyCommand
         | ToolError::InvalidField { .. }
+        | ToolError::InvalidPattern { .. }
+        | ToolError::CursorAhead { .. }
         | ToolError::NothingToChange(_)
         | ToolError::InvalidNoteKey(_)
         | ToolError::InvalidTodoTitle(_)

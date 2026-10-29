@@ -48,6 +48,8 @@ const AUTOSTART_OFF: &str = "autostart off";
 const RESTART_CHANGED: &str = "restart";
 const STOP_SIGNAL_CHANGED: &str = "stop-signal";
 const STOP_GRACE_CHANGED: &str = "stop-grace";
+const READY_CHANGED: &str = "ready";
+const READY_CLEARED: &str = "ready cleared";
 /// Follows a running process's name in the restart hint.
 const IS_RUNNING: &str = "is running;";
 /// The command that applies a change to a running process.
@@ -123,6 +125,11 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         .restart(args.flags.restart)
         .stop_signal(args.flags.stop_signal)
         .stop_grace(args.flags.stop_grace)
+        .ready(match (args.flags.ready()?, args.no_ready) {
+            (Some(check), _) => FieldEdit::Set(check),
+            (None, true) => FieldEdit::Clear,
+            (None, false) => FieldEdit::Keep,
+        })
         .build();
     let stack = store
         .stack(root)?
@@ -150,6 +157,7 @@ fn asks_nothing(args: &SetArgs) -> bool {
         && args.description.is_none()
         && !args.no_description
         && args.unset_env.is_empty()
+        && !args.no_ready
         && args.flags.is_empty()
 }
 
@@ -200,6 +208,11 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
     if let Some(grace) = change.stop_grace() {
         words.push(format!("{STOP_GRACE_CHANGED} {grace}"));
     }
+    match change.ready() {
+        FieldEdit::Set(_) => words.push(READY_CHANGED.to_string()),
+        FieldEdit::Clear => words.push(READY_CLEARED.to_string()),
+        FieldEdit::Keep => {},
+    }
     words
 }
 
@@ -249,13 +262,15 @@ mod tests {
             .stop_grace(Some(
                 PositiveDuration::try_new(Duration::from_secs(10)).unwrap(),
             ))
+            .ready(FieldEdit::Clear)
             .build();
 
         assert_eq!(change_words(&change), vec![
             "cwd cleared",
             "env PORT",
             "restart on-failure",
-            "stop-grace 10s"
+            "stop-grace 10s",
+            "ready cleared"
         ]);
     }
 }

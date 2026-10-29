@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::FieldEdit,
-    process::{RestartPolicy, StopSignal},
+    process::{ReadyCheck, RestartPolicy, StopSignal},
     value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration},
 };
 
@@ -41,6 +41,9 @@ pub struct ProcessChange {
     /// A new grace period before force-kill.
     #[builder(default)]
     stop_grace: Option<PositiveDuration>,
+    /// An edit to the readiness check.
+    #[builder(default)]
+    ready: FieldEdit<ReadyCheck>,
 }
 
 impl ProcessChange {
@@ -55,6 +58,7 @@ impl ProcessChange {
             && self.restart.is_none()
             && self.stop_signal.is_none()
             && self.stop_grace.is_none()
+            && self.ready.is_keep()
     }
 }
 
@@ -74,6 +78,12 @@ mod tests {
         assert!(
             !ProcessChange::builder()
                 .unset_env(vec![EnvName::try_new("PORT").unwrap()])
+                .build()
+                .is_empty()
+        );
+        assert!(
+            !ProcessChange::builder()
+                .ready(FieldEdit::Clear)
                 .build()
                 .is_empty()
         );

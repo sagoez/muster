@@ -34,9 +34,9 @@ use crate::{
     adapter::{
         holder::rotated_path,
         service::{
-            BatchOutcome, LaunchEnvironment, Notice, ProcessAction, ProcessStatus, ProjectStatus,
-            ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse, WaitOutcome,
-            WaitSpec,
+            BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Notice, ProcessAction,
+            ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind, ServiceRequest,
+            ServiceResponse, WaitOutcome, WaitSpec,
         },
     },
     domain::{
@@ -99,17 +99,49 @@ pub fn up_within(
     bound: Duration,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, ClientError> {
+    up_sending(client, project, bound, None, watch).map(|(report, _)| report)
+}
+
+/// Like [`up_within`], and waits, as `wait` asks, on each process it
+/// starts, in the same request; the waits come back in start order.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+pub fn up_waiting(
+    client: &ServiceClient,
+    project: &Project,
+    bound: Duration,
+    wait: &WaitSpec,
+    watch: &mut dyn SettleWatch,
+) -> Result<(ActionReport, Vec<WaitOutcome>), ClientError> {
+    up_sending(client, project, bound, Some(wait), watch)
+}
+
+/// Sends `Up`, with `wait` when given, then reports what settled within
+/// `bound` and how each wait ended.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+fn up_sending(
+    client: &ServiceClient,
+    project: &Project,
+    bound: Duration,
+    wait: Option<&WaitSpec>,
+    watch: &mut dyn SettleWatch,
+) -> Result<(ActionReport, Vec<WaitOutcome>), ClientError> {
     let before = status(client, project)?;
     ready_to_send(watch)?;
     let sent = SystemTime::now();
-    let batch = batch(
-        client.send(&ServiceRequest::Up {
-            project: project.root().clone(),
-            environment: LaunchEnvironment::current(),
-            wait: None,
-        })?,
-        project,
-    )?;
+    let request = ServiceRequest::Up {
+        project: project.root().clone(),
+        environment: LaunchEnvironment::current(),
+        wait: wait.cloned(),
+    };
+    let response = match wait {
+        Some(wait) => client.send_waiting(&request, *wait.timeout())?,
+        None => client.send(&request)?,
+    };
+    let batch = batch(response, project)?;
     let settling = Settling::builder()
         .action(Action::Up)
         .before(&before)
@@ -118,7 +150,8 @@ pub fn up_within(
         .bound(bound)
         .build();
     let report = report(client, project, settling, watch)?;
-    with_refusals(report, &batch, client, project)
+    let report = with_refusals(report, &batch, client, project)?;
+    Ok((report, batch.waits().clone()))
 }
 
 /// Lets the caller send its request, unless `watch` says it was interrupted
@@ -309,6 +342,31 @@ pub fn wait(
         project,
         name,
     )
+}
+
+/// The lifecycle events of `project` after `since` (the newest few without
+/// it), of `kinds` (every kind when empty), waiting at most `wait` for one
+/// when there are none yet.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+pub fn events(
+    client: &ServiceClient,
+    project: &Project,
+    since: Option<EventSeq>,
+    kinds: &[EventKind],
+    wait: Duration,
+) -> Result<EventPage, ClientError> {
+    let request = ServiceRequest::Events {
+        project: project.root().clone(),
+        since,
+        kinds: kinds.to_vec(),
+        wait,
+    };
+    match client.send_waiting(&request, wait)? {
+        ServiceResponse::Events(page) => Ok(page),
+        other => Err(unexpected(other, project, None)),
+    }
 }
 
 /// How the wait on the process `name` of `project` ended, from `response`.

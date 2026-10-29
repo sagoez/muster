@@ -2,8 +2,7 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::pending::lease_of;
-use crate::domain::coordination::{Author, Todo, TodoId, TodoStatus, TodoTitle};
+use crate::domain::coordination::{Author, ClaimState, Todo, TodoId, TodoStatus, TodoTitle};
 
 /// One todo as an agent reads it, with who holds it. An expired claim reads
 /// as pending, its holder shown as `stale_owner`.
@@ -36,21 +35,21 @@ pub struct TodoView {
 impl TodoView {
     /// `todo` as read at `now`, Unix seconds.
     pub fn at(todo: &Todo, now: u64) -> Self {
-        let lease = lease_of(todo);
-        let live = lease.as_ref().filter(|lease| lease.claimed_until() > now);
-        let stale = lease.as_ref().filter(|lease| lease.claimed_until() <= now);
+        let (owner, expires_in_s, stale_owner) = match todo.claim_state(now) {
+            ClaimState::Unclaimed => (None, None, None),
+            ClaimState::Held { owner, expires_in } => {
+                (Some(owner.clone()), Some(expires_in.as_secs()), None)
+            },
+            ClaimState::Stale { owner } => (None, None, Some(owner.clone())),
+        };
         Self {
             id: todo.id().clone(),
             title: todo.title().clone(),
-            status: if stale.is_some() {
-                TodoStatus::Pending
-            } else {
-                *todo.status()
-            },
+            status: todo.effective_status(now),
             deps: todo.deps().clone(),
-            owner: live.map(|lease| lease.owner().clone()),
-            expires_in_s: live.map(|lease| lease.claimed_until() - now),
-            stale_owner: stale.map(|lease| lease.owner().clone()),
+            owner,
+            expires_in_s,
+            stale_owner,
             author: todo.author().clone(),
             updated_at: *todo.updated_at(),
         }

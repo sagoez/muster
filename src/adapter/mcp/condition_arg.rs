@@ -1,23 +1,19 @@
 use getset::{CopyGetters, Getters};
 use schemars::JsonSchema;
-use serde::{
-    Deserialize, Serialize,
-    de::{
-        IntoDeserializer,
-        value::{Error as ValueError, StrDeserializer},
-    },
-};
+use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::{
-    pending::{
-        LineMatcher, LocalPort, LocalUrl, LogPattern, PatternKind, PatternText, StateGoal,
-        WaitCondition,
+use super::{process_fields::invalid, tool_error::ToolError};
+use crate::{
+    adapter::{
+        holder::LineMatcher,
+        service::{StateGoal, WaitCondition},
     },
-    process_fields::invalid,
-    tool_error::ToolError,
+    domain::{
+        process::{LogPattern, PatternKind},
+        value::{LocalPort, LocalUrl},
+    },
 };
-use crate::domain::process::ProcessState;
 
 /// What a condition must name exactly one of.
 const ONE_CONDITION_FORM: &str = "exactly one of log, port, http, state or ready";
@@ -25,20 +21,14 @@ const ONE_CONDITION_FORM: &str = "exactly one of log, port, http, state or ready
 const REGEX_FORM: &str = "regex only together with log";
 /// What `status` needs beside it.
 const STATUS_FORM: &str = "status only together with http";
-/// The form a log pattern is written in.
-const PATTERN_FORM: &str = "text of 1 to 512 characters";
-/// The form a regex log pattern is written in.
-const REGEX_PATTERN_FORM: &str = "a valid regex of 1 to 512 characters";
 /// The form a port is written in.
 const PORT_FORM: &str = "a port from 1 to 65535";
 /// The form a URL is written in.
 const URL_FORM: &str = "an http URL on localhost, 127.0.0.1 or [::1]";
 /// The states a state condition takes.
-const STATE_FORM: &str = "pending, starting, running, paused, stopping, exited, crashed, restarting, unsupervised or stopped";
+const STATE_FORM: &str = "running, paused, exited, crashed, restarting or stopped";
 /// The only value `ready` takes.
 const READY_FORM: &str = "true";
-/// The state that means not running for any reason.
-const STOPPED: &str = "stopped";
 /// The names of a condition's kinds, as an agent writes them.
 const LOG: &str = "log";
 const PORT: &str = "port";
@@ -162,60 +152,13 @@ impl ConditionArg {
     }
 }
 
-impl From<&WaitCondition> for ConditionArg {
-    /// `condition` written back as an agent writes it, to echo a wait.
-    fn from(condition: &WaitCondition) -> Self {
-        let blank = Self::default();
-        match condition {
-            WaitCondition::Log(pattern) => Self {
-                log: Some(pattern.text().to_string()),
-                regex: (pattern.kind() == PatternKind::Regex).then_some(true),
-                ..blank
-            },
-            WaitCondition::Port(port) => Self {
-                port: Some(port.into_inner()),
-                ..blank
-            },
-            WaitCondition::Http { url, status } => Self {
-                http: Some(url.to_string()),
-                status: *status,
-                ..blank
-            },
-            WaitCondition::State(goal) => Self {
-                state: Some(match goal {
-                    StateGoal::State(state) => state.to_string(),
-                    StateGoal::Stopped => STOPPED.to_string(),
-                }),
-                ..blank
-            },
-            WaitCondition::Ready => Self {
-                ready: Some(true),
-                ..blank
-            },
-        }
-    }
-}
-
 /// The log pattern `text`, a regex when `regex`, checked by compiling it.
 ///
 /// # Errors
 /// Returns the refusal of a blank, overlong or uncompilable pattern.
 pub fn log_pattern(field: &'static str, text: &str, regex: bool) -> Result<LogPattern, ToolError> {
-    let form = if regex {
-        REGEX_PATTERN_FORM
-    } else {
-        PATTERN_FORM
-    };
-    let pattern = LogPattern::builder()
-        .text(PatternText::try_new(text).map_err(|_| invalid(field, form, text))?)
-        .kind(if regex {
-            PatternKind::Regex
-        } else {
-            PatternKind::Substring
-        })
-        .build();
-    LineMatcher::compile(&pattern).map_err(|_| invalid(field, form, text))?;
-    Ok(pattern)
+    LineMatcher::checked(text, PatternKind::of_regex(regex))
+        .map_err(|source| ToolError::InvalidPattern { field, source })
 }
 
 /// The localhost port `port`.
@@ -231,27 +174,23 @@ pub fn local_port(field: &'static str, port: u16) -> Result<LocalPort, ToolError
 /// # Errors
 /// Returns the refusal of a URL whose host is not loopback.
 pub fn local_url(field: &'static str, url: &str) -> Result<LocalUrl, ToolError> {
-    LocalUrl::try_new(url).map_err(|_| invalid(field, URL_FORM, url))
+    url.parse().map_err(|_| invalid(field, URL_FORM, url))
 }
 
-/// The state goal `raw`: a state `ps` shows, or `stopped`.
+/// The state goal `raw`.
 ///
 /// # Errors
 /// Returns the refusal of anything else, listing the states.
 fn state_goal(field: &'static str, raw: &str) -> Result<StateGoal, ToolError> {
-    let trimmed = raw.trim();
-    if trimmed == STOPPED {
-        return Ok(StateGoal::Stopped);
-    }
-    let deserializer: StrDeserializer<'_, ValueError> = trimmed.into_deserializer();
-    ProcessState::deserialize(deserializer)
-        .map(StateGoal::State)
+    raw.trim()
+        .parse()
         .map_err(|_| invalid(field, STATE_FORM, raw))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::client::ConditionView;
 
     /// The field refusals are reported under.
     const FIELD: &str = "until";
@@ -282,7 +221,7 @@ mod tests {
         ] {
             let condition = read(json.clone()).unwrap();
             assert_eq!(
-                serde_json::to_value(ConditionArg::from(&condition)).unwrap(),
+                serde_json::to_value(ConditionView::from(&condition)).unwrap(),
                 json
             );
         }
@@ -316,7 +255,8 @@ mod tests {
                 .contains("localhost")
         );
         assert!(refused(serde_json::json!({ "port": 0 })).contains("1 to 65535"));
-        assert!(refused(serde_json::json!({ "state": "sleeping" })).contains("unsupervised"));
+        assert!(refused(serde_json::json!({ "state": "sleeping" })).contains("restarting"));
+        assert!(refused(serde_json::json!({ "log": "(", "regex": true })).contains("regex"));
         assert!(refused(serde_json::json!({ "log": "   " })).contains("1 to 512"));
         assert!(refused(serde_json::json!({ "log": "x".repeat(513) })).contains("1 to 512"));
     }

@@ -7,10 +7,10 @@ use rmcp::{
 };
 
 use super::{
+    agent_wait_view::AgentWaitView,
     bounds::{CALL_BOUND, wait_bound},
     events_view::EventsView,
     lock_view::LockView,
-    pending::{self, EventKind, EventSeq},
     process_fields::invalid,
     progress::with_progress,
     project_arg::ProjectArg,
@@ -21,9 +21,11 @@ use super::{
     stack_up_arg::StackUpArg,
     tool_error::ToolError,
     up_view::UpView,
-    wait_view::WaitView,
 };
-use crate::adapter::client::{NoticeView, ProjectIdentityView, Unwatched, process};
+use crate::adapter::{
+    client::{NoticeView, ProjectIdentityView, Unwatched, process},
+    service::{EventKind, EventSeq, WaitSpec},
+};
 
 /// Most notices `stack_status` returns.
 const STATUS_NOTICES: usize = 10;
@@ -52,7 +54,7 @@ impl MusterMcp {
             .ask(arg.project().clone(), move |client, project| {
                 let status = process::status(client, project)?;
                 let notices = process::notices(client, project)?;
-                let locks = pending::locks(coordination.as_ref(), project.root())?;
+                let locks = coordination.locks(project.root())?;
                 Ok((status, notices, locks))
             })
             .await?;
@@ -120,25 +122,26 @@ impl MusterMcp {
     /// Returns the caller's mistake or a fault of muster's.
     pub(super) async fn up(&self, arg: StackUpArg) -> ToolResult {
         let bound = wait_bound(arg.timeout_s());
-        let wait = arg.wait().unwrap_or(false).then(|| {
-            pending::WaitSpec::builder()
-                .until(None)
-                .since(None)
-                .timeout(bound)
-                .build()
-        });
+        let wait = arg
+            .wait()
+            .unwrap_or(false)
+            .then(|| WaitSpec::builder().timeout(bound).build());
         let ((report, waits), alerts) = self
             .ask(arg.project().clone(), move |client, project| {
-                let report = process::up_within(client, project, CALL_BOUND, &mut Unwatched)?;
-                let waits = match &wait {
-                    Some(spec) => pending::up_and_wait(client, project, spec)?,
-                    None => Vec::new(),
-                };
-                Ok((report, waits))
+                Ok(match &wait {
+                    Some(spec) => {
+                        process::up_waiting(client, project, CALL_BOUND, spec, &mut Unwatched)?
+                    },
+                    None => (
+                        process::up_within(client, project, CALL_BOUND, &mut Unwatched)?,
+                        Vec::new(),
+                    ),
+                })
             })
             .await?;
         let failed = report.failed() || waits.iter().any(|wait| wait.status().is_failure());
-        let view = UpView::from(&report).with_waits(waits.iter().map(WaitView::from).collect());
+        let view =
+            UpView::from(&report).with_waits(waits.iter().map(AgentWaitView::from).collect());
         structured(with_alerts(json(&view)?, &alerts)?, failed)
     }
 
@@ -174,8 +177,8 @@ impl MusterMcp {
         let alerts_seen = self.alerts.clone();
         let (page, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
-                let page = pending::events(client, project, since, &kinds, wait)?;
-                alerts_seen.mark_seen(project.root(), page.cursor());
+                let page = process::events(client, project, since, &kinds, wait)?;
+                alerts_seen.mark_seen(project.root(), *page.cursor());
                 Ok(page)
             })
             .await?;

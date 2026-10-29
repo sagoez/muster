@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{Environment, ProcessDefaults, ProcessSpec},
-    process::{RestartPolicy, StopPolicy, StopSignal},
+    process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Description, PositiveDuration, ProcessName},
 };
 
@@ -39,6 +39,9 @@ pub struct ProcessDraft {
     /// Its grace period before force-kill, or the default.
     #[builder(default)]
     stop_grace: Option<PositiveDuration>,
+    /// What each run waits for before it counts as ready, when anything.
+    #[builder(default)]
+    ready: Option<ReadyCheck>,
 }
 
 impl ProcessDraft {
@@ -57,6 +60,7 @@ impl ProcessDraft {
             .autostart(self.autostart.unwrap_or(*defaults.autostart()))
             .restart(self.restart.unwrap_or(*defaults.restart()))
             .stop(stop)
+            .ready(self.ready)
             .build()
     }
 }

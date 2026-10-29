@@ -7,7 +7,6 @@ use typed_builder::TypedBuilder;
 
 use super::{
     nullable::nullable,
-    pending::ReadyCheck,
     process_fields::{
         ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice,
         command, description, env_name, env_vars, stop_grace, working_dir,
@@ -18,6 +17,7 @@ use crate::{
     adapter::mcp::tool_error::ToolError,
     domain::{
         config::{FieldEdit, ProcessChange},
+        process::ReadyCheck,
         value::{Description, ProjectRoot},
     },
 };
@@ -107,6 +107,7 @@ impl ProcessSetArg {
                     .transpose()?,
             )
             .stop_grace(self.stop_grace.as_deref().map(stop_grace).transpose()?)
+            .ready(self.ready_edit()?)
             .build())
     }
 
@@ -129,7 +130,7 @@ impl ProcessSetArg {
     ///
     /// # Errors
     /// Returns the refusal of a readiness check out of form.
-    pub fn ready_edit(&self) -> Result<FieldEdit<ReadyCheck>, ToolError> {
+    fn ready_edit(&self) -> Result<FieldEdit<ReadyCheck>, ToolError> {
         Ok(match &self.ready {
             None => FieldEdit::Keep,
             Some(None) => FieldEdit::Clear,
@@ -172,6 +173,21 @@ mod tests {
             set.description_edit().unwrap(),
             FieldEdit::Set(Description::try_new("the dev server").unwrap())
         );
+    }
+
+    /// `ready` absent keeps the check, null clears it and an object sets it.
+    #[test]
+    fn ready_absent_null_and_a_check_are_three_edits() {
+        let kept = arg(serde_json::json!({ "name": "web" }));
+        let cleared = arg(serde_json::json!({ "name": "web", "ready": null }));
+        let set = arg(serde_json::json!({
+            "name": "web",
+            "ready": { "port": 3000, "timeout": "30s" },
+        }));
+
+        assert_eq!(kept.ready_edit().unwrap(), FieldEdit::Keep);
+        assert_eq!(cleared.ready_edit().unwrap(), FieldEdit::Clear);
+        assert!(matches!(set.ready_edit().unwrap(), FieldEdit::Set(_)));
     }
 
     /// A field the tool does not take is refused rather than ignored, so a

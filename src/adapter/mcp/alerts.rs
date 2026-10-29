@@ -4,12 +4,11 @@
 
 use std::{collections::HashMap, sync::Mutex};
 
-use super::{
-    alerts_view::AlertsView,
-    event_view::EventView,
-    pending::{EventKind, EventPage, EventSeq},
+use super::{alerts_view::AlertsView, event_view::EventView};
+use crate::{
+    adapter::service::{EventKind, EventPage, EventSeq},
+    domain::value::ProjectRoot,
 };
-use crate::domain::value::ProjectRoot;
 
 /// Most alerts one result carries.
 pub const MAX_ALERTS: usize = 5;
@@ -50,9 +49,16 @@ impl Alerts {
     /// marking it seen. The first page of a project only sets where alerts
     /// start, so history from before the connection is never replayed.
     pub fn take(&self, project: &ProjectRoot, page: &EventPage) -> AlertsView {
-        let first = self.since(project).is_none();
-        self.mark_seen(project, page.cursor());
-        if first {
+        let since = self.since(project);
+        if since.is_some_and(|since| *page.cursor() < since)
+            && let Ok(mut seen) = self.seen.lock()
+        {
+            // A service started afresh numbers its events from zero again.
+            seen.insert(project.clone(), *page.cursor());
+            return AlertsView::default();
+        }
+        self.mark_seen(project, *page.cursor());
+        if since.is_none() {
             return AlertsView::default();
         }
         let worthy: Vec<EventView> = page
@@ -74,7 +80,7 @@ mod tests {
     use std::{path::PathBuf, time::SystemTime};
 
     use super::*;
-    use crate::{adapter::mcp::pending::StackEvent, domain::value::ProcessName};
+    use crate::{adapter::service::StackEvent, domain::value::ProcessName};
 
     /// The project every alert here is about.
     fn shop() -> ProjectRoot {
@@ -88,8 +94,9 @@ mod tests {
             .zip(first..)
             .map(|(kind, seq)| {
                 StackEvent::builder()
-                    .seq(EventSeq::at(seq))
+                    .seq(EventSeq::new(seq))
                     .at(SystemTime::UNIX_EPOCH)
+                    .project(Some(shop()))
                     .process(Some(ProcessName::try_new("api").unwrap()))
                     .kind(*kind)
                     .detail("exit 1".to_string())
@@ -100,7 +107,7 @@ mod tests {
         let last = first + kinds.len() as u64;
         EventPage::builder()
             .events(events)
-            .cursor(EventSeq::at(last))
+            .cursor(EventSeq::new(last))
             .gap(false)
             .build()
     }
@@ -114,7 +121,7 @@ mod tests {
             alerts.take(&shop(), &page(1, &[EventKind::Crashed])),
             AlertsView::default()
         );
-        assert_eq!(alerts.since(&shop()), Some(EventSeq::at(2)));
+        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(2)));
 
         let view = alerts.take(&shop(), &page(2, &[EventKind::Started, EventKind::Crashed]));
         assert_eq!(view.alerts().len(), 1);
@@ -126,7 +133,7 @@ mod tests {
     #[test]
     fn a_flood_keeps_the_newest_and_counts_the_rest() {
         let alerts = Alerts::default();
-        alerts.mark_seen(&shop(), EventSeq::at(0));
+        alerts.mark_seen(&shop(), EventSeq::new(0));
 
         let view = alerts.take(&shop(), &page(1, &[EventKind::Crashed; 8]));
 
@@ -135,12 +142,25 @@ mod tests {
         assert_eq!(view.alerts_omitted(), Some(3));
     }
 
+    /// A page older than the mark comes from a service started afresh, so
+    /// the mark restarts there and later crashes still alert.
+    #[test]
+    fn a_restarted_service_resets_the_mark() {
+        let alerts = Alerts::default();
+        alerts.mark_seen(&shop(), EventSeq::new(500));
+
+        assert_eq!(alerts.take(&shop(), &page(1, &[])), AlertsView::default());
+        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(1)));
+        let view = alerts.take(&shop(), &page(2, &[EventKind::Crashed]));
+        assert_eq!(view.alerts().len(), 1);
+    }
+
     /// The seen mark never moves backwards.
     #[test]
     fn the_seen_mark_only_advances() {
         let alerts = Alerts::default();
-        alerts.mark_seen(&shop(), EventSeq::at(9));
-        alerts.mark_seen(&shop(), EventSeq::at(4));
-        assert_eq!(alerts.since(&shop()), Some(EventSeq::at(9)));
+        alerts.mark_seen(&shop(), EventSeq::new(9));
+        alerts.mark_seen(&shop(), EventSeq::new(4));
+        assert_eq!(alerts.since(&shop()), Some(EventSeq::new(9)));
     }
 }

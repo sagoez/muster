@@ -166,7 +166,7 @@ fn is_unique_violation(error: &rusqlite::Error) -> bool {
 }
 
 /// What the insert and update statements bind: the project id as `?1`, the
-/// name key as `?2`, then the definition columns `?3` to `?10`.
+/// name key as `?2`, then the definition columns `?3` to `?13`.
 ///
 /// # Errors
 /// Returns [`ConfigError::Database`] for a working directory that is not UTF-8.
@@ -177,6 +177,14 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         .map(path_text)
         .transpose()?
         .map(str::to_owned);
+    let ready = spec.ready().as_ref().map(|check| {
+        let (kind, target) = check.probe().stored();
+        (kind.to_string(), target, grace_millis(*check.timeout()))
+    });
+    let (ready_kind, ready_target, ready_timeout_ms) = match ready {
+        Some((kind, target, timeout)) => (Some(kind), Some(target), Some(timeout)),
+        None => (None, None, None),
+    };
     Ok(vec![
         project_id.into(),
         spec.name().key().into(),
@@ -191,6 +199,9 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         spec.restart().to_string().into(),
         spec.stop().signal().to_string().into(),
         grace_millis(*spec.stop().grace_period()).into(),
+        ready_kind.into(),
+        ready_target.into(),
+        ready_timeout_ms.into(),
     ])
 }
 
@@ -206,8 +217,9 @@ fn insert_process(
     let process_id: i64 = conn
         .query_row(
             "INSERT INTO processes (project_id, name_key, name, command, working_dir, description, \
-             autostart, restart, stop_signal, stop_grace_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING id",
+             autostart, restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
+             ready_timeout_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id",
             params_from_iter(process_params(project_id, spec)?),
             |row| row.get(0),
         )
@@ -224,8 +236,7 @@ fn insert_process(
 }
 
 /// Overwrites the definition of the process whose name shares `spec`'s key,
-/// keeping its row id, so its place in the stack and its readiness check
-/// stay.
+/// keeping its row id, so its place in the stack stays.
 fn update_process(
     conn: &Connection,
     project_id: i64,
@@ -234,7 +245,8 @@ fn update_process(
     let process_id: i64 = conn
         .query_row(
             "UPDATE processes SET name = ?3, command = ?4, working_dir = ?5, description = ?6, \
-             autostart = ?7, restart = ?8, stop_signal = ?9, stop_grace_ms = ?10 \
+             autostart = ?7, restart = ?8, stop_signal = ?9, stop_grace_ms = ?10, \
+             ready_kind = ?11, ready_target = ?12, ready_timeout_ms = ?13 \
              WHERE project_id = ?1 AND name_key = ?2 RETURNING id",
             params_from_iter(process_params(project_id, spec)?),
             |row| row.get(0),
@@ -402,21 +414,7 @@ mod tests {
         stack.names().iter().map(ToString::to_string).collect()
     }
 
-    /// Sets a readiness check by hand, as the control-plane queries will.
-    fn set_ready(store: &SqliteStore, process: &str) {
-        store
-            .write(|conn| {
-                conn.execute(
-                    "UPDATE processes SET ready_kind = 'port', ready_target = '3000', \
-                     ready_timeout_ms = 30000 WHERE name = ?1",
-                    params![process],
-                )
-                .map_err(db_error)
-            })
-            .unwrap();
-    }
-
-    /// The check [`set_ready`] stores, as the stack reads it back.
+    /// A readiness check on local port 3000.
     fn port_check() -> ReadyCheck {
         ReadyCheck::builder()
             .probe(ReadyProbe::from_stored("port", "3000").unwrap())
@@ -478,9 +476,10 @@ mod tests {
     fn a_change_keeps_order_and_readiness() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
-        store.add_process(&root, &full_spec()).unwrap();
+        store
+            .add_process(&root, &full_spec().with_ready(Some(port_check())))
+            .unwrap();
         store.add_process(&root, &spec("api", "cargo run")).unwrap();
-        set_ready(&store, "web");
         let change = ProcessChange::builder()
             .command(Some(CommandLine::try_new("pnpm dev").unwrap()))
             .working_dir(FieldEdit::Clear)
@@ -500,6 +499,51 @@ mod tests {
         assert_eq!(names_of(&stack), ["web", "api"]);
         assert_eq!(stack.processes()[0], changed);
         assert_eq!(ready_target(&store, "web").as_deref(), Some("3000"));
+    }
+
+    /// Each readiness probe is written and read back, and a change sets,
+    /// replaces and clears it.
+    #[test]
+    fn a_readiness_check_is_stored_and_changed() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let check = |kind: &str, target: &str| {
+            ReadyCheck::builder()
+                .probe(ReadyProbe::from_stored(kind, target).unwrap())
+                .timeout(grace_from_millis("readiness timeout", 60_000).unwrap())
+                .build()
+        };
+        let regex = check("regex", r"ready in \d+ms");
+        store
+            .add_process(
+                &root,
+                &spec("web", "npm run dev").with_ready(Some(regex.clone())),
+            )
+            .unwrap();
+        assert_eq!(
+            store.stack(&root).unwrap().unwrap().processes()[0].ready(),
+            &Some(regex)
+        );
+
+        let http = check("http", "http://localhost:3000/health");
+        let set = ProcessChange::builder()
+            .ready(FieldEdit::Set(http.clone()))
+            .build();
+        assert_eq!(
+            store
+                .change_process(&root, &name("web"), &set)
+                .unwrap()
+                .ready(),
+            &Some(http)
+        );
+
+        let clear = ProcessChange::builder().ready(FieldEdit::Clear).build();
+        store.change_process(&root, &name("web"), &clear).unwrap();
+        assert_eq!(
+            store.stack(&root).unwrap().unwrap().processes()[0].ready(),
+            &None
+        );
+        assert_eq!(ready_target(&store, "web"), None);
     }
 
     #[test]
@@ -593,17 +637,19 @@ mod tests {
         ]);
     }
 
-    /// Merge replaces same-named definitions in place and keeps the rest;
-    /// an updated row keeps its readiness check.
+    /// Merge replaces same-named definitions in place, readiness included,
+    /// and keeps the rest.
     #[test]
     fn a_merge_import_updates_in_place() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(
+                &root,
+                &spec("web", "npm run dev").with_ready(Some(port_check())),
+            )
             .unwrap();
         store.add_process(&root, &spec("api", "cargo run")).unwrap();
-        set_ready(&store, "web");
 
         let (registration, plan) = store
             .import(
@@ -618,11 +664,8 @@ mod tests {
         assert_eq!(*plan.added(), vec![name("worker")]);
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(names_of(&stack), ["web", "api", "worker"]);
-        assert_eq!(
-            stack.processes()[0],
-            full_spec().with_ready(Some(port_check()))
-        );
-        assert_eq!(ready_target(&store, "web").as_deref(), Some("3000"));
+        assert_eq!(stack.processes()[0], full_spec());
+        assert_eq!(ready_target(&store, "web"), None);
     }
 
     #[test]

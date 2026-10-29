@@ -33,6 +33,13 @@ pub enum PatternKind {
     Regex,
 }
 
+impl PatternKind {
+    /// A regex when `regex`, else a substring.
+    pub fn of_regex(regex: bool) -> Self {
+        if regex { Self::Regex } else { Self::Substring }
+    }
+}
+
 /// A pattern one output line is tested against.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
@@ -104,6 +111,22 @@ impl ReadyProbe {
             ReadyKind::Http => target.parse().map(Self::Http),
         }
     }
+
+    /// The kind and target this probe is stored as, which
+    /// [`Self::from_stored`] reads back.
+    pub fn stored(&self) -> (ReadyKind, String) {
+        match self {
+            Self::Log(pattern) => (
+                match pattern.kind() {
+                    PatternKind::Substring => ReadyKind::Log,
+                    PatternKind::Regex => ReadyKind::Regex,
+                },
+                pattern.text().to_string(),
+            ),
+            Self::Port(port) => (ReadyKind::Port, port.to_string()),
+            Self::Http(url) => (ReadyKind::Http, url.to_string()),
+        }
+    }
 }
 
 /// A process's stored readiness check: what to wait for after each spawn, and
@@ -160,6 +183,24 @@ mod tests {
             ReadyProbe::from_stored("http", "http://localhost:3000/health").unwrap(),
             ReadyProbe::Http("http://localhost:3000/health".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn every_probe_reads_back_as_stored() {
+        for (kind, target) in [
+            ("log", "Listening on"),
+            ("regex", r"ready in \d+ms"),
+            ("port", "3000"),
+            ("http", "http://localhost:3000/health"),
+        ] {
+            let probe = ReadyProbe::from_stored(kind, target).unwrap();
+            let (stored_kind, stored_target) = probe.stored();
+            assert_eq!(
+                ReadyProbe::from_stored(&stored_kind.to_string(), &stored_target).unwrap(),
+                probe
+            );
+            assert_eq!(stored_kind.to_string(), kind);
+        }
     }
 
     #[test]

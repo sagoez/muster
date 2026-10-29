@@ -132,7 +132,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::Environment,
-        process::{RestartPolicy, StopPolicy, StopSignal},
+        process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName},
     };
 
@@ -152,6 +152,10 @@ processes:
   stop:
     signal: terminate
     grace_period: 5s
+  ready:
+    log: ready in \\d+ms
+    regex: true
+    timeout: 1m
 - name: worker
   command: bin/worker
   autostart: false
@@ -184,6 +188,12 @@ processes:
                         .grace_period(grace(5))
                         .build(),
                 )
+                .ready(Some(
+                    ReadyCheck::builder()
+                        .probe(ReadyProbe::from_stored("regex", r"ready in \d+ms").unwrap())
+                        .timeout(grace(60))
+                        .build(),
+                ))
                 .build(),
             ProcessSpec::builder()
                 .name(ProcessName::try_new("worker").unwrap())
@@ -328,6 +338,39 @@ processes:
             refusal(&entry_with("").replace("command: npm run dev", "command: '  '")),
             "processes[0] (web): command must not be empty"
         );
+    }
+
+    /// A readiness check names exactly one probe, a loopback URL, a regex
+    /// that compiles and a timeout above zero.
+    #[test]
+    fn a_bad_readiness_check_names_the_entry() {
+        for (ready, reason) in [
+            ("ready:\n  timeout: 5s", "exactly one"),
+            (
+                "ready:\n  port: 3000\n  http: http://localhost/\n  timeout: 5s",
+                "exactly one",
+            ),
+            (
+                "ready:\n  port: 3000\n  regex: true\n  timeout: 5s",
+                "regex",
+            ),
+            (
+                "ready:\n  log: '('\n  regex: true\n  timeout: 5s",
+                "not a usable regex",
+            ),
+            (
+                "ready:\n  http: http://example.com/\n  timeout: 5s",
+                "example.com",
+            ),
+            ("ready:\n  port: 0\n  timeout: 5s", "1 to 65535"),
+            ("ready:\n  port: 3000\n  timeout: 0s", "longer than zero"),
+        ] {
+            let refused = refusal(&entry_with(ready));
+            assert!(
+                refused.starts_with("processes[0] (web): ready: ") && refused.contains(reason),
+                "{ready}: {refused}"
+            );
+        }
     }
 
     #[test]

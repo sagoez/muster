@@ -6,7 +6,7 @@ use crate::{
     adapter::{
         client::{ClientError, FailureKind},
         exchange::ExchangeError,
-        holder::HolderError,
+        holder::{HolderError, PatternError},
         service::ServiceErrorKind,
     },
     domain::{
@@ -97,9 +97,10 @@ pub enum CliError {
         "'{0}' is not a valid environment variable; pass KEY=VALUE, where KEY has no '=' and does not start with MUSTER_"
     )]
     InvalidEnv(String),
-    /// A `--log` pattern was blank or too long.
-    #[error("'{0}' is not a valid pattern; pass 1 to 512 characters")]
-    InvalidPattern(String),
+    /// A `--log` or `--ready-log` pattern was blank, too long, or a regex
+    /// that does not compile.
+    #[error(transparent)]
+    InvalidPattern(#[from] PatternError),
     /// A `--description` was blank.
     #[error("the description is empty; pass --no-description to clear it")]
     EmptyDescription,

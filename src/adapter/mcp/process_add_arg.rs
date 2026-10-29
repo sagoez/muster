@@ -97,6 +97,7 @@ impl ProcessAddArg {
                     .transpose()?,
             )
             .stop_grace(self.stop_grace.as_deref().map(stop_grace).transpose()?)
+            .ready(self.ready.as_ref().map(ReadyArg::check).transpose()?)
             .build())
     }
 }

@@ -39,6 +39,12 @@ pub enum EntryError {
         /// The variable left unfilled.
         name: String,
     },
+    /// `ready` is not a usable readiness check.
+    #[error("ready: {reason}")]
+    InvalidReady {
+        /// What is wrong with it.
+        reason: String,
+    },
     /// `stop.grace_period` is zero.
     #[error("stop.grace_period must be longer than zero")]
     ZeroGrace,

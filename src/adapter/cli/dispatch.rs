@@ -63,8 +63,7 @@ use crate::{
     adapter::{
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectView, RunningServiceNotifier,
-            ServiceClient, SettingView, SettingsView, SettleWatch, UserService, WaitView,
-            process,
+            ServiceClient, SettingView, SettingsView, SettleWatch, UserService, WaitView, process,
         },
         mcp::{self, McpDeps, Scope},
         private_dir::state_dir,

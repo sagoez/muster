@@ -22,11 +22,13 @@ use super::{
     identity::Identity,
     mcp_deps::McpDeps,
     mcp_error::McpError,
-    pending::{events, release_locks_of},
     tool_error::ToolError,
     tool_failure::ToolFailure,
 };
-use crate::{adapter::client::ServiceClient, domain::project::Project};
+use crate::{
+    adapter::client::{ServiceClient, process},
+    domain::project::Project,
+};
 
 /// Server name reported to connecting agents.
 const MCP_SERVER_NAME: &str = "muster";
@@ -90,7 +92,7 @@ pub async fn serve_stdio(deps: McpDeps) -> Result<(), McpError> {
         .await
         .map_err(|error| McpError::Wait(error.to_string()))?;
     // The locks lapse by their TTL when the release cannot run.
-    let _ = release_locks_of(deps.coordination().as_ref(), identity.author());
+    let _ = deps.coordination().release_locks_of(identity.author());
     Ok(())
 }
 
@@ -181,7 +183,7 @@ impl MusterMcp {
 /// without waiting. A failed read leaves them for the next call.
 pub(super) fn unheard(alerts: &Alerts, client: &ServiceClient, project: &Project) -> AlertsView {
     let since = alerts.since(project.root());
-    match events(client, project, since, &ALERT_KINDS, Duration::ZERO) {
+    match process::events(client, project, since, &ALERT_KINDS, Duration::ZERO) {
         Ok(page) => alerts.take(project.root(), &page),
         Err(_) => AlertsView::default(),
     }

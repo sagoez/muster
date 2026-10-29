@@ -84,6 +84,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .restart(args.flags.restart)
         .stop_signal(args.flags.stop_signal)
         .stop_grace(args.flags.stop_grace)
+        .ready(args.flags.ready()?)
         .build();
     let (registration, spec) = stack_editor(&store)
         .add(&root, draft)

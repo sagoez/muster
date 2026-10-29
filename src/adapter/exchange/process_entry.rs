@@ -4,10 +4,10 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::{EntryError, StopEntry};
+use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
     config::{Environment, ProcessSpec},
-    process::{RestartPolicy, StopPolicy},
+    process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName},
 };
 
@@ -39,6 +39,10 @@ pub struct ProcessEntry {
     restart: RestartPolicy,
     /// How it is stopped.
     stop: StopEntry,
+    /// What each run waits for before it counts as ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    ready: Option<ReadyEntry>,
 }
 
 impl ProcessEntry {
@@ -73,6 +77,7 @@ impl From<&ProcessSpec> for ProcessEntry {
                 .signal(*spec.stop().signal())
                 .grace_period(spec.stop().grace_period().into_inner())
                 .build(),
+            ready: spec.ready().as_ref().map(ReadyEntry::from),
         }
     }
 }
@@ -123,6 +128,7 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
                     )
                     .build(),
             )
+            .ready(entry.ready.map(ReadyCheck::try_from).transpose()?)
             .build())
     }
 }

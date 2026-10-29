@@ -4,7 +4,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::stop_view::StopView;
+use super::{ready_view::ReadyView, stop_view::StopView};
 use crate::domain::{
     config::ProcessSpec,
     process::RestartPolicy,
@@ -39,6 +39,9 @@ pub struct DefinitionView {
     /// How it is stopped.
     #[getset(get = "pub")]
     stop: StopView,
+    /// What each run waits for before it counts as ready.
+    #[getset(get = "pub")]
+    ready: Option<ReadyView>,
 }
 
 impl From<&ProcessSpec> for DefinitionView {
@@ -57,6 +60,7 @@ impl From<&ProcessSpec> for DefinitionView {
             autostart: *spec.autostart(),
             restart: *spec.restart(),
             stop: StopView::from(spec.stop()),
+            ready: spec.ready().as_ref().map(ReadyView::from),
         }
     }
 }
@@ -68,7 +72,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::Environment,
-        process::{StopPolicy, StopSignal},
+        process::{ReadyCheck, ReadyProbe, StopPolicy, StopSignal},
         value::{EnvName, EnvValue, PositiveDuration},
     };
 
@@ -99,8 +103,19 @@ mod tests {
             serde_json::json!({
                 "name": "web", "command": "npm run dev", "working_dir": "frontend",
                 "description": null, "environment": {"PORT": "5173"}, "autostart": true,
-                "restart": "on-failure", "stop": {"signal": "terminate", "grace": 5.5}
+                "restart": "on-failure", "stop": {"signal": "terminate", "grace": 5.5},
+                "ready": null
             })
+        );
+        let regex = spec.with_ready(Some(
+            ReadyCheck::builder()
+                .probe(ReadyProbe::from_stored("regex", r"ready in \d+ms").unwrap())
+                .timeout(PositiveDuration::try_new(Duration::from_secs(90)).unwrap())
+                .build(),
+        ));
+        assert_eq!(
+            serde_json::to_value(DefinitionView::from(&regex)).unwrap()["ready"],
+            serde_json::json!({"log": r"ready in \d+ms", "regex": true, "timeout": "1m 30s"})
         );
     }
 }

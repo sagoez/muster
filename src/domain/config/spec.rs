@@ -74,14 +74,8 @@ impl ProcessSpec {
             autostart: change.autostart().unwrap_or(self.autostart),
             restart: change.restart().unwrap_or(self.restart),
             stop,
-            ready: self.ready,
+            ready: change.ready().clone().apply(self.ready),
         }
-    }
-
-    /// Whether `other` defines anything but the readiness check differently,
-    /// which an import changes while a stored check stays.
-    pub fn differs_outside_readiness(&self, other: &Self) -> bool {
-        self.clone().with_ready(other.ready.clone()) != *other
     }
 
     /// The directory the process launches in under `root`.

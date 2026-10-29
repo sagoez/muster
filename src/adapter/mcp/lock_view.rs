@@ -2,8 +2,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::pending::Lock;
-use crate::domain::coordination::Author;
+use crate::domain::coordination::{Author, Lock};
 
 /// A held lock as `stack_status` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -29,8 +28,8 @@ impl LockView {
         Self {
             name: lock.name().to_string(),
             owner: lock.owner().clone(),
-            note: lock.note().clone(),
-            expires_in_s: lock.expires_at().saturating_sub(now),
+            note: lock.note().as_ref().map(ToString::to_string),
+            expires_in_s: lock.expires_in(now).as_secs(),
         }
     }
 }

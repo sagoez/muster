@@ -292,17 +292,22 @@ Arguments:
   <COMMAND>...  The command, after `--`: one argument is a shell expression, several are joined as the shell split them
 
 Options:
-      --cwd <DIR>              Its working directory, read from the current folder; stored relative to the project when inside it. Defaults to the project's folder
-  -p, --project <PROJECT>      The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-      --description <TEXT>     A one-line description
-      --env <KEY=VALUE>        Set an environment variable, `KEY=VALUE` (repeatable)
-      --autostart              Start it with `muster up`
-      --no-autostart           Leave it out of `muster up`
-      --restart <POLICY>       What happens when its child exits [possible values: never, on-failure, always]
-      --stop-signal <SIGNAL>   The signal a graceful stop sends [possible values: terminate, interrupt]
-      --stop-grace <DURATION>  How long a graceful stop waits before it kills, such as `5s`
-      --json                   Print the result as JSON
-  -h, --help                   Print help
+      --cwd <DIR>                 Its working directory, read from the current folder; stored relative to the project when inside it. Defaults to the project's folder
+  -p, --project <PROJECT>         The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --description <TEXT>        A one-line description
+      --env <KEY=VALUE>           Set an environment variable, `KEY=VALUE` (repeatable)
+      --autostart                 Start it with `muster up`
+      --no-autostart              Leave it out of `muster up`
+      --restart <POLICY>          What happens when its child exits [possible values: never, on-failure, always]
+      --stop-signal <SIGNAL>      The signal a graceful stop sends [possible values: terminate, interrupt]
+      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`
+      --ready-log <TEXT>          Ready once an output line contains this text; needs --ready-timeout
+      --ready-regex               Read --ready-log as a regular expression
+      --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout
+      --ready-http <URL>          Ready once this localhost URL answers below 500; needs --ready-timeout
+      --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
+      --json                      Print the result as JSON
+  -h, --help                      Print help
 
 
 $ muster set --help
@@ -315,21 +320,27 @@ Arguments:
   [COMMAND]...  A new command, after `--`, joined as `muster add` joins it
 
 Options:
-      --command <CMD>          A new command, as one shell expression
-  -p, --project <PROJECT>      The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-      --cwd <DIR>              A new working directory, read from the current folder
-      --no-cwd                 Run in the project's folder again
-      --description <TEXT>     A new one-line description
-      --no-description         Remove the description
-      --unset-env <KEY>        Remove an environment variable (repeatable); one that is not set is left alone
-      --env <KEY=VALUE>        Set an environment variable, `KEY=VALUE` (repeatable)
-      --autostart              Start it with `muster up`
-      --no-autostart           Leave it out of `muster up`
-      --restart <POLICY>       What happens when its child exits [possible values: never, on-failure, always]
-      --stop-signal <SIGNAL>   The signal a graceful stop sends [possible values: terminate, interrupt]
-      --stop-grace <DURATION>  How long a graceful stop waits before it kills, such as `5s`
-      --json                   Print the result as JSON
-  -h, --help                   Print help
+      --command <CMD>             A new command, as one shell expression
+  -p, --project <PROJECT>         The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --cwd <DIR>                 A new working directory, read from the current folder
+      --no-cwd                    Run in the project's folder again
+      --description <TEXT>        A new one-line description
+      --no-description            Remove the description
+      --unset-env <KEY>           Remove an environment variable (repeatable); one that is not set is left alone
+      --no-ready                  Remove the readiness check
+      --env <KEY=VALUE>           Set an environment variable, `KEY=VALUE` (repeatable)
+      --autostart                 Start it with `muster up`
+      --no-autostart              Leave it out of `muster up`
+      --restart <POLICY>          What happens when its child exits [possible values: never, on-failure, always]
+      --stop-signal <SIGNAL>      The signal a graceful stop sends [possible values: terminate, interrupt]
+      --stop-grace <DURATION>     How long a graceful stop waits before it kills, such as `5s`
+      --ready-log <TEXT>          Ready once an output line contains this text; needs --ready-timeout
+      --ready-regex               Read --ready-log as a regular expression
+      --ready-port <PORT>         Ready once this localhost port accepts a connection; needs --ready-timeout
+      --ready-http <URL>          Ready once this localhost URL answers below 500; needs --ready-timeout
+      --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
+      --json                      Print the result as JSON
+  -h, --help                      Print help
 
 
 $ muster rm --help

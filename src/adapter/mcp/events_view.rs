@@ -2,7 +2,8 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{event_view::EventView, pending::EventPage};
+use super::event_view::EventView;
+use crate::adapter::service::EventPage;
 
 /// A page of stack events, as `stack_events` answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -23,7 +24,7 @@ impl From<&EventPage> for EventsView {
         Self {
             events: page.events().iter().map(EventView::from).collect(),
             cursor: page.cursor().to_string(),
-            gap: page.gap(),
+            gap: *page.gap(),
         }
     }
 }

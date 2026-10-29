@@ -3,8 +3,14 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::{
-    adapter::client::{ClientError, FailureKind},
-    domain::{config::ConfigError, value::ValueParseError},
+    adapter::{
+        client::{ClientError, FailureKind},
+        holder::PatternError,
+    },
+    domain::{
+        config::ConfigError,
+        value::{OutputCursor, ValueParseError},
+    },
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
@@ -52,6 +58,24 @@ pub enum ToolError {
         field: &'static str,
         /// What it accepts and what it got.
         reason: ValueParseError,
+    },
+    /// A log pattern was blank, too long, or a regex that does not compile.
+    #[error("invalid {field}: {source}")]
+    InvalidPattern {
+        /// The field.
+        field: &'static str,
+        /// Why the pattern is refused.
+        source: PatternError,
+    },
+    /// A cursor names output past the end of the process's log.
+    #[error(
+        "invalid since: {cursor} is past the end of the output, {end}; pass a cursor from an earlier result"
+    )]
+    CursorAhead {
+        /// The cursor given.
+        cursor: OutputCursor,
+        /// The end of the output.
+        end: OutputCursor,
     },
     /// A call that edits fields was given none to change.
     #[error("{0} changed nothing; pass at least one field to change")]
@@ -104,9 +128,6 @@ pub enum ToolError {
         /// The keys the project has.
         valid: Vec<String>,
     },
-    /// A feature a parallel package lands is not in this build yet.
-    #[error("{0} is not available in this muster build")]
-    Pending(&'static str),
 }
 
 impl ToolError {
@@ -120,10 +141,11 @@ impl ToolError {
             Self::UnknownTodo { .. } => FailureKind::UnknownTodo,
             Self::UnknownValue { .. } => FailureKind::UnknownKey,
             Self::NothingToChange(_) => FailureKind::Usage,
-            Self::Pending(_) => FailureKind::Io,
             Self::InvalidName(_)
             | Self::EmptyCommand
             | Self::InvalidField { .. }
+            | Self::InvalidPattern { .. }
+            | Self::CursorAhead { .. }
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
@@ -148,13 +170,14 @@ impl ToolError {
             | Self::InvalidName(_)
             | Self::EmptyCommand
             | Self::InvalidField { .. }
+            | Self::InvalidPattern { .. }
+            | Self::CursorAhead { .. }
             | Self::NothingToChange(_)
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
-            | Self::InvalidKvKey(_)
-            | Self::Pending(_) => Vec::new(),
+            | Self::InvalidKvKey(_) => Vec::new(),
         };
         names.into_iter().take(MAX_CANDIDATES).collect()
     }

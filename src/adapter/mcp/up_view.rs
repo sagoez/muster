@@ -2,7 +2,7 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::wait_view::WaitView;
+use super::agent_wait_view::AgentWaitView;
 use crate::{
     adapter::client::{ActionReport, NoticeView, Outcome, ProcessOutcome, ProjectIdentityView},
     domain::value::ProcessName,
@@ -28,12 +28,12 @@ pub struct UpView {
     /// Each wait, when the call waited.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[builder(default)]
-    waits: Vec<WaitView>,
+    waits: Vec<AgentWaitView>,
 }
 
 impl UpView {
     /// The view with `waits`, one per process the call waited on.
-    pub fn with_waits(mut self, waits: Vec<WaitView>) -> Self {
+    pub fn with_waits(mut self, waits: Vec<AgentWaitView>) -> Self {
         self.waits = waits;
         self
     }

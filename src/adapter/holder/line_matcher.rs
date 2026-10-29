@@ -1,7 +1,7 @@
 use regex::{Regex, RegexBuilder};
 
 use super::pattern_error::PatternError;
-use crate::domain::process::{LogPattern, PatternKind};
+use crate::domain::process::{LogPattern, PatternKind, PatternText};
 
 /// The most memory a compiled regex may take, so a pathological pattern is
 /// refused rather than stalling whoever compiles it.
@@ -22,6 +22,20 @@ enum Matcher {
 pub struct LineMatcher(Matcher);
 
 impl LineMatcher {
+    /// The pattern `text` matched as `kind`, checked by compiling it, so a
+    /// pattern refused here is never stored or sent.
+    ///
+    /// # Errors
+    /// Returns [`PatternError::Malformed`] for blank or overlong text and
+    /// [`PatternError::InvalidRegex`] for a regex that does not compile.
+    pub fn checked(text: &str, kind: PatternKind) -> Result<LogPattern, PatternError> {
+        let text =
+            PatternText::try_new(text).map_err(|_| PatternError::Malformed(text.to_string()))?;
+        let pattern = LogPattern::builder().text(text).kind(kind).build();
+        Self::compile(&pattern)?;
+        Ok(pattern)
+    }
+
     /// Compiles `pattern`, bounding a regex's compiled size by
     /// [`REGEX_SIZE_LIMIT`].
     ///
@@ -95,5 +109,23 @@ mod tests {
             "{error}"
         );
         assert!(LineMatcher::compile(&pattern(r"\w{1000}{1000}", PatternKind::Regex)).is_err());
+    }
+
+    /// A checked pattern is trimmed and compiled; blank text and a regex
+    /// that does not compile are refused before anything stores them.
+    #[test]
+    fn a_checked_pattern_is_trimmed_and_compiled() {
+        assert_eq!(
+            LineMatcher::checked(" ready ", PatternKind::Substring).unwrap(),
+            pattern("ready", PatternKind::Substring)
+        );
+        assert_eq!(
+            LineMatcher::checked("  ", PatternKind::Substring),
+            Err(PatternError::Malformed("  ".to_string()))
+        );
+        assert!(matches!(
+            LineMatcher::checked("(unclosed", PatternKind::Regex),
+            Err(PatternError::InvalidRegex { .. })
+        ));
     }
 }

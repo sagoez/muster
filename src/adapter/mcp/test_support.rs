@@ -90,6 +90,29 @@ pub fn fixture() -> Fixture {
     let root = ProjectRoot::try_new(fs::canonicalize(&folder).unwrap()).unwrap();
     let store = SqliteStore::open(&dir.path().join(DATABASE)).unwrap();
     let notifier = Arc::new(RecordingNotifier::default());
+    let server = serving(&root, &store, &notifier, AGENT);
+    Fixture {
+        _dir: dir,
+        root,
+        store,
+        notifier,
+        server,
+    }
+}
+
+/// A second server in `fixture`'s folder and database, writing as `agent`.
+pub fn server_as(fixture: &Fixture, agent: &str) -> MusterMcp {
+    serving(&fixture.root, &fixture.store, &fixture.notifier, agent)
+}
+
+/// A server started in `root` over `store`, telling `notifier` of its edits
+/// and writing as `agent`.
+fn serving(
+    root: &ProjectRoot,
+    store: &SqliteStore,
+    notifier: &Arc<RecordingNotifier>,
+    agent: &str,
+) -> MusterMcp {
     let deps = McpDeps::builder()
         .scope(
             Scope::builder()
@@ -97,7 +120,7 @@ pub fn fixture() -> Fixture {
                 .base(root.as_ref().clone())
                 .build(),
         )
-        .agent(Some(AGENT.to_string()))
+        .agent(Some(agent.to_string()))
         .service(Arc::new(NoService))
         .projects(Arc::new(store.clone()))
         .coordination(Arc::new(store.clone()))
@@ -105,13 +128,7 @@ pub fn fixture() -> Fixture {
         .settings(Arc::new(store.clone()))
         .notifier(notifier.clone())
         .build();
-    Fixture {
-        _dir: dir,
-        root,
-        store,
-        notifier,
-        server: MusterMcp::new(deps),
-    }
+    MusterMcp::new(deps)
 }
 
 /// `process_add` arguments for `name` running `command`.

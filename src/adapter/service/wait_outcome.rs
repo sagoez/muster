@@ -29,6 +29,14 @@ pub enum WaitStatus {
     ReadyTimeout,
 }
 
+impl WaitStatus {
+    /// Whether the wait ended in a way the caller must act on: anything but
+    /// a match or a wait that ran out of time.
+    pub fn is_failure(self) -> bool {
+        !matches!(self, Self::Matched | Self::Waiting)
+    }
+}
+
 /// The output line that satisfied a wait.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]

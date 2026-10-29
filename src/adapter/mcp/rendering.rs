@@ -1,8 +1,10 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
-use super::pending::{LogSlice, WaitOutcome};
-use crate::{adapter::sanitize::printable_lines, domain::value::ProcessName};
+use crate::{
+    adapter::{holder::LogSlice, sanitize::printable_lines, service::WaitOutcome},
+    domain::value::ProcessName,
+};
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;
@@ -64,14 +66,14 @@ pub fn tail_text(outcome: &WaitOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::mcp::pending::OutputCursor;
+    use crate::domain::value::OutputCursor;
 
     /// A log reads as its header, the omission marker and its lines.
     #[test]
     fn a_log_reads_as_a_header_and_its_lines() {
         let slice = LogSlice::builder()
-            .from(OutputCursor::at(16010))
-            .cursor(OutputCursor::at(18234))
+            .from(OutputCursor::new(16010))
+            .cursor(OutputCursor::new(18234))
             .lines(vec![
                 "Listening on 3000".to_string(),
                 "GET / 200".to_string(),

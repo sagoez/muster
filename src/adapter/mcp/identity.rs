@@ -6,8 +6,7 @@ use std::{
     },
 };
 
-use super::pending::AgentId;
-use crate::domain::coordination::Author;
+use crate::domain::coordination::{AgentId, Author};
 
 /// Who one MCP connection writes as, resolved once the client has named
 /// itself, and whether it has been told yet.

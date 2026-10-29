@@ -7,13 +7,11 @@ use super::{args::WaitArgs, error::CliError};
 use crate::{
     adapter::{
         client::ClientError,
+        holder::LineMatcher,
         sanitize::printable,
         service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
     },
-    domain::{
-        process::{LogPattern, PatternKind, PatternText},
-        value::OutputCursor,
-    },
+    domain::{process::PatternKind, value::OutputCursor},
 };
 
 /// Longest one wait request asks the service for; a longer wait is a series
@@ -25,19 +23,14 @@ const LINE_INDENT: &str = "  ";
 /// What `args` asks to wait for, or `None` for the process's default.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidPattern`] for a blank or overlong `--log`.
+/// Returns [`CliError::InvalidPattern`] for a blank or overlong `--log`, or
+/// a `--regex` that does not compile.
 pub fn condition(args: &WaitArgs) -> Result<Option<WaitCondition>, CliError> {
     if let Some(log) = &args.log {
-        let text = PatternText::try_new(log.as_str())
-            .map_err(|_| CliError::InvalidPattern(log.clone()))?;
-        let kind = if args.regex {
-            PatternKind::Regex
-        } else {
-            PatternKind::Substring
-        };
-        return Ok(Some(WaitCondition::Log(
-            LogPattern::builder().text(text).kind(kind).build(),
-        )));
+        return Ok(Some(WaitCondition::Log(LineMatcher::checked(
+            log,
+            PatternKind::of_regex(args.regex),
+        )?)));
     }
     Ok(args
         .port

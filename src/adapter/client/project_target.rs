@@ -78,8 +78,9 @@ impl ProjectTarget {
 /// the root muster exports to each process (`env_project`), then the
 /// deepest registered project containing `cwd`, else `cwd` unregistered.
 /// A `--project` naming a folder (it contains `/` or starts with `.` or `~`)
-/// is read against `cwd`; anything else is a registered project's name.
-/// There is no fallback to some other registered project.
+/// is read against `cwd`, unless no such folder exists and a registered
+/// project has that name, as `.dotfiles` may; anything else is a registered
+/// project's name. There is no fallback to some other registered project.
 ///
 /// # Errors
 /// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
@@ -95,7 +96,13 @@ pub fn resolve_project(
         if !names_a_folder(value) {
             return named(value, projects);
         }
-        return folder(&cwd.join(expand_home(Path::new(value))), projects);
+        let path = cwd.join(expand_home(Path::new(value)));
+        if !path.is_dir()
+            && let Some(project) = registered_named(value, projects)?
+        {
+            return Ok(ProjectTarget::Registered(project));
+        }
+        return folder(&path, projects);
     }
     if let Some(root) = env_project {
         return folder(&cwd.join(root), projects);
@@ -117,11 +124,7 @@ pub fn env_project(value: Option<PathBuf>) -> Option<PathBuf> {
 /// Returns [`ResolveError::UnknownProject`] listing the registered names
 /// when none is.
 fn named(value: &str, projects: &dyn ProjectStore) -> Result<ProjectTarget, ResolveError> {
-    let found = match ProjectName::try_new(value) {
-        Ok(name) => projects.project_named(&name)?,
-        Err(_) => None,
-    };
-    match found {
+    match registered_named(value, projects)? {
         Some(project) => Ok(ProjectTarget::Registered(project)),
         None => Err(ResolveError::UnknownProject {
             name: value.to_string(),
@@ -131,6 +134,20 @@ fn named(value: &str, projects: &dyn ProjectStore) -> Result<ProjectTarget, Reso
                 .map(|project| project.name().clone())
                 .collect(),
         }),
+    }
+}
+
+/// The registered project called `value`, if any.
+///
+/// # Errors
+/// Returns the store's failure.
+fn registered_named(
+    value: &str,
+    projects: &dyn ProjectStore,
+) -> Result<Option<Project>, ResolveError> {
+    match ProjectName::try_new(value) {
+        Ok(name) => Ok(projects.project_named(&name)?),
+        Err(_) => Ok(None),
     }
 }
 
@@ -337,6 +354,33 @@ mod tests {
             ProjectTarget::Registered(project("gone", &gone))
         );
         assert!(resolve_project(Some("./missing"), None, &base, &projects).is_err());
+    }
+
+    /// A registered name starting with `.` or `~` is found by name when no
+    /// such folder exists; an existing folder of that name still wins.
+    #[test]
+    fn a_dotted_name_is_a_name_when_no_such_folder_exists() {
+        let (_scratch, base) = tree();
+        let dotfiles = project(".dotfiles", &base.join("shop"));
+        let tilde = project("~notes", &base.join("shop/web"));
+        let projects = Projects(vec![dotfiles.clone(), tilde.clone()]);
+
+        assert_eq!(
+            resolve_project(Some(".dotfiles"), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(dotfiles)
+        );
+        assert_eq!(
+            resolve_project(Some("~notes"), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(tilde)
+        );
+        fs::create_dir(base.join("elsewhere/.dotfiles")).unwrap();
+        assert_eq!(
+            resolve_project(Some(".dotfiles"), None, &base.join("elsewhere"), &projects).unwrap(),
+            ProjectTarget::Unregistered(
+                ProjectRoot::try_new(base.join("elsewhere/.dotfiles")).unwrap()
+            )
+        );
+        assert!(resolve_project(Some(".missing"), None, &base, &projects).is_err());
     }
 
     /// Only a non-empty `MUSTER_PROJECT` names a project.

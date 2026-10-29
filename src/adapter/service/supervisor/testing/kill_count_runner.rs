@@ -1,5 +1,8 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::kill_count_handle::KillCountHandle;
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
@@ -7,8 +10,10 @@ use crate::domain::{
 };
 
 /// A runner whose handles count how many times they are killed.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct KillCountRunner {
-    pub(crate) kills: Arc<AtomicUsize>,
+    kills: Arc<AtomicUsize>,
 }
 
 impl ProcessRunner for KillCountRunner {
@@ -17,8 +22,8 @@ impl ProcessRunner for KillCountRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(KillCountHandle {
-            kills: self.kills.clone(),
-        }))
+        Ok(Box::new(
+            KillCountHandle::builder().kills(self.kills.clone()).build(),
+        ))
     }
 }

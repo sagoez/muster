@@ -148,9 +148,9 @@ fn json_requested() -> bool {
 /// Runs the command `args` names on `ports`, printing its result and exiting
 /// with the code its outcome documents.
 pub fn run(args: Args, ports: &dyn CliPorts) {
-    let invocation = Invocation::new(args.project, ports);
+    let invocation = Invocation::new(args.project().clone(), ports);
     let invocation = &invocation;
-    match args.command {
+    match args.into_command() {
         Some(Command::Ps {
             all,
             commands,
@@ -177,12 +177,12 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             |_, client, project, watch| Ok(process::down(client, project, watch)?),
         ),
         Some(Command::Start(args)) => start(invocation, args, ProcessAction::Start),
-        Some(Command::Stop(target)) => control(invocation, target, ProcessAction::Stop),
+        Some(Command::Stop(target)) => control(invocation, &target, ProcessAction::Stop),
         Some(Command::Restart(args)) => start(invocation, args, ProcessAction::Restart),
         Some(Command::Wait(args)) => wait(invocation, args),
-        Some(Command::Pause(target)) => control(invocation, target, ProcessAction::Pause),
-        Some(Command::Resume(target)) => control(invocation, target, ProcessAction::Resume),
-        Some(Command::Kill(target)) => control(invocation, target, ProcessAction::Kill),
+        Some(Command::Pause(target)) => control(invocation, &target, ProcessAction::Pause),
+        Some(Command::Resume(target)) => control(invocation, &target, ProcessAction::Resume),
+        Some(Command::Kill(target)) => control(invocation, &target, ProcessAction::Kill),
         Some(Command::Logs {
             name, filter, json, ..
         }) if !filter.is_empty() => filtered_logs(invocation, name, &filter, json),
@@ -201,7 +201,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Notices { json }) => notices(invocation, json),
         Some(Command::Service { command }) => service(invocation, command),
         Some(Command::Add(args)) => {
-            let json = args.json;
+            let json = args.json();
             let presenter = Presenter::detect(json);
             match add(invocation, args) {
                 Ok(view) => {
@@ -450,8 +450,8 @@ fn asking_first(
 
 /// Applies a lifecycle `action` to the process `target` names, or to the one
 /// chosen at a terminal when it names none.
-fn control(invocation: &Invocation<'_>, target: ProcessArgs, action: ProcessAction) {
-    let ProcessArgs { name, json } = target;
+fn control(invocation: &Invocation<'_>, target: &ProcessArgs, action: ProcessAction) {
+    let (name, json) = (target.name().clone(), target.json());
     let presenter = asking_first(
         Presenter::detect(json),
         json,
@@ -473,15 +473,12 @@ fn control(invocation: &Invocation<'_>, target: ProcessArgs, action: ProcessActi
 /// Starts or restarts the process `args` names, then, with `--wait`, waits
 /// for its new run to be ready.
 fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
-    let StartArgs {
-        target,
-        wait,
-        timeout,
-    } = args;
-    if !wait {
-        return control(invocation, target, action);
+    let timeout = *args.timeout();
+    if !args.wait() {
+        return control(invocation, args.target(), action);
     }
-    let ProcessArgs { name, json } = target;
+    let target = args.target();
+    let (name, json) = (target.name().clone(), target.json());
     let presenter = asking_first(
         Presenter::detect(json),
         json,
@@ -507,24 +504,24 @@ fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
 /// Waits for what `args` names on its process, chosen at a terminal when it
 /// names none.
 fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
-    let json = args.json;
+    let json = args.json();
     let presenter = asking_first(
         Presenter::detect(json),
         json,
-        args.name.is_none(),
+        args.name().is_none(),
         Presenter::can_choose_process,
     );
     let until = condition(&args).unwrap_or_else(|error| fail_command(json, &error));
     let project = project_or_fail(invocation, json);
     let result = invocation.connect().and_then(|client| {
-        let name = named_or_chosen(&project, args.name.as_ref(), presenter)(&process::status(
+        let name = named_or_chosen(&project, args.name().as_ref(), presenter)(&process::status(
             &client, &project,
         )?)?;
         let send = |spec: &WaitSpec| process::wait(&client, &project, &name, spec);
         Ok(wait_through(
             until,
-            args.since,
-            args.timeout.map(PositiveDuration::into_inner),
+            *args.since(),
+            args.timeout().map(PositiveDuration::into_inner),
             send,
             send,
         )?)
@@ -796,7 +793,7 @@ fn service(invocation: &Invocation<'_>, command: ServiceCommand) {
 /// `muster set`: the change, then whether a running process waits for its
 /// next start to take it.
 fn change(invocation: &Invocation<'_>, args: SetArgs) {
-    let json = args.json;
+    let json = args.json();
     let presenter = Presenter::detect(json);
     match set(invocation, args) {
         Ok(view) => print_result(json, &view, |view| written(presenter.show(&set_rows(view)))),
@@ -1023,7 +1020,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
 /// the service reached next, so neither a bad command line nor a service
 /// that cannot start leaves anything added.
 fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
-    let json = args.json;
+    let json = args.json();
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
         let plan = RunPlan::prepare(invocation, store.as_ref(), args)?;

@@ -8,6 +8,7 @@ use clap::{
     },
 };
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
+use getset::Getters;
 use strum::IntoEnumIterator;
 
 use super::{cli_ports::CliPorts, command::Command};
@@ -159,7 +160,7 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
 
 /// Command-line arguments. With no subcommand, muster prints `ps` for the
 /// current project, or every loaded project outside one.
-#[derive(Parser)]
+#[derive(Parser, Getters)]
 #[command(
     name = APP_NAME,
     bin_name = APP_NAME,
@@ -175,18 +176,24 @@ pub struct Args {
     // Global, so it is recognized before or after a subcommand rather than
     // being swallowed by `run`'s command words.
     #[arg(short, long, global = true, value_name = "PROJECT")]
-    pub project: Option<String>,
+    #[getset(get = "pub")]
+    project: Option<String>,
+    /// The command to run; none prints `ps`.
     #[command(subcommand)]
-    pub command: Option<Command>,
+    command: Option<Command>,
+}
+
+impl Args {
+    /// The command to run, taken out of the arguments to be dispatched.
+    pub fn into_command(self) -> Option<Command> {
+        self.command
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::{
-        cli::process_args::ProcessArgs, holder::HOLDER_SUBCOMMAND,
-        service::protocol::SERVICE_SUBCOMMAND,
-    };
+    use crate::adapter::{holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND};
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.
@@ -237,10 +244,11 @@ mod tests {
     #[test]
     fn names_with_spaces_and_unicode_parse_as_one_argument() {
         let args = Args::try_parse_from(["muster", "stop", "dev server", "--json"]).unwrap();
-        assert!(matches!(
-            args.command,
-            Some(Command::Stop(ProcessArgs { name: Some(name), json: true })) if name.as_ref() == "dev server"
-        ));
+        let Some(Command::Stop(stop)) = args.command else {
+            panic!("stop parses");
+        };
+        assert!(stop.json());
+        assert_eq!(stop.name().as_ref().map(AsRef::as_ref), Some("dev server"));
         let args = Args::try_parse_from(["muster", "logs", "cafe\u{301}", "-f"]).unwrap();
         assert!(matches!(
             args.command,
@@ -288,10 +296,10 @@ mod tests {
         let Some(Command::Add(add)) = args.command else {
             panic!("add parses");
         };
-        assert_eq!(add.name, "web");
-        assert_eq!(add.command, ["npm", "run", "dev"]);
-        assert_eq!(add.flags.restart, Some(RestartPolicy::OnFailure));
-        assert_eq!(add.flags.autostart(), Some(false));
+        assert_eq!(add.name(), "web");
+        assert_eq!(add.command(), &["npm", "run", "dev"]);
+        assert_eq!(add.flags().restart(), Some(RestartPolicy::OnFailure));
+        assert_eq!(add.flags().autostart(), Some(false));
         assert!(Args::try_parse_from(["muster", "add", "web"]).is_err());
         assert!(
             Args::try_parse_from(["muster", "add", "web", "--restart", "sometimes", "--", "x"])

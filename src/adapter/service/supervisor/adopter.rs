@@ -607,18 +607,7 @@ mod tests {
 
     /// `harness` able to adopt through `adopter`.
     fn with_adopter(harness: Harness, adopter: Box<dyn HolderAdopter>) -> Harness {
-        let Harness {
-            supervisor,
-            events,
-            notices,
-            event_log,
-        } = harness;
-        Harness {
-            supervisor: supervisor.with_adopter(adopter),
-            events,
-            notices,
-            event_log,
-        }
+        harness.adopting_through(adopter)
     }
 
     /// A harness over `p`, restarting always, that can adopt holders.
@@ -669,24 +658,26 @@ mod tests {
     #[test]
     fn adopted_process_is_running_with_its_pid_and_restart_policy_applies_on_its_exit() {
         let spawns = SpawnRecorder::default();
-        let mut harness = adopting(Box::new(RequestRecordingRunner {
-            recorder: spawns.clone(),
-        }));
+        let mut harness = adopting(Box::new(
+            RequestRecordingRunner::builder()
+                .recorder(spawns.clone())
+                .build(),
+        ));
         let pane = PaneId::new(PANE);
 
-        harness.supervisor.adopt(record("p"));
+        harness.supervisor_mut().adopt(record("p"));
         harness.up();
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Running);
         assert_eq!(*status.processes()[0].pid(), Some(fake_launcher_pid()));
         assert!(
-            spawns.requests.borrow().is_empty(),
+            spawns.requests().borrow().is_empty(),
             "up leaves an adopted process running rather than starting another"
         );
 
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
@@ -697,12 +688,14 @@ mod tests {
             pane: respawned,
             generation,
             ..
-        }) = harness.events.recv_timeout(RESPAWN_WAIT)
+        }) = harness.events().recv_timeout(RESPAWN_WAIT)
         else {
             panic!("the restart policy schedules a respawn");
         };
-        harness.supervisor.handle_respawn(respawned, generation);
-        let requests = spawns.requests.borrow();
+        harness
+            .supervisor_mut()
+            .handle_respawn(respawned, generation);
+        let requests = spawns.requests().borrow();
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0]
@@ -725,13 +718,13 @@ mod tests {
                 "true",
                 RestartPolicy::Never,
             )]),
-            Box::new(SignalAdopter(Arc::clone(&signals))),
+            Box::new(SignalAdopter::new(Arc::clone(&signals))),
         );
 
-        harness.supervisor.adopt(record("gone"));
+        harness.supervisor_mut().adopt(record("gone"));
 
         let gone = harness
-            .supervisor
+            .supervisor_mut()
             .workspace()
             .processes()
             .iter()
@@ -739,16 +732,16 @@ mod tests {
             .map(|process| *process.id())
             .expect("the removed process has a row while it stops");
         assert_eq!(
-            *signals.termination.lock().unwrap(),
+            *signals.termination().lock().unwrap(),
             Some((StopSignal::Interrupt, STOP_GRACE)),
             "stopped through the recorded stop policy"
         );
         assert_eq!(
             harness
-                .notices
+                .notices()
                 .lock()
                 .unwrap()
-                .recent(harness.supervisor.root())[0]
+                .recent(harness.supervisor().root())[0]
                 .process(),
             &Some(name("gone"))
         );
@@ -757,14 +750,14 @@ mod tests {
                 .notice_messages()
                 .contains(&ADOPT_REMOVED_NOTICE.to_string())
         );
-        let generation = harness.supervisor.generations()[&gone];
-        harness.supervisor.handle_output(
+        let generation = harness.supervisor_mut().generations()[&gone];
+        harness.supervisor_mut().handle_output(
             gone,
             generation,
             ProcessOutput::Exited(ExitOutcome::Succeeded),
         );
-        assert!(harness.supervisor.workspace().process(gone).is_none());
-        assert_eq!(harness.supervisor.process_names(), vec![p()]);
+        assert!(harness.supervisor_mut().workspace().process(gone).is_none());
+        assert_eq!(harness.supervisor_mut().process_names(), vec![p()]);
     }
 
     /// A record naming an already supervised process whose child is gone is
@@ -777,8 +770,8 @@ mod tests {
         harness.up();
 
         harness
-            .supervisor
-            .adopt(record_at("p", gone_pid(), &holder.socket));
+            .supervisor_mut()
+            .adopt(record_at("p", gone_pid(), holder.socket()));
 
         assert!(holder.was_collected());
         assert!(
@@ -799,16 +792,18 @@ mod tests {
                 "true",
                 RestartPolicy::Never,
             )]),
-            Box::new(ReconnectingAdopter {
-                record: None,
-                refuses: true,
-                adoptions: Rc::new(Cell::new(0)),
-            }),
+            Box::new(
+                ReconnectingAdopter::builder()
+                    .record(None)
+                    .refuses(true)
+                    .adoptions(Rc::new(Cell::new(0)))
+                    .build(),
+            ),
         );
 
         harness
-            .supervisor
-            .adopt(record_at("p", gone_pid(), &holder.socket));
+            .supervisor_mut()
+            .adopt(record_at("p", gone_pid(), holder.socket()));
 
         assert!(holder.was_collected());
         let messages = harness.notice_messages();
@@ -841,10 +836,12 @@ mod tests {
         let spawns = Arc::new(AtomicUsize::new(0));
         let harness = with_adopter(
             Harness::over(
-                Box::new(FixedPidRunner {
-                    pid,
-                    spawns: spawns.clone(),
-                }),
+                Box::new(
+                    FixedPidRunner::builder()
+                        .pid(pid)
+                        .spawns(spawns.clone())
+                        .build(),
+                ),
                 &[graceful_spec("true")],
             ),
             Box::new(adopter),
@@ -873,13 +870,13 @@ mod tests {
         let deadline = Instant::now() + SETTLE_WAIT;
         while !done(harness) {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match harness.events.recv_timeout(remaining) {
+            match harness.events().recv_timeout(remaining) {
                 Ok(ServiceEvent::ForceStop {
                     pane,
                     spawn_generation,
                     shutdown_generation,
                     ..
-                }) => harness.supervisor.handle_force_stop(
+                }) => harness.supervisor_mut().handle_force_stop(
                     pane,
                     spawn_generation,
                     shutdown_generation,
@@ -893,12 +890,17 @@ mod tests {
     /// A supervisor of `p` (graceful stop) left running unsupervised as
     /// `orphan` by an adoption that failed at startup, plus its spawn count.
     fn configured_unsupervised(orphan: &Orphan) -> (Harness, Arc<AtomicUsize>) {
-        let (mut harness, spawns) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
-            record: None,
-            refuses: true,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.adopt(record_with_pid("p", orphan.pid()));
+        let (mut harness, spawns) = reconnectable_over(
+            orphan.pid(),
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(true)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness
+            .supervisor_mut()
+            .adopt(record_with_pid("p", orphan.pid()));
         assert_eq!(state(&harness), ProcessState::Unsupervised);
         (harness, spawns)
     }
@@ -912,15 +914,15 @@ mod tests {
         orphan: &Orphan,
     ) {
         assert_eq!(state(harness), ProcessState::Unsupervised);
-        assert!(!harness.supervisor.is_live(PaneId::new(PANE)));
+        assert!(!harness.supervisor_mut().is_live(PaneId::new(PANE)));
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].pid(),
+            *harness.supervisor_mut().snapshot().processes()[0].pid(),
             Some(orphan.pid())
         );
         let spawned = spawns.load(Ordering::SeqCst);
 
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
 
         assert_eq!(spawns.load(Ordering::SeqCst), spawned, "no second copy");
         assert_eq!(state(harness), ProcessState::Unsupervised);
@@ -931,7 +933,7 @@ mod tests {
                 .any(|message| message.ends_with(&orphan.pid().to_string()))
         );
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(state(harness), ProcessState::Stopping);
         assert!(orphan.alive(), "the graceful signal is ignored");
 
@@ -941,13 +943,13 @@ mod tests {
 
     /// The current generation of [`PANE`].
     fn generation(harness: &Harness) -> SpawnGeneration {
-        harness.supervisor.generations()[&PaneId::new(PANE)]
+        harness.supervisor().generations()[&PaneId::new(PANE)]
     }
 
     /// The state of `p`.
     fn state(harness: &Harness) -> ProcessState {
         *harness
-            .supervisor
+            .supervisor()
             .workspace()
             .process(PaneId::new(PANE))
             .unwrap()
@@ -957,7 +959,7 @@ mod tests {
     /// The state of the process on `pane`, while it has a row.
     fn state_of(harness: &Harness, pane: PaneId) -> Option<ProcessState> {
         harness
-            .supervisor
+            .supervisor()
             .workspace()
             .process(pane)
             .map(|process| *process.state())
@@ -966,7 +968,7 @@ mod tests {
     /// Reports `p`'s output stream as broken.
     fn break_stream(harness: &mut Harness) {
         let current = generation(harness);
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             PaneId::new(PANE),
             current,
             ProcessOutput::Unreadable("bad frame".to_string()),
@@ -978,40 +980,46 @@ mod tests {
     #[test]
     fn an_unreadable_stream_reconnects_and_a_later_stop_observes_the_exit() {
         let adoptions = Rc::new(Cell::new(0));
-        let mut harness = reconnectable(ReconnectingAdopter {
-            record: Some(record("p")),
-            refuses: false,
-            adoptions: adoptions.clone(),
-        });
+        let mut harness = reconnectable(
+            ReconnectingAdopter::builder()
+                .record(Some(record("p")))
+                .refuses(false)
+                .adoptions(adoptions.clone())
+                .build(),
+        );
         let pane = PaneId::new(PANE);
         let broken = generation(&harness);
 
         break_stream(&mut harness);
 
         assert_eq!(adoptions.get(), 1);
-        assert!(harness.supervisor.is_live(pane));
+        assert!(harness.supervisor_mut().is_live(pane));
         assert_eq!(state(&harness), ProcessState::Running);
         let current = generation(&harness);
         assert_ne!(current, broken);
-        harness
-            .supervisor
-            .handle_output(pane, broken, ProcessOutput::Chunk(b"stale".to_vec()));
-        harness
-            .supervisor
-            .handle_output(pane, current, ProcessOutput::Chunk(b"fresh".to_vec()));
+        harness.supervisor_mut().handle_output(
+            pane,
+            broken,
+            ProcessOutput::Chunk(b"stale".to_vec()),
+        );
+        harness.supervisor_mut().handle_output(
+            pane,
+            current,
+            ProcessOutput::Chunk(b"fresh".to_vec()),
+        );
         let tail = harness.run_tail(pane);
         assert!(tail.iter().any(|line| line.contains("fresh")), "{tail:?}");
         assert!(!tail.iter().any(|line| line.contains("stale")), "{tail:?}");
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         let current = generation(&harness);
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             pane,
             current,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
         assert_eq!(state(&harness), ProcessState::Exited);
-        assert!(!harness.supervisor.is_live(pane));
+        assert!(!harness.supervisor_mut().is_live(pane));
     }
 
     /// A graceful stop already delivered when the stream breaks carries over
@@ -1019,18 +1027,20 @@ mod tests {
     /// settles as a stop rather than a restart.
     #[test]
     fn a_stop_in_flight_survives_a_reconnect() {
-        let mut harness = reconnectable(ReconnectingAdopter {
-            record: Some(record("p")),
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.stop(&p());
+        let mut harness = reconnectable(
+            ReconnectingAdopter::builder()
+                .record(Some(record("p")))
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness.supervisor_mut().stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Stopping);
         let current = generation(&harness);
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             PaneId::new(PANE),
             current,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
@@ -1038,7 +1048,10 @@ mod tests {
 
         assert_eq!(state(&harness), ProcessState::Exited);
         assert!(
-            !matches!(harness.events.try_recv(), Ok(ServiceEvent::Respawn { .. })),
+            !matches!(
+                harness.events().try_recv(),
+                Ok(ServiceEvent::Respawn { .. })
+            ),
             "no restart is scheduled"
         );
     }
@@ -1052,11 +1065,14 @@ mod tests {
         for refuses in [false, true] {
             let orphan = Orphan::spawn();
             let record = record_with_pid("p", orphan.pid());
-            let (mut harness, spawns) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
-                record: refuses.then_some(record),
-                refuses,
-                adoptions: Rc::new(Cell::new(0)),
-            });
+            let (mut harness, spawns) = reconnectable_over(
+                orphan.pid(),
+                ReconnectingAdopter::builder()
+                    .record(refuses.then_some(record))
+                    .refuses(refuses)
+                    .adoptions(Rc::new(Cell::new(0)))
+                    .build(),
+            );
             harness.up();
 
             break_stream(&mut harness);
@@ -1080,23 +1096,26 @@ mod tests {
             let orphan = Orphan::spawn();
             let record = record_with_pid("p", orphan.pid());
             let attempts = Rc::new(Cell::new(0));
-            let (mut harness, spawns) = reconnectable_over(orphan.pid(), RecoveringAdopter {
-                record: record.clone(),
-                attempts: Rc::clone(&attempts),
-            });
-            harness.supervisor.adopt(record);
+            let (mut harness, spawns) = reconnectable_over(
+                orphan.pid(),
+                RecoveringAdopter::builder()
+                    .record(record.clone())
+                    .attempts(Rc::clone(&attempts))
+                    .build(),
+            );
+            harness.supervisor_mut().adopt(record);
             assert_eq!(state(&harness), ProcessState::Unsupervised);
 
             if retry_by_start {
-                harness.supervisor.start(&p(), &no_env());
+                harness.supervisor_mut().start(&p(), &no_env());
             } else {
-                harness.supervisor.retry_adoptions();
+                harness.supervisor_mut().retry_adoptions();
             }
 
             assert_eq!(state(&harness), ProcessState::Running, "{retry_by_start}");
             assert_eq!(attempts.get(), 2);
             assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
-            harness.supervisor.retry_adoptions();
+            harness.supervisor_mut().retry_adoptions();
             assert_eq!(attempts.get(), 2, "a supervised child is left alone");
         }
     }
@@ -1119,11 +1138,14 @@ mod tests {
     #[test]
     fn a_failed_reconnect_of_a_gone_child_settles_as_an_exit() {
         let pid = gone_pid();
-        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
-            record: None,
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
+        let (mut harness, spawns) = reconnectable_over(
+            pid,
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
         harness.up();
 
         break_stream(&mut harness);
@@ -1135,7 +1157,7 @@ mod tests {
                 && message.ends_with(&pid.to_string())
         }));
         let respawn = loop {
-            match harness.events.recv_timeout(RESPAWN_WAIT) {
+            match harness.events().recv_timeout(RESPAWN_WAIT) {
                 Ok(ServiceEvent::Respawn {
                     pane, generation, ..
                 }) => break (pane, generation),
@@ -1143,7 +1165,9 @@ mod tests {
                 Err(_) => panic!("the restart policy schedules a respawn"),
             }
         };
-        harness.supervisor.handle_respawn(respawn.0, respawn.1);
+        harness
+            .supervisor_mut()
+            .handle_respawn(respawn.0, respawn.1);
         assert_eq!(spawns.load(Ordering::SeqCst), 2);
     }
 
@@ -1152,14 +1176,16 @@ mod tests {
     /// uptime still counts from its real start.
     #[test]
     fn a_reconnect_keeps_stack_membership_and_start_time() {
-        let mut harness = reconnectable(ReconnectingAdopter {
-            record: Some(record("p")),
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
+        let mut harness = reconnectable(
+            ReconnectingAdopter::builder()
+                .record(Some(record("p")))
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
         let pane = PaneId::new(PANE);
         let started_at = Instant::now() - EARLIER;
-        if let Some(target) = harness.supervisor.panes.get_mut(&pane) {
+        if let Some(target) = harness.supervisor_mut().panes.get_mut(&pane) {
             target
                 .set_config_membership(ConfigMembership::RetireOnExit)
                 .set_started_at(started_at);
@@ -1167,38 +1193,40 @@ mod tests {
 
         break_stream(&mut harness);
 
-        let target = &harness.supervisor.panes()[&pane];
+        let target = &harness.supervisor_mut().panes()[&pane];
         assert_eq!(target.config_membership(), ConfigMembership::RetireOnExit);
         assert!(
-            harness.supervisor.snapshot().processes()[0]
+            harness.supervisor_mut().snapshot().processes()[0]
                 .uptime()
                 .unwrap()
                 >= EARLIER
         );
         let current = generation(&harness);
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             pane,
             current,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
-        assert!(harness.supervisor.workspace().process(pane).is_none());
+        assert!(harness.supervisor_mut().workspace().process(pane).is_none());
     }
 
     /// A paused process reconnects paused, so a resume still reaches it.
     #[test]
     fn a_paused_process_reconnects_paused_and_resumes() {
-        let mut harness = reconnectable(ReconnectingAdopter {
-            record: Some(record("p")),
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.pause(&p());
+        let mut harness = reconnectable(
+            ReconnectingAdopter::builder()
+                .record(Some(record("p")))
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness.supervisor_mut().pause(&p());
         assert_eq!(state(&harness), ProcessState::Paused);
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Paused);
 
-        harness.supervisor.resume(&p());
+        harness.supervisor_mut().resume(&p());
         assert_eq!(state(&harness), ProcessState::Running);
     }
 
@@ -1211,20 +1239,20 @@ mod tests {
         let (mut harness, spawns) = configured_unsupervised(&orphan);
 
         harness
-            .supervisor
+            .supervisor_mut()
             .apply_stack(&stack(&[graceful_spec(OTHER_COMMAND)]));
 
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].pid(),
+            *harness.supervisor_mut().snapshot().processes()[0].pid(),
             Some(orphan.pid())
         );
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         harness.up();
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         drive_until_exited(&mut harness);
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "the new command starts");
     }
 
@@ -1235,8 +1263,11 @@ mod tests {
         let (mut harness, spawns) = configured_unsupervised(&orphan);
         assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
-        assert_eq!(*harness.supervisor.snapshot().processes()[0].pid(), None);
-        harness.supervisor.start(&p(), &no_env());
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].pid(),
+            None
+        );
+        harness.supervisor_mut().start(&p(), &no_env());
 
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert_eq!(state(&harness), ProcessState::Running);
@@ -1248,7 +1279,7 @@ mod tests {
     fn a_reused_pid_is_never_signalled() {
         let orphan = Orphan::spawn();
         let (mut harness, _) = configured_unsupervised(&orphan);
-        if let Some(target) = harness.supervisor.panes.get_mut(&PaneId::new(PANE)) {
+        if let Some(target) = harness.supervisor_mut().panes.get_mut(&PaneId::new(PANE)) {
             target.set_unsupervised(Some(
                 UnsupervisedChild::builder()
                     .pid(orphan.pid())
@@ -1257,7 +1288,7 @@ mod tests {
             ));
         }
 
-        harness.supervisor.force_kill(&p());
+        harness.supervisor_mut().force_kill(&p());
 
         assert_eq!(state(&harness), ProcessState::Exited);
         assert_eq!(
@@ -1272,12 +1303,14 @@ mod tests {
     /// still killed rather than left `Stopping`.
     #[test]
     fn a_reconnect_rearms_the_deadline_of_a_stop_in_flight() {
-        let mut harness = reconnectable(ReconnectingAdopter {
-            record: Some(record("p")),
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.stop(&p());
+        let mut harness = reconnectable(
+            ReconnectingAdopter::builder()
+                .record(Some(record("p")))
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness.supervisor_mut().stop(&p());
 
         break_stream(&mut harness);
 
@@ -1298,7 +1331,7 @@ mod tests {
         let orphan = Orphan::unreaped();
         let (mut harness, _) = configured_unsupervised(&orphan);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         drive_until(&mut harness, "the kills to give up", |harness| {
             state(harness) == ProcessState::Unsupervised
         });
@@ -1309,7 +1342,7 @@ mod tests {
                 .iter()
                 .any(|message| message.ends_with(&orphan.pid().to_string()))
         );
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(
             state(&harness),
             ProcessState::Stopping,
@@ -1328,22 +1361,28 @@ mod tests {
             .build();
         let mut harness = with_adopter(
             Harness::over(
-                Box::new(FixedPidRunner {
-                    pid: orphan.pid(),
-                    spawns: Arc::new(AtomicUsize::new(0)),
-                }),
+                Box::new(
+                    FixedPidRunner::builder()
+                        .pid(orphan.pid())
+                        .spawns(Arc::new(AtomicUsize::new(0)))
+                        .build(),
+                ),
                 &[spec("p", "true", RestartPolicy::Never).with_stop(long_grace)],
             ),
-            Box::new(ReconnectingAdopter {
-                record: None,
-                refuses: true,
-                adoptions: Rc::new(Cell::new(0)),
-            }),
+            Box::new(
+                ReconnectingAdopter::builder()
+                    .record(None)
+                    .refuses(true)
+                    .adoptions(Rc::new(Cell::new(0)))
+                    .build(),
+            ),
         );
-        harness.supervisor.adopt(record_with_pid("p", orphan.pid()));
+        harness
+            .supervisor_mut()
+            .adopt(record_with_pid("p", orphan.pid()));
         assert_eq!(state(&harness), ProcessState::Unsupervised);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
         let stopped = Instant::now();
         assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
@@ -1364,7 +1403,7 @@ mod tests {
         let (harness, _) = configured_unsupervised(&orphan);
         assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor().snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Exited);
         assert_eq!(*status.processes()[0].pid(), None);
     }
@@ -1376,11 +1415,11 @@ mod tests {
         let orphan = Orphan::spawn();
         let (mut harness, _) = configured_unsupervised(&orphan);
 
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().apply_stack(&stack(&[]));
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         drive_until(&mut harness, "the removed row to retire", |harness| {
-            harness.supervisor.workspace().is_empty()
+            harness.supervisor().workspace().is_empty()
         });
         assert!(!orphan.alive());
     }
@@ -1392,12 +1431,12 @@ mod tests {
         let orphan = Orphan::spawn();
         let (mut harness, spawns) = configured_unsupervised(&orphan);
         let old = PaneId::new(PANE);
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().apply_stack(&stack(&[]));
         assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
 
-        assert!(harness.supervisor.workspace().process(old).is_none());
+        assert!(harness.supervisor_mut().workspace().process(old).is_none());
         assert_eq!(spawns.load(Ordering::SeqCst), 0);
         assert_eq!(
             harness.notice_messages().last().map(String::as_str),
@@ -1411,11 +1450,14 @@ mod tests {
     #[test]
     fn an_unadoptable_record_whose_child_pid_was_reused_leaves_nothing_unsupervised() {
         let stranger = Orphan::spawn();
-        let (mut harness, spawns) = reconnectable_over(stranger.pid(), ReconnectingAdopter {
-            record: None,
-            refuses: true,
-            adoptions: Rc::new(Cell::new(0)),
-        });
+        let (mut harness, spawns) = reconnectable_over(
+            stranger.pid(),
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(true)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
         let record = HolderRecord::builder()
             .id(HolderId::generate().unwrap())
             .project(ProjectRoot::try_new(PathBuf::from(TEST_PROJECT)).unwrap())
@@ -1430,7 +1472,7 @@ mod tests {
             .child_started_at(SystemTime::now())
             .build();
 
-        harness.supervisor.adopt(record);
+        harness.supervisor_mut().adopt(record);
 
         assert_ne!(state(&harness), ProcessState::Unsupervised);
         assert!(
@@ -1439,7 +1481,7 @@ mod tests {
                 .iter()
                 .any(|message| message.contains(SINCE_EXITED))
         );
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert!(stranger.alive(), "the stranger is never signalled");
     }
@@ -1457,7 +1499,7 @@ mod tests {
         let deadline = Instant::now() + SETTLE_WAIT;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match harness.events.recv_timeout(remaining) {
+            match harness.events().recv_timeout(remaining) {
                 Ok(ServiceEvent::Adopted {
                     pane,
                     generation,
@@ -1479,21 +1521,21 @@ mod tests {
         let orphan = Orphan::spawn();
         let mut harness = with_adopter(
             Harness::over(Box::new(FakeRunner), &[]),
-            Box::new(FailingWorkerAdopter { record: None }),
+            Box::new(FailingWorkerAdopter::builder().record(None).build()),
         );
         harness
-            .supervisor
+            .supervisor_mut()
             .adopt(record_with_pid("gone", orphan.pid()));
         let pane = PaneId::new(PANE);
         assert_eq!(state_of(&harness, pane), Some(ProcessState::Starting));
 
         let (pane, generation, record, result) = adopted(&harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_adopted(pane, generation, &record, result);
 
         drive_until(&mut harness, "the removed row to retire", |harness| {
-            harness.supervisor.workspace().process(pane).is_none()
+            harness.supervisor().workspace().process(pane).is_none()
         });
         assert!(!orphan.alive(), "the child was killed");
     }
@@ -1503,23 +1545,28 @@ mod tests {
     #[test]
     fn a_restart_kept_through_a_failed_reconnect_is_applied() {
         let pid = gone_pid();
-        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
-            record: None,
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.adopter = Some(Box::new(FailingWorkerAdopter {
-            record: Some(record_with_pid("p", pid)),
-        }));
+        let (mut harness, spawns) = reconnectable_over(
+            pid,
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness.supervisor_mut().adopter = Some(Box::new(
+            FailingWorkerAdopter::builder()
+                .record(Some(record_with_pid("p", pid)))
+                .build(),
+        ));
         harness.up();
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
         let (pane, generation, record, result) = adopted(&harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_adopted(pane, generation, &record, result);
 
         assert_eq!(spawns.load(Ordering::SeqCst), 2, "the kept restart ran");
@@ -1532,23 +1579,28 @@ mod tests {
     #[test]
     fn a_pause_kept_through_a_failed_reconnect_never_reaches_the_relaunched_process() {
         let pid = gone_pid();
-        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
-            record: None,
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
-        harness.supervisor.adopter = Some(Box::new(FailingWorkerAdopter {
-            record: Some(record_with_pid("p", pid)),
-        }));
+        let (mut harness, spawns) = reconnectable_over(
+            pid,
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
+        harness.supervisor_mut().adopter = Some(Box::new(
+            FailingWorkerAdopter::builder()
+                .record(Some(record_with_pid("p", pid)))
+                .build(),
+        ));
         harness.up();
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
-        harness.supervisor.pause(&p());
+        harness.supervisor_mut().pause(&p());
         let (pane, generation, record, result) = adopted(&harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_adopted(pane, generation, &record, result);
 
         assert_eq!(
@@ -1566,13 +1618,16 @@ mod tests {
     #[test]
     fn a_stop_in_flight_continues_when_the_reconnect_fails_while_the_child_runs() {
         let orphan = Orphan::spawn();
-        let (mut harness, _) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
-            record: None,
-            refuses: false,
-            adoptions: Rc::new(Cell::new(0)),
-        });
+        let (mut harness, _) = reconnectable_over(
+            orphan.pid(),
+            ReconnectingAdopter::builder()
+                .record(None)
+                .refuses(false)
+                .adoptions(Rc::new(Cell::new(0)))
+                .build(),
+        );
         harness.up();
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         break_stream(&mut harness);

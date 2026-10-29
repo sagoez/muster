@@ -13,12 +13,11 @@ use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
 
 use super::{
-    mcp_deps::McpDeps, no_service::NoService, process_add_arg::ProcessAddArg,
-    recording_notifier::RecordingNotifier, scope::Scope, server::MusterMcp,
-    tool_failure::ToolFailure,
+    mcp_deps::McpDeps, process_add_arg::ProcessAddArg, recording_notifier::RecordingNotifier,
+    scope::Scope, server::MusterMcp, tool_failure::ToolFailure,
 };
 use crate::{
-    adapter::store::SqliteStore,
+    adapter::{client::fake_service::FakeService, store::SqliteStore},
     domain::{port::StackEditLog, value::ProjectRoot},
 };
 
@@ -85,7 +84,7 @@ fn serving(
                 .build(),
         )
         .agent(Some(agent.to_string()))
-        .service(Arc::new(NoService))
+        .service(Arc::new(FakeService::default()))
         .projects(Arc::new(store.clone()))
         .coordination(Arc::new(store.clone()))
         .stacks(Arc::new(store.clone()))

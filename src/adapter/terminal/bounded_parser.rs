@@ -128,34 +128,17 @@ fn is_continuation(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::dispatch_recorder::DispatchRecorder, *};
 
     /// Bytes in the unterminated OSC each test feeds, many times the bound.
     const FLOOD: usize = 4 * 1024 * 1024;
-
-    /// Records what the parser dispatched.
-    #[derive(Default)]
-    struct Recorder {
-        printed: String,
-        oscs: Vec<Vec<u8>>,
-    }
-
-    impl Perform for Recorder {
-        fn print(&mut self, character: char) {
-            self.printed.push(character);
-        }
-
-        fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-            self.oscs.push(params.concat());
-        }
-    }
 
     /// An unterminated multi-megabyte OSC never holds more than the bound,
     /// is dropped whole, and the stream parses again after its terminator.
     #[test]
     fn an_unterminated_osc_stays_bounded_and_the_stream_resyncs() {
         let mut parser = BoundedParser::new();
-        let mut recorder = Recorder::default();
+        let mut recorder = DispatchRecorder::default();
         parser.advance(&mut recorder, b"before\x1b]0;");
         let mut dropped = 0;
 
@@ -168,8 +151,8 @@ mod tests {
         parser.advance(&mut recorder, b"\x07after\x1b]2;title\x07");
 
         assert!(dropped >= FLOOD - MAX_PENDING_BYTES);
-        assert_eq!(recorder.printed, "beforeafter");
-        assert_eq!(recorder.oscs, vec![b"2title".to_vec()]);
+        assert_eq!(recorder.printed(), "beforeafter");
+        assert_eq!(recorder.oscs(), vec![b"2title".to_vec()]);
     }
 
     /// The same flood in one write, as a log copy hands it over, is dropped
@@ -177,7 +160,7 @@ mod tests {
     #[test]
     fn a_flood_in_one_write_is_dropped_too() {
         let mut parser = BoundedParser::new();
-        let mut recorder = Recorder::default();
+        let mut recorder = DispatchRecorder::default();
         let mut stream = b"before\x1b]0;".to_vec();
         stream.extend(vec![b'x'; FLOOD]);
         stream.extend(b"\x07after");
@@ -185,8 +168,8 @@ mod tests {
         parser.advance(&mut recorder, &stream);
 
         assert!(parser.pending() <= MAX_PENDING_BYTES);
-        assert_eq!(recorder.printed, "beforeafter");
-        assert!(recorder.oscs.is_empty());
+        assert_eq!(recorder.printed(), "beforeafter");
+        assert!(recorder.oscs().is_empty());
     }
 
     /// A character is never split between slices, so a chunk parses as vte
@@ -204,28 +187,28 @@ mod tests {
     #[test]
     fn an_escape_ends_the_dropped_run() {
         let mut parser = BoundedParser::new();
-        let mut recorder = Recorder::default();
+        let mut recorder = DispatchRecorder::default();
         parser.advance(&mut recorder, b"\x1b]0;");
         parser.advance(&mut recorder, &vec![b'x'; MAX_PENDING_BYTES + 1]);
 
         parser.advance(&mut recorder, b"\x1b]2;ok\x07text");
 
-        assert_eq!(recorder.oscs, vec![b"2ok".to_vec()]);
-        assert_eq!(recorder.printed, "text");
+        assert_eq!(recorder.oscs(), vec![b"2ok".to_vec()]);
+        assert_eq!(recorder.printed(), "text");
     }
 
     /// A string within the bound is parsed as vte parses it.
     #[test]
     fn a_string_within_the_bound_is_kept() {
         let mut parser = BoundedParser::new();
-        let mut recorder = Recorder::default();
+        let mut recorder = DispatchRecorder::default();
         let mut sequence = b"\x1b]2;".to_vec();
         sequence.extend(vec![b'y'; MAX_PENDING_BYTES - 8]);
         sequence.push(BEL);
 
         parser.advance(&mut recorder, &sequence);
 
-        assert_eq!(recorder.oscs.len(), 1);
+        assert_eq!(recorder.oscs().len(), 1);
         assert_eq!(parser.pending(), 0);
     }
 }

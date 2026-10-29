@@ -1,5 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::recording_handle::RecordingHandle;
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
@@ -7,8 +10,10 @@ use crate::domain::{
 };
 
 /// A runner whose spawned processes record their input.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct RecordingRunner {
-    pub(crate) written: Arc<Mutex<Vec<u8>>>,
+    written: Arc<Mutex<Vec<u8>>>,
 }
 
 impl ProcessRunner for RecordingRunner {
@@ -17,8 +22,10 @@ impl ProcessRunner for RecordingRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(RecordingHandle {
-            written: self.written.clone(),
-        }))
+        Ok(Box::new(
+            RecordingHandle::builder()
+                .written(self.written.clone())
+                .build(),
+        ))
     }
 }

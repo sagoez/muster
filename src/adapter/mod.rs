@@ -15,6 +15,10 @@ pub mod no_state_dir;
 pub mod notifier;
 pub mod open_files;
 pub mod path;
+#[cfg(test)]
+pub(crate) mod ping;
+#[cfg(test)]
+pub(crate) mod pong;
 pub mod port_occupants;
 pub mod private_dir;
 pub mod probe;

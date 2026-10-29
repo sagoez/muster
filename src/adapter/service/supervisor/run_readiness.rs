@@ -1,5 +1,8 @@
 use std::time::Instant;
 
+use getset::{CopyGetters, Getters};
+use typed_builder::TypedBuilder;
+
 use crate::{
     adapter::{holder::LineMatcher, service::ProbeTarget},
     domain::process::{Readiness, ReadyCheck, ReadyProbe},
@@ -7,17 +10,23 @@ use crate::{
 
 /// The readiness of one pane's current run: its check, how far it got, and
 /// what is tested to pass it. Private to the supervisor, which owns it.
+#[derive(Getters, CopyGetters, TypedBuilder)]
 pub(crate) struct RunReadiness {
     /// How far the run got.
-    pub(super) state: Readiness,
+    #[getset(get_copy = "pub(super)")]
+    state: Readiness,
     /// The check it is held to.
-    pub(super) check: ReadyCheck,
+    #[getset(get = "pub(super)")]
+    check: ReadyCheck,
     /// When the run started, for how long it took.
-    pub(super) since: Instant,
+    #[getset(get_copy = "pub(super)")]
+    since: Instant,
     /// When it times out while still waiting.
-    pub(super) deadline: Instant,
+    #[getset(get_copy = "pub(super)")]
+    deadline: Instant,
     /// The compiled pattern of a log check.
-    pub(super) matcher: Option<LineMatcher>,
+    #[getset(get = "pub(super)")]
+    matcher: Option<LineMatcher>,
 }
 
 impl RunReadiness {
@@ -31,5 +40,12 @@ impl RunReadiness {
                 status: None,
             }),
         }
+    }
+
+    /// Moves the check to `state`, which ends it, so its log pattern is no
+    /// longer matched.
+    pub(super) fn settle(&mut self, state: Readiness) {
+        self.state = state;
+        self.matcher = None;
     }
 }

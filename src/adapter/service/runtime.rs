@@ -2428,9 +2428,9 @@ mod tests {
     fn a_result_for_a_project_without_a_supervisor_is_discarded() {
         let kills = Arc::new(AtomicUsize::new(0));
 
-        release_unrecorded(Ok(Box::new(KillCountHandle {
-            kills: Arc::clone(&kills),
-        })));
+        release_unrecorded(Ok(Box::new(
+            KillCountHandle::builder().kills(Arc::clone(&kills)).build(),
+        )));
 
         assert_eq!(kills.load(Ordering::SeqCst), 1);
     }

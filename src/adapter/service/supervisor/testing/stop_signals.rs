@@ -3,12 +3,16 @@ use std::{
     time::Duration,
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use crate::domain::process::StopSignal;
 
 /// Counts graceful termination requests separately from hard kills.
-#[derive(Default)]
+#[derive(Default, Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct StopSignals {
-    pub(crate) terminates: AtomicUsize,
-    pub(crate) kills: AtomicUsize,
-    pub(crate) termination: Mutex<Option<(StopSignal, Duration)>>,
+    terminates: AtomicUsize,
+    kills: AtomicUsize,
+    termination: Mutex<Option<(StopSignal, Duration)>>,
 }

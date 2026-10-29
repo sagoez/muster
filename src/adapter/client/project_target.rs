@@ -230,45 +230,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::config::ConfigError;
-
-    /// A store holding a fixed set of projects.
-    struct Projects(Vec<Project>);
-
-    impl ProjectStore for Projects {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.0.clone())
-        }
-
-        fn project_at(&self, root: &ProjectRoot) -> Result<Option<Project>, ConfigError> {
-            Ok(self
-                .0
-                .iter()
-                .find(|project| project.root() == root)
-                .cloned())
-        }
-
-        fn project_named(&self, name: &ProjectName) -> Result<Option<Project>, ConfigError> {
-            Ok(self
-                .0
-                .iter()
-                .find(|project| project.name() == name)
-                .cloned())
-        }
-
-        fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
-            Ok(self
-                .0
-                .iter()
-                .filter(|project| project.root().contains(dir))
-                .max_by_key(|project| project.root().as_ref().components().count())
-                .cloned())
-        }
-
-        fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {
-            Ok(false)
-        }
-    }
+    use crate::adapter::client::fixed_projects::FixedProjects;
 
     /// A project called `name` rooted at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -295,7 +257,7 @@ mod tests {
         let (_scratch, base) = tree();
         let shop = project("shop", &base.join("shop"));
         let web = project("web", &base.join("shop/web"));
-        let projects = Projects(vec![shop.clone(), web.clone()]);
+        let projects = FixedProjects::new(vec![shop.clone(), web.clone()]);
 
         let resolved = resolve_project(None, None, &base.join("shop/web/src"), &projects).unwrap();
         assert_eq!(resolved, ProjectTarget::Registered(web));
@@ -317,7 +279,7 @@ mod tests {
         let (_scratch, base) = tree();
         let home = base.join("elsewhere");
         let web = project("web", &base.join("shop/web"));
-        let projects = Projects(vec![web.clone()]);
+        let projects = FixedProjects::new(vec![web.clone()]);
         let unregistered = |dir: &Path| {
             ProjectTarget::Unregistered(ProjectRoot::try_new(dir.to_path_buf()).unwrap())
         };
@@ -358,7 +320,7 @@ mod tests {
     fn a_folder_inside_a_project_is_within_it() {
         let (_scratch, base) = tree();
         let shop = project("shop", &base.join("shop"));
-        let projects = Projects(vec![shop.clone()]);
+        let projects = FixedProjects::new(vec![shop.clone()]);
 
         let nested = resolve_project(Some("./web/src"), None, &base.join("shop"), &projects)
             .unwrap()
@@ -380,7 +342,7 @@ mod tests {
         let (_scratch, base) = tree();
         let shop = project("shop", &base.join("shop"));
         let web = project("web", &base.join("shop/web"));
-        let projects = Projects(vec![shop.clone(), web.clone()]);
+        let projects = FixedProjects::new(vec![shop.clone(), web.clone()]);
         let cwd = base.join("shop/web");
         let env = base.join("shop");
 
@@ -410,7 +372,7 @@ mod tests {
         let (_scratch, base) = tree();
         let shop = project("shop", &base.join("shop"));
         let elsewhere = project("elsewhere", &base.join("elsewhere"));
-        let projects = Projects(vec![shop.clone(), elsewhere.clone()]);
+        let projects = FixedProjects::new(vec![shop.clone(), elsewhere.clone()]);
 
         assert_eq!(
             resolve_project(
@@ -434,7 +396,7 @@ mod tests {
     #[test]
     fn a_nested_folder_is_its_own_target_when_named() {
         let (_scratch, base) = tree();
-        let projects = Projects(vec![project("shop", &base.join("shop"))]);
+        let projects = FixedProjects::new(vec![project("shop", &base.join("shop"))]);
         let nested = base.join("shop/web");
 
         assert_eq!(
@@ -447,7 +409,7 @@ mod tests {
     #[test]
     fn an_unknown_name_is_refused() {
         let (_scratch, base) = tree();
-        let projects = Projects(Vec::new());
+        let projects = FixedProjects::new(Vec::new());
 
         assert!(matches!(
             resolve_project(Some("blog"), None, &base, &projects),
@@ -462,7 +424,7 @@ mod tests {
     fn a_registered_project_whose_folder_is_gone_is_still_found() {
         let (_scratch, base) = tree();
         let gone = base.join("gone");
-        let projects = Projects(vec![project("gone", &gone)]);
+        let projects = FixedProjects::new(vec![project("gone", &gone)]);
 
         assert_eq!(
             resolve_project(None, Some(&gone), &base, &projects).unwrap(),
@@ -478,7 +440,7 @@ mod tests {
         let (_scratch, base) = tree();
         let dotfiles = project(".dotfiles", &base.join("shop"));
         let tilde = project("~notes", &base.join("shop/web"));
-        let projects = Projects(vec![dotfiles.clone(), tilde.clone()]);
+        let projects = FixedProjects::new(vec![dotfiles.clone(), tilde.clone()]);
 
         assert_eq!(
             resolve_project(Some(".dotfiles"), None, &base, &projects).unwrap(),

@@ -74,7 +74,7 @@ impl ProcessHandle for FakeChild {
     }
 
     fn input(&self) -> Option<Box<dyn ProcessInput>> {
-        Some(Box::new(RecordingInput(Arc::clone(&self.written))))
+        Some(Box::new(RecordingInput::new(Arc::clone(&self.written))))
     }
 
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {

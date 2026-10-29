@@ -3,6 +3,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
@@ -11,8 +14,10 @@ use crate::domain::{
 };
 
 /// A handle that records everything written to its PTY.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct RecordingHandle {
-    pub(crate) written: Arc<Mutex<Vec<u8>>>,
+    written: Arc<Mutex<Vec<u8>>>,
 }
 
 impl ProcessHandle for RecordingHandle {

@@ -6,6 +6,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
@@ -14,8 +17,10 @@ use crate::domain::{
 };
 
 /// A handle that counts the exits acknowledged to it.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct AckCountHandle {
-    pub(crate) acks: Arc<AtomicUsize>,
+    acks: Arc<AtomicUsize>,
 }
 
 impl ProcessHandle for AckCountHandle {

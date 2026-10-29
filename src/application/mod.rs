@@ -1,3 +1,9 @@
+#[cfg(test)]
+mod editor_fakes;
+#[cfg(test)]
+mod editor_fixtures;
+#[cfg(test)]
+mod editor_step;
 mod exit_decision;
 mod process_lifecycle;
 mod stack_editor;

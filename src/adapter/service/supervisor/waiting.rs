@@ -194,8 +194,8 @@ impl Supervisor {
         let checks = self
             .readiness
             .values()
-            .filter(|readiness| readiness.state.is_waiting())
-            .map(|readiness| readiness.deadline);
+            .filter(|readiness| readiness.state().is_waiting())
+            .map(|readiness| readiness.deadline());
         let windows = self
             .waiters
             .iter()
@@ -226,7 +226,7 @@ impl Supervisor {
         let expired: Vec<PaneId> = self
             .readiness
             .iter()
-            .filter(|(_, readiness)| readiness.state.is_waiting() && readiness.deadline <= now)
+            .filter(|(_, readiness)| readiness.state().is_waiting() && readiness.deadline() <= now)
             .map(|(pane, _)| *pane)
             .collect();
         for pane in expired {
@@ -261,7 +261,7 @@ impl Supervisor {
             return;
         }
         if self.readiness.get(&pane).is_some_and(|readiness| {
-            readiness.state.is_waiting() && readiness.probe().as_ref() == Some(probe)
+            readiness.state().is_waiting() && readiness.probe().as_ref() == Some(probe)
         }) {
             self.pass_readiness(pane);
         }
@@ -320,9 +320,9 @@ impl Supervisor {
         }
         let generation = self.current_generation(pane);
         if self.readiness.get(&pane).is_some_and(|readiness| {
-            readiness.state.is_waiting()
+            readiness.state().is_waiting()
                 && readiness
-                    .matcher
+                    .matcher()
                     .as_ref()
                     .is_some_and(|matcher| lines.iter().any(|line| matcher.is_match(line.text())))
         }) {
@@ -423,13 +423,16 @@ impl Supervisor {
         match (deadline > now, check.probe()) {
             (true, _) => self.start_readiness(pane, check, since, deadline),
             (false, ReadyProbe::Log(_)) => {
-                self.readiness.insert(pane, RunReadiness {
-                    state: Readiness::Ready,
-                    check,
-                    since,
-                    deadline,
-                    matcher: None,
-                });
+                self.readiness.insert(
+                    pane,
+                    RunReadiness::builder()
+                        .state(Readiness::Ready)
+                        .check(check)
+                        .since(since)
+                        .deadline(deadline)
+                        .matcher(None)
+                        .build(),
+                );
             },
             (false, _) => self.start_readiness(pane, check, since, now + timeout),
         }
@@ -448,10 +451,10 @@ impl Supervisor {
         if let Some(readiness) = self
             .readiness
             .get(&pane)
-            .filter(|readiness| readiness.state.is_waiting())
+            .filter(|readiness| readiness.state().is_waiting())
             && let Some(probe) = readiness.probe()
         {
-            probes.watch(self.root(), pane, generation, probe, readiness.deadline);
+            probes.watch(self.root(), pane, generation, probe, readiness.deadline());
         }
         for waiter in &self.waiters {
             if waiter.pane() == pane
@@ -484,8 +487,7 @@ impl Supervisor {
                 .build(),
         );
         if let Some(readiness) = self.readiness.get_mut(&pane) {
-            readiness.state = readiness.state.on_exit();
-            readiness.matcher = None;
+            readiness.settle(readiness.state().on_exit());
         }
         self.metrics.clear_ports(pane);
         if let Some(probes) = &self.probes {
@@ -645,7 +647,7 @@ impl Supervisor {
                 })
                 .map(|_| (WaitStatus::Matched, None)),
             WaitCondition::Ready => {
-                match self.readiness.get(&pane).map(|readiness| readiness.state) {
+                match self.readiness.get(&pane).map(|readiness| readiness.state()) {
                     Some(Readiness::Ready) => Some((WaitStatus::Matched, None)),
                     Some(Readiness::TimedOut) => Some((WaitStatus::ReadyTimeout, None)),
                     Some(Readiness::None | Readiness::Waiting) | None => None,
@@ -745,13 +747,16 @@ impl Supervisor {
             },
             ReadyProbe::Port(_) | ReadyProbe::Http(_) => None,
         };
-        self.readiness.insert(pane, RunReadiness {
-            state: Readiness::on_spawn(Some(&check)),
-            check,
-            since,
-            deadline,
-            matcher,
-        });
+        self.readiness.insert(
+            pane,
+            RunReadiness::builder()
+                .state(Readiness::on_spawn(Some(&check)))
+                .check(check)
+                .since(since)
+                .deadline(deadline)
+                .matcher(matcher)
+                .build(),
+        );
     }
 
     /// Passes `pane`'s readiness check and records the event.
@@ -759,9 +764,8 @@ impl Supervisor {
         let Some(readiness) = self.readiness.get_mut(&pane) else {
             return;
         };
-        readiness.state = readiness.state.on_passed();
-        readiness.matcher = None;
-        let took = humantime::format_duration(whole_millis(readiness.since.elapsed()));
+        readiness.settle(readiness.state().on_passed());
+        let took = humantime::format_duration(whole_millis(readiness.since().elapsed()));
         self.record_event(Some(pane), EventKind::Ready, format!("ready in {took}"));
     }
 
@@ -771,9 +775,8 @@ impl Supervisor {
         let Some(readiness) = self.readiness.get_mut(&pane) else {
             return;
         };
-        readiness.state = readiness.state.on_deadline();
-        readiness.matcher = None;
-        let timeout = *readiness.check.timeout();
+        readiness.settle(readiness.state().on_deadline());
+        let timeout = *readiness.check().timeout();
         let name = self
             .workspace
             .process(pane)
@@ -899,24 +902,26 @@ mod tests {
     /// Feeds `bytes` as `name`'s current run's output.
     fn print(harness: &mut Harness, name: &str, bytes: &[u8]) {
         let pane = harness
-            .supervisor
+            .supervisor_mut()
             .pane_named(&super::super::testing::name(name))
             .unwrap();
-        let generation = harness.supervisor.current_generation(pane);
-        harness
-            .supervisor
-            .handle_output(pane, generation, ProcessOutput::Chunk(bytes.to_vec()));
+        let generation = harness.supervisor_mut().current_generation(pane);
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Chunk(bytes.to_vec()),
+        );
     }
 
     /// Ends `name`'s current run with `outcome`.
     fn end(harness: &mut Harness, name: &str, outcome: ExitOutcome) {
         let pane = harness
-            .supervisor
+            .supervisor_mut()
             .pane_named(&super::super::testing::name(name))
             .unwrap();
-        let generation = harness.supervisor.current_generation(pane);
+        let generation = harness.supervisor_mut().current_generation(pane);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_output(pane, generation, ProcessOutput::Exited(outcome));
     }
 
@@ -929,10 +934,10 @@ mod tests {
     ) -> Receiver<ServiceResponse> {
         let (reply, answers) = unbounded();
         let prepared = harness
-            .supervisor
+            .supervisor_mut()
             .prepare_wait(&super::super::testing::name(name), wait)
             .unwrap();
-        harness.supervisor.begin_wait(prepared, after, reply);
+        harness.supervisor_mut().begin_wait(prepared, after, reply);
         answers
     }
 
@@ -948,10 +953,10 @@ mod tests {
     /// The kinds of the events recorded so far.
     fn event_kinds(harness: &Harness) -> Vec<EventKind> {
         harness
-            .event_log
+            .event_log()
             .lock()
             .unwrap()
-            .page(harness.supervisor.root(), None, &[])
+            .page(harness.supervisor().root(), None, &[])
             .events()
             .iter()
             .map(StackEvent::kind)
@@ -967,7 +972,7 @@ mod tests {
         let name = super::super::testing::name("api");
 
         let Err(refused) = harness
-            .supervisor
+            .supervisor_mut()
             .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(20))))
         else {
             panic!("a cursor past the end is refused");
@@ -976,7 +981,7 @@ mod tests {
         assert!(refused.message().contains("o:20"), "{}", refused.message());
         assert!(
             harness
-                .supervisor
+                .supervisor_mut()
                 .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(19))))
                 .is_ok()
         );
@@ -997,12 +1002,12 @@ mod tests {
 
         assert!(
             harness
-                .supervisor
+                .supervisor_mut()
                 .prepare_wait(&name, &spec(Some(log("x")), Some(log_end)))
                 .is_ok()
         );
         let Err(refused) = harness
-            .supervisor
+            .supervisor_mut()
             .prepare_wait(&name, &spec(Some(log("x")), Some(log_end.advanced(1))))
         else {
             panic!("a cursor past the log's end is refused");
@@ -1035,7 +1040,9 @@ mod tests {
             None,
         );
         assert!(answered(&answers).is_none());
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         let matched = answered(&answers).unwrap();
         assert_eq!(matched.status(), WaitStatus::Matched);
@@ -1084,9 +1091,9 @@ mod tests {
     fn a_wait_riding_on_a_restart_never_sees_the_old_run() {
         let mut harness = up(&[api(RestartPolicy::Never, None)]);
         let name = super::super::testing::name("api");
-        let before = harness.supervisor.generation_of(&name);
+        let before = harness.supervisor_mut().generation_of(&name);
         harness
-            .supervisor
+            .supervisor_mut()
             .restart(&name, &LaunchEnvironment::default());
         let answers = wait_on(
             &mut harness,
@@ -1147,19 +1154,19 @@ mod tests {
         ] {
             let mut harness = up(&[api(RestartPolicy::Never, None)]);
             let answers = wait_on(&mut harness, "api", &spec(None, None), None);
-            harness.supervisor.settle_waits(Instant::now());
+            harness.supervisor_mut().settle_waits(Instant::now());
             assert!(answered(&answers).is_none(), "running, inside the window");
 
             end(&mut harness, "api", outcome);
-            harness.supervisor.settle_waits(Instant::now());
+            harness.supervisor_mut().settle_waits(Instant::now());
             assert_eq!(answered(&answers).unwrap().status(), status);
         }
 
         let mut harness = up(&[api(RestartPolicy::Never, None)]);
         let answers = wait_on(&mut harness, "api", &spec(None, None), None);
-        let window_end = harness.supervisor.next_wait_deadline().unwrap();
+        let window_end = harness.supervisor_mut().next_wait_deadline().unwrap();
         assert!(window_end <= Instant::now() + QUICK_EXIT_WINDOW);
-        harness.supervisor.settle_waits(window_end);
+        harness.supervisor_mut().settle_waits(window_end);
         assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Matched);
     }
 
@@ -1185,14 +1192,14 @@ mod tests {
         print(&mut harness, "api", b"booting\n");
         let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
 
-        harness.supervisor.settle_waits(Instant::now());
+        harness.supervisor_mut().settle_waits(Instant::now());
         assert!(answered(&answers).is_none());
-        harness.supervisor.settle_waits(Instant::now() + WAIT);
+        harness.supervisor_mut().settle_waits(Instant::now() + WAIT);
 
         let waiting = answered(&answers).unwrap();
         assert_eq!(waiting.status(), WaitStatus::Waiting);
         assert_eq!(*waiting.cursor(), OutputCursor::new(8));
-        assert!(harness.supervisor.next_wait_deadline().is_none());
+        assert!(harness.supervisor_mut().next_wait_deadline().is_none());
     }
 
     /// A marker the process printed on its first line, before its handle
@@ -1206,9 +1213,9 @@ mod tests {
             Some(check),
         )]);
         harness.up();
-        harness.supervisor.settle_waits(Instant::now());
+        harness.supervisor_mut().settle_waits(Instant::now());
 
-        let snapshot = harness.supervisor.snapshot();
+        let snapshot = harness.supervisor_mut().snapshot();
         let status = &snapshot.processes()[0];
         assert_eq!(*status.ready(), Readiness::Ready);
         let start = OutputCursor::new(BACKLOG_RUN_START);
@@ -1238,18 +1245,18 @@ mod tests {
         let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
         let answers = wait_on(&mut harness, "api", &spec(None, None), None);
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].ready(),
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
             Readiness::Waiting
         );
 
         print(&mut harness, "api", b"webpack compiled in 3ms\n");
-        harness.supervisor.settle_waits(Instant::now());
+        harness.supervisor_mut().settle_waits(Instant::now());
 
         let ready = answered(&answers).unwrap();
         assert_eq!(ready.status(), WaitStatus::Matched);
         assert_eq!(*ready.until(), WaitCondition::Ready);
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].ready(),
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
             Readiness::Ready
         );
         assert!(event_kinds(&harness).contains(&EventKind::Ready));
@@ -1261,14 +1268,14 @@ mod tests {
         let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
         let answers = wait_on(&mut harness, "api", &spec(None, None), None);
 
-        harness.supervisor.settle_waits(Instant::now() + WAIT);
+        harness.supervisor_mut().settle_waits(Instant::now() + WAIT);
 
         assert_eq!(
             answered(&answers).unwrap().status(),
             WaitStatus::ReadyTimeout
         );
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].ready(),
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
             Readiness::TimedOut
         );
         assert_eq!(harness.notice_messages(), [
@@ -1276,7 +1283,7 @@ mod tests {
         ]);
         assert!(event_kinds(&harness).contains(&EventKind::ReadyTimeout));
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].state(),
+            *harness.supervisor_mut().snapshot().processes()[0].state(),
             ProcessState::Running
         );
     }
@@ -1289,25 +1296,25 @@ mod tests {
             Some(ready(ReadyProbe::Port(port))),
         )]);
         let pane = harness
-            .supervisor
+            .supervisor_mut()
             .pane_named(&super::super::testing::name("api"))
             .unwrap();
-        let current = harness.supervisor.current_generation(pane);
+        let current = harness.supervisor_mut().current_generation(pane);
         let stale = SpawnGeneration::initial();
 
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_probe_passed(pane, stale, &ProbeTarget::Port(port));
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].ready(),
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
             Readiness::Waiting
         );
 
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_probe_passed(pane, current, &ProbeTarget::Port(port));
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].ready(),
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
             Readiness::Ready
         );
     }
@@ -1323,7 +1330,9 @@ mod tests {
             None,
         );
 
-        harness.supervisor.stop(&super::super::testing::name("api"));
+        harness
+            .supervisor_mut()
+            .stop(&super::super::testing::name("api"));
         end(
             &mut harness,
             "api",
@@ -1332,7 +1341,7 @@ mod tests {
 
         assert_eq!(answered(&for_log).unwrap().status(), WaitStatus::Stopped);
         assert_eq!(answered(&for_stop).unwrap().status(), WaitStatus::Matched);
-        let last = harness.supervisor.snapshot().processes()[0]
+        let last = harness.supervisor_mut().snapshot().processes()[0]
             .last_exit()
             .clone()
             .unwrap();
@@ -1348,7 +1357,7 @@ mod tests {
         let (reply, answers) = unbounded();
 
         harness
-            .supervisor
+            .supervisor_mut()
             .up_waiting(
                 &LaunchEnvironment::default(),
                 &spec(Some(log("up")), None),
@@ -1387,7 +1396,7 @@ mod tests {
 
         for until in [regex, WaitCondition::Ready] {
             let refusal = harness
-                .supervisor
+                .supervisor()
                 .prepare_wait(&name, &spec(Some(until), None))
                 .err()
                 .unwrap();
@@ -1398,16 +1407,14 @@ mod tests {
     #[test]
     fn a_restart_that_fails_to_launch_ends_its_wait_as_crashed() {
         let mut harness = Harness::over(
-            Box::new(FlakyRunner {
-                spawns: AtomicUsize::new(0),
-            }),
+            Box::new(FlakyRunner::builder().spawns(AtomicUsize::new(0)).build()),
             &[api(RestartPolicy::Never, None)],
         );
         harness.up();
         let name = super::super::testing::name("api");
-        let before = harness.supervisor.generation_of(&name);
+        let before = harness.supervisor_mut().generation_of(&name);
         harness
-            .supervisor
+            .supervisor_mut()
             .restart(&name, &LaunchEnvironment::default());
         let answers = wait_on(&mut harness, "api", &spec(None, None), Some(before));
 
@@ -1418,7 +1425,7 @@ mod tests {
         );
 
         assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Crashed);
-        let last = harness.supervisor.snapshot().processes()[0]
+        let last = harness.supervisor_mut().snapshot().processes()[0]
             .last_exit()
             .clone()
             .unwrap();

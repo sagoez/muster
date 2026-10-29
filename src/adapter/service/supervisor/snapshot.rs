@@ -48,7 +48,7 @@ impl Supervisor {
                         .ready(
                             self.readiness
                                 .get(&pane)
-                                .map(|readiness| readiness.state)
+                                .map(|readiness| readiness.state())
                                 .unwrap_or_default(),
                         )
                         .urls(urls(process.ready().as_ref(), &ports))
@@ -129,15 +129,15 @@ mod tests {
     /// `new` builds the workspace from the stack and starts nothing.
     #[test]
     fn a_new_supervisor_runs_the_stack_and_starts_nothing() {
-        let harness = Harness::over(Box::new(FakeRunner), &[spec(
+        let mut harness = Harness::over(Box::new(FakeRunner), &[spec(
             "p",
             "true",
             RestartPolicy::Never,
         )]);
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
 
-        assert_eq!(status.project(), harness.supervisor.project());
+        assert_eq!(status.project(), harness.supervisor_mut().project());
         assert_eq!(status.processes().len(), 1);
         assert_eq!(status.processes()[0].name(), &name("p"));
         assert_eq!(*status.processes()[0].state(), ProcessState::Pending);
@@ -155,17 +155,17 @@ mod tests {
         )]);
         harness.up();
         let pane = PaneId::new(PANE);
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
-        let respawn = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_respawn(pane, respawn);
-        harness.supervisor.set_attached(&name("p"), 2);
+        let respawn = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_respawn(pane, respawn);
+        harness.supervisor_mut().set_attached(&name("p"), 2);
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
 
         let process = &status.processes()[0];
         assert_eq!(*process.state(), ProcessState::Running);

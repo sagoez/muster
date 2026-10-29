@@ -56,8 +56,8 @@ impl RunPlan {
         store: &dyn LocalState,
         args: &RunArgs,
     ) -> Result<Self, CliError> {
-        let command = command_string(&args.command)?;
-        let name = process_name(args.name.as_deref(), &args.command)?;
+        let command = command_string(args.command())?;
+        let name = process_name(args.name().as_deref(), args.command())?;
         let target = invocation
             .target(store)?
             .registrable(home_dir().as_deref(), store)?;

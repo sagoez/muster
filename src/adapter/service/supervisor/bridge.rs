@@ -154,8 +154,10 @@ mod tests {
     /// Delivers `output` from [`PANE`]'s current process.
     fn deliver(harness: &mut Harness, output: ProcessOutput) {
         let pane = PaneId::new(PANE);
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(pane, generation, output);
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, output);
     }
 
     /// Repaints [`PANE`]'s current process with a screen showing `text`.
@@ -169,11 +171,11 @@ mod tests {
     /// The screen of the process `name` as a caller gets it: a holder read is
     /// performed here and settled back with the supervisor.
     fn output_of(harness: &mut Harness, name: &str) -> Option<String> {
-        match harness.supervisor.screen(&named(name))? {
+        match harness.supervisor_mut().screen(&named(name))? {
             ScreenReply::Ready(screen) => Some(screen),
             ScreenReply::ReadHolder(screen) => {
                 let read = screen.read();
-                Some(harness.supervisor.settle_holder_read(screen, read))
+                Some(harness.supervisor_mut().settle_holder_read(screen, read))
             },
         }
     }
@@ -212,10 +214,10 @@ mod tests {
     /// The warning notices raised so far.
     fn warnings(harness: &Harness) -> usize {
         harness
-            .notices
+            .notices()
             .lock()
             .unwrap()
-            .recent(harness.supervisor.root())
+            .recent(harness.supervisor().root())
             .iter()
             .filter(|notice| *notice.level() == NoticeLevel::Warning)
             .count()
@@ -231,11 +233,11 @@ mod tests {
         assert_eq!(output_of(&mut harness, UNKNOWN), None);
 
         harness
-            .supervisor
+            .supervisor_mut()
             .start(&named(NAME), &LaunchEnvironment::default());
         repaint(&mut harness, SERVICE_SCREEN);
 
-        let Some(ScreenReply::Ready(screen)) = harness.supervisor.screen(&named(NAME)) else {
+        let Some(ScreenReply::Ready(screen)) = harness.supervisor_mut().screen(&named(NAME)) else {
             panic!("a process without a holder is answered at once");
         };
         assert!(screen.contains(SERVICE_SCREEN));
@@ -271,7 +273,7 @@ mod tests {
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
 
-        let Some(ScreenReply::Ready(screen)) = harness.supervisor.screen(&named(NAME)) else {
+        let Some(ScreenReply::Ready(screen)) = harness.supervisor_mut().screen(&named(NAME)) else {
             panic!("a finished process is answered at once");
         };
         assert!(screen.contains(HOLDER_SCREEN), "{screen:?}");
@@ -284,7 +286,7 @@ mod tests {
         let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
         let screen = handed_out(&mut harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .settle_holder_read(screen, Ok(HOLDER_SCREEN.to_string()));
 
         assert!(handed_out(&mut harness).fallback().contains(HOLDER_SCREEN));
@@ -340,7 +342,7 @@ mod tests {
 
         let screen = handed_out(&mut harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .settle_holder_read(screen, Ok(HOLDER_SCREEN.to_string()));
         output_of(&mut harness, NAME);
         assert_eq!(warnings(&harness), 2, "a new streak warns again");
@@ -348,7 +350,7 @@ mod tests {
 
     /// The holder read the supervisor hands out for [`NAME`].
     fn handed_out(harness: &mut Harness) -> HolderScreen {
-        match harness.supervisor.screen(&named(NAME)) {
+        match harness.supervisor_mut().screen(&named(NAME)) {
             Some(ScreenReply::ReadHolder(screen)) => screen,
             other => panic!("answered at once: {other:?}"),
         }
@@ -362,45 +364,50 @@ mod tests {
         let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
         let respawned = handed_out(&mut harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .restart(&named(NAME), &LaunchEnvironment::default());
         let pane = PaneId::new(PANE);
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
-        assert_ne!(harness.supervisor.generations()[&pane], generation);
+        assert_ne!(harness.supervisor_mut().generations()[&pane], generation);
         let failure = || Err(PtyError::System(UNSERVED_SOCKET.to_string()));
 
-        let answered = harness.supervisor.settle_holder_read(respawned, failure());
+        let answered = harness
+            .supervisor_mut()
+            .settle_holder_read(respawned, failure());
 
         assert!(
             answered.contains(SERVICE_SCREEN),
             "a stale read is still answered"
         );
         assert_eq!(warnings(&harness), 0);
-        assert!(!harness.supervisor.attention.has_failing_screen_reads());
+        assert!(
+            !harness
+                .supervisor_mut()
+                .attention
+                .has_failing_screen_reads()
+        );
     }
 
     #[test]
     fn input_reaches_a_live_process_and_is_refused_for_a_stopped_or_unknown_one() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let mut harness = over(
-            Box::new(RecordingRunner {
-                written: written.clone(),
-            }),
+            Box::new(RecordingRunner::builder().written(written.clone()).build()),
             false,
         );
         let send = |harness: &mut Harness, name: &str| {
-            harness.supervisor.send_input(&named(name), b"ls\r")
+            harness.supervisor_mut().send_input(&named(name), b"ls\r")
         };
 
         assert!(!send(&mut harness, NAME), "not running yet");
         assert!(!send(&mut harness, UNKNOWN), "no such process");
         harness
-            .supervisor
+            .supervisor_mut()
             .start(&named(NAME), &LaunchEnvironment::default());
         assert!(send(&mut harness, NAME));
         assert_eq!(*written.lock().unwrap(), b"ls\r");

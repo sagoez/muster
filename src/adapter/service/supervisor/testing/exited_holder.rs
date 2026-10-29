@@ -1,7 +1,9 @@
 use std::{os::unix::net::UnixListener, path::PathBuf, thread};
 
 use crossbeam_channel::{Receiver, bounded};
+use getset::Getters;
 use tempfile::TempDir;
+use typed_builder::TypedBuilder;
 
 use super::fixtures::SETTLE_WAIT;
 use crate::{
@@ -18,9 +20,11 @@ const SCRATCH_PREFIX: &str = "ma-";
 /// A fake holder at a socket in a scratch directory that takes one
 /// supervisor, tells it the child exited, and reports whether the exit
 /// was collected.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct ExitedHolder {
     _scratch: TempDir,
-    pub(crate) socket: PathBuf,
+    socket: PathBuf,
     collected: Receiver<()>,
 }
 

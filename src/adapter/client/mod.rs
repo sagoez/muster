@@ -12,6 +12,10 @@ mod environment_view;
 mod exit_view;
 mod failure_kind;
 mod failure_view;
+#[cfg(test)]
+pub(crate) mod fake_service;
+#[cfg(test)]
+pub(crate) mod fixed_projects;
 mod listed_value;
 mod lock_view;
 mod log_read;
@@ -49,8 +53,6 @@ mod stop_view;
 mod todo_page;
 mod todo_view;
 mod unavailable_reason;
-#[cfg(test)]
-mod unstarted_service;
 mod unwatched;
 mod user_service;
 mod wait_end;

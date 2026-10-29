@@ -27,8 +27,6 @@ mod lock_name_arg;
 mod mcp_deps;
 mod mcp_error;
 mod name_arg;
-#[cfg(test)]
-mod no_service;
 mod note_write_arg;
 mod process_add_arg;
 mod process_fields;

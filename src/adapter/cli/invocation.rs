@@ -230,111 +230,25 @@ impl<'a> Invocation<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Mutex};
+    use std::fs;
 
     use tempfile::TempDir;
 
-    use super::*;
+    use super::{super::fake_ports::FakePorts, *};
     use crate::{
         adapter::{
-            cli::mcp_launch::McpLaunch,
-            client::{ClientError, ServiceStatus},
+            client::ClientError,
             no_state_dir::NoStateDir,
-            service::{Notice, ProjectStatus, ServiceRequest},
-            store::{
-                SqliteStore,
-                test_support::{fresh_store, spec},
-            },
+            service::ServiceRequest,
+            store::test_support::{fresh_store, spec},
         },
-        domain::{
-            config::{ConfigError, ImportMode},
-            port::StackReader,
-            value::ProjectRoot,
-        },
-        error::MusterError,
+        domain::{config::ImportMode, port::StackReader, value::ProjectRoot},
     };
 
-    /// A service that is never reached, recording what it was told.
-    #[derive(Default)]
-    struct RecordingService {
-        told: Mutex<Vec<ServiceRequest>>,
-    }
-
-    impl ServiceAccess for RecordingService {
-        fn connect(&self) -> Result<ServiceClient, ClientError> {
-            Err(ClientError::NoStateDir(NoStateDir))
-        }
-
-        fn loaded_status(
-            &self,
-            _project: &ProjectRoot,
-        ) -> Result<Option<ProjectStatus>, ClientError> {
-            Ok(None)
-        }
-
-        fn running_notices(
-            &self,
-            _project: &ProjectRoot,
-        ) -> Result<Option<Vec<Notice>>, ClientError> {
-            Ok(None)
-        }
-
-        fn status(&self) -> Result<ServiceStatus, ClientError> {
-            Err(ClientError::NoStateDir(NoStateDir))
-        }
-
-        fn stop(&self) -> Result<bool, ClientError> {
-            Ok(false)
-        }
-
-        fn notify(&self, request: &ServiceRequest) {
-            self.told.lock().unwrap().push(request.clone());
-        }
-    }
-
-    /// Ports over a scratch database and a [`RecordingService`].
-    struct FakePorts {
-        store: SqliteStore,
-        service: Arc<RecordingService>,
-    }
-
-    impl CliPorts for FakePorts {
-        fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError> {
-            Ok(Arc::new(self.store.clone()))
-        }
-
-        fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
-            Ok(Some(Arc::new(self.store.clone())))
-        }
-
-        fn service(&self) -> Arc<dyn ServiceAccess> {
-            self.service.clone()
-        }
-
-        fn serve_mcp(&self, _launch: McpLaunch) -> Result<(), MusterError> {
-            Ok(())
-        }
-
-        fn mcp_config(&self, _executable: &Path) -> String {
-            String::new()
-        }
-
-        fn run_service(&self) -> Result<(), MusterError> {
-            Ok(())
-        }
-
-        fn run_holder(&self, _spec: &Path) -> Result<(), MusterError> {
-            Ok(())
-        }
-    }
-
+    /// Ports over a fresh scratch database, and the folder holding it.
     fn ports() -> (FakePorts, TempDir) {
         let (store, scratch) = fresh_store();
-        let ports = FakePorts {
-            store,
-            service: Arc::new(RecordingService::default()),
-        };
-        (ports, scratch)
+        (FakePorts::new(store), scratch)
     }
 
     /// An edit goes to the injected state and is told to the injected
@@ -354,8 +268,8 @@ mod tests {
             .import(&root, &[spec("web", "true")], ImportMode::Strict)
             .unwrap();
 
-        assert!(ports.store.stack(&root).unwrap().is_some());
-        assert_eq!(*ports.service.told.lock().unwrap(), vec![
+        assert!(ports.store().stack(&root).unwrap().is_some());
+        assert_eq!(ports.fake_service().told(), vec![
             ServiceRequest::StackChanged {
                 project: root.clone()
             }

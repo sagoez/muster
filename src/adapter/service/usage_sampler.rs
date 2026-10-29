@@ -70,50 +70,25 @@ impl UsageSampler {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc};
-
-    use super::*;
+    use super::{
+        super::{
+            fake_metrics::{FakeMetrics, SAMPLED_MEMORY},
+            sampled_calls::SampledCalls,
+        },
+        *,
+    };
     use crate::{
         adapter::service::supervisor::testing::*,
         domain::{
-            port::ProcessSample,
             process::{Process, RestartPolicy},
             value::PaneId,
         },
     };
 
-    /// Memory the fake sampler reports for every pid.
-    const SAMPLED_MEMORY: u64 = 4096;
-
-    /// A sampler that records the pids of every call and reports a fixed load
-    /// for each.
-    struct FakeMetrics {
-        calls: Rc<RefCell<Vec<Vec<Pid>>>>,
-    }
-
-    impl ProcessMetrics for FakeMetrics {
-        fn sample(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessSample> {
-            self.calls.borrow_mut().push(pids.to_vec());
-            pids.iter()
-                .map(|pid| {
-                    (
-                        *pid,
-                        ProcessSample::builder()
-                            .cpu_percent(0.0)
-                            .memory_bytes(SAMPLED_MEMORY)
-                            .build(),
-                    )
-                })
-                .collect()
-        }
-    }
-
     /// A sampler over [`FakeMetrics`] and the calls it records.
-    fn sampler() -> (UsageSampler, Rc<RefCell<Vec<Vec<Pid>>>>) {
-        let calls = Rc::new(RefCell::new(Vec::new()));
-        let sampler = UsageSampler::new(Box::new(FakeMetrics {
-            calls: calls.clone(),
-        }));
+    fn sampler() -> (UsageSampler, SampledCalls) {
+        let calls = SampledCalls::default();
+        let sampler = UsageSampler::new(Box::new(FakeMetrics::new(calls.clone())));
         (sampler, calls)
     }
 
@@ -133,22 +108,25 @@ mod tests {
         let mut first = running();
         let mut second = running();
         let deadline = sampler
-            .next_deadline([&first.supervisor, &second.supervisor])
+            .next_deadline([first.supervisor(), second.supervisor()])
             .expect("a live process arms the sampler");
 
         assert!(!sampler.sample(deadline - Duration::from_millis(1), [
-            &mut first.supervisor,
-            &mut second.supervisor
+            first.supervisor_mut(),
+            second.supervisor_mut()
         ],));
         assert!(calls.borrow().is_empty());
-        assert!(sampler.sample(deadline, [&mut first.supervisor, &mut second.supervisor]));
+        assert!(sampler.sample(deadline, [
+            first.supervisor_mut(),
+            &mut second.supervisor_mut()
+        ]));
 
         assert_eq!(*calls.borrow(), vec![vec![
             fake_launcher_pid(),
             fake_launcher_pid()
         ]]);
         for harness in [&first, &second] {
-            let usage = harness.supervisor.snapshot().processes()[0]
+            let usage = harness.supervisor().snapshot().processes()[0]
                 .usage()
                 .expect("each project takes the sample");
             assert_eq!(*usage.memory_bytes(), SAMPLED_MEMORY);
@@ -161,6 +139,6 @@ mod tests {
         let (sampler, _) = sampler();
         let idle = Harness::new(Box::new(PidRunner), Vec::new());
 
-        assert!(sampler.next_deadline([&idle.supervisor]).is_none());
+        assert!(sampler.next_deadline([idle.supervisor()]).is_none());
     }
 }

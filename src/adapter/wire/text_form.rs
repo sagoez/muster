@@ -19,30 +19,18 @@ impl TextForm for TodoStatus {}
 
 #[cfg(test)]
 mod tests {
-    use serde::{Deserialize, Serialize};
-
-    use super::*;
-    use crate::adapter::wire::form;
-
-    /// A record carrying a text-form value.
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct Carrier {
-        #[serde(with = "form")]
-        ready: Readiness,
-    }
+    use super::{super::text_carrier::TextCarrier, *};
 
     /// A text-form value travels as its kebab-case name and refuses any
     /// other text.
     #[test]
     fn a_text_form_travels_as_its_name_and_refuses_others() {
-        let carrier = Carrier {
-            ready: Readiness::TimedOut,
-        };
+        let carrier = TextCarrier::new(Readiness::TimedOut);
 
         let json = serde_json::to_string(&carrier).unwrap();
 
         assert_eq!(json, r#"{"ready":"timed-out"}"#);
-        assert_eq!(serde_json::from_str::<Carrier>(&json).unwrap(), carrier);
-        assert!(serde_json::from_str::<Carrier>(r#"{"ready":"late"}"#).is_err());
+        assert_eq!(serde_json::from_str::<TextCarrier>(&json).unwrap(), carrier);
+        assert!(serde_json::from_str::<TextCarrier>(r#"{"ready":"late"}"#).is_err());
     }
 }

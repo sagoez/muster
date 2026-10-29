@@ -31,9 +31,9 @@ mod export;
 mod export_view;
 #[cfg(test)]
 mod fake_holder;
-mod file_identity;
 #[cfg(test)]
-mod fixed_projects;
+mod fake_ports;
+mod file_identity;
 mod followed_output;
 mod gap_marked;
 mod held_sequence;
@@ -56,6 +56,8 @@ mod lock_command;
 mod log_filter_args;
 mod log_follower;
 mod mcp_launch;
+#[cfg(test)]
+mod memory_coordination;
 mod note;
 mod note_command;
 mod output;

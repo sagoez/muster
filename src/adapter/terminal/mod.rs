@@ -7,6 +7,8 @@ pub mod cell_color;
 pub mod cell_flags;
 pub mod cell_style;
 pub mod cursor_state;
+#[cfg(test)]
+mod dispatch_recorder;
 pub mod emulator;
 mod emulator_sink;
 pub mod escape;

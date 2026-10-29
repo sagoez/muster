@@ -1,3 +1,5 @@
+use getset::{CopyGetters, Getters};
+
 use super::{
     args::{RAW_LOG_FLAGS, line_limit},
     error::CliError,
@@ -9,24 +11,29 @@ use crate::{
 
 /// `muster logs` flags that read the log as stripped, filtered lines rather
 /// than the raw bytes; any one of them switches to that read.
-#[derive(clap::Args)]
+#[derive(clap::Args, Getters, CopyGetters)]
 pub struct LogFilterArgs {
     /// Print only the newest N lines, escapes removed (at most 2000).
     #[arg(short = 'n', long, value_name = "N", value_parser = line_limit, conflicts_with_all = RAW_LOG_FLAGS)]
-    pub lines: Option<LineLimit>,
+    #[getset(get = "pub")]
+    lines: Option<LineLimit>,
     /// Print only output after this cursor, from an earlier `muster wait` or
     /// `muster logs --json`.
     #[arg(long, value_name = "CURSOR", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub since: Option<OutputCursor>,
+    #[getset(get = "pub")]
+    since: Option<OutputCursor>,
     /// Print only lines containing this text.
     #[arg(long, value_name = "TEXT", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub grep: Option<String>,
+    #[getset(get = "pub")]
+    grep: Option<String>,
     /// Read --grep as a regular expression.
     #[arg(long, requires = "grep")]
-    pub regex: bool,
+    #[getset(get_copy = "pub")]
+    regex: bool,
     /// Print only error lines, each with its stack trace.
     #[arg(long, conflicts_with = "grep", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub errors: bool,
+    #[getset(get_copy = "pub")]
+    errors: bool,
 }
 
 impl LogFilterArgs {

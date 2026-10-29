@@ -11,6 +11,8 @@ mod project_wire;
 mod pty_size_wire;
 mod spawn_history_wire;
 mod stop_policy_wire;
+#[cfg(test)]
+mod text_carrier;
 mod text_form;
 mod wire_form;
 

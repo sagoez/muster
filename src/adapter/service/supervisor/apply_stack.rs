@@ -59,7 +59,7 @@ mod tests {
     fn state_of(harness: &Harness, raw: &str) -> ProcessState {
         let key = name(raw).key();
         *harness
-            .supervisor
+            .supervisor()
             .workspace()
             .processes()
             .iter()
@@ -71,7 +71,7 @@ mod tests {
     /// The names of the workspace's processes, in order.
     fn names(harness: &Harness) -> Vec<String> {
         harness
-            .supervisor
+            .supervisor()
             .workspace()
             .processes()
             .iter()
@@ -81,9 +81,9 @@ mod tests {
 
     /// Delivers `outcome` as the exit of the process on `pane`.
     fn exit(harness: &mut Harness, pane: PaneId, outcome: ExitOutcome) {
-        let generation = harness.supervisor.generations()[&pane];
+        let generation = harness.supervisor_mut().generations()[&pane];
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_output(pane, generation, ProcessOutput::Exited(outcome));
     }
 
@@ -92,21 +92,23 @@ mod tests {
     fn an_added_process_waits_pending() {
         let spawns = SpawnRecorder::default();
         let mut harness = Harness::over(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             &[spec("web", "npm run dev", RestartPolicy::Never)],
         );
         harness.up();
 
-        harness.supervisor.apply_stack(&stack(&[
+        harness.supervisor_mut().apply_stack(&stack(&[
             spec("web", "npm run dev", RestartPolicy::Never),
             spec("api", "cargo run", RestartPolicy::Never),
         ]));
 
         assert_eq!(names(&harness), ["web", "api"]);
         assert_eq!(state_of(&harness, "api"), ProcessState::Pending);
-        assert_eq!(spawns.requests.borrow().len(), 1, "nothing new started");
+        assert_eq!(spawns.requests().borrow().len(), 1, "nothing new started");
     }
 
     /// A changed running process keeps running unrestarted; its next start
@@ -115,29 +117,33 @@ mod tests {
     fn a_changed_running_process_keeps_running_and_restarts_with_the_change() {
         let spawns = SpawnRecorder::default();
         let mut harness = Harness::over(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             &[spec("web", "npm run dev", RestartPolicy::Never)],
         );
         harness.up();
-        let generation = harness.supervisor.generations()[&PaneId::new(0)];
+        let generation = harness.supervisor_mut().generations()[&PaneId::new(0)];
 
-        harness
-            .supervisor
-            .apply_stack(&stack(&[spec("web", "pnpm dev", RestartPolicy::Never)]));
+        harness.supervisor_mut().apply_stack(&stack(&[spec(
+            "web",
+            "pnpm dev",
+            RestartPolicy::Never,
+        )]));
 
         assert_eq!(state_of(&harness, "web"), ProcessState::Running);
         assert_eq!(
-            harness.supervisor.generations()[&PaneId::new(0)],
+            harness.supervisor_mut().generations()[&PaneId::new(0)],
             generation,
             "not restarted"
         );
         harness
-            .supervisor
+            .supervisor_mut()
             .restart(&name("web"), &LaunchEnvironment::default());
         exit(&mut harness, PaneId::new(0), ExitOutcome::Succeeded);
-        let requests = spawns.requests.borrow();
+        let requests = spawns.requests().borrow();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].command().as_ref(), "pnpm dev");
     }
@@ -148,9 +154,11 @@ mod tests {
     fn a_removed_running_process_is_stopped_and_discarded_on_exit() {
         let signals = Arc::new(StopSignals::default());
         let mut harness = Harness::over(
-            Box::new(StopSignalRunner {
-                signals: Arc::clone(&signals),
-            }),
+            Box::new(
+                StopSignalRunner::builder()
+                    .signals(Arc::clone(&signals))
+                    .build(),
+            ),
             &[
                 spec("web", "npm run dev", RestartPolicy::Always),
                 spec("idle", "true", RestartPolicy::Never).with_autostart(false),
@@ -158,14 +166,14 @@ mod tests {
         );
         harness.up();
 
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().apply_stack(&stack(&[]));
 
         assert_eq!(names(&harness), ["web"], "the stopped one went at once");
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 1);
         assert_eq!(state_of(&harness, "web"), ProcessState::Stopping);
         exit(&mut harness, PaneId::new(0), ExitOutcome::FAILED_UNKNOWN);
-        assert!(harness.supervisor.workspace().is_empty());
-        assert!(harness.supervisor.is_idle());
+        assert!(harness.supervisor_mut().workspace().is_empty());
+        assert!(harness.supervisor_mut().is_idle());
     }
 
     /// A name added back while its process retires is kept: its exit settles
@@ -174,17 +182,17 @@ mod tests {
     fn a_name_added_back_while_retiring_is_kept() {
         let kills = Arc::new(AtomicUsize::new(0));
         let mut harness = Harness::over(
-            Box::new(KillCountRunner {
-                kills: Arc::clone(&kills),
-            }),
+            Box::new(KillCountRunner::builder().kills(Arc::clone(&kills)).build()),
             &[spec("web", "npm run dev", RestartPolicy::Never)],
         );
         harness.up();
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().apply_stack(&stack(&[]));
 
-        harness
-            .supervisor
-            .apply_stack(&stack(&[spec("web", "npm run dev", RestartPolicy::Never)]));
+        harness.supervisor_mut().apply_stack(&stack(&[spec(
+            "web",
+            "npm run dev",
+            RestartPolicy::Never,
+        )]));
         exit(&mut harness, PaneId::new(0), ExitOutcome::Succeeded);
 
         assert_eq!(names(&harness), ["web"]);
@@ -201,21 +209,23 @@ mod tests {
             "npm run dev",
             RestartPolicy::Never,
         )]);
-        harness.supervisor.advance_generation(PaneId::new(0));
+        harness.supervisor_mut().advance_generation(PaneId::new(0));
         assert!(
             harness
-                .supervisor
+                .supervisor_mut()
                 .leave_unsupervised(PaneId::new(0), orphan.pid(), None)
         );
 
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().apply_stack(&stack(&[]));
         assert_eq!(state_of(&harness, "web"), ProcessState::Stopping);
         assert!(orphan.end_with(Signal::KILL).is_some(), "the orphan ended");
         let pane = PaneId::new(0);
-        let spawn = harness.supervisor.generations()[&pane];
-        let shutdown = harness.supervisor.panes()[&pane].shutdown_generation();
-        harness.supervisor.handle_force_stop(pane, spawn, shutdown);
+        let spawn = harness.supervisor_mut().generations()[&pane];
+        let shutdown = harness.supervisor_mut().panes()[&pane].shutdown_generation();
+        harness
+            .supervisor_mut()
+            .handle_force_stop(pane, spawn, shutdown);
 
-        assert!(harness.supervisor.workspace().is_empty());
+        assert!(harness.supervisor_mut().workspace().is_empty());
     }
 }

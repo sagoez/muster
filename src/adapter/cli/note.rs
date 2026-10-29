@@ -157,188 +157,11 @@ fn remove(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::PathBuf};
+    use std::path::PathBuf;
 
-    use super::*;
-    use crate::domain::{
-        config::ConfigError,
-        coordination::{
-            Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
-            LockRelease, LockTtl, NewTodoTitle, Scratchpad, SessionId, Todo, TodoChange, TodoId,
-            TodoLease, TodoUpdate,
-        },
-        value::EpochSeconds,
-    };
+    use super::{super::memory_coordination::MemoryCoordination, *};
 
-    /// An in-memory coordination store recording scratchpads for one project.
-    #[derive(Default)]
-    struct FakeStore {
-        notes: RefCell<Vec<Scratchpad>>,
-    }
-
-    impl CoordinationStore for FakeStore {
-        fn scratchpads(&self, _project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError> {
-            Ok(self.notes.borrow().clone())
-        }
-
-        fn scratchpad(
-            &self,
-            _project: &ProjectRoot,
-            key: &ScratchpadKey,
-        ) -> Result<Option<Scratchpad>, ConfigError> {
-            Ok(self
-                .notes
-                .borrow()
-                .iter()
-                .find(|note| note.key() == key)
-                .cloned())
-        }
-
-        fn set_scratchpad(
-            &self,
-            _project: &ProjectRoot,
-            author: &Author,
-            key: &ScratchpadKey,
-            body: &NoteBody,
-        ) -> Result<(), ConfigError> {
-            let note = Scratchpad::builder()
-                .key(key.clone())
-                .body(body.to_string())
-                .author(author.clone())
-                .updated_at(EpochSeconds::new(0))
-                .build();
-            let mut notes = self.notes.borrow_mut();
-            notes.retain(|existing| existing.key() != key);
-            notes.push(note);
-            Ok(())
-        }
-
-        fn delete_scratchpad(
-            &self,
-            _project: &ProjectRoot,
-            key: &ScratchpadKey,
-        ) -> Result<bool, ConfigError> {
-            let mut notes = self.notes.borrow_mut();
-            let before = notes.len();
-            notes.retain(|note| note.key() != key);
-            Ok(notes.len() != before)
-        }
-
-        fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn add_todo(
-            &self,
-            _project: &ProjectRoot,
-            _author: &Author,
-            _title: &NewTodoTitle,
-            _deps: &[TodoId],
-        ) -> Result<Todo, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn update_todo(
-            &self,
-            _project: &ProjectRoot,
-            _me: &Author,
-            _id: &TodoId,
-            _change: &TodoChange,
-        ) -> Result<TodoUpdate, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn claim_todo(
-            &self,
-            _project: &ProjectRoot,
-            _me: &Author,
-            _id: Option<&TodoId>,
-            _lease: TodoLease,
-        ) -> Result<Claim, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn delete_todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<bool, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn acquire_lock(
-            &self,
-            _project: &ProjectRoot,
-            _me: &LockHolder,
-            _name: &LockName,
-            _ttl: LockTtl,
-            _note: Option<&LockNote>,
-        ) -> Result<LockAttempt, ConfigError> {
-            unreachable!("note commands never touch locks")
-        }
-
-        fn release_lock(
-            &self,
-            _project: &ProjectRoot,
-            _me: &LockHolder,
-            _name: &LockName,
-        ) -> Result<LockRelease, ConfigError> {
-            unreachable!("note commands never touch locks")
-        }
-
-        fn break_lock(
-            &self,
-            _project: &ProjectRoot,
-            _name: &LockName,
-        ) -> Result<Option<Lock>, ConfigError> {
-            unreachable!("note commands never touch locks")
-        }
-
-        fn release_locks_of(&self, _session: &SessionId) -> Result<usize, ConfigError> {
-            unreachable!("note commands never touch locks")
-        }
-
-        fn locks(&self, _project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
-            unreachable!("note commands never touch locks")
-        }
-
-        fn values(&self, _project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn value(
-            &self,
-            _project: &ProjectRoot,
-            _key: &KvKey,
-        ) -> Result<Option<KeyValue>, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn set_value(
-            &self,
-            _project: &ProjectRoot,
-            _author: &Author,
-            _key: &KvKey,
-            _value: &KvValue,
-        ) -> Result<(), ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn delete_value(&self, _project: &ProjectRoot, _key: &KvKey) -> Result<bool, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn import(
-            &self,
-            _project: &ProjectRoot,
-            _scratchpads: &[Scratchpad],
-            _todos: &[Todo],
-            _values: &[KeyValue],
-        ) -> Result<(), ConfigError> {
-            unreachable!("note commands never import")
-        }
-    }
-
+    /// The project every test note belongs to.
     fn project() -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
     }
@@ -346,7 +169,7 @@ mod tests {
     /// Setting then listing shows the key; getting returns the body verbatim.
     #[test]
     fn set_then_get_and_list() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(
             &store,
             &project(),
@@ -372,20 +195,20 @@ mod tests {
     /// A body past the maximum is refused with its length, and not stored.
     #[test]
     fn an_oversized_body_is_refused() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         let body = "x".repeat(NOTE_BODY_MAX_CHARS + 1);
         assert!(matches!(
             set(&store, &project(), &Author::human(), "plan", &body),
             Err(CliError::TooLong { max: NOTE_BODY_MAX_CHARS, found, .. })
                 if found == NOTE_BODY_MAX_CHARS + 1
         ));
-        assert!(store.notes.borrow().is_empty());
+        assert!(store.scratchpads(&project()).unwrap().is_empty());
     }
 
     /// An empty store lists a hint rather than nothing.
     #[test]
     fn list_reports_empty() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         let listed = list(&store, &project()).unwrap();
         assert_eq!(listed.rows()[0].detail(), EMPTY_NOTE);
         assert_eq!(listed.rows()[0].kind(), RowKind::Hint);
@@ -395,16 +218,16 @@ mod tests {
     /// A note an agent wrote is attributed in the list; the human's is not.
     #[test]
     fn list_attributes_agent_notes() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(&store, &project(), &Author::human(), "mine", "human note").unwrap();
-        store.notes.borrow_mut().push(
-            Scratchpad::builder()
-                .key(ScratchpadKey::try_new("theirs").unwrap())
-                .body("agent note".to_string())
-                .author(Author::agent("claude"))
-                .updated_at(EpochSeconds::new(0))
-                .build(),
-        );
+        store
+            .set_scratchpad(
+                &project(),
+                &Author::agent("claude"),
+                &ScratchpadKey::try_new("theirs").unwrap(),
+                &NoteBody::try_new("agent note").unwrap(),
+            )
+            .unwrap();
 
         let listed = list(&store, &project()).unwrap();
         let details: Vec<&str> = listed
@@ -422,7 +245,7 @@ mod tests {
     /// Getting an absent note errors so scripts see a non-zero exit.
     #[test]
     fn get_absent_is_an_error() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         assert!(matches!(
             get(&store, &project(), "ghost"),
             Err(CliError::UnknownNote(key)) if key == "ghost"
@@ -432,7 +255,7 @@ mod tests {
     /// Removing reports success, then reports absence idempotently.
     #[test]
     fn remove_is_idempotent() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(&store, &project(), &Author::human(), "plan", "body").unwrap();
 
         let first = remove(&store, &project(), "plan").unwrap();
@@ -446,7 +269,7 @@ mod tests {
     /// A blank key is rejected before the store is touched.
     #[test]
     fn a_blank_key_is_rejected() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         assert!(matches!(
             set(&store, &project(), &Author::human(), "   ", "body"),
             Err(CliError::InvalidNoteKey(_))

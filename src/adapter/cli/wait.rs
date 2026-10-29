@@ -26,22 +26,22 @@ const LINE_INDENT: &str = "  ";
 /// Returns [`CliError::InvalidPattern`] for a blank or overlong `--log`, or
 /// a `--regex` that does not compile.
 pub fn condition(args: &WaitArgs) -> Result<Option<WaitCondition>, CliError> {
-    if let Some(log) = &args.log {
+    if let Some(log) = args.log() {
         return Ok(Some(WaitCondition::Log(LineMatcher::checked(
             log,
-            PatternKind::of_regex(args.regex),
+            PatternKind::of_regex(args.regex()),
         )?)));
     }
     Ok(args
-        .port
+        .port()
         .map(WaitCondition::Port)
         .or_else(|| {
-            args.http.clone().map(|url| WaitCondition::Http {
+            args.http().clone().map(|url| WaitCondition::Http {
                 url,
-                status: args.status,
+                status: *args.status(),
             })
         })
-        .or_else(|| args.state.map(WaitCondition::State)))
+        .or_else(|| args.state().map(WaitCondition::State)))
 }
 
 /// Waits for `until` (the process's default when `None`) from `since`, at

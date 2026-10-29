@@ -58,29 +58,30 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
     let store = invocation.store()?;
     let target = invocation.registering_target(store.as_ref())?;
     let root = target.root().clone();
-    let name = ProcessName::try_new(args.name.clone())
-        .map_err(|error| CliError::invalid_name(&args.name, error))?;
-    let command = command_string(&args.command)?;
-    let working_dir = match args.cwd {
-        Some(dir) => WorkingDirPlace::of(&root, &invocation.in_cwd(&dir)?)?.stored(),
+    let name = ProcessName::try_new(args.name().clone())
+        .map_err(|error| CliError::invalid_name(args.name(), error))?;
+    let command = command_string(args.command())?;
+    let working_dir = match args.cwd() {
+        Some(dir) => WorkingDirPlace::of(&root, &invocation.in_cwd(dir)?)?.stored(),
         None => None,
     };
     let description = args
-        .description
+        .description()
+        .clone()
         .map(|text| Description::try_new(text).map_err(|_| CliError::EmptyDescription))
         .transpose()?;
-    let environment: Environment = args.flags.environment()?.into_iter().collect();
+    let environment: Environment = args.flags().environment()?.into_iter().collect();
     let draft = ProcessDraft::builder()
         .name(name)
         .command(command)
         .working_dir(working_dir)
         .description(description)
         .environment(environment)
-        .autostart(args.flags.autostart())
-        .restart(args.flags.restart)
-        .stop_signal(args.flags.stop_signal)
-        .stop_grace(args.flags.stop_grace)
-        .ready(args.flags.ready()?)
+        .autostart(args.flags().autostart())
+        .restart(args.flags().restart())
+        .stop_signal(args.flags().stop_signal())
+        .stop_grace(args.flags().stop_grace())
+        .ready(args.flags().ready()?)
         .build();
     let (registration, spec) = invocation
         .editor(store.as_ref())

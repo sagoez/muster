@@ -1307,8 +1307,6 @@ fn occupied(
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::RefCell,
-        collections::VecDeque,
         path::Path,
         sync::{
             Arc, Mutex,
@@ -1324,7 +1322,7 @@ mod tests {
         },
         domain::{
             config::{Environment, ProcessSpec},
-            port::{OutputSink, ProcessRunner},
+            port::ProcessRunner,
             process::{Process, RestartPolicy, StopSignal},
             pty::{ExitCause, PtySize},
             value::{EnvName, EnvValue, Pid},
@@ -1369,9 +1367,7 @@ mod tests {
     fn with_stop_signals() -> (Harness, Arc<StopSignals>) {
         let signals = Arc::new(StopSignals::default());
         let harness = started(
-            Box::new(StopSignalRunner {
-                signals: signals.clone(),
-            }),
+            Box::new(StopSignalRunner::builder().signals(signals.clone()).build()),
             process(RestartPolicy::Never),
         );
         (harness, signals)
@@ -1384,10 +1380,12 @@ mod tests {
     ) -> (Harness, Arc<RetryStopSignals>) {
         let signals = Arc::new(RetryStopSignals::default());
         let harness = started(
-            Box::new(RetryStopRunner {
-                signals: signals.clone(),
-                terminate_outcome,
-            }),
+            Box::new(
+                RetryStopRunner::builder()
+                    .signals(signals.clone())
+                    .terminate_outcome(terminate_outcome)
+                    .build(),
+            ),
             process(restart),
         );
         (harness, signals)
@@ -1396,7 +1394,7 @@ mod tests {
     /// The test process's lifecycle state.
     fn state(harness: &Harness) -> ProcessState {
         *harness
-            .supervisor
+            .supervisor()
             .workspace()
             .process(pane())
             .unwrap()
@@ -1405,39 +1403,39 @@ mod tests {
 
     /// The test pane's current spawn generation.
     fn current_gen(harness: &Harness) -> SpawnGeneration {
-        *harness.supervisor.generations().get(&pane()).unwrap()
+        *harness.supervisor().generations().get(&pane()).unwrap()
     }
 
     /// The test pane's current graceful-stop generation.
     fn current_shutdown_gen(harness: &Harness) -> ShutdownGeneration {
-        harness.supervisor.panes()[&pane()].shutdown_generation()
+        harness.supervisor().panes()[&pane()].shutdown_generation()
     }
 
     /// What the test pane's next exit means.
     fn exit_intent(harness: &Harness) -> ExitIntent {
-        harness.supervisor.panes()[&pane()].exit_intent()
+        harness.supervisor().panes()[&pane()].exit_intent()
     }
 
     /// Whether the test pane has a live process.
     fn is_live(harness: &Harness) -> bool {
-        harness.supervisor.is_live(pane())
+        harness.supervisor().is_live(pane())
     }
 
     /// Delivers `outcome` as the current process's exit.
     fn exit(harness: &mut Harness, outcome: ExitOutcome) {
         let generation = current_gen(harness);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_output(pane(), generation, ProcessOutput::Exited(outcome));
     }
 
     /// The levels of `harness`'s notices, with their messages.
     fn notice_levels(harness: &Harness) -> Vec<(NoticeLevel, String)> {
         harness
-            .notices
+            .notices()
             .lock()
             .unwrap()
-            .recent(harness.supervisor.root())
+            .recent(harness.supervisor().root())
             .iter()
             .map(|notice| (*notice.level(), notice.message().clone()))
             .collect()
@@ -1453,7 +1451,7 @@ mod tests {
     #[test]
     fn retiring_a_pane_drops_its_usage_sample() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.metrics.set_usage(
+        harness.supervisor_mut().metrics.set_usage(
             pane(),
             ProcessUsage::builder()
                 .pid(Pid::try_new(4242).unwrap())
@@ -1462,9 +1460,9 @@ mod tests {
                 .build(),
         );
 
-        harness.supervisor.retire_pane(pane());
+        harness.supervisor_mut().retire_pane(pane());
 
-        assert!(harness.supervisor.metrics.usage(pane()).is_none());
+        assert!(harness.supervisor_mut().metrics.usage(pane()).is_none());
     }
 
     /// A start for a pane with no process entity is refused with a notice
@@ -1473,20 +1471,22 @@ mod tests {
     fn spawning_a_pane_without_a_process_reports_it_and_changes_nothing() {
         let spawns = SpawnRecorder::default();
         let mut harness = Harness::new(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             Vec::new(),
         );
 
-        harness.supervisor.spawn(pane());
+        harness.supervisor_mut().spawn(pane());
 
         assert_eq!(harness.notice_messages(), vec![
             SPAWN_UNKNOWN_PROCESS.to_string()
         ]);
-        assert!(spawns.requests.borrow().is_empty());
-        assert!(!harness.supervisor.generations().contains_key(&pane()));
-        assert!(!harness.supervisor.panes().contains_key(&pane()));
+        assert!(spawns.requests().borrow().is_empty());
+        assert!(!harness.supervisor_mut().generations().contains_key(&pane()));
+        assert!(!harness.supervisor_mut().panes().contains_key(&pane()));
     }
 
     /// A launch carries the process's definition, the client's environment
@@ -1503,22 +1503,23 @@ mod tests {
                 EnvValue::try_new("5173").unwrap(),
             ));
         let mut harness = Harness::over(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             &[own],
         );
 
-        harness.supervisor.up(&client_env("FROM", "first"));
+        harness.supervisor_mut().up(&client_env("FROM", "first"));
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
+        let generation = current_gen(&harness);
+        harness.supervisor_mut().handle_respawn(pane(), generation);
         harness
-            .supervisor
-            .handle_respawn(pane(), current_gen(&harness));
-        harness
-            .supervisor
+            .supervisor_mut()
             .restart(&p(), &client_env("FROM", "second"));
 
-        let requests = spawns.requests.borrow();
+        let requests = spawns.requests().borrow();
         let first = &requests[0];
         assert_eq!(first.command().as_ref(), "npm run dev");
         assert_eq!(
@@ -1543,7 +1544,7 @@ mod tests {
         drop(requests);
         exit(&mut harness, ExitOutcome::Succeeded);
         assert_eq!(
-            spawns.requests.borrow()[2].launch_environment(),
+            spawns.requests().borrow()[2].launch_environment(),
             &from("second"),
             "a user's restart takes the asking client's"
         );
@@ -1555,9 +1556,11 @@ mod tests {
     fn new_settings_change_the_next_launch_only() {
         let spawns = SpawnRecorder::default();
         let mut harness = Harness::over(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             &[
                 spec("p", "true", RestartPolicy::Never),
                 spec("q", "true", RestartPolicy::Never).with_autostart(false),
@@ -1567,11 +1570,11 @@ mod tests {
         let bigger = PtySize::try_new(40, 120).unwrap();
 
         harness
-            .supervisor
+            .supervisor_mut()
             .apply_settings(&test_settings().with_default_size(bigger));
-        harness.supervisor.start(&name("q"), &no_env());
+        harness.supervisor_mut().start(&name("q"), &no_env());
 
-        let requests = spawns.requests.borrow();
+        let requests = spawns.requests().borrow();
         assert_eq!(requests[0].size(), *test_settings().default_size());
         assert_eq!(requests[1].size(), bigger);
         assert_eq!(requests.len(), 2, "the running process keeps its terminal");
@@ -1584,7 +1587,7 @@ mod tests {
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
         assert!(
-            harness.supervisor.panes().contains_key(&pane()),
+            harness.supervisor_mut().panes().contains_key(&pane()),
             "the terminal is retained"
         );
         assert!(!is_live(&harness), "the live handle is dropped");
@@ -1596,15 +1599,18 @@ mod tests {
     #[test]
     fn an_exit_clears_the_attached_count() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.set_attached(&p(), 2);
+        harness.supervisor_mut().set_attached(&p(), 2);
         let generation = current_gen(&harness);
 
         exit(&mut harness, ExitOutcome::Succeeded);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_output(pane(), generation, ProcessOutput::Attached(1));
 
-        assert_eq!(*harness.supervisor.snapshot().processes()[0].attached(), 0);
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].attached(),
+            0
+        );
     }
 
     #[test]
@@ -1613,7 +1619,7 @@ mod tests {
 
         assert_eq!(state(&harness), ProcessState::Restarting);
         assert!(
-            harness.supervisor.restarts.backs_off(pane()),
+            harness.supervisor().restarts.backs_off(pane()),
             "a backoff retry must be scheduled after a failed spawn"
         );
     }
@@ -1629,22 +1635,22 @@ mod tests {
     fn pause_then_resume_toggles_state_while_the_process_stays_alive() {
         let mut harness = running(RestartPolicy::Never);
 
-        harness.supervisor.pause(&p());
+        harness.supervisor_mut().pause(&p());
         assert_eq!(state(&harness), ProcessState::Paused);
         assert!(is_live(&harness), "a paused process keeps its live handle");
 
-        harness.supervisor.resume(&p());
+        harness.supervisor_mut().resume(&p());
         assert_eq!(state(&harness), ProcessState::Running);
     }
 
     #[test]
     fn pausing_a_finished_process_is_a_noop() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         exit(&mut harness, ExitOutcome::Succeeded);
         assert_eq!(state(&harness), ProcessState::Exited);
 
-        harness.supervisor.pause(&p());
+        harness.supervisor_mut().pause(&p());
 
         assert_eq!(state(&harness), ProcessState::Exited);
     }
@@ -1653,7 +1659,7 @@ mod tests {
     fn a_failed_pause_signal_leaves_the_state_unchanged() {
         let mut harness = started(Box::new(PauseFailRunner), process(RestartPolicy::Never));
 
-        harness.supervisor.pause(&p());
+        harness.supervisor_mut().pause(&p());
 
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(harness.notice_messages(), vec![
@@ -1664,7 +1670,7 @@ mod tests {
     #[test]
     fn user_stop_is_exited_not_crashed_even_on_nonzero_exit() {
         let mut harness = running(RestartPolicy::Always);
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
 
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
@@ -1685,7 +1691,7 @@ mod tests {
         let mut harness = running(RestartPolicy::Always);
 
         for _ in 0..5 {
-            harness.supervisor.apply_exit(pane(), crash());
+            harness.supervisor_mut().apply_exit(pane(), crash());
         }
         assert_eq!(
             harness.notice_messages(),
@@ -1693,7 +1699,7 @@ mod tests {
             "one notice for the whole loop"
         );
         assert_eq!(
-            harness.supervisor.snapshot().processes()[0]
+            harness.supervisor_mut().snapshot().processes()[0]
                 .last_exit()
                 .as_ref()
                 .map(LastExit::outcome),
@@ -1701,8 +1707,8 @@ mod tests {
             "ps still shows how it last ended"
         );
 
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.apply_exit(pane(), crash());
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().apply_exit(pane(), crash());
         assert_eq!(
             harness.notice_messages().len(),
             2,
@@ -1710,12 +1716,12 @@ mod tests {
         );
 
         harness
-            .supervisor
+            .supervisor_mut()
             .panes
             .get_mut(&pane())
             .unwrap()
             .set_started_at(Instant::now() - RESTART_STABLE_RUN);
-        harness.supervisor.apply_exit(pane(), crash());
+        harness.supervisor_mut().apply_exit(pane(), crash());
         assert_eq!(
             harness.notice_messages().len(),
             3,
@@ -1730,16 +1736,16 @@ mod tests {
         let notifier = RecordingNotifier::default();
         let mut harness = running(RestartPolicy::Always);
         harness
-            .supervisor
+            .supervisor_mut()
             .attention
             .set_notifier(Box::new(notifier.clone()));
         harness
-            .supervisor
+            .supervisor_mut()
             .apply_settings(&test_settings().with_desktop_notifications(true));
 
         for _ in 0..3 {
             harness
-                .supervisor
+                .supervisor_mut()
                 .apply_exit(pane(), ExitOutcome::Failed(ExitCause::Status(1)));
         }
         let delivered = notifier.delivered();
@@ -1750,10 +1756,10 @@ mod tests {
             Some("crashed: exited with status 1")
         );
 
-        harness.supervisor.apply_settings(&test_settings());
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().apply_settings(&test_settings());
+        harness.supervisor_mut().start(&p(), &no_env());
         harness
-            .supervisor
+            .supervisor_mut()
             .apply_exit(pane(), ExitOutcome::Failed(ExitCause::Status(1)));
         assert_eq!(notifier.delivered().len(), 1);
         assert_eq!(harness.notice_messages().len(), 2);
@@ -1765,10 +1771,10 @@ mod tests {
     fn up_begins_a_new_crash_streak() {
         let crash = || ExitOutcome::Failed(ExitCause::Status(1));
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.apply_exit(pane(), crash());
+        harness.supervisor_mut().apply_exit(pane(), crash());
 
         harness.up();
-        harness.supervisor.apply_exit(pane(), crash());
+        harness.supervisor_mut().apply_exit(pane(), crash());
 
         assert_eq!(harness.notice_messages().len(), 2);
     }
@@ -1792,7 +1798,7 @@ mod tests {
                 )],
                 "{policy:?}"
             );
-            let status = harness.supervisor.snapshot();
+            let status = harness.supervisor_mut().snapshot();
             assert_eq!(
                 status.processes()[0]
                     .last_exit()
@@ -1812,7 +1818,7 @@ mod tests {
         exit(&mut harness, ExitOutcome::Succeeded);
 
         assert!(harness.notice_messages().is_empty());
-        let shown = harness.supervisor.snapshot().processes()[0]
+        let shown = harness.supervisor_mut().snapshot().processes()[0]
             .last_exit()
             .clone();
         assert_eq!(
@@ -1826,22 +1832,22 @@ mod tests {
     #[test]
     fn repeated_manual_stop_reuses_one_graceful_escalation() {
         let (mut harness, signals) = with_stop_signals();
-        harness.supervisor.stop(&p());
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
+        harness.supervisor_mut().stop(&p());
 
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 0);
         assert_eq!(
-            *signals.termination.lock().unwrap(),
+            *signals.termination().lock().unwrap(),
             Some((StopSignal::Interrupt, TEST_STOP_GRACE))
         );
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         let (spawn, shutdown) = (current_gen(&harness), current_shutdown_gen(&harness));
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_force_stop(pane(), spawn, shutdown);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 1);
         assert_eq!(harness.notice_messages(), vec![
             FORCE_STOP_NOTICE.to_string()
         ]);
@@ -1854,8 +1860,8 @@ mod tests {
         let (mut harness, _signals) = with_stop_signals();
         let scheduled = current_gen(&harness);
 
-        harness.supervisor.retire_pane(pane());
-        let reused = harness.supervisor.bump_generation(pane());
+        harness.supervisor_mut().retire_pane(pane());
+        let reused = harness.supervisor_mut().bump_generation(pane());
 
         assert_ne!(reused, scheduled);
         assert!(reused.into_inner() > scheduled.into_inner());
@@ -1868,14 +1874,14 @@ mod tests {
         let (mut harness, _signals) = with_stop_signals();
         let scheduled = current_gen(&harness);
 
-        harness.supervisor.retire_pane(pane());
+        harness.supervisor_mut().retire_pane(pane());
 
         assert_ne!(
-            harness.supervisor.generations().get(&pane()).copied(),
+            harness.supervisor_mut().generations().get(&pane()).copied(),
             Some(scheduled)
         );
-        harness.supervisor.handle_respawn(pane(), scheduled);
-        assert!(!harness.supervisor.panes().contains_key(&pane()));
+        harness.supervisor_mut().handle_respawn(pane(), scheduled);
+        assert!(!harness.supervisor_mut().panes().contains_key(&pane()));
     }
 
     /// Force-kill ignores the graceful stop policy.
@@ -1883,10 +1889,10 @@ mod tests {
     fn force_stop_bypasses_the_graceful_policy() {
         let (mut harness, signals) = with_stop_signals();
 
-        harness.supervisor.force_kill(&p());
+        harness.supervisor_mut().force_kill(&p());
 
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 0);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 1);
         assert_eq!(state(&harness), ProcessState::Stopping);
     }
 
@@ -1895,10 +1901,10 @@ mod tests {
     fn restart_uses_the_graceful_policy_then_respawns() {
         let (mut harness, signals) = with_stop_signals();
 
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
 
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 1);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 0);
         assert_eq!(state(&harness), ProcessState::Stopping);
         assert_eq!(exit_intent(&harness), ExitIntent::RestartInFlight);
 
@@ -1915,22 +1921,22 @@ mod tests {
         let (mut harness, signals) = with_stop_signals();
         let spawn_generation = current_gen(&harness);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         let stale_shutdown = current_shutdown_gen(&harness);
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
         let current_shutdown = current_shutdown_gen(&harness);
 
         assert_ne!(stale_shutdown, current_shutdown);
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_force_stop(pane(), spawn_generation, stale_shutdown);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 0);
         assert_eq!(exit_intent(&harness), ExitIntent::RestartInFlight);
 
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_force_stop(pane(), spawn_generation, current_shutdown);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1938,15 +1944,15 @@ mod tests {
         let (mut harness, signals) =
             with_retrying_stop_signals(TerminateOutcome::Fails, RestartPolicy::Never);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(exit_intent(&harness), ExitIntent::StopRetryable);
 
-        harness.supervisor.stop(&p());
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
+        harness.supervisor_mut().stop(&p());
 
         assert_eq!(exit_intent(&harness), ExitIntent::StopInFlight);
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 2);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 2);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1954,22 +1960,22 @@ mod tests {
         let (mut harness, signals) =
             with_retrying_stop_signals(TerminateOutcome::Succeeds, RestartPolicy::Never);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         let (spawn, shutdown) = (current_gen(&harness), current_shutdown_gen(&harness));
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_force_stop(pane(), spawn, shutdown);
         assert_eq!(exit_intent(&harness), ExitIntent::StopRetryable);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         let (spawn, shutdown) = (current_gen(&harness), current_shutdown_gen(&harness));
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_force_stop(pane(), spawn, shutdown);
 
         assert_eq!(exit_intent(&harness), ExitIntent::StopInFlight);
-        assert_eq!(signals.terminates.load(Ordering::SeqCst), 2);
-        assert_eq!(signals.kills.load(Ordering::SeqCst), 2);
+        assert_eq!(signals.terminates().load(Ordering::SeqCst), 2);
+        assert_eq!(signals.kills().load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1977,7 +1983,7 @@ mod tests {
         let (mut harness, _signals) =
             with_retrying_stop_signals(TerminateOutcome::Fails, RestartPolicy::Always);
 
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
         assert_eq!(state(&harness), ProcessState::Exited);
@@ -1990,8 +1996,8 @@ mod tests {
     #[test]
     fn restart_after_stop_wins_before_the_exit_arrives() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.stop(&p());
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().stop(&p());
+        harness.supervisor_mut().restart(&p(), &no_env());
 
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
@@ -2006,12 +2012,12 @@ mod tests {
         let stale = current_gen(&harness);
         assert!(!is_live(&harness));
 
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
         let current = current_gen(&harness);
         assert_ne!(current, stale);
         assert!(is_live(&harness));
 
-        harness.supervisor.handle_respawn(pane(), stale);
+        harness.supervisor_mut().handle_respawn(pane(), stale);
         assert_eq!(current_gen(&harness), current);
         assert!(is_live(&harness));
     }
@@ -2019,14 +2025,12 @@ mod tests {
     #[test]
     fn failed_forced_respawn_deactivates_the_pane() {
         let mut harness = started(
-            Box::new(FlakyRunner {
-                spawns: AtomicUsize::new(0),
-            }),
+            Box::new(FlakyRunner::builder().spawns(AtomicUsize::new(0)).build()),
             process(RestartPolicy::Never),
         );
         assert!(is_live(&harness));
 
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
         assert!(!is_live(&harness), "a failed respawn leaves no dead handle");
@@ -2038,8 +2042,8 @@ mod tests {
         let mut harness = running(RestartPolicy::Never);
         let old_gen = current_gen(&harness);
 
-        harness.supervisor.restart(&p(), &no_env());
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().restart(&p(), &no_env());
+        harness.supervisor_mut().handle_output(
             pane(),
             old_gen,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
@@ -2047,12 +2051,16 @@ mod tests {
         let new_gen = current_gen(&harness);
         assert_ne!(new_gen, old_gen);
 
-        harness
-            .supervisor
-            .handle_output(pane(), old_gen, ProcessOutput::Chunk(b"stale".to_vec()));
-        harness
-            .supervisor
-            .handle_output(pane(), new_gen, ProcessOutput::Chunk(b"fresh".to_vec()));
+        harness.supervisor_mut().handle_output(
+            pane(),
+            old_gen,
+            ProcessOutput::Chunk(b"stale".to_vec()),
+        );
+        harness.supervisor_mut().handle_output(
+            pane(),
+            new_gen,
+            ProcessOutput::Chunk(b"fresh".to_vec()),
+        );
 
         assert_eq!(harness.run_tail(pane()), ["fresh"]);
     }
@@ -2066,17 +2074,19 @@ mod tests {
     fn an_unreadable_output_stream_is_a_notice_naming_the_process() {
         let mut harness = running(RestartPolicy::Always);
 
-        harness.supervisor.handle_output(
+        let generation = current_gen(&harness);
+
+        harness.supervisor_mut().handle_output(
             pane(),
-            current_gen(&harness),
+            generation,
             ProcessOutput::Unreadable("bad frame".to_string()),
         );
 
         let notices = harness
-            .notices
+            .notices()
             .lock()
             .unwrap()
-            .recent(harness.supervisor.root());
+            .recent(harness.supervisor().root());
         assert_eq!(
             notices.len(),
             3,
@@ -2090,7 +2100,7 @@ mod tests {
             &format!("{CRASHED_NOTICE}: {}", ExitOutcome::FAILED_UNKNOWN)
         );
         assert_eq!(state(&harness), ProcessState::Restarting);
-        assert!(!harness.supervisor.is_live(pane()));
+        assert!(!harness.supervisor_mut().is_live(pane()));
     }
 
     /// A running process is not started a second time over its live handle.
@@ -2098,16 +2108,18 @@ mod tests {
     fn starting_a_running_process_leaves_it_alone() {
         let spawns = SpawnRecorder::default();
         let mut harness = started(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             process(RestartPolicy::Never),
         );
         let generation = current_gen(&harness);
 
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
 
-        assert_eq!(spawns.requests.borrow().len(), 1);
+        assert_eq!(spawns.requests().borrow().len(), 1);
         assert_eq!(current_gen(&harness), generation);
     }
 
@@ -2117,9 +2129,7 @@ mod tests {
     fn shutdown_leaves_every_handle_unkilled() {
         let kills = Arc::new(AtomicUsize::new(0));
         let mut harness = Harness::over(
-            Box::new(KillCountRunner {
-                kills: kills.clone(),
-            }),
+            Box::new(KillCountRunner::builder().kills(kills.clone()).build()),
             &[
                 spec("p", "true", RestartPolicy::Always),
                 spec("q", "true", RestartPolicy::Never),
@@ -2128,22 +2138,22 @@ mod tests {
         harness.up();
         let generation = current_gen(&harness);
 
-        harness.supervisor.shutdown();
+        harness.supervisor_mut().shutdown();
 
         assert_eq!(kills.load(Ordering::SeqCst), 0, "no process was killed");
-        assert!(!harness.supervisor.is_live(pane()));
-        assert!(!harness.supervisor.is_live(PaneId::new(1)));
-        harness.supervisor.handle_respawn(pane(), generation);
+        assert!(!harness.supervisor_mut().is_live(pane()));
+        assert!(!harness.supervisor_mut().is_live(PaneId::new(1)));
+        harness.supervisor_mut().handle_respawn(pane(), generation);
         assert!(
-            !harness.supervisor.is_live(pane()),
+            !harness.supervisor_mut().is_live(pane()),
             "a respawn queued before shutdown starts nothing"
         );
 
         let mut failing = started(Box::new(FailingRunner), process(RestartPolicy::Always));
         let pending = current_gen(&failing);
-        failing.supervisor.shutdown();
+        failing.supervisor_mut().shutdown();
         let after_shutdown = current_gen(&failing);
-        failing.supervisor.handle_respawn(pane(), pending);
+        failing.supervisor_mut().handle_respawn(pane(), pending);
         assert_eq!(
             current_gen(&failing),
             after_shutdown,
@@ -2156,34 +2166,21 @@ mod tests {
     #[test]
     fn restarts_on_request_are_counted_whether_or_not_the_process_runs() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         exit(&mut harness, ExitOutcome::Succeeded);
 
-        harness.supervisor.restart(&p(), &no_env());
-        assert_eq!(*harness.supervisor.snapshot().processes()[0].restarts(), 1);
+        harness.supervisor_mut().restart(&p(), &no_env());
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].restarts(),
+            1
+        );
 
-        harness.supervisor.restart(&p(), &no_env());
+        harness.supervisor_mut().restart(&p(), &no_env());
         exit(&mut harness, ExitOutcome::Succeeded);
-        assert_eq!(*harness.supervisor.snapshot().processes()[0].restarts(), 2);
-    }
-
-    /// A runner whose spawns succeed or fail in a scripted order.
-    struct ScriptedRunner {
-        outcomes: RefCell<VecDeque<bool>>,
-    }
-
-    impl ProcessRunner for ScriptedRunner {
-        fn spawn(
-            &self,
-            _request: SpawnRequest,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            if self.outcomes.borrow_mut().pop_front().unwrap_or(false) {
-                Ok(Box::new(FakeHandle))
-            } else {
-                Err(PtyError::System("spawn failed".to_string()))
-            }
-        }
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].restarts(),
+            2
+        );
     }
 
     /// A process that keeps failing to spawn under an auto-restart policy is
@@ -2191,19 +2188,17 @@ mod tests {
     #[test]
     fn a_failing_spawn_is_reported_once_per_streak() {
         let mut harness = started(
-            Box::new(ScriptedRunner {
-                outcomes: RefCell::new(VecDeque::from([false, false, true, false])),
-            }),
+            Box::new(ScriptedRunner::new([false, false, true, false])),
             process(RestartPolicy::Always),
         );
         let retry = current_gen(&harness);
-        harness.supervisor.handle_respawn(pane(), retry);
+        harness.supervisor_mut().handle_respawn(pane(), retry);
         let retry = current_gen(&harness);
-        harness.supervisor.handle_respawn(pane(), retry);
+        harness.supervisor_mut().handle_respawn(pane(), retry);
         assert!(is_live(&harness));
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
         let retry = current_gen(&harness);
-        harness.supervisor.handle_respawn(pane(), retry);
+        harness.supervisor_mut().handle_respawn(pane(), retry);
 
         let reports = |harness: &Harness| {
             harness
@@ -2218,7 +2213,7 @@ mod tests {
             "one report per streak, the second after a success"
         );
 
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         assert_eq!(
             reports(&harness),
             3,
@@ -2232,20 +2227,22 @@ mod tests {
     fn up_starts_the_autostart_set_once() {
         let spawns = SpawnRecorder::default();
         let mut harness = Harness::over(
-            Box::new(RequestRecordingRunner {
-                recorder: spawns.clone(),
-            }),
+            Box::new(
+                RequestRecordingRunner::builder()
+                    .recorder(spawns.clone())
+                    .build(),
+            ),
             &[
                 spec("p", "true", RestartPolicy::Never),
                 spec("manual", "true", RestartPolicy::Never).with_autostart(false),
             ],
         );
 
-        let first = harness.supervisor.up(&no_env());
-        let second = harness.supervisor.up(&no_env());
+        let first = harness.supervisor_mut().up(&no_env());
+        let second = harness.supervisor_mut().up(&no_env());
 
         let started: Vec<String> = spawns
-            .requests
+            .requests()
             .borrow()
             .iter()
             .map(|request| request.process().as_ref().to_string())
@@ -2256,7 +2253,7 @@ mod tests {
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(
             *harness
-                .supervisor
+                .supervisor_mut()
                 .workspace()
                 .process(PaneId::new(1))
                 .unwrap()
@@ -2272,18 +2269,16 @@ mod tests {
     fn a_handled_exit_is_acknowledged_and_a_shutdown_acknowledges_nothing() {
         let acks = Arc::new(AtomicUsize::new(0));
         let mut harness = started(
-            Box::new(AckCountRunner {
-                acks: Arc::clone(&acks),
-            }),
+            Box::new(AckCountRunner::builder().acks(Arc::clone(&acks)).build()),
             process(RestartPolicy::Never),
         );
 
         exit(&mut harness, ExitOutcome::Succeeded);
         assert_eq!(acks.load(Ordering::SeqCst), 1);
 
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         assert!(is_live(&harness));
-        harness.supervisor.shutdown();
+        harness.supervisor_mut().shutdown();
         assert_eq!(acks.load(Ordering::SeqCst), 1);
     }
 
@@ -2295,26 +2290,23 @@ mod tests {
     fn a_restarting_exit_is_held_until_the_respawn_or_until_the_restart_settles() {
         let acks = Arc::new(AtomicUsize::new(0));
         let mut harness = started(
-            Box::new(AckCountRunner {
-                acks: Arc::clone(&acks),
-            }),
+            Box::new(AckCountRunner::builder().acks(Arc::clone(&acks)).build()),
             process(RestartPolicy::Always),
         );
 
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
         assert_eq!(state(&harness), ProcessState::Restarting);
-        harness.supervisor.release_settled_exits();
+        harness.supervisor_mut().release_settled_exits();
         assert_eq!(acks.load(Ordering::SeqCst), 0, "held while restarting");
-        harness
-            .supervisor
-            .handle_respawn(pane(), current_gen(&harness));
+        let generation = current_gen(&harness);
+        harness.supervisor_mut().handle_respawn(pane(), generation);
         assert!(is_live(&harness));
         assert_eq!(acks.load(Ordering::SeqCst), 1, "released by the respawn");
 
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(acks.load(Ordering::SeqCst), 1);
-        harness.supervisor.release_settled_exits();
+        harness.supervisor_mut().release_settled_exits();
         assert_eq!(acks.load(Ordering::SeqCst), 2, "released once stopped");
     }
 
@@ -2324,24 +2316,20 @@ mod tests {
     fn a_held_exit_displaced_by_another_is_acknowledged() {
         let acks = Arc::new(AtomicUsize::new(0));
         let mut harness = started(
-            Box::new(AckCountRunner {
-                acks: Arc::clone(&acks),
-            }),
+            Box::new(AckCountRunner::builder().acks(Arc::clone(&acks)).build()),
             process(RestartPolicy::Always),
         );
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
         assert_eq!(acks.load(Ordering::SeqCst), 0, "held for the restart");
 
-        harness.supervisor.install_pane(
+        harness.supervisor_mut().install_pane(
             pane(),
-            Box::new(AckCountHandle {
-                acks: Arc::clone(&acks),
-            }),
+            Box::new(AckCountHandle::builder().acks(Arc::clone(&acks)).build()),
         );
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
         assert_eq!(acks.load(Ordering::SeqCst), 1, "the displaced exit");
-        assert_eq!(harness.supervisor.attach.held_count(), 1);
+        assert_eq!(harness.supervisor_mut().attach.held_count(), 1);
     }
 
     /// `down` stops every running process and leaves stopped ones alone.
@@ -2354,13 +2342,13 @@ mod tests {
         ]);
         harness.up();
 
-        let outcome = harness.supervisor.down();
+        let outcome = harness.supervisor_mut().down();
 
         assert_eq!(outcome.acted(), &vec![p(), name("q")]);
         assert_eq!(state(&harness), ProcessState::Stopping);
         assert_eq!(
             *harness
-                .supervisor
+                .supervisor_mut()
                 .workspace()
                 .process(PaneId::new(1))
                 .unwrap()
@@ -2374,22 +2362,20 @@ mod tests {
     #[test]
     fn supervision_errors_land_in_notices_not_panics() {
         let mut harness = started(
-            Box::new(FlakyRunner {
-                spawns: AtomicUsize::new(0),
-            }),
+            Box::new(FlakyRunner::builder().spawns(AtomicUsize::new(0)).build()),
             process(RestartPolicy::Never),
         );
 
-        harness.supervisor.start(&name("missing"), &no_env());
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().start(&name("missing"), &no_env());
+        harness.supervisor_mut().stop(&p());
         exit(&mut harness, ExitOutcome::Succeeded);
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
 
         let notices = harness
-            .notices
+            .notices()
             .lock()
             .unwrap()
-            .recent(harness.supervisor.root());
+            .recent(harness.supervisor().root());
         let messages: Vec<&str> = notices
             .iter()
             .map(|notice| notice.message().as_str())
@@ -2410,38 +2396,18 @@ mod tests {
     fn the_supervisor_never_answers_terminal_queries() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let mut harness = started(
-            Box::new(RecordingRunner {
-                written: written.clone(),
-            }),
+            Box::new(RecordingRunner::builder().written(written.clone()).build()),
             process(RestartPolicy::Never),
         );
         let generation = current_gen(&harness);
 
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             pane(),
             generation,
             ProcessOutput::Chunk(CURSOR_AND_KEYBOARD_QUERIES.to_vec()),
         );
 
         assert!(written.lock().unwrap().is_empty());
-    }
-
-    /// A runner whose launches run on a worker and always fail.
-    #[derive(Clone)]
-    struct FailingWorkerRunner;
-
-    impl ProcessRunner for FailingWorkerRunner {
-        fn spawn(
-            &self,
-            request: SpawnRequest,
-            sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            FailingRunner.spawn(request, sink)
-        }
-
-        fn detached(&self) -> Option<Arc<dyn ProcessRunner + Send + Sync>> {
-            Some(Arc::new(self.clone()))
-        }
     }
 
     /// Output the launch delivers before its result reaches the loop.
@@ -2458,17 +2424,19 @@ mod tests {
     #[test]
     fn a_worker_launch_installs_its_screen_then_the_output_that_came_first() {
         let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Never);
-        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor_mut().start(&p(), &no_env());
         assert_eq!(state(&harness), ProcessState::Starting);
         let (pane, generation, result) = spawned(&harness);
 
-        harness.supervisor.handle_output(
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Chunk(EARLY_OUTPUT.to_vec()),
         );
         assert_eq!(state(&harness), ProcessState::Starting);
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(harness.run_tail(pane), ["first then"]);
@@ -2479,17 +2447,19 @@ mod tests {
     #[test]
     fn an_up_during_a_launch_keeps_the_launch_environment() {
         let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Always);
-        harness.supervisor.up(&client_env("FROM", "first"));
+        harness.supervisor_mut().up(&client_env("FROM", "first"));
         assert_eq!(state(&harness), ProcessState::Starting);
 
-        let again = harness.supervisor.up(&client_env("FROM", "second"));
+        let again = harness.supervisor_mut().up(&client_env("FROM", "second"));
         let (pane, generation, result) = spawned(&harness);
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         assert!(again.is_empty(), "{again:?}");
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(
-            harness.supervisor.launches.environment_of(pane),
+            harness.supervisor_mut().launches.environment_of(pane),
             Some(&client_env("FROM", "first").to_os())
         );
     }
@@ -2499,8 +2469,8 @@ mod tests {
     #[test]
     fn a_stop_while_starting_reaches_the_launched_process() {
         let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Never);
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.stop(&p());
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().stop(&p());
         assert_eq!(
             state(&harness),
             ProcessState::Starting,
@@ -2508,7 +2478,9 @@ mod tests {
         );
         let (pane, generation, result) = spawned(&harness);
 
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         assert_eq!(state(&harness), ProcessState::Stopping);
         assert_eq!(exit_intent(&harness), ExitIntent::StopInFlight);
@@ -2519,16 +2491,18 @@ mod tests {
     #[test]
     fn a_superseded_launch_is_killed_not_installed() {
         let runner = WorkerRunner::default();
-        let kills = Arc::clone(&runner.0);
+        let kills = Arc::clone(runner.kills());
         let mut harness = on_worker(Box::new(runner), RestartPolicy::Never);
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.retire_pane(pane());
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().retire_pane(pane());
         let (pane, generation, result) = spawned(&harness);
 
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         assert_eq!(kills.load(Ordering::SeqCst), 1);
-        assert!(!harness.supervisor.is_live(pane));
+        assert!(!harness.supervisor_mut().is_live(pane));
     }
 
     /// A launch still in flight when the service lets go of its processes is
@@ -2537,18 +2511,20 @@ mod tests {
     #[test]
     fn a_launch_in_flight_at_shutdown_is_detached_not_killed() {
         let runner = WorkerRunner::default();
-        let kills = Arc::clone(&runner.0);
+        let kills = Arc::clone(runner.kills());
         let mut harness = on_worker(Box::new(runner), RestartPolicy::Never);
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.shutdown();
-        assert_eq!(harness.supervisor.launches_in_flight(), 1);
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().shutdown();
+        assert_eq!(harness.supervisor_mut().launches_in_flight(), 1);
         let (pane, generation, result) = spawned(&harness);
 
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
 
         assert_eq!(kills.load(Ordering::SeqCst), 0, "never stopped");
-        assert_eq!(harness.supervisor.launches_in_flight(), 0);
-        assert!(!harness.supervisor.is_live(pane));
+        assert_eq!(harness.supervisor_mut().launches_in_flight(), 0);
+        assert!(!harness.supervisor_mut().is_live(pane));
     }
 
     /// A launch a removal superseded is killed when its result arrives, even
@@ -2558,22 +2534,24 @@ mod tests {
     fn a_launch_retired_around_shutdown_is_killed_not_detached() {
         for retire_first in [true, false] {
             let runner = WorkerRunner::default();
-            let kills = Arc::clone(&runner.0);
+            let kills = Arc::clone(runner.kills());
             let mut harness = on_worker(Box::new(runner), RestartPolicy::Never);
-            harness.supervisor.start(&p(), &no_env());
+            harness.supervisor_mut().start(&p(), &no_env());
             if retire_first {
-                harness.supervisor.retire_pane(pane());
-                harness.supervisor.shutdown();
+                harness.supervisor_mut().retire_pane(pane());
+                harness.supervisor_mut().shutdown();
             } else {
-                harness.supervisor.shutdown();
-                harness.supervisor.retire_pane(pane());
+                harness.supervisor_mut().shutdown();
+                harness.supervisor_mut().retire_pane(pane());
             }
             let (pane, generation, result) = spawned(&harness);
 
-            harness.supervisor.handle_spawned(pane, generation, result);
+            harness
+                .supervisor_mut()
+                .handle_spawned(pane, generation, result);
 
             assert_eq!(kills.load(Ordering::SeqCst), 1, "discarded, not detached");
-            assert_eq!(harness.supervisor.launches_in_flight(), 0);
+            assert_eq!(harness.supervisor_mut().launches_in_flight(), 0);
         }
     }
 
@@ -2583,14 +2561,16 @@ mod tests {
     fn a_pause_while_starting_is_dropped_when_the_launch_fails() {
         for resume in [false, true] {
             let mut harness = on_worker(Box::new(FailingWorkerRunner), RestartPolicy::Never);
-            harness.supervisor.start(&p(), &no_env());
-            harness.supervisor.pause(&p());
+            harness.supervisor_mut().start(&p(), &no_env());
+            harness.supervisor_mut().pause(&p());
             if resume {
-                harness.supervisor.resume(&p());
+                harness.supervisor_mut().resume(&p());
             }
             let (pane, generation, result) = spawned(&harness);
 
-            harness.supervisor.handle_spawned(pane, generation, result);
+            harness
+                .supervisor_mut()
+                .handle_spawned(pane, generation, result);
 
             assert_eq!(state(&harness), ProcessState::Crashed);
             let notices = harness.notice_messages();
@@ -2605,15 +2585,17 @@ mod tests {
     fn a_pause_or_resume_while_starting_applies_once_installed() {
         for (resume, expected) in [(false, ProcessState::Paused), (true, ProcessState::Running)] {
             let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Never);
-            harness.supervisor.start(&p(), &no_env());
-            harness.supervisor.pause(&p());
+            harness.supervisor_mut().start(&p(), &no_env());
+            harness.supervisor_mut().pause(&p());
             if resume {
-                harness.supervisor.resume(&p());
+                harness.supervisor_mut().resume(&p());
             }
             assert_eq!(state(&harness), ProcessState::Starting);
             let (pane, generation, result) = spawned(&harness);
 
-            harness.supervisor.handle_spawned(pane, generation, result);
+            harness
+                .supervisor_mut()
+                .handle_spawned(pane, generation, result);
 
             assert_eq!(state(&harness), expected);
         }
@@ -2625,28 +2607,34 @@ mod tests {
     #[test]
     fn a_process_removed_while_starting_is_stopped_and_retires_on_exit() {
         let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Always);
-        harness.supervisor.start(&p(), &no_env());
-        harness.supervisor.apply_stack(&stack(&[]));
+        harness.supervisor_mut().start(&p(), &no_env());
+        harness.supervisor_mut().apply_stack(&stack(&[]));
         assert!(
-            harness.supervisor.workspace().process(pane()).is_some(),
+            harness
+                .supervisor_mut()
+                .workspace()
+                .process(pane())
+                .is_some(),
             "a starting row is kept until it exits"
         );
         let (pane, generation, result) = spawned(&harness);
 
-        harness.supervisor.handle_spawned(pane, generation, result);
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
         assert_eq!(
-            harness.supervisor.panes()[&pane].config_membership(),
+            harness.supervisor_mut().panes()[&pane].config_membership(),
             ConfigMembership::RetireOnExit
         );
         assert_eq!(state(&harness), ProcessState::Stopping);
-        let current = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let current = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             current,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
 
-        assert!(harness.supervisor.workspace().process(pane).is_none());
+        assert!(harness.supervisor_mut().workspace().process(pane).is_none());
     }
 
     /// The test process's spec, for a stack that keeps it.
@@ -2660,7 +2648,7 @@ mod tests {
         let mut harness = running(RestartPolicy::Never);
         let generation = current_gen(&harness);
 
-        harness.supervisor.apply_stack(&stack(&[kept()]));
+        harness.supervisor_mut().apply_stack(&stack(&[kept()]));
 
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(current_gen(&harness), generation);

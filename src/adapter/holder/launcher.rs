@@ -126,8 +126,8 @@ mod tests {
     fn a_detached_command_leads_its_own_session_and_process_group() {
         let mut command = Command::new(LONG_RUNNER);
         command.arg(LONG_RUNNER_SECONDS);
-        let child = Reaped(detached(&mut command).spawn().unwrap());
-        let pid = child.0.id();
+        let child = Reaped::new(detached(&mut command).spawn().unwrap());
+        let pid = child.id();
 
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
         let fields = stat

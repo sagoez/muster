@@ -16,7 +16,14 @@ use crate::domain::{
 
 /// A handle that connected to a screen already showing [`FIRST_SCREEN`],
 /// which its log holds too, counting the kills it is sent.
-pub(crate) struct ConnectedHandle(pub(super) Arc<AtomicUsize>);
+pub(crate) struct ConnectedHandle(Arc<AtomicUsize>);
+
+impl ConnectedHandle {
+    /// A handle counting its kills into `kills`.
+    pub(crate) fn new(kills: Arc<AtomicUsize>) -> Self {
+        Self(kills)
+    }
+}
 
 impl ProcessHandle for ConnectedHandle {
     fn screen_size(&self) -> Option<PtySize> {

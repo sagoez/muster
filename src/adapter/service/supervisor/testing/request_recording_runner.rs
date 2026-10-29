@@ -1,3 +1,6 @@
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::{fake_handle::FakeHandle, spawn_recorder::SpawnRecorder};
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
@@ -5,8 +8,10 @@ use crate::domain::{
 };
 
 /// A successful runner that retains each spawn request.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct RequestRecordingRunner {
-    pub(crate) recorder: SpawnRecorder,
+    recorder: SpawnRecorder,
 }
 
 impl ProcessRunner for RequestRecordingRunner {
@@ -15,7 +20,7 @@ impl ProcessRunner for RequestRecordingRunner {
         request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        self.recorder.requests.borrow_mut().push(request);
+        self.recorder.requests().borrow_mut().push(request);
         Ok(Box::new(FakeHandle))
     }
 }

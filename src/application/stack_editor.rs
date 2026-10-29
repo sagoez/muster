@@ -114,229 +114,33 @@ impl StackEditor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::PathBuf, time::Duration};
-
-    use super::*;
+    use super::{
+        super::{
+            editor_fakes::EditorFakes,
+            editor_fixtures::{draft, grace, name, root, spec},
+            editor_step::EditorStep,
+        },
+        *,
+    };
     use crate::domain::{
-        color_scheme::ColorScheme,
-        config::{Environment, McpStackEdits, Stack},
-        port::StackReader,
+        config::Environment,
         process::{RestartPolicy, StopSignal},
-        project::Project,
-        pty::PtySize,
-        value::{CommandLine, DetachKey, ProjectName, ScrollbackLines, StackRevision, StopGrace},
+        value::ScrollbackLines,
     };
 
-    /// One step the fakes record, so a test can check what happened in order.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum Step {
-        /// A store committed a write.
-        Wrote,
-        /// The stack store committed a write for this author.
-        WroteFor(Author),
-        /// The notifier heard a stack change.
-        StackChanged(ProjectRoot),
-        /// The notifier heard a settings change.
-        SettingsChanged,
-    }
-
-    /// Fakes every port over one shared log; `fail` makes every write refuse.
-    struct Fakes {
-        log: RefCell<Vec<Step>>,
-        added: RefCell<Vec<ProcessSpec>>,
-        settings: RefCell<Settings>,
-        fail: bool,
-    }
-
-    impl Fakes {
-        fn new(fail: bool) -> Self {
-            Self {
-                log: RefCell::new(Vec::new()),
-                added: RefCell::new(Vec::new()),
-                settings: RefCell::new(settings()),
-                fail,
-            }
-        }
-
-        fn editor(&self) -> StackEditor<'_> {
-            StackEditor::builder()
-                .stacks(self)
-                .settings(self)
-                .notifier(self)
-                .build()
-        }
-
-        /// Records a write, or refuses it when failing.
-        fn write(&self) -> Result<(), ConfigError> {
-            self.record(Step::Wrote)
-        }
-
-        /// Records a stack write for `author`, or refuses it when failing.
-        fn write_for(&self, author: &Author) -> Result<(), ConfigError> {
-            self.record(Step::WroteFor(author.clone()))
-        }
-
-        /// Records `step`, or refuses it when failing.
-        fn record(&self, step: Step) -> Result<(), ConfigError> {
-            if self.fail {
-                return Err(ConfigError::Storage("refused".into()));
-            }
-            self.log.borrow_mut().push(step);
-            Ok(())
-        }
-
-        fn steps(&self) -> Vec<Step> {
-            self.log.borrow().clone()
-        }
-    }
-
-    impl StackReader for Fakes {
-        fn stack(&self, _root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
-            Ok(None)
-        }
-
-        fn stack_revision(
-            &self,
-            _root: &ProjectRoot,
-        ) -> Result<Option<StackRevision>, ConfigError> {
-            Ok(None)
-        }
-    }
-
-    impl StackStore for Fakes {
-        fn add_process(
-            &self,
-            _root: &ProjectRoot,
-            spec: &ProcessSpec,
-            author: &Author,
-        ) -> Result<Registration, ConfigError> {
-            self.write_for(author)?;
-            self.added.borrow_mut().push(spec.clone());
-            Ok(registration())
-        }
-
-        fn change_process(
-            &self,
-            _root: &ProjectRoot,
-            _name: &ProcessName,
-            change: &ProcessChange,
-            author: &Author,
-        ) -> Result<ProcessSpec, ConfigError> {
-            self.write_for(author)?;
-            Ok(spec().with_change(change))
-        }
-
-        fn remove_process(
-            &self,
-            _root: &ProjectRoot,
-            _name: &ProcessName,
-            author: &Author,
-        ) -> Result<ProcessSpec, ConfigError> {
-            self.write_for(author)?;
-            Ok(spec())
-        }
-
-        fn import(
-            &self,
-            _root: &ProjectRoot,
-            processes: &[ProcessSpec],
-            mode: ImportMode,
-        ) -> Result<(Registration, ImportPlan), ConfigError> {
-            self.write()?;
-            let stack = Stack::builder()
-                .project(registration().project().clone())
-                .processes(Vec::new())
-                .build();
-            Ok((registration(), stack.plan_import(processes, mode)?))
-        }
-    }
-
-    impl SettingsStore for Fakes {
-        fn load(&self) -> Result<Settings, ConfigError> {
-            Ok(self.settings.borrow().clone())
-        }
-
-        fn apply(&self, change: &SettingChange, _author: &Author) -> Result<Settings, ConfigError> {
-            self.write()?;
-            let changed = self.settings.borrow().clone().with_change(change);
-            *self.settings.borrow_mut() = changed.clone();
-            Ok(changed)
-        }
-    }
-
-    impl StateChangeNotifier for Fakes {
-        fn stack_changed(&self, root: &ProjectRoot) {
-            self.log.borrow_mut().push(Step::StackChanged(root.clone()));
-        }
-
-        fn settings_changed(&self) {
-            self.log.borrow_mut().push(Step::SettingsChanged);
-        }
-    }
-
-    fn root() -> ProjectRoot {
-        ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()
-    }
-
-    fn registration() -> Registration {
-        Registration::builder()
-            .project(
-                Project::builder()
-                    .root(root())
-                    .name(ProjectName::try_new("shop").unwrap())
-                    .build(),
-            )
-            .newly_registered(true)
-            .build()
-    }
-
-    fn grace(seconds: u64) -> StopGrace {
-        StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
-    }
-
-    fn settings() -> Settings {
-        Settings::builder()
-            .desktop_notifications(true)
-            .default_size(PtySize::try_new(24, 80).unwrap())
-            .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
-            .log_max_size("10MiB".parse().unwrap())
-            .scrollback(ScrollbackLines::try_new(1000).unwrap())
-            .color_scheme(ColorScheme::Dark)
-            .default_autostart(true)
-            .default_restart(RestartPolicy::OnFailure)
-            .default_stop_signal(StopSignal::Interrupt)
-            .default_stop_grace(grace(7))
-            .mcp_stack_edits(McpStackEdits::Allow)
-            .build()
-    }
-
-    fn name() -> ProcessName {
-        ProcessName::try_new("web").unwrap()
-    }
-
-    fn draft() -> ProcessDraft {
-        ProcessDraft::builder()
-            .name(name())
-            .command(CommandLine::try_new("npm run dev").unwrap())
-            .build()
-    }
-
-    fn spec() -> ProcessSpec {
-        draft().complete(&settings().process_defaults())
-    }
-
     /// The write commits first, then the notifier hears the project's root.
-    fn assert_wrote_then_notified(fakes: &Fakes, write: Step) {
-        assert_eq!(fakes.steps(), [write, Step::StackChanged(root())]);
+    fn assert_wrote_then_notified(fakes: &EditorFakes, write: EditorStep) {
+        assert_eq!(fakes.steps(), [write, EditorStep::StackChanged(root())]);
     }
 
+    /// The agent every attributed edit is made by.
     fn agent() -> Author {
         Author::agent("claude")
     }
 
     #[test]
     fn add_completes_the_draft_from_the_default_settings() {
-        let fakes = Fakes::new(false);
+        let fakes = EditorFakes::new(false);
 
         let (registration, spec) = fakes
             .editor()
@@ -349,14 +153,14 @@ mod tests {
         assert_eq!(*spec.stop().signal(), StopSignal::Interrupt);
         assert_eq!(*spec.stop().grace_period(), grace(7));
         assert_eq!(spec.environment(), &Environment::empty());
-        assert_eq!(*fakes.added.borrow(), [spec]);
-        assert_wrote_then_notified(&fakes, Step::WroteFor(Author::human()));
+        assert_eq!(fakes.added(), [spec]);
+        assert_wrote_then_notified(&fakes, EditorStep::WroteFor(Author::human()));
     }
 
     /// The agent making a change reaches the store's write, which records it.
     #[test]
     fn change_returns_the_new_definition_after_its_write() {
-        let fakes = Fakes::new(false);
+        let fakes = EditorFakes::new(false);
 
         let changed = fakes
             .editor()
@@ -364,21 +168,21 @@ mod tests {
             .unwrap();
 
         assert!(!*changed.autostart());
-        assert_wrote_then_notified(&fakes, Step::WroteFor(agent()));
+        assert_wrote_then_notified(&fakes, EditorStep::WroteFor(agent()));
     }
 
     #[test]
     fn remove_notifies_after_its_write() {
-        let fakes = Fakes::new(false);
+        let fakes = EditorFakes::new(false);
 
         fakes.editor().remove(&root(), &name(), &agent()).unwrap();
 
-        assert_wrote_then_notified(&fakes, Step::WroteFor(agent()));
+        assert_wrote_then_notified(&fakes, EditorStep::WroteFor(agent()));
     }
 
     #[test]
     fn import_notifies_after_its_write() {
-        let fakes = Fakes::new(false);
+        let fakes = EditorFakes::new(false);
 
         let (_, plan) = fakes
             .editor()
@@ -386,7 +190,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(*plan.added(), [name()]);
-        assert_wrote_then_notified(&fakes, Step::Wrote);
+        assert_wrote_then_notified(&fakes, EditorStep::Wrote);
     }
 
     /// The change the `change` edits apply.
@@ -396,7 +200,7 @@ mod tests {
 
     #[test]
     fn configure_notifies_a_settings_change_after_the_write() {
-        let fakes = Fakes::new(false);
+        let fakes = EditorFakes::new(false);
 
         let settings = fakes
             .editor()
@@ -407,13 +211,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(settings.scrollback().into_inner(), 50);
-        assert_eq!(fakes.steps(), [Step::Wrote, Step::SettingsChanged]);
+        assert_eq!(fakes.steps(), [
+            EditorStep::Wrote,
+            EditorStep::SettingsChanged
+        ]);
     }
 
     /// A refused write is never announced.
     #[test]
     fn a_failed_write_notifies_nothing() {
-        let fakes = Fakes::new(true);
+        let fakes = EditorFakes::new(true);
         let editor = fakes.editor();
 
         assert!(editor.add(&root(), draft(), &agent()).is_err());

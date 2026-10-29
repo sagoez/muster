@@ -186,20 +186,10 @@ where
 mod tests {
     use std::{env, path::PathBuf, thread};
 
-    use serde::Deserialize;
     use uuid::Uuid;
 
     use super::*;
-
-    #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-    enum Ping {
-        Ping,
-    }
-
-    #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-    enum Pong {
-        Pong(u32),
-    }
+    use crate::adapter::{ping::Ping, pong::Pong};
 
     /// A socket path short enough for every platform's `sun_path` cap. macOS
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches

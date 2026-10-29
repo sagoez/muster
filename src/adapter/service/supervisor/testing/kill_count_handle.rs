@@ -6,6 +6,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
@@ -14,8 +17,10 @@ use crate::domain::{
 };
 
 /// A handle that counts how many times it is killed.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct KillCountHandle {
-    pub(crate) kills: Arc<AtomicUsize>,
+    kills: Arc<AtomicUsize>,
 }
 
 impl ProcessHandle for KillCountHandle {

@@ -98,14 +98,16 @@ mod tests {
         let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
         harness.up();
 
-        assert_eq!(harness.supervisor.usage_pids(), vec![fake_launcher_pid()]);
+        assert_eq!(harness.supervisor_mut().usage_pids(), vec![
+            fake_launcher_pid()
+        ]);
         assert!(
             harness
-                .supervisor
+                .supervisor_mut()
                 .take_usage(&sample_of(fake_launcher_pid()))
         );
 
-        let usage = harness.supervisor.snapshot().processes()[0]
+        let usage = harness.supervisor_mut().snapshot().processes()[0]
             .usage()
             .expect("the sample reaches the snapshot");
         assert_eq!(*usage.pid(), fake_launcher_pid());
@@ -117,7 +119,7 @@ mod tests {
     fn an_idle_project_wants_no_usage() {
         let harness = Harness::new(Box::new(PidRunner), Vec::new());
 
-        assert!(!harness.supervisor.wants_usage());
+        assert!(!harness.supervisor().wants_usage());
     }
 
     /// The exit of the last live process drops its sampled usage at once, so
@@ -127,18 +129,18 @@ mod tests {
         let mut harness = Harness::new(Box::new(PidRunner), vec![terminal()]);
         harness.up();
         harness
-            .supervisor
+            .supervisor_mut()
             .take_usage(&sample_of(fake_launcher_pid()));
 
-        harness.supervisor.force_kill(&name("p"));
+        harness.supervisor_mut().force_kill(&name("p"));
         let pane = PaneId::new(PANE);
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
 
-        assert!(!harness.supervisor.wants_usage());
+        assert!(!harness.supervisor_mut().wants_usage());
     }
 }

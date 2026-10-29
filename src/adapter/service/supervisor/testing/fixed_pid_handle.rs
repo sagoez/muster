@@ -8,7 +8,14 @@ use crate::domain::{
 };
 
 /// A handle that reports a fixed pid and accepts every request.
-pub(crate) struct FixedPidHandle(pub(crate) Pid);
+pub(crate) struct FixedPidHandle(Pid);
+
+impl FixedPidHandle {
+    /// A handle reporting `pid`.
+    pub(crate) fn new(pid: Pid) -> Self {
+        Self(pid)
+    }
+}
 
 impl ProcessHandle for FixedPidHandle {
     fn take_initial_screen(&mut self) -> Option<Vec<u8>> {

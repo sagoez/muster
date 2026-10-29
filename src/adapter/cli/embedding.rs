@@ -4,7 +4,14 @@ use super::wrapped::Wrapped;
 
 /// An error whose display already embeds its source.
 #[derive(Debug)]
-pub(super) struct Embedding(pub(super) Wrapped);
+pub(super) struct Embedding(Wrapped);
+
+impl Embedding {
+    /// An error embedding `source`'s display in its own.
+    pub(super) fn new(source: Wrapped) -> Self {
+        Self(source)
+    }
+}
 
 impl fmt::Display for Embedding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

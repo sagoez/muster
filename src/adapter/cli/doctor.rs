@@ -359,7 +359,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::cli::{embedding::Embedding, fixed_projects::Projects, wrapped::Wrapped},
+        adapter::{
+            cli::{embedding::Embedding, wrapped::Wrapped},
+            client::fixed_projects::FixedProjects,
+        },
         domain::{
             project::Project,
             value::{ProjectName, ProjectRoot},
@@ -380,14 +383,14 @@ mod tests {
     fn a_registered_folder_that_is_gone_is_a_warning() {
         let scratch = TempDir::new().unwrap();
         let here = scratch.path().canonicalize().unwrap();
-        let probe = projects_probe(&Projects(vec![
+        let probe = projects_probe(&FixedProjects::new(vec![
             project("here", &here),
             project("gone", &here.join("gone")),
         ]));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("gone"), "{}", probe.detail());
-        let fine = projects_probe(&Projects(vec![project("here", &here)]));
+        let fine = projects_probe(&FixedProjects::new(vec![project("here", &here)]));
         assert_eq!(fine.outcome(), ProbeOutcome::Ok);
         assert_eq!(fine.detail(), "1 registered");
     }
@@ -446,7 +449,10 @@ mod tests {
     /// A source the message already shows is not repeated.
     #[test]
     fn the_error_chain_skips_sources_already_shown() {
-        assert_eq!(error_chain(&Embedding(Wrapped)), "could not open: locked");
+        assert_eq!(
+            error_chain(&Embedding::new(Wrapped)),
+            "could not open: locked"
+        );
     }
 
     /// The completions probe warns with the exact line when unregistered.

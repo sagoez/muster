@@ -9,7 +9,14 @@ use crate::domain::{
 /// A runner whose launches run on a worker, as a holder runner's do; the
 /// shared count is the kills its handles were sent.
 #[derive(Clone, Default)]
-pub(crate) struct WorkerRunner(pub(crate) Arc<AtomicUsize>);
+pub(crate) struct WorkerRunner(Arc<AtomicUsize>);
+
+impl WorkerRunner {
+    /// The kills its handles were sent.
+    pub(crate) fn kills(&self) -> &Arc<AtomicUsize> {
+        &self.0
+    }
+}
 
 impl ProcessRunner for WorkerRunner {
     fn spawn(
@@ -17,7 +24,7 @@ impl ProcessRunner for WorkerRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(ConnectedHandle(Arc::clone(&self.0))))
+        Ok(Box::new(ConnectedHandle::new(Arc::clone(&self.0))))
     }
 
     fn detached(&self) -> Option<Arc<dyn ProcessRunner + Send + Sync>> {

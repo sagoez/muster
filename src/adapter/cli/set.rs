@@ -90,10 +90,10 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
     let store = invocation.store()?;
     let project = invocation.editing_project(store.as_ref())?;
     let root = project.root();
-    let words = (!args.words.is_empty())
-        .then(|| command_string(&args.words))
+    let words = (!args.words().is_empty())
+        .then(|| command_string(args.words()))
         .transpose()?;
-    let working_dir = match (args.cwd, args.no_cwd) {
+    let working_dir = match (args.cwd().clone(), args.no_cwd()) {
         (Some(dir), _) => match WorkingDirPlace::of(root, &invocation.in_cwd(&dir)?)?.stored() {
             Some(dir) => FieldEdit::Set(dir),
             None => FieldEdit::Clear,
@@ -101,7 +101,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         (None, true) => FieldEdit::Clear,
         (None, false) => FieldEdit::Keep,
     };
-    let description = match (args.description, args.no_description) {
+    let description = match (args.description().clone(), args.no_description()) {
         (Some(text), _) => {
             FieldEdit::Set(Description::try_new(text).map_err(|_| CliError::EmptyDescription)?)
         },
@@ -109,21 +109,21 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         (None, false) => FieldEdit::Keep,
     };
     let change = ProcessChange::builder()
-        .command(args.command.or(words))
+        .command(args.command().clone().or(words))
         .working_dir(working_dir)
         .description(description)
-        .set_env(args.flags.environment()?)
+        .set_env(args.flags().environment()?)
         .unset_env(
-            args.unset_env
+            args.unset_env()
                 .iter()
                 .map(|raw| env_name(raw))
                 .collect::<Result<_, _>>()?,
         )
-        .autostart(args.flags.autostart())
-        .restart(args.flags.restart)
-        .stop_signal(args.flags.stop_signal)
-        .stop_grace(args.flags.stop_grace)
-        .ready(match (args.flags.ready()?, args.no_ready) {
+        .autostart(args.flags().autostart())
+        .restart(args.flags().restart())
+        .stop_signal(args.flags().stop_signal())
+        .stop_grace(args.flags().stop_grace())
+        .ready(match (args.flags().ready()?, args.no_ready()) {
             (Some(check), _) => FieldEdit::Set(check),
             (None, true) => FieldEdit::Clear,
             (None, false) => FieldEdit::Keep,
@@ -134,7 +134,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         .ok_or_else(|| ConfigError::UnknownProject {
             root: root.as_ref().clone(),
         })?;
-    let name = resolve_among(stack.names(), &project, &args.name)?;
+    let name = resolve_among(stack.names(), &project, args.name())?;
     let spec = invocation
         .editor(store.as_ref())
         .change(root, &name, &change, &Author::human())?;
@@ -151,15 +151,15 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
 /// Whether `args` asks for no change at all, which is refused before any
 /// state is read.
 fn asks_nothing(args: &SetArgs) -> bool {
-    args.command.is_none()
-        && args.words.is_empty()
-        && args.cwd.is_none()
-        && !args.no_cwd
-        && args.description.is_none()
-        && !args.no_description
-        && args.unset_env.is_empty()
-        && !args.no_ready
-        && args.flags.is_empty()
+    args.command().is_none()
+        && args.words().is_empty()
+        && args.cwd().is_none()
+        && !args.no_cwd()
+        && args.description().is_none()
+        && !args.no_description()
+        && args.unset_env().is_empty()
+        && !args.no_ready()
+        && args.flags().is_empty()
 }
 
 /// What `change` changes, in words: `restart on-failure`, `env PORT`.

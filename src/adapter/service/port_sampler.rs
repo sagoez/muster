@@ -44,51 +44,27 @@ impl PortSampler {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        net::{IpAddr, Ipv4Addr},
+    use super::{
+        super::fixed_listening_ports::{FixedListeningPorts, HELD_PORT},
+        *,
     };
-
-    use super::*;
-    use crate::domain::port::ListeningSocket;
 
     /// Longest a test waits for a sample.
     const SAMPLE_WAIT: Duration = Duration::from_secs(5);
 
-    /// Reports port 3000 under every root it is asked about.
-    struct EveryRootOn3000;
-
-    impl ListeningPorts for EveryRootOn3000 {
-        fn listening(&mut self, roots: &[Pid]) -> HashMap<Pid, Vec<ListeningSocket>> {
-            roots
-                .iter()
-                .map(|root| {
-                    (*root, vec![
-                        ListeningSocket::builder()
-                            .port(3000)
-                            .address(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                            .pid(Pid::try_new(root.into_inner() + 1).unwrap())
-                            .build(),
-                    ])
-                })
-                .collect()
-        }
-    }
-
+    /// Each sample reaches the loop as an event.
     #[test]
     fn posts_each_sample_to_the_loop() {
         let (sender, events) = bounded(4);
-        let sampler = PortSampler::spawn(Box::new(EveryRootOn3000), sender);
+        let sampler = PortSampler::spawn(Box::new(FixedListeningPorts), sender);
 
         let root = Pid::try_new(41).unwrap();
         sampler.sample(vec![root]);
 
-        match events.recv_timeout(SAMPLE_WAIT).unwrap() {
-            ServiceEvent::PortsSampled { ports } => {
-                assert_eq!(ports[&root][0].port(), 3000);
-                assert_eq!(ports[&root][0].pid(), Pid::try_new(42).unwrap());
-            },
-            _ => panic!("expected a sample"),
-        }
+        let ServiceEvent::PortsSampled { ports } = events.recv_timeout(SAMPLE_WAIT).unwrap() else {
+            panic!("expected a sample");
+        };
+        assert_eq!(ports[&root][0].port(), HELD_PORT);
+        assert_eq!(ports[&root][0].pid(), Pid::try_new(42).unwrap());
     }
 }

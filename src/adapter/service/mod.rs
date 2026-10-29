@@ -13,7 +13,11 @@ mod event_seq;
 mod event_waiter;
 mod exit_reason;
 #[cfg(test)]
+mod fake_metrics;
+#[cfg(test)]
 mod fake_pool;
+#[cfg(test)]
+mod fixed_listening_ports;
 mod flow;
 mod holder_pool;
 mod last_exit;
@@ -54,6 +58,8 @@ mod runtime;
 mod runtime_fixture;
 #[cfg(test)]
 mod runtime_testing;
+#[cfg(test)]
+mod sampled_calls;
 mod service_deps;
 mod service_error;
 mod service_error_body;

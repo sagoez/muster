@@ -101,6 +101,6 @@ mod tests {
             RestartPolicy::Never,
         )]);
 
-        assert!(harness.supervisor.has_process(&name("cafe\u{301}")));
+        assert!(harness.supervisor().has_process(&name("cafe\u{301}")));
     }
 }

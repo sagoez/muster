@@ -439,12 +439,12 @@ impl TerminalEmulator {
         let cell = &self.term.grid()[line][Column(col as usize)];
         let flags = cell.flags;
         let spacer = flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
-        RenderCell {
-            ch: cell.c,
-            zerowidth: cell.zerowidth().map(<[char]>::to_vec).unwrap_or_default(),
-            style: cell_style(cell.fg, cell.bg, flags),
-            spacer,
-        }
+        RenderCell::builder()
+            .ch(cell.c)
+            .zerowidth(cell.zerowidth().map(<[char]>::to_vec).unwrap_or_default())
+            .style(cell_style(cell.fg, cell.bg, flags))
+            .spacer(spacer)
+            .build()
     }
 
     /// The text of the linear selection from viewport `(top, start_col)` to
@@ -880,10 +880,10 @@ mod tests {
     fn repaint_reproduces_combining_and_wide_characters() {
         let mut live = TerminalEmulator::new(rows(3), cols(12), 0, ColorScheme::Dark);
         live.process("e\u{301}x \u{754c}\u{9762}!\r\n\u{754c}".as_bytes());
-        assert_eq!(live.cell(0, 0).zerowidth(), ['\u{301}']);
+        assert_eq!(live.cell(0, 0).zerowidth(), &['\u{301}']);
         let mut rebuilt = TerminalEmulator::new(rows(3), cols(12), 0, ColorScheme::Dark);
         rebuilt.process(&live.repaint());
-        assert_eq!(rebuilt.cell(0, 0).zerowidth(), ['\u{301}']);
+        assert_eq!(rebuilt.cell(0, 0).zerowidth(), &['\u{301}']);
         assert_screens_match(&live, &rebuilt);
     }
 

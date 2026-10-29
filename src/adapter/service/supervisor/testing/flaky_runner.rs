@@ -1,5 +1,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::fake_handle::FakeHandle;
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
@@ -7,8 +10,10 @@ use crate::domain::{
 };
 
 /// A runner that succeeds once, then fails every subsequent spawn.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct FlakyRunner {
-    pub(crate) spawns: AtomicUsize,
+    spawns: AtomicUsize,
 }
 
 impl ProcessRunner for FlakyRunner {

@@ -1,10 +1,11 @@
 use crossbeam_channel::{Receiver, unbounded};
+use getset::{Getters, MutGetters};
 
 use super::fixtures::{stack, test_project, test_settings};
 use crate::{
     adapter::service::{
         EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
-        supervisor::{Supervisor, SupervisorDeps},
+        supervisor::{HolderAdopter, Supervisor, SupervisorDeps},
     },
     application::Workspace,
     domain::{config::ProcessSpec, port::ProcessRunner, process::Process, value::PaneId},
@@ -12,11 +13,20 @@ use crate::{
 
 /// A supervisor under test, with the channel its timers and output arrive on
 /// and the notices it raises.
+#[derive(Getters, MutGetters)]
 pub(crate) struct Harness {
-    pub(crate) supervisor: Supervisor,
-    pub(crate) events: Receiver<ServiceEvent>,
-    pub(crate) notices: SharedNotices,
-    pub(crate) event_log: SharedEventLog,
+    /// The supervisor under test.
+    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
+    supervisor: Supervisor,
+    /// Where its timers and output arrive.
+    #[getset(get = "pub(crate)")]
+    events: Receiver<ServiceEvent>,
+    /// The notices it raises.
+    #[getset(get = "pub(crate)")]
+    notices: SharedNotices,
+    /// The events it records.
+    #[getset(get = "pub(crate)")]
+    event_log: SharedEventLog,
 }
 
 impl Harness {
@@ -50,8 +60,17 @@ impl Harness {
     /// `runner`.
     pub(crate) fn new(runner: Box<dyn ProcessRunner>, processes: Vec<Process>) -> Self {
         let mut harness = Self::over(runner, &[]);
-        *harness.supervisor.workspace_mut() = Workspace::builder().processes(processes).build();
+        *harness.supervisor_mut().workspace_mut() =
+            Workspace::builder().processes(processes).build();
         harness
+    }
+
+    /// This harness, its supervisor able to adopt holders through `adopter`.
+    pub(crate) fn adopting_through(self, adopter: Box<dyn HolderAdopter>) -> Self {
+        Self {
+            supervisor: self.supervisor.with_adopter(adopter),
+            ..self
+        }
     }
 
     /// Brings the project up as a client with no environment of its own would.

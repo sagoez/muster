@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::fixtures::REFUSAL;
 use crate::{
     adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
@@ -12,9 +15,10 @@ use crate::{
 
 /// An adopter that runs on a worker, as the service's does, finds
 /// `record` for its child's pid and fails every adoption.
-#[derive(Clone)]
+#[derive(Clone, Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct FailingWorkerAdopter {
-    pub(crate) record: Option<HolderRecord>,
+    record: Option<HolderRecord>,
 }
 
 impl HolderAdopter for FailingWorkerAdopter {

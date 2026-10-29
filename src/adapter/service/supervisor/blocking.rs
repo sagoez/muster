@@ -157,7 +157,7 @@ mod tests {
         adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*},
         domain::{
             config::ProcessSpec,
-            port::{ListeningSocket, PortOccupant, PortOccupants},
+            port::{ListeningSocket, PortOccupant},
             process::{ReadyCheck, ReadyProbe, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
             value::{LocalPort, Pid, PositiveDuration, ProjectName},
@@ -182,15 +182,6 @@ mod tests {
     /// Its command line.
     const OUTSIDER_COMMAND: &str = "python3 -m http.server 3000";
 
-    /// Answers every port lookup with the same occupant.
-    struct Occupied(Option<PortOccupant>);
-
-    impl PortOccupants for Occupied {
-        fn occupant(&mut self, _port: u16) -> Option<PortOccupant> {
-            self.0.clone()
-        }
-    }
-
     /// A program muster does not run, listening on [`PORT`].
     fn outsider() -> PortOccupant {
         PortOccupant::builder()
@@ -214,17 +205,17 @@ mod tests {
     fn a_start_on_a_held_port_is_refused_naming_the_holder() {
         let mut harness = Harness::over(Box::new(PidRunner), &[on_port("web")]);
         harness
-            .supervisor
+            .supervisor_mut()
             .set_held_ports(HashMap::from([(PORT, holder("admin", "web"))]));
 
-        let batch = harness.supervisor.up(&LaunchEnvironment::default());
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
 
         assert!(batch.acted().is_empty());
         assert_eq!(
             batch.refused()[0].reason(),
             "did not start: port 3000 is held by project 'admin', process 'web'"
         );
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         let web = &status.processes()[0];
         assert_eq!(*web.state(), ProcessState::Blocked);
         let block = web.blocked_on().as_ref().expect("blocked");
@@ -234,18 +225,18 @@ mod tests {
         );
         assert_eq!(
             harness
-                .event_log
+                .event_log()
                 .lock()
                 .unwrap()
-                .page(harness.supervisor.root(), None, &[EventKind::Blocked])
+                .page(harness.supervisor().root(), None, &[EventKind::Blocked])
                 .events()
                 .len(),
             1
         );
 
-        harness.supervisor.set_held_ports(HashMap::new());
-        harness.supervisor.up(&LaunchEnvironment::default());
-        let status = harness.supervisor.snapshot();
+        harness.supervisor_mut().set_held_ports(HashMap::new());
+        harness.supervisor_mut().up(&LaunchEnvironment::default());
+        let status = harness.supervisor_mut().snapshot();
         assert!(status.processes()[0].blocked_on().is_none());
         assert!(status.processes()[0].state().may_be_running());
     }
@@ -256,18 +247,18 @@ mod tests {
     fn a_start_on_a_port_another_program_holds_is_refused_naming_it() {
         let mut harness = Harness::over(Box::new(PidRunner), &[on_port("web")]);
         harness
-            .supervisor
+            .supervisor_mut()
             .metrics
-            .set_port_occupants(Box::new(Occupied(Some(outsider()))));
+            .set_port_occupants(Box::new(Occupied::by(Some(outsider()))));
 
-        let batch = harness.supervisor.up(&LaunchEnvironment::default());
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
 
         assert!(batch.acted().is_empty());
         assert_eq!(
             batch.refused()[0].reason(),
             &format!("did not start: port 3000 is held by pid {OUTSIDER_PID} ({OUTSIDER_COMMAND})")
         );
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
         assert_eq!(
             status.processes()[0]
@@ -285,28 +276,28 @@ mod tests {
         let respawning = on_port("web").with_restart(RestartPolicy::Always);
         let mut harness = Harness::over(Box::new(PidRunner), &[respawning]);
         harness.up();
-        let pane = harness.supervisor.pane_named(&name("web")).unwrap();
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
+        let pane = harness.supervisor_mut().pane_named(&name("web")).unwrap();
+        let generation = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_output(
             pane,
             generation,
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].state(),
+            *harness.supervisor_mut().snapshot().processes()[0].state(),
             ProcessState::Restarting
         );
 
         harness
-            .supervisor
+            .supervisor_mut()
             .set_held_ports(HashMap::from([(PORT, holder("admin", "web"))]));
-        let respawn = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_respawn(pane, respawn);
+        let respawn = harness.supervisor_mut().generations()[&pane];
+        harness.supervisor_mut().handle_respawn(pane, respawn);
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
         assert!(status.processes()[0].blocked_on().is_some());
-        assert_eq!(harness.supervisor.generations()[&pane], respawn);
+        assert_eq!(harness.supervisor_mut().generations()[&pane], respawn);
     }
 
     /// A process's own port never blocks it, and the ports a project's live
@@ -322,8 +313,9 @@ mod tests {
                 .pid(fake_launcher_pid())
                 .build(),
         ])]);
-        harness.supervisor.take_ports(&sample);
-        let held: HashMap<u16, PortHolder> = harness.supervisor.held_ports().into_iter().collect();
+        harness.supervisor_mut().take_ports(&sample);
+        let held: HashMap<u16, PortHolder> =
+            harness.supervisor_mut().held_ports().into_iter().collect();
         assert_eq!(
             held[&PORT],
             PortHolder::builder()
@@ -331,14 +323,14 @@ mod tests {
                 .process(name("api"))
                 .build()
         );
-        harness.supervisor.set_held_ports(held);
+        harness.supervisor_mut().set_held_ports(held);
 
         harness
-            .supervisor
+            .supervisor_mut()
             .restart(&name("api"), &LaunchEnvironment::default());
 
         assert!(
-            harness.supervisor.snapshot().processes()[0]
+            harness.supervisor_mut().snapshot().processes()[0]
                 .blocked_on()
                 .is_none()
         );
@@ -351,15 +343,15 @@ mod tests {
     fn a_worker_launch_finds_its_port_held_off_the_loop() {
         let mut harness = Harness::over(Box::new(WorkerRunner::default()), &[on_port("web")]);
         harness
-            .supervisor
+            .supervisor_mut()
             .metrics
-            .set_port_occupants(Box::new(Occupied(Some(outsider()))));
+            .set_port_occupants(Box::new(Occupied::by(Some(outsider()))));
 
         harness
-            .supervisor
+            .supervisor_mut()
             .start(&name("web"), &LaunchEnvironment::default());
         assert_eq!(
-            *harness.supervisor.snapshot().processes()[0].state(),
+            *harness.supervisor_mut().snapshot().processes()[0].state(),
             ProcessState::Starting
         );
         let Ok(ServiceEvent::LaunchBlocked {
@@ -368,19 +360,19 @@ mod tests {
             port,
             occupant,
             ..
-        }) = harness.events.recv_timeout(Duration::from_secs(5))
+        }) = harness.events().recv_timeout(Duration::from_secs(5))
         else {
             panic!("the worker reports the held port");
         };
         let block = PortBlock::builder()
             .port(port)
-            .holder(harness.supervisor.owner_of(occupant))
+            .holder(harness.supervisor_mut().owner_of(occupant))
             .build();
         harness
-            .supervisor
+            .supervisor_mut()
             .handle_launch_blocked(pane, generation, block);
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Blocked);
         assert_eq!(
             status.processes()[0]
@@ -389,7 +381,7 @@ mod tests {
                 .map(PortBlock::holder),
             Some(&PortOwner::Other(outsider()))
         );
-        assert!(harness.supervisor.launches_in_flight() == 0);
+        assert!(harness.supervisor_mut().launches_in_flight() == 0);
     }
 
     /// A port a supervised process's child listens on is named after that
@@ -401,7 +393,7 @@ mod tests {
             spec("api", "true", RestartPolicy::Never),
         ]);
         harness
-            .supervisor
+            .supervisor_mut()
             .start(&name("api"), &LaunchEnvironment::default());
         let child = PortOccupant::builder()
             .pid(Pid::try_new(OUTSIDER_PID).unwrap())
@@ -409,15 +401,15 @@ mod tests {
             .ancestors(vec![fake_launcher_pid()])
             .build();
         harness
-            .supervisor
+            .supervisor_mut()
             .metrics
-            .set_port_occupants(Box::new(Occupied(Some(child))));
+            .set_port_occupants(Box::new(Occupied::by(Some(child))));
 
         harness
-            .supervisor
+            .supervisor_mut()
             .start(&name("web"), &LaunchEnvironment::default());
 
-        let status = harness.supervisor.snapshot();
+        let status = harness.supervisor_mut().snapshot();
         let web = status
             .processes()
             .iter()

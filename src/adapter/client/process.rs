@@ -879,7 +879,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
-            client::unstarted_service::UnstartedService,
+            client::fake_service::FakeService,
             service::NoticeLevel,
             store::{
                 SqliteStore,
@@ -959,16 +959,12 @@ mod tests {
     fn stored_notices_never_start_the_service() {
         let (store, _scratch, project, edit) = edited_project();
 
-        let idle = stored_notices(&UnstartedService { running: None }, &store, &project).unwrap();
-        let live = stored_notices(
-            &UnstartedService {
-                running: Some(vec![earlier()]),
-            },
-            &store,
-            &project,
-        )
-        .unwrap();
+        let stopped = FakeService::default();
+        let running = FakeService::running(vec![earlier()]);
+        let idle = stored_notices(&stopped, &store, &project).unwrap();
+        let live = stored_notices(&running, &store, &project).unwrap();
 
+        assert_eq!(stopped.connects() + running.connects(), 0);
         assert!(!idle.service_running());
         let idle_messages: Vec<&String> = idle.notices().iter().map(Notice::message).collect();
         assert_eq!(idle_messages, [&edit.to_string()]);

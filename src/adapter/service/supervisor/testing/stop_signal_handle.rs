@@ -3,6 +3,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::stop_signals::StopSignals;
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
@@ -12,8 +15,10 @@ use crate::domain::{
 };
 
 /// A handle that distinguishes graceful termination from a hard kill.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct StopSignalHandle {
-    pub(crate) signals: Arc<StopSignals>,
+    signals: Arc<StopSignals>,
 }
 
 impl ProcessHandle for StopSignalHandle {
@@ -82,13 +87,13 @@ impl ProcessHandle for StopSignalHandle {
     }
 
     fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
-        self.signals.terminates.fetch_add(1, Ordering::SeqCst);
-        *self.signals.termination.lock().unwrap() = Some((signal, grace));
+        self.signals.terminates().fetch_add(1, Ordering::SeqCst);
+        *self.signals.termination().lock().unwrap() = Some((signal, grace));
         Ok(())
     }
 
     fn kill(&mut self) -> Result<(), PtyError> {
-        self.signals.kills.fetch_add(1, Ordering::SeqCst);
+        self.signals.kills().fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }

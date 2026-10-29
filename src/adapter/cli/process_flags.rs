@@ -1,3 +1,5 @@
+use getset::CopyGetters;
+
 use super::{
     args::{positive_duration, restart_parser, stop_grace, stop_signal_parser},
     error::CliError,
@@ -18,44 +20,47 @@ pub const READY_GROUP: &str = "ready";
 
 /// The definition flags `add` and `set` share; each one left out keeps the
 /// default (`add`) or the current value (`set`).
-#[derive(clap::Args)]
+#[derive(clap::Args, CopyGetters)]
 pub struct ProcessFlags {
     /// Set an environment variable, `KEY=VALUE` (repeatable).
     #[arg(long = "env", value_name = "KEY=VALUE")]
-    pub env: Vec<String>,
+    env: Vec<String>,
     /// Start it with `muster up`.
     #[arg(long, conflicts_with = "no_autostart")]
-    pub autostart: bool,
+    autostart: bool,
     /// Leave it out of `muster up`.
     #[arg(long)]
-    pub no_autostart: bool,
+    no_autostart: bool,
     /// What happens when its child exits.
     #[arg(long, value_name = "POLICY", value_parser = restart_parser())]
-    pub restart: Option<RestartPolicy>,
+    #[getset(get_copy = "pub")]
+    restart: Option<RestartPolicy>,
     /// The signal a graceful stop sends.
     #[arg(long, value_name = "SIGNAL", value_parser = stop_signal_parser())]
-    pub stop_signal: Option<StopSignal>,
+    #[getset(get_copy = "pub")]
+    stop_signal: Option<StopSignal>,
     /// How long a graceful stop waits before it kills, such as `5s`; at most
     /// 1h.
     #[arg(long, value_name = "DURATION", value_parser = stop_grace)]
-    pub stop_grace: Option<StopGrace>,
+    #[getset(get_copy = "pub")]
+    stop_grace: Option<StopGrace>,
     /// Ready once an output line contains this text; needs --ready-timeout.
     #[arg(long, group = READY_GROUP, value_name = "TEXT", requires = "ready_timeout")]
-    pub ready_log: Option<String>,
+    ready_log: Option<String>,
     /// Read --ready-log as a regular expression.
     #[arg(long, requires = "ready_log")]
-    pub ready_regex: bool,
+    ready_regex: bool,
     /// Ready once this localhost port accepts a connection; needs
     /// --ready-timeout.
     #[arg(long, group = READY_GROUP, value_name = "PORT", requires = "ready_timeout")]
-    pub ready_port: Option<LocalPort>,
+    ready_port: Option<LocalPort>,
     /// Ready once this localhost URL answers below 500; needs
     /// --ready-timeout.
     #[arg(long, group = READY_GROUP, value_name = "URL", requires = "ready_timeout")]
-    pub ready_http: Option<LocalUrl>,
+    ready_http: Option<LocalUrl>,
     /// How long each run may take to become ready, such as `60s`.
     #[arg(long, requires = READY_GROUP, value_name = "DURATION", value_parser = positive_duration)]
-    pub ready_timeout: Option<PositiveDuration>,
+    ready_timeout: Option<PositiveDuration>,
 }
 
 impl ProcessFlags {

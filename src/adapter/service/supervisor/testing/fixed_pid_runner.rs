@@ -3,6 +3,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use getset::Getters;
+use typed_builder::TypedBuilder;
+
 use super::fixed_pid_handle::FixedPidHandle;
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
@@ -11,9 +14,11 @@ use crate::domain::{
 };
 
 /// A runner whose every process reports `pid`, counting its spawns.
+#[derive(Getters, TypedBuilder)]
+#[getset(get = "pub(crate)")]
 pub(crate) struct FixedPidRunner {
-    pub(crate) pid: Pid,
-    pub(crate) spawns: Arc<AtomicUsize>,
+    pid: Pid,
+    spawns: Arc<AtomicUsize>,
 }
 
 impl ProcessRunner for FixedPidRunner {
@@ -23,6 +28,6 @@ impl ProcessRunner for FixedPidRunner {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FixedPidHandle(self.pid)))
+        Ok(Box::new(FixedPidHandle::new(self.pid)))
     }
 }

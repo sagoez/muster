@@ -12,6 +12,9 @@ processes:
     stop:
       signal: terminate
       grace_period: 5s
+    ready:
+      http: http://localhost:5173/
+      timeout: 60s
   - name: worker
     command: bin/worker
     autostart: false

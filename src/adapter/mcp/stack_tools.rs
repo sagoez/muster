@@ -42,11 +42,13 @@ impl MusterMcp {
     /// The whole stack of one project.
     #[tool(
         description = "The whole stack of this project in one call: each process's state, \
-            uptime, restarts, CPU and memory, and how it last exited, plus recent warnings, held \
-            locks and alerts. Call this first, and whenever you are unsure what is running. \
-            Returns {project, you, processes: [{name, state, pid, uptime_s, restarts, \
-            run_start, cpu_percent, memory_bytes, last_exit}], notices, locks, events_cursor, \
-            alerts}; a field with no value is left out."
+            readiness, uptime, restarts, listening ports, URLs, CPU and memory, and how it last \
+            exited, plus recent warnings, held locks and alerts. Call this first, and whenever \
+            you are unsure what is running. Returns {project, you, processes: [{name, state, \
+            ready, pid, uptime_s, restarts, ports, urls, run_start, cpu_percent, memory_bytes, \
+            last_exit: {status, signal, reason, at}, blocked_on: {port, holder, hint}}], \
+            notices, locks, events_cursor, alerts}; a field with no value is left out. Pass \
+            run_start as since to process_logs to read only the current run."
     )]
     pub(super) async fn stack_status(&self, Parameters(arg): Parameters<ProjectArg>) -> ToolResult {
         let coordination = self.deps.coordination().clone();

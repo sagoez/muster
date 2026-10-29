@@ -371,8 +371,8 @@ pub enum Command {
     },
     /// Serve muster to agents as an MCP server over stdio (spawned as a
     /// child process by a connecting agent). Each call acts on the project
-    /// containing this folder, or the one --project names, unless it names
-    /// another.
+    /// containing this folder, or the one --project or $MUSTER_PROJECT
+    /// names, unless it names another.
     Mcp {
         /// Print the JSON config snippet to add muster to an agent's MCP
         /// servers, then exit instead of serving.

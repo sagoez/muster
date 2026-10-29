@@ -70,15 +70,21 @@ has:
 - `--autostart` or `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`; restarts back off;
 - `--stop-signal`: `terminate` (SIGTERM) or `interrupt` (SIGINT), and
-  `--stop-grace`, how long a stop waits before SIGKILL.
+  `--stop-grace`, how long a stop waits before SIGKILL;
+- a readiness check, what each run waits for before it counts as ready: one of
+  `--ready-log TEXT` (with `--ready-regex` for a regex), `--ready-port PORT` or
+  `--ready-http URL` on localhost, and `--ready-timeout`, how long a run has to
+  pass it. A run that misses it raises a warning and keeps running. A start
+  whose readiness port another supervised process listens on is refused,
+  naming that process.
 
 A field left out takes the matching `default-*` setting, and the process stores
 that value, so changing a default later changes only processes added after it.
 `muster add` never starts anything.
 
 `muster set <name>` changes the fields it is given: `--command` or a new command
-after `--`, `--no-cwd` and `--no-description` to clear, `--env` to add or
-replace a variable and `--unset-env` to remove one. A running process keeps its
+after `--`, `--no-cwd`, `--no-description` and `--no-ready` to clear, `--env` to
+add or replace a variable and `--unset-env` to remove one. A running process keeps its
 current run; `muster restart <name>` applies the change. `muster rm <name>...`
 stops each process it removes and waits for it to end. A name cannot be
 changed: remove the process and add it again.
@@ -108,8 +114,13 @@ processes:
     stop:
       signal: terminate
       grace_period: 5s
+    ready:
+      log: ready in
+      timeout: 60s
 ```
 
+`ready` is optional and takes one of `log` (with `regex: true` for a regex),
+`port` or `http`, and a `timeout`.
 [examples/muster.yml](examples/muster.yml) is a complete example. The file
 never names the project: the folder that imports it is the project.
 
@@ -152,15 +163,16 @@ answers in the same shapes.
 
 | Command | What it does |
 |---|---|
-| `muster ps [--all]` | List processes with state, pid, uptime, restarts and usage |
+| `muster ps [--all]` | List processes with state, readiness, pid, uptime, restarts and usage |
 | `muster up` | Start every autostart process |
 | `muster down` | Stop every process |
-| `muster start [name]` | Start a process |
+| `muster start [name] [--wait [--timeout D]]` | Start a process, and with `--wait` wait until it is ready, or running when it has no readiness check |
 | `muster stop [name]` | Stop a process through its stop policy |
-| `muster restart [name]` | Restart a process |
+| `muster restart [name] [--wait [--timeout D]]` | Restart a process, waiting as `start` does |
+| `muster wait [name] [--log P [--regex] \| --port N \| --http URL [--status C] \| --state S] [--since CURSOR] [--timeout D]` | Wait until a process prints a line, accepts a connection, answers a URL, reaches a state, or passes its readiness check |
 | `muster pause [name]` / `resume [name]` | Suspend and resume a process (SIGSTOP and SIGCONT) |
 | `muster kill [name]` | Kill a process at once |
-| `muster logs [name] [-f] [--screen]` | Print a process's log, follow it, or print its current screen |
+| `muster logs [name] [-f] [--screen] [-n N] [--since CURSOR] [--grep P [--regex]] [--errors]` | Print a process's log, follow it, print its current screen, or print filtered lines |
 | `muster attach [name] [--read-only]` | Show a process in this terminal and type into it |
 | `muster add <name> [options] -- <command>` | Add a process to the project, registering the folder |
 | `muster set <name> [options]` | Change a process's fields |
@@ -235,7 +247,7 @@ reads:
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
  "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
- "stop": {"signal": "terminate", "grace": 5.0}}
+ "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": "30s"}}
 ```
 
 `muster logs -f --json` prints one object per line.
@@ -253,8 +265,16 @@ process; `--read-only` watches without typing or resizing.
 
 Each process writes its raw output to a log under the state directory, across
 restarts and after it exits. A log rotates at `log-max-size`, keeping one older
-file. `muster logs` reads it; `muster logs --screen` prints what the terminal
-shows now.
+file. `muster logs` prints it byte for byte; `muster logs --screen` prints what
+the terminal shows now.
+
+Every byte of a process's output has an offset that runs on across restarts
+and rotations, written as a cursor such as `o:18234`. `-n N`, `--since CURSOR`,
+`--grep TEXT` (with `--regex`) and `--errors` print stripped lines instead: the
+newest `N` (100 by default), only what follows the cursor, only matching lines,
+or only error lines with their stack traces. With `--json` the result carries
+the `cursor` to pass as `--since` next time, and `muster wait` reports the same
+cursors.
 
 ## Processes outlive the service
 
@@ -274,8 +294,9 @@ service in place.
 MCP servers. It names no project, so one entry serves every project: each tool
 call acts on the project its `project` argument names (a registered project's
 name, or a folder), else on the deepest registered project containing the
-folder the server runs in, or the one `--project` names. Resolution runs per
-call, so a folder registered after the server started is found. Every result
+folder the server runs in, or the one `--project` or `$MUSTER_PROJECT` names.
+A folder inside a project acts on that project, and projects are found by the
+same rule as the CLI's. Resolution runs per call, so a folder registered after the server started is found. Every result
 about a project names it.
 
 `--as NAME` sets the id the agent's coordination writes and locks carry; it
@@ -306,7 +327,16 @@ only new output. The tools:
 A wait takes one condition: `{"log": "Listening on"}` (add `"regex": true` for a
 regex), `{"port": 3000}`, `{"http": "http://localhost:3000/health"}` (with an
 optional `status`), `{"state": "running"}` or `{"ready": true}`. A `port` or
-`http` condition only reaches loopback hosts.
+`http` condition only reaches loopback hosts. A stored readiness check takes
+the same shape with a `timeout`, such as `{"log": "Listening on", "timeout":
+"60s"}`; `process_set` with `ready: null` removes it.
+
+Cursors are offsets in a process's output that run on across restarts, so
+`process_logs` with `since` set to a wait's `cursor`, or to `run_start` from
+`stack_status`, returns only what followed. `stack_status` also lists each
+process's readiness, the ports its process tree listens on, its URLs, how it
+last exited and why, and `blocked_on` when its start was refused because
+another process holds its readiness port.
 
 No call blocks longer than 45 seconds; a wait that has not finished answers with
 status `waiting` and a cursor to continue from, and a request carrying a

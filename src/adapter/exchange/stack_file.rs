@@ -340,6 +340,14 @@ processes:
         );
     }
 
+    /// The example the README points at reads as a stack.
+    #[test]
+    fn the_shipped_example_reads() {
+        let stack = read_stack_file(include_str!("../../../examples/muster.yml")).unwrap();
+        assert_eq!(stack.len(), 2);
+        assert!(stack[0].ready().is_some());
+    }
+
     /// A readiness check names exactly one probe, a loopback URL, a regex
     /// that compiles and a timeout above zero.
     #[test]

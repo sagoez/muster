@@ -13,6 +13,7 @@ use typed_builder::TypedBuilder;
 use super::{
     config::{HolderConfig, error_path_beside, write_private_file},
     error::HolderError,
+    holder_launcher::HolderLauncher,
     server::HolderServer,
 };
 use crate::{adapter::open_files::OpenFilesLimit, domain::pty::PtyError};
@@ -21,15 +22,6 @@ use crate::{adapter::open_files::OpenFilesLimit, domain::pty::PtyError};
 pub const HOLDER_SUBCOMMAND: &str = "__holder";
 /// Flag naming the holder's spec file.
 pub const SPEC_FLAG: &str = "--spec";
-
-/// Starts a holder for one child.
-pub trait HolderLauncher: Send + Sync {
-    /// Starts a holder running `config`, without waiting for it to serve.
-    ///
-    /// # Errors
-    /// Returns a [`PtyError`] when the holder cannot be started.
-    fn launch(&self, config: HolderConfig) -> Result<(), PtyError>;
-}
 
 /// Launches each holder as `<binary> __holder --spec <json-file>`, detached
 /// into its own session with no stdio, so it outlives the service and the
@@ -114,6 +106,7 @@ pub(crate) fn reap(mut child: Child) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::adapter::holder::reaped::Reaped;
 
     /// A command that outlives the checks made on it.
     const LONG_RUNNER: &str = "sleep";
@@ -124,16 +117,6 @@ mod tests {
     const PGRP_FIELD: usize = 2;
     /// Index of the session id among the fields after the command name.
     const SESSION_FIELD: usize = 3;
-
-    /// Kills and collects a spawned child even when the test panics.
-    struct Reaped(Child);
-
-    impl Drop for Reaped {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 
     #[test]
     fn a_detached_command_leads_its_own_session_and_process_group() {

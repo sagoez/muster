@@ -1,16 +1,12 @@
-use std::{
-    fmt::{self, Display, Formatter},
-    path::PathBuf,
-};
+use std::fmt::{self, Display, Formatter};
 
+use super::working_dir::WorkingDir;
 use crate::domain::{
     config::{ProcessField, ProcessSpec},
     coordination::Author,
     value::ProcessName,
 };
 
-/// How a working directory that is the project root itself reads.
-const PROJECT_ROOT: &str = "the project root";
 /// What separates the fields an edit names.
 const FIELD_SEPARATOR: &str = ", ";
 
@@ -112,22 +108,9 @@ impl Display for StackEdit {
     }
 }
 
-/// A stored working directory as a person reads it.
-struct WorkingDir<'a>(&'a Option<PathBuf>);
-
-impl Display for WorkingDir<'_> {
-    /// The folder, or [`PROJECT_ROOT`] for none.
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(dir) => write!(f, "{}", dir.display()),
-            None => f.write_str(PROJECT_ROOT),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
 
     use super::*;
     use crate::domain::{

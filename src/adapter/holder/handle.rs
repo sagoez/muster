@@ -1,5 +1,4 @@
 use std::{
-    io::{self, Read},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -13,32 +12,24 @@ use std::{
 
 use super::{
     client::greet,
+    client_message::ClientMessage,
+    client_role::ClientRole,
     error::HolderError,
-    protocol::{ClientMessage, ClientRole, HolderControl, HolderMessage},
+    holder_control::HolderControl,
+    reader::{Reader, spawn_reader},
     runner::abandon,
+    shared_writer::SharedWriter,
 };
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
     process::StopSignal,
-    pty::{ProcessOutput, PtyError, PtySize, ScreenSource},
+    pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
 
-/// Reported when a writer panicked mid-frame, leaving the connection unusable.
-const CONNECTION_POISONED: &str = "holder connection writer is poisoned";
 /// Longest one write to the holder may wait for it to read, so a holder that
 /// stops reading fails the request instead of stalling the service.
-const HOLDER_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Reported when the holder took no write within [`HOLDER_WRITE_TIMEOUT`].
-const WRITE_TIMED_OUT: &str = "the holder stopped reading its supervisor connection";
-/// Reported for a write on a connection an earlier timeout broke.
-const WRITER_BROKEN: &str = "the holder connection broke on an earlier write";
-/// Reported when the holder closed the connection without an exit and no
-/// longer serves its socket.
-const HOLDER_LOST: &str = "the holder stopped serving without reporting an exit";
-/// How long a probe of a holder's socket waits for a dying holder's exit to
-/// reset the connection its listener still queued.
-const SERVING_PROBE: Duration = Duration::from_millis(500);
+pub(super) const HOLDER_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The service's supervisor connection to one holder, driving its child.
 ///
@@ -233,166 +224,6 @@ impl Drop for HolderHandle {
     }
 }
 
-/// The write half of a holder connection, writing one whole frame at a time.
-/// A write the holder does not take within [`HOLDER_WRITE_TIMEOUT`] fails
-/// rather than stall its caller, and breaks the connection: the frame may be
-/// cut short, so nothing more is written, and the broken stream is reported
-/// as unreadable output so the supervisor reconnects.
-#[derive(Clone)]
-struct SharedWriter {
-    /// The connection's write half.
-    stream: Arc<Mutex<UnixStream>>,
-    /// Set once a write timed out, leaving the stream mid-frame.
-    broken: Arc<AtomicBool>,
-    /// Where the broken stream is reported.
-    sink: Arc<dyn OutputSink>,
-    /// Set when the handle was dropped, so nothing is reported.
-    detached: Arc<AtomicBool>,
-}
-
-impl SharedWriter {
-    /// Writes `message` as one frame.
-    ///
-    /// # Errors
-    /// Returns a [`PtyError`] when the write fails or times out, the
-    /// connection is already broken, or a writer panicked.
-    fn send(&self, message: ClientMessage) -> Result<(), PtyError> {
-        if self.broken.load(Ordering::SeqCst) {
-            return Err(PtyError::System(WRITER_BROKEN.to_string()));
-        }
-        let mut stream = self
-            .stream
-            .lock()
-            .map_err(|_| PtyError::System(CONNECTION_POISONED.to_string()))?;
-        match message.write_to(&mut *stream) {
-            Err(HolderError::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                self.break_connection();
-                Err(PtyError::System(WRITE_TIMED_OUT.to_string()))
-            },
-            written => Ok(written?),
-        }
-    }
-
-    /// Marks the connection broken and reports it, off the caller's thread,
-    /// since the sink may be the very queue the caller drains.
-    fn break_connection(&self) {
-        if self.broken.swap(true, Ordering::SeqCst) || self.detached.load(Ordering::SeqCst) {
-            return;
-        }
-        let sink = Arc::clone(&self.sink);
-        thread::spawn(move || sink.send(ProcessOutput::Unreadable(WRITE_TIMED_OUT.to_string())));
-    }
-}
-
-impl ProcessInput for SharedWriter {
-    /// Sends `bytes` for the holder to queue to the child.
-    ///
-    /// # Errors
-    /// Returns a [`PtyError`] when the holder connection fails.
-    fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.send(ClientMessage::Input(bytes.to_vec()))
-    }
-}
-
-/// Everything the reader thread owns.
-struct Reader {
-    /// The connection's read half.
-    stream: UnixStream,
-    /// The holder's socket, probed when the connection drops unexpectedly.
-    socket: PathBuf,
-    /// Where the child's screen, output and exit go.
-    sink: Arc<dyn OutputSink>,
-    /// Set when the handle was dropped.
-    detached: Arc<AtomicBool>,
-    /// Set when the holder reports the exit.
-    exit_held: Arc<AtomicBool>,
-}
-
-/// Forwards the holder's frames to the sink until the child exits or the
-/// connection closes. A sink that is slow only delays this thread; the holder
-/// resyncs a supervisor that falls behind rather than waiting for it.
-///
-/// The exit is forwarded, never collected: the holder keeps it until the
-/// supervisor acknowledges it, so an exit lost on the way leaves the holder
-/// re-adoptable. A frame that cannot be decoded is reported as unreadable
-/// output and ends the reader. A connection lost without an exit is reported
-/// as unreadable too, when the handle was not dropped and the holder no
-/// longer serves its socket, so the supervisor's reconnect decides whether
-/// the child outlived its holder; a holder that still serves has handed the
-/// child to another supervisor, which is reported as nothing.
-fn spawn_reader(mut reader: Reader) {
-    thread::spawn(move || {
-        loop {
-            match HolderMessage::read_from(&mut reader.stream) {
-                Ok(HolderMessage::Snapshot {
-                    repaint,
-                    size,
-                    attached,
-                    ..
-                }) => {
-                    reader.sink.send(ProcessOutput::Repaint {
-                        bytes: repaint,
-                        size,
-                    });
-                    reader.sink.send(ProcessOutput::Attached(attached));
-                },
-                Ok(HolderMessage::Output { at, bytes }) => {
-                    reader.sink.send(ProcessOutput::Placed { at, bytes });
-                },
-                Ok(HolderMessage::Exited(outcome)) => {
-                    reader.exit_held.store(true, Ordering::SeqCst);
-                    reader.sink.send(ProcessOutput::Exited(outcome));
-                    return;
-                },
-                Ok(HolderMessage::Warning(text)) => reader.sink.send(ProcessOutput::Warning(text)),
-                Ok(HolderMessage::Attached(count)) => {
-                    reader.sink.send(ProcessOutput::Attached(count));
-                },
-                Ok(HolderMessage::Rejected(_)) => {},
-                Err(error) if error.is_undecodable() => {
-                    if !reader.detached.load(Ordering::SeqCst) {
-                        reader
-                            .sink
-                            .send(ProcessOutput::Unreadable(error.to_string()));
-                    }
-                    return;
-                },
-                Err(_) => break,
-            }
-        }
-        if !reader.detached.load(Ordering::SeqCst) && !holder_serves(&reader.socket) {
-            reader
-                .sink
-                .send(ProcessOutput::Unreadable(HOLDER_LOST.to_string()));
-        }
-    });
-}
-
-/// Whether a holder still serves `socket`: it takes a connection and keeps it
-/// open for [`SERVING_PROBE`]. A holder killed mid-exit may close this
-/// connection before its listener, which then still queues a connect until
-/// the exit resets it, so a connect alone would mistake it for serving.
-fn holder_serves(socket: &Path) -> bool {
-    let Ok(mut probe) = UnixStream::connect(socket) else {
-        return false;
-    };
-    if probe.set_read_timeout(Some(SERVING_PROBE)).is_err() {
-        return true;
-    }
-    match probe.read(&mut [0; 1]) {
-        Ok(read) => read > 0,
-        Err(error) => matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -402,10 +233,19 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crossbeam_channel::{RecvTimeoutError, Sender, unbounded};
+    use crossbeam_channel::{RecvTimeoutError, unbounded};
 
     use super::*;
-    use crate::adapter::test_scratch::short_scratch;
+    use crate::{
+        adapter::{
+            holder::{
+                channel_sink::ChannelSink, protocol::HolderMessage, reader::HOLDER_LOST,
+                shared_writer::WRITE_TIMED_OUT,
+            },
+            test_scratch::short_scratch,
+        },
+        domain::pty::ProcessOutput,
+    };
 
     /// Bound on every wait in these tests; reaching it fails the test.
     const WAIT: Duration = Duration::from_secs(10);
@@ -431,15 +271,6 @@ mod tests {
     /// Input sent at once to a holder that never reads, far past what the
     /// socket buffers.
     const FLOOD_BYTES: usize = 4 * 1024 * 1024;
-
-    /// Forwards a holder handle's output into a channel.
-    struct ChannelSink(Sender<ProcessOutput>);
-
-    impl OutputSink for ChannelSink {
-        fn send(&self, output: ProcessOutput) {
-            let _ = self.0.send(output);
-        }
-    }
 
     /// The service end of a connection whose other end already holds the
     /// fake holder's screen, and that other end.

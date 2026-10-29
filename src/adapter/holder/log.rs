@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::log_base::{Generation, LogBase};
+use super::{generation::Generation, log_base::LogBase};
 use crate::{
     adapter::private_dir::create_private_dir_all,
     domain::value::{ByteSize, OutputCursor},

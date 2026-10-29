@@ -15,6 +15,7 @@ mod setting_key;
 mod spec;
 mod stack;
 mod stack_edit;
+mod working_dir;
 
 pub use environment::*;
 pub use error::*;

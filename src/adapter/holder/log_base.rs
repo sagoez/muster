@@ -1,14 +1,15 @@
 use std::{
     ffi::OsString,
-    fs::{self, File},
+    fs,
     io::{self, Write},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
 use atomic_write_file::AtomicWriteFile;
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
+
+use super::{generation::Generation, resolved::Resolved};
 
 /// Suffix of the sidecar that records where the live log starts.
 const BASE_SUFFIX: &str = ".base";
@@ -20,30 +21,6 @@ fn base_path(log: &Path) -> PathBuf {
     let mut base = OsString::from(log.as_os_str());
     base.push(BASE_SUFFIX);
     PathBuf::from(base)
-}
-
-/// One generation of a log as found on disk: its file identity and length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters, TypedBuilder)]
-#[getset(get_copy = "pub(super)")]
-pub(super) struct Generation {
-    /// The file's inode, which a rename keeps.
-    inode: u64,
-    /// Bytes in the file.
-    len: u64,
-}
-
-impl Generation {
-    /// The identity and length `file` has now.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when the file cannot be inspected.
-    pub(super) fn of(file: &File) -> io::Result<Self> {
-        let metadata = file.metadata()?;
-        Ok(Self {
-            inode: metadata.ino(),
-            len: metadata.len(),
-        })
-    }
 }
 
 /// Where a log's live file starts in the process's output stream, and which
@@ -58,17 +35,6 @@ pub(super) struct LogBase {
     offset: u64,
     /// The inode of the live file it was recorded for.
     inode: u64,
-}
-
-/// A live file's start offset, and whether the sidecar pinned it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters)]
-#[getset(get_copy = "pub(super)")]
-pub(super) struct Resolved {
-    /// The absolute offset of the live file's first byte.
-    offset: u64,
-    /// Whether the sidecar belongs to the files found; otherwise the offset
-    /// is the sidecar's own, the best available.
-    exact: bool,
 }
 
 impl LogBase {
@@ -103,16 +69,18 @@ impl LogBase {
         live: Option<Generation>,
         rotated: Option<Generation>,
     ) -> Resolved {
-        let rotated_len = rotated.map_or(0, |rotated| rotated.len);
+        let rotated_len = rotated.map_or(0, |rotated| rotated.len());
         let (offset, exact) = match sidecar {
             None => (rotated_len, true),
-            Some(base) if live.is_some_and(|live| live.inode == base.inode) => (base.offset, true),
-            Some(base) if rotated.is_some_and(|rotated| rotated.inode == base.inode) => {
+            Some(base) if live.is_some_and(|live| live.inode() == base.inode) => {
+                (base.offset, true)
+            },
+            Some(base) if rotated.is_some_and(|rotated| rotated.inode() == base.inode) => {
                 (base.offset.saturating_add(rotated_len), true)
             },
             Some(base) => (base.offset, false),
         };
-        Resolved { offset, exact }
+        Resolved::builder().offset(offset).exact(exact).build()
     }
 }
 
@@ -123,7 +91,7 @@ mod tests {
     use super::*;
 
     fn generation(inode: u64, len: u64) -> Option<Generation> {
-        Some(Generation { inode, len })
+        Some(Generation::builder().inode(inode).len(len).build())
     }
 
     #[test]
@@ -151,10 +119,7 @@ mod tests {
             offset: 100,
             inode: 7,
         });
-        let exact = |offset| Resolved {
-            offset,
-            exact: true,
-        };
+        let exact = |offset| Resolved::builder().offset(offset).exact(true).build();
 
         assert_eq!(LogBase::resolve(None, generation(1, 5), None), exact(0));
         assert_eq!(
@@ -171,10 +136,7 @@ mod tests {
         );
         assert_eq!(
             LogBase::resolve(base, generation(8, 0), generation(9, 60)),
-            Resolved {
-                offset: 100,
-                exact: false
-            }
+            Resolved::builder().offset(100).exact(false).build()
         );
     }
 }

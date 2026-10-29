@@ -5,65 +5,14 @@ use std::{
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 
-use super::{event::ServiceEvent, supervisor::SpawnGeneration};
-use crate::{
-    adapter::probe::{probe_http, probe_port},
-    domain::value::{LocalPort, LocalUrl, PaneId, ProjectRoot},
+use super::{
+    event::ServiceEvent, probe_command::ProbeCommand, probe_target::ProbeTarget,
+    probe_task::ProbeTask, supervisor::SpawnGeneration,
 };
+use crate::domain::value::{PaneId, ProjectRoot};
 
 /// How often each pending probe is tried.
 pub const PROBE_INTERVAL: Duration = Duration::from_millis(250);
-
-/// What a probe tries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ProbeTarget {
-    /// A TCP connect to the local port.
-    Port(LocalPort),
-    /// An HTTP GET of the local URL, passing on `status` or below 500.
-    Http {
-        /// What to fetch.
-        url: LocalUrl,
-        /// The status to pass on.
-        status: Option<u16>,
-    },
-}
-
-impl ProbeTarget {
-    /// Tries it once.
-    fn passes(&self) -> bool {
-        match self {
-            Self::Port(port) => probe_port(*port),
-            Self::Http { url, status } => probe_http(url, *status),
-        }
-    }
-}
-
-/// One probe the worker tries until it passes or its time runs out.
-struct ProbeTask {
-    /// The project of the process it is for.
-    project: ProjectRoot,
-    /// The pane of the process it is for.
-    pane: PaneId,
-    /// The run it is for.
-    generation: SpawnGeneration,
-    /// What it tries.
-    target: ProbeTarget,
-    /// When it is given up.
-    until: Instant,
-}
-
-/// What the loop asks of the worker.
-enum ProbeCommand {
-    /// Try a probe until it passes or its time runs out.
-    Watch(ProbeTask),
-    /// Give up every probe of a pane.
-    Forget {
-        /// The pane's project.
-        project: ProjectRoot,
-        /// The pane.
-        pane: PaneId,
-    },
-}
 
 /// Tries port and HTTP probes on its own thread, never the loop's, and posts
 /// each pass back as [`ServiceEvent::ProbePassed`]. The thread ends once
@@ -191,6 +140,7 @@ mod tests {
     use crossbeam_channel::bounded;
 
     use super::*;
+    use crate::domain::value::LocalPort;
 
     /// Longest a test waits for a probe to pass.
     const PASS_WAIT: Duration = Duration::from_secs(5);

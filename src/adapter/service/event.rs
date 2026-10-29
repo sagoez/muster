@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crossbeam_channel::Sender;
 
 use super::{
-    probe_worker::ProbeTarget,
+    probe_target::ProbeTarget,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
     supervisor::{HolderScreen, ShutdownGeneration, SpawnGeneration},

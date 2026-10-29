@@ -6,15 +6,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::notice::Notice;
+use super::{notice::Notice, shared_notices::SharedNotices};
 use crate::domain::value::ProjectRoot;
 
 /// Most notices kept in memory; the oldest is dropped to make room.
 pub const MAX_NOTICES: usize = 256;
-
-/// Notices shared between the supervisors that raise them and the readers that
-/// show them.
-pub type SharedNotices = Arc<Mutex<Notices>>;
 
 /// A bounded ring of the most recent notices across every project, each also
 /// appended as a JSON line to an optional log file.

@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 
-use getset::{CopyGetters, Getters};
-use typed_builder::TypedBuilder;
-
+use super::tap_line::TapLine;
 use crate::{adapter::holder::strip_line, domain::value::OutputCursor};
 
 /// Bytes of stripped lines a tap keeps, newest last.
@@ -10,17 +8,6 @@ pub const TAP_RING_BYTES: usize = 256 * 1024;
 /// Longest a line grows without a newline before it is cut into a line of its
 /// own, so a stream with no newlines cannot grow a tap without bound.
 const LINE_MAX_BYTES: usize = 64 * 1024;
-
-/// One line of output, escapes removed, and where it began.
-#[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
-pub struct TapLine {
-    /// Where the line began in the output.
-    #[getset(get_copy = "pub")]
-    at: OutputCursor,
-    /// The line, escapes removed and carriage returns applied.
-    #[getset(get = "pub")]
-    text: String,
-}
 
 /// The output stream of one process as lines, for waits and readiness to be
 /// tested against: strips each chunk, assembles lines, and keeps the newest

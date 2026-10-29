@@ -7,13 +7,16 @@ use std::{
 };
 
 use super::{
+    client_message::ClientMessage,
+    client_role::ClientRole,
     config::{HolderConfig, is_handover_file},
     dirs::HolderDirs,
     error::HolderError,
     handle::HolderHandle,
+    holder_control::HolderControl,
+    holder_launcher::HolderLauncher,
     id::HolderId,
-    launcher::HolderLauncher,
-    protocol::{ClientMessage, ClientRole, HolderControl, HolderMessage},
+    protocol::HolderMessage,
     record::HolderRecord,
 };
 use crate::{

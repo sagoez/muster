@@ -4,25 +4,16 @@ use std::{
     time::SystemTime,
 };
 
-use getset::Getters;
-use typed_builder::TypedBuilder;
-
 use super::{
-    event_kind::EventKind, event_page::EventPage, event_seq::EventSeq, stack_event::StackEvent,
+    event_draft::EventDraft, event_kind::EventKind, event_page::EventPage, event_seq::EventSeq,
+    shared_event_log::SharedEventLog, stack_event::StackEvent,
 };
-use crate::{
-    adapter::sanitize::printable,
-    domain::value::{OutputCursor, ProcessName, ProjectRoot},
-};
+use crate::domain::value::ProjectRoot;
 
 /// Most events kept in memory; the oldest is dropped to make room.
 pub const MAX_EVENTS: usize = 1024;
 /// Most events a read without a cursor returns, the newest ones.
 pub const EVENTS_WITHOUT_SINCE: usize = 20;
-
-/// The event log shared between the supervisors that record events and the
-/// loop that answers reads of it.
-pub type SharedEventLog = Arc<Mutex<EventLog>>;
 
 /// A bounded ring of the most recent lifecycle events across every project,
 /// each numbered by how many were ever recorded, so a reader can resume from
@@ -32,25 +23,6 @@ pub struct EventLog {
     ring: VecDeque<StackEvent>,
     /// How many events were ever recorded, the newest one's seq.
     recorded: u64,
-}
-
-/// What one event is about and what it says, before the log numbers it.
-#[derive(Debug, Clone, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct EventDraft {
-    /// The project it concerns, or none for the service as a whole.
-    project: Option<ProjectRoot>,
-    /// The process it concerns, when one.
-    #[builder(default)]
-    process: Option<ProcessName>,
-    /// What happened.
-    kind: EventKind,
-    /// More about it, for a person to read.
-    #[builder(setter(into))]
-    detail: String,
-    /// Where the process's output stood when it happened.
-    #[builder(default)]
-    cursor: Option<OutputCursor>,
 }
 
 impl Default for EventLog {
@@ -82,29 +54,12 @@ impl EventLog {
 
     /// Records `draft` as [`Self::record`] does, as having happened `at`.
     pub fn record_at(&mut self, draft: EventDraft, at: SystemTime) -> EventSeq {
-        let EventDraft {
-            project,
-            process,
-            kind,
-            detail,
-            cursor,
-        } = draft;
         self.recorded += 1;
         let seq = EventSeq::new(self.recorded);
         if self.ring.len() == MAX_EVENTS {
             self.ring.pop_front();
         }
-        self.ring.push_back(
-            StackEvent::builder()
-                .seq(seq)
-                .at(at)
-                .project(project)
-                .process(process)
-                .kind(kind)
-                .detail(printable(&detail))
-                .cursor(cursor)
-                .build(),
-        );
+        self.ring.push_back(draft.into_event(seq, at));
         seq
     }
 
@@ -158,6 +113,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::domain::value::ProcessName;
 
     fn root(path: &str) -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from(path)).unwrap()

@@ -1,21 +1,17 @@
 //! The messages a holder and its clients exchange, each carried in one
 //! [`Frame`]. Byte streams travel raw; structured bodies are JSON.
 
-use std::{
-    io::{Read, Write},
-    time::Duration,
-};
-
-use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 
 use super::{
     error::HolderError,
-    frame::{Frame, FrameTag, read_frame, write_frame},
+    frame::{Frame, read_frame, write_frame},
+    frame_tag::FrameTag,
+    reject_reason::RejectReason,
 };
 use crate::{
     adapter::wire::WireForm,
     domain::{
-        process::StopSignal,
         pty::{ExitOutcome, PtySize},
         value::{OutputCursor, Pid},
     },
@@ -32,84 +28,6 @@ const OFFSET_BYTES: usize = 8;
 /// Bytes of a snapshot payload before its repaint: the pid, the size, the
 /// attach-client count, then the run's start offset.
 const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES + OFFSET_BYTES;
-
-/// How a connected client participates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", rename_all_fields = "kebab-case")]
-pub enum ClientRole {
-    /// The service: writes, resizes, controls the child and collects its exit.
-    Supervisor,
-    /// A user terminal; a read-only one only watches.
-    Attach {
-        /// Whether input and resizes from this client are refused.
-        read_only: bool,
-    },
-}
-
-impl ClientRole {
-    /// Whether this client may write input and resize the PTY.
-    pub fn writable(self) -> bool {
-        !matches!(self, Self::Attach { read_only: true })
-    }
-}
-
-/// A process control request, honoured only from a supervisor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", rename_all_fields = "kebab-case")]
-pub enum HolderControl {
-    /// Suspends the child's process group.
-    Pause,
-    /// Resumes a suspended child's process group.
-    Resume,
-    /// Sends `signal`, allowing `grace` before the group is force-killed.
-    Terminate {
-        /// The graceful signal to send.
-        #[serde(with = "crate::adapter::wire::form")]
-        signal: StopSignal,
-        /// Time allowed for a graceful exit.
-        grace: Duration,
-    },
-    /// Force-kills the child's process group.
-    Kill,
-}
-
-/// Why the holder refused a client message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RejectReason {
-    /// The client sent a message before introducing itself.
-    HelloRequired,
-    /// The client sent a second hello; its role is fixed by the first.
-    AlreadyIntroduced,
-    /// A read-only client tried to write or resize.
-    ReadOnly,
-    /// A non-supervisor tried to control the child or collect its exit.
-    SupervisorOnly,
-    /// An exit was collected before the child exited.
-    NotExited,
-    /// The child refused the operation, typically because it has exited.
-    ChildUnavailable,
-    /// The child is not reading its input fast enough; the input was dropped.
-    InputBacklogged,
-}
-
-/// A message from a client to the holder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientMessage {
-    /// Introduces the client; must come first.
-    Hello {
-        /// How the client participates.
-        role: ClientRole,
-    },
-    /// Bytes to write to the child.
-    Input(Vec<u8>),
-    /// The client's terminal size.
-    Resize(PtySize),
-    /// A process control request.
-    Control(HolderControl),
-    /// Acknowledges the held exit outcome, letting the holder finish.
-    CollectExit,
-}
 
 /// A message from the holder to a client.
 ///
@@ -153,25 +71,6 @@ pub enum HolderMessage {
     Attached(u32),
 }
 
-impl ClientMessage {
-    /// Writes this message as one frame.
-    ///
-    /// # Errors
-    /// Returns a [`HolderError`] when encoding or the write fails.
-    pub fn write_to(self, writer: &mut impl Write) -> Result<(), HolderError> {
-        Ok(write_frame(writer, &Frame::try_from(self)?)?)
-    }
-
-    /// Reads one client message.
-    ///
-    /// # Errors
-    /// Returns a [`HolderError`] when the read fails or the frame is not a
-    /// well-formed client message.
-    pub fn read_from(reader: &mut impl Read) -> Result<Self, HolderError> {
-        Self::try_from(read_frame(reader)?)
-    }
-}
-
 impl HolderMessage {
     /// Writes this message as one frame.
     ///
@@ -188,50 +87,6 @@ impl HolderMessage {
     /// well-formed holder message.
     pub fn read_from(reader: &mut impl Read) -> Result<Self, HolderError> {
         Self::try_from(read_frame(reader)?)
-    }
-}
-
-impl TryFrom<ClientMessage> for Frame {
-    type Error = HolderError;
-
-    /// Encodes a client message into its frame.
-    fn try_from(message: ClientMessage) -> Result<Self, Self::Error> {
-        let (tag, payload) = match message {
-            ClientMessage::Hello { role } => (FrameTag::Hello, serde_json::to_vec(&role)?),
-            ClientMessage::Input(bytes) => (FrameTag::Input, bytes),
-            ClientMessage::Resize(size) => (FrameTag::Resize, encode_size(size).to_vec()),
-            ClientMessage::Control(control) => (FrameTag::Control, serde_json::to_vec(&control)?),
-            ClientMessage::CollectExit => (FrameTag::CollectExit, Vec::new()),
-        };
-        Ok(Frame::builder().tag(tag).payload(payload).build())
-    }
-}
-
-impl TryFrom<Frame> for ClientMessage {
-    type Error = HolderError;
-
-    /// Decodes a frame into a client message.
-    fn try_from(frame: Frame) -> Result<Self, Self::Error> {
-        let tag = frame.tag();
-        let payload = frame.into_payload();
-        match tag {
-            FrameTag::Hello => Ok(Self::Hello {
-                role: serde_json::from_slice(&payload)?,
-            }),
-            FrameTag::Input => Ok(Self::Input(payload)),
-            FrameTag::Resize => decode_size(&payload)
-                .map(Self::Resize)
-                .ok_or(HolderError::MalformedPayload(tag)),
-            FrameTag::Control => Ok(Self::Control(serde_json::from_slice(&payload)?)),
-            FrameTag::CollectExit if payload.is_empty() => Ok(Self::CollectExit),
-            FrameTag::CollectExit => Err(HolderError::MalformedPayload(tag)),
-            FrameTag::Snapshot
-            | FrameTag::Output
-            | FrameTag::Exited
-            | FrameTag::Rejected
-            | FrameTag::Warning
-            | FrameTag::Attached => Err(HolderError::UnexpectedFrame(tag)),
-        }
     }
 }
 
@@ -330,7 +185,7 @@ impl TryFrom<Frame> for HolderMessage {
 }
 
 /// Encodes a PTY size as big-endian rows then cols.
-fn encode_size(size: PtySize) -> [u8; SIZE_BYTES] {
+pub(super) fn encode_size(size: PtySize) -> [u8; SIZE_BYTES] {
     let [rows_high, rows_low] = size.rows().into_inner().to_be_bytes();
     let [cols_high, cols_low] = size.cols().into_inner().to_be_bytes();
     [rows_high, rows_low, cols_high, cols_low]
@@ -351,7 +206,7 @@ fn decode_offset(bytes: &[u8]) -> Option<OutputCursor> {
 
 /// Decodes a PTY size written by [`encode_size`], or `None` for the wrong
 /// length or a size outside the PTY bounds, which no holder renders.
-fn decode_size(bytes: &[u8]) -> Option<PtySize> {
+pub(super) fn decode_size(bytes: &[u8]) -> Option<PtySize> {
     let [rows_high, rows_low, cols_high, cols_low] = <[u8; SIZE_BYTES]>::try_from(bytes).ok()?;
     PtySize::try_new(
         u16::from_be_bytes([rows_high, rows_low]),
@@ -362,10 +217,18 @@ fn decode_size(bytes: &[u8]) -> Option<PtySize> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, time::Duration};
 
     use super::*;
-    use crate::domain::pty::{ExitCause, SignalName};
+    use crate::{
+        adapter::holder::{
+            client_message::ClientMessage, client_role::ClientRole, holder_control::HolderControl,
+        },
+        domain::{
+            process::StopSignal,
+            pty::{ExitCause, SignalName},
+        },
+    };
 
     fn size(rows: u16, cols: u16) -> PtySize {
         PtySize::try_new(rows, cols).unwrap()

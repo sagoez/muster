@@ -1,20 +1,11 @@
-use regex::{Regex, RegexBuilder};
+use regex::RegexBuilder;
 
-use super::pattern_error::PatternError;
+use super::{matcher::Matcher, pattern_error::PatternError};
 use crate::domain::process::{LogPattern, PatternKind, PatternText};
 
 /// The most memory a compiled regex may take, so a pathological pattern is
 /// refused rather than stalling whoever compiles it.
 pub const REGEX_SIZE_LIMIT: usize = 1024 * 1024;
-
-/// How a compiled matcher tests a line.
-#[derive(Debug, Clone)]
-enum Matcher {
-    /// The line contains the text.
-    Substring(String),
-    /// The regex is found in the line.
-    Regex(Regex),
-}
 
 /// A [`LogPattern`] compiled once and tested against many stripped lines.
 /// Regexes run in linear time, so no line can make a match slow.

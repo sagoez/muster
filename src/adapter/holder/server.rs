@@ -20,12 +20,16 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use super::{
     byte_queue::ByteQueue,
+    client_message::ClientMessage,
+    client_role::ClientRole,
     config::HolderConfig,
     error::HolderError,
     frame::{Frame, write_frame},
+    holder_control::HolderControl,
     log::RotatingLog,
-    protocol::{ClientMessage, ClientRole, HolderControl, HolderMessage, RejectReason},
+    protocol::HolderMessage,
     record::HolderRecord,
+    reject_reason::RejectReason,
 };
 use crate::{
     adapter::{

@@ -7,8 +7,8 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{
-    error::HolderError,
-    protocol::{ClientMessage, ClientRole, HolderMessage},
+    client_message::ClientMessage, client_role::ClientRole, error::HolderError,
+    protocol::HolderMessage,
 };
 use crate::{
     adapter::terminal::TerminalEmulator,

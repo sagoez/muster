@@ -3,24 +3,14 @@
 //! log, stripping and filtering them, and capping what is returned.
 
 use std::{
-    collections::VecDeque,
-    fs::{self, File},
     io::{self, BufRead, BufReader, Read},
-    os::unix::fs::{FileExt, MetadataExt},
     path::Path,
 };
 
 use super::{
-    error::HolderError,
-    error_line::{is_continuation, is_error_line},
-    line_filter::LineFilter,
-    log::rotated_path,
-    log_base::{Generation, LogBase},
-    log_query::LogQuery,
-    log_slice::LogSlice,
-    strip::strip_line,
+    error::HolderError, filter_state::FilterState, kept::Kept, log_query::LogQuery,
+    log_slice::LogSlice, span::Span, span_reader::SpanReader, strip::strip_line,
 };
-use crate::domain::value::OutputCursor;
 
 /// The longest line a read returns, in characters; the rest is cut.
 pub const LINE_MAX_CHARS: usize = 2000;
@@ -30,14 +20,12 @@ pub const ERROR_CONTEXT_LINES: usize = 12;
 pub const GROUP_SEPARATOR: &str = "--";
 /// Raw bytes of one line kept for stripping and matching; the rest of a
 /// longer line is skipped, so one huge line cannot exhaust memory.
-const RAW_LINE_KEEP_BYTES: usize = 64 * 1024;
+pub(super) const RAW_LINE_KEEP_BYTES: usize = 64 * 1024;
 /// Bytes read per step when scanning back from the end, and buffered when
 /// reading forward.
-const BLOCK_BYTES: usize = 64 * 1024;
-/// Times the files are opened again when a rotation moves them mid-open.
-const OPEN_ATTEMPTS: usize = 3;
+pub(super) const BLOCK_BYTES: usize = 64 * 1024;
 /// Ends a line.
-const LINE_FEED: u8 = b'\n';
+pub(super) const LINE_FEED: u8 = b'\n';
 /// Opens the note on a cut line, before the count of characters cut.
 const CUT_OPEN: &str = " [... ";
 /// Closes the note on a cut line.
@@ -146,415 +134,23 @@ fn cut(text: String, skipped: usize) -> String {
     format!("{kept}{CUT_OPEN}{dropped}{CUT_CLOSE}")
 }
 
-/// The newest lines a read keeps, dropping the oldest past the line or byte
-/// cap. Group separators take bytes but do not count as lines.
-struct Kept {
-    /// The lines, oldest first.
-    lines: VecDeque<String>,
-    /// Separators among the lines.
-    separators: usize,
-    /// Bytes the lines take with their line feeds.
-    bytes: usize,
-    /// Lines dropped to stay within the caps.
-    omitted: usize,
-    /// The most lines kept.
-    line_cap: usize,
-    /// The most bytes kept.
-    byte_cap: usize,
-}
-
-impl Kept {
-    /// An empty collection with the caps of `query`.
-    fn new(query: &LogQuery) -> Self {
-        Self {
-            lines: VecDeque::new(),
-            separators: 0,
-            bytes: 0,
-            omitted: 0,
-            line_cap: query.lines().into_inner(),
-            byte_cap: query.max_bytes().into_inner(),
-        }
-    }
-
-    /// Adds a line that passed the filter.
-    fn push(&mut self, line: String) {
-        self.bytes += line.len() + 1;
-        self.lines.push_back(line);
-        self.enforce_caps();
-    }
-
-    /// Adds a separator between error groups, unless nothing precedes it.
-    fn separate(&mut self) {
-        if !self.lines.is_empty() {
-            self.separators += 1;
-            self.push(GROUP_SEPARATOR.to_string());
-        }
-    }
-
-    /// Drops the oldest lines until the caps hold.
-    fn enforce_caps(&mut self) {
-        while self.lines.len() - self.separators > self.line_cap || self.bytes > self.byte_cap {
-            if let Some(line) = self.lines.pop_front() {
-                self.bytes -= line.len() + 1;
-                self.omitted += 1;
-            }
-            if self
-                .lines
-                .front()
-                .is_some_and(|line| line == GROUP_SEPARATOR)
-            {
-                self.lines.pop_front();
-                self.separators -= 1;
-                self.bytes -= GROUP_SEPARATOR.len() + 1;
-            }
-        }
-    }
-
-    /// The kept lines, oldest first.
-    fn into_lines(self) -> Vec<String> {
-        self.lines.into()
-    }
-}
-
-/// A filter applied line by line, with what errors-only needs to remember.
-struct FilterState<'a> {
-    /// The filter.
-    filter: &'a LineFilter,
-    /// Continuation lines the current error group may still take.
-    context: usize,
-    /// Whether the previous line was kept, so adjacent groups need no
-    /// separator.
-    previous_kept: bool,
-}
-
-impl<'a> FilterState<'a> {
-    /// A fresh state for `filter`.
-    fn new(filter: &'a LineFilter) -> Self {
-        Self {
-            filter,
-            context: 0,
-            previous_kept: false,
-        }
-    }
-
-    /// Passes `text` through the filter into `kept`.
-    fn offer(&mut self, text: String, kept: &mut Kept) {
-        let keep = match self.filter {
-            LineFilter::All => true,
-            LineFilter::Grep(matcher) => matcher.is_match(&text),
-            LineFilter::ErrorsOnly if is_error_line(&text) => {
-                if !self.previous_kept {
-                    kept.separate();
-                }
-                self.context = ERROR_CONTEXT_LINES;
-                true
-            },
-            LineFilter::ErrorsOnly if self.context > 0 && is_continuation(&text) => {
-                self.context -= 1;
-                true
-            },
-            LineFilter::ErrorsOnly => {
-                self.context = 0;
-                false
-            },
-        };
-        if keep {
-            kept.push(text);
-        }
-        self.previous_kept = keep;
-    }
-}
-
-/// One generation's file and where it sits in the output stream.
-struct Piece {
-    /// The open file; a rotation renaming it does not disturb the read.
-    file: File,
-    /// The absolute offset of the first byte read from it.
-    start: u64,
-    /// Bytes read from it, at most its length when it was opened.
-    len: u64,
-    /// Bytes at the front of the file that fall before offset zero, which
-    /// only a sidecar that disagrees with the files can leave.
-    skip: u64,
-}
-
-/// The log's kept output as one stream, the rotated generation then the live
-/// one, fixed at the lengths they had when opened.
-struct Span {
-    /// The generations present, oldest first.
-    pieces: Vec<Piece>,
-    /// The oldest byte still kept.
-    oldest: OutputCursor,
-    /// Just past the newest byte.
-    end: OutputCursor,
-}
-
-impl Span {
-    /// Opens both generations of `log` and places them in the stream through
-    /// the sidecar. When a rotation moved the files mid-open, so the pair
-    /// opened is not what the paths name afterwards or the sidecar fits
-    /// neither, it opens them again; the last attempt reads what it has.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when a file exists and cannot be opened.
-    fn open(log: &Path) -> io::Result<Self> {
-        let rotated_log = rotated_path(log);
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let rotated = open_generation(&rotated_log)?;
-            let live = open_generation(log)?;
-            let rotated_generation = rotated.as_ref().map(|(_, generation)| *generation);
-            let live_generation = live.as_ref().map(|(_, generation)| *generation);
-            let resolved =
-                LogBase::resolve(LogBase::read(log), live_generation, rotated_generation);
-            let settled = resolved.exact()
-                && still_names(&rotated_log, rotated_generation)?
-                && still_names(log, live_generation)?;
-            if !settled && attempt < OPEN_ATTEMPTS {
-                continue;
-            }
-            let base = resolved.offset();
-            let rotated = rotated.map(|(file, generation)| {
-                let len = generation.len().min(base);
-                Piece {
-                    file,
-                    start: base - len,
-                    len,
-                    skip: generation.len() - len,
-                }
-            });
-            let live = live.map(|(file, generation)| Piece {
-                file,
-                start: base,
-                len: generation.len(),
-                skip: 0,
-            });
-            let pieces: Vec<Piece> = rotated.into_iter().chain(live).collect();
-            let oldest = pieces.first().map_or(base, |piece| piece.start);
-            let end = pieces.last().map_or(base, |piece| piece.start + piece.len);
-            return Ok(Self {
-                pieces,
-                oldest: OutputCursor::new(oldest),
-                end: OutputCursor::new(end.max(base)),
-            });
-        }
-    }
-
-    /// Reads into `buffer` from absolute `offset`, from the one piece holding
-    /// it; zero at the end of the stream.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when the read fails.
-    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
-        let Some(piece) = self
-            .pieces
-            .iter()
-            .find(|piece| offset >= piece.start && offset < piece.start + piece.len)
-        else {
-            return Ok(0);
-        };
-        let available = piece.start + piece.len - offset;
-        let wanted = buffer
-            .len()
-            .min(usize::try_from(available).unwrap_or(usize::MAX));
-        piece
-            .file
-            .read_at(&mut buffer[..wanted], offset - piece.start + piece.skip)
-    }
-
-    /// Fills `buffer` from absolute `offset`, across pieces; returns the bytes
-    /// read, fewer only at the end of the stream or of a file cut short.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when a read fails.
-    fn read_full_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut filled = 0;
-        while filled < buffer.len() {
-            let read = self.read_at(offset + filled as u64, &mut buffer[filled..])?;
-            if read == 0 {
-                break;
-            }
-            filled += read;
-        }
-        Ok(filled)
-    }
-
-    /// Where reading must start for the newest `query.lines()` lines that
-    /// pass the filter: scans back from the end in blocks, testing each line
-    /// once, and stops at the line that completes the count. Errors-only
-    /// counts error lines, each of which opens a group of at least one line.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when a read fails.
-    fn newest_start(&self, query: &LogQuery) -> io::Result<OutputCursor> {
-        let wanted = query.lines().into_inner();
-        let oldest = self.oldest.offset();
-        let end = self.end.offset();
-        let mut counted = 0;
-        let mut block = vec![0; BLOCK_BYTES];
-        let mut high = end;
-        let mut line_end = end;
-        while high > oldest {
-            let low = high.saturating_sub(BLOCK_BYTES as u64).max(oldest);
-            let length = (high - low) as usize;
-            let filled = self.read_full_at(low, &mut block[..length])?;
-            for index in (0..filled).rev() {
-                if block[index] != LINE_FEED {
-                    continue;
-                }
-                let line_start = low + index as u64 + 1;
-                let trailing = line_start == end;
-                if !trailing && self.counts(query, line_start, line_end, (low, &block[..filled]))? {
-                    counted += 1;
-                    if counted >= wanted {
-                        return Ok(OutputCursor::new(line_start));
-                    }
-                }
-                line_end = line_start - 1;
-            }
-            high = low;
-        }
-        Ok(self.oldest)
-    }
-
-    /// Whether the line `[start, end)` counts toward the newest lines wanted,
-    /// reading its head from `block` (which starts at the given offset) when
-    /// it lies there, else from the files.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when a read fails.
-    fn counts(
-        &self,
-        query: &LogQuery,
-        start: u64,
-        end: u64,
-        block: (u64, &[u8]),
-    ) -> io::Result<bool> {
-        if matches!(query.filter(), LineFilter::All) {
-            return Ok(true);
-        }
-        let head_end = end.min(start + RAW_LINE_KEEP_BYTES as u64);
-        let (block_start, bytes) = block;
-        let text = if head_end <= block_start + bytes.len() as u64 {
-            strip_line(&bytes[(start - block_start) as usize..(head_end - block_start) as usize])
-        } else {
-            let mut head = vec![0; (head_end - start) as usize];
-            let filled = self.read_full_at(start, &mut head)?;
-            strip_line(&head[..filled])
-        };
-        Ok(match query.filter() {
-            LineFilter::All => true,
-            LineFilter::Grep(matcher) => matcher.is_match(&text),
-            LineFilter::ErrorsOnly => is_error_line(&text),
-        })
-    }
-}
-
-/// `path` opened with its identity and length, or none when it is absent.
-///
-/// # Errors
-/// Returns an [`io::Error`] when it exists and cannot be opened.
-fn open_generation(path: &Path) -> io::Result<Option<(File, Generation)>> {
-    match File::open(path) {
-        Ok(file) => {
-            let generation = Generation::of(&file)?;
-            Ok(Some((file, generation)))
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Whether `path` still names the file `opened` was taken from, or still
-/// names nothing when nothing was opened.
-///
-/// # Errors
-/// Returns an [`io::Error`] when the path exists and cannot be inspected.
-fn still_names(path: &Path, opened: Option<Generation>) -> io::Result<bool> {
-    let now = match fs::metadata(path) {
-        Ok(metadata) => Some(metadata.ino()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    Ok(now == opened.map(|generation| generation.inode()))
-}
-
-/// A forward reader over a [`Span`] from an absolute offset.
-struct SpanReader<'a> {
-    /// The stream read.
-    span: &'a Span,
-    /// The next offset to read.
-    at: OutputCursor,
-}
-
-impl Read for SpanReader<'_> {
-    /// Reads from the current offset onward.
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.span.read_at(self.at.offset(), buffer)?;
-        self.at = self.at.advanced(read as u64);
-        Ok(read)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{ops::Range, path::PathBuf};
+    use std::{fs, ops::Range};
 
-    use bytesize::ByteSize as RawByteSize;
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
         adapter::holder::{
-            byte_limit::ByteLimit, line_limit::LineLimit, line_matcher::LineMatcher,
-            log::RotatingLog,
+            byte_limit::ByteLimit, line_filter::LineFilter, line_limit::LineLimit,
+            line_matcher::LineMatcher, log::rotated_path, log_fixture::Fixture,
         },
         domain::{
             process::{LogPattern, PatternKind, PatternText},
-            value::ByteSize,
+            value::OutputCursor,
         },
     };
-
-    /// A log in a scratch directory, written through the holder's own log.
-    struct Fixture {
-        _scratch: TempDir,
-        path: PathBuf,
-        log: RotatingLog,
-    }
-
-    impl Fixture {
-        /// A fresh log rotating at `cap` bytes.
-        fn with_cap(cap: u64) -> Self {
-            let scratch = TempDir::new().unwrap();
-            let path = scratch.path().join("api.log");
-            let log = RotatingLog::open(
-                path.clone(),
-                ByteSize::try_new(RawByteSize::b(cap)).unwrap(),
-            )
-            .unwrap();
-            Self {
-                _scratch: scratch,
-                path,
-                log,
-            }
-        }
-
-        /// A log that never rotates in these tests.
-        fn new() -> Self {
-            Self::with_cap(1 << 30)
-        }
-
-        fn write(&mut self, bytes: &[u8]) -> OutputCursor {
-            let at = self.log.end();
-            self.log.append(bytes).unwrap();
-            at
-        }
-
-        fn read(&self, query: &LogQuery) -> LogSlice {
-            read_log(&self.path, query).unwrap()
-        }
-    }
 
     fn lines(count: usize) -> LineLimit {
         LineLimit::try_new(count).unwrap()

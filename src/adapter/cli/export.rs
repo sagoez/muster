@@ -93,7 +93,7 @@ pub fn export(
     if !force && fs::symlink_metadata(&path).is_ok() {
         return Err(CliError::FileExists(path));
     }
-    write_atomically(&path, &text).map_err(|source| ConfigError::Write {
+    write_atomically(&path, &text).map_err(|source| CliError::WriteFile {
         path: path.clone(),
         source,
     })?;

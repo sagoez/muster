@@ -10,6 +10,7 @@ use super::{
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
     },
+    store_error::StoreError,
 };
 use crate::domain::{
     config::{
@@ -35,10 +36,10 @@ const READY_TIMEOUT: &str = "readiness timeout";
 /// The text a path column holds.
 ///
 /// # Errors
-/// Returns [`ConfigError::Database`] for a path that is not UTF-8.
+/// Returns a storage failure for a path that is not UTF-8.
 fn path_text(path: &Path) -> Result<&str, ConfigError> {
     path.to_str()
-        .ok_or_else(|| ConfigError::Database(format!("{} is not valid UTF-8", path.display())))
+        .ok_or_else(|| StoreError::NotUtf8(path.to_path_buf()).into())
 }
 
 /// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`.
@@ -175,7 +176,7 @@ fn is_unique_violation(error: &rusqlite::Error) -> bool {
 /// name key as `?2`, then the definition columns `?3` to `?13`.
 ///
 /// # Errors
-/// Returns [`ConfigError::Database`] for a working directory that is not UTF-8.
+/// Returns a storage failure for a working directory that is not UTF-8.
 fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, ConfigError> {
     let working_dir = spec
         .working_dir()
@@ -288,7 +289,7 @@ fn delete_process(
 /// inside the caller's write transaction.
 ///
 /// # Errors
-/// Returns [`ConfigError::Database`] when the revision cannot be written.
+/// Returns a storage failure when the revision cannot be written.
 fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
     conn.execute(
         "UPDATE stack_revision_counter SET value = value + 1 WHERE id = 1",

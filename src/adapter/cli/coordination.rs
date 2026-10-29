@@ -9,7 +9,6 @@ use super::{
     text_file::write_atomically,
 };
 use crate::domain::{
-    config::ConfigError,
     coordination::{KeyValue, Scratchpad, Todo},
     port::CoordinationStore,
     value::ProjectRoot,
@@ -73,7 +72,7 @@ fn export(
         path: file.to_path_buf(),
         reason: error.to_string(),
     })?;
-    write_atomically(file, &text).map_err(|source| ConfigError::Write {
+    write_atomically(file, &text).map_err(|source| CliError::WriteFile {
         path: file.to_path_buf(),
         source,
     })?;

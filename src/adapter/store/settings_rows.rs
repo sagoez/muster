@@ -1,8 +1,11 @@
 use bytesize::ByteSize as RawByteSize;
 use rusqlite::{Connection, Row, params};
 
-use super::sqlite_store::{
-    SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
+use super::{
+    sqlite_store::{
+        SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
+    },
+    store_error::StoreError,
 };
 use crate::domain::{
     config::{ConfigError, SettingChange},
@@ -82,7 +85,7 @@ fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
     let mut rows = statement.query([]).map_err(db_error)?;
     match rows.next().map_err(db_error)? {
         Some(row) => settings_from_row(row),
-        None => Err(ConfigError::Database("the settings row is missing".into())),
+        None => Err(StoreError::MissingSettings.into()),
     }
 }
 

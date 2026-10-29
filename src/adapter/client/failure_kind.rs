@@ -99,10 +99,8 @@ impl From<&ConfigError> for FailureKind {
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
-            ConfigError::Write { .. }
-            | ConfigError::NoStateDir
-            | ConfigError::CoordinationId(_)
-            | ConfigError::Database(_)
+            ConfigError::CoordinationId(_)
+            | ConfigError::Storage(_)
             | ConfigError::CorruptRow { .. } => Self::Io,
         }
     }
@@ -133,7 +131,7 @@ mod tests {
         let unknown = ConfigError::UnknownProject {
             root: PathBuf::from("/p"),
         };
-        let broken = ConfigError::Database("locked".to_string());
+        let broken = ConfigError::Storage("locked".into());
 
         assert_eq!(FailureKind::from(&unknown), FailureKind::UnknownProject);
         assert_eq!(FailureKind::from(&broken), FailureKind::Io);

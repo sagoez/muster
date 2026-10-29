@@ -171,10 +171,8 @@ fn config_message(error: &ConfigError) -> String {
             "a process named {} already exists in this project; {CHOOSE_ANOTHER_NAME}",
             name.shell_quoted()
         ),
-        ConfigError::Write { .. }
-        | ConfigError::NoStateDir
-        | ConfigError::CoordinationId(_)
-        | ConfigError::Database(_)
+        ConfigError::CoordinationId(_)
+        | ConfigError::Storage(_)
         | ConfigError::CorruptRow { .. }
         | ConfigError::TooLarge { .. }
         | ConfigError::UnsupportedSchema { .. }
@@ -280,7 +278,7 @@ mod tests {
             result.structured_content.expect("structured")["error"]["candidates"],
             serde_json::json!(["web"])
         );
-        let broken = ToolFailure::from(ConfigError::Database("disk I/O error".to_string()))
+        let broken = ToolFailure::from(ConfigError::Storage("disk I/O error".into()))
             .answer()
             .unwrap_err();
         assert_eq!(broken.code, rmcp::model::ErrorCode::INTERNAL_ERROR);

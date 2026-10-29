@@ -14,7 +14,7 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum MusterError {
     /// An I/O failure while driving the terminal or a child process.
-    #[error("i/o error: {0}")]
+    #[error(transparent)]
     Io(#[from] io::Error),
     /// A failure reading or writing muster's stored state.
     #[error(transparent)]
@@ -29,6 +29,3 @@ pub enum MusterError {
     #[error(transparent)]
     Service(#[from] ServiceError),
 }
-
-/// Crate-wide result alias.
-pub type Result<T> = std::result::Result<T, MusterError>;

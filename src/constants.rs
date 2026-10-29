@@ -4,9 +4,6 @@ pub const APP_NAME: &str = "muster";
 /// binary replaces an older service.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The stack file `muster export` writes and `muster import` reads by
-/// default, in the project's folder.
-pub const STACK_FILE: &str = "muster.yml";
 /// The file argument that means stdout or stdin.
 pub const STDIO_PATH: &str = "-";
 

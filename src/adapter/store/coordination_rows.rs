@@ -4,6 +4,7 @@ use super::{
     lock_rows,
     project_rows::require_project,
     sqlite_store::{SqliteStore, corrupt, db_error, now_epoch_secs},
+    store_error::StoreError,
 };
 use crate::domain::{
     config::ConfigError,
@@ -56,7 +57,7 @@ fn updated_at(row: &Row, index: usize) -> Result<u64, ConfigError> {
 
 /// Serializes a todo's dependency ids to the JSON stored in `deps`.
 fn deps_json(deps: &[TodoId]) -> Result<String, ConfigError> {
-    serde_json::to_string(deps).map_err(|error| ConfigError::Database(error.to_string()))
+    Ok(serde_json::to_string(deps).map_err(StoreError::Encode)?)
 }
 
 /// Reads a [`SELECT_SCRATCHPAD`] row.

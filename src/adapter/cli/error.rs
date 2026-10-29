@@ -143,6 +143,15 @@ pub enum CliError {
         #[source]
         source: io::Error,
     },
+    /// An exported file could not be written.
+    #[error("could not write {}: {source}", path.display())]
+    WriteFile {
+        /// The file.
+        path: PathBuf,
+        /// What failed.
+        #[source]
+        source: io::Error,
+    },
     /// A stack file does not hold a stack muster can import.
     #[error("{} is not a stack muster can import: {source}", path.display())]
     StackFile {
@@ -254,6 +263,7 @@ impl CliError {
             | Self::Terminal(_)
             | Self::AttachLost { .. }
             | Self::ReadFile { .. }
+            | Self::WriteFile { .. }
             | Self::CurrentDir(_) => FailureKind::Io,
             Self::Usage(_) | Self::Cancelled | Self::NothingToChange | Self::NeedsYes(_) => {
                 FailureKind::Usage
@@ -374,7 +384,7 @@ mod tests {
             CliExit::InvalidInput
         );
         assert_eq!(
-            exit(ConfigError::Database("locked".to_string())),
+            exit(ConfigError::Storage("locked".into())),
             CliExit::ActionFailed
         );
         assert_eq!(
@@ -434,8 +444,8 @@ mod tests {
             "a process named 'api' already exists in shop; pass --name to choose another"
         );
         assert!(matches!(
-            CliError::adding(ConfigError::NoStateDir, Some(project), ""),
-            CliError::Config(ConfigError::NoStateDir)
+            CliError::adding(ConfigError::Storage("locked".into()), Some(project), ""),
+            CliError::Config(ConfigError::Storage(_))
         ));
     }
 }

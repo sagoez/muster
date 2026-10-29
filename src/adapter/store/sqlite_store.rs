@@ -11,6 +11,7 @@ use std::{
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
+use super::StoreError;
 use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
     domain::{
@@ -60,10 +61,10 @@ impl SqliteStore {
     /// Opens the database in muster's state directory, creating it if absent.
     ///
     /// # Errors
-    /// Returns [`ConfigError::NoStateDir`] without a state directory, or what
-    /// [`SqliteStore::open`] returns.
+    /// Returns a [`StoreError::NoStateDir`] storage failure without a state
+    /// directory, or what [`SqliteStore::open`] returns.
     pub fn open_default() -> Result<Self, ConfigError> {
-        let dir = state_dir().ok_or(ConfigError::NoStateDir)?;
+        let dir = state_dir().ok_or(StoreError::NoStateDir)?;
         Self::open(&dir.join(DATABASE_FILE))
     }
 
@@ -72,14 +73,14 @@ impl SqliteStore {
     /// is created 0600.
     ///
     /// # Errors
-    /// Returns [`ConfigError::Write`] when the directory or file cannot be
-    /// prepared, [`ConfigError::UnsupportedSchema`] for a database a newer
-    /// muster wrote, or [`ConfigError::Database`] when SQLite fails.
+    /// Returns a [`StoreError::Prepare`] storage failure when the directory or
+    /// file cannot be prepared, [`ConfigError::UnsupportedSchema`] for a
+    /// database a newer muster wrote, or a storage failure when SQLite fails.
     pub fn open(path: &Path) -> Result<Self, ConfigError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            prepare_state_dir(parent).map_err(|source| ConfigError::Write {
+            prepare_state_dir(parent).map_err(|source| StoreError::Prepare {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -90,7 +91,7 @@ impl SqliteStore {
             .mode(PRIVATE_DB_MODE)
             .open(path)
             .and_then(|file| file.set_permissions(Permissions::from_mode(PRIVATE_DB_MODE)))
-            .map_err(|source| ConfigError::Write {
+            .map_err(|source| StoreError::Prepare {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -117,7 +118,7 @@ impl SqliteStore {
     ///
     /// # Errors
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer
-    /// muster wrote, or [`ConfigError::Database`] when SQLite fails.
+    /// muster wrote, or a storage failure when SQLite fails.
     pub fn open_existing(path: &Path) -> Result<Option<Self>, ConfigError> {
         if !path.is_file() {
             return Ok(None);
@@ -144,7 +145,7 @@ impl SqliteStore {
     /// Runs `work` in a read transaction, so its queries see one snapshot.
     ///
     /// # Errors
-    /// Returns what `work` returns, or [`ConfigError::Database`] when the
+    /// Returns what `work` returns, or a storage failure when the
     /// transaction cannot begin.
     pub(super) fn read<T>(
         &self,
@@ -159,7 +160,7 @@ impl SqliteStore {
     /// succeeds and rolling back otherwise.
     ///
     /// # Errors
-    /// Returns what `work` returns, or [`ConfigError::Database`] when the
+    /// Returns what `work` returns, or a storage failure when the
     /// transaction cannot begin or commit.
     pub(super) fn write<T>(
         &self,
@@ -177,11 +178,10 @@ impl SqliteStore {
     /// Locks the shared connection for one operation.
     ///
     /// # Errors
-    /// Returns [`ConfigError::Database`] when a previous holder panicked.
+    /// Returns a [`StoreError::Poisoned`] storage failure when a previous
+    /// holder panicked.
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, ConfigError> {
-        self.conn
-            .lock()
-            .map_err(|_| ConfigError::Database("the database connection lock is poisoned".into()))
+        Ok(self.conn.lock().map_err(|_| StoreError::Poisoned)?)
     }
 }
 
@@ -192,7 +192,7 @@ impl SqliteStore {
 ///
 /// # Errors
 /// Returns [`ConfigError::UnsupportedSchema`] when the database is newer than
-/// [`MIGRATIONS`], or [`ConfigError::Database`] when a migration fails.
+/// [`MIGRATIONS`], or a storage failure when a migration fails.
 fn migrate(conn: &mut Connection) -> Result<(), ConfigError> {
     if pending_from(conn)?.is_none() {
         return Ok(());
@@ -217,7 +217,7 @@ fn migrate(conn: &mut Connection) -> Result<(), ConfigError> {
 ///
 /// # Errors
 /// Returns [`ConfigError::UnsupportedSchema`] when the database is newer than
-/// [`MIGRATIONS`], or [`ConfigError::Database`] when the version cannot be
+/// [`MIGRATIONS`], or a storage failure when the version cannot be
 /// read.
 fn pending_from(conn: &Connection) -> Result<Option<usize>, ConfigError> {
     let latest = MIGRATIONS.len();
@@ -260,7 +260,7 @@ fn switch_to_wal(conn: &Connection) -> rusqlite::Result<()> {
 /// Maps a driver error to the domain error, keeping `rusqlite` out of the
 /// domain.
 pub(super) fn db_error(error: rusqlite::Error) -> ConfigError {
-    ConfigError::Database(error.to_string())
+    StoreError::Sqlite(error).into()
 }
 
 /// The error for a stored value the domain refuses: the row was edited by

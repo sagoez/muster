@@ -1220,7 +1220,7 @@ mod tests {
             let spec = stacks
                 .get_mut(root)
                 .and_then(|processes| processes.iter_mut().find(|spec| spec.name() == name))
-                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+                .ok_or_else(|| ConfigError::Storage(name.to_string().into()))?;
             *spec = spec.clone().with_change(change);
             let changed = spec.clone();
             self.bump(root);
@@ -1235,11 +1235,11 @@ mod tests {
             let mut stacks = self.stacks.lock().unwrap();
             let processes = stacks
                 .get_mut(root)
-                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+                .ok_or_else(|| ConfigError::Storage(name.to_string().into()))?;
             let index = processes
                 .iter()
                 .position(|spec| spec.name() == name)
-                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+                .ok_or_else(|| ConfigError::Storage(name.to_string().into()))?;
             let removed = processes.remove(index);
             self.bump(root);
             Ok(removed)
@@ -1251,7 +1251,7 @@ mod tests {
             _processes: &[ProcessSpec],
             _mode: ImportMode,
         ) -> Result<(Registration, ImportPlan), ConfigError> {
-            Err(ConfigError::Database("not used by these tests".to_string()))
+            Err(ConfigError::Storage("not used by these tests".into()))
         }
     }
 

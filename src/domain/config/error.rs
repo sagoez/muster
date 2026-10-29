@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{error::Error as StdError, path::PathBuf};
 
 use thiserror::Error;
 
@@ -13,26 +13,14 @@ const NO_NAMES: &str = "none";
 /// coordination.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// A file could not be written to disk.
-    #[error("could not write {path}: {source}")]
-    Write {
-        /// Path that failed to write.
-        path: PathBuf,
-        /// Underlying I/O error.
-        source: io::Error,
-    },
-    /// No state directory could be located on this platform.
-    #[error("no state directory is available")]
-    NoStateDir,
     /// A coordination id could not be generated (its UUID text was empty, which
     /// cannot happen in practice).
     #[error("could not generate a coordination id: {0}")]
     CoordinationId(String),
-    /// The database could not be opened, read, or written. Carries a message
-    /// rather than the driver's error type so no database library leaks into
-    /// the domain.
-    #[error("database error: {0}")]
-    Database(String),
+    /// The store behind a port failed. Opaque, so no storage library or path
+    /// detail leaks into the domain.
+    #[error(transparent)]
+    Storage(Box<dyn StdError + Send + Sync + 'static>),
     /// A stored row holds a value the domain refuses: it was edited by hand
     /// or written by a different muster.
     #[error("stored {what} is invalid: {reason}")]

@@ -157,7 +157,7 @@ mod tests {
         /// Records a write, or refuses it when failing.
         fn write(&self) -> Result<(), ConfigError> {
             if self.fail {
-                return Err(ConfigError::Database("refused".to_string()));
+                return Err(ConfigError::Storage("refused".into()));
             }
             self.log.borrow_mut().push(Step::Wrote);
             Ok(())

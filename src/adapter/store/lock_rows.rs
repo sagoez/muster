@@ -3,6 +3,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use super::{
     coordination_rows::collect,
     sqlite_store::{corrupt, db_error},
+    store_error::StoreError,
 };
 use crate::domain::{
     config::ConfigError,
@@ -85,8 +86,8 @@ pub(super) fn acquire(
             expires_in: *ttl.as_ref(),
         });
     }
-    let holder = find(conn, project_id, name)?
-        .ok_or_else(|| ConfigError::Database(format!("lock '{name}' vanished mid-acquire")))?;
+    let holder =
+        find(conn, project_id, name)?.ok_or_else(|| StoreError::LockVanished(name.to_string()))?;
     Ok(LockAttempt::HeldBy {
         expires_in: holder.expires_in(now),
         owner: holder.owner().clone(),

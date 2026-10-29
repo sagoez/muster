@@ -511,7 +511,7 @@ impl Supervisor {
             SpawnRequest::builder()
                 .process(process.name().clone())
                 .command(process.command().clone())
-                .working_dir(Some(process.spec().launch_dir(root)))
+                .working_dir(Some(process.spec().launch_dir(root).ok()?))
                 .project(Some(root.as_ref().clone()))
                 .launch_environment(self.launches.environment(pane))
                 .environment(environment)
@@ -525,6 +525,20 @@ impl Supervisor {
         )
     }
 
+    /// Refuses `pane`'s launch with an error notice naming the process and
+    /// the fix when its stored working directory leaves the project root.
+    fn refuse_unconfined_launch(&self, pane: PaneId) -> bool {
+        let Some(unconfined) = self
+            .workspace
+            .process(pane)
+            .and_then(|process| process.spec().unconfined_dir())
+        else {
+            return false;
+        };
+        self.notify(NoticeLevel::Error, Some(pane), unconfined.to_string());
+        true
+    }
+
     /// Spawns `pane`'s process and connects its PTY to the service event
     /// stream.
     pub(super) fn spawn(&mut self, pane: PaneId) {
@@ -535,10 +549,11 @@ impl Supervisor {
     /// with, now and on its policy restarts, once the launch goes ahead; a
     /// refused launch leaves the environment of the last one in place. Every
     /// launch, a policy respawn included, is refused while a port it needs
-    /// is taken.
+    /// is taken, and always when its stored directory leaves the root.
     fn spawn_with(&mut self, pane: PaneId, environment: Option<&LaunchEnvironment>) {
         if self.is_starting(pane)
             || self.refuse_unsupervised_launch(pane)
+            || self.refuse_unconfined_launch(pane)
             || self.refuse_blocked_launch(pane)
         {
             return;

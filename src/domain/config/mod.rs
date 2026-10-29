@@ -18,6 +18,7 @@ mod spec;
 mod stack;
 mod stack_edit;
 mod too_many_vars;
+mod unconfined_dir;
 mod unreadable_project;
 mod working_dir;
 
@@ -41,4 +42,5 @@ pub use spec::*;
 pub use stack::*;
 pub use stack_edit::*;
 pub use too_many_vars::*;
+pub use unconfined_dir::*;
 pub use unreadable_project::*;

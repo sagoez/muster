@@ -435,8 +435,10 @@ with the user's rights at the next start:
   the service was running at the time.
 - A `working_dir` must be a folder inside the project root; one outside it, or
   a symlink leading out of it, is refused. A stored one that climbs out of the
-  root, as only a hand edit of the database can make, is refused when read,
-  naming the process, and the process is never started.
+  root, as only a hand edit of the database can make, keeps the project
+  readable but that process is never started: a start is refused naming it,
+  `muster ps` and `muster doctor` name it, and `muster set <name> --no-cwd`
+  or `muster rm <name>` fixes it.
 - A command holds at most 8192 characters, a description 300 and a name 64; a
   process has at most 64 variables, each name at most 128 characters and
   each value 8192; a project holds at most 100 processes. A longer or larger

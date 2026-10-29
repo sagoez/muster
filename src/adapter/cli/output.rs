@@ -31,7 +31,7 @@ use crate::{
     },
     constants::APP_NAME,
     domain::{
-        config::Stack,
+        config::{ProcessSpec, Stack},
         process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
@@ -54,6 +54,8 @@ const PS_HEADERS: [&str; 10] = [
 ];
 /// Header of the column `ps --commands` adds.
 const COMMAND_HEADER: &str = "COMMAND";
+/// Opens the line under a `ps` table naming a process that is never started.
+const UNCONFINED_MARK: &str = "! ";
 /// The READY cell of a run that passed its readiness check.
 const READY_YES: &str = "yes";
 /// The READY cell of a run still waiting on its readiness check.
@@ -163,9 +165,15 @@ const FALLBACK_FAILURE_JSON: &str =
 
 /// The human `ps` table of `statuses`, each project's table under a heading
 /// naming the project and its folder; with `all`, the tables are indented
-/// under their headings. With `stacks`, each row ends in the process's
-/// command as its project's stored stack holds it.
-pub fn render_status(statuses: &[ProjectStatus], all: bool, stacks: Option<&[Stack]>) -> String {
+/// under their headings. With `commands`, each row ends in the process's
+/// command as its project's stored stack in `stacks` holds it. Each process
+/// whose stored directory leaves its root is named below its table.
+pub fn render_status(
+    statuses: &[ProjectStatus],
+    all: bool,
+    stacks: &[Stack],
+    commands: bool,
+) -> String {
     if statuses.is_empty() {
         return NO_PROJECTS.to_string();
     }
@@ -173,16 +181,25 @@ pub fn render_status(statuses: &[ProjectStatus], all: bool, stacks: Option<&[Sta
     statuses
         .iter()
         .map(|status| {
-            let commands = stacks.map(|stacks| {
-                stacks
-                    .iter()
-                    .find(|stack| stack.project().root() == status.project().root())
-            });
-            format!(
+            let stack = stacks
+                .iter()
+                .find(|stack| stack.project().root() == status.project().root());
+            let mut rendered = format!(
                 "{}\n{}",
                 project_heading(status.project()),
-                project_table(status, indent, commands)
-            )
+                project_table(status, indent, commands.then_some(stack))
+            );
+            for unconfined in stack
+                .into_iter()
+                .flat_map(|stack| stack.processes())
+                .filter_map(ProcessSpec::unconfined_dir)
+            {
+                rendered.push_str(&format!(
+                    "\n{indent}{UNCONFINED_MARK}{}",
+                    printable(&unconfined.to_string())
+                ));
+            }
+            rendered
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -821,9 +838,12 @@ mod tests {
 
     #[test]
     fn ps_table_snapshot() {
-        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, None));
-        insta::assert_snapshot!("ps_table_all", render_status(&[shop(), blog()], true, None));
-        insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true, None));
+        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, &[], false));
+        insta::assert_snapshot!(
+            "ps_table_all",
+            render_status(&[shop(), blog()], true, &[], false)
+        );
+        insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true, &[], false));
     }
 
     /// `ps --commands` ends each row in its stored command, made printable,
@@ -849,7 +869,7 @@ mod tests {
             ])
             .build();
 
-        let rendered = render_status(&[shop()], false, Some(&[stack]));
+        let rendered = render_status(&[shop()], false, &[stack], true);
 
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines[1].trim_end().ends_with(COMMAND_HEADER), "{rendered}");
@@ -859,16 +879,56 @@ mod tests {
             !rendered.replace('\n', "").chars().any(char::is_control),
             "{rendered:?}"
         );
-        assert!(!render_status(&[shop()], false, None).contains(COMMAND_HEADER));
+        assert!(!render_status(&[shop()], false, &[], false).contains(COMMAND_HEADER));
     }
 
     /// Plain `ps` names the project it lists, so a listing from a nested
     /// folder says which project it is.
     #[test]
     fn plain_ps_names_its_project() {
-        let rendered = render_status(&[shop()], false, None);
+        let rendered = render_status(&[shop()], false, &[], false);
 
         assert_eq!(rendered.lines().next(), Some("shop  /home/me/shop"));
+    }
+
+    /// A process whose stored directory leaves the root is named under the
+    /// table with the fix, the directory escaped, and only in its project.
+    #[test]
+    fn ps_names_a_process_that_is_never_started() {
+        let stack = Stack::builder()
+            .project(shop_project())
+            .processes(vec![
+                ProcessSpec::builder()
+                    .name(name("dev server"))
+                    .command(CommandLine::try_new("npm run dev").unwrap())
+                    .working_dir(Some("../\u{1b}[2J".into()))
+                    .environment(Environment::empty())
+                    .autostart(true)
+                    .restart(RestartPolicy::Never)
+                    .stop(
+                        StopPolicy::builder()
+                            .signal(StopSignal::Terminate)
+                            .grace_period(StopGrace::try_new(GRACE).unwrap())
+                            .build(),
+                    )
+                    .build(),
+            ])
+            .build();
+
+        let rendered = render_status(&[shop(), blog()], true, &[stack], false);
+
+        let marked: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.trim_start().starts_with(UNCONFINED_MARK))
+            .collect();
+        assert_eq!(marked.len(), 1, "{rendered}");
+        assert!(marked[0].contains("'dev server'"), "{rendered}");
+        assert!(marked[0].contains("--no-cwd"), "{rendered}");
+        assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+        assert!(
+            rendered.find(marked[0]) < rendered.find("blog"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -881,7 +941,7 @@ mod tests {
     /// character does not push its row out of line.
     #[test]
     fn ps_columns_align_by_display_width() {
-        let rendered = render_status(&[shop()], false, None);
+        let rendered = render_status(&[shop()], false, &[], false);
         let state_column: Vec<usize> = rendered
             .lines()
             .skip(1)

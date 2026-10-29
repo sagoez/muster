@@ -19,7 +19,7 @@ use super::{
 use crate::domain::{
     config::{
         ConfigError, Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-        Stack, StackEdit, stays_under_root,
+        Stack, StackEdit,
     },
     coordination::Author,
     port::{StackReader, StackStore},
@@ -46,25 +46,9 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
         .ok_or_else(|| StoreError::NotUtf8(path.to_path_buf()).into())
 }
 
-/// The stored working directory `dir` of the process `name`. A relative one
-/// is read against the project root and refused unless it stays under it,
-/// so a hand edit can never climb out of the project; an absolute one is a
-/// folder a person chose outside the project with `--cwd`.
-///
-/// # Errors
-/// Returns [`ConfigError::CorruptRow`] naming the process for an empty
-/// directory or a relative one that climbs out of the root.
-fn confined(name: &ProcessName, dir: PathBuf) -> Result<PathBuf, ConfigError> {
-    if dir.as_os_str().is_empty() || (dir.is_relative() && !stays_under_root(&dir)) {
-        return Err(corrupt(
-            &format!("working dir of {}", name.shell_quoted()),
-            format!("{} is not a folder under the project root", dir.display()),
-        ));
-    }
-    Ok(dir)
-}
-
 /// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`.
+/// A working directory that leaves the root reads as stored, so the process
+/// can be changed or removed; [`ProcessSpec::launch_dir`] never launches it.
 fn process_from_row(
     row: &Row,
     environments: &mut HashMap<i64, Environment>,
@@ -94,13 +78,10 @@ fn process_from_row(
         _ => None,
     };
     let name = ProcessName::try_new(name).map_err(|error| corrupt("process name", error))?;
-    let working_dir = working_dir
-        .map(|dir| confined(&name, PathBuf::from(dir)))
-        .transpose()?;
     Ok(ProcessSpec::builder()
         .name(name)
         .command(CommandLine::try_new(command).map_err(|error| corrupt("command", error))?)
-        .working_dir(working_dir)
+        .working_dir(working_dir.map(PathBuf::from))
         .description(
             description
                 .map(Description::try_new)
@@ -574,36 +555,63 @@ mod tests {
         assert_eq!(stack.project().root(), &root);
     }
 
-    /// A stored relative working directory that climbs out of the root is
-    /// refused when read, naming the process; one under the root, or an
-    /// absolute one a person chose outside the project, reads.
+    /// A stored relative working directory that climbs out of the root, as a
+    /// hand edit makes, leaves the project readable: that process reads as
+    /// unconfined, its neighbour as stored, and a change or a removal of it
+    /// lands.
     #[test]
-    fn a_stored_working_dir_climbing_out_of_the_root_is_refused() {
+    fn a_stored_working_dir_climbing_out_of_the_root_reads_unconfined() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
         store
             .add_process(&root, &full_spec(), &Author::human())
             .unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
         let stored = |dir: &str| {
             store
                 .write(|conn| {
-                    conn.execute("UPDATE processes SET working_dir = ?1", params![dir])
-                        .map_err(db_error)
+                    conn.execute(
+                        "UPDATE processes SET working_dir = ?1 WHERE name = 'web'",
+                        params![dir],
+                    )
+                    .map_err(db_error)
                 })
                 .unwrap();
-            store.stack(&root)
+            store.stack(&root).unwrap().unwrap()
         };
 
         for escaping in ["../../../../etc", "a/../..", ""] {
-            let refused = stored(escaping).unwrap_err();
-            assert!(
-                matches!(&refused, ConfigError::CorruptRow { what, .. } if what == "working dir of 'web'"),
-                "{escaping}: {refused}"
+            let stack = stored(escaping);
+            let web = stack.process(&name("web")).unwrap();
+            assert_eq!(
+                web.unconfined_dir().map(|dir| dir.dir().clone()),
+                Some(PathBuf::from(escaping))
             );
+            assert_eq!(stack.process(&name("api")).unwrap().unconfined_dir(), None);
         }
         for reads in ["frontend/../src", "/srv/elsewhere"] {
-            assert!(stored(reads).is_ok(), "{reads}");
+            assert_eq!(
+                stored(reads).processes()[0].unconfined_dir(),
+                None,
+                "{reads}"
+            );
         }
+
+        stored("../..");
+        let cleared = ProcessChange::builder()
+            .working_dir(FieldEdit::Clear)
+            .build();
+        let changed = store
+            .change_process(&root, &name("web"), &cleared, &Author::human())
+            .unwrap();
+        assert_eq!(changed.unconfined_dir(), None);
+        stored("../..");
+        store
+            .remove_process(&root, &name("web"), &Author::human())
+            .unwrap();
+        assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), ["api"]);
     }
 
     #[test]

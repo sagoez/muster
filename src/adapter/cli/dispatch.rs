@@ -369,7 +369,8 @@ fn bare(invocation: &Invocation<'_>) {
 
 /// Prints the current project's processes, or every loaded project's with
 /// `all`, each under a heading naming the project, and with `commands` each
-/// process's stored command.
+/// process's stored command. A process whose stored directory leaves its
+/// root is named below its table, with the fix.
 fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
     let result = (|| {
         let project = if all {
@@ -380,40 +381,31 @@ fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
         };
         let client = invocation.connect()?;
         let statuses = process::ps(&client, project.as_ref().map(Project::root))?;
-        let stacks = if commands {
-            Some(stored_stacks(invocation, &statuses)?)
-        } else {
-            None
-        };
+        let stacks = stored_stacks(invocation, &statuses);
         Ok((statuses, stacks))
     })();
     match result {
         Ok((statuses, stacks)) => {
             let views: Vec<ProjectView> = statuses.iter().map(ProjectView::from).collect();
             print_result(json, &views, |_| {
-                emit_line(&output::render_status(&statuses, all, stacks.as_deref()));
+                emit_line(&output::render_status(&statuses, all, &stacks, commands));
             });
         },
         Err(error) => fail_command(json, &error),
     }
 }
 
-/// The stored stack of each project in `statuses` that is still registered.
-///
-/// # Errors
-/// Returns a [`CliError`] when the database cannot be opened or read.
-fn stored_stacks(
-    invocation: &Invocation<'_>,
-    statuses: &[ProjectStatus],
-) -> Result<Vec<Stack>, CliError> {
-    let store = invocation.store()?;
-    let mut stacks = Vec::new();
-    for status in statuses {
-        if let Some(stack) = store.stack(status.project().root())? {
-            stacks.push(stack);
-        }
-    }
-    Ok(stacks)
+/// The stored stack of each project in `statuses` that is still registered
+/// and reads; one that does not is left out, so `ps` still shows what the
+/// service runs.
+fn stored_stacks(invocation: &Invocation<'_>, statuses: &[ProjectStatus]) -> Vec<Stack> {
+    let Ok(store) = invocation.store() else {
+        return Vec::new();
+    };
+    statuses
+        .iter()
+        .filter_map(|status| store.stack(status.project().root()).ok().flatten())
+        .collect()
 }
 
 /// Prints `result` of an action into the frame `presenter` opened and exits

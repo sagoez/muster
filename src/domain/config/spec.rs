@@ -5,7 +5,9 @@ use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessChange, ProcessField, TooManyVars},
+    config::{
+        Environment, ProcessChange, ProcessField, TooManyVars, UnconfinedDir, stays_under_root,
+    },
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
 };
@@ -92,11 +94,32 @@ impl ProcessSpec {
     }
 
     /// The directory the process launches in under `root`.
-    pub fn launch_dir(&self, root: &ProjectRoot) -> PathBuf {
-        match &self.working_dir {
+    ///
+    /// # Errors
+    /// Returns the [`UnconfinedDir`] of a stored directory that leaves the
+    /// root, so no launch ever runs outside the project by accident.
+    pub fn launch_dir(&self, root: &ProjectRoot) -> Result<PathBuf, UnconfinedDir> {
+        if let Some(unconfined) = self.unconfined_dir() {
+            return Err(unconfined);
+        }
+        Ok(match &self.working_dir {
             Some(dir) => root.as_ref().join(dir),
             None => root.as_ref().clone(),
-        }
+        })
+    }
+
+    /// The stored working directory when it is empty or relative and climbs
+    /// out of the root; an absolute one is a folder a person chose with
+    /// `--cwd` and is kept.
+    pub fn unconfined_dir(&self) -> Option<UnconfinedDir> {
+        let dir = self.working_dir.as_ref()?;
+        let confined = !dir.as_os_str().is_empty() && (dir.is_absolute() || stays_under_root(dir));
+        (!confined).then(|| {
+            UnconfinedDir::builder()
+                .name(self.name.clone())
+                .dir(dir.clone())
+                .build()
+        })
     }
 
     /// The process this definition describes, on pane `id` and `Pending`.
@@ -230,18 +253,38 @@ mod tests {
     fn launches_in_the_root_or_under_it() {
         assert_eq!(
             spec().launch_dir(&root()),
-            PathBuf::from("/home/me/shop/frontend")
+            Ok(PathBuf::from("/home/me/shop/frontend"))
         );
         assert_eq!(
             spec().with_working_dir(None).launch_dir(&root()),
-            PathBuf::from("/home/me/shop")
+            Ok(PathBuf::from("/home/me/shop"))
         );
         assert_eq!(
             spec()
                 .with_working_dir(Some(PathBuf::from("/srv/data")))
                 .launch_dir(&root()),
-            PathBuf::from("/srv/data")
+            Ok(PathBuf::from("/srv/data"))
         );
+    }
+
+    /// A stored relative directory that climbs out of the root, or an empty
+    /// one, never launches, and the refusal names the process and the fix.
+    #[test]
+    fn an_unconfined_dir_never_launches() {
+        for escaping in ["../../../../etc", "a/../..", ""] {
+            let unconfined = spec().with_working_dir(Some(PathBuf::from(escaping)));
+            let refused = unconfined.launch_dir(&root()).unwrap_err();
+            assert_eq!(Some(refused.clone()), unconfined.unconfined_dir());
+            assert_eq!(refused.name(), spec().name());
+            assert!(
+                refused.to_string().contains("`muster set 'web' --no-cwd`"),
+                "{refused}"
+            );
+        }
+        for confined in ["frontend/../src", "/srv/elsewhere"] {
+            let spec = spec().with_working_dir(Some(PathBuf::from(confined)));
+            assert_eq!(spec.unconfined_dir(), None, "{confined}");
+        }
     }
 
     #[test]

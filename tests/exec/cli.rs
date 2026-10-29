@@ -1984,28 +1984,35 @@ fn a_corrupt_process_row_breaks_only_its_project() {
 }
 
 /// A stored working directory that climbs out of the project, which only a
-/// hand edit of the database can make, is refused naming the process, and
-/// the process never starts.
+/// hand edit of the database can make, refuses only that process: it never
+/// starts, `ps` and `doctor` name it with the fix, its neighbour still
+/// starts, and `set --no-cwd` and `rm` work on it.
 #[test]
 fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
     let scratch = Scratch::new();
     let project = scratch.project(
         "shop",
-        &stack(&[entry("escape", "pwd > ran; sleep 600", false)]),
+        &stack(&[
+            entry("escape", "pwd > ran; sleep 600", false),
+            entry("fine", "sleep 600", false),
+        ]),
     );
-    Connection::open(scratch.database())
-        .unwrap()
-        .execute(
-            "UPDATE processes SET working_dir = '../../../../etc' WHERE name = 'escape'",
-            [],
-        )
-        .unwrap();
+    let climb = || {
+        Connection::open(scratch.database())
+            .unwrap()
+            .execute(
+                "UPDATE processes SET working_dir = '../../../../etc' WHERE name = 'escape'",
+                [],
+            )
+            .unwrap();
+    };
+    climb();
 
     let start = scratch.on(&project, &["start", "escape"]);
 
     assert!(!start.status.success(), "{}", shown(&start));
     assert!(
-        stderr(&start).contains("working dir of 'escape'"),
+        stdout(&start).contains("working dir '../../../../etc' of 'escape'"),
         "{}",
         shown(&start)
     );
@@ -2013,6 +2020,41 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
         processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
         "nothing was launched"
     );
+    let ps = scratch.on(&project, &["ps"]);
+    assert!(ps.status.success(), "{}", shown(&ps));
+    assert!(
+        stdout(&ps).contains("`muster set 'escape' --no-cwd`"),
+        "{}",
+        shown(&ps)
+    );
+    let doctor = scratch.muster(&["doctor"]);
+    assert_eq!(
+        doctor.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&doctor)
+    );
+    assert!(
+        stdout(&doctor).contains("of 'escape' leaves the project root"),
+        "{}",
+        shown(&doctor)
+    );
+    let fine = scratch.on(&project, &["start", "fine"]);
+    assert!(fine.status.success(), "{}", shown(&fine));
+
+    let cleared = scratch.on(&project, &["set", "escape", "--no-cwd"]);
+    assert!(cleared.status.success(), "{}", shown(&cleared));
+    let doctor = scratch.muster(&["doctor"]);
+    assert!(
+        stdout(&doctor).contains("every stored process reads"),
+        "{}",
+        shown(&doctor)
+    );
+    climb();
+    let removed = scratch.on(&project, &["rm", "escape"]);
+    assert!(removed.status.success(), "{}", shown(&removed));
+    let stop = scratch.on(&project, &["stop", "fine"]);
+    assert!(stop.status.success(), "{}", shown(&stop));
 }
 
 /// A project row edited by hand to a name muster refuses breaks only that

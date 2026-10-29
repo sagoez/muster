@@ -21,7 +21,7 @@ use super::{
 use crate::{
     adapter::{client::ProjectTarget, sanitize::printable},
     domain::{
-        config::ConfigError,
+        config::{ConfigError, ProcessSpec, Stack},
         port::{LocalState, ProjectStore, StackStore},
     },
 };
@@ -175,8 +175,9 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
     }
 }
 
-/// Whether every registered project's stored processes read, naming each
-/// project whose rows do not and why.
+/// Whether every registered project's stored processes read and may start,
+/// naming each project whose rows do not and why, and each process whose
+/// stored directory leaves its root with the commands that fix it.
 pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> Probe {
     let projects = match projects.projects() {
         Ok(projects) => projects,
@@ -188,16 +189,29 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
             );
         },
     };
-    let invalid: Vec<String> = projects
-        .iter()
-        .filter_map(|project| {
-            stacks
-                .stack(project.root())
-                .err()
-                .map(|error| format!("{} ({})", project.name(), error_chain(&error)))
-        })
-        .collect();
-    if invalid.is_empty() {
+    let mut invalid = Vec::new();
+    let mut unconfined = Vec::new();
+    for project in &projects {
+        match stacks.stack(project.root()) {
+            Ok(stack) => unconfined.extend(
+                stack
+                    .iter()
+                    .flat_map(Stack::processes)
+                    .filter_map(ProcessSpec::unconfined_dir)
+                    .map(|dir| format!("in {}, {dir}", project.name())),
+            ),
+            Err(error) => invalid.push(format!("{} ({})", project.name(), error_chain(&error))),
+        }
+    }
+    let mut problems = Vec::new();
+    if !invalid.is_empty() {
+        problems.push(format!(
+            "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
+            invalid.join(LIST_SEPARATOR)
+        ));
+    }
+    problems.extend(unconfined);
+    if problems.is_empty() {
         probe(
             DoctorCheck::Processes,
             ProbeOutcome::Ok,
@@ -207,10 +221,7 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
         probe(
             DoctorCheck::Processes,
             ProbeOutcome::Fail,
-            format!(
-                "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
-                invalid.join(LIST_SEPARATOR)
-            ),
+            printable(&problems.join(DETAIL_SEPARATOR)),
         )
     }
 }

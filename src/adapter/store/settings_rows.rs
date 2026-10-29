@@ -2,13 +2,15 @@ use bytesize::ByteSize as RawByteSize;
 use rusqlite::{Connection, Row, params};
 
 use super::{
+    edit_log_rows::record_edit_everywhere,
     sqlite_store::{
         SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
     },
     store_error::StoreError,
 };
 use crate::domain::{
-    config::{ConfigError, SettingChange},
+    config::{ConfigError, SettingChange, StackEdit},
+    coordination::Author,
     port::SettingsStore,
     pty::PtySize,
     settings::Settings,
@@ -125,24 +127,35 @@ impl SettingsStore for SqliteStore {
         self.read(load_settings)
     }
 
-    fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
+    fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
         self.write(|conn| {
             let settings = load_settings(conn)?.with_change(change);
             store_settings(conn, &settings)?;
-            load_settings(conn)
+            let stored = load_settings(conn)?;
+            let key = change.key();
+            record_edit_everywhere(conn, &StackEdit::Configured {
+                author: author.clone(),
+                key,
+                value: stored.value_text(key),
+            })?;
+            Ok(stored)
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::{
-        adapter::store::test_support::{database, fresh_store},
+        adapter::store::test_support::{database, fresh_store, spec},
         domain::{
             color_scheme::ColorScheme,
             config::{McpStackEdits, SettingKey},
+            port::{StackEditLog, StackStore},
             process::{RestartPolicy, StopSignal},
+            value::ProjectRoot,
         },
     };
 
@@ -191,7 +204,12 @@ mod tests {
         let mut expected = store.load().unwrap();
         for change in &changes {
             expected = expected.with_change(change);
-            assert_eq!(store.apply(change).unwrap(), expected, "{}", change.key());
+            assert_eq!(
+                store.apply(change, &Author::human()).unwrap(),
+                expected,
+                "{}",
+                change.key()
+            );
         }
 
         assert_eq!(store.load().unwrap(), expected);
@@ -261,10 +279,55 @@ mod tests {
         let (store, _scratch) = fresh_store();
 
         let settings = store
-            .apply(&parsed(SettingKey::DefaultStopGrace, "1500us"))
+            .apply(
+                &parsed(SettingKey::DefaultStopGrace, "1500us"),
+                &Author::human(),
+            )
             .unwrap();
 
         assert_eq!(settings.value_text(SettingKey::DefaultStopGrace), "2ms");
         assert_eq!(settings, store.load().unwrap());
+    }
+
+    /// An agent's change is kept, with the value stored, in every project's
+    /// edit log under no process; the human's is not.
+    #[test]
+    fn an_agents_change_is_logged_in_every_project() {
+        let (store, scratch) = fresh_store();
+        let roots: Vec<ProjectRoot> = ["shop", "blog"]
+            .iter()
+            .map(|folder| {
+                let dir = scratch.path().join(folder);
+                fs::create_dir_all(&dir).unwrap();
+                let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+                store
+                    .add_process(&root, &spec("web", "true"), &Author::human())
+                    .unwrap();
+                root
+            })
+            .collect();
+
+        store
+            .apply(
+                &parsed(SettingKey::DefaultRestart, "always"),
+                &Author::human(),
+            )
+            .unwrap();
+        store
+            .apply(
+                &parsed(SettingKey::DefaultStopGrace, "1500us"),
+                &Author::agent("claude"),
+            )
+            .unwrap();
+
+        for root in &roots {
+            let edits = store.edits(root).unwrap();
+            assert_eq!(edits.len(), 1, "{edits:?}");
+            assert_eq!(edits[0].process(), &None);
+            assert_eq!(
+                edits[0].message(),
+                "agent claude set default-stop-grace to 2ms"
+            );
+        }
     }
 }

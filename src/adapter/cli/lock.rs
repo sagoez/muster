@@ -121,7 +121,7 @@ mod tests {
             test_support::{fresh_store, spec},
         },
         domain::{
-            coordination::{Author, LockNote, LockTtl},
+            coordination::{Author, LockHolder, LockNote, LockTtl},
             port::StackStore,
         },
     };
@@ -150,7 +150,7 @@ mod tests {
         store
             .acquire_lock(
                 &root,
-                &Author::agent("claude"),
+                &LockHolder::fresh("claude"),
                 &LockName::try_new("migrations").unwrap(),
                 LockTtl::DEFAULT,
                 Some(&LockNote::try_new("running 0042").unwrap()),
@@ -179,7 +179,7 @@ mod tests {
         store
             .acquire_lock(
                 &root,
-                &Author::agent("claude"),
+                &LockHolder::fresh("claude"),
                 &name,
                 LockTtl::DEFAULT,
                 None,

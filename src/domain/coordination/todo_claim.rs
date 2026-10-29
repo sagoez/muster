@@ -3,7 +3,7 @@ use std::time::Duration;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::Author;
+use crate::domain::coordination::{Author, TodoLease};
 
 /// An agent's hold on an in-progress todo: who works it, and the Unix second
 /// its lease runs out.
@@ -17,6 +17,15 @@ pub struct TodoClaim {
 }
 
 impl TodoClaim {
+    /// A claim for `owner` taken at `now` for `lease`.
+    #[must_use]
+    pub fn fresh(owner: &Author, lease: TodoLease, now: u64) -> Self {
+        Self {
+            owner: owner.clone(),
+            claimed_until: now + lease.as_ref().as_secs(),
+        }
+    }
+
     /// Whether the lease still holds at `now`.
     #[must_use]
     pub fn is_live(&self, now: u64) -> bool {

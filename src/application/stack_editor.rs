@@ -96,13 +96,17 @@ impl StackEditor<'_> {
         Ok(imported)
     }
 
-    /// Applies `change` to the settings and returns the result.
+    /// Applies `change` for `author` to the settings and returns the result.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the value is refused or the store cannot
     /// be written.
-    pub fn configure(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
-        let settings = self.settings.apply(change)?;
+    pub fn configure(
+        &self,
+        change: &SettingChange,
+        author: &Author,
+    ) -> Result<Settings, ConfigError> {
+        let settings = self.settings.apply(change, author)?;
         self.notifier.settings_changed();
         Ok(settings)
     }
@@ -252,7 +256,7 @@ mod tests {
             Ok(self.settings.borrow().clone())
         }
 
-        fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
+        fn apply(&self, change: &SettingChange, _author: &Author) -> Result<Settings, ConfigError> {
             self.write()?;
             let changed = self.settings.borrow().clone().with_change(change);
             *self.settings.borrow_mut() = changed.clone();
@@ -396,9 +400,10 @@ mod tests {
 
         let settings = fakes
             .editor()
-            .configure(&SettingChange::Scrollback(
-                ScrollbackLines::try_new(50).unwrap(),
-            ))
+            .configure(
+                &SettingChange::Scrollback(ScrollbackLines::try_new(50).unwrap()),
+                &agent(),
+            )
             .unwrap();
 
         assert_eq!(settings.scrollback().into_inner(), 50);
@@ -425,7 +430,7 @@ mod tests {
         );
         assert!(
             editor
-                .configure(&SettingChange::DesktopNotifications(false))
+                .configure(&SettingChange::DesktopNotifications(false), &agent())
                 .is_err()
         );
         assert!(fakes.steps().is_empty());

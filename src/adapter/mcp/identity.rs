@@ -6,11 +6,11 @@ use std::{
     },
 };
 
-use crate::domain::coordination::{AgentId, Author};
+use crate::domain::coordination::{AgentId, Author, LockHolder, SessionId};
 
 /// Who one MCP connection writes as, resolved once the client has named
-/// itself, and whether it has been told yet.
-#[derive(Debug, Default)]
+/// itself, whether it has been told yet, and the session its locks belong to.
+#[derive(Debug)]
 pub struct Identity {
     /// The `--as` name.
     agent: Option<String>,
@@ -18,15 +18,32 @@ pub struct Identity {
     author: OnceLock<Author>,
     /// Whether a result has already echoed the author to the agent.
     introduced: AtomicBool,
+    /// This connection, which owns the locks it takes.
+    session: SessionId,
 }
 
 impl Identity {
-    /// An identity that prefers `agent`, the `--as` name.
+    /// An identity that prefers `agent`, the `--as` name, in a new session.
     pub fn new(agent: Option<String>) -> Self {
         Self {
             agent,
-            ..Self::default()
+            author: OnceLock::new(),
+            introduced: AtomicBool::new(false),
+            session: SessionId::generate(),
         }
+    }
+
+    /// This connection's session.
+    pub fn session(&self) -> &SessionId {
+        &self.session
+    }
+
+    /// Who takes and releases locks: the author, through this session.
+    pub fn lock_holder(&self) -> LockHolder {
+        LockHolder::builder()
+            .author(self.author().clone())
+            .session(self.session.clone())
+            .build()
     }
 
     /// Fixes the author now that the client named itself `client`; a call

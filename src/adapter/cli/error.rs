@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, ResolveError},
+        client::{ClientError, FailureKind, RefusedFolder, ResolveError},
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
         sanitize::printable,
@@ -48,6 +48,17 @@ pub enum CliError {
         /// The folder the project was looked for from.
         dir: PathBuf,
     },
+    /// The command would register a folder that cannot be a project.
+    #[error(
+        "{} is {why}, which cannot be a muster project; run inside a project folder or pass -p",
+        dir.display()
+    )]
+    Unregistrable {
+        /// The folder.
+        dir: PathBuf,
+        /// Why it is refused.
+        why: RefusedFolder,
+    },
     /// A note key was blank or whitespace-only.
     #[error("'{0}' is not a valid note key")]
     InvalidNoteKey(String),
@@ -57,6 +68,16 @@ pub enum CliError {
     /// A todo title was blank or whitespace-only.
     #[error("'{0}' is not a valid todo title")]
     InvalidTodoTitle(String),
+    /// A note body, value or todo title ran past the most it may hold.
+    #[error("the {what} is {found} characters; at most {max} are allowed")]
+    TooLong {
+        /// What was too long, such as `note body`.
+        what: &'static str,
+        /// The most characters it may hold.
+        max: usize,
+        /// How many it had.
+        found: usize,
+    },
     /// A todo id was blank or whitespace-only.
     #[error("'{0}' is not a valid todo id")]
     InvalidTodoId(String),
@@ -249,6 +270,7 @@ impl From<ResolveError> for CliError {
         match error {
             ResolveError::UnknownProject { name, .. } => Self::UnknownProject(name),
             ResolveError::NotAProject { dir } => Self::NotAProject { dir },
+            ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
             ResolveError::Config(error) => Self::Config(error),
         }
     }
@@ -285,8 +307,10 @@ impl CliError {
             Self::NotATerminal
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
+            | Self::Unregistrable { .. }
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
+            | Self::TooLong { .. }
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
@@ -315,6 +339,7 @@ impl CliError {
             Self::Config(_)
             | Self::UnknownProject(_)
             | Self::NotAProject { .. }
+            | Self::Unregistrable { .. }
             | Self::NothingRunning(_)
             | Self::UnknownNote(_)
             | Self::UnknownTodo(_)
@@ -334,6 +359,7 @@ impl CliError {
             | Self::NothingToChoose(_)
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
+            | Self::TooLong { .. }
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)

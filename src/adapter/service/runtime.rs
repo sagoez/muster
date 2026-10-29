@@ -659,7 +659,7 @@ impl ServiceRuntime {
             log.record_at(
                 EventDraft::builder()
                     .project(Some(project.clone()))
-                    .process(Some(edit.process().clone()))
+                    .process(edit.process().clone())
                     .kind(EventKind::Notice)
                     .detail(edit.message().clone())
                     .build(),
@@ -690,15 +690,20 @@ impl ServiceRuntime {
         self.stack_changed(project)
     }
 
-    /// Reads the stored settings for every later launch, and hands them to
-    /// every supervisor.
+    /// Reads the stored settings for every later launch, hands them to every
+    /// supervisor, and raises the agent's setting change each loaded
+    /// project's edit log took with it.
     ///
     /// # Errors
-    /// Returns the refusal when the settings cannot be read.
+    /// Returns the refusal when the settings or an edit log cannot be read.
     fn settings_changed(&mut self) -> Result<(), ServiceErrorBody> {
         self.settings = self.settings_store.load().map_err(store_refusal)?;
         for supervisor in self.supervisors.values_mut() {
             supervisor.apply_settings(&self.settings);
+        }
+        let loaded: Vec<ProjectRoot> = self.supervisors.keys().cloned().collect();
+        for project in &loaded {
+            self.raise_edits(project)?;
         }
         Ok(())
     }
@@ -1094,6 +1099,7 @@ mod tests {
         },
         domain::{
             config::SettingChange,
+            coordination::Author,
             port::ProcessRunner,
             process::{LogPattern, PatternKind, PatternText, ProcessState},
             pty::{ProcessOutput, PtySize},
@@ -2071,6 +2077,35 @@ mod tests {
         service.stop();
     }
 
+    /// An agent's setting change, which moves no stack's revision, is a
+    /// `notice` event on no process once the service is told of it.
+    #[test]
+    fn an_agents_setting_change_is_a_notice_event() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        let loaded = edit_events(&service, &project, None);
+
+        fixture
+            .store
+            .apply(
+                &SettingChange::DefaultSize(PtySize::try_new(40, 120).unwrap()),
+                &Author::agent("claude"),
+            )
+            .unwrap();
+        assert_eq!(
+            service.send(ServiceRequest::SettingsChanged),
+            ServiceResponse::Ok
+        );
+
+        let told = told(&edit_events(&service, &project, Some(*loaded.cursor())));
+        assert_eq!(told, [(
+            "agent claude set default-size to 40x120".to_string(),
+            None
+        )]);
+        service.stop();
+    }
+
     /// A holder found at start whose process is no longer in the project is
     /// stopped through the stop policy its record carries, with a notice, and
     /// its row goes once it has exited.
@@ -2136,7 +2171,7 @@ mod tests {
 
         fixture
             .store
-            .apply(&SettingChange::DefaultSize(bigger))
+            .apply(&SettingChange::DefaultSize(bigger), &Author::human())
             .unwrap();
         assert_eq!(
             service.send(ServiceRequest::SettingsChanged),

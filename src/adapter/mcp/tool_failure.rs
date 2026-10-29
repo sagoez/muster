@@ -124,7 +124,10 @@ pub fn agent_message(error: &ToolError) -> String {
         ToolError::UnknownValue { .. } => format!("{error}; {CALL_KV_READ}"),
         ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
         ToolError::NoProjectHere { .. }
-        | ToolError::InvalidName(_)
+        | ToolError::Unregistrable { .. }
+        | ToolError::OutsideBase { .. }
+        | ToolError::ProjectRequired { .. }
+        | ToolError::InvalidName { .. }
         | ToolError::EmptyCommand
         | ToolError::InvalidField { .. }
         | ToolError::InvalidPattern { .. }

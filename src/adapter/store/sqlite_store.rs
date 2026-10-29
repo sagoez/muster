@@ -51,6 +51,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_stack_revision.sql"),
     include_str!("migrations/0003_mcp_stack_edits.sql"),
     include_str!("migrations/0004_stack_edit_log.sql"),
+    include_str!("migrations/0005_setting_edits.sql"),
+    include_str!("migrations/0006_lock_sessions.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and
@@ -564,7 +566,10 @@ mod tests {
         assert!(store.load().is_ok());
         assert!(
             store
-                .apply(&SettingChange::DesktopNotifications(false))
+                .apply(
+                    &SettingChange::DesktopNotifications(false),
+                    &Author::human()
+                )
                 .is_err()
         );
     }

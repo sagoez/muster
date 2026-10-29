@@ -73,9 +73,9 @@ pub fn connection_config(executable: &Path) -> String {
 }
 
 /// Serves `deps` as an MCP server over stdio, blocking until the client
-/// disconnects, then releases the locks this connection's agent holds; a
-/// crash leaves them to lapse. Intended to run as a child process an agent
-/// spawns, so the OS process boundary is the trust boundary.
+/// disconnects, then releases the locks this connection took; a crash
+/// leaves them to lapse. Intended to run as a child process an agent spawns,
+/// so the OS process boundary is the trust boundary.
 ///
 /// # Errors
 /// Returns [`McpError`] if the server cannot be initialized or stops abnormally.
@@ -90,9 +90,14 @@ pub(super) async fn serve_stdio(deps: McpDeps) -> Result<(), McpError> {
         .waiting()
         .await
         .map_err(|error| McpError::Wait(error.to_string()))?;
-    // The locks lapse by their TTL when the release cannot run.
-    let _ = deps.coordination().release_locks_of(identity.author());
+    release_session_locks(&deps, &identity);
     Ok(())
+}
+
+/// Releases the locks taken through `identity`'s session, and only those,
+/// as its connection ends. They lapse by their TTL when the release fails.
+pub(super) fn release_session_locks(deps: &McpDeps, identity: &Identity) {
+    let _ = deps.coordination().release_locks_of(identity.session());
 }
 
 /// MCP driving adapter exposing projects' stacks, processes, settings and

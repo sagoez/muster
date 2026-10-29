@@ -367,15 +367,17 @@ impl StackStore for SqliteStore {
         self.write(|conn| {
             let project = require_project(conn, root)?;
             let project_id = project.0;
-            let changed = stack_of(conn, project)?
-                .require(name)?
-                .clone()
-                .with_change(change);
+            let before = stack_of(conn, project)?.require(name)?.clone();
+            let changed = before.clone().with_change(change);
+            let fields = before.differing_fields(&changed);
+            if fields.is_empty() {
+                return Ok(changed);
+            }
             update_process(conn, project_id, &changed)?;
             bump_revision(conn, project_id)?;
             record_edit(conn, project_id, &StackEdit::Changed {
                 author: author.clone(),
-                fields: change.fields(),
+                fields,
                 spec: changed.clone(),
             })?;
             Ok(changed)
@@ -442,7 +444,7 @@ mod tests {
         adapter::store::test_support::{fresh_store, spec},
         domain::{
             config::FieldEdit,
-            port::ProjectStore,
+            port::{ProjectStore, StackEditLog},
             process::{RestartPolicy, StopSignal},
             value::PositiveDuration,
         },
@@ -814,7 +816,7 @@ mod tests {
                 &root,
                 &name("web"),
                 &ProcessChange::builder()
-                    .working_dir(FieldEdit::Clear)
+                    .working_dir(FieldEdit::Set(PathBuf::from("frontend")))
                     .build(),
                 &Author::human(),
             )
@@ -834,6 +836,44 @@ mod tests {
             .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
         moved(&store);
+    }
+
+    /// A change that leaves every value as it was writes nothing: the
+    /// revision stays and the edit log keeps no entry; a change that also
+    /// moves one field logs only that one.
+    #[test]
+    fn a_change_logs_only_what_it_changed() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let agent = Author::agent("claude");
+        store
+            .add_process(&root, &spec("web", "npm run dev"), &agent)
+            .unwrap();
+        let revision = store.stack_revision(&root).unwrap();
+        let logged = store.edits(&root).unwrap().len();
+
+        let same = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("npm run dev").unwrap()))
+            .working_dir(FieldEdit::Clear)
+            .build();
+        store
+            .change_process(&root, &name("web"), &same, &agent)
+            .unwrap();
+        assert_eq!(store.stack_revision(&root).unwrap(), revision);
+        assert_eq!(store.edits(&root).unwrap().len(), logged);
+
+        let one = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("npm run dev").unwrap()))
+            .autostart(Some(true))
+            .build();
+        store
+            .change_process(&root, &name("web"), &one, &agent)
+            .unwrap();
+        assert_ne!(store.stack_revision(&root).unwrap(), revision);
+        assert_eq!(
+            store.edits(&root).unwrap().last().unwrap().message(),
+            "agent claude changed autostart of 'web'"
+        );
     }
 
     #[test]

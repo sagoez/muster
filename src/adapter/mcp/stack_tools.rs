@@ -8,7 +8,7 @@ use rmcp::{
 
 use super::{
     agent_wait_view::AgentWaitView,
-    bounds::{CALL_BOUND, wait_bound},
+    bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, WAIT_S_FIELD, wait_bound},
     events_view::EventsView,
     process_fields::invalid,
     progress::with_progress,
@@ -130,7 +130,7 @@ impl MusterMcp {
     /// # Errors
     /// Returns the caller's mistake or a fault of muster's.
     pub(super) async fn up(&self, arg: StackUpArg) -> ToolResult {
-        let bound = wait_bound(arg.timeout_s());
+        let bound = wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?;
         let wait = arg
             .wait()
             .unwrap_or(false)
@@ -179,10 +179,7 @@ impl MusterMcp {
                     .map_err(|_| invalid(KINDS_FIELD, KINDS_FORM, raw))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let wait = arg
-            .wait_s()
-            .map_or(Duration::ZERO, Duration::from_secs)
-            .min(CALL_BOUND);
+        let wait = wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
         let alerts_seen = self.alerts.clone();
         let (page, alerts) = self
             .ask(arg.project().clone(), move |client, project| {

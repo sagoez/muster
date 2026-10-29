@@ -40,7 +40,7 @@ impl Notice {
         Self {
             at: *edit.at(),
             project: Some(root.clone()),
-            process: Some(edit.process().clone()),
+            process: edit.process().clone(),
             level: NoticeLevel::Warning,
             message: edit.message().clone(),
         }

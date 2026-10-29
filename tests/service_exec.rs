@@ -189,7 +189,10 @@ impl Scratch {
         };
         scratch
             .store()
-            .apply(&SettingChange::DesktopNotifications(false))
+            .apply(
+                &SettingChange::DesktopNotifications(false),
+                &Author::human(),
+            )
             .unwrap();
         scratch
     }

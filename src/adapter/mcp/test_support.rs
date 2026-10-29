@@ -1,7 +1,7 @@
 //! A server over a scratch database whose service is never reached, so no
 //! test touches the user's real state or service socket.
 
-use std::{fs, sync::Arc};
+use std::{fs, path::Path, sync::Arc};
 
 use rmcp::{
     ErrorData,
@@ -81,6 +81,7 @@ fn serving(
             Scope::builder()
                 .cwd(root.as_ref().clone())
                 .base(root.as_ref().clone())
+                .home(root.as_ref().parent().map(Path::to_path_buf))
                 .build(),
         )
         .agent(Some(agent.to_string()))

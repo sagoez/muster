@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::resolve_error::ResolveError;
+use super::{refused_folder::RefusedFolder, resolve_error::ResolveError};
 use crate::{
     adapter::path::{absolutize, expand_home, names_a_folder, project_root},
     domain::{
@@ -50,6 +50,44 @@ impl ProjectTarget {
             Self::Unregistered(root) => Err(ResolveError::NotAProject {
                 dir: root.into_inner(),
             }),
+        }
+    }
+
+    /// This target, unless it is a folder that may not become a project: the
+    /// filesystem root, `home` or a folder above it, or one holding a
+    /// registered project.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::Unregistrable`] naming why the folder is
+    /// refused, or the store's failure.
+    pub fn registrable(
+        self,
+        home: Option<&Path>,
+        projects: &dyn ProjectStore,
+    ) -> Result<Self, ResolveError> {
+        let Self::Unregistered(root) = &self else {
+            return Ok(self);
+        };
+        let dir: &Path = root.as_ref();
+        let why = if dir.parent().is_none() {
+            Some(RefusedFolder::FilesystemRoot)
+        } else if home.is_some_and(|home| home == dir) {
+            Some(RefusedFolder::Home)
+        } else if home.is_some_and(|home| home.starts_with(dir)) {
+            Some(RefusedFolder::AboveHome)
+        } else {
+            projects
+                .projects()?
+                .into_iter()
+                .find(|project| project.root().as_ref().starts_with(dir))
+                .map(|project| RefusedFolder::HoldsProject(project.name().clone()))
+        };
+        match why {
+            Some(why) => Err(ResolveError::Unregistrable {
+                dir: dir.to_path_buf(),
+                why,
+            }),
+            None => Ok(self),
         }
     }
 
@@ -269,6 +307,48 @@ mod tests {
             outside.registered(),
             Err(ResolveError::NotAProject { dir }) if dir == base.join("elsewhere")
         ));
+    }
+
+    /// The filesystem root, the home folder, a folder above it and a folder
+    /// holding a project are refused; a folder inside home or inside a
+    /// project, and a registered project, are not.
+    #[test]
+    fn only_a_folder_that_claims_nothing_else_may_be_registered() {
+        let (_scratch, base) = tree();
+        let home = base.join("elsewhere");
+        let web = project("web", &base.join("shop/web"));
+        let projects = Projects(vec![web.clone()]);
+        let unregistered = |dir: &Path| {
+            ProjectTarget::Unregistered(ProjectRoot::try_new(dir.to_path_buf()).unwrap())
+        };
+        let refusal = |dir: &Path| match unregistered(dir).registrable(Some(&home), &projects) {
+            Err(ResolveError::Unregistrable { why, .. }) => why,
+            other => panic!("{} was not refused: {other:?}", dir.display()),
+        };
+
+        assert_eq!(refusal(Path::new("/")), RefusedFolder::FilesystemRoot);
+        assert_eq!(refusal(&home), RefusedFolder::Home);
+        assert_eq!(refusal(&base), RefusedFolder::AboveHome);
+        assert_eq!(
+            refusal(&base.join("shop")),
+            RefusedFolder::HoldsProject(web.name().clone())
+        );
+        fs::create_dir_all(home.join("app")).unwrap();
+        assert!(
+            unregistered(&home.join("app"))
+                .registrable(Some(&home), &projects)
+                .is_ok()
+        );
+        assert!(
+            unregistered(&base.join("shop/web/src"))
+                .registrable(Some(&home), &projects)
+                .is_ok()
+        );
+        assert!(
+            ProjectTarget::Registered(web)
+                .registrable(Some(&home), &projects)
+                .is_ok()
+        );
     }
 
     /// A folder named inside a project, which is no project's root, is read

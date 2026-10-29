@@ -10,6 +10,7 @@ use muster::{
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         open_files::OpenFilesLimit,
+        path::home_dir,
         port_occupants::OsPortOccupants,
         private_dir::{prepare_state_dir, state_dir},
         service::{
@@ -116,6 +117,7 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
             Scope::builder()
                 .cwd(launch.cwd().clone())
                 .base(launch.base().clone())
+                .home(home_dir())
                 .build(),
         )
         .agent(launch.agent().clone())

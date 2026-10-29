@@ -4,12 +4,13 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, ResolveError},
+        client::{ClientError, FailureKind, RefusedFolder, ResolveError},
         holder::PatternError,
+        sanitize::printable,
     },
     domain::{
         config::{ConfigError, McpStackEdits, SettingKey},
-        value::ValueParseError,
+        value::{NameProblem, ValueParseError},
     },
 };
 
@@ -44,9 +45,47 @@ pub enum ToolError {
         /// The registered projects' names.
         valid: Vec<String>,
     },
+    /// The folder `process_add` would register cannot be a project.
+    #[error("{} is {why}, which cannot be a muster project", dir.display())]
+    Unregistrable {
+        /// The folder.
+        dir: PathBuf,
+        /// Why it is refused.
+        why: RefusedFolder,
+    },
+    /// `process_add` named a folder outside the server's base folder.
+    #[error(
+        "{} is outside {}; process_add registers only this server's folder or one inside it",
+        dir.display(),
+        base.display()
+    )]
+    OutsideBase {
+        /// The folder named.
+        dir: PathBuf,
+        /// The server's base folder.
+        base: PathBuf,
+    },
+    /// `process_add` without `project` would register a base folder that
+    /// cannot be a project.
+    #[error(
+        "this server's folder {} is {why}, which cannot be a muster project; pass project, a \
+         registered project or a folder inside it",
+        dir.display()
+    )]
+    ProjectRequired {
+        /// The server's base folder.
+        dir: PathBuf,
+        /// Why it is refused.
+        why: RefusedFolder,
+    },
     /// A process name was blank or held a control character.
-    #[error("'{0}' is not a valid process name")]
-    InvalidName(String),
+    #[error("'{}' is not a valid process name: it {problem}", printable(name))]
+    InvalidName {
+        /// The name as typed.
+        name: String,
+        /// Why it is refused.
+        problem: NameProblem,
+    },
     /// A command was blank.
     #[error("the command is empty")]
     EmptyCommand,
@@ -121,7 +160,7 @@ pub enum ToolError {
     /// The `mcp-stack-edits` setting keeps agents from editing the stack.
     #[error(
         "{0} is refused: the {key} setting is {value}, so agents cannot add, change or remove \
-         processes; ask the user to run muster config set {key} {allow} if they want to allow it",
+         processes, type into them or change settings; ask the user to run muster config set {key} {allow} if they want to allow it",
         key = SettingKey::McpStackEdits,
         value = McpStackEdits::ReadOnly,
         allow = McpStackEdits::Allow
@@ -156,6 +195,7 @@ impl From<ResolveError> for ToolError {
                 valid: valid.iter().map(ToString::to_string).collect(),
             },
             ResolveError::NotAProject { dir } => Self::NoProjectHere { dir },
+            ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
             ResolveError::Config(error) => Self::Config(error),
         }
     }
@@ -172,7 +212,10 @@ impl ToolError {
             Self::UnknownTodo { .. } => FailureKind::UnknownTodo,
             Self::UnknownValue { .. } => FailureKind::UnknownKey,
             Self::NothingToChange(_) => FailureKind::Usage,
-            Self::InvalidName(_)
+            Self::Unregistrable { .. }
+            | Self::OutsideBase { .. }
+            | Self::ProjectRequired { .. }
+            | Self::InvalidName { .. }
             | Self::EmptyCommand
             | Self::InvalidField { .. }
             | Self::InvalidPattern { .. }
@@ -199,7 +242,10 @@ impl ToolError {
             | Self::UnknownValue { valid, .. } => valid.clone(),
             Self::Config(_)
             | Self::NoProjectHere { .. }
-            | Self::InvalidName(_)
+            | Self::Unregistrable { .. }
+            | Self::OutsideBase { .. }
+            | Self::ProjectRequired { .. }
+            | Self::InvalidName { .. }
             | Self::EmptyCommand
             | Self::InvalidField { .. }
             | Self::InvalidPattern { .. }

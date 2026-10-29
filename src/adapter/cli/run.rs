@@ -12,9 +12,12 @@ use super::{
     working_dir::stored_working_dir,
 };
 use crate::{
-    adapter::client::{
-        ActionReport, ProjectTarget, ServiceClient, SettleWatch,
-        process::{ready_to_send, start_added},
+    adapter::{
+        client::{
+            ActionReport, ProjectTarget, ServiceClient, SettleWatch,
+            process::{ready_to_send, start_added},
+        },
+        path::home_dir,
     },
     application::StackEditor,
     domain::{
@@ -56,7 +59,9 @@ impl RunPlan {
     ) -> Result<Self, CliError> {
         let command = command_string(&args.command)?;
         let name = process_name(args.name.as_deref(), &args.command)?;
-        let target = invocation.target(store)?;
+        let target = invocation
+            .target(store)?
+            .registrable(home_dir().as_deref(), store)?;
         if let ProjectTarget::Registered(project) = &target
             && store
                 .stack(project.root())?

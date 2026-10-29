@@ -14,8 +14,8 @@ pub struct RecordedEdit {
     id: EditId,
     /// When the store recorded it.
     at: SystemTime,
-    /// The process the edit concerns.
-    process: ProcessName,
+    /// The process the edit concerns, or none for a setting.
+    process: Option<ProcessName>,
     /// The edit's text, which never shows an environment value.
     message: String,
 }

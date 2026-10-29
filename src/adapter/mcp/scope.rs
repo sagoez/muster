@@ -9,7 +9,7 @@ use typed_builder::TypedBuilder;
 
 use super::tool_error::ToolError;
 use crate::{
-    adapter::client::{ProjectTarget, resolve_project},
+    adapter::client::{ProjectTarget, ResolveError, resolve_project},
     domain::{port::ProjectStore, project::Project},
 };
 
@@ -23,8 +23,11 @@ pub struct Scope {
     /// read against.
     cwd: PathBuf,
     /// The folder whose deepest containing project a call without `project`
-    /// acts on.
+    /// acts on, and the only folder, with those inside it, `process_add`
+    /// registers.
     base: PathBuf,
+    /// The user's home folder, which is never registered.
+    home: Option<PathBuf>,
 }
 
 impl Scope {
@@ -60,6 +63,45 @@ impl Scope {
         let from: &Path = if given { &self.cwd } else { &self.base };
         Ok(resolve_project(project, None, from, projects)?)
     }
+
+    /// The project `process_add` adds to, as [`Scope::target`] finds it,
+    /// when that folder may be registered: the base folder or one inside it,
+    /// and never one [`ProjectTarget::registrable`] refuses.
+    ///
+    /// # Errors
+    /// Returns [`ToolError::OutsideBase`] for a folder outside the base,
+    /// [`ToolError::Unregistrable`] for a refused one,
+    /// [`ToolError::ProjectRequired`] when no `project` was given and the
+    /// base is refused, or what [`Scope::target`] returns.
+    pub fn registering_target(
+        &self,
+        project: Option<&str>,
+        projects: &dyn ProjectStore,
+    ) -> Result<ProjectTarget, ToolError> {
+        let target = self.target(project, projects)?;
+        let ProjectTarget::Unregistered(root) = &target else {
+            return Ok(target);
+        };
+        let base = self
+            .base
+            .canonicalize()
+            .unwrap_or_else(|_| self.base.clone());
+        if !root.as_ref().starts_with(&base) {
+            return Err(ToolError::OutsideBase {
+                dir: root.as_ref().clone(),
+                base,
+            });
+        }
+        let given = project.is_some_and(|value| !value.trim().is_empty());
+        target
+            .registrable(self.home.as_deref(), projects)
+            .map_err(|error| match error {
+                ResolveError::Unregistrable { dir, why } if !given => {
+                    ToolError::ProjectRequired { dir, why }
+                },
+                other => other.into(),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -70,7 +112,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::store::{SqliteStore, test_support::spec},
+        adapter::{
+            client::RefusedFolder,
+            store::{SqliteStore, test_support::spec},
+        },
         domain::{coordination::Author, port::StackStore, value::ProjectRoot},
     };
 
@@ -105,6 +150,7 @@ mod tests {
         Scope::builder()
             .cwd(cwd.to_path_buf())
             .base(cwd.to_path_buf())
+            .home(None)
             .build()
     }
 
@@ -159,6 +205,7 @@ mod tests {
         let scope = Scope::builder()
             .cwd(base.join("elsewhere"))
             .base(base.join("shop/web"))
+            .home(None)
             .build();
 
         assert_eq!(name_of(&scope.project(None, &store).unwrap()), "web");
@@ -203,5 +250,63 @@ mod tests {
         assert!(
             matches!(inside, ProjectTarget::Registered(project) if project.name().to_string() == "shop")
         );
+    }
+
+    /// A server started in the home folder or at `/` registers neither:
+    /// without `project` the call asks for one, and with one it registers
+    /// only a folder inside the server's own.
+    #[test]
+    fn process_add_registers_only_inside_the_base_and_never_home_or_root() {
+        let (_scratch, base, store) = tree();
+        let home = base.join("elsewhere");
+        fs::create_dir_all(home.join("app")).unwrap();
+        let served_in = |dir: &Path| {
+            Scope::builder()
+                .cwd(dir.to_path_buf())
+                .base(dir.to_path_buf())
+                .home(Some(home.clone()))
+                .build()
+        };
+
+        assert!(matches!(
+            served_in(&home).registering_target(None, &store),
+            Err(ToolError::ProjectRequired {
+                why: RefusedFolder::Home,
+                ..
+            })
+        ));
+        assert!(matches!(
+            served_in(Path::new("/")).registering_target(None, &store),
+            Err(ToolError::ProjectRequired {
+                why: RefusedFolder::FilesystemRoot,
+                ..
+            })
+        ));
+        assert_eq!(
+            served_in(&home)
+                .registering_target(Some("./app"), &store)
+                .unwrap(),
+            ProjectTarget::Unregistered(ProjectRoot::try_new(home.join("app")).unwrap())
+        );
+        assert!(matches!(
+            served_in(&home.join("app")).registering_target(Some(".."), &store),
+            Err(ToolError::OutsideBase { .. })
+        ));
+        assert!(matches!(
+            served_in(&home)
+                .registering_target(Some(base.join("shop/api").to_str().unwrap()), &store),
+            Err(ToolError::OutsideBase { .. })
+        ));
+        assert!(matches!(
+            served_in(Path::new("/")).registering_target(Some(home.to_str().unwrap()), &store),
+            Err(ToolError::Unregistrable {
+                why: RefusedFolder::Home,
+                ..
+            })
+        ));
+        assert!(matches!(
+            served_in(&home).registering_target(Some("shop"), &store),
+            Ok(ProjectTarget::Registered(_))
+        ));
     }
 }

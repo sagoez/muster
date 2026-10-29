@@ -31,7 +31,9 @@ starts it in the background.
 A project is a folder. The first `muster add`, `muster run`, `muster import` or
 `muster init` that adds a process to a folder registers it, named after the
 folder (`shop`, then `shop-2` for a second folder of that name). Its stack is
-the list of processes it defines, in the order they were added.
+the list of processes it defines, in the order they were added. `/`, your home
+folder, a folder above it and a folder holding a registered project are never
+registered: run the command inside a project folder, or pass `-p`.
 
 Everything muster stores lives in one SQLite database, `muster.db` in muster's
 state directory (`~/.local/state/muster` on Linux,
@@ -344,8 +346,10 @@ about a project names it.
 `--as NAME` sets the id the agent's coordination writes and locks carry; it
 defaults to `MUSTER_AGENT`, then `herdr-pane-<HERDR_PANE_ID>`, then a random
 session id, and is prefixed with the client's name (`claude-code@herdr-pane-3`).
-`stack_status` and the first write result say which label is yours. When the
-server exits cleanly it releases the locks it holds.
+`stack_status` and the first write result say which label is yours. A lock
+belongs to the connection that took it: another connection under the same label
+cannot renew or release it, and when the server exits cleanly it releases the
+locks its own connection took.
 
 An agent's loop is: `stack_status` to see what runs; after a code change,
 `process_restart` with `wait: true`; when something breaks, `process_logs` with
@@ -361,21 +365,32 @@ only new output. The tools:
 - the stack definition: `process_add`, `process_set` and `process_remove`, which
   edit it as `muster add`, `set` and `rm` do, within the guardrails below;
   `process_add` registers the folder when it is not yet a project, and `ready`
-  stores a readiness check;
+  stores a readiness check. It registers only the server's own folder or one
+  inside it, under the same rule as the CLI, so a server started in `/` or your
+  home folder must pass `project`;
 - settings: `config_get`, and `config_set` for the `default-*` settings;
 - coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
-  `note_delete`, `kv_read`, `kv_write`, `kv_delete`.
+  `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
+  65536 characters, a value 4096 and a todo title 500; a longer one is refused
+  over MCP and the CLI. `todo_list` pages with `limit`, answering `more` and a
+  `cursor` to pass for the next page, and a `kv_read` listing cuts each value
+  to 200 characters and marks it `truncated`. Setting a todo `in-progress`
+  claims it for the caller, and a forced change to another agent's todo takes
+  its claim over.
 
 An agent's stack edits are held to guardrails, since a changed command runs
 with the user's rights at the next start:
 
 - `muster config set mcp-stack-edits read-only` refuses every `process_add`,
-  `process_set` and `process_remove` with an `isError` result naming the
-  setting; `allow` lets them through again. Only the CLI changes it.
+  `process_set`, `process_remove`, `process_send` and `config_set` with an
+  `isError` result naming the setting; `allow` lets them through again. Only
+  the CLI changes it.
 - Every edit an agent makes is recorded as a notice naming the agent, the
-  process and the fields changed, with the new command and working directory
-  when it set them. It is kept in muster's database with the edit itself, in
+  process and the fields it actually changed, with the new command and working
+  directory when it set them; a `process_set` that changes nothing records
+  nothing. A `config_set` is recorded in every project, naming the setting and
+  its new value. It is kept in muster's database with the edit itself, in
   one transaction, the newest 50 per project, so it shows in `muster notices`,
   in `stack_status` and as a `notice` event in `stack_events` whether or not
   the service was running at the time.
@@ -400,7 +415,9 @@ another process holds its readiness port.
 
 No call blocks longer than 45 seconds; a wait that has not finished answers with
 status `waiting` and a cursor to continue from, and a request carrying a
-progress token hears progress every 5 seconds. Output is stripped of terminal
+progress token hears progress every 5 seconds. A value outside its bound is
+refused, never cut to fit: a `timeout_s` or `wait_s` past 45, a `limit` of 0 or
+past 200, and a wait whose `since` lies past the output written so far. Output is stripped of terminal
 escapes and capped, saying what it dropped. Every stack and process result
 carries `alerts`: crashes, readiness timeouts and blocked starts since the
 agent's last call, so it learns of a crash without polling.

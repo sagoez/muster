@@ -7,12 +7,14 @@ use super::{
 use crate::{
     adapter::{client::NoteEntry, wire::WireForm},
     domain::{
-        coordination::{Author, ScratchpadKey},
+        coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey},
         port::CoordinationStore,
         value::ProjectRoot,
     },
 };
 
+/// What a refusal calls a note's body.
+const NOTE_BODY: &str = "note body";
 /// Line printed when the project has no notes yet.
 const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>`";
 /// The JSON key of the listed notes.
@@ -102,7 +104,9 @@ fn get(
 /// Creates or replaces the note under `key` with `body`.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidNoteKey`] for a blank key, or a store write failure.
+/// Returns [`CliError::InvalidNoteKey`] for a blank key,
+/// [`CliError::TooLong`] for a body past [`NOTE_BODY_MAX_CHARS`], or a store
+/// write failure.
 fn set(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
@@ -111,7 +115,12 @@ fn set(
     body: &str,
 ) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    store.set_scratchpad(project, author, &parsed, body)?;
+    let body = NoteBody::try_new(body).map_err(|_| CliError::TooLong {
+        what: NOTE_BODY,
+        max: NOTE_BODY_MAX_CHARS,
+        found: body.chars().count(),
+    })?;
+    store.set_scratchpad(project, author, &parsed, &body)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
@@ -154,8 +163,9 @@ mod tests {
     use crate::domain::{
         config::ConfigError,
         coordination::{
-            Claim, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
-            Scratchpad, Todo, TodoChange, TodoId, TodoLease, TodoTitle, TodoUpdate,
+            Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
+            LockRelease, LockTtl, Scratchpad, SessionId, Todo, TodoChange, TodoId, TodoLease,
+            TodoTitle, TodoUpdate,
         },
     };
 
@@ -188,11 +198,11 @@ mod tests {
             _project: &ProjectRoot,
             author: &Author,
             key: &ScratchpadKey,
-            body: &str,
+            body: &NoteBody,
         ) -> Result<(), ConfigError> {
             let note = Scratchpad::builder()
                 .key(key.clone())
-                .body(body.to_owned())
+                .body(body.to_string())
                 .author(author.clone())
                 .updated_at(0)
                 .build();
@@ -258,7 +268,7 @@ mod tests {
         fn acquire_lock(
             &self,
             _project: &ProjectRoot,
-            _me: &Author,
+            _me: &LockHolder,
             _name: &LockName,
             _ttl: LockTtl,
             _note: Option<&LockNote>,
@@ -269,7 +279,7 @@ mod tests {
         fn release_lock(
             &self,
             _project: &ProjectRoot,
-            _me: &Author,
+            _me: &LockHolder,
             _name: &LockName,
         ) -> Result<LockRelease, ConfigError> {
             unreachable!("note commands never touch locks")
@@ -283,7 +293,7 @@ mod tests {
             unreachable!("note commands never touch locks")
         }
 
-        fn release_locks_of(&self, _me: &Author) -> Result<usize, ConfigError> {
+        fn release_locks_of(&self, _session: &SessionId) -> Result<usize, ConfigError> {
             unreachable!("note commands never touch locks")
         }
 
@@ -308,7 +318,7 @@ mod tests {
             _project: &ProjectRoot,
             _author: &Author,
             _key: &KvKey,
-            _value: &str,
+            _value: &KvValue,
         ) -> Result<(), ConfigError> {
             unreachable!("note commands never touch key-values")
         }
@@ -356,6 +366,19 @@ mod tests {
         assert_eq!(body.rows()[0].detail(), "line one");
         assert_eq!(body.rows()[1].detail(), "line two");
         assert_eq!(body.json()["body"], "line one\nline two");
+    }
+
+    /// A body past the maximum is refused with its length, and not stored.
+    #[test]
+    fn an_oversized_body_is_refused() {
+        let store = FakeStore::default();
+        let body = "x".repeat(NOTE_BODY_MAX_CHARS + 1);
+        assert!(matches!(
+            set(&store, &project(), &Author::human(), "plan", &body),
+            Err(CliError::TooLong { max: NOTE_BODY_MAX_CHARS, found, .. })
+                if found == NOTE_BODY_MAX_CHARS + 1
+        ));
+        assert!(store.notes.borrow().is_empty());
     }
 
     /// An empty store lists a hint rather than nothing.

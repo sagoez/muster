@@ -6,9 +6,12 @@ use std::{
 
 use super::{cli_ports::CliPorts, error::CliError, report::print_note};
 use crate::{
-    adapter::client::{
-        ProjectTarget, RunningServiceNotifier, ServiceAccess, ServiceClient, env_project,
-        resolve_project,
+    adapter::{
+        client::{
+            ProjectTarget, RunningServiceNotifier, ServiceAccess, ServiceClient, env_project,
+            resolve_project,
+        },
+        path::home_dir,
     },
     application::StackEditor,
     constants::{APP_NAME, MUSTER_PROJECT_ENV},
@@ -152,6 +155,19 @@ impl<'a> Invocation<'a> {
         let target = self.target(store)?;
         self.note_override(store, &target)?;
         Ok(target)
+    }
+
+    /// The project a command that may register its folder acts on, as
+    /// [`Self::editing_target`] finds it, refusing a folder that cannot be a
+    /// project.
+    ///
+    /// # Errors
+    /// Returns [`CliError::Unregistrable`] for such a folder, or the
+    /// [`CliError`] of a project that cannot be resolved.
+    pub fn registering_target(&self, store: &dyn LocalState) -> Result<ProjectTarget, CliError> {
+        Ok(self
+            .editing_target(store)?
+            .registrable(home_dir().as_deref(), store)?)
     }
 
     /// The registered project a command that edits a stack acts on, noted as

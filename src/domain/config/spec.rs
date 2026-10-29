@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
 use getset::{Getters, WithSetters};
+use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessChange},
+    config::{Environment, ProcessChange, ProcessField},
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
 };
@@ -76,6 +77,23 @@ impl ProcessSpec {
             stop,
             ready: change.ready().clone().apply(self.ready),
         }
+    }
+
+    /// The fields `after` holds a different value in, in definition order.
+    pub fn differing_fields(&self, after: &Self) -> Vec<ProcessField> {
+        ProcessField::iter()
+            .filter(|field| match field {
+                ProcessField::Command => self.command != after.command,
+                ProcessField::WorkingDir => self.working_dir != after.working_dir,
+                ProcessField::Description => self.description != after.description,
+                ProcessField::Environment => self.environment != after.environment,
+                ProcessField::Autostart => self.autostart != after.autostart,
+                ProcessField::Restart => self.restart != after.restart,
+                ProcessField::StopSignal => self.stop.signal() != after.stop.signal(),
+                ProcessField::StopGrace => self.stop.grace_period() != after.stop.grace_period(),
+                ProcessField::Ready => self.ready != after.ready,
+            })
+            .collect()
     }
 
     /// The directory the process launches in under `root`.

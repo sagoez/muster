@@ -1,16 +1,19 @@
 //! The coordination tools: shared todos with claims, short named locks,
 //! notes and key-values, written as this connection's agent.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
-use serde_json::json as object_of;
+use serde_json::{Value, json as object_of};
 use tokio::time;
 
 use super::{
-    bounds::{CALL_BOUND, page_size},
+    bounds::{WAIT_S_FIELD, page_size, wait_bound},
     key_arg::KeyArg,
     kv_write_arg::KvWriteArg,
     lock_acquire_arg::LockAcquireArg,
@@ -26,6 +29,7 @@ use super::{
     todo_list_arg::TodoListArg,
     todo_update_arg::TodoUpdateArg,
     tool_error::ToolError,
+    tool_failure::ToolFailure,
     tool_result::ToolResult,
 };
 use crate::{
@@ -35,9 +39,10 @@ use crate::{
     },
     domain::{
         coordination::{
-            Claim, KvKey, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
-            ScratchpadKey, TODO_LEASE_MAX, TodoChange, TodoId, TodoLease, TodoStatus, TodoTitle,
-            TodoUpdate, claimable,
+            Claim, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue, LOCK_TTL_MAX, LockAttempt,
+            LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey,
+            TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoLease, TodoStatus,
+            TodoTitle, TodoTitleError, TodoUpdate, claimable,
         },
         port::CoordinationStore,
         value::ProjectRoot,
@@ -55,6 +60,15 @@ const NOTE_FIELD: &str = "note";
 const LEASE_FIELD: &str = "lease_s";
 const TTL_FIELD: &str = "ttl_s";
 const RELEASE_FIELD: &str = "release";
+const BODY_FIELD: &str = "body";
+const VALUE_FIELD: &str = "value";
+const TITLE_FIELD: &str = "title";
+const CURSOR_FIELD: &str = "cursor";
+/// The form a `todo_list` cursor is written in.
+const CURSOR_FORM: &str =
+    "the cursor of an earlier todo_list page, naming a todo that still exists";
+/// The form a bounded text is written in, followed by its maximum.
+const LENGTH_FORM: &str = "at most ";
 /// The statuses a todo takes.
 const STATUS_FORM: &str = "pending, in-progress or done";
 /// The form a lock name is written in.
@@ -82,6 +96,12 @@ const RELEASED: &str = "released";
 const OWNER: &str = "owner";
 const NOTE: &str = "note";
 const EXPIRES_IN_S: &str = "expires_in_s";
+const MORE: &str = "more";
+const CURSOR: &str = "cursor";
+const TRUNCATED: &str = "truncated";
+/// Most characters of each value a `kv_read` listing carries; reading the
+/// key returns the whole value.
+pub(super) const LISTED_VALUE_CHARS: usize = 200;
 
 /// The scratchpad key an agent typed as `key`.
 ///
@@ -105,6 +125,64 @@ fn todo_id(id: &str) -> Result<TodoId, ToolError> {
 /// Returns the caller's mistake for a blank key.
 fn kv_key(key: &str) -> Result<KvKey, ToolError> {
     KvKey::try_new(key.to_string()).map_err(|_| ToolError::InvalidKvKey(key.to_string()))
+}
+
+/// The refusal of `text`, given as `field`, for running past `max`
+/// characters.
+fn too_long(field: &'static str, max: usize, text: &str) -> ToolError {
+    invalid(
+        field,
+        &format!("{LENGTH_FORM}{max} characters"),
+        &format!("{} characters", text.chars().count()),
+    )
+}
+
+/// `entry` as a `kv_read` listing shows it: its value cut to
+/// [`LISTED_VALUE_CHARS`], marked `truncated` when cut.
+///
+/// # Errors
+/// Returns a fault of muster's when the entry cannot be serialized.
+fn listed_entry(entry: &KeyValue) -> Result<Value, ToolFailure> {
+    let cut = entry.value().chars().count() > LISTED_VALUE_CHARS;
+    let shown = KeyValue::builder()
+        .key(entry.key().clone())
+        .value(entry.value().chars().take(LISTED_VALUE_CHARS).collect())
+        .author(entry.author().clone())
+        .updated_at(*entry.updated_at())
+        .build();
+    let mut value = json(&shown.to_wire())?;
+    if cut {
+        value[TRUNCATED] = Value::Bool(true);
+    }
+    Ok(value)
+}
+
+/// The note body an agent typed as `body`.
+///
+/// # Errors
+/// Returns the caller's mistake for a body past [`NOTE_BODY_MAX_CHARS`].
+fn note_body(body: &str) -> Result<NoteBody, ToolError> {
+    NoteBody::try_new(body).map_err(|_| too_long(BODY_FIELD, NOTE_BODY_MAX_CHARS, body))
+}
+
+/// The key-value value an agent typed as `value`.
+///
+/// # Errors
+/// Returns the caller's mistake for a value past [`KV_VALUE_MAX_CHARS`].
+fn kv_value(value: &str) -> Result<KvValue, ToolError> {
+    KvValue::try_new(value).map_err(|_| too_long(VALUE_FIELD, KV_VALUE_MAX_CHARS, value))
+}
+
+/// The todo title an agent typed as `title`.
+///
+/// # Errors
+/// Returns the caller's mistake for a blank title or one past
+/// [`TODO_TITLE_MAX_CHARS`].
+fn todo_title(title: &str) -> Result<TodoTitle, ToolError> {
+    TodoTitle::try_new(title).map_err(|error| match error {
+        TodoTitleError::LenCharMaxViolated => too_long(TITLE_FIELD, TODO_TITLE_MAX_CHARS, title),
+        TodoTitleError::NotEmptyViolated => ToolError::InvalidTodoTitle(title.to_string()),
+    })
 }
 
 /// The lock name an agent typed as `name`.
@@ -184,10 +262,14 @@ impl MusterMcp {
             (pending, in-progress or done); owner keeps those held by \"me\" or by another \
             agent's label; claimable=true lists only pending todos whose dependencies are done. \
             Returns {todos: [{id, title, status, deps, owner, expires_in_s, stale_owner, author, \
-            updated_at}]}; an expired claim reads as pending with its holder as stale_owner."
+            updated_at}], more} (limit, default <default-list-limit>, at most \
+            <max-list-limit>); an expired claim reads as pending with its holder as stale_owner. \
+            When more is true, cursor names where the page ended: pass it as cursor for the next \
+            page."
     )]
     pub(super) async fn todo_list(&self, Parameters(arg): Parameters<TodoListArg>) -> ToolResult {
         let status = arg.status().as_deref().map(todo_status).transpose()?;
+        let after = arg.cursor().as_deref().map(todo_id).transpose()?;
         let me = self.identity.author().clone();
         let owner = arg.owner().clone().map(|owner| {
             if owner.trim() == OWNER_ME {
@@ -197,20 +279,33 @@ impl MusterMcp {
             }
         });
         let only_claimable = arg.claimable().unwrap_or(false);
-        let limit = page_size(arg.limit());
+        let limit = page_size(arg.limit())?;
         let todos = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
                 Ok(deps.coordination().todos(project.root())?)
             })
             .await?;
+        let start = match &after {
+            None => 0,
+            Some(id) => {
+                todos
+                    .iter()
+                    .position(|todo| todo.id() == id)
+                    .ok_or_else(|| invalid(CURSOR_FIELD, CURSOR_FORM, id.as_ref()))?
+                    + 1
+            },
+        };
         let now = unix_now();
         let listed: Vec<_> = if only_claimable {
-            claimable(&todos, now).collect()
+            let earlier: HashSet<&TodoId> = todos[..start].iter().map(Todo::id).collect();
+            claimable(&todos, now)
+                .filter(|todo| !earlier.contains(todo.id()))
+                .collect()
         } else {
-            todos.iter().collect()
+            todos[start..].iter().collect()
         };
-        let page: Vec<TodoView> = listed
+        let mut matching = listed
             .into_iter()
             .map(|todo| TodoView::at(todo, now))
             .filter(|view| status.is_none_or(|status| *view.status() == status))
@@ -220,21 +315,24 @@ impl MusterMcp {
                         .as_ref()
                         .is_some_and(|held| held.label() == owner)
                 })
-            })
-            .take(limit)
-            .collect();
-        structured(object_of!({ TODOS: json(&page)? }), false)
+            });
+        let page: Vec<TodoView> = matching.by_ref().take(limit).collect();
+        let more = matching.next().is_some();
+        let mut value = object_of!({ TODOS: json(&page)?, MORE: more });
+        if more && let Some(last) = page.last() {
+            value[CURSOR] = Value::String(last.id().to_string());
+        }
+        structured(value, false)
     }
 
     /// Adds a todo.
     #[tool(
-        description = "Add a pending todo. Takes title and deps, the ids of todos it depends \
-            on. Returns the todo {id, title, status, deps, author, updated_at}, with you (the \
+        description = "Add a pending todo. Takes title (at most <todo-title-max-chars> \
+            characters) and deps, the ids of todos it depends on. Returns the todo {id, title, status, deps, author, updated_at}, with you (the \
             label your writes carry) the first time."
     )]
     pub(super) async fn todo_add(&self, Parameters(arg): Parameters<TodoAddArg>) -> ToolResult {
-        let title = TodoTitle::try_new(arg.title().clone())
-            .map_err(|_| ToolError::InvalidTodoTitle(arg.title().clone()))?;
+        let title = todo_title(arg.title())?;
         let deps = arg
             .deps()
             .iter()
@@ -309,14 +407,7 @@ impl MusterMcp {
     ) -> ToolResult {
         let id = todo_id(arg.id())?;
         let status = arg.status().as_deref().map(todo_status).transpose()?;
-        let title = arg
-            .title()
-            .as_ref()
-            .map(|title| {
-                TodoTitle::try_new(title.clone())
-                    .map_err(|_| ToolError::InvalidTodoTitle(title.clone()))
-            })
-            .transpose()?;
+        let title = arg.title().as_deref().map(todo_title).transpose()?;
         let status = match (arg.release().unwrap_or(false), status) {
             (false, status) => status,
             (true, None | Some(TodoStatus::Pending)) => Some(TodoStatus::Pending),
@@ -375,9 +466,11 @@ impl MusterMcp {
     #[tool(
         description = "Take a short named lock, such as \"migrations\" or \"db-reset\", before \
             work that two agents must not do at once. Expires after ttl_s (default \
-            <default-ttl-s>, at most <max-ttl-s>); acquiring it again renews it. With wait_s (at \
-            most <call-bound-s>), waits for it to free up. Returns {acquired: true, \
-            expires_in_s}, or {acquired: false, owner, note, expires_in_s}."
+            <default-ttl-s>, at most <max-ttl-s>); acquiring it again renews it. The lock belongs \
+            to this connection: another connection under the same label cannot renew or release \
+            it, and it is released when this connection ends. With wait_s (at most \
+            <call-bound-s>), waits for it to free up. Returns {acquired: true, expires_in_s}, or \
+            {acquired: false, owner, note, expires_in_s}."
     )]
     pub(super) async fn lock_acquire(
         &self,
@@ -397,7 +490,7 @@ impl MusterMcp {
         Parameters(arg): Parameters<LockNameArg>,
     ) -> ToolResult {
         let name = lock_name(arg.name())?;
-        let me = self.identity.author().clone();
+        let me = self.identity.lock_holder();
         let release = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
@@ -427,7 +520,7 @@ impl MusterMcp {
     )]
     pub(super) async fn note_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(note_key).transpose()?;
-        let limit = page_size(arg.limit());
+        let limit = page_size(arg.limit())?;
         let notes = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
@@ -451,17 +544,19 @@ impl MusterMcp {
     /// Writes a note.
     #[tool(
         description = "Create or replace a shared markdown note that other agents and the human \
-            read. Returns {saved: key}, with you (the label your writes carry) the first time."
+            read; the body holds at most <note-body-max-chars> characters. Returns {saved: key}, \
+            with you (the label your writes carry) the first time."
     )]
     pub(super) async fn note_write(&self, Parameters(arg): Parameters<NoteWriteArg>) -> ToolResult {
         let key = note_key(arg.key())?;
+        let body = note_body(arg.body())?;
         let me = self.identity.author().clone();
         let saved = key.to_string();
         self.blocking(move |deps| {
             let project = deps.project(arg.project().as_deref())?;
             Ok(deps
                 .coordination()
-                .set_scratchpad(project.root(), &me, &key, arg.body())?)
+                .set_scratchpad(project.root(), &me, &key, &body)?)
         })
         .await?;
         structured(self.introduced(object_of!({ SAVED: saved })), false)
@@ -488,12 +583,14 @@ impl MusterMcp {
     /// Reads one key-value entry, or lists them.
     #[tool(
         description = "Without key, lists the shared key-values {entries: [{key, value, author, \
-            updated_at}]} (limit, default <default-list-limit>, at most <max-list-limit>). With \
-            key, returns that entry; an unknown key is flagged isError."
+            updated_at, truncated}], more} (limit, default <default-list-limit>, at most \
+            <max-list-limit>), each value cut to its first <listed-value-chars> characters and \
+            marked truncated when cut. With key, returns that entry whole; an unknown key is \
+            flagged isError."
     )]
     pub(super) async fn kv_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(kv_key).transpose()?;
-        let limit = page_size(arg.limit());
+        let limit = page_size(arg.limit())?;
         let entries = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
@@ -501,8 +598,13 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page: Vec<_> = entries.iter().take(limit).map(WireForm::to_wire).collect();
-            return structured(object_of!({ ENTRIES: json(&page)? }), false);
+            let page = entries
+                .iter()
+                .take(limit)
+                .map(listed_entry)
+                .collect::<Result<Vec<_>, _>>()?;
+            let more = entries.len() > limit;
+            return structured(object_of!({ ENTRIES: page, MORE: more }), false);
         };
         match entries.iter().find(|entry| entry.key() == &key) {
             Some(entry) => structured(json(&entry.to_wire())?, false),
@@ -520,17 +622,19 @@ impl MusterMcp {
     /// Writes a key-value entry.
     #[tool(
         description = "Create or replace a small shared fact, such as a chosen port or a build \
-            id. Returns {saved: key}, with you (the label your writes carry) the first time."
+            id, of at most <kv-value-max-chars> characters. Returns {saved: key}, with you (the \
+            label your writes carry) the first time."
     )]
     pub(super) async fn kv_write(&self, Parameters(arg): Parameters<KvWriteArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
+        let value = kv_value(arg.value())?;
         let me = self.identity.author().clone();
         let saved = key.to_string();
         self.blocking(move |deps| {
             let project = deps.project(arg.project().as_deref())?;
             Ok(deps
                 .coordination()
-                .set_value(project.root(), &me, &key, arg.value())?)
+                .set_value(project.root(), &me, &key, &value)?)
         })
         .await?;
         structured(self.introduced(object_of!({ SAVED: saved })), false)
@@ -564,12 +668,8 @@ impl MusterMcp {
         let name = lock_name(arg.name())?;
         let ttl = lock_ttl(arg.ttl_s())?;
         let note = arg.note().as_deref().map(lock_note).transpose()?;
-        let deadline = Instant::now()
-            + arg
-                .wait_s()
-                .map_or(Duration::ZERO, Duration::from_secs)
-                .min(CALL_BOUND);
-        let me = self.identity.author().clone();
+        let deadline = Instant::now() + wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
+        let me = self.identity.lock_holder();
         let project = arg.project().clone();
         loop {
             let (name, me, project, note) =
@@ -613,8 +713,15 @@ impl MusterMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::mcp::test_support::{
-        AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+    use crate::{
+        adapter::mcp::{
+            bounds::MAX_LIST_LIMIT,
+            server::release_session_locks,
+            test_support::{
+                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+            },
+        },
+        domain::port::CoordinationStore,
     };
 
     /// A note written through the tool reads back by key and in the index,
@@ -949,6 +1056,178 @@ mod tests {
             assert_eq!(freed[RELEASED], true);
             let retaken = content(other.acquire(acquire("migrations", None)).await);
             assert_eq!(retaken[ACQUIRED], true);
+        });
+    }
+
+    /// Two connections under one label do not share a lock, and the end of
+    /// an earlier connection, seen after its agent reconnected, does not
+    /// release the lock the new connection took.
+    #[test]
+    fn a_lock_belongs_to_its_connection() {
+        let fixture = fixture();
+        register(&fixture);
+        let earlier = server_as(&fixture, AGENT);
+        let acquire = || {
+            LockAcquireArg::builder()
+                .name("migrations".to_string())
+                .build()
+        };
+        let release = || {
+            Parameters(
+                LockNameArg::builder()
+                    .name("migrations".to_string())
+                    .build(),
+            )
+        };
+
+        runtime().block_on(async {
+            assert_eq!(content(earlier.acquire(acquire()).await)[ACQUIRED], true);
+            let twin = content(fixture.server.acquire(acquire()).await);
+            assert_eq!(twin[ACQUIRED], false);
+            assert_eq!(twin[OWNER], AGENT);
+            let not_shared = content(fixture.server.lock_release(release()).await);
+            assert_eq!(not_shared[RELEASED], false);
+
+            release_session_locks(&earlier.deps, &earlier.identity);
+            assert_eq!(
+                content(fixture.server.acquire(acquire()).await)[ACQUIRED],
+                true
+            );
+            release_session_locks(&earlier.deps, &earlier.identity);
+        });
+        assert_eq!(fixture.store.locks(&fixture.root).unwrap().len(), 1);
+    }
+
+    /// A note body, value or title past its maximum is refused naming the
+    /// field, and nothing is stored.
+    #[test]
+    fn oversized_writes_are_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server;
+        runtime().block_on(async {
+            let body = refusal(
+                server
+                    .note_write(Parameters(
+                        NoteWriteArg::builder()
+                            .key("plan".to_string())
+                            .body("x".repeat(NOTE_BODY_MAX_CHARS + 1))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(body.contains("invalid body"), "{body}");
+            let value = refusal(
+                server
+                    .kv_write(Parameters(
+                        KvWriteArg::builder()
+                            .key("port".to_string())
+                            .value("x".repeat(KV_VALUE_MAX_CHARS + 1))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(value.contains("invalid value"), "{value}");
+            let title = refusal(
+                server
+                    .todo_add(Parameters(
+                        TodoAddArg::builder()
+                            .title("x".repeat(TODO_TITLE_MAX_CHARS + 1))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(title.contains("invalid title"), "{title}");
+        });
+        assert!(fixture.store.scratchpads(&fixture.root).unwrap().is_empty());
+        assert!(fixture.store.values(&fixture.root).unwrap().is_empty());
+        assert!(fixture.store.todos(&fixture.root).unwrap().is_empty());
+    }
+
+    /// `todo_list` pages through every todo by cursor, saying when more
+    /// follow; a limit out of range is refused, never clamped.
+    #[test]
+    fn todo_list_pages_by_cursor() {
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server;
+        let list = |cursor: Option<String>, limit: Option<usize>| {
+            TodoListArg::builder().cursor(cursor).limit(limit).build()
+        };
+        runtime().block_on(async {
+            for title in ["one", "two", "three"] {
+                content(
+                    server
+                        .todo_add(Parameters(
+                            TodoAddArg::builder().title(title.to_string()).build(),
+                        ))
+                        .await,
+                );
+            }
+            let mut titles = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = content(server.todo_list(Parameters(list(cursor, Some(2)))).await);
+                for todo in page[TODOS].as_array().unwrap() {
+                    titles.push(todo["title"].as_str().unwrap().to_string());
+                }
+                if page[MORE] == false {
+                    assert!(page.get(CURSOR).is_none());
+                    break;
+                }
+                cursor = page[CURSOR].as_str().map(str::to_string);
+            }
+            assert_eq!(titles, ["one", "two", "three"]);
+
+            for limit in [0, MAX_LIST_LIMIT + 1] {
+                let refused = refusal(server.todo_list(Parameters(list(None, Some(limit)))).await);
+                assert!(refused.contains("invalid limit"), "{refused}");
+            }
+            let gone = refusal(
+                server
+                    .todo_list(Parameters(list(Some("no-such-todo".to_string()), None)))
+                    .await,
+            );
+            assert!(gone.contains("invalid cursor"), "{gone}");
+        });
+    }
+
+    /// A `kv_read` listing cuts each long value and marks it; reading the key
+    /// returns it whole.
+    #[test]
+    fn kv_read_lists_bounded_values() {
+        let fixture = fixture();
+        register(&fixture);
+        let long = "x".repeat(LISTED_VALUE_CHARS + 10);
+        runtime().block_on(async {
+            content(
+                fixture
+                    .server
+                    .kv_write(Parameters(
+                        KvWriteArg::builder()
+                            .key("blob".to_string())
+                            .value(long.clone())
+                            .build(),
+                    ))
+                    .await,
+            );
+            let listed = content(fixture.server.kv_read(Parameters(ReadArg::default())).await);
+            let entry = &listed[ENTRIES][0];
+            assert_eq!(
+                entry["value"].as_str().unwrap().chars().count(),
+                LISTED_VALUE_CHARS
+            );
+            assert_eq!(entry[TRUNCATED], true);
+            assert_eq!(listed[MORE], false);
+            let whole = content(
+                fixture
+                    .server
+                    .kv_read(Parameters(
+                        ReadArg::builder().key(Some("blob".to_string())).build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(whole["value"], long);
         });
     }
 }

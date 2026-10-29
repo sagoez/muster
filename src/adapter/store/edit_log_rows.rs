@@ -32,11 +32,16 @@ const RETENTION: &str = "edit log retention";
 /// Reads one `stack_edits` row.
 fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
     let at_ms: i64 = row.get(AT_MS).map_err(db_error)?;
-    let process: String = row.get(PROCESS).map_err(db_error)?;
+    let process: Option<String> = row.get(PROCESS).map_err(db_error)?;
     Ok(RecordedEdit::builder()
         .id(EditId::new(row.get(ID).map_err(db_error)?))
         .at(UNIX_EPOCH + duration_from_millis(RECORDED_AT, at_ms)?)
-        .process(ProcessName::try_new(process).map_err(|error| corrupt(PROCESS, error))?)
+        .process(
+            process
+                .map(ProcessName::try_new)
+                .transpose()
+                .map_err(|error| corrupt(PROCESS, error))?,
+        )
         .message(row.get(MESSAGE).map_err(db_error)?)
         .build())
 }
@@ -74,7 +79,7 @@ pub(super) fn record_edit(
         params![
             project_id,
             now_millis()?,
-            edit.process().as_ref(),
+            edit.process().map(AsRef::<str>::as_ref),
             edit.to_string()
         ],
     )
@@ -85,6 +90,33 @@ pub(super) fn record_edit(
         params![project_id, column_integer(RETENTION, EDIT_LOG_RETENTION)?],
     )
     .map_err(db_error)?;
+    Ok(())
+}
+
+/// Records `edit` to the log of every registered project, as
+/// [`record_edit`] does for one.
+///
+/// # Errors
+/// Returns a storage failure when a log cannot be written, which rolls the
+/// caller's transaction back.
+pub(super) fn record_edit_everywhere(
+    conn: &Connection,
+    edit: &StackEdit,
+) -> Result<(), ConfigError> {
+    if !edit.is_logged() {
+        return Ok(());
+    }
+    let mut statement = conn
+        .prepare("SELECT id FROM projects ORDER BY id")
+        .map_err(db_error)?;
+    let ids: Vec<i64> = statement
+        .query_map([], |row| row.get(0))
+        .map_err(db_error)?
+        .collect::<Result<_, _>>()
+        .map_err(db_error)?;
+    for project_id in ids {
+        record_edit(conn, project_id, edit)?;
+    }
     Ok(())
 }
 
@@ -194,7 +226,11 @@ mod tests {
             .to_string(),
             &removal("web"),
         ]);
-        assert!(edits.iter().all(|edit| edit.process().as_ref() == "web"));
+        assert!(
+            edits
+                .iter()
+                .all(|edit| edit.process().as_ref().map(AsRef::as_ref) == Some("web"))
+        );
         assert!(edits[0].id() < edits[1].id() && edits[1].id() < edits[2].id());
         assert!(*edits[0].at() >= before);
     }

@@ -11,6 +11,7 @@ use crate::{
     adapter::client::SettingView,
     domain::{
         config::{SettingChange, SettingKey},
+        coordination::Author,
         settings::Settings,
     },
 };
@@ -41,7 +42,9 @@ pub fn set_setting(
 ) -> Result<SettingView, CliError> {
     let change = SettingChange::parse(key, raw)?;
     let store = invocation.store()?;
-    let settings = invocation.editor(store.as_ref()).configure(&change)?;
+    let settings = invocation
+        .editor(store.as_ref())
+        .configure(&change, &Author::human())?;
     Ok(SettingView::of(&settings, key))
 }
 

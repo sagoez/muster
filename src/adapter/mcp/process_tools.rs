@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::{
     agent_wait_view::AgentWaitView,
     alerts_view::AlertsView,
-    bounds::{CALL_BOUND, wait_bound},
+    bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, wait_bound},
     condition_arg::ConditionArg,
     control_arg::ControlArg,
     control_view::ControlView,
@@ -74,17 +74,22 @@ const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 const CONTROL_UNREPORTED: &str = "a control answer with no report";
 /// The form a line or byte limit is written in, followed by its maximum.
 const LIMIT_FORM: &str = "a number from 1 to ";
-/// The stack-editing tools, as their refusals name them.
+/// The tools a read-only `mcp-stack-edits` refuses, as their refusals name
+/// them.
 const PROCESS_ADD: &str = "process_add";
 const PROCESS_SET: &str = "process_set";
 const PROCESS_REMOVE: &str = "process_remove";
+const PROCESS_SEND: &str = "process_send";
 
 /// The process reference an agent typed as `name`.
 ///
 /// # Errors
 /// Returns the caller's mistake for a blank name.
 fn reference(name: &str) -> Result<ProcessRef, ToolError> {
-    ProcessRef::try_new(name.to_string()).map_err(|_| ToolError::InvalidName(name.to_string()))
+    ProcessRef::try_new(name.to_string()).map_err(|error| ToolError::InvalidName {
+        name: name.to_string(),
+        problem: error.into(),
+    })
 }
 
 /// The output cursor an agent typed as `raw`, refused as the field `field`.
@@ -261,13 +266,15 @@ impl MusterMcp {
         description = "Type text into a process's terminal, as if a person typed it, to answer \
             a prompt or press a key in a watcher (for example \"r\" to reload). enter=true \
             submits the line. Returns {sent: true, alerts}. Flagged isError when the process is \
-            not running."
+            not running, and when the user's mcp-stack-edits setting is read-only."
     )]
     pub(super) async fn process_send(
         &self,
         Parameters(arg): Parameters<SendInputArg>,
     ) -> ToolResult {
         let name = reference(arg.name())?;
+        self.blocking(|deps| deps.allow_stack_edit(PROCESS_SEND))
+            .await?;
         let data = if arg.enter().unwrap_or(false) {
             format!("{}{ENTER}", arg.text())
         } else {
@@ -299,7 +306,9 @@ impl MusterMcp {
     /// Adds a process to a project's stack.
     #[tool(
         description = "Add a process to this project's stack, registering the folder as a \
-            project if it is not one. Takes name, command (a shell command), and optionally \
+            project if it is not one; only this server's folder or one inside it is registered, \
+            never / or the home folder or a folder holding a project, so a server started there \
+            must pass project. Takes name, command (a shell command), and optionally \
             working_dir (a folder inside the project root, relative to it), description, \
             environment (an object of variable names to values), autostart, restart \
             (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (such as \
@@ -468,7 +477,7 @@ impl MusterMcp {
     /// fault of a service that cannot be reached.
     pub(super) async fn control(&self, arg: ControlArg, action: ProcessAction) -> ToolResult {
         let name = reference(arg.name())?;
-        let bound = wait_bound(arg.timeout_s());
+        let bound = wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?;
         let wait: Option<WaitSpec> = arg
             .wait()
             .as_ref()
@@ -534,7 +543,7 @@ impl MusterMcp {
                     .transpose()?,
             )
             .since(output_cursor(SINCE_FIELD, arg.since().as_deref())?)
-            .timeout(wait_bound(arg.timeout_s()))
+            .timeout(wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?)
             .build();
         let (outcome, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
@@ -614,11 +623,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::mcp::test_support::{
-            AGENT, add, content, edits, fixture, refusal, register, runtime,
+        adapter::mcp::{
+            config_set_arg::ConfigSetArg,
+            config_tools::CONFIG_SET,
+            test_support::{AGENT, add, content, edits, fixture, refusal, register, runtime},
         },
         domain::{
             config::{McpStackEdits, SettingChange},
+            coordination::Author,
             port::{ProjectStore, SettingsStore, StackReader},
             value::ProcessName,
         },
@@ -698,16 +710,21 @@ mod tests {
     }
 
     /// While the user's `mcp-stack-edits` setting is read-only, every stack
-    /// edit is refused naming the setting and how to allow it, and nothing
-    /// is written or announced; allowing it again lets the edit through.
+    /// edit, typed input and setting change is refused naming the setting
+    /// and how to allow it, and nothing is written, sent or announced;
+    /// allowing it again lets the edit through.
     #[test]
     fn read_only_stack_edits_refuse_every_edit() {
         let fixture = fixture();
         register(&fixture);
         fixture
             .store
-            .apply(&SettingChange::McpStackEdits(McpStackEdits::ReadOnly))
+            .apply(
+                &SettingChange::McpStackEdits(McpStackEdits::ReadOnly),
+                &Author::human(),
+            )
             .unwrap();
+        let settings = fixture.store.load().unwrap();
 
         runtime().block_on(async {
             let refusals = [
@@ -720,12 +737,32 @@ mod tests {
                     .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
                     .await,
                 fixture.server.process_remove(named("web")).await,
+                fixture
+                    .server
+                    .process_send(Parameters(
+                        SendInputArg::builder()
+                            .name("web".to_string())
+                            .text("rm -rf ~".to_string())
+                            .build(),
+                    ))
+                    .await,
+                fixture
+                    .server
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-restart".to_string())
+                            .value("always".to_string())
+                            .build(),
+                    ))
+                    .await,
             ];
-            for (refused, tool) in
-                refusals
-                    .into_iter()
-                    .zip([PROCESS_ADD, PROCESS_SET, PROCESS_REMOVE])
-            {
+            for (refused, tool) in refusals.into_iter().zip([
+                PROCESS_ADD,
+                PROCESS_SET,
+                PROCESS_REMOVE,
+                PROCESS_SEND,
+                CONFIG_SET,
+            ]) {
                 let message = refusal(refused);
                 assert!(message.starts_with(tool), "{message}");
                 assert!(
@@ -748,10 +785,14 @@ mod tests {
         assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
         assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
         assert_eq!(edits(&fixture).len(), 1);
+        assert_eq!(fixture.store.load().unwrap(), settings);
 
         fixture
             .store
-            .apply(&SettingChange::McpStackEdits(McpStackEdits::Allow))
+            .apply(
+                &SettingChange::McpStackEdits(McpStackEdits::Allow),
+                &Author::human(),
+            )
             .unwrap();
         runtime().block_on(async {
             content(
@@ -1066,5 +1107,51 @@ mod tests {
             error.data.expect("the failure rides along")["error"]["kind"],
             "service-unavailable"
         );
+    }
+
+    /// A refused name says why, and its control characters come back
+    /// escaped, never raw.
+    #[test]
+    fn an_invalid_name_says_why_and_is_escaped() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let control = refusal(
+                fixture
+                    .server
+                    .process_add(Parameters(add("web\u{1b}]0;owned\u{7}", "true")))
+                    .await,
+            );
+            assert!(control.contains("holds a control character"), "{control}");
+            assert!(!control.contains('\u{1b}'), "{control:?}");
+            assert!(control.contains("\\u{1b}"), "{control}");
+            let empty = refusal(
+                fixture
+                    .server
+                    .process_add(Parameters(add("   ", "true")))
+                    .await,
+            );
+            assert!(empty.contains("is empty"), "{empty}");
+        });
+    }
+
+    /// A timeout past the call bound is refused naming the field, never cut
+    /// to the bound.
+    #[test]
+    fn a_wait_past_the_call_bound_is_refused() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let refused = refusal(
+                fixture
+                    .server
+                    .wait(
+                        ProcessWaitArg::builder()
+                            .name("web".to_string())
+                            .timeout_s(Some(CALL_BOUND.as_secs() + 1))
+                            .build(),
+                    )
+                    .await,
+            );
+            assert!(refused.contains("invalid timeout_s"), "{refused}");
+        });
     }
 }

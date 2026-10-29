@@ -115,7 +115,7 @@ pub fn read(
     store: &dyn LocalState,
     file: Option<&str>,
 ) -> Result<StackRead, CliError> {
-    let target = invocation.editing_target(store)?;
+    let target = invocation.registering_target(store)?;
     let (path, text) = match StackPath::of(invocation, target.root().as_ref(), file)? {
         StackPath::Stdio => (
             PathBuf::from(STDIN_NAME),

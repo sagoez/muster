@@ -1,9 +1,9 @@
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, Claim, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote, LockRelease,
-        LockTtl, Scratchpad, ScratchpadKey, Todo, TodoChange, TodoId, TodoLease, TodoTitle,
-        TodoUpdate,
+        Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
+        LockRelease, LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange,
+        TodoId, TodoLease, TodoTitle, TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -41,7 +41,7 @@ pub trait CoordinationStore {
         project: &ProjectRoot,
         author: &Author,
         key: &ScratchpadKey,
-        body: &str,
+        body: &NoteBody,
     ) -> Result<(), ConfigError>;
 
     /// Removes the scratchpad named `key` under `project`. Returns whether one was
@@ -139,7 +139,7 @@ pub trait CoordinationStore {
         project: &ProjectRoot,
         author: &Author,
         key: &KvKey,
-        value: &str,
+        value: &KvValue,
     ) -> Result<(), ConfigError>;
 
     /// Removes the key-value entry named `key` under `project`. Returns whether
@@ -150,28 +150,29 @@ pub trait CoordinationStore {
     fn delete_value(&self, project: &ProjectRoot, key: &KvKey) -> Result<bool, ConfigError>;
 
     /// Takes the lock `name` under `project` for `me` for `ttl`, in one
-    /// statement: free or expired, it becomes `me`'s; held by `me`, it renews
-    /// and takes `note`.
+    /// statement: free or expired, it becomes `me`'s; held by `me`, through
+    /// the same session, it renews and takes `note`.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or written.
     fn acquire_lock(
         &self,
         project: &ProjectRoot,
-        me: &Author,
+        me: &LockHolder,
         name: &LockName,
         ttl: LockTtl,
         note: Option<&LockNote>,
     ) -> Result<LockAttempt, ConfigError>;
 
-    /// Releases the lock `name` under `project` when `me` holds it.
+    /// Releases the lock `name` under `project` when `me`, through the same
+    /// session, holds it.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or written.
     fn release_lock(
         &self,
         project: &ProjectRoot,
-        me: &Author,
+        me: &LockHolder,
         name: &LockName,
     ) -> Result<LockRelease, ConfigError>;
 
@@ -186,12 +187,12 @@ pub trait CoordinationStore {
         name: &LockName,
     ) -> Result<Option<Lock>, ConfigError>;
 
-    /// Releases every lock `me` holds in any project, as an MCP server does
-    /// when it exits. Returns how many went.
+    /// Releases every lock taken through `session` in any project, as an MCP
+    /// server does when its connection ends. Returns how many went.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be written.
-    fn release_locks_of(&self, me: &Author) -> Result<usize, ConfigError>;
+    fn release_locks_of(&self, session: &SessionId) -> Result<usize, ConfigError>;
 
     /// Every lock under `project` that has not expired, by name.
     ///

@@ -2,7 +2,7 @@ use std::fmt::{self, Display, Formatter};
 
 use super::working_dir::WorkingDir;
 use crate::domain::{
-    config::{ProcessField, ProcessSpec},
+    config::{ProcessField, ProcessSpec, SettingKey},
     coordination::Author,
     value::ProcessName,
 };
@@ -37,14 +37,25 @@ pub enum StackEdit {
         /// The process removed.
         name: ProcessName,
     },
+    /// `author` set the machine-wide setting `key`, which every project's
+    /// new processes take, to `value`.
+    Configured {
+        /// Who edited.
+        author: Author,
+        /// The setting.
+        key: SettingKey,
+        /// Its new value, written as `config get` shows it.
+        value: String,
+    },
 }
 
 impl StackEdit {
-    /// The process the edit concerns.
-    pub fn process(&self) -> &ProcessName {
+    /// The process the edit concerns, or none for a setting.
+    pub fn process(&self) -> Option<&ProcessName> {
         match self {
-            Self::Added { spec, .. } | Self::Changed { spec, .. } => spec.name(),
-            Self::Removed { name, .. } => name,
+            Self::Added { spec, .. } | Self::Changed { spec, .. } => Some(spec.name()),
+            Self::Removed { name, .. } => Some(name),
+            Self::Configured { .. } => None,
         }
     }
 
@@ -53,7 +64,8 @@ impl StackEdit {
         match self {
             Self::Added { author, .. }
             | Self::Changed { author, .. }
-            | Self::Removed { author, .. } => author,
+            | Self::Removed { author, .. }
+            | Self::Configured { author, .. } => author,
         }
     }
 
@@ -104,6 +116,9 @@ impl Display for StackEdit {
                 author.label(),
                 name.shell_quoted()
             ),
+            Self::Configured { author, key, value } => {
+                write!(f, "agent {} set {key} to {value}", author.label())
+            },
         }
     }
 }
@@ -157,7 +172,7 @@ mod tests {
             "agent claude-code@builder added 'web', running `npm run dev` in frontend"
         );
         assert!(!edit.to_string().contains("s3cret"));
-        assert_eq!(edit.process().as_ref(), "web");
+        assert_eq!(edit.process().map(AsRef::as_ref), Some("web"));
     }
 
     /// A change names every field it edited, and the new command and

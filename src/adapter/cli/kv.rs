@@ -7,12 +7,14 @@ use super::{
 use crate::{
     adapter::wire::WireForm,
     domain::{
-        coordination::{Author, KvKey},
+        coordination::{Author, KV_VALUE_MAX_CHARS, KvKey, KvValue},
         port::CoordinationStore,
         value::ProjectRoot,
     },
 };
 
+/// What a refusal calls an entry's value.
+const KV_VALUE: &str = "value";
 /// Line printed when the project has no key-value entries yet.
 const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>`";
 /// Columns between a listed entry's key and value.
@@ -108,7 +110,8 @@ fn get(
 /// Creates or replaces the entry under `key` with `value`.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidKvKey`] for a blank key, or a store write failure.
+/// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::TooLong`]
+/// for a value past [`KV_VALUE_MAX_CHARS`], or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
@@ -117,7 +120,12 @@ fn set(
     value: &str,
 ) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    store.set_value(project, author, &parsed, value)?;
+    let value = KvValue::try_new(value).map_err(|_| CliError::TooLong {
+        what: KV_VALUE,
+        max: KV_VALUE_MAX_CHARS,
+        found: value.chars().count(),
+    })?;
+    store.set_value(project, author, &parsed, &value)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
@@ -160,8 +168,9 @@ mod tests {
     use crate::domain::{
         config::ConfigError,
         coordination::{
-            Claim, KeyValue, Lock, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
-            Scratchpad, ScratchpadKey, Todo, TodoChange, TodoId, TodoLease, TodoTitle, TodoUpdate,
+            Claim, KeyValue, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
+            LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoId,
+            TodoLease, TodoTitle, TodoUpdate,
         },
     };
 
@@ -194,11 +203,11 @@ mod tests {
             _project: &ProjectRoot,
             author: &Author,
             key: &KvKey,
-            value: &str,
+            value: &KvValue,
         ) -> Result<(), ConfigError> {
             let entry = KeyValue::builder()
                 .key(key.clone())
-                .value(value.to_owned())
+                .value(value.to_string())
                 .author(author.clone())
                 .updated_at(0)
                 .build();
@@ -232,7 +241,7 @@ mod tests {
             _project: &ProjectRoot,
             _author: &Author,
             _key: &ScratchpadKey,
-            _body: &str,
+            _body: &NoteBody,
         ) -> Result<(), ConfigError> {
             unreachable!("kv commands never touch scratchpads")
         }
@@ -290,7 +299,7 @@ mod tests {
         fn acquire_lock(
             &self,
             _project: &ProjectRoot,
-            _me: &Author,
+            _me: &LockHolder,
             _name: &LockName,
             _ttl: LockTtl,
             _note: Option<&LockNote>,
@@ -301,7 +310,7 @@ mod tests {
         fn release_lock(
             &self,
             _project: &ProjectRoot,
-            _me: &Author,
+            _me: &LockHolder,
             _name: &LockName,
         ) -> Result<LockRelease, ConfigError> {
             unreachable!("kv commands never touch locks")
@@ -315,7 +324,7 @@ mod tests {
             unreachable!("kv commands never touch locks")
         }
 
-        fn release_locks_of(&self, _me: &Author) -> Result<usize, ConfigError> {
+        fn release_locks_of(&self, _session: &SessionId) -> Result<usize, ConfigError> {
             unreachable!("kv commands never touch locks")
         }
 
@@ -357,6 +366,21 @@ mod tests {
         let value = get(&store, &project(), "port").unwrap();
         assert_eq!(value.rows()[0].detail(), "4000");
         assert_eq!(value.json()["key"], "port");
+    }
+
+    /// A value past the maximum is refused with its length, and not stored.
+    #[test]
+    fn an_oversized_value_is_refused() {
+        let store = FakeStore::default();
+        let value = "x".repeat(KV_VALUE_MAX_CHARS + 1);
+        assert!(matches!(
+            set(&store, &project(), &Author::human(), "blob", &value),
+            Err(CliError::TooLong {
+                max: KV_VALUE_MAX_CHARS,
+                ..
+            })
+        ));
+        assert!(get(&store, &project(), "blob").is_err());
     }
 
     /// Getting an absent value errors so scripts see a non-zero exit.

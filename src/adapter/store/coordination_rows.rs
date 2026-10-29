@@ -9,9 +9,9 @@ use super::{
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, Claim, ClaimState, KeyValue, KvKey, Lock, LockAttempt, LockName, LockNote,
-        LockRelease, LockTtl, Scratchpad, ScratchpadKey, Todo, TodoChange, TodoClaim, TodoId,
-        TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+        Author, Claim, ClaimState, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder,
+        LockName, LockNote, LockRelease, LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId,
+        Todo, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
     value::ProjectRoot,
@@ -326,7 +326,7 @@ impl CoordinationStore for SqliteStore {
         project: &ProjectRoot,
         author: &Author,
         key: &ScratchpadKey,
-        body: &str,
+        body: &NoteBody,
     ) -> Result<(), ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -493,7 +493,7 @@ impl CoordinationStore for SqliteStore {
         project: &ProjectRoot,
         author: &Author,
         key: &KvKey,
-        value: &str,
+        value: &KvValue,
     ) -> Result<(), ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -522,7 +522,7 @@ impl CoordinationStore for SqliteStore {
     fn acquire_lock(
         &self,
         project: &ProjectRoot,
-        me: &Author,
+        me: &LockHolder,
         name: &LockName,
         ttl: LockTtl,
         note: Option<&LockNote>,
@@ -536,7 +536,7 @@ impl CoordinationStore for SqliteStore {
     fn release_lock(
         &self,
         project: &ProjectRoot,
-        me: &Author,
+        me: &LockHolder,
         name: &LockName,
     ) -> Result<LockRelease, ConfigError> {
         self.write(|conn| {
@@ -556,8 +556,8 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
-    fn release_locks_of(&self, me: &Author) -> Result<usize, ConfigError> {
-        self.write(|conn| lock_rows::release_all_of(conn, me))
+    fn release_locks_of(&self, session: &SessionId) -> Result<usize, ConfigError> {
+        self.write(|conn| lock_rows::release_all_of(conn, session))
     }
 
     fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
@@ -628,10 +628,20 @@ mod tests {
         let root = project(&store, &scratch, "shop");
 
         store
-            .set_scratchpad(&root, &author(), &key("plan"), "first")
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("plan"),
+                &NoteBody::try_new("first").unwrap(),
+            )
             .unwrap();
         store
-            .set_scratchpad(&root, &author(), &key("plan"), "second")
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("plan"),
+                &NoteBody::try_new("second").unwrap(),
+            )
             .unwrap();
 
         let all = store.scratchpads(&root).unwrap();
@@ -648,10 +658,20 @@ mod tests {
         let two = project(&store, &scratch, "two");
 
         store
-            .set_scratchpad(&one, &Author::human(), &key("plan"), "one")
+            .set_scratchpad(
+                &one,
+                &Author::human(),
+                &key("plan"),
+                &NoteBody::try_new("one").unwrap(),
+            )
             .unwrap();
         store
-            .set_scratchpad(&two, &Author::human(), &key("plan"), "two")
+            .set_scratchpad(
+                &two,
+                &Author::human(),
+                &key("plan"),
+                &NoteBody::try_new("two").unwrap(),
+            )
             .unwrap();
 
         assert_eq!(store.scratchpads(&one).unwrap().len(), 1);
@@ -680,7 +700,7 @@ mod tests {
             &ghost,
             &author(),
             &key("k"),
-            "v"
+            &NoteBody::try_new("v").unwrap()
         )));
         assert!(refused(store.todos(&ghost).map(|_| ())));
         assert!(refused(
@@ -692,7 +712,7 @@ mod tests {
             &ghost,
             &author(),
             &KvKey::try_new("k").unwrap(),
-            "v"
+            &KvValue::try_new("v").unwrap()
         )));
         assert!(refused(CoordinationStore::import(
             &store,
@@ -709,7 +729,13 @@ mod tests {
         let lock = LockName::try_new("migrations").unwrap();
         assert!(refused(
             store
-                .acquire_lock(&ghost, &author(), &lock, LockTtl::DEFAULT, None)
+                .acquire_lock(
+                    &ghost,
+                    &LockHolder::fresh("tester"),
+                    &lock,
+                    LockTtl::DEFAULT,
+                    None
+                )
                 .map(|_| ())
         ));
         assert!(refused(store.locks(&ghost).map(|_| ())));
@@ -886,12 +912,17 @@ mod tests {
             )
             .unwrap();
 
-        for todo in [&done, &busy] {
-            assert!(matches!(
-                store.claim_todo(&root, &me, Some(todo.id()), lease).unwrap(),
-                Claim::Unavailable(found) if found.id() == todo.id()
-            ));
-        }
+        assert!(matches!(
+            store.claim_todo(&root, &me, Some(done.id()), lease).unwrap(),
+            Claim::Unavailable(found) if found.id() == done.id()
+        ));
+        assert!(
+            matches!(
+                store.claim_todo(&root, &me, Some(busy.id()), lease).unwrap(),
+                Claim::HeldBy { owner, .. } if owner == Author::human()
+            ),
+            "setting in-progress claimed it for the human"
+        );
         assert_eq!(
             store
                 .claim_todo(&root, &me, Some(&TodoId::generate().unwrap()), lease)
@@ -1041,8 +1072,8 @@ mod tests {
         let root = project(&store, &scratch, "shop");
         let name = LockName::try_new("migrations").unwrap();
         let note = LockNote::try_new("running 0042").unwrap();
-        let claude = Author::agent("claude");
-        let codex = Author::agent("codex");
+        let claude = LockHolder::fresh("claude");
+        let codex = LockHolder::fresh("codex");
         let ttl = LockTtl::DEFAULT;
 
         assert_eq!(
@@ -1061,7 +1092,7 @@ mod tests {
         else {
             panic!("the lock is held");
         };
-        assert_eq!((owner, held_note), (claude.clone(), Some(note)));
+        assert_eq!((owner, held_note), (claude.author().clone(), Some(note)));
         assert!(expires_in <= *ttl.as_ref());
         assert!(matches!(
             store
@@ -1078,7 +1109,7 @@ mod tests {
         assert_eq!(
             store.release_lock(&root, &codex, &name).unwrap(),
             LockRelease::HeldBy {
-                owner: claude.clone()
+                owner: claude.author().clone()
             }
         );
         assert_eq!(
@@ -1106,7 +1137,43 @@ mod tests {
             store.acquire_lock(&root, &codex, &name, ttl, None).unwrap(),
             LockAttempt::Acquired { .. }
         ));
-        assert_eq!(store.locks(&root).unwrap()[0].owner(), &codex);
+        assert_eq!(store.locks(&root).unwrap()[0].owner(), codex.author());
+    }
+
+    /// Two connections under one label are two holders: neither renews,
+    /// releases nor, on disconnect, drops the other's lock.
+    #[test]
+    fn a_lock_belongs_to_its_session_not_its_label() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let name = LockName::try_new("migrations").unwrap();
+        let first = LockHolder::fresh("claude");
+        let second = LockHolder::fresh("claude");
+        let ttl = LockTtl::DEFAULT;
+
+        store.acquire_lock(&root, &first, &name, ttl, None).unwrap();
+        assert!(matches!(
+            store
+                .acquire_lock(&root, &second, &name, ttl, None)
+                .unwrap(),
+            LockAttempt::HeldBy { .. }
+        ));
+        assert!(matches!(
+            store.release_lock(&root, &second, &name).unwrap(),
+            LockRelease::HeldBy { .. }
+        ));
+        assert_eq!(store.release_locks_of(second.session()).unwrap(), 0);
+        assert_eq!(store.locks(&root).unwrap().len(), 1);
+
+        assert_eq!(store.release_locks_of(first.session()).unwrap(), 1);
+        assert!(matches!(
+            store
+                .acquire_lock(&root, &second, &name, ttl, None)
+                .unwrap(),
+            LockAttempt::Acquired { .. }
+        ));
+        assert_eq!(store.release_locks_of(first.session()).unwrap(), 0);
+        assert_eq!(store.locks(&root).unwrap().len(), 1);
     }
 
     /// Runs every lock out, as if their holders went away an hour ago.
@@ -1130,8 +1197,8 @@ mod tests {
         let two = project(&store, &scratch, "two");
         let name = LockName::try_new("db-reset").unwrap();
         let other = LockName::try_new("deploy").unwrap();
-        let claude = Author::agent("claude");
-        let codex = Author::agent("codex");
+        let claude = LockHolder::fresh("claude");
+        let codex = LockHolder::fresh("codex");
         let ttl = LockTtl::DEFAULT;
 
         store.acquire_lock(&one, &claude, &name, ttl, None).unwrap();
@@ -1143,7 +1210,7 @@ mod tests {
             .acquire_lock(&two, &claude, &other, ttl, None)
             .unwrap();
 
-        assert_eq!(store.release_locks_of(&claude).unwrap(), 2);
+        assert_eq!(store.release_locks_of(claude.session()).unwrap(), 2);
         assert!(store.locks(&one).unwrap().is_empty());
         let left: Vec<_> = store
             .locks(&two)
@@ -1151,10 +1218,10 @@ mod tests {
             .into_iter()
             .map(|lock| lock.owner().clone())
             .collect();
-        assert_eq!(left, vec![codex.clone()]);
+        assert_eq!(left, vec![codex.author().clone()]);
 
         let broken = store.break_lock(&two, &name).unwrap().unwrap();
-        assert_eq!(broken.owner(), &codex);
+        assert_eq!(broken.owner(), codex.author());
         assert_eq!(store.break_lock(&two, &name).unwrap(), None);
     }
 
@@ -1164,8 +1231,12 @@ mod tests {
         let root = project(&store, &scratch, "shop");
         let k = KvKey::try_new("port").unwrap();
 
-        store.set_value(&root, &author(), &k, "3000").unwrap();
-        store.set_value(&root, &author(), &k, "4000").unwrap();
+        store
+            .set_value(&root, &author(), &k, &KvValue::try_new("3000").unwrap())
+            .unwrap();
+        store
+            .set_value(&root, &author(), &k, &KvValue::try_new("4000").unwrap())
+            .unwrap();
 
         assert_eq!(store.values(&root).unwrap().len(), 1);
         assert_eq!(store.value(&root, &k).unwrap().unwrap().value(), "4000");
@@ -1235,7 +1306,12 @@ mod tests {
         let (writer, scratch) = fresh_store();
         let root = project(&writer, &scratch, "shop");
         writer
-            .set_scratchpad(&root, &Author::agent("claude"), &key("progress"), "started")
+            .set_scratchpad(
+                &root,
+                &Author::agent("claude"),
+                &key("progress"),
+                &NoteBody::try_new("started").unwrap(),
+            )
             .unwrap();
 
         let reader = SqliteStore::open(&database(&scratch)).unwrap();

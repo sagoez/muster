@@ -32,6 +32,15 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
+/// The user's home folder, canonicalized when it exists, so it compares with
+/// a [`ProjectRoot`].
+pub fn home_dir() -> Option<PathBuf> {
+    BaseDirs::new().map(|dirs| {
+        let home = dirs.home_dir();
+        home.canonicalize().unwrap_or_else(|_| home.to_path_buf())
+    })
+}
+
 /// The project folder `dir` names: `~` expanded, canonicalized, and required
 /// to be an existing directory whose path is UTF-8, since the store keeps
 /// roots as text.

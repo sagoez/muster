@@ -28,4 +28,8 @@ pub struct TodoListArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     limit: Option<usize>,
+    /// The cursor a previous page returned, to list the todos after it.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    cursor: Option<String>,
 }

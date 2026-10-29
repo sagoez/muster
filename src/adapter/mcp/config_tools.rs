@@ -15,6 +15,9 @@ use crate::{
     domain::config::{SettingChange, SettingKey},
 };
 
+/// The setting tool, as a read-only refusal names it.
+pub(super) const CONFIG_SET: &str = "config_set";
+
 /// The setting key an agent typed as `raw`.
 ///
 /// # Errors
@@ -47,9 +50,10 @@ impl MusterMcp {
         description = "Change one of the default-* settings, the defaults a new process takes. \
             Takes key and value, the value written as config_get shows it (true, 24x80, \
             on-failure, 5s). They apply to processes added, or for default-size started, \
-            afterwards. Every other setting is the user's to change and is refused. Returns \
-            {key, value}. An unknown or refused key or an invalid value is a result flagged \
-            isError that names the accepted form."
+            afterwards. Every other setting is the user's to change and is refused. The change \
+            is shown to the user as a notice. Returns {key, value}. An unknown or refused key \
+            or an invalid value is a result flagged isError that names the accepted form, as is \
+            any change while the user's mcp-stack-edits setting is read-only."
     )]
     pub(super) async fn config_set(&self, Parameters(arg): Parameters<ConfigSetArg>) -> ToolResult {
         let key = setting_key(arg.key())?;
@@ -57,8 +61,12 @@ impl MusterMcp {
             return Err(ToolError::SettingNotForAgents(key).into());
         }
         let change = SettingChange::parse(key, arg.value())?;
+        let author = self.identity.author().clone();
         let settings = self
-            .blocking(move |deps| Ok(deps.editor().configure(&change)?))
+            .blocking(move |deps| {
+                deps.allow_stack_edit(CONFIG_SET)?;
+                Ok(deps.editor().configure(&change, &author)?)
+            })
             .await?;
         structured(json(&SettingView::of(&settings, key))?, false)
     }
@@ -70,7 +78,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::mcp::test_support::{add, content, fixture, refusal, runtime},
+        adapter::mcp::test_support::{add, content, edits, fixture, refusal, runtime},
         domain::{config::McpStackEdits, port::SettingsStore},
     };
 
@@ -158,8 +166,23 @@ mod tests {
                     .await,
             );
             assert_eq!(added["process"]["restart"], "on-failure");
+
+            content(
+                server
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-autostart".to_string())
+                            .value("false".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
         });
-        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 1);
+        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 2);
+        assert_eq!(
+            edits(&fixture).last().map(String::as_str),
+            Some("agent test set default-autostart to false")
+        );
     }
 
     /// `config_set` refuses every key but the `default-*` ones, so an agent

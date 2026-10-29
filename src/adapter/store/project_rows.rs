@@ -193,7 +193,7 @@ mod tests {
         adapter::store::test_support::{fresh_store, spec},
         domain::{
             config::Environment,
-            coordination::{Author, KvKey},
+            coordination::{Author, KvKey, KvValue},
             port::{CoordinationStore, StackReader, StackStore},
             value::{EnvName, EnvValue},
         },
@@ -330,7 +330,7 @@ mod tests {
                 &root,
                 &Author::human(),
                 &KvKey::try_new("port").unwrap(),
-                "3000",
+                &KvValue::try_new("3000").unwrap(),
             )
             .unwrap();
         store
@@ -338,7 +338,7 @@ mod tests {
                 &other,
                 &Author::human(),
                 &KvKey::try_new("port").unwrap(),
-                "4000",
+                &KvValue::try_new("4000").unwrap(),
             )
             .unwrap();
 

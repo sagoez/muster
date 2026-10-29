@@ -8,7 +8,7 @@ use super::supervisor::testing::test_settings;
 use crate::domain::{
     config::{
         ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, RecordedEdit,
-        Registration, SettingChange, Stack,
+        Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
     port::{SettingsStore, StackEditLog, StackReader, StackStore},
@@ -49,7 +49,7 @@ impl MemoryStore {
             RecordedEdit::builder()
                 .id(EditId::new(id))
                 .at(SystemTime::UNIX_EPOCH)
-                .process(ProcessName::try_new(process).unwrap())
+                .process(Some(ProcessName::try_new(process).unwrap()))
                 .message(message.to_string())
                 .build(),
         ));
@@ -183,9 +183,31 @@ impl SettingsStore for MemoryStore {
         Ok(self.settings.lock().unwrap().clone())
     }
 
-    fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
+    fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
         let mut settings = self.settings.lock().unwrap();
         *settings = settings.clone().with_change(change);
+        let key = change.key();
+        let edit = StackEdit::Configured {
+            author: author.clone(),
+            key,
+            value: settings.value_text(key),
+        };
+        if edit.is_logged() {
+            let roots: Vec<ProjectRoot> = self.stacks.lock().unwrap().keys().cloned().collect();
+            let mut edits = self.edits.lock().unwrap();
+            for root in roots {
+                let id = i64::try_from(edits.len()).unwrap() + 1;
+                edits.push((
+                    root,
+                    RecordedEdit::builder()
+                        .id(EditId::new(id))
+                        .at(SystemTime::UNIX_EPOCH)
+                        .process(None)
+                        .message(edit.to_string())
+                        .build(),
+                ));
+            }
+        }
         Ok(settings.clone())
     }
 }

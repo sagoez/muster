@@ -32,6 +32,9 @@ pub const FAILURE_TAIL_LINES: usize = 30;
 const NO_READY_CHECK: &str = "has no readiness check; wait for a log line, port, URL or state";
 /// Shown when a process name matches nothing in its project.
 const UNKNOWN_PROCESS: &str = "no process with that name in this project";
+/// Why a wait from a cursor past a process's output is refused, before the
+/// cursor and the output's end.
+const SINCE_PAST_END: &str = "since is past the end of the output";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
 
@@ -75,6 +78,17 @@ impl Supervisor {
                     .candidates(self.process_names())
                     .build()
             })?;
+        if let Some(since) = spec.since() {
+            let end = self
+                .taps
+                .get(process.id())
+                .map_or(OutputCursor::new(0), OutputTap::cursor);
+            if *since > end {
+                return Err(invalid_input(format!(
+                    "{name}: {SINCE_PAST_END} ({since} > {end})"
+                )));
+            }
+        }
         let has_check = process.ready().is_some();
         let until = spec
             .until()
@@ -909,6 +923,30 @@ mod tests {
             .iter()
             .map(StackEvent::kind)
             .collect()
+    }
+
+    /// A cursor past the output written so far is refused, never waited
+    /// from as if it were the end; the end itself is accepted.
+    #[test]
+    fn a_wait_from_past_the_end_is_refused() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        print(&mut harness, "api", b"Listening on :3000\n");
+        let name = super::super::testing::name("api");
+
+        let Err(refused) = harness
+            .supervisor
+            .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(20))))
+        else {
+            panic!("a cursor past the end is refused");
+        };
+        assert_eq!(refused.kind(), &ServiceErrorKind::InvalidInput);
+        assert!(refused.message().contains("o:20"), "{}", refused.message());
+        assert!(
+            harness
+                .supervisor
+                .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(19))))
+                .is_ok()
+        );
     }
 
     #[test]

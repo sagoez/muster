@@ -62,8 +62,8 @@ impl McpDeps {
         self.scope.project(project, self.projects.as_ref())
     }
 
-    /// Refuses `tool`'s stack edit unless the `mcp-stack-edits` setting
-    /// allows agents to edit the stack.
+    /// Refuses `tool` unless the `mcp-stack-edits` setting allows agents to
+    /// edit the stack, type into a process or change settings.
     ///
     /// # Errors
     /// Returns [`ToolError::StackEditsReadOnly`] naming `tool` when the
@@ -76,12 +76,14 @@ impl McpDeps {
         }
     }
 
-    /// The project `process_add` adds to, registered or not.
+    /// The project `process_add` adds to, registered or a folder it may
+    /// register.
     ///
     /// # Errors
-    /// Returns the caller's mistake for a project that does not resolve, or
-    /// the store's failure.
+    /// Returns the caller's mistake for a project that does not resolve or
+    /// a folder that may not be registered, or the store's failure.
     pub fn target(&self, project: Option<&str>) -> Result<ProjectTarget, ToolError> {
-        self.scope.target(project, self.projects.as_ref())
+        self.scope
+            .registering_target(project, self.projects.as_ref())
     }
 }

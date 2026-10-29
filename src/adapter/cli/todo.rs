@@ -8,13 +8,16 @@ use crate::{
     adapter::{client::TodoView, store::now_epoch_secs},
     domain::{
         coordination::{
-            Author, ClaimState, Todo, TodoChange, TodoId, TodoStatus, TodoTitle, TodoUpdate,
+            Author, ClaimState, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoStatus,
+            TodoTitle, TodoTitleError, TodoUpdate,
         },
         port::CoordinationStore,
         value::ProjectRoot,
     },
 };
 
+/// What a refusal calls a todo's title.
+const TODO_TITLE: &str = "todo title";
 /// Line printed when the project has no todos yet.
 const EMPTY_NOTE: &str = "no todos; add one with `muster todo add <title>`";
 /// Columns between the fields of a listed todo line.
@@ -108,6 +111,7 @@ fn claim_note(todo: &Todo, now: u64) -> String {
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoTitle`] for a blank title,
+/// [`CliError::TooLong`] for one past [`TODO_TITLE_MAX_CHARS`],
 /// [`CliError::InvalidTodoId`] for a blank dependency id, or a store failure.
 fn add(
     store: &dyn CoordinationStore,
@@ -116,8 +120,14 @@ fn add(
     title: &str,
     deps: &[String],
 ) -> Result<Answer, CliError> {
-    let title =
-        TodoTitle::try_new(title).map_err(|_| CliError::InvalidTodoTitle(title.to_string()))?;
+    let title = TodoTitle::try_new(title).map_err(|error| match error {
+        TodoTitleError::LenCharMaxViolated => CliError::TooLong {
+            what: TODO_TITLE,
+            max: TODO_TITLE_MAX_CHARS,
+            found: title.chars().count(),
+        },
+        TodoTitleError::NotEmptyViolated => CliError::InvalidTodoTitle(title.to_string()),
+    })?;
     let deps = deps
         .iter()
         .map(|dep| parse_id(dep))
@@ -375,6 +385,19 @@ mod tests {
         assert!(matches!(
             add(&store, &root, &Author::human(), "   ", &[]),
             Err(CliError::InvalidTodoTitle(_))
+        ));
+        assert!(matches!(
+            add(
+                &store,
+                &root,
+                &Author::human(),
+                &"x".repeat(TODO_TITLE_MAX_CHARS + 1),
+                &[]
+            ),
+            Err(CliError::TooLong {
+                max: TODO_TITLE_MAX_CHARS,
+                ..
+            })
         ));
         assert!(matches!(
             add(&store, &root, &Author::human(), "task", &["  ".to_string()]),

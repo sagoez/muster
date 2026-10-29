@@ -924,7 +924,7 @@ fn import(
 fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let target = invocation.editing_target(store.as_ref())?;
+        let target = invocation.registering_target(store.as_ref())?;
         let candidates = offered(store.as_ref(), target.root())?;
         let here = !invocation.names_project() && offers_here(&invocation.cwd()?, target.root());
         Ok((store, target, candidates, here))

@@ -3666,3 +3666,41 @@ fn a_followed_log_in_json_carries_cursors() {
     };
     assert!(offset(&second) > offset(&first), "{first} {second}");
 }
+
+/// Neither `/` nor the home folder becomes a project: `add`, `import` and
+/// `init --yes` there refuse and say how to pick one.
+#[test]
+fn the_filesystem_root_and_home_are_never_registered() {
+    let scratch = Scratch::new();
+    let home = scratch.path();
+    fs::write(home.join(STACK_FILE), single()).unwrap();
+    let from = |folder: &Path, args: &[&str]| {
+        scratch
+            .command(args)
+            .current_dir(folder)
+            .env("HOME", &home)
+            .output()
+            .unwrap()
+    };
+
+    for (folder, why) in [
+        (Path::new("/"), "the filesystem root"),
+        (home.as_path(), "your home folder"),
+    ] {
+        for args in [
+            &["add", "web", "--", "true"][..],
+            &["import"][..],
+            &["init", "--yes"][..],
+        ] {
+            let refused = from(folder, args);
+            assert!(!refused.status.success(), "{args:?}: {}", shown(&refused));
+            assert!(
+                stderr(&refused).contains(why) && stderr(&refused).contains("pass -p"),
+                "{args:?}: {}",
+                shown(&refused)
+            );
+        }
+    }
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects, serde_json::json!([]), "{projects}");
+}

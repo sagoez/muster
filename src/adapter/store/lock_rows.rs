@@ -7,20 +7,25 @@ use super::{
 };
 use crate::domain::{
     config::ConfigError,
-    coordination::{Author, Lock, LockAttempt, LockName, LockNote, LockRelease, LockTtl},
+    coordination::{
+        Author, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, SessionId,
+    },
 };
 
 /// The columns [`lock_from_row`] reads, in order.
 const LOCK_COLUMNS: &str = "name, owner, note, expires_at";
 
-/// Takes the lock for `me` when it is free, expired or already `me`'s, in one
-/// upsert whose `RETURNING` yields no row when someone else holds it.
+/// Takes the lock for `me` when it is free, expired or already `me`'s through
+/// the same session, in one upsert whose `RETURNING` yields no row when
+/// someone else holds it.
 const ACQUIRE: &str = "\
-INSERT INTO locks (project_id, name, owner, note, expires_at) \
-VALUES (:project, :name, :me, :note, :until) \
+INSERT INTO locks (project_id, name, owner, session, note, expires_at) \
+VALUES (:project, :name, :me, :session, :note, :until) \
 ON CONFLICT (project_id, name) DO UPDATE SET \
-    owner = excluded.owner, note = excluded.note, expires_at = excluded.expires_at \
-WHERE locks.expires_at < :now OR locks.owner = excluded.owner \
+    owner = excluded.owner, session = excluded.session, note = excluded.note, \
+    expires_at = excluded.expires_at \
+WHERE locks.expires_at < :now \
+    OR (locks.owner = excluded.owner AND locks.session = excluded.session) \
 RETURNING expires_at";
 
 /// Reads a lock row selected as [`LOCK_COLUMNS`].
@@ -59,7 +64,7 @@ fn find(conn: &Connection, project_id: i64, name: &LockName) -> Result<Option<Lo
 pub(super) fn acquire(
     conn: &Connection,
     project_id: i64,
-    me: &Author,
+    me: &LockHolder,
     name: &LockName,
     ttl: LockTtl,
     note: Option<&LockNote>,
@@ -72,7 +77,8 @@ pub(super) fn acquire(
             named_params! {
                 ":project": project_id,
                 ":name": name.as_ref(),
-                ":me": me.label(),
+                ":me": me.author().label(),
+                ":session": me.session().as_ref(),
                 ":note": note.map(AsRef::<str>::as_ref),
                 ":until": until as i64,
                 ":now": now as i64,
@@ -95,21 +101,28 @@ pub(super) fn acquire(
     })
 }
 
-/// Releases the lock `name` of project `project_id` when `me` holds it.
+/// Releases the lock `name` of project `project_id` when `me` holds it
+/// through the same session.
 ///
 /// # Errors
 /// Returns a [`ConfigError`] when SQLite fails or a stored row is invalid.
 pub(super) fn release(
     conn: &Connection,
     project_id: i64,
-    me: &Author,
+    me: &LockHolder,
     name: &LockName,
     now: u64,
 ) -> Result<LockRelease, ConfigError> {
     let removed = conn
         .execute(
-            "DELETE FROM locks WHERE project_id = ?1 AND name = ?2 AND owner = ?3",
-            params![project_id, name.as_ref(), me.label()],
+            "DELETE FROM locks WHERE project_id = ?1 AND name = ?2 AND owner = ?3 \
+             AND session = ?4",
+            params![
+                project_id,
+                name.as_ref(),
+                me.author().label(),
+                me.session().as_ref()
+            ],
         )
         .map_err(db_error)?;
     if removed > 0 {
@@ -141,13 +154,16 @@ pub(super) fn break_lock(
     .pop())
 }
 
-/// Removes every lock `me` holds in any project. Returns how many went.
+/// Removes every lock taken through `session` in any project. Returns how
+/// many went.
 ///
 /// # Errors
 /// Returns a [`ConfigError`] when SQLite fails.
-pub(super) fn release_all_of(conn: &Connection, me: &Author) -> Result<usize, ConfigError> {
-    conn.execute("DELETE FROM locks WHERE owner = ?1", params![me.label()])
-        .map_err(db_error)
+pub(super) fn release_all_of(conn: &Connection, session: &SessionId) -> Result<usize, ConfigError> {
+    conn.execute("DELETE FROM locks WHERE session = ?1", params![
+        session.as_ref()
+    ])
+    .map_err(db_error)
 }
 
 /// Every lock of project `project_id` live at `now`, by name.

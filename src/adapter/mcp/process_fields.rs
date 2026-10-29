@@ -61,7 +61,10 @@ pub(super) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolE
 /// Returns [`ToolError::InvalidName`] for a blank name or one holding a
 /// control character.
 pub(super) fn process_name(raw: &str) -> Result<ProcessName, ToolError> {
-    ProcessName::try_new(raw.to_string()).map_err(|_| ToolError::InvalidName(raw.to_string()))
+    ProcessName::try_new(raw.to_string()).map_err(|error| ToolError::InvalidName {
+        name: raw.to_string(),
+        problem: error.into(),
+    })
 }
 
 /// The command an agent typed as `raw`.

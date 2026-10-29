@@ -74,7 +74,7 @@ impl StoreRecorder {
         });
     }
 
-    /// Waits, at most [`FLUSH_WAIT`], until every write sent before it landed,
+    /// Waits, at most `FLUSH_WAIT`, until every write sent before it landed,
     /// so a service exiting leaves its last records stored.
     pub fn flush(&self) {
         let (done, landed) = bounded(1);

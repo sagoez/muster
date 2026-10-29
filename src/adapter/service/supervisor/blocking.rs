@@ -115,7 +115,7 @@ impl Supervisor {
 
     /// Settles the launch of `pane` at `generation`, whose worker found the
     /// port it needs held as `block` says, so nothing was launched: the
-    /// launch is refused as [`Self::block_launch`] does, its waits end and
+    /// launch is refused as `Self::block_launch` does, its waits end and
     /// what was asked meanwhile applies. A launch a later action superseded
     /// is only forgotten.
     pub fn handle_launch_blocked(

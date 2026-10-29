@@ -12,14 +12,12 @@ use std::{
 use uuid::Uuid;
 
 use super::{service_request::ServiceRequest, service_response::ServiceResponse};
-use crate::adapter::ipc;
+use crate::adapter::{holder::fnv1a, ipc};
 
 /// Hidden subcommand that runs the service in the current process.
 pub const SERVICE_SUBCOMMAND: &str = "__service";
 /// Extension of the service socket's file name.
 const SOCKET_EXTENSION: &str = "sock";
-/// Hex digits of the state directory's digest naming its service socket.
-const SOCKET_KEY_DIGITS: usize = 16;
 /// Prefix of the name the service first binds its socket at.
 const STAGING_PREFIX: &str = ".";
 /// Hex digits of the random name the service first binds its socket at.
@@ -28,14 +26,11 @@ const STAGING_DIGITS: usize = 8;
 const LOG_FILE: &str = "service.log";
 
 /// The socket the service of `state_dir` listens on, in `socket_dir`. It is
-/// named for a stable digest of the state directory, so services of two
-/// state directories sharing one runtime directory never take each other's.
+/// named for a stable hash of the state directory, so services of two state
+/// directories sharing one runtime directory never take each other's.
 pub fn socket_path(socket_dir: &Path, state_dir: &Path) -> PathBuf {
-    let digest = Uuid::new_v5(&Uuid::NAMESPACE_URL, state_dir.as_os_str().as_bytes())
-        .simple()
-        .to_string();
     socket_dir
-        .join(&digest[..SOCKET_KEY_DIGITS])
+        .join(format!("{:016x}", fnv1a(state_dir.as_os_str().as_bytes())))
         .with_extension(SOCKET_EXTENSION)
 }
 

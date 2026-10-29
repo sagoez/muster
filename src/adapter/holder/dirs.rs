@@ -148,7 +148,7 @@ fn log_file_stem(name: &ProcessName) -> String {
 
 /// The 64-bit FNV-1a hash of `bytes`: stable across builds and platforms,
 /// unlike the standard library's hasher.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })

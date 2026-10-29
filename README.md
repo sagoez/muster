@@ -326,7 +326,9 @@ and rotations, written as a cursor such as `o:18234`. `-n N`, `--since CURSOR`,
 newest `N` (100 by default), only what follows the cursor, only matching lines,
 or only error lines with their stack traces. With `--json` the result carries
 the `cursor` to pass as `--since` next time, and `muster wait` reports the same
-cursors.
+cursors. A wait, at the CLI or over MCP, reports how long it took as
+`elapsed_s`, seconds to the millisecond (`2.14`), counted across every request
+a long wait is made of; its text reads `after 2.140s`.
 
 ## Processes outlive the service
 

@@ -201,8 +201,8 @@ impl MusterMcp {
             when the process has a readiness check, else running. Only output after since \
             counts; without since, only output after this call. Waits at most timeout_s \
             (default <default-wait-s>, at most <call-bound-s>). Returns {process, status, until, \
-            match, cursor, elapsed_ms, tail, hint, alerts}. status waiting is not an error: call \
-            again with since=cursor. exited, crashed, stopped, not-running and ready-timeout are \
+            match, cursor, elapsed_s (seconds, to the millisecond), tail, hint, alerts}. \
+            status waiting is not an error: call again with since=cursor. exited, crashed, stopped, not-running and ready-timeout are \
             flagged isError and include the last <failure-tail-lines> lines in tail."
     )]
     pub(super) async fn process_wait(

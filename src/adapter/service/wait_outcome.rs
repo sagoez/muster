@@ -44,6 +44,15 @@ pub struct WaitOutcome {
     scanned_from: Option<OutputCursor>,
 }
 
+impl WaitOutcome {
+    /// This outcome as having waited `elapsed` in all, as a wait made of
+    /// several requests did.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed = elapsed;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

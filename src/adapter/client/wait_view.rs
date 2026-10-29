@@ -2,14 +2,16 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{condition_view::ConditionView, match_view::MatchView};
+use super::{
+    condition_view::ConditionView, elapsed_seconds::ElapsedSeconds, match_view::MatchView,
+};
 use crate::{
     adapter::service::{WaitOutcome, WaitStatus},
     domain::value::{OutputCursor, ProcessName},
 };
 
-/// How a wait ended, as `--json` shows it: elapsed time in whole
-/// milliseconds, the condition in words, cursors in their text form.
+/// How a wait ended, as `--json` and MCP show it: elapsed time in seconds to
+/// the millisecond, the condition in words, cursors in their text form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct WaitView {
     /// The process waited on.
@@ -21,9 +23,9 @@ pub struct WaitView {
     /// What was waited for, in the shape a wait condition is written.
     #[getset(get = "pub")]
     until: ConditionView,
-    /// Whole milliseconds it waited.
+    /// How long it waited, in seconds to the millisecond.
     #[getset(get_copy = "pub")]
-    elapsed_ms: u64,
+    elapsed_s: ElapsedSeconds,
     /// Where the output stood when it ended; output after it is new.
     #[getset(get_copy = "pub")]
     cursor: OutputCursor,
@@ -48,7 +50,7 @@ impl From<&WaitOutcome> for WaitView {
             process: outcome.process().clone(),
             status: outcome.status(),
             until: ConditionView::from(outcome.until()),
-            elapsed_ms: u64::try_from(outcome.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_s: ElapsedSeconds::from(outcome.elapsed()),
             cursor: *outcome.cursor(),
             matched: outcome.matched().as_ref().map(|matched| {
                 MatchView::builder()

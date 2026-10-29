@@ -8,7 +8,7 @@ expression: "serde_json::to_string_pretty(&WaitView::from(&outcome)).unwrap()"
   "until": {
     "state": "running"
   },
-  "elapsed_ms": 2140,
+  "elapsed_s": 2.14,
   "cursor": "o:18234",
   "match": {
     "line": "Listening on :3000",

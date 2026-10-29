@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::{error::CliError, wait_args::WaitArgs};
 use crate::{
     adapter::{
-        client::ClientError,
+        client::{ClientError, ElapsedSeconds},
         holder::LineMatcher,
         sanitize::printable,
         service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
@@ -71,6 +71,7 @@ pub fn wait_through(
             .build()
     };
     let mut outcome = first(&chunk(since, until))?;
+    let mut waited = outcome.elapsed();
     while outcome.status() == WaitStatus::Waiting
         && deadline.is_none_or(|deadline| Instant::now() < deadline)
     {
@@ -78,16 +79,15 @@ pub fn wait_through(
             Some(*outcome.cursor()),
             Some(outcome.until().clone()),
         ))?;
+        waited = waited.saturating_add(outcome.elapsed());
     }
-    Ok(outcome)
+    Ok(outcome.with_elapsed(waited))
 }
 
 /// How a wait ended, for a person: what was waited for and how it went,
 /// then the matched line, or the run's last lines when it did not match.
 pub fn wait_text(outcome: &WaitOutcome) -> String {
-    let elapsed = humantime::format_duration(Duration::from_millis(
-        u64::try_from(outcome.elapsed().as_millis()).unwrap_or(u64::MAX),
-    ));
+    let elapsed = ElapsedSeconds::from(outcome.elapsed());
     let mut lines = vec![printable(&format!(
         "{}: {} waiting for {} after {elapsed}",
         outcome.process(),
@@ -173,6 +173,11 @@ mod tests {
             Some(OutputCursor::new(10)),
             Some(OutputCursor::new(11))
         ]);
+        assert_eq!(
+            ended.elapsed(),
+            Duration::from_millis(3 * 2140),
+            "elapsed counts every request"
+        );
     }
 
     #[test]

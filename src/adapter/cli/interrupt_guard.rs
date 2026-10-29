@@ -78,6 +78,8 @@ fn register_flags() -> io::Result<Flags> {
 
 #[cfg(test)]
 mod tests {
+    use signal_hook::low_level::raise;
+
     use super::*;
     use crate::adapter::cli::{error::CliError, presenter::asked};
 
@@ -88,7 +90,7 @@ mod tests {
     fn an_armed_guard_turns_sigint_into_a_flag() {
         let guard = InterruptGuard::arm();
         assert!(!guard.interrupted());
-        signal_hook::low_level::raise(SIGINT).unwrap();
+        raise(SIGINT).unwrap();
         assert!(guard.interrupted());
         drop(guard);
         assert!(!InterruptGuard::arm().interrupted());
@@ -96,7 +98,7 @@ mod tests {
         // A guard armed inside another neither clears its pending interrupt
         // nor disarms it when it drops. One test, as the flags are global.
         let outer = InterruptGuard::arm();
-        signal_hook::low_level::raise(SIGINT).unwrap();
+        raise(SIGINT).unwrap();
         let inner = InterruptGuard::arm();
         assert!(inner.interrupted(), "the pending interrupt survives");
         drop(inner);

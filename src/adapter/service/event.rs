@@ -6,7 +6,7 @@ use super::{
     probe_target::ProbeTarget,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
-    supervisor::{HolderScreen, ShutdownGeneration, SpawnGeneration},
+    supervisor::{HolderScreen, RetryId, ShutdownGeneration, SpawnGeneration},
 };
 use crate::{
     adapter::holder::HolderRecord,
@@ -105,7 +105,7 @@ pub enum ServiceEvent {
         /// Pane of the unsupervised child.
         pane: PaneId,
         /// The try that is due.
-        attempt: u64,
+        attempt: RetryId,
     },
     /// A worker looked for a holder serving a child left running
     /// unsupervised; adopt it, unless a later try superseded this one.
@@ -115,7 +115,7 @@ pub enum ServiceEvent {
         /// Pane of the unsupervised child.
         pane: PaneId,
         /// The try the look was for.
-        attempt: u64,
+        attempt: RetryId,
         /// Whether a start asked for it, so a holder not found is told.
         asked: bool,
         /// The record of the holder serving the child, if one does, boxed so

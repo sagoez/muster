@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use super::pane_retry::PaneRetry;
+use super::{pane_retry::PaneRetry, retry_id::RetryId};
 use crate::domain::value::{PaneId, Pid};
 
 /// Wait before the first timed retry of an adoption that failed.
@@ -16,50 +16,44 @@ pub(super) struct AdoptionRetries {
     /// Each pane's retries, while it has any.
     panes: HashMap<PaneId, PaneRetry>,
     /// The id the next try takes, unique across panes.
-    next: u64,
+    next: RetryId,
 }
 
 impl AdoptionRetries {
     /// Whether the failed adoption of `holder` for `pane` is news, recording
     /// that it was told.
     pub(super) fn first_failure(&mut self, pane: PaneId, holder: Pid) -> bool {
-        let retry = self.entry(pane);
-        let news = retry.told != Some(holder);
-        retry.told = Some(holder);
-        news
+        self.entry(pane).tell(holder)
     }
 
     /// Starts a new try of `pane` now, superseding any scheduled one, and
     /// returns its id.
-    pub(super) fn begin(&mut self, pane: PaneId) -> u64 {
+    pub(super) fn begin(&mut self, pane: PaneId) -> RetryId {
         let id = self.take_id();
-        self.entry(pane).current = id;
+        self.entry(pane).begin(id);
         id
     }
 
     /// Schedules the next timed try of `pane`, superseding any other: returns
     /// its id and how long to wait, which doubles each time up to
     /// [`MAX_RETRY`].
-    pub(super) fn schedule(&mut self, pane: PaneId) -> (u64, Duration) {
+    pub(super) fn schedule(&mut self, pane: PaneId) -> (RetryId, Duration) {
         let id = self.take_id();
-        let retry = self.entry(pane);
-        let delay = retry.delay;
-        retry.delay = retry.delay.saturating_mul(2).min(MAX_RETRY);
-        retry.current = id;
+        let delay = self.entry(pane).schedule(id, MAX_RETRY);
         (id, delay)
     }
 
     /// Whether `id` is `pane`'s current try.
-    pub(super) fn is_current(&self, pane: PaneId, id: u64) -> bool {
+    pub(super) fn is_current(&self, pane: PaneId, id: RetryId) -> bool {
         self.panes
             .get(&pane)
-            .is_some_and(|retry| retry.current == id)
+            .is_some_and(|retry| retry.current() == id)
     }
 
     /// `pane`'s current try, for a test to let it come due.
     #[cfg(test)]
-    pub(super) fn current(&self, pane: PaneId) -> Option<u64> {
-        self.panes.get(&pane).map(|retry| retry.current)
+    pub(super) fn current(&self, pane: PaneId) -> Option<RetryId> {
+        self.panes.get(&pane).map(PaneRetry::current)
     }
 
     /// Forgets `pane`'s retries, once its holder is supervised again.
@@ -69,16 +63,14 @@ impl AdoptionRetries {
 
     /// `pane`'s retries, fresh when it has none.
     fn entry(&mut self, pane: PaneId) -> &mut PaneRetry {
-        self.panes.entry(pane).or_insert(PaneRetry {
-            told: None,
-            delay: FIRST_RETRY,
-            current: 0,
-        })
+        self.panes
+            .entry(pane)
+            .or_insert_with(|| PaneRetry::new(FIRST_RETRY))
     }
 
     /// A try id no try has had.
-    fn take_id(&mut self) -> u64 {
-        self.next += 1;
+    fn take_id(&mut self) -> RetryId {
+        self.next = self.next.next();
         self.next
     }
 }

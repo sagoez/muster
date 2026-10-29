@@ -1996,7 +1996,12 @@ mod tests {
                 ProcessOutput::Repaint { bytes, .. } if bytes.starts_with(RESYNC_PREFIX) => {
                     resynced = true;
                 },
-                _ => {},
+                ProcessOutput::Chunk(_)
+                | ProcessOutput::Repaint { .. }
+                | ProcessOutput::Exited(_)
+                | ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_) => {},
             }
         }
         assert!(

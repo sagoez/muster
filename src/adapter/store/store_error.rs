@@ -50,7 +50,13 @@ impl StoreError {
                 error.sqlite_error_code(),
                 Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
             ),
-            _ => false,
+            Self::NoStateDir(_)
+            | Self::Prepare { .. }
+            | Self::Poisoned
+            | Self::MissingSettings
+            | Self::LockVanished(_)
+            | Self::NotUtf8(_)
+            | Self::Encode(_) => false,
         }
     }
 }

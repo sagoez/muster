@@ -455,7 +455,12 @@ mod tests {
             iter::from_fn(|| outputs.recv_timeout(QUIET).ok())
                 .filter_map(|output| match output {
                     ProcessOutput::Placed { at, bytes } => Some((at, bytes)),
-                    _ => None,
+                    ProcessOutput::Chunk(_)
+                    | ProcessOutput::Repaint { .. }
+                    | ProcessOutput::Exited(_)
+                    | ProcessOutput::Unreadable(_)
+                    | ProcessOutput::Warning(_)
+                    | ProcessOutput::Attached(_) => None,
                 })
                 .collect();
         assert_eq!(placed, [
@@ -520,7 +525,12 @@ mod tests {
             iter::from_fn(|| outputs.recv_timeout(QUIET).ok())
                 .filter_map(|output| match output {
                     ProcessOutput::Placed { at, bytes } => Some((at, bytes)),
-                    _ => None,
+                    ProcessOutput::Chunk(_)
+                    | ProcessOutput::Repaint { .. }
+                    | ProcessOutput::Exited(_)
+                    | ProcessOutput::Unreadable(_)
+                    | ProcessOutput::Warning(_)
+                    | ProcessOutput::Attached(_) => None,
                 })
                 .collect();
         let (first, replayed) = placed.split_first().unwrap();

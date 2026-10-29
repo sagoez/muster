@@ -10,8 +10,8 @@ use std::{
     thread,
 };
 
-use libc::O_NOCTTY;
 use rustix::{
+    fs::OFlags,
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
     termios::{Termios, Winsize, tcgetattr, tcsetwinsize},
 };
@@ -49,7 +49,7 @@ impl TestPty {
         let slave: OwnedFd = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(O_NOCTTY)
+            .custom_flags(OFlags::NOCTTY.bits() as i32)
             .open(path.to_str().unwrap())
             .unwrap()
             .into();

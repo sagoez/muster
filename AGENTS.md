@@ -46,7 +46,8 @@ plugs into a port.
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
   `CoordinationStore`, `StackEditLog`). `RunHistory` and `RaisedEdits` stay
-  out of it: only the service writes them. No I/O, no framework types, no `async`. Fully unit-testable in isolation.
+  out of it: only the service writes them. The domain has no I/O, no
+  framework types and no `async`, and is fully unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
   `domain` only.
@@ -88,8 +89,8 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 `adapter`. Framework/library types never cross into `domain`.
 
 Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
-`HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts` and
-`SettleWatch`. Each abstracts one adapter's call into another, or what the
+`HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts`,
+`SettleWatch` and `FollowedStream`. Each abstracts one adapter's call into another, or what the
 composition root hands an adapter, and carries adapter types (service
 requests, holder records, clap launches), so it has no place in `domain`. A
 seam the core itself needs, with only domain types in its signature, is a

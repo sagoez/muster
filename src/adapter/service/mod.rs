@@ -26,6 +26,7 @@ mod holder_pool;
 mod last_exit;
 mod launch_environment;
 mod located;
+mod log_appender;
 mod matched_line;
 #[cfg(test)]
 mod memory_store;

@@ -3,7 +3,7 @@ use std::{sync::Arc, thread};
 use super::{
     adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
     config_membership::ConfigMembership, entity::Supervisor, launch_purpose::LaunchPurpose,
-    pending_intent::PendingIntent, pending_launch::PendingLaunch,
+    pending_intent::PendingIntent, pending_launch::PendingLaunch, retry_id::RetryId,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
 use crate::{
@@ -342,7 +342,7 @@ impl Supervisor {
     /// Looks again for the holder of `pane`'s unsupervised child once the
     /// backoff of try `attempt` has passed, unless a later try superseded it
     /// or the child is no longer left alone.
-    pub fn handle_adoption_retry_due(&mut self, pane: PaneId, attempt: u64) {
+    pub fn handle_adoption_retry_due(&mut self, pane: PaneId, attempt: RetryId) {
         if self.adoption_retries.is_current(pane, attempt) && self.retryable_pid(pane).is_some() {
             self.probe_adoption(pane, attempt, false);
         }
@@ -356,7 +356,7 @@ impl Supervisor {
     pub fn handle_adoption_probed(
         &mut self,
         pane: PaneId,
-        attempt: u64,
+        attempt: RetryId,
         asked: bool,
         record: Option<HolderRecord>,
     ) {
@@ -434,7 +434,7 @@ impl Supervisor {
     /// Looks for a holder serving `pane`'s unsupervised child for try
     /// `attempt`, on a worker when the adopter allows it, since reading the
     /// holder records and probing a socket may block, and inline otherwise.
-    fn probe_adoption(&mut self, pane: PaneId, attempt: u64, asked: bool) {
+    fn probe_adoption(&mut self, pane: PaneId, attempt: RetryId, asked: bool) {
         let (Some(pid), Some(adopter)) = (self.retryable_pid(pane), self.adopter.as_ref()) else {
             return;
         };

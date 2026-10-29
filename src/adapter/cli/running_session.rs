@@ -20,9 +20,9 @@ use super::{
     scripted_signals::ScriptedSignals,
     session_alarm::SessionAlarm,
     signal_slot::SignalSlot,
-    test_pty::{TestPty, wait_until},
+    test_pty::TestPty,
 };
-use crate::adapter::service::Located;
+use crate::adapter::{service::Located, test_wait::wait_until};
 
 /// A session running on a thread, with a way to send it events a signal
 /// would.

@@ -85,24 +85,13 @@ pub fn unlink(path: &Path) {
 }
 
 /// Sends `request` to the socket at `path` and returns its response, one
-/// newline-delimited JSON message each way.
+/// newline-delimited JSON message each way, giving up once the response has
+/// not arrived within `reply_timeout`, so a wedged server cannot hang its
+/// client.
 ///
 /// # Errors
 /// Returns an [`io::Error`] if the socket cannot be reached (no server
-/// running) or the exchange fails.
-pub fn request<Req, Resp>(path: &Path, request: &Req) -> io::Result<Resp>
-where
-    Req: Serialize,
-    Resp: DeserializeOwned,
-{
-    exchange(UnixStream::connect(path)?, request)
-}
-
-/// As [`request`], giving up once the response has not arrived within
-/// `reply_timeout`, so a wedged server cannot hang its client.
-///
-/// # Errors
-/// Returns an [`io::Error`] as [`request`] does, or one of kind
+/// running) or the exchange fails, or one of kind
 /// [`io::ErrorKind::WouldBlock`] or [`io::ErrorKind::TimedOut`] when the
 /// response is late.
 pub fn request_within<Req, Resp>(
@@ -189,7 +178,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::adapter::{ping::Ping, pong::Pong};
+    use crate::adapter::{ping::Ping, pong::Pong, test_wait::REPLY};
 
     /// A socket path short enough for every platform's `sun_path` cap. macOS
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches
@@ -214,7 +203,7 @@ mod tests {
             .unwrap();
         });
 
-        let response: Pong = request(&path, &Ping::Ping).unwrap();
+        let response: Pong = request_within(&path, &Ping::Ping, REPLY).unwrap();
         assert_eq!(response, Pong::Pong(42));
         server.join().unwrap();
         unlink(&path);
@@ -270,7 +259,7 @@ mod tests {
     #[test]
     fn connecting_with_no_listener_errors() {
         let path = env::temp_dir().join(format!("muster-absent-{}.sock", Uuid::new_v4()));
-        let result: io::Result<Pong> = request(&path, &Ping::Ping);
+        let result: io::Result<Pong> = request_within(&path, &Ping::Ping, REPLY);
         assert!(result.is_err());
     }
 }

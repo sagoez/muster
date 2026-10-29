@@ -7,6 +7,8 @@ mod screen_source;
 mod signal_name;
 mod size;
 mod spawn_history;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use error::*;
 pub use exit_cause::*;

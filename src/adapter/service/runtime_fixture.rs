@@ -25,6 +25,7 @@ use crate::{
         },
         signal_target::SignalTarget,
         test_scratch::short_scratch,
+        test_wait::REPLY,
     },
     domain::{config::ProcessSpec, pty::SpawnRequest, value::ProjectRoot},
 };
@@ -152,7 +153,7 @@ impl Fixture {
             ServiceRuntime::run(singleton, deps)
         });
         wait_until("the service to answer", || {
-            protocol::send(&socket, &ServiceRequest::Ps { project: None }).is_ok()
+            protocol::send_within(&socket, &ServiceRequest::Ps { project: None }, REPLY).is_ok()
         });
         Running::builder()
             .socket(socket)

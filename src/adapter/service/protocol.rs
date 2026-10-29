@@ -46,16 +46,8 @@ pub fn log_path(state_dir: &Path) -> PathBuf {
     state_dir.join(LOG_FILE)
 }
 
-/// Sends `request` to the service at `socket` and returns its answer.
-///
-/// # Errors
-/// Returns an [`io::Error`] when no service accepts at `socket` or the
-/// exchange fails.
-pub fn send(socket: &Path, request: &ServiceRequest) -> io::Result<ServiceResponse> {
-    ipc::request(socket, request)
-}
-
-/// As [`send`], giving up when the answer takes longer than `reply_timeout`.
+/// Sends `request` to the service at `socket` and returns its answer, giving
+/// up when it takes longer than `reply_timeout`.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when no service accepts at `socket`, the exchange

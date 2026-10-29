@@ -23,7 +23,7 @@ mod frame_tag;
 mod generation;
 mod handle;
 #[cfg(test)]
-mod harness;
+pub(crate) mod harness;
 mod holder_control;
 mod holder_event;
 mod holder_launcher;

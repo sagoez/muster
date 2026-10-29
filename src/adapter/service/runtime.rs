@@ -1222,6 +1222,7 @@ mod tests {
                 },
             },
             signal_target::SignalTarget,
+            test_wait::REPLY,
         },
         domain::{
             config::SettingChange,
@@ -1486,10 +1487,14 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
         let screen_project = project.clone();
         let reading = thread::spawn(move || {
-            protocol::send(&socket, &ServiceRequest::Screen {
-                project: screen_project,
-                name: ProcessName::try_new("api").unwrap(),
-            })
+            protocol::send_within(
+                &socket,
+                &ServiceRequest::Screen {
+                    project: screen_project,
+                    name: ProcessName::try_new("api").unwrap(),
+                },
+                REPLY,
+            )
             .unwrap()
         });
         thread::sleep(POLL * 10);
@@ -1869,9 +1874,10 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let response: ServiceResponse = ipc::request(
+        let response: ServiceResponse = ipc::request_within(
             service.socket(),
             &serde_json::json!({ "ps": { "project": "project" } }),
+            REPLY,
         )
         .unwrap();
 

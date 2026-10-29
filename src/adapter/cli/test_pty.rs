@@ -8,7 +8,6 @@ use std::{
     os::{fd::OwnedFd, unix::fs::OpenOptionsExt},
     sync::{Arc, Mutex, PoisonError},
     thread,
-    time::{Duration, Instant},
 };
 
 use libc::O_NOCTTY;
@@ -18,22 +17,10 @@ use rustix::{
 };
 
 use super::host_terminal::HostTerminal;
+use crate::adapter::test_wait::wait_until;
 
-/// Bound on every wait; reaching it fails the test.
-pub const WAIT: Duration = Duration::from_secs(10);
-/// Interval between checks of a polled condition.
-pub const POLL: Duration = Duration::from_millis(10);
 /// Bytes read from the master at a time.
 const READ_CHUNK: usize = 4096;
-
-/// Polls `condition` until it holds, failing the test at [`WAIT`].
-pub fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
-}
 
 /// Whether `haystack` contains `needle`.
 pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {

@@ -240,13 +240,9 @@ mod tests {
         },
         domain::{
             process::StopSignal,
-            pty::{ExitCause, SignalName},
+            pty::{ExitCause, SignalName, testing::size},
         },
     };
-
-    fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::try_new(rows, cols).unwrap()
-    }
 
     /// Every message survives the wire in both directions.
     #[test]

@@ -296,12 +296,11 @@ mod tests {
                 shared_writer::WRITE_TIMED_OUT,
             },
             test_scratch::short_scratch,
+            test_wait::WAIT,
         },
         domain::pty::ProcessOutput,
     };
 
-    /// Bound on every wait in these tests; reaching it fails the test.
-    const WAIT: Duration = Duration::from_secs(10);
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mh-";
     /// A socket path nothing serves, so a lost connection finds no holder.

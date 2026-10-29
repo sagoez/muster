@@ -17,9 +17,12 @@ use super::{
     service_request::ServiceRequest,
     service_response::ServiceResponse,
 };
-use crate::domain::{
-    process::ProcessState,
-    value::{ProcessName, ProjectRoot},
+use crate::{
+    adapter::test_wait::REPLY,
+    domain::{
+        process::ProcessState,
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
 /// A service running on a thread of the test.
@@ -34,7 +37,7 @@ pub(super) struct Running {
 impl Running {
     /// Sends `request` as a client would and returns the answer.
     pub(super) fn send(&self, request: ServiceRequest) -> ServiceResponse {
-        protocol::send(&self.socket, &request).unwrap()
+        protocol::send_within(&self.socket, &request, REPLY).unwrap()
     }
 
     /// Brings `project` up with no client environment.
@@ -119,7 +122,7 @@ impl Drop for Running {
     /// Stops a service a failing test left running.
     fn drop(&mut self) {
         if self.thread.is_some() {
-            let _ = protocol::send(&self.socket, &ServiceRequest::Stop);
+            let _ = protocol::send_within(&self.socket, &ServiceRequest::Stop, REPLY);
             if let Some(thread) = self.thread.take() {
                 let started = Instant::now();
                 while !thread.is_finished() && started.elapsed() < WAIT {

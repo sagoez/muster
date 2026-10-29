@@ -32,5 +32,7 @@ pub mod store;
 pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_scratch;
+#[cfg(test)]
+pub(crate) mod test_wait;
 pub mod wire;
 pub mod workspace_request;

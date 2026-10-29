@@ -106,12 +106,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::domain::config::ConfigError;
-
-    /// A PTY of `rows` by `cols`.
-    fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::try_new(rows, cols).unwrap()
-    }
+    use crate::domain::{config::ConfigError, pty::testing::size};
 
     /// Settings with every value explicit.
     fn settings() -> Settings {

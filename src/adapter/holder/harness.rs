@@ -28,9 +28,9 @@ use crate::{
 
 /// A running holder on a thread, with its scratch directory.
 #[derive(Getters, MutGetters)]
-pub(super) struct Harness {
+pub(crate) struct Harness {
     /// The holder's configuration.
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub(crate)", get_mut = "pub(super)")]
     config: HolderConfig,
     /// The thread serving the holder, until it is joined.
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
@@ -41,7 +41,7 @@ pub(super) struct Harness {
 
 impl Harness {
     /// A holder running `command` in a fresh scratch directory.
-    pub(super) fn start(command: &str) -> Self {
+    pub(crate) fn start(command: &str) -> Self {
         Self::start_with(command, SUPERVISOR_DEADLINE, ColorScheme::Dark)
     }
 
@@ -95,7 +95,7 @@ impl Harness {
     }
 
     /// Whether the holder's thread has returned.
-    pub(super) fn server_finished(&self) -> bool {
+    pub(crate) fn server_finished(&self) -> bool {
         self.server.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
@@ -117,7 +117,7 @@ impl Harness {
     }
 
     /// Joins a holder whose exit a test already collected.
-    pub(super) fn finish_collected(mut self) {
+    pub(crate) fn finish_collected(mut self) {
         wait_until("the holder to return", || self.server_finished());
         let server = self.server.take().unwrap();
         server.join().unwrap().unwrap();

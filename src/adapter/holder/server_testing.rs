@@ -1,30 +1,23 @@
 //! What the holder server's tests and their fixtures share: bounds, the test
 //! child's request and a scratch directory.
 
-use std::{
-    path::Path,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Duration};
 
 use tempfile::TempDir;
 
 use super::testing::test_request;
 use crate::{
     adapter::test_scratch::short_scratch,
-    domain::{
-        color_scheme::ColorScheme,
-        pty::{PtySize, SpawnRequest},
-    },
+    domain::{color_scheme::ColorScheme, pty::SpawnRequest},
+};
+pub(super) use crate::{
+    adapter::test_wait::{POLL, WAIT, wait_until},
+    domain::pty::testing::size,
 };
 
-/// Bound on every wait in these tests; reaching it fails the test.
-pub(super) const WAIT: Duration = Duration::from_secs(10);
 /// First-supervisor deadline of a test holder: past any test's length, so
 /// only the deadline test ever reaches one.
 pub(super) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
-/// Interval between checks of a polled condition.
-pub(super) const POLL: Duration = Duration::from_millis(10);
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "mh-";
 /// Initial PTY rows of every test child.
@@ -42,11 +35,6 @@ pub(super) const FAKE_PID: u32 = 4242;
 /// Why the fake handle refuses a resize.
 pub(super) const RESIZE_REFUSED: &str = "resize refused";
 
-/// A PTY size of `rows` by `cols`.
-pub(super) fn size(rows: u16, cols: u16) -> PtySize {
-    PtySize::try_new(rows, cols).unwrap()
-}
-
 /// A request to run `command` as `dev server` of the project at `dir`,
 /// whose terminal answers color queries from `color_scheme`.
 pub(super) fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> SpawnRequest {
@@ -61,15 +49,6 @@ pub(super) fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> S
         .color_scheme(color_scheme)
         .stop(request.stop())
         .build()
-}
-
-/// Polls `condition` until it holds, failing the test at [`WAIT`].
-pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
 }
 
 /// A scratch directory under a short root, removed even when a test panics.

@@ -90,7 +90,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::cli::test_pty::wait_until;
+    use crate::adapter::test_wait::wait_until;
 
     /// A full inbox nothing drains neither blocks the relay nor loses the
     /// ending signal: the relay ends once its signals do, and the ending is

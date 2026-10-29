@@ -9,14 +9,14 @@ use std::{
 use getset::{Getters, MutGetters};
 use tempfile::TempDir;
 
-use super::{
-    attach_testing::{COLS, FAKE_PID, ROWS, scratch, size},
-    test_pty::{WAIT, wait_until},
-};
+use super::attach_testing::{COLS, FAKE_PID, ROWS, scratch};
 use crate::{
-    adapter::holder::{ClientMessage, HolderMessage},
+    adapter::{
+        holder::{ClientMessage, HolderMessage},
+        test_wait::{WAIT, wait_until},
+    },
     domain::{
-        pty::PtySize,
+        pty::{PtySize, testing::size},
         value::{OutputCursor, Pid},
     },
 };

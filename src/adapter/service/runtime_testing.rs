@@ -1,25 +1,17 @@
 //! What the service runtime's tests and their fixtures share: bounds, the
 //! test service's identity, and the processes and statuses they work with.
 
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
-
 use super::{
     launch_environment::LaunchEnvironment, process_status::ProcessStatus,
     project_status::ProjectStatus, supervisor::testing::test_stop,
 };
+pub(super) use crate::adapter::test_wait::{POLL, WAIT, wait_until};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::RestartPolicy,
     value::{CommandLine, ProcessName},
 };
 
-/// Bound on every wait in these tests; reaching it fails the test.
-pub(super) const WAIT: Duration = Duration::from_secs(10);
-/// Interval between checks of a polled condition.
-pub(super) const POLL: Duration = Duration::from_millis(10);
 /// Prefix of every test scratch directory.
 pub(super) const SCRATCH_PREFIX: &str = "ms-";
 /// The version the test services report.
@@ -28,15 +20,6 @@ pub(super) const VERSION: &str = "0.0.0-test";
 pub(super) const TEST_BINARY: &str = "/usr/bin/muster-test";
 /// A child that runs until it is killed.
 pub(super) const SLEEPER: &str = "sleep 600";
-
-/// Polls `condition` until it holds, failing the test at [`WAIT`].
-pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !condition() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        thread::sleep(POLL);
-    }
-}
 
 /// A process `name` running [`SLEEPER`], starting with the project when
 /// `autostart`.

@@ -352,7 +352,7 @@ mod tests {
         adapter::{
             cli::{
                 attach_pump::RESYNC_WAIT,
-                attach_testing::{COLS, FAKE_PID, ROWS, scratch, size},
+                attach_testing::{COLS, FAKE_PID, ROWS, scratch},
                 ending_signal::EndingSignal,
                 fake_holder::FakeHolder,
                 held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
@@ -364,7 +364,7 @@ mod tests {
             terminal::emulator::RESET_TERMINAL,
         },
         domain::{
-            pty::{ExitCause, ExitOutcome},
+            pty::{ExitCause, ExitOutcome, testing::size},
             value::{OutputCursor, Pid},
         },
     };

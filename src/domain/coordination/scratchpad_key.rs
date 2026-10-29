@@ -1,10 +1,14 @@
 use nutype::nutype;
 
-/// Name identifying a scratchpad within a project. Trimmed and non-empty, so a
-/// blank or whitespace-only key can never address a note.
+/// Most characters a note's key holds.
+pub const NOTE_KEY_MAX_CHARS: usize = 128;
+
+/// Name identifying a scratchpad within a project. Trimmed, non-empty and at
+/// most [`NOTE_KEY_MAX_CHARS`] long, so a blank key can never address a note
+/// and one key cannot flood a listing.
 #[nutype(
     sanitize(trim),
-    validate(not_empty),
+    validate(not_empty, len_char_max = NOTE_KEY_MAX_CHARS),
     derive(
         Debug,
         Clone,
@@ -34,5 +38,15 @@ mod tests {
     fn a_blank_key_is_rejected() {
         assert!(ScratchpadKey::try_new("   ").is_err());
         assert!(ScratchpadKey::try_new("").is_err());
+    }
+
+    /// A key up to the maximum is kept; one past it is refused.
+    #[test]
+    fn a_key_is_bounded() {
+        assert!(ScratchpadKey::try_new("k".repeat(NOTE_KEY_MAX_CHARS)).is_ok());
+        assert_eq!(
+            ScratchpadKey::try_new("k".repeat(NOTE_KEY_MAX_CHARS + 1)),
+            Err(ScratchpadKeyError::LenCharMaxViolated)
+        );
     }
 }

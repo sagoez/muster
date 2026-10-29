@@ -20,6 +20,16 @@ pub enum EntryError {
     /// `command` is blank.
     #[error("command must not be empty")]
     EmptyCommand,
+    /// `command` or `description` runs past the most it may hold.
+    #[error("{field} is {found} characters; at most {max} are allowed")]
+    TooLong {
+        /// The key that is too long.
+        field: &'static str,
+        /// The most characters it may hold.
+        max: usize,
+        /// How many it had.
+        found: usize,
+    },
     /// `working_dir` is present but empty.
     #[error("working_dir must not be empty; leave the key out to run in the project root")]
     EmptyWorkingDir,

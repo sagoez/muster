@@ -13,8 +13,8 @@ use crate::{
         coordination::{
             Author, Claim, ClaimState, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder,
             LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad,
-            ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus,
-            TodoTitle, TodoUpdate,
+            ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease,
+            TodoStatus, TodoTitle, TodoUpdate,
         },
         port::CoordinationStore,
         value::{EpochSeconds, ProjectRoot},
@@ -378,14 +378,14 @@ impl CoordinationStore for SqliteStore {
         project: &ProjectRoot,
         author: &Author,
         title: &NewTodoTitle,
-        deps: &[TodoId],
+        deps: &TodoDeps,
     ) -> Result<Todo, ConfigError> {
         let todo = Todo::builder()
             .id(TodoId::generate()
                 .map_err(|error| ConfigError::CoordinationId(error.to_string()))?)
             .title(title.title().clone())
             .status(TodoStatus::Pending)
-            .deps(deps.to_vec())
+            .deps(deps.as_ref().clone())
             .claim(None)
             .author(author.clone())
             .updated_at(epoch_now())
@@ -706,7 +706,12 @@ mod tests {
         assert!(refused(store.todos(&ghost).map(|_| ())));
         assert!(refused(
             store
-                .add_todo(&ghost, &author(), &NewTodoTitle::try_new("t").unwrap(), &[])
+                .add_todo(
+                    &ghost,
+                    &author(),
+                    &NewTodoTitle::try_new("t").unwrap(),
+                    &deps(&[])
+                )
                 .map(|_| ())
         ));
         assert!(refused(store.set_value(
@@ -754,7 +759,7 @@ mod tests {
                 &root,
                 &author(),
                 &NewTodoTitle::try_new("wire the store").unwrap(),
-                slice::from_ref(&dep),
+                &deps(slice::from_ref(&dep)),
             )
             .unwrap();
         assert_eq!(*created.status(), TodoStatus::Pending);
@@ -808,14 +813,19 @@ mod tests {
             .build()
     }
 
+    /// `ids` as a todo's dependencies.
+    fn deps(ids: &[TodoId]) -> TodoDeps {
+        TodoDeps::try_new(ids.to_vec()).unwrap()
+    }
+
     /// A pending todo titled `title` under `root`.
-    fn add(store: &SqliteStore, root: &ProjectRoot, title: &str, deps: &[TodoId]) -> Todo {
+    fn add(store: &SqliteStore, root: &ProjectRoot, title: &str, ids: &[TodoId]) -> Todo {
         store
             .add_todo(
                 root,
                 &author(),
                 &NewTodoTitle::try_new(title).unwrap(),
-                deps,
+                &deps(ids),
             )
             .unwrap()
     }

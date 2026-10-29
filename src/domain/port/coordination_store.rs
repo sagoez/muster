@@ -3,7 +3,7 @@ use crate::domain::{
     coordination::{
         Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
         LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
-        TodoChange, TodoId, TodoLease, TodoUpdate,
+        TodoChange, TodoDeps, TodoId, TodoLease, TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -79,7 +79,7 @@ pub trait CoordinationStore {
         project: &ProjectRoot,
         author: &Author,
         title: &NewTodoTitle,
-        deps: &[TodoId],
+        deps: &TodoDeps,
     ) -> Result<Todo, ConfigError>;
 
     /// Applies `change` by `me` to the todo identified by `id` under `project`,

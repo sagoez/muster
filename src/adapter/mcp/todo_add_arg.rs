@@ -14,7 +14,7 @@ pub struct TodoAddArg {
     project: Option<String>,
     /// What the task is.
     title: String,
-    /// Ids of todos this one depends on.
+    /// Ids of todos this one depends on, at most <todo-deps-max>.
     #[builder(default)]
     deps: Option<Vec<String>>,
 }

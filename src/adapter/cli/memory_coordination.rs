@@ -5,7 +5,7 @@ use crate::domain::{
     coordination::{
         Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
         LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
-        TodoChange, TodoId, TodoLease, TodoUpdate,
+        TodoChange, TodoDeps, TodoId, TodoLease, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -80,7 +80,7 @@ impl CoordinationStore for MemoryCoordination {
         _project: &ProjectRoot,
         _author: &Author,
         _title: &NewTodoTitle,
-        _deps: &[TodoId],
+        _deps: &TodoDeps,
     ) -> Result<Todo, ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }

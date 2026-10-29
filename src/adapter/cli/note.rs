@@ -7,7 +7,10 @@ use super::{
 use crate::{
     adapter::{client::NoteEntry, wire::WireForm},
     domain::{
-        coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey},
+        coordination::{
+            Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
+            ScratchpadKeyError,
+        },
         port::CoordinationStore,
         value::ProjectRoot,
     },
@@ -15,6 +18,8 @@ use crate::{
 
 /// What a refusal calls a note's body.
 const NOTE_BODY: &str = "note body";
+/// What a refusal calls a note's key.
+const NOTE_KEY: &str = "note key";
 /// Line printed when the project has no notes yet.
 const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>`";
 /// The JSON key of the listed notes.
@@ -49,9 +54,17 @@ pub fn note(
 /// Parses a user-supplied note key into a validated [`ScratchpadKey`].
 ///
 /// # Errors
-/// Returns [`CliError::InvalidNoteKey`] when the key is blank or whitespace-only.
+/// Returns [`CliError::InvalidNoteKey`] when the key is blank or
+/// whitespace-only, or [`CliError::TooLong`] past [`NOTE_KEY_MAX_CHARS`].
 fn parse_key(key: &str) -> Result<ScratchpadKey, CliError> {
-    ScratchpadKey::try_new(key).map_err(|_| CliError::InvalidNoteKey(key.to_string()))
+    ScratchpadKey::try_new(key).map_err(|error| match error {
+        ScratchpadKeyError::LenCharMaxViolated => CliError::TooLong {
+            what: NOTE_KEY,
+            max: NOTE_KEY_MAX_CHARS,
+            found: key.trim().chars().count(),
+        },
+        ScratchpadKeyError::NotEmptyViolated => CliError::InvalidNoteKey(key.to_string()),
+    })
 }
 
 /// Lists the keys of every note stored for `project`, one per line, without

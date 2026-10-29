@@ -102,9 +102,10 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         (None, false) => FieldEdit::Keep,
     };
     let description = match (args.description().clone(), args.no_description()) {
-        (Some(text), _) => {
-            FieldEdit::Set(Description::try_new(text).map_err(|_| CliError::EmptyDescription)?)
-        },
+        (Some(text), _) => FieldEdit::Set(
+            Description::try_new(text.as_str())
+                .map_err(|error| CliError::description(&text, &error))?,
+        ),
         (None, true) => FieldEdit::Clear,
         (None, false) => FieldEdit::Keep,
     };

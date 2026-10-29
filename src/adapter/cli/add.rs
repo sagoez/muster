@@ -68,7 +68,10 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
     let description = args
         .description()
         .clone()
-        .map(|text| Description::try_new(text).map_err(|_| CliError::EmptyDescription))
+        .map(|text| {
+            Description::try_new(text.as_str())
+                .map_err(|error| CliError::description(&text, &error))
+        })
         .transpose()?;
     let environment: Environment = args.flags().environment()?.into_iter().collect();
     let draft = ProcessDraft::builder()

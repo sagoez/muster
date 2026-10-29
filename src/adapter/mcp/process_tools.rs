@@ -632,7 +632,7 @@ mod tests {
             config::{McpStackEdits, SettingChange},
             coordination::Author,
             port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
-            value::ProcessName,
+            value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
         },
     };
 
@@ -906,6 +906,62 @@ mod tests {
             .expect("a stack");
         assert_eq!(stack.names().len(), 1);
         assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), 1);
+    }
+
+    /// A command or description past its maximum is refused on add and set
+    /// naming the field and its limit, and nothing is written.
+    #[test]
+    fn an_overlong_command_or_description_is_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        let long = |max: usize| "x".repeat(max + 1);
+
+        runtime().block_on(async {
+            let refusals = [
+                (
+                    fixture
+                        .server()
+                        .process_add(Parameters(add("worker", &long(COMMAND_MAX_CHARS))))
+                        .await,
+                    COMMAND_MAX_CHARS,
+                ),
+                (
+                    fixture
+                        .server()
+                        .process_set(set(
+                            serde_json::json!({ "name": "web", "command": long(COMMAND_MAX_CHARS) }),
+                        ))
+                        .await,
+                    COMMAND_MAX_CHARS,
+                ),
+                (
+                    fixture
+                        .server()
+                        .process_set(set(serde_json::json!({
+                            "name": "web",
+                            "description": long(DESCRIPTION_MAX_CHARS),
+                        })))
+                        .await,
+                    DESCRIPTION_MAX_CHARS,
+                ),
+            ];
+            for (refused, max) in refusals {
+                let message = refusal(refused);
+                assert!(
+                    message.contains(&format!("at most {max} characters")),
+                    "{message}"
+                );
+            }
+        });
+
+        let stack = fixture
+            .store()
+            .stack(fixture.root())
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names().len(), 1);
+        assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
+        assert_eq!(*stack.processes()[0].description(), None);
     }
 
     /// A readiness check out of form is refused naming the ready field, and

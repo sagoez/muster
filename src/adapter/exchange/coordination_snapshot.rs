@@ -41,7 +41,10 @@ pub struct CoordinationSnapshot {
 mod tests {
     use super::*;
     use crate::domain::{
-        coordination::{Author, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS, ScratchpadKey},
+        coordination::{
+            Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS,
+            NOTE_KEY_MAX_CHARS, ScratchpadKey, TODO_DEPS_MAX,
+        },
         value::EpochSeconds,
     };
 
@@ -108,5 +111,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(value.contains("value 'blob'"), "{value}");
+    }
+
+    /// A key past its maximum, or a todo with too many dependencies, is
+    /// refused on import naming the limit.
+    #[test]
+    fn an_oversized_key_or_dependency_list_is_refused() {
+        let read = |yaml: String| {
+            serde_yaml_ng::from_str::<CoordinationSnapshot>(&yaml)
+                .map_err(|error| error.to_string())
+        };
+        let keyed = |note: usize, value: usize| {
+            format!(
+                "version: 1\nscratchpads:\n- key: {}\n  body: b\n  author: human\n  updated_at: 1\ntodos: []\nvalues:\n- key: {}\n  value: v\n  author: human\n  updated_at: 1\n",
+                "k".repeat(note),
+                "k".repeat(value)
+            )
+        };
+        assert!(read(keyed(NOTE_KEY_MAX_CHARS, KV_KEY_MAX_CHARS)).is_ok());
+        for refused in [
+            read(keyed(NOTE_KEY_MAX_CHARS + 1, 1)),
+            read(keyed(1, KV_KEY_MAX_CHARS + 1)),
+        ] {
+            let refused = refused.unwrap_err();
+            assert!(refused.contains("too long"), "{refused}");
+        }
+        let todo = |deps: usize| {
+            format!(
+                "version: 1\nscratchpads: []\ntodos:\n- id: t\n  title: ship\n  status: pending\n  deps: [{}]\n  claim: null\n  author: human\n  updated_at: 1\nvalues: []\n",
+                vec!["a"; deps].join(", ")
+            )
+        };
+        assert!(
+            read(todo(TODO_DEPS_MAX)).is_ok(),
+            "{:?}",
+            read(todo(TODO_DEPS_MAX))
+        );
+        let many = read(todo(TODO_DEPS_MAX + 1)).unwrap_err();
+        assert!(
+            many.contains(&format!("at most {TODO_DEPS_MAX} are allowed")),
+            "{many}"
+        );
     }
 }

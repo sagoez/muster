@@ -19,7 +19,7 @@ use super::{
     lock_acquire_arg::LockAcquireArg,
     lock_name_arg::LockNameArg,
     note_write_arg::NoteWriteArg,
-    process_fields::invalid,
+    process_fields::{KEY_FIELD, invalid, too_long},
     progress::with_progress,
     read_arg::ReadArg,
     server::{MusterMcp, json, structured},
@@ -39,10 +39,12 @@ use crate::{
     },
     domain::{
         coordination::{
-            Claim, KV_VALUE_MAX_CHARS, KvKey, KvValue, LOCK_TTL_MAX, LockAttempt, LockName,
-            LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NewTodoTitle, NewTodoTitleError,
-            NoteBody, ScratchpadKey, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange,
-            TodoId, TodoLease, TodoStatus, TodoUpdate, claimable,
+            Claim, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue, LOCK_TTL_MAX,
+            LockAttempt, LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS,
+            NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey,
+            ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX,
+            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease,
+            TodoStatus, TodoUpdate, claimable,
         },
         port::CoordinationStore,
         value::ProjectRoot,
@@ -67,8 +69,10 @@ const CURSOR_FIELD: &str = "cursor";
 /// The form a `todo_list` cursor is written in.
 const CURSOR_FORM: &str =
     "the cursor of an earlier todo_list page, naming a todo that still exists";
-/// The form a bounded text is written in, followed by its maximum.
-const LENGTH_FORM: &str = "at most ";
+/// The form a bounded list is written in, followed by its maximum.
+const COUNT_FORM: &str = "at most ";
+/// The `deps` field of `todo_add`.
+const DEPS_FIELD: &str = "deps";
 /// The statuses a todo takes.
 const STATUS_FORM: &str = "pending, in-progress or done";
 /// The form a lock name is written in.
@@ -100,35 +104,66 @@ const MORE: &str = "more";
 /// The scratchpad key an agent typed as `key`.
 ///
 /// # Errors
-/// Returns the caller's mistake for a blank key.
+/// Returns the caller's mistake for a blank key or one past
+/// [`NOTE_KEY_MAX_CHARS`].
 fn note_key(key: &str) -> Result<ScratchpadKey, ToolError> {
-    ScratchpadKey::try_new(key.to_string()).map_err(|_| ToolError::InvalidNoteKey(key.to_string()))
+    ScratchpadKey::try_new(key.to_string()).map_err(|error| match error {
+        ScratchpadKeyError::NotEmptyViolated => ToolError::InvalidNoteKey(key.to_string()),
+        ScratchpadKeyError::LenCharMaxViolated => {
+            too_long(KEY_FIELD, NOTE_KEY_MAX_CHARS, key.trim())
+        },
+    })
+}
+
+/// The todo id an agent typed as `id` in `field`.
+///
+/// # Errors
+/// Returns the caller's mistake for a blank id or one past
+/// [`TODO_ID_MAX_CHARS`].
+fn todo_id_in(field: &'static str, id: &str) -> Result<TodoId, ToolError> {
+    TodoId::try_new(id.to_string()).map_err(|error| match error {
+        TodoIdError::NotEmptyViolated => ToolError::InvalidTodoId(id.to_string()),
+        TodoIdError::LenCharMaxViolated => too_long(field, TODO_ID_MAX_CHARS, id.trim()),
+    })
 }
 
 /// The todo id an agent typed as `id`.
 ///
 /// # Errors
-/// Returns the caller's mistake for a blank id.
+/// Returns the caller's mistake for a blank or overlong id.
 fn todo_id(id: &str) -> Result<TodoId, ToolError> {
-    TodoId::try_new(id.to_string()).map_err(|_| ToolError::InvalidTodoId(id.to_string()))
+    todo_id_in(ID, id)
+}
+
+/// The dependencies an agent typed as `deps`.
+///
+/// # Errors
+/// Returns the caller's mistake for a blank or overlong id, or for more than
+/// [`TODO_DEPS_MAX`] of them.
+fn todo_deps(deps: &[String]) -> Result<TodoDeps, ToolError> {
+    let ids = deps
+        .iter()
+        .map(|dep| todo_id_in(DEPS_FIELD, dep))
+        .collect::<Result<Vec<_>, _>>()?;
+    TodoDeps::try_new(ids).map_err(|_| {
+        invalid(
+            DEPS_FIELD,
+            &format!("{COUNT_FORM}{TODO_DEPS_MAX} ids"),
+            &format!("{} ids", deps.len()),
+        )
+    })
 }
 
 /// The key-value key an agent typed as `key`.
 ///
 /// # Errors
-/// Returns the caller's mistake for a blank key.
+/// Returns the caller's mistake for a blank key or one past
+/// [`KV_KEY_MAX_CHARS`].
 fn kv_key(key: &str) -> Result<KvKey, ToolError> {
-    KvKey::try_new(key.to_string()).map_err(|_| ToolError::InvalidKvKey(key.to_string()))
-}
-
-/// The refusal of `text`, given as `field`, for running past `max`
-/// characters.
-fn too_long(field: &'static str, max: usize, text: &str) -> ToolError {
-    invalid(
-        field,
-        &format!("{LENGTH_FORM}{max} characters"),
-        &format!("{} characters", text.chars().count()),
-    )
+    KvKey::try_new(key.to_string()).map_err(|error| match error {
+        KvKeyError::NotEmptyViolated => ToolError::InvalidKvKey(key.to_string()),
+        KvKeyError::LenCharMaxViolated => too_long(KEY_FIELD, KV_KEY_MAX_CHARS, key.trim()),
+    })
 }
 
 /// The note body an agent typed as `body`.
@@ -293,17 +328,13 @@ impl MusterMcp {
     /// Adds a todo.
     #[tool(
         description = "Add a pending todo. Takes title (at most <todo-title-max-chars> \
-            characters) and deps, the ids of todos it depends on. Returns the todo {id, title, status, deps, author, updated_at}, with you (the \
-            label your writes carry) the first time."
+            characters) and deps, the ids of at most <todo-deps-max> todos it depends on. \
+            Returns the todo {id, title, status, deps, author, updated_at}, with you (the label \
+            your writes carry) the first time."
     )]
     pub(super) async fn todo_add(&self, Parameters(arg): Parameters<TodoAddArg>) -> ToolResult {
         let title = todo_title(arg.title())?;
-        let deps = arg
-            .deps()
-            .iter()
-            .flatten()
-            .map(|dep| todo_id(dep))
-            .collect::<Result<Vec<_>, _>>()?;
+        let deps = todo_deps(arg.deps().as_deref().unwrap_or_default())?;
         let me = self.identity.author().clone();
         let created = self
             .blocking(move |store| {
@@ -516,8 +547,9 @@ impl MusterMcp {
     /// Writes a note.
     #[tool(
         description = "Create or replace a shared markdown note that other agents and the human \
-            read; the body holds at most <note-body-max-chars> characters. Returns {saved: key}, \
-            with you (the label your writes carry) the first time."
+            read; the key holds at most <note-key-max-chars> characters and the body at most \
+            <note-body-max-chars>. Returns {saved: key}, with you (the label your writes carry) \
+            the first time."
     )]
     pub(super) async fn note_write(&self, Parameters(arg): Parameters<NoteWriteArg>) -> ToolResult {
         let key = note_key(arg.key())?;
@@ -594,8 +626,9 @@ impl MusterMcp {
     /// Writes a key-value entry.
     #[tool(
         description = "Create or replace a small shared fact, such as a chosen port or a build \
-            id, of at most <kv-value-max-chars> characters. Returns {saved: key}, with you (the \
-            label your writes carry) the first time."
+            id, of at most <kv-value-max-chars> characters under a key of at most \
+            <kv-key-max-chars>. Returns {saved: key}, with you (the label your writes carry) the \
+            first time."
     )]
     pub(super) async fn kv_write(&self, Parameters(arg): Parameters<KvWriteArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
@@ -1129,6 +1162,84 @@ mod tests {
         );
         assert!(fixture.store().values(fixture.root()).unwrap().is_empty());
         assert!(fixture.store().todos(fixture.root()).unwrap().is_empty());
+    }
+
+    /// A note or kv key past its maximum, too many dependencies or an overlong
+    /// dependency id is refused naming the field and its limit, without
+    /// echoing the text, and nothing is stored.
+    #[test]
+    fn oversized_keys_and_dependencies_are_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server();
+        let long_key = "k".repeat(NOTE_KEY_MAX_CHARS.max(KV_KEY_MAX_CHARS) + 1);
+        let deps = |count: usize, id: &str| {
+            TodoAddArg::builder()
+                .title("ship".to_string())
+                .deps(Some(vec![id.to_string(); count]))
+                .build()
+        };
+        runtime().block_on(async {
+            let note = refusal(
+                server
+                    .note_write(Parameters(
+                        NoteWriteArg::builder()
+                            .key(long_key.clone())
+                            .body("x".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(note.contains("invalid key"), "{note}");
+            assert!(
+                note.contains(&format!("at most {NOTE_KEY_MAX_CHARS} characters")),
+                "{note}"
+            );
+            assert!(!note.contains(&long_key), "{note}");
+            let value = refusal(
+                server
+                    .kv_write(Parameters(
+                        KvWriteArg::builder()
+                            .key(long_key.clone())
+                            .value("1".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(
+                value.contains(&format!("at most {KV_KEY_MAX_CHARS} characters")),
+                "{value}"
+            );
+            let many = refusal(
+                server
+                    .todo_add(Parameters(deps(TODO_DEPS_MAX + 1, "a")))
+                    .await,
+            );
+            assert!(many.contains("invalid deps"), "{many}");
+            assert!(
+                many.contains(&format!("at most {TODO_DEPS_MAX} ids")),
+                "{many}"
+            );
+            let long_id = refusal(
+                server
+                    .todo_add(Parameters(deps(1, &"i".repeat(TODO_ID_MAX_CHARS + 1))))
+                    .await,
+            );
+            assert!(
+                long_id.contains(&format!("at most {TODO_ID_MAX_CHARS} characters")),
+                "{long_id}"
+            );
+            content(server.todo_add(Parameters(deps(TODO_DEPS_MAX, "a"))).await);
+        });
+        assert!(
+            fixture
+                .store()
+                .scratchpads(fixture.root())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(fixture.store().values(fixture.root()).unwrap().is_empty());
+        assert_eq!(fixture.store().todos(fixture.root()).unwrap().len(), 1);
     }
 
     /// `todo_list` pages through every todo by cursor, saying when more

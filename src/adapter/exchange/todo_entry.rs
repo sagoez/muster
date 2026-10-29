@@ -5,7 +5,9 @@ use typed_builder::TypedBuilder;
 use crate::{
     adapter::wire::{WireForm, form, optional_form},
     domain::{
-        coordination::{Author, Todo, TodoClaim, TodoId, TodoStatus, TodoTitle},
+        coordination::{
+            Author, TODO_DEPS_MAX, Todo, TodoClaim, TodoDeps, TodoId, TodoStatus, TodoTitle,
+        },
         value::EpochSeconds,
     },
 };
@@ -50,11 +52,18 @@ impl WireForm for Todo {
     }
 
     fn from_wire(wire: TodoEntry) -> Result<Self, String> {
+        let found = wire.deps.len();
+        let deps = TodoDeps::try_new(wire.deps).map_err(|_| {
+            format!(
+                "todo '{}' depends on {found} todos; at most {TODO_DEPS_MAX} are allowed",
+                wire.id.as_ref()
+            )
+        })?;
         Ok(Self::builder()
             .id(wire.id)
             .title(wire.title)
             .status(wire.status)
-            .deps(wire.deps)
+            .deps(deps.into_inner())
             .claim(wire.claim)
             .author(wire.author)
             .updated_at(wire.updated_at)

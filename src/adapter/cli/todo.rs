@@ -11,8 +11,9 @@ use crate::{
     },
     domain::{
         coordination::{
-            Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_TITLE_MAX_CHARS, Todo,
-            TodoChange, TodoId, TodoStatus, TodoUpdate,
+            Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
+            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoStatus,
+            TodoUpdate,
         },
         port::CoordinationStore,
         value::{EpochSeconds, ProjectRoot},
@@ -21,6 +22,10 @@ use crate::{
 
 /// What a refusal calls a todo's title.
 const TODO_TITLE: &str = "todo title";
+/// What a refusal calls a todo id.
+const TODO_ID: &str = "todo id";
+/// What a refusal calls a todo's dependencies.
+const TODO_DEPS: &str = "dependency list";
 /// Line printed when the project has no todos yet.
 const EMPTY_NOTE: &str = "no todos; add one with `muster todo add <title>`";
 /// Columns between the fields of a listed todo line.
@@ -61,9 +66,17 @@ pub fn todo(
 /// Parses a user-supplied id into a validated [`TodoId`].
 ///
 /// # Errors
-/// Returns [`CliError::InvalidTodoId`] when the id is blank or whitespace-only.
+/// Returns [`CliError::InvalidTodoId`] when the id is blank or whitespace-only,
+/// or [`CliError::TooLong`] past [`TODO_ID_MAX_CHARS`].
 fn parse_id(id: &str) -> Result<TodoId, CliError> {
-    TodoId::try_new(id).map_err(|_| CliError::InvalidTodoId(id.to_string()))
+    TodoId::try_new(id).map_err(|error| match error {
+        TodoIdError::LenCharMaxViolated => CliError::TooLong {
+            what: TODO_ID,
+            max: TODO_ID_MAX_CHARS,
+            found: id.chars().count(),
+        },
+        TodoIdError::NotEmptyViolated => CliError::InvalidTodoId(id.to_string()),
+    })
 }
 
 /// Lists one page of `limit` todos for `project`, after the todo `cursor`
@@ -133,7 +146,9 @@ fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
 /// # Errors
 /// Returns [`CliError::InvalidTodoTitle`] for a blank title,
 /// [`CliError::TooLong`] for one past [`TODO_TITLE_MAX_CHARS`],
-/// [`CliError::InvalidTodoId`] for a blank dependency id, or a store failure.
+/// [`CliError::InvalidTodoId`] for a blank dependency id,
+/// [`CliError::TooMany`] for more than [`TODO_DEPS_MAX`] dependencies, or a
+/// store failure.
 fn add(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
@@ -149,10 +164,15 @@ fn add(
         },
         NewTodoTitleError::Blank => CliError::InvalidTodoTitle(title.to_string()),
     })?;
-    let deps = deps
+    let ids = deps
         .iter()
         .map(|dep| parse_id(dep))
         .collect::<Result<Vec<_>, _>>()?;
+    let deps = TodoDeps::try_new(ids).map_err(|_| CliError::TooMany {
+        what: TODO_DEPS,
+        max: TODO_DEPS_MAX,
+        found: deps.len(),
+    })?;
     let created = store.add_todo(project, author, &title, &deps)?;
     Answer::of(
         vec![Row::unlabeled(

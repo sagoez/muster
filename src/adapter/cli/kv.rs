@@ -10,7 +10,7 @@ use crate::{
         wire::WireForm,
     },
     domain::{
-        coordination::{Author, KV_VALUE_MAX_CHARS, KvKey, KvValue},
+        coordination::{Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue},
         port::CoordinationStore,
         value::ProjectRoot,
     },
@@ -18,6 +18,8 @@ use crate::{
 
 /// What a refusal calls an entry's value.
 const KV_VALUE: &str = "value";
+/// What a refusal calls an entry's key.
+const KV_KEY: &str = "key";
 /// Line printed when the project has no key-value entries yet.
 const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>`";
 /// Columns between a listed entry's key and value.
@@ -61,9 +63,17 @@ pub fn kv(
 /// Parses a user-supplied key into a validated [`KvKey`].
 ///
 /// # Errors
-/// Returns [`CliError::InvalidKvKey`] when the key is blank or whitespace-only.
+/// Returns [`CliError::InvalidKvKey`] when the key is blank or whitespace-only,
+/// or [`CliError::TooLong`] past [`KV_KEY_MAX_CHARS`].
 fn parse_key(key: &str) -> Result<KvKey, CliError> {
-    KvKey::try_new(key).map_err(|_| CliError::InvalidKvKey(key.to_string()))
+    KvKey::try_new(key).map_err(|error| match error {
+        KvKeyError::LenCharMaxViolated => CliError::TooLong {
+            what: KV_KEY,
+            max: KV_KEY_MAX_CHARS,
+            found: key.trim().chars().count(),
+        },
+        KvKeyError::NotEmptyViolated => CliError::InvalidKvKey(key.to_string()),
+    })
 }
 
 /// Lists the first `limit` entries for `project` as `key  value`, one per

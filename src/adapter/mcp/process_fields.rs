@@ -9,11 +9,16 @@ use super::tool_error::ToolError;
 use crate::{
     adapter::client::WorkingDirPlace,
     domain::value::{
-        CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
-        ValueParseError, parse_choice,
+        COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
+        DescriptionError, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace, ValueParseError,
+        parse_choice,
     },
 };
 
+/// The `command` field.
+pub(super) const COMMAND_FIELD: &str = "command";
+/// The form a bounded text is written in, followed by its maximum.
+const LENGTH_FORM: &str = "at most ";
 /// The `working_dir` field.
 pub(super) const WORKING_DIR_FIELD: &str = "working_dir";
 /// The `description` field.
@@ -64,21 +69,42 @@ pub(super) fn process_name(raw: &str) -> Result<ProcessName, ToolError> {
     })
 }
 
+/// The refusal of `text`, given as `field`, for running past `max`
+/// characters. Names the length, never echoes the text.
+pub(super) fn too_long(field: &'static str, max: usize, text: &str) -> ToolError {
+    invalid(
+        field,
+        &format!("{LENGTH_FORM}{max} characters"),
+        &format!("{} characters", text.chars().count()),
+    )
+}
+
 /// The command an agent typed as `raw`.
 ///
 /// # Errors
-/// Returns [`ToolError::EmptyCommand`] for a blank command.
+/// Returns [`ToolError::EmptyCommand`] for a blank command, or the refusal of
+/// one past [`COMMAND_MAX_CHARS`].
 pub(super) fn command(raw: &str) -> Result<CommandLine, ToolError> {
-    CommandLine::try_new(raw.to_string()).map_err(|_| ToolError::EmptyCommand)
+    CommandLine::try_new(raw.to_string()).map_err(|error| match error {
+        CommandLineError::NotEmptyViolated => ToolError::EmptyCommand,
+        CommandLineError::LenCharMaxViolated => {
+            too_long(COMMAND_FIELD, COMMAND_MAX_CHARS, raw.trim())
+        },
+    })
 }
 
 /// The description an agent typed as `raw`.
 ///
 /// # Errors
-/// Returns the refusal of a blank description.
+/// Returns the refusal of a blank description, or of one past
+/// [`DESCRIPTION_MAX_CHARS`].
 pub(super) fn description(raw: &str) -> Result<Description, ToolError> {
-    Description::try_new(raw.to_string())
-        .map_err(|_| invalid(DESCRIPTION_FIELD, DESCRIPTION_FORM, raw))
+    Description::try_new(raw.to_string()).map_err(|error| match error {
+        DescriptionError::NotEmptyViolated => invalid(DESCRIPTION_FIELD, DESCRIPTION_FORM, raw),
+        DescriptionError::LenCharMaxViolated => {
+            too_long(DESCRIPTION_FIELD, DESCRIPTION_MAX_CHARS, raw.trim())
+        },
+    })
 }
 
 /// The environment variable name an agent typed as `raw` in `field`.

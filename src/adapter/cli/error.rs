@@ -13,9 +13,17 @@ use crate::{
     domain::{
         config::ConfigError,
         coordination::Author,
-        value::{NameProblem, ProcessName, ProcessNameError, ProjectName},
+        value::{
+            COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
+            NameProblem, ProcessName, ProcessNameError, ProjectName,
+        },
     },
 };
+
+/// What a refusal calls a process's command.
+const COMMAND: &str = "command";
+/// What a refusal calls a process's description.
+const DESCRIPTION: &str = "description";
 
 /// What a person should try after a refusal of each kind, appended to its
 /// message.
@@ -68,12 +76,23 @@ pub enum CliError {
     /// A todo title was blank or whitespace-only.
     #[error("'{0}' is not a valid todo title")]
     InvalidTodoTitle(String),
-    /// A note body, value or todo title ran past the most it may hold.
+    /// A key, body, value, title, command or description ran past the most
+    /// it may hold.
     #[error("the {what} is {found} characters; at most {max} are allowed")]
     TooLong {
         /// What was too long, such as `note body`.
         what: &'static str,
         /// The most characters it may hold.
+        max: usize,
+        /// How many it had.
+        found: usize,
+    },
+    /// A list held more items than it may.
+    #[error("the {what} holds {found} items; at most {max} are allowed")]
+    TooMany {
+        /// What held too many, such as `dependency list`.
+        what: &'static str,
+        /// The most items it may hold.
         max: usize,
         /// How many it had.
         found: usize,
@@ -294,6 +313,30 @@ impl CliError {
         }
     }
 
+    /// The refusal of `raw` as a command.
+    pub fn command(raw: &str, error: &CommandLineError) -> Self {
+        match error {
+            CommandLineError::NotEmptyViolated => Self::EmptyCommand,
+            CommandLineError::LenCharMaxViolated => Self::TooLong {
+                what: COMMAND,
+                max: COMMAND_MAX_CHARS,
+                found: raw.trim().chars().count(),
+            },
+        }
+    }
+
+    /// The refusal of `raw` as a description.
+    pub fn description(raw: &str, error: &DescriptionError) -> Self {
+        match error {
+            DescriptionError::NotEmptyViolated => Self::EmptyDescription,
+            DescriptionError::LenCharMaxViolated => Self::TooLong {
+                what: DESCRIPTION,
+                max: DESCRIPTION_MAX_CHARS,
+                found: raw.trim().chars().count(),
+            },
+        }
+    }
+
     /// The kind of failure, for `--json` output and the exit code.
     pub fn kind(&self) -> FailureKind {
         match self {
@@ -320,6 +363,7 @@ impl CliError {
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::TooLong { .. }
+            | Self::TooMany { .. }
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
@@ -369,6 +413,7 @@ impl CliError {
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::TooLong { .. }
+            | Self::TooMany { .. }
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)

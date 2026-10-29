@@ -11,19 +11,21 @@ use crate::domain::value::CommandLine;
 ///
 /// # Errors
 /// Returns [`CliError::InvalidCommand`] when the words cannot be joined into
-/// a shell command, or [`CliError::EmptyCommand`] for a blank one.
+/// a shell command, [`CliError::EmptyCommand`] for a blank one, or
+/// [`CliError::TooLong`] for one past the most a command holds.
 pub fn command_string(words: &[String]) -> Result<CommandLine, CliError> {
     let joined = match words {
         [expression] => expression.clone(),
         _ => shlex::try_join(words.iter().map(String::as_str))
             .map_err(|_| CliError::InvalidCommand)?,
     };
-    CommandLine::try_new(joined).map_err(|_| CliError::EmptyCommand)
+    CommandLine::try_new(joined.as_str()).map_err(|error| CliError::command(&joined, &error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::value::COMMAND_MAX_CHARS;
 
     /// The words, owned.
     fn words(raw: &[&str]) -> Vec<String> {
@@ -59,5 +61,17 @@ mod tests {
             command_string(&words(&["a", "b\0c"])),
             Err(CliError::InvalidCommand)
         ));
+    }
+
+    /// A command past the most one holds is refused, naming the limit.
+    #[test]
+    fn an_overlong_command_is_refused_with_its_limit() {
+        let refused = command_string(&words(&[&"x".repeat(COMMAND_MAX_CHARS + 1)])).unwrap_err();
+
+        assert!(matches!(
+            refused,
+            CliError::TooLong { max: COMMAND_MAX_CHARS, found, .. } if found == COMMAND_MAX_CHARS + 1
+        ));
+        assert!(refused.to_string().contains(&COMMAND_MAX_CHARS.to_string()));
     }
 }

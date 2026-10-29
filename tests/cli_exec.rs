@@ -35,21 +35,22 @@ use muster::{
         },
         open_files::OpenFilesLimit,
         service::{
-            BatchOutcome, EventKind, LaunchEnvironment, Notice, NoticeLevel, ProcessAction,
-            ProcessStatus, ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError,
-            ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
+            BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
+            ProcessAction, ProcessStatus, ProjectPorts, ProjectStatus, Refusal, ServiceDeps,
+            ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion,
+            Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
     },
     domain::{
         config::ProcessChange,
-        coordination::Author,
+        coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
         port::{Notifier, PortOccupants, StackStore},
         process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
-        value::{ProcessName, ProjectName, ProjectRoot},
+        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName, ProjectName, ProjectRoot},
     },
 };
 use rusqlite::Connection;
@@ -2713,6 +2714,92 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
 
     let stop = scratch.muster(&["service", "stop"]);
     assert!(stop.status.success(), "{}", shown(&stop));
+}
+
+/// Every field an agent writes has a named maximum: a key, command,
+/// description or dependency list past it is refused naming the limit, over
+/// MCP and the CLI alike, and after maximal writes `stack_status` and
+/// `stack_events` stay bounded.
+#[test]
+fn agent_written_fields_are_bounded() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    let long = |max: usize| "x".repeat(max + 1);
+
+    for (tool, arguments, limit) in [
+        (
+            "note_write",
+            serde_json::json!({ "key": long(NOTE_KEY_MAX_CHARS), "body": "b" }),
+            NOTE_KEY_MAX_CHARS,
+        ),
+        (
+            "kv_write",
+            serde_json::json!({ "key": long(KV_KEY_MAX_CHARS), "value": "v" }),
+            KV_KEY_MAX_CHARS,
+        ),
+        (
+            "todo_add",
+            serde_json::json!({ "title": "t", "deps": vec!["a"; TODO_DEPS_MAX + 1] }),
+            TODO_DEPS_MAX,
+        ),
+        (
+            "process_add",
+            serde_json::json!({ "name": "big", "command": long(COMMAND_MAX_CHARS) }),
+            COMMAND_MAX_CHARS,
+        ),
+        (
+            "process_add",
+            serde_json::json!({
+                "name": "big",
+                "command": "true",
+                "description": long(DESCRIPTION_MAX_CHARS),
+            }),
+            DESCRIPTION_MAX_CHARS,
+        ),
+    ] {
+        let refused = mcp.mistake(tool, arguments);
+        assert!(
+            result_text(&refused).contains(&format!("at most {limit}")),
+            "{tool}: {refused}"
+        );
+    }
+
+    let maximal = |mark: &str| format!("true {mark}{}", "#".repeat(COMMAND_MAX_CHARS - 6));
+    mcp.result(
+        "process_add",
+        serde_json::json!({
+            "name": "big",
+            "command": maximal("a"),
+            "description": "d".repeat(DESCRIPTION_MAX_CHARS),
+        }),
+    );
+    for mark in ["b", "c", "d"] {
+        mcp.result(
+            "process_set",
+            serde_json::json!({ "name": "big", "command": maximal(mark) }),
+        );
+    }
+    let bound = 4 * (COMMAND_MAX_CHARS + DESCRIPTION_MAX_CHARS) * EVENTS_WITHOUT_SINCE;
+    for tool in ["stack_status", "stack_events"] {
+        let size = mcp.result(tool, serde_json::json!({})).to_string().len();
+        assert!(size < bound, "{tool} answered {size} bytes");
+    }
+
+    let cli = scratch.on(&project, &["note", "set", &long(NOTE_KEY_MAX_CHARS), "b"]);
+    assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+    assert!(
+        stderr(&cli).contains(&format!("at most {NOTE_KEY_MAX_CHARS}")),
+        "{}",
+        shown(&cli)
+    );
+    let cli = scratch.on(&project, &["add", "huge", "--", &long(COMMAND_MAX_CHARS)]);
+    assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
+    assert!(
+        stderr(&cli).contains(&format!("at most {COMMAND_MAX_CHARS}")),
+        "{}",
+        shown(&cli)
+    );
 }
 
 /// `mcp --print-config` prints the snippet alone, and a reader that closes

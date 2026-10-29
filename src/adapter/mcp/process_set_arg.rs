@@ -11,9 +11,9 @@ use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
-        DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD, RESTART_FIELD,
-        STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice, command, description,
-        env_name, env_vars, stop_grace, working_dir,
+        COMMAND_FIELD, DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD,
+        RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice, command,
+        description, env_name, env_vars, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
 };
@@ -30,8 +30,6 @@ use crate::{
 const PROJECT_FIELD: &str = "project";
 /// The field naming the process.
 const NAME_FIELD: &str = "name";
-/// The field holding the new command.
-const COMMAND_FIELD: &str = "command";
 /// The field saying whether `muster up` starts it.
 const AUTOSTART_FIELD: &str = "autostart";
 /// The field holding the readiness check.
@@ -65,13 +63,14 @@ pub struct ProcessSetArg {
     project: Option<String>,
     /// The process's name.
     name: String,
-    /// The new shell command.
+    /// The new shell command, at most <command-max-chars> characters.
     #[builder(default)]
     command: Option<String>,
     /// Where it runs, relative to the project root; null runs it in the root.
     #[builder(default)]
     working_dir: Option<Option<String>>,
-    /// A one-line note about it; null removes it.
+    /// A one-line note about it, at most <description-max-chars> characters;
+    /// null removes it.
     #[builder(default)]
     description: Option<Option<String>>,
     /// Environment variables to add or replace, by name.

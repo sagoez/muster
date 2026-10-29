@@ -15,9 +15,13 @@ use crate::{
         holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
         service::{EVENTS_WITHOUT_SINCE, supervisor::FAILURE_TAIL_LINES},
     },
-    domain::coordination::{
-        KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT, LOCK_TTL_MAX,
-        NOTE_BODY_MAX_CHARS, TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
+    domain::{
+        coordination::{
+            KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT,
+            LOCK_TTL_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
+            TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
+        },
+        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS},
     },
 };
 
@@ -25,12 +29,17 @@ use crate::{
 const DESCRIPTION_KEY: &str = "description";
 
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 19] {
+fn placeholders() -> [(&'static str, String); 24] {
     [
         ("<listed-value-chars>", LISTED_VALUE_CHARS.to_string()),
+        ("<note-key-max-chars>", NOTE_KEY_MAX_CHARS.to_string()),
         ("<note-body-max-chars>", NOTE_BODY_MAX_CHARS.to_string()),
+        ("<kv-key-max-chars>", KV_KEY_MAX_CHARS.to_string()),
         ("<kv-value-max-chars>", KV_VALUE_MAX_CHARS.to_string()),
         ("<todo-title-max-chars>", TODO_TITLE_MAX_CHARS.to_string()),
+        ("<todo-deps-max>", TODO_DEPS_MAX.to_string()),
+        ("<command-max-chars>", COMMAND_MAX_CHARS.to_string()),
+        ("<description-max-chars>", DESCRIPTION_MAX_CHARS.to_string()),
         ("<lock-name-max-chars>", LOCK_NAME_MAX_CHARS.to_string()),
         ("<call-bound-s>", CALL_BOUND.as_secs().to_string()),
         ("<default-wait-s>", DEFAULT_WAIT.as_secs().to_string()),

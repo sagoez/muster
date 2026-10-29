@@ -33,12 +33,12 @@ pub struct ProcessAddArg {
     project: Option<String>,
     /// The process's name, unique in this project.
     name: String,
-    /// The shell command it runs.
+    /// The shell command it runs, at most <command-max-chars> characters.
     command: String,
     /// Where it runs, relative to the project root. Defaults to the root.
     #[builder(default)]
     working_dir: Option<String>,
-    /// A one-line note about it.
+    /// A one-line note about it, at most <description-max-chars> characters.
     #[builder(default)]
     description: Option<String>,
     /// Environment variables it runs with, by name.

@@ -11,8 +11,16 @@ use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace},
+    value::{
+        COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
+        DescriptionError, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
+    },
 };
+
+/// The key of an entry's command.
+const COMMAND_KEY: &str = "command";
+/// The key of an entry's description.
+const DESCRIPTION_KEY: &str = "description";
 
 /// One process of a stack file. Optional keys are written only when set, and
 /// a variable whose value is `None` is the export's placeholder.
@@ -114,6 +122,34 @@ fn process_name(raw: String) -> Result<ProcessName, EntryError> {
     ProcessName::try_new(raw).map_err(|error| EntryError::InvalidName(error.into()))
 }
 
+/// Reads the entry's command, refusing a blank one and one past
+/// [`COMMAND_MAX_CHARS`].
+fn command(raw: String) -> Result<CommandLine, EntryError> {
+    let found = raw.trim().chars().count();
+    CommandLine::try_new(raw).map_err(|error| match error {
+        CommandLineError::NotEmptyViolated => EntryError::EmptyCommand,
+        CommandLineError::LenCharMaxViolated => EntryError::TooLong {
+            field: COMMAND_KEY,
+            max: COMMAND_MAX_CHARS,
+            found,
+        },
+    })
+}
+
+/// Reads the entry's description, refusing a blank one and one past
+/// [`DESCRIPTION_MAX_CHARS`].
+fn description(raw: String) -> Result<Description, EntryError> {
+    let found = raw.trim().chars().count();
+    Description::try_new(raw).map_err(|error| match error {
+        DescriptionError::NotEmptyViolated => EntryError::EmptyDescription,
+        DescriptionError::LenCharMaxViolated => EntryError::TooLong {
+            field: DESCRIPTION_KEY,
+            max: DESCRIPTION_MAX_CHARS,
+            found,
+        },
+    })
+}
+
 /// Reads the entry's working directory: a non-empty folder given relative to
 /// the project root that never climbs above it.
 fn working_dir(dir: PathBuf) -> Result<PathBuf, EntryError> {
@@ -162,15 +198,9 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
             .collect::<Result<Environment, EntryError>>()?;
         Ok(ProcessSpec::builder()
             .name(process_name(entry.name)?)
-            .command(CommandLine::try_new(entry.command).map_err(|_| EntryError::EmptyCommand)?)
+            .command(command(entry.command)?)
             .working_dir(entry.working_dir.map(working_dir).transpose()?)
-            .description(
-                entry
-                    .description
-                    .map(Description::try_new)
-                    .transpose()
-                    .map_err(|_| EntryError::EmptyDescription)?,
-            )
+            .description(entry.description.map(description).transpose()?)
             .environment(environment)
             .autostart(entry.autostart)
             .restart(entry.restart)

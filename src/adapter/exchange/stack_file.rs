@@ -147,7 +147,8 @@ mod tests {
         config::Environment,
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
-            CommandLine, Description, EnvName, EnvValue, PositiveDuration, ProcessName, StopGrace,
+            COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, EnvName, EnvValue,
+            PositiveDuration, ProcessName, StopGrace,
         },
     };
 
@@ -367,6 +368,37 @@ processes:
         assert_eq!(
             refusal(&entry_with("").replace("command: npm run dev", "command: '  '")),
             "processes[0] (web): command must not be empty"
+        );
+    }
+
+    /// A command or description past its maximum is refused naming the
+    /// limit; one at the maximum is read.
+    #[test]
+    fn an_overlong_command_or_description_is_refused() {
+        let command = |length: usize| {
+            entry_with("").replace(
+                "command: npm run dev",
+                &format!("command: {}", "x".repeat(length)),
+            )
+        };
+        assert!(read_stack_file(&command(COMMAND_MAX_CHARS)).is_ok());
+        assert_eq!(
+            refusal(&command(COMMAND_MAX_CHARS + 1)),
+            format!(
+                "processes[0] (web): command is {} characters; at most {COMMAND_MAX_CHARS} are allowed",
+                COMMAND_MAX_CHARS + 1
+            )
+        );
+        let description =
+            |length: usize| entry_with(&format!("description: {}", "d".repeat(length)));
+        assert!(read_stack_file(&description(DESCRIPTION_MAX_CHARS)).is_ok());
+        assert_eq!(
+            refusal(&description(DESCRIPTION_MAX_CHARS + 1)),
+            format!(
+                "processes[0] (web): description is {} characters; at most \
+                 {DESCRIPTION_MAX_CHARS} are allowed",
+                DESCRIPTION_MAX_CHARS + 1
+            )
         );
     }
 

@@ -354,10 +354,14 @@ mod tests {
         let refused = spec()
             .with_change(&set(vec![(name("CERT"), long.clone())]))
             .unwrap_err();
-        let ConfigError::OverCap { name, over } = &refused else {
+        let ConfigError::OverCap {
+            name: process,
+            over,
+        } = &refused
+        else {
             panic!("refused for another reason: {refused}");
         };
-        assert_eq!(name, spec().name());
+        assert_eq!(process, spec().name());
         assert!(matches!(over, OverCap::VarValue { .. }), "{refused}");
         let full = spec().with_environment(many(ENV_VARS_MAX));
         assert!(matches!(

@@ -240,8 +240,8 @@ impl Supervisor {
     /// on a worker, keeping what was asked meanwhile, or settles the
     /// reconnect as failed when no holder runs that child, then applies what
     /// was asked. A reconnect a later action or a shutdown superseded adopts
-    /// nothing; a child a later action's look found still running is left
-    /// unsupervised, as [`Self::settle_superseded_search`] says.
+    /// nothing, and a child its look found still running is left
+    /// unsupervised so a stop reaches it.
     pub fn handle_reconnect_located(
         &mut self,
         pane: PaneId,

@@ -193,7 +193,7 @@ impl HolderRunner {
     }
 
     /// Where the log of the process `name` of `project` ends, and its last
-    /// bytes before that, at most [`LOG_TAIL_BYTES`], with where they start:
+    /// bytes before that, at most `LOG_TAIL_BYTES`, with where they start:
     /// what a supervisor that never saw the process run reports of it. None
     /// when the log cannot be read, as before any run wrote one.
     pub fn log_tail(

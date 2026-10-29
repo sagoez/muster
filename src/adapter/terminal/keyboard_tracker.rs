@@ -27,7 +27,8 @@ use super::{
 /// child. The primary and alternate screens keep independent state so a mode an
 /// alternate-screen app leaves behind cannot leak into the restored shell. A
 /// new tracker starts on the legacy encoding, and a child's request is masked
-/// to [`SUPPORTED_FLAGS`] before it takes effect.
+/// to [`SUPPORTED_FLAGS`](super::keyboard_protocol::SUPPORTED_FLAGS) before it
+/// takes effect.
 #[derive(Default)]
 pub struct KittyKeyboardTracker {
     /// The VT parser, kept across chunks so a split sequence still completes.

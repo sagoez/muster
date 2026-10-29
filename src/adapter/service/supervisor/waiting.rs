@@ -189,7 +189,7 @@ impl Supervisor {
     }
 
     /// Refuses the wait `id` held on `pane` if the read of its log has not
-    /// answered it within [`LOG_TAIL_TIMEOUT`], so a log that cannot be read
+    /// answered it within `LOG_TAIL_TIMEOUT`, so a log that cannot be read
     /// never holds a wait past its caller's patience.
     pub fn handle_held_wait_overdue(&mut self, pane: PaneId, id: u64) {
         let Some(waits) = self.held_waits.get_mut(&pane) else {

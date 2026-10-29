@@ -5,7 +5,10 @@ use super::{
     row_kind::RowKind,
 };
 use crate::{
-    adapter::wire::WireForm,
+    adapter::{
+        client::{ListedValue, PageSize},
+        wire::WireForm,
+    },
     domain::{
         coordination::{Author, KV_VALUE_MAX_CHARS, KvKey, KvValue},
         port::CoordinationStore,
@@ -21,6 +24,12 @@ const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>
 const FIELD_GAP: &str = "  ";
 /// The JSON key of the listed entries.
 const ENTRIES: &str = "entries";
+/// The JSON key of whether entries follow the listed page.
+const MORE: &str = "more";
+/// What follows a listed value that was cut short.
+const CUT_MARK: &str = "...";
+/// Line printed under a listing that more entries follow.
+const MORE_NOTE: &str = "more follow; pass a larger --limit to list them";
 /// The JSON key of the key a write saved.
 const SAVED: &str = "saved";
 /// The JSON key of the key a delete named.
@@ -29,19 +38,20 @@ const KEY: &str = "key";
 const DELETED: &str = "deleted";
 
 /// Runs a `muster kv` action against `store` for `project`, returning what to
-/// print. Absent a subcommand, lists the project's entries.
+/// print. Absent a subcommand, lists the project's first `limit` entries.
 ///
 /// # Errors
 /// Returns [`CliError`] when a key is invalid, a requested value is absent, or the
 /// store cannot be read or written.
 pub fn kv(
     command: Option<KvCommand>,
+    limit: PageSize,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project),
+        None => list(store, project, limit),
         Some(KvCommand::Get { key }) => get(store, project, &key),
         Some(KvCommand::Set { key, value }) => set(store, project, author, &key, &value),
         Some(KvCommand::Rm { key }) => remove(store, project, &key),
@@ -56,32 +66,46 @@ fn parse_key(key: &str) -> Result<KvKey, CliError> {
     KvKey::try_new(key).map_err(|_| CliError::InvalidKvKey(key.to_string()))
 }
 
-/// Lists every entry for `project` as `key  value`, one per line.
+/// Lists the first `limit` entries for `project` as `key  value`, one per
+/// line, each value cut as `kv_read` cuts it, saying when more follow.
 ///
 /// # Errors
 /// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Answer, CliError> {
+fn list(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    limit: PageSize,
+) -> Result<Answer, CliError> {
     let entries = store.values(project)?;
-    let wire: Vec<_> = entries.iter().map(WireForm::to_wire).collect();
-    let rows = if entries.is_empty() {
-        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
-    } else {
-        entries
-            .iter()
-            .map(|entry| {
-                Row::unlabeled(
-                    RowKind::Plain,
-                    format!(
-                        "{key}{FIELD_GAP}{value}{attribution}",
-                        key = entry.key().as_ref(),
-                        value = entry.value(),
-                        attribution = attribution(entry.author()),
-                    ),
-                )
-            })
-            .collect()
-    };
-    Answer::of(rows, &json!({ ENTRIES: wire }))
+    let page: Vec<ListedValue> = entries
+        .iter()
+        .take(limit.into_inner())
+        .map(ListedValue::from)
+        .collect();
+    let more = entries.len() > page.len();
+    let mut rows: Vec<Row> = page
+        .iter()
+        .map(|listed| {
+            let entry = listed.entry();
+            Row::unlabeled(
+                RowKind::Plain,
+                format!(
+                    "{key}{FIELD_GAP}{value}{cut}{attribution}",
+                    key = entry.key().as_ref(),
+                    value = entry.value(),
+                    cut = if listed.truncated() { CUT_MARK } else { "" },
+                    attribution = attribution(entry.author()),
+                ),
+            )
+        })
+        .collect();
+    if entries.is_empty() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    if more {
+        rows.push(Row::unlabeled(RowKind::Hint, MORE_NOTE));
+    }
+    Answer::of(rows, &json!({ ENTRIES: page, MORE: more }))
 }
 
 /// Prints the value under `key`, one row per line so the framed layout stays
@@ -165,12 +189,15 @@ mod tests {
     use std::{cell::RefCell, path::PathBuf};
 
     use super::*;
-    use crate::domain::{
-        config::ConfigError,
-        coordination::{
-            Claim, KeyValue, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
-            LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoId,
-            TodoLease, TodoTitle, TodoUpdate,
+    use crate::{
+        adapter::client::LISTED_VALUE_CHARS,
+        domain::{
+            config::ConfigError,
+            coordination::{
+                Claim, KeyValue, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
+                LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoId,
+                TodoLease, TodoTitle, TodoUpdate,
+            },
         },
     };
 
@@ -354,7 +381,7 @@ mod tests {
         set(&store, &project(), &Author::human(), "port", "3000").unwrap();
         set(&store, &project(), &Author::human(), "port", "4000").unwrap();
 
-        let listed = list(&store, &project()).unwrap();
+        let listed = list(&store, &project(), PageSize::default()).unwrap();
         assert_eq!(
             listed.rows().len(),
             1,
@@ -366,6 +393,30 @@ mod tests {
         let value = get(&store, &project(), "port").unwrap();
         assert_eq!(value.rows()[0].detail(), "4000");
         assert_eq!(value.json()["key"], "port");
+    }
+
+    /// A listing cuts a long value and marks it, pages by `limit` and says
+    /// when more follow; `get` still returns the value whole.
+    #[test]
+    fn list_cuts_values_and_pages() {
+        let store = FakeStore::default();
+        let long = "x".repeat(LISTED_VALUE_CHARS + 1);
+        set(&store, &project(), &Author::human(), "blob", &long).unwrap();
+        set(&store, &project(), &Author::human(), "port", "4000").unwrap();
+
+        let first = list(&store, &project(), PageSize::try_new(1).unwrap()).unwrap();
+        assert_eq!(first.json()["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(first.json()["entries"][0]["truncated"], true);
+        assert_eq!(first.json()["more"], true);
+        assert!(first.rows()[0].detail().contains(CUT_MARK));
+        assert_eq!(first.rows()[1].detail(), MORE_NOTE);
+
+        let all = list(&store, &project(), PageSize::default()).unwrap();
+        assert_eq!(all.json()["more"], false);
+        assert_eq!(
+            get(&store, &project(), "blob").unwrap().json()["value"],
+            long
+        );
     }
 
     /// A value past the maximum is refused with its length, and not stored.
@@ -423,7 +474,10 @@ mod tests {
     fn list_reports_empty() {
         let store = FakeStore::default();
         assert_eq!(
-            list(&store, &project()).unwrap().rows()[0].detail(),
+            list(&store, &project(), PageSize::default())
+                .unwrap()
+                .rows()[0]
+                .detail(),
             EMPTY_NOTE
         );
     }

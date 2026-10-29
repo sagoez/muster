@@ -249,16 +249,28 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
                 note(command, store, root, &Author::human())
             })
         },
-        Some(Command::Todo { command, json }) => {
-            with_root(invocation, json, TODO_TITLE, |store, root| {
-                todo(command, store, root, &Author::human())
-            })
-        },
-        Some(Command::Kv { command, json }) => {
-            with_root(invocation, json, KV_TITLE, |store, root| {
-                kv(command, store, root, &Author::human())
-            })
-        },
+        Some(Command::Todo {
+            command,
+            limit,
+            cursor,
+            json,
+        }) => with_root(invocation, json, TODO_TITLE, |store, root| {
+            todo(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                root,
+                &Author::human(),
+            )
+        }),
+        Some(Command::Kv {
+            command,
+            limit,
+            json,
+        }) => with_root(invocation, json, KV_TITLE, |store, root| {
+            kv(command, limit, store, root, &Author::human())
+        }),
         Some(Command::Lock { command, json }) => {
             with_root(invocation, json, LOCK_TITLE, |store, root| {
                 lock(command, store, root)

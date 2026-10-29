@@ -40,7 +40,9 @@ pub struct CoordinationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::coordination::{Author, KvKey, ScratchpadKey};
+    use crate::domain::coordination::{
+        Author, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS, ScratchpadKey,
+    };
 
     /// A snapshot round-trips through YAML with its authors as labels.
     #[test]
@@ -81,5 +83,29 @@ mod tests {
         let yaml = "version: 1\nscratchpads: []\ntodos: []\nvalues: []\nextra: 1\n";
 
         assert!(serde_yaml_ng::from_str::<CoordinationSnapshot>(yaml).is_err());
+    }
+
+    /// A note body or a value past the cap a write is held to is refused on
+    /// import too, naming its key; one at the cap is read.
+    #[test]
+    fn an_oversized_note_or_value_is_refused() {
+        let file = |body: usize, value: usize| {
+            format!(
+                "version: 1\nscratchpads:\n- key: plan\n  body: {}\n  author: human\n  updated_at: 1\ntodos: []\nvalues:\n- key: blob\n  value: {}\n  author: human\n  updated_at: 1\n",
+                "x".repeat(body),
+                "y".repeat(value)
+            )
+        };
+        let read = |yaml: String| serde_yaml_ng::from_str::<CoordinationSnapshot>(&yaml);
+
+        assert!(read(file(NOTE_BODY_MAX_CHARS, KV_VALUE_MAX_CHARS)).is_ok());
+        let note = read(file(NOTE_BODY_MAX_CHARS + 1, 1))
+            .unwrap_err()
+            .to_string();
+        assert!(note.contains("note 'plan'"), "{note}");
+        let value = read(file(1, KV_VALUE_MAX_CHARS + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(value.contains("value 'blob'"), "{value}");
     }
 }

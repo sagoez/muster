@@ -218,9 +218,9 @@ CLI alone.
 | `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read, or remove one with its processes and coordination state |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes a running service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
-| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long |
+| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long. `todo` and `kv` list a page of `--limit` entries (50 by default, at most 200) as `todo_list` and `kv_read` do: `todo --cursor <id>` reads on, and a `kv` listing cuts each value to 200 characters |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
-| `muster coordination export\|import` | Move that shared state as YAML |
+| `muster coordination export\|import` | Move that shared state as YAML; an import refuses a note body, value or todo title longer than a write may be |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
 | `muster doctor` | Diagnose the database, projects, stored processes and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
@@ -383,7 +383,7 @@ only new output. The tools:
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
   65536 characters, a value 4096 and a todo title 500; a longer one is refused
-  over MCP and the CLI. `todo_list` pages with `limit`, answering `more` and a
+  over MCP, the CLI and `muster coordination import`. `todo_list` pages with `limit`, answering `more` and a
   `cursor` to pass for the next page, and a `kv_read` listing cuts each value
   to 200 characters and marks it `truncated`. Setting a todo `in-progress`
   claims it for the caller, and a forced change to another agent's todo takes

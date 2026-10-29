@@ -10,7 +10,7 @@ use super::{
     set_args::SetArgs, start_args::StartArgs, todo_command::TodoCommand, wait_args::WaitArgs,
 };
 use crate::{
-    adapter::{holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND},
+    adapter::{client::PageSize, holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND},
     domain::value::ProcessRef,
 };
 
@@ -202,6 +202,12 @@ pub enum Command {
     Todo {
         #[command(subcommand)]
         command: Option<TodoCommand>,
+        /// Todos one page of the listing shows.
+        #[arg(long, default_value_t)]
+        limit: PageSize,
+        /// List from after this todo id, the cursor an earlier page ended at.
+        #[arg(long)]
+        cursor: Option<String>,
         /// Print the result as JSON.
         #[arg(long, global = true)]
         json: bool,
@@ -210,6 +216,10 @@ pub enum Command {
     Kv {
         #[command(subcommand)]
         command: Option<KvCommand>,
+        /// Entries one page of the listing shows, each value cut short;
+        /// `kv get` shows a value whole.
+        #[arg(long, default_value_t)]
+        limit: PageSize,
         /// Print the result as JSON.
         #[arg(long, global = true)]
         json: bool,

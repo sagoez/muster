@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::{process_fields::invalid, tool_error::ToolError};
+use crate::adapter::client::{MAX_LIST_LIMIT, PageSize};
 
 /// Longest any call blocks, under the 60 seconds many MCP clients give one.
 pub const CALL_BOUND: Duration = Duration::from_secs(45);
@@ -12,10 +13,6 @@ pub const CALL_BOUND: Duration = Duration::from_secs(45);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 /// How often a call that carries a progress token hears that it still runs.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-/// Entries a list tool returns when the caller does not ask for a size.
-pub const DEFAULT_LIST_LIMIT: usize = 50;
-/// Hard cap on a list tool's page.
-pub const MAX_LIST_LIMIT: usize = 200;
 /// The field a page size is given as.
 const LIMIT_FIELD: &str = "limit";
 /// The fields a wait is given as: how long a call waits for its condition,
@@ -48,20 +45,20 @@ pub fn wait_bound(
     }
 }
 
-/// The page size a call asked for, [`DEFAULT_LIST_LIMIT`] when it did not.
+/// The page size a call asked for, the default size when it did not.
 ///
 /// # Errors
 /// Returns the caller's mistake for zero or a size past [`MAX_LIST_LIMIT`].
-pub fn page_size(limit: Option<usize>) -> Result<usize, ToolError> {
-    match limit {
-        None => Ok(DEFAULT_LIST_LIMIT),
-        Some(limit) if (1..=MAX_LIST_LIMIT).contains(&limit) => Ok(limit),
-        Some(limit) => Err(invalid(
-            LIMIT_FIELD,
-            &format!("{PAGE_FORM}{MAX_LIST_LIMIT}"),
-            &limit.to_string(),
-        )),
-    }
+pub fn page_size(limit: Option<usize>) -> Result<PageSize, ToolError> {
+    limit.map_or(Ok(PageSize::default()), |limit| {
+        PageSize::try_new(limit).map_err(|_| {
+            invalid(
+                LIMIT_FIELD,
+                &format!("{PAGE_FORM}{MAX_LIST_LIMIT}"),
+                &limit.to_string(),
+            )
+        })
+    })
 }
 
 #[cfg(test)]
@@ -95,8 +92,8 @@ mod tests {
     /// A page size defaults; zero and one past the cap are refused.
     #[test]
     fn a_page_size_defaults_and_out_of_range_is_refused() {
-        assert_eq!(page_size(None).unwrap(), DEFAULT_LIST_LIMIT);
-        assert_eq!(page_size(Some(5)).unwrap(), 5);
+        assert_eq!(page_size(None).unwrap(), PageSize::default());
+        assert_eq!(page_size(Some(5)).unwrap().into_inner(), 5);
         assert!(page_size(Some(0)).is_err());
         assert!(page_size(Some(MAX_LIST_LIMIT + 1)).is_err());
     }

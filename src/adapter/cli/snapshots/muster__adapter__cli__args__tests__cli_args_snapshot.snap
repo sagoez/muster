@@ -582,6 +582,8 @@ Commands:
 
 Options:
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --limit <LIMIT>      Todos one page of the listing shows [default: 50]
+      --cursor <CURSOR>    List from after this todo id, the cursor an earlier page ended at
       --json               Print the result as JSON
   -h, --help               Print help
 
@@ -644,6 +646,7 @@ Commands:
 
 Options:
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --limit <LIMIT>      Entries one page of the listing shows, each value cut short; `kv get` shows a value whole [default: 50]
       --json               Print the result as JSON
   -h, --help               Print help
 

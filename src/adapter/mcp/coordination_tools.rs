@@ -9,7 +9,7 @@ use std::{
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
-use serde_json::{Value, json as object_of};
+use serde_json::json as object_of;
 use tokio::time;
 
 use super::{
@@ -29,18 +29,17 @@ use super::{
     todo_list_arg::TodoListArg,
     todo_update_arg::TodoUpdateArg,
     tool_error::ToolError,
-    tool_failure::ToolFailure,
     tool_result::ToolResult,
 };
 use crate::{
     adapter::{
-        client::{NoteEntry, TodoView},
+        client::{ListedValue, NoteEntry, TodoPage, TodoView},
         wire::WireForm,
     },
     domain::{
         coordination::{
-            Claim, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue, LOCK_TTL_MAX, LockAttempt,
-            LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey,
+            Claim, KV_VALUE_MAX_CHARS, KvKey, KvValue, LOCK_TTL_MAX, LockAttempt, LockName,
+            LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey,
             TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoLease, TodoStatus,
             TodoTitle, TodoTitleError, TodoUpdate, claimable,
         },
@@ -82,7 +81,6 @@ const RELEASE_FORM: &str = "release only without a status other than pending";
 /// The tool `todo_update`'s refusal names.
 const TODO_UPDATE: &str = "todo_update";
 /// Keys of the results built here.
-const TODOS: &str = "todos";
 const TODO: &str = "todo";
 const NOTES: &str = "notes";
 const ENTRIES: &str = "entries";
@@ -97,11 +95,6 @@ const OWNER: &str = "owner";
 const NOTE: &str = "note";
 const EXPIRES_IN_S: &str = "expires_in_s";
 const MORE: &str = "more";
-const CURSOR: &str = "cursor";
-const TRUNCATED: &str = "truncated";
-/// Most characters of each value a `kv_read` listing carries; reading the
-/// key returns the whole value.
-pub(super) const LISTED_VALUE_CHARS: usize = 200;
 
 /// The scratchpad key an agent typed as `key`.
 ///
@@ -135,26 +128,6 @@ fn too_long(field: &'static str, max: usize, text: &str) -> ToolError {
         &format!("{LENGTH_FORM}{max} characters"),
         &format!("{} characters", text.chars().count()),
     )
-}
-
-/// `entry` as a `kv_read` listing shows it: its value cut to
-/// [`LISTED_VALUE_CHARS`], marked `truncated` when cut.
-///
-/// # Errors
-/// Returns a fault of muster's when the entry cannot be serialized.
-fn listed_entry(entry: &KeyValue) -> Result<Value, ToolFailure> {
-    let cut = entry.value().chars().count() > LISTED_VALUE_CHARS;
-    let shown = KeyValue::builder()
-        .key(entry.key().clone())
-        .value(entry.value().chars().take(LISTED_VALUE_CHARS).collect())
-        .author(entry.author().clone())
-        .updated_at(*entry.updated_at())
-        .build();
-    let mut value = json(&shown.to_wire())?;
-    if cut {
-        value[TRUNCATED] = Value::Bool(true);
-    }
-    Ok(value)
 }
 
 /// The note body an agent typed as `body`.
@@ -286,16 +259,13 @@ impl MusterMcp {
                 Ok(deps.coordination().todos(project.root())?)
             })
             .await?;
-        let start = match &after {
-            None => 0,
-            Some(id) => {
-                todos
-                    .iter()
-                    .position(|todo| todo.id() == id)
-                    .ok_or_else(|| invalid(CURSOR_FIELD, CURSOR_FORM, id.as_ref()))?
-                    + 1
-            },
-        };
+        let start = TodoPage::resume(&todos, after.as_ref()).ok_or_else(|| {
+            invalid(
+                CURSOR_FIELD,
+                CURSOR_FORM,
+                after.as_ref().map_or("", AsRef::as_ref),
+            )
+        })?;
         let now = unix_now();
         let listed: Vec<_> = if only_claimable {
             let earlier: HashSet<&TodoId> = todos[..start].iter().map(Todo::id).collect();
@@ -305,7 +275,7 @@ impl MusterMcp {
         } else {
             todos[start..].iter().collect()
         };
-        let mut matching = listed
+        let matching = listed
             .into_iter()
             .map(|todo| TodoView::at(todo, now))
             .filter(|view| status.is_none_or(|status| *view.status() == status))
@@ -316,13 +286,7 @@ impl MusterMcp {
                         .is_some_and(|held| held.label() == owner)
                 })
             });
-        let page: Vec<TodoView> = matching.by_ref().take(limit).collect();
-        let more = matching.next().is_some();
-        let mut value = object_of!({ TODOS: json(&page)?, MORE: more });
-        if more && let Some(last) = page.last() {
-            value[CURSOR] = Value::String(last.id().to_string());
-        }
-        structured(value, false)
+        structured(json(&TodoPage::of(matching, limit))?, false)
     }
 
     /// Adds a todo.
@@ -528,7 +492,11 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page: Vec<NoteEntry> = notes.iter().take(limit).map(NoteEntry::from).collect();
+            let page: Vec<NoteEntry> = notes
+                .iter()
+                .take(limit.into_inner())
+                .map(NoteEntry::from)
+                .collect();
             return structured(object_of!({ NOTES: json(&page)? }), false);
         };
         match notes.iter().find(|note| note.key() == &key) {
@@ -598,13 +566,13 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page = entries
+            let page: Vec<ListedValue> = entries
                 .iter()
-                .take(limit)
-                .map(listed_entry)
-                .collect::<Result<Vec<_>, _>>()?;
-            let more = entries.len() > limit;
-            return structured(object_of!({ ENTRIES: page, MORE: more }), false);
+                .take(limit.into_inner())
+                .map(ListedValue::from)
+                .collect();
+            let more = entries.len() > limit.into_inner();
+            return structured(object_of!({ ENTRIES: json(&page)?, MORE: more }), false);
         };
         match entries.iter().find(|entry| entry.key() == &key) {
             Some(entry) => structured(json(&entry.to_wire())?, false),
@@ -714,15 +682,24 @@ impl MusterMcp {
 mod tests {
     use super::*;
     use crate::{
-        adapter::mcp::{
-            bounds::MAX_LIST_LIMIT,
-            server::release_session_locks,
-            test_support::{
-                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+        adapter::{
+            client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
+            mcp::{
+                server::release_session_locks,
+                test_support::{
+                    AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+                },
             },
         },
         domain::port::CoordinationStore,
     };
+
+    /// The key a `todo_list` page holds its todos under.
+    const TODOS: &str = "todos";
+    /// The key a listing names its next page's cursor under.
+    const CURSOR: &str = "cursor";
+    /// The key a listing marks a cut value with.
+    const TRUNCATED: &str = "truncated";
 
     /// A note written through the tool reads back by key and in the index,
     /// which leaves out bodies; the first write says who the agent is.

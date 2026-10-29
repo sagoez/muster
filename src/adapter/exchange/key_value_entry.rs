@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter::wire::{WireForm, form},
-    domain::coordination::{Author, KeyValue, KvKey},
+    domain::coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
 };
 
 /// A key-value entry as a coordination snapshot and an agent read it.
@@ -33,9 +33,16 @@ impl WireForm for KeyValue {
     }
 
     fn from_wire(wire: KeyValueEntry) -> Result<Self, String> {
+        let found = wire.value.chars().count();
+        let value = KvValue::try_new(wire.value).map_err(|_| {
+            format!(
+                "value '{}' is {found} characters; at most {KV_VALUE_MAX_CHARS} are allowed",
+                wire.key.as_ref()
+            )
+        })?;
         Ok(Self::builder()
             .key(wire.key)
-            .value(wire.value)
+            .value(value.into_inner())
             .author(wire.author)
             .updated_at(wire.updated_at)
             .build())

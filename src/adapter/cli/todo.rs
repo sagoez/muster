@@ -5,7 +5,10 @@ use super::{
     todo_command::TodoCommand,
 };
 use crate::{
-    adapter::{client::TodoView, store::now_epoch_secs},
+    adapter::{
+        client::{PageSize, TodoPage, TodoView},
+        store::now_epoch_secs,
+    },
     domain::{
         coordination::{
             Author, ClaimState, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoStatus,
@@ -22,27 +25,31 @@ const TODO_TITLE: &str = "todo title";
 const EMPTY_NOTE: &str = "no todos; add one with `muster todo add <title>`";
 /// Columns between the fields of a listed todo line.
 const FIELD_GAP: &str = "  ";
-/// The JSON key of the listed todos.
-const TODOS: &str = "todos";
+/// Line printed under a page that more todos follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster todo --cursor ";
 /// The JSON key of the id a delete named.
 const ID: &str = "id";
 /// The JSON key of whether a delete found something.
 const DELETED: &str = "deleted";
 
 /// Runs a `muster todo` action against `store` for `project`, returning what
-/// to print. Absent a subcommand, lists the project's todos.
+/// to print. Absent a subcommand, lists one page of `limit` todos after the
+/// todo `cursor` names.
 ///
 /// # Errors
-/// Returns [`CliError`] when a title or id is invalid, a status targets an
-/// unknown todo or one an agent holds, or the store cannot be read or written.
+/// Returns [`CliError`] when a title, id or cursor is invalid, a status
+/// targets an unknown todo or one an agent holds, or the store cannot be read
+/// or written.
 pub fn todo(
     command: Option<TodoCommand>,
+    limit: PageSize,
+    cursor: Option<&str>,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, now_epoch_secs() as u64),
+        None => list(store, project, limit, cursor, now_epoch_secs() as u64),
         Some(TodoCommand::Add { title, deps }) => add(store, project, author, &title, &deps),
         Some(TodoCommand::Status { id, status, force }) => {
             set_status(store, project, author, &id, status, force)
@@ -59,39 +66,53 @@ fn parse_id(id: &str) -> Result<TodoId, CliError> {
     TodoId::try_new(id).map_err(|_| CliError::InvalidTodoId(id.to_string()))
 }
 
-/// Lists every todo for `project` as `id  status  title`, one per line, with
-/// who holds it and for how long at `now` (Unix seconds).
+/// Lists one page of `limit` todos for `project`, after the todo `cursor`
+/// names, as `id  status  title`, one per line, with who holds it and for how
+/// long at `now` (Unix seconds), and how to read on when more follow.
 ///
 /// # Errors
-/// Returns [`CliError`] when the store cannot be read.
+/// Returns [`CliError::UnknownTodo`] for a cursor naming no todo, or a store
+/// read failure.
 fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
+    limit: PageSize,
+    cursor: Option<&str>,
     now: u64,
 ) -> Result<Answer, CliError> {
+    let after = cursor.map(parse_id).transpose()?;
     let todos = store.todos(project)?;
-    let views: Vec<TodoView> = todos.iter().map(|todo| TodoView::at(todo, now)).collect();
-    let rows = if todos.is_empty() {
-        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
-    } else {
-        todos
-            .iter()
-            .map(|todo| {
-                Row::unlabeled(
-                    RowKind::Plain,
-                    format!(
-                        "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
-                        id = todo.id().as_ref(),
-                        status = todo.effective_status(now),
-                        title = todo.title().as_ref(),
-                        claim = claim_note(todo, now),
-                        attribution = attribution(todo.author()),
-                    ),
-                )
-            })
-            .collect()
-    };
-    Answer::of(rows, &json!({ TODOS: views }))
+    let start = TodoPage::resume(&todos, after.as_ref())
+        .ok_or_else(|| CliError::UnknownTodo(cursor.unwrap_or_default().to_string()))?;
+    let listed = &todos[start..];
+    let page = TodoPage::of(listed.iter().map(|todo| TodoView::at(todo, now)), limit);
+    let mut rows: Vec<Row> = listed
+        .iter()
+        .take(page.todos().len())
+        .map(|todo| {
+            Row::unlabeled(
+                RowKind::Plain,
+                format!(
+                    "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
+                    id = todo.id().as_ref(),
+                    status = todo.effective_status(now),
+                    title = todo.title().as_ref(),
+                    claim = claim_note(todo, now),
+                    attribution = attribution(todo.author()),
+                ),
+            )
+        })
+        .collect();
+    if todos.is_empty() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    if let Some(next) = page.cursor() {
+        rows.push(Row::unlabeled(
+            RowKind::Hint,
+            format!("{MORE_NOTE}{}`", next.as_ref()),
+        ));
+    }
+    Answer::of(rows, &page)
 }
 
 /// Who holds `todo` at `now`, as a suffix for its listed line: the holder and
@@ -262,7 +283,7 @@ mod tests {
         let (store, root, _scratch) = fixture();
         let id = added_id(&store, &root, "wire the store");
 
-        let listed = list(&store, &root, now()).unwrap();
+        let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
         assert_eq!(listed.rows().len(), 1);
         assert_eq!(
             listed.rows()[0].detail(),
@@ -281,7 +302,7 @@ mod tests {
         let todo = claim(&store, &root, "claude", &id);
         let until = *todo.claim().as_ref().unwrap().claimed_until();
 
-        let held = list(&store, &root, until - 90).unwrap();
+        let held = list(&store, &root, PageSize::default(), None, until - 90).unwrap();
         assert_eq!(
             held.rows()[0].detail(),
             &format!(
@@ -289,7 +310,7 @@ mod tests {
                 humantime::format_duration(Duration::from_secs(90))
             )
         );
-        let lapsed = list(&store, &root, until + 1).unwrap();
+        let lapsed = list(&store, &root, PageSize::default(), None, until + 1).unwrap();
         assert_eq!(
             lapsed.rows()[0].detail(),
             &format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
@@ -314,7 +335,9 @@ mod tests {
         assert_eq!(ok.rows()[0].kind(), RowKind::Ok);
         assert_eq!(ok.json()["status"], "done");
         assert!(
-            list(&store, &root, now()).unwrap().rows()[0]
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
                 .detail()
                 .contains("done")
         );
@@ -357,7 +380,9 @@ mod tests {
 
         set_status(&store, &root, &Author::human(), &id, TodoStatus::Done, true).unwrap();
         assert!(
-            list(&store, &root, now()).unwrap().rows()[0]
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
                 .detail()
                 .contains("done")
         );
@@ -409,12 +434,48 @@ mod tests {
         ));
     }
 
+    /// A listing pages by cursor like `todo_list`, saying how to read on, and
+    /// a cursor naming no todo is refused.
+    #[test]
+    fn list_pages_by_cursor() {
+        let (store, root, _scratch) = fixture();
+        let ids: Vec<String> = ["one", "two", "three"]
+            .iter()
+            .map(|title| added_id(&store, &root, title))
+            .collect();
+        let two = PageSize::try_new(2).unwrap();
+
+        let first = list(&store, &root, two, None, now()).unwrap();
+        assert_eq!(first.json()["todos"].as_array().unwrap().len(), 2);
+        assert_eq!(first.json()["more"], true);
+        assert_eq!(first.json()["cursor"], ids[1].as_str());
+        assert!(
+            first.rows()[2].detail().contains(&ids[1]),
+            "{:?}",
+            first.rows()
+        );
+
+        let rest = list(&store, &root, two, Some(&ids[1]), now()).unwrap();
+        assert_eq!(rest.json()["todos"][0]["id"], ids[2].as_str());
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert_eq!(rest.rows().len(), 1);
+
+        assert!(matches!(
+            list(&store, &root, two, Some("no-such-todo"), now()),
+            Err(CliError::UnknownTodo(_))
+        ));
+    }
+
     /// An empty store lists a hint rather than nothing.
     #[test]
     fn list_reports_empty() {
         let (store, root, _scratch) = fixture();
         assert_eq!(
-            list(&store, &root, now()).unwrap().rows()[0].detail(),
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
+                .detail(),
             EMPTY_NOTE
         );
     }

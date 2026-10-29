@@ -5,12 +5,10 @@
 
 use rmcp::handler::server::router::tool::ToolRouter;
 
-use super::{
-    bounds::{CALL_BOUND, DEFAULT_LIST_LIMIT, DEFAULT_WAIT, MAX_LIST_LIMIT},
-    coordination_tools::LISTED_VALUE_CHARS,
-};
+use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
 use crate::{
     adapter::{
+        client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
         holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
         service::{EVENTS_WITHOUT_SINCE, supervisor::FAILURE_TAIL_LINES},
     },

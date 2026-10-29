@@ -9,7 +9,7 @@ use crate::{
     adapter::holder::LineMatcher,
     domain::{
         process::{PatternKind, ReadyCheck, ReadyProbe},
-        value::{LocalPort, LocalUrl, PositiveDuration},
+        value::{LocalPort, LocalUrl, PORT_FORM, PositiveDuration},
     },
 };
 
@@ -17,8 +17,8 @@ use crate::{
 const ONE_PROBE: &str = "name exactly one of log, port or http";
 /// Why `regex` without `log` is refused.
 const REGEX_WITHOUT_LOG: &str = "regex goes only with log";
-/// Why port zero is refused.
-const ZERO_PORT: &str = "port must be from 1 to 65535";
+/// Opens why port zero is refused, before [`PORT_FORM`].
+const ZERO_PORT: &str = "port must be";
 /// Why a zero timeout, or one finer than a millisecond, is refused.
 const ZERO_TIMEOUT: &str = "timeout must be longer than zero, in whole milliseconds";
 
@@ -104,7 +104,8 @@ impl TryFrom<ReadyEntry> for ReadyCheck {
                     .map_err(|error| invalid(error.to_string()))?,
             ),
             (None, Some(port), None) => ReadyProbe::Port(
-                LocalPort::try_new(port).map_err(|_| invalid(ZERO_PORT.to_string()))?,
+                LocalPort::try_new(port)
+                    .map_err(|_| invalid(format!("{ZERO_PORT} {PORT_FORM}")))?,
             ),
             (None, None, Some(url)) => ReadyProbe::Http(
                 url.parse::<LocalUrl>()

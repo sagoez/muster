@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::domain::{
     config::{RepeatedPort, TooManyPorts},
-    value::NameProblem,
+    value::{NameProblem, PORT_FORM},
 };
 
 /// Why one process entry of a stack file is refused.
@@ -85,7 +85,7 @@ pub enum EntryError {
         reason: String,
     },
     /// `ports` lists zero, which names no port.
-    #[error("ports: {port} is not a port from 1 to 65535")]
+    #[error("ports: {port} is not {PORT_FORM}")]
     InvalidPort {
         /// The port refused.
         port: u16,

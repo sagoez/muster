@@ -1,4 +1,4 @@
-use std::num::TryFromIntError;
+use std::{num::TryFromIntError, sync::LazyLock};
 
 use strum::ParseError;
 
@@ -11,8 +11,8 @@ use crate::domain::{
     pty::SignalNameError,
     value::{
         ByteSizeError, CommandLineError, DescriptionError, DetachKeyError, EnvNameError,
-        EnvValueError, LocalPortError, LogMaxSizeError, PositiveDurationError, ProcessNameError,
-        ScrollbackLinesError, StopGraceError,
+        EnvValueError, LocalPortError, LogMaxSizeError, PORT_FORM, PositiveDurationError,
+        ProcessNameError, ScrollbackLinesError, StopGraceError,
     },
 };
 
@@ -47,8 +47,8 @@ const NOT_A_GRACE: &str =
 const NOT_AN_ENV_NAME: &str = "it is empty, holds '=' or NUL, or starts with MUSTER_";
 /// Why a stored variable value is refused.
 const HOLDS_NUL: &str = "it holds a NUL character";
-/// Why a stored port is refused.
-const NOT_A_PORT: &str = "it is not a port from 1 to 65535";
+/// Why a stored port is refused, naming [`PORT_FORM`].
+static NOT_A_PORT: LazyLock<String> = LazyLock::new(|| format!("it is not {PORT_FORM}"));
 /// Why stored idle-stop columns that do not go together are refused.
 pub(super) const IDLE_STOP_MISMATCHED: &str =
     "it names a kind muster does not know, or milliseconds that kind does not take";
@@ -173,7 +173,7 @@ impl Refusal for LocalPortError {
     /// The reason a stored port is refused.
     fn reason(&self) -> &'static str {
         match self {
-            Self::GreaterViolated => NOT_A_PORT,
+            Self::GreaterViolated => NOT_A_PORT.as_str(),
         }
     }
 }

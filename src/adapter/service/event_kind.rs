@@ -18,7 +18,9 @@ pub enum EventKind {
     Exited,
     /// A run failed on its own.
     Crashed,
-    /// A run ended and its restart policy will start it again.
+    /// A run was stopped so a restart could start it again. A run that ends
+    /// on its own is `exited` or `crashed`, whether or not its policy
+    /// restarts it.
     Restarting,
     /// A run was stopped on request.
     Stopped,

@@ -2,7 +2,10 @@ use serde::Serialize;
 use strum::{Display, EnumMessage};
 
 use super::action::Action;
-use crate::{adapter::service::ProcessStatus, domain::process::ProcessState};
+use crate::{
+    adapter::service::{ExitReason, ProcessStatus},
+    domain::process::ProcessState,
+};
 
 /// What became of one process a command acted on, once it settled or the
 /// command stopped waiting. Each variant's message is how a person reads it.
@@ -22,7 +25,7 @@ pub enum Outcome {
     /// It ran and exited successfully.
     #[strum(message = "ran and exited")]
     Exited,
-    /// It failed, or is crash-looping under its restart policy.
+    /// It failed, whether or not its restart policy starts it again.
     #[strum(message = "crashed")]
     Crashed,
     /// A child the service cannot reach may still run, so it was not started.
@@ -255,6 +258,7 @@ fn launched(
             Outcome::NotStarted
         },
         ProcessState::Exited => Outcome::Exited,
+        ProcessState::Restarting if exited_cleanly(after) => Outcome::Exited,
         ProcessState::Crashed | ProcessState::Restarting => Outcome::Crashed,
         ProcessState::Pending
         | ProcessState::Starting
@@ -263,12 +267,27 @@ fn launched(
     }
 }
 
+/// Whether `status`'s last run ended on its own with status 0, as a
+/// `restart: always` process between runs may have.
+fn exited_cleanly(status: &ProcessStatus) -> bool {
+    status
+        .last_exit()
+        .as_ref()
+        .is_some_and(|exit| exit.reason() == ExitReason::Exited)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::value::{Pid, ProcessName};
+    use crate::{
+        adapter::service::LastExit,
+        domain::{
+            pty::{ExitCause, ExitOutcome},
+            value::{Pid, ProcessName},
+        },
+    };
 
     /// `api` listed in `state` with `pid` after `restarts` restarts.
     fn status(state: ProcessState, pid: Option<u32>, restarts: u32) -> ProcessStatus {
@@ -284,6 +303,43 @@ mod tests {
             .last_exit(None)
             .stop_grace(Duration::from_secs(5))
             .build()
+    }
+
+    /// `api` waiting to restart after its last run ended with `outcome`.
+    fn restarting_after(outcome: ExitOutcome) -> ProcessStatus {
+        let reason = ExitReason::of(&outcome, false);
+        ProcessStatus::builder()
+            .name(ProcessName::try_new("api").unwrap())
+            .state(ProcessState::Restarting)
+            .pid(None)
+            .uptime(None)
+            .restarts(1)
+            .usage(None)
+            .attached(0)
+            .last_exit(Some(
+                LastExit::builder().outcome(outcome).reason(reason).build(),
+            ))
+            .stop_grace(Duration::from_secs(5))
+            .build()
+    }
+
+    /// A `restart: always` run that exited 0 is reported as exited, a failed
+    /// one as crashed, whatever the policy does next.
+    #[test]
+    fn a_restarting_process_is_reported_by_how_its_run_ended() {
+        let stopped = status(ProcessState::Exited, None, 0);
+        let settle = |after: ProcessStatus| {
+            Outcome::settle(Action::Start, Some(&stopped), Some(&after), true)
+        };
+
+        assert_eq!(
+            settle(restarting_after(ExitOutcome::Succeeded)),
+            Outcome::Exited
+        );
+        assert_eq!(
+            settle(restarting_after(ExitOutcome::Failed(ExitCause::Status(1)))),
+            Outcome::Crashed
+        );
     }
 
     #[test]

@@ -497,9 +497,7 @@ impl Supervisor {
             ExitReason::Crashed | ExitReason::Killed | ExitReason::FailedToStart => {
                 EventKind::Crashed
             },
-            ExitReason::Stopped | ExitReason::Exited if next == ProcessState::Restarting => {
-                EventKind::Restarting
-            },
+            ExitReason::Stopped if next == ProcessState::Restarting => EventKind::Restarting,
             ExitReason::Stopped => EventKind::Stopped,
             ExitReason::Exited => EventKind::Exited,
         };
@@ -1437,6 +1435,20 @@ mod tests {
         end(&mut harness, "api", ExitOutcome::Succeeded);
 
         assert_eq!(event_kinds(&harness), [
+            EventKind::Started,
+            EventKind::Exited
+        ]);
+    }
+
+    /// A `restart: always` run that exits 0 is recorded as exited, never as
+    /// crashed or restarting, though its policy starts it again.
+    #[test]
+    fn a_clean_exit_under_restart_always_is_recorded_as_exited() {
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+
+        end(&mut harness, "api", ExitOutcome::Succeeded);
+
+        assert_eq!(event_kinds(&harness)[..2], [
             EventKind::Started,
             EventKind::Exited
         ]);

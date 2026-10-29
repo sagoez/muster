@@ -38,7 +38,7 @@ use muster::{
         shell::{SHELL_REPORT_SUBCOMMAND, ShellFiles},
         store::SqliteStore,
     },
-    constants::APP_NAME,
+    constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
         config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
@@ -63,6 +63,10 @@ use crate::common::{
 
 /// The stack file `export` and `import` use by default.
 const STACK_FILE: &str = "muster.yml";
+/// A wrapper a command can run under, between it and the shell.
+const TIMEOUT: &str = "timeout";
+/// How long that wrapper lets the command run, in seconds.
+const WRAPPER_SECONDS: &str = "60";
 /// Exit code of an action that failed.
 const ACTION_FAILED: i32 = 1;
 /// Exit code of a command line that does not parse.
@@ -4674,6 +4678,38 @@ fn the_filesystem_root_and_home_are_never_registered() {
     }
     let (_, projects) = scratch.json(&["projects"]);
     assert_eq!(projects, serde_json::json!([]), "{projects}");
+}
+
+/// Correctness M4: `doctor` run through a wrapper, here `timeout`, from the
+/// shell whose pid the hook exported finds the hook, though that shell is
+/// its grandparent; a pid that is no ancestor still warns.
+#[test]
+fn doctor_finds_the_hook_of_a_shell_it_runs_under_through_a_wrapper() {
+    let scratch = Scratch::new();
+    let shell_check = |exported: u32| {
+        let output = scratch
+            .isolated(Path::new(TIMEOUT))
+            .args([WRAPPER_SECONDS, BINARY, "doctor", "--json"])
+            .env(MUSTER_SHELL_ENV, exported.to_string())
+            .output()
+            .unwrap();
+        parsed(&output)["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == "shell-hook")
+            .cloned()
+            .unwrap_or_else(|| panic!("no shell hook check: {}", shown(&output)))
+    };
+
+    let found = shell_check(process::id());
+    assert_eq!(found["outcome"], "ok", "{found}");
+
+    let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
+    let missing = shell_check(stranger.id());
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+    assert_eq!(missing["outcome"], "warn", "{missing}");
 }
 
 /// The report a shell's hook runs at each prompt prints nothing and exits 0

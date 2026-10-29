@@ -29,8 +29,13 @@ use crate::{
     domain::{
         config::{ConfigError, ProcessSpec, Stack},
         port::{LocalState, ProjectStore, StackStore},
+        value::Pid,
     },
 };
+
+/// Most of doctor's ancestors searched for the hooked shell: past any chain
+/// of wrappers it runs under.
+pub const HOOK_SEARCH_DEPTH: usize = 16;
 
 /// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
@@ -353,18 +358,23 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
     }
 }
 
-/// Whether the shell doctor runs in, `parent`, is the one the hook exported
-/// as `exported`; when it is not, warns with the line that loads the hook
-/// for the shell `shell_path` names, or for every shell when it names none
-/// the hook supports.
+/// Whether the shell the hook exported as `exported` is one of doctor's
+/// `ancestors`, so doctor runs in it even under `env`, `timeout` or
+/// `mise exec`; when it is not, warns with the line that loads the hook for
+/// the shell `shell_path` names, or for every shell when it names none the
+/// hook supports.
 pub fn shell_hook_probe(
     exported: Option<&str>,
-    parent: Option<u32>,
+    ancestors: &[Pid],
     shell_path: Option<&str>,
 ) -> Probe {
     let hooked = exported
         .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .is_some_and(|pid| Some(pid) == parent);
+        .is_some_and(|pid| {
+            ancestors
+                .iter()
+                .any(|ancestor| ancestor.into_inner() == pid)
+        });
     if hooked {
         return probe(
             DoctorCheck::ShellHook,
@@ -622,28 +632,35 @@ mod tests {
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
     }
 
-    /// The hook is found only when the shell doctor runs in is the one that
-    /// exported its pid; otherwise the probe warns with the line for
-    /// `$SHELL`, or every shell's line when `$SHELL` is none the hook
-    /// supports.
-    #[test]
-    fn doctor_finds_the_hook_only_when_the_parent_is_the_hooked_shell() {
-        let active = shell_hook_probe(Some("4242"), Some(4242), Some("/bin/zsh"));
-        assert_eq!(active.outcome(), ProbeOutcome::Ok);
-        assert_eq!(active.detail(), HOOK_ACTIVE);
-        assert_eq!(active.check(), DoctorCheck::ShellHook);
+    /// The pids `raw` names.
+    fn pids(raw: &[u32]) -> Vec<Pid> {
+        raw.iter().map(|pid| Pid::try_new(*pid).unwrap()).collect()
+    }
 
-        for (exported, parent) in [
-            (Some("4242"), Some(4243)),
-            (None, Some(4242)),
-            (Some("4242"), None),
-            (Some("not a pid"), Some(4242)),
+    /// The hook is found only when the shell that exported its pid is one of
+    /// doctor's ancestors, its parent or further up, as under `env` or
+    /// `timeout`; otherwise the probe warns with the line for `$SHELL`, or
+    /// every shell's line when `$SHELL` is none the hook supports.
+    #[test]
+    fn doctor_finds_the_hook_only_when_an_ancestor_is_the_hooked_shell() {
+        for ancestors in [&[4242, 300][..], &[4300, 4242, 300]] {
+            let active = shell_hook_probe(Some("4242"), &pids(ancestors), Some("/bin/zsh"));
+            assert_eq!(active.outcome(), ProbeOutcome::Ok, "{ancestors:?}");
+            assert_eq!(active.detail(), HOOK_ACTIVE);
+            assert_eq!(active.check(), DoctorCheck::ShellHook);
+        }
+
+        for (exported, ancestors) in [
+            (Some("4242"), &[4243, 300][..]),
+            (None, &[4242]),
+            (Some("4242"), &[]),
+            (Some("not a pid"), &[4242]),
         ] {
-            let probe = shell_hook_probe(exported, parent, Some("/usr/bin/zsh"));
+            let probe = shell_hook_probe(exported, &pids(ancestors), Some("/usr/bin/zsh"));
             assert_eq!(
                 probe.outcome(),
                 ProbeOutcome::Warn,
-                "{exported:?} {parent:?}"
+                "{exported:?} {ancestors:?}"
             );
             assert_eq!(
                 probe.detail(),
@@ -651,7 +668,7 @@ mod tests {
             );
         }
 
-        let fish = shell_hook_probe(None, Some(1), Some("/opt/homebrew/bin/fish"));
+        let fish = shell_hook_probe(None, &pids(&[2]), Some("/opt/homebrew/bin/fish"));
         assert!(
             fish.detail().ends_with("muster shell-init fish | source"),
             "{}",
@@ -659,7 +676,7 @@ mod tests {
         );
 
         for shell_path in [Some("/bin/tcsh"), None] {
-            let unknown = shell_hook_probe(None, Some(4242), shell_path);
+            let unknown = shell_hook_probe(None, &pids(&[4242]), shell_path);
             assert_eq!(unknown.outcome(), ProbeOutcome::Warn);
             for shell in HookShell::iter() {
                 assert!(

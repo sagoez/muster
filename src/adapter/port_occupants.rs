@@ -1,8 +1,7 @@
 use listeners::{Listener, Protocol, SocketState};
-use sysinfo::{
-    Pid as SysinfoPid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
-};
+use sysinfo::{Pid as SysinfoPid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+use super::process_tree::ancestors;
 use crate::domain::{
     port::{PortOccupant, PortOccupants},
     value::{LocalPort, Pid},
@@ -83,32 +82,9 @@ impl OsPortOccupants {
             PortOccupant::builder()
                 .pid(pid)
                 .command(command)
-                .ancestors(self.ancestors(pid))
+                .ancestors(ancestors(&mut self.system, pid, MAX_ANCESTORS))
                 .build(),
         )
-    }
-
-    /// The parent of `pid`, its parent and so on, at most [`MAX_ANCESTORS`]
-    /// of them, reading each from the process table as it is reached.
-    fn ancestors(&mut self, pid: Pid) -> Vec<Pid> {
-        let mut ancestors = Vec::new();
-        let mut current = SysinfoPid::from_u32(pid.into_inner());
-        while ancestors.len() < MAX_ANCESTORS {
-            let Some(parent) = self.system.process(current).and_then(Process::parent) else {
-                break;
-            };
-            let Ok(parent_pid) = Pid::try_new(parent.as_u32()) else {
-                break;
-            };
-            ancestors.push(parent_pid);
-            self.system.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[parent]),
-                true,
-                ProcessRefreshKind::nothing().without_tasks(),
-            );
-            current = parent;
-        }
-        ancestors
     }
 }
 

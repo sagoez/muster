@@ -18,7 +18,8 @@ use clap::{
 };
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
-use rustix::process::getppid;
+use rustix::process::getpid;
+use sysinfo::System;
 
 use super::{
     add::{add, add_rows},
@@ -36,8 +37,9 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
-        processes_probe, project_probe, projects_probe, shell_hook_probe, socket_probe,
+        HOOK_SEARCH_DEPTH, any_failed, completions_probe, database_probe, doctor_report,
+        error_chain, legacy_probe, processes_probe, project_probe, projects_probe,
+        shell_hook_probe, socket_probe,
     },
     doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
@@ -93,6 +95,7 @@ use crate::{
             resolve_project,
         },
         private_dir::state_dir,
+        process_tree::ancestors,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
@@ -104,7 +107,7 @@ use crate::{
         occupancy::ReportStamp,
         port::LocalState,
         project::Project,
-        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, Pid, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -1353,10 +1356,14 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
-    let parent = getppid().and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok());
+    let ancestors = u32::try_from(getpid().as_raw_nonzero().get())
+        .ok()
+        .and_then(|this| Pid::try_new(this).ok())
+        .map(|this| ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
+        .unwrap_or_default();
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),
-        parent,
+        &ancestors,
         shell.as_deref(),
     ));
     let view = DoctorView::builder()

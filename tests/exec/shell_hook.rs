@@ -44,6 +44,9 @@ const SHORT_IDLE_STOP_TIME: Duration = Duration::from_secs(1);
 const STOP_SLACK: Duration = SHELL_SWEEP_INTERVAL;
 /// Prompts typed in the tests that count reports or look for noise.
 const PROMPTS: u64 = 5;
+/// Prompts a seq read may miss: the one after the last marker, whose hook
+/// may not have run yet when its reports are found done.
+const UNSEEN_PROMPTS: u64 = 1;
 /// The stack file `import` reads.
 const STACK_FILE: &str = "muster.yml";
 /// The subcommand the service runs as.
@@ -313,25 +316,27 @@ fn the_hook_prints_no_job_control_noise() {
 }
 
 /// A hook loaded a second time is not added again: each prompt reports
-/// once, so the reported seq grows by one per prompt.
+/// once, so the reported seq grows by one per prompt, give or take the
+/// prompt each reading may run ahead of; a hook added twice grows it twice
+/// as fast.
 #[test]
 fn loading_the_hook_twice_reports_once_per_prompt() {
     each_shell("loading twice", |scratch, shell, program| {
         let session = ShellSession::start(scratch, shell, program);
         session.load_hook();
         session.wait_reports_done();
-        let before = session.record().map(|record| record.seq().into_inner());
+        let before = session.record().unwrap().seq().into_inner();
 
         for _ in 0..PROMPTS {
             session.settle();
         }
         session.wait_reports_done();
 
-        let after = session.record().map(|record| record.seq().into_inner());
-        assert_eq!(
-            after,
-            before.map(|seq| seq + PROMPTS),
-            "{shell}: {before:?} then {after:?}"
+        let after = session.record().unwrap().seq().into_inner();
+        let grown = after - before;
+        assert!(
+            (PROMPTS - UNSEEN_PROMPTS..=PROMPTS + UNSEEN_PROMPTS).contains(&grown),
+            "{shell}: {before} then {after} over {PROMPTS} prompts"
         );
     });
 }

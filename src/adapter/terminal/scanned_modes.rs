@@ -30,6 +30,12 @@ const SAVE_CURSOR_FINAL: u8 = b'7';
 const RESTORE_CURSOR_FINAL: u8 = b'8';
 /// Top margin assumed when DECSTBM omits it.
 const DEFAULT_TOP_MARGIN: usize = 1;
+/// Intermediate byte of DECSCUSR (`CSI Ps SP q`).
+const CURSOR_STYLE_INTERMEDIATE: u8 = b' ';
+/// Final of DECSCUSR.
+const CURSOR_STYLE_FINAL: char = 'q';
+/// DECSCUSR parameter that returns the cursor to the terminal's own style.
+const DEFAULT_CURSOR_STYLE: u16 = 0;
 
 /// The modes a [`ModeScanner`](super::mode_scanner::ModeScanner) follows,
 /// and what the byte it last fed completed.
@@ -39,6 +45,9 @@ pub(super) struct Modes {
     pub(super) origin: bool,
     /// Origin mode as the saved cursor holds it.
     saved_origin: bool,
+    /// Whether the child chose a cursor style, rather than leaving the
+    /// terminal's own.
+    pub(super) cursor_style_set: bool,
     /// What the byte being fed completed.
     pub(super) observed: Observation,
 }
@@ -99,6 +108,7 @@ impl Perform for Modes {
             FULL_RESET_FINAL => {
                 self.origin = false;
                 self.saved_origin = false;
+                self.cursor_style_set = false;
                 self.observed = Observation::FullReset;
             },
             SAVE_CURSOR_FINAL => self.saved_origin = self.origin,
@@ -108,8 +118,8 @@ impl Perform for Modes {
         }
     }
 
-    /// Follows private mode switches, DECSTBM and TBC; a sequence the parser
-    /// had to cut short is ignored, as the emulator ignores it.
+    /// Follows private mode switches, DECSTBM, TBC and DECSCUSR; a sequence
+    /// the parser had to cut short is ignored, as the emulator ignores it.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         if ignore {
             return;
@@ -118,6 +128,11 @@ impl Perform for Modes {
             ([PRIVATE_MARKER], SET_MODE_FINAL) => self.private_modes(params, true),
             ([PRIVATE_MARKER], RESET_MODE_FINAL) => self.private_modes(params, false),
             ([], SCROLL_REGION_FINAL) => self.observed = Self::scroll_region(params),
+            ([CURSOR_STYLE_INTERMEDIATE], CURSOR_STYLE_FINAL) => {
+                self.cursor_style_set = param_values(params)
+                    .next()
+                    .is_some_and(|style| style != DEFAULT_CURSOR_STYLE);
+            },
             ([], CLEAR_TABS_FINAL) => {
                 self.observed = match param_values(params).next() {
                     Some(CLEAR_CURRENT_TAB) => Observation::ClearTabStop,

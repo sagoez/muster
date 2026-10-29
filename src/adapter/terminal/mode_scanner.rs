@@ -43,6 +43,12 @@ impl ModeScanner {
         self.modes.origin
     }
 
+    /// Whether DECSCUSR chose a cursor style other than the terminal's own
+    /// after what was fed.
+    pub fn cursor_style_set(&self) -> bool {
+        self.modes.cursor_style_set
+    }
+
     /// Consumes one output byte and reports what, if anything, it completed.
     pub fn feed(&mut self, byte: u8) -> Observation {
         self.modes.observed = Observation::Nothing;

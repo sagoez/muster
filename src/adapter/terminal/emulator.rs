@@ -363,8 +363,12 @@ impl TerminalEmulator {
         }
     }
 
-    /// Appends the DECSCUSR sequence for the cursor style, when it has one.
+    /// Appends the DECSCUSR sequence for the cursor style the child chose;
+    /// none when it chose none, so the viewer's own cursor is left alone.
     fn push_cursor_style(&self, out: &mut String) {
+        if !self.scanner.cursor_style_set() {
+            return;
+        }
         let style = self.term.cursor_style();
         let blinking_code = match style.shape {
             CursorShape::Block => CURSOR_BLINKING_BLOCK,
@@ -763,8 +767,8 @@ mod tests {
     };
 
     use super::{
-        CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND, TerminalEmulator, resolve_color,
-        to_color,
+        CURSOR_STYLE_FINAL, CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND,
+        TerminalEmulator, resolve_color, to_color,
     };
     use crate::{
         adapter::terminal::bounded_parser::MAX_PENDING_BYTES,
@@ -899,6 +903,24 @@ mod tests {
         rebuilt.process(later);
         assert!(live.screen_text().starts_with("top"));
         assert_screens_match(&live, &rebuilt);
+    }
+
+    /// A child that never chose a cursor style, or went back to the
+    /// terminal's own, gets no DECSCUSR in its repaint; a chosen one does.
+    #[test]
+    fn repaint_sets_the_cursor_style_only_when_the_child_chose_one() {
+        let decscusr = |emulator: &TerminalEmulator| {
+            String::from_utf8_lossy(&emulator.repaint()).contains(CURSOR_STYLE_FINAL)
+        };
+        let mut live = TerminalEmulator::new(rows(3), cols(10), 0, ColorScheme::Dark);
+        live.process(b"plain");
+        assert!(!decscusr(&live));
+        live.process(b"\x1b[2 q");
+        assert!(decscusr(&live));
+        live.process(b"\x1b[0 q");
+        assert!(!decscusr(&live));
+        live.process(b"\x1b[6 q\x1bc");
+        assert!(!decscusr(&live));
     }
 
     /// A repaint taken just after a line was filled to its last column keeps

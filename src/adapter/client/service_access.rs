@@ -2,7 +2,7 @@ use super::{
     client_error::ClientError, service_client::ServiceClient, service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{ProjectStatus, ServiceRequest},
+    adapter::service::{Notice, ProjectStatus, ServiceRequest},
     domain::value::ProjectRoot,
 };
 
@@ -22,6 +22,15 @@ pub trait ServiceAccess: Send + Sync {
     /// Returns a [`ClientError`] when a service holds the socket but does
     /// not answer.
     fn loaded_status(&self, project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError>;
+
+    /// The recent notices a running service raised about `project` and
+    /// itself, oldest first, without starting the service; none when no
+    /// service runs.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when a service holds the socket but does
+    /// not answer.
+    fn running_notices(&self, project: &ProjectRoot) -> Result<Option<Vec<Notice>>, ClientError>;
 
     /// Whether the service runs, its version and the projects it has
     /// loaded, without starting or replacing it.

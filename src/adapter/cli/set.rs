@@ -22,6 +22,7 @@ use crate::{
     },
     domain::{
         config::{ConfigError, FieldEdit, ProcessChange},
+        coordination::Author,
         value::Description,
     },
 };
@@ -142,7 +143,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
     let name = resolve_among(stack.names(), &project, &args.name)?;
     let spec = invocation
         .editor(store.as_ref())
-        .change(root, &name, &change)?;
+        .change(root, &name, &change, &Author::human())?;
     let running = runs_now(invocation.service(), root, spec.name());
     Ok(SetView::builder()
         .project(ProjectIdentityView::from(&project))

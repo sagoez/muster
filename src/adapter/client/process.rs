@@ -18,6 +18,7 @@ use super::{
     client_error::ClientError,
     log_read::LogRead,
     log_slice_view::LogSliceView,
+    notice_log::NoticeLog,
     notice_view::NoticeView,
     outcome::Outcome,
     process_outcome::ProcessOutcome,
@@ -439,6 +440,25 @@ pub fn notices(
     with_edits(service_notices(client, project)?, edits, project)
 }
 
+/// The agent edits `edits` keeps for `project`, with the recent notices of
+/// `project` and of the service when one already runs, oldest first. The
+/// service is never started.
+///
+/// # Errors
+/// Returns a [`ClientError`] when a running service does not answer, or the
+/// edit log cannot be read.
+pub fn stored_notices(
+    service: &dyn ServiceAccess,
+    edits: &dyn StackEditLog,
+    project: &Project,
+) -> Result<NoticeLog, ClientError> {
+    let live = service.running_notices(project.root())?;
+    Ok(NoticeLog::builder()
+        .service_running(live.is_some())
+        .notices(with_edits(live.unwrap_or_default(), edits, project)?)
+        .build())
+}
+
 /// `notices` with the agent edits `edits` keeps for `project`, oldest first.
 ///
 /// # Errors
@@ -849,11 +869,17 @@ fn refusal(
 mod tests {
     use std::fs;
 
+    use tempfile::TempDir;
+
     use super::*;
     use crate::{
         adapter::{
+            client::unstarted_service::UnstartedService,
             service::NoticeLevel,
-            store::test_support::{fresh_store, spec},
+            store::{
+                SqliteStore,
+                test_support::{fresh_store, spec},
+            },
         },
         domain::{config::StackEdit, coordination::Author, port::StackStore},
     };
@@ -872,39 +898,77 @@ mod tests {
         assert_eq!(wait_end_at_deadline(own, own), WaitEnd::TimedOut);
     }
 
-    /// An agent edit recorded while no service ran is shown among the
-    /// service's notices, in time order, as a warning on its process.
-    #[test]
-    fn a_stored_edit_joins_the_service_notices_in_time_order() {
+    /// A store whose `shop` project had its `web` process removed by an
+    /// agent, the edit that removal recorded, and the project.
+    fn edited_project() -> (SqliteStore, TempDir, Project, StackEdit) {
         let (store, scratch) = fresh_store();
         let dir = scratch.path().join("shop");
         fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::try_new(dir).unwrap();
-        let registration = store.add_process(&root, &spec("web", "true")).unwrap();
-        let project = registration.project().clone();
+        let registration = store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let name = ProcessName::try_new("web").unwrap();
+        let agent = Author::agent("claude");
+        store.remove_process(&root, &name, &agent).unwrap();
         let edit = StackEdit::Removed {
-            author: Author::agent("claude"),
-            name: ProcessName::try_new("web").unwrap(),
+            author: agent,
+            name,
         };
-        let earlier = Notice::builder()
+        (store, scratch, registration.project().clone(), edit)
+    }
+
+    /// A notice raised long before any edit.
+    fn earlier() -> Notice {
+        Notice::builder()
             .at(SystemTime::UNIX_EPOCH)
             .project(None)
             .process(None)
             .level(NoticeLevel::Error)
             .message("old".to_string())
-            .build();
+            .build()
+    }
 
-        store.record_edit(&root, &edit).unwrap();
-        let notices = with_edits(vec![earlier.clone()], &store, &project).unwrap();
+    /// An agent edit recorded while no service ran is shown among the
+    /// service's notices, in time order, as a warning on its process.
+    #[test]
+    fn a_stored_edit_joins_the_service_notices_in_time_order() {
+        let (store, _scratch, project, edit) = edited_project();
+
+        let notices = with_edits(vec![earlier()], &store, &project).unwrap();
 
         assert_eq!(notices.len(), 2);
-        assert_eq!(notices[0], earlier);
+        assert_eq!(notices[0], earlier());
         assert_eq!(notices[1].message(), &edit.to_string());
-        assert_eq!(notices[1].project().as_ref(), Some(&root));
+        assert_eq!(notices[1].project().as_ref(), Some(project.root()));
         assert_eq!(
             notices[1].process().as_ref().map(AsRef::as_ref),
             Some("web")
         );
         assert_eq!(*notices[1].level(), NoticeLevel::Warning);
+    }
+
+    /// The stored notices are read with no service running and none started,
+    /// and a running service's own join them.
+    #[test]
+    fn stored_notices_never_start_the_service() {
+        let (store, _scratch, project, edit) = edited_project();
+
+        let idle = stored_notices(&UnstartedService { running: None }, &store, &project).unwrap();
+        let live = stored_notices(
+            &UnstartedService {
+                running: Some(vec![earlier()]),
+            },
+            &store,
+            &project,
+        )
+        .unwrap();
+
+        assert!(!idle.service_running());
+        let idle_messages: Vec<&String> = idle.notices().iter().map(Notice::message).collect();
+        assert_eq!(idle_messages, [&edit.to_string()]);
+        assert!(live.service_running());
+        assert_eq!(live.notices().len(), 2);
+        assert_eq!(live.notices()[0], earlier());
     }
 }

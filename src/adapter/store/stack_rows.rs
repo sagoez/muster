@@ -9,6 +9,7 @@ use rusqlite::{
 };
 
 use super::{
+    edit_log_rows::record_edit,
     project_rows::{ProjectRow, find_project, register, require_project, root_text},
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
@@ -18,8 +19,9 @@ use super::{
 use crate::domain::{
     config::{
         ConfigError, Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-        Stack,
+        Stack, StackEdit,
     },
+    coordination::Author,
     port::{StackReader, StackStore},
     process::{ReadyCheck, ReadyProbe, StopPolicy},
     project::Project,
@@ -341,11 +343,16 @@ impl StackStore for SqliteStore {
         &self,
         root: &ProjectRoot,
         spec: &ProcessSpec,
+        author: &Author,
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
             let (project_id, registration) = register(conn, root)?;
             insert_process(conn, project_id, spec)?;
             bump_revision(conn, project_id)?;
+            record_edit(conn, project_id, &StackEdit::Added {
+                author: author.clone(),
+                spec: spec.clone(),
+            })?;
             Ok(registration)
         })
     }
@@ -355,6 +362,7 @@ impl StackStore for SqliteStore {
         root: &ProjectRoot,
         name: &ProcessName,
         change: &ProcessChange,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError> {
         self.write(|conn| {
             let project = require_project(conn, root)?;
@@ -365,6 +373,11 @@ impl StackStore for SqliteStore {
                 .with_change(change);
             update_process(conn, project_id, &changed)?;
             bump_revision(conn, project_id)?;
+            record_edit(conn, project_id, &StackEdit::Changed {
+                author: author.clone(),
+                fields: change.fields(),
+                spec: changed.clone(),
+            })?;
             Ok(changed)
         })
     }
@@ -373,6 +386,7 @@ impl StackStore for SqliteStore {
         &self,
         root: &ProjectRoot,
         name: &ProcessName,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError> {
         self.write(|conn| {
             let project = require_project(conn, root)?;
@@ -380,6 +394,10 @@ impl StackStore for SqliteStore {
             let removed = stack_of(conn, project)?.require(name)?.clone();
             delete_process(conn, project_id, name)?;
             bump_revision(conn, project_id)?;
+            record_edit(conn, project_id, &StackEdit::Removed {
+                author: author.clone(),
+                name: removed.name().clone(),
+            })?;
             Ok(removed)
         })
     }
@@ -495,9 +513,15 @@ mod tests {
         let root = root(&scratch);
         assert_eq!(store.stack(&root).unwrap(), None, "not registered yet");
 
-        store.add_process(&root, &full_spec()).unwrap();
-        store.add_process(&root, &spec("api", "cargo run")).unwrap();
-        store.add_process(&root, &spec("db", "postgres")).unwrap();
+        store
+            .add_process(&root, &full_spec(), &Author::human())
+            .unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
+        store
+            .add_process(&root, &spec("db", "postgres"), &Author::human())
+            .unwrap();
 
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(names_of(&stack), ["web", "api", "db"]);
@@ -510,11 +534,11 @@ mod tests {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
         store
-            .add_process(&root, &spec(CAFE_COMPOSED, "true"))
+            .add_process(&root, &spec(CAFE_COMPOSED, "true"), &Author::human())
             .unwrap();
 
         let error = store
-            .add_process(&root, &spec(CAFE_DECOMPOSED, "false"))
+            .add_process(&root, &spec(CAFE_DECOMPOSED, "false"), &Author::human())
             .unwrap_err();
 
         assert!(matches!(
@@ -531,9 +555,15 @@ mod tests {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
         store
-            .add_process(&root, &full_spec().with_ready(Some(port_check())))
+            .add_process(
+                &root,
+                &full_spec().with_ready(Some(port_check())),
+                &Author::human(),
+            )
             .unwrap();
-        store.add_process(&root, &spec("api", "cargo run")).unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
         let change = ProcessChange::builder()
             .command(Some(CommandLine::try_new("pnpm dev").unwrap()))
             .working_dir(FieldEdit::Clear)
@@ -541,7 +571,9 @@ mod tests {
             .stop_signal(Some(StopSignal::Interrupt))
             .build();
 
-        let changed = store.change_process(&root, &name("web"), &change).unwrap();
+        let changed = store
+            .change_process(&root, &name("web"), &change, &Author::human())
+            .unwrap();
 
         assert_eq!(
             changed,
@@ -572,6 +604,7 @@ mod tests {
             .add_process(
                 &root,
                 &spec("web", "npm run dev").with_ready(Some(regex.clone())),
+                &Author::human(),
             )
             .unwrap();
         assert_eq!(
@@ -585,14 +618,16 @@ mod tests {
             .build();
         assert_eq!(
             store
-                .change_process(&root, &name("web"), &set)
+                .change_process(&root, &name("web"), &set, &Author::human())
                 .unwrap()
                 .ready(),
             &Some(http)
         );
 
         let clear = ProcessChange::builder().ready(FieldEdit::Clear).build();
-        store.change_process(&root, &name("web"), &clear).unwrap();
+        store
+            .change_process(&root, &name("web"), &clear, &Author::human())
+            .unwrap();
         assert_eq!(
             store.stack(&root).unwrap().unwrap().processes()[0].ready(),
             &None
@@ -612,7 +647,11 @@ mod tests {
             .build();
 
         let error = store
-            .add_process(&root, &spec("web", "npm run dev").with_ready(Some(endless)))
+            .add_process(
+                &root,
+                &spec("web", "npm run dev").with_ready(Some(endless)),
+                &Author::human(),
+            )
             .unwrap_err();
 
         assert!(matches!(error, ConfigError::TooLarge { .. }), "{error}");
@@ -625,16 +664,20 @@ mod tests {
         let root = root(&scratch);
         let change = ProcessChange::builder().autostart(Some(true)).build();
         assert!(matches!(
-            store.change_process(&root, &name("web"), &change),
+            store.change_process(&root, &name("web"), &change, &Author::human()),
             Err(ConfigError::UnknownProject { root: refused }) if &refused == root.as_ref()
         ));
-        store.add_process(&root, &spec("api", "cargo run")).unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
 
         for error in [
             store
-                .change_process(&root, &name("web"), &change)
+                .change_process(&root, &name("web"), &change, &Author::human())
                 .unwrap_err(),
-            store.remove_process(&root, &name("web")).unwrap_err(),
+            store
+                .remove_process(&root, &name("web"), &Author::human())
+                .unwrap_err(),
         ] {
             assert!(matches!(
                 error,
@@ -647,9 +690,13 @@ mod tests {
     fn remove_returns_the_definition_and_keeps_the_project() {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
-        store.add_process(&root, &full_spec()).unwrap();
+        store
+            .add_process(&root, &full_spec(), &Author::human())
+            .unwrap();
 
-        let removed = store.remove_process(&root, &name("web")).unwrap();
+        let removed = store
+            .remove_process(&root, &name("web"), &Author::human())
+            .unwrap();
 
         assert_eq!(removed, full_spec());
         assert!(store.stack(&root).unwrap().unwrap().processes().is_empty());
@@ -673,7 +720,7 @@ mod tests {
         assert_eq!(store.project_at(&root).unwrap(), None);
 
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
         let error = store
             .import(
@@ -720,9 +767,12 @@ mod tests {
             .add_process(
                 &root,
                 &spec("web", "npm run dev").with_ready(Some(port_check())),
+                &Author::human(),
             )
             .unwrap();
-        store.add_process(&root, &spec("api", "cargo run")).unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
 
         let (registration, plan) = store
             .import(
@@ -756,7 +806,7 @@ mod tests {
         };
 
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
         moved(&store);
         store
@@ -766,6 +816,7 @@ mod tests {
                 &ProcessChange::builder()
                     .working_dir(FieldEdit::Clear)
                     .build(),
+                &Author::human(),
             )
             .unwrap();
         moved(&store);
@@ -773,12 +824,14 @@ mod tests {
             .import(&root, &[spec("api", "cargo run")], ImportMode::Merge)
             .unwrap();
         moved(&store);
-        store.remove_process(&root, &name("api")).unwrap();
+        store
+            .remove_process(&root, &name("api"), &Author::human())
+            .unwrap();
         moved(&store);
         assert!(store.remove_project(&root).unwrap());
         assert_eq!(store.stack_revision(&root).unwrap(), None);
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
         moved(&store);
     }
@@ -788,9 +841,11 @@ mod tests {
         let (store, scratch) = fresh_store();
         let root = root(&scratch);
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
-        store.add_process(&root, &spec("api", "cargo run")).unwrap();
+        store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
 
         let (_, plan) = store
             .import(

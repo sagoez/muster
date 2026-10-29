@@ -3,30 +3,32 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::{
         ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft, ProcessSpec,
-        Registration, SettingChange, StackEdit,
+        Registration, SettingChange,
     },
-    port::{SettingsStore, StackEditLog, StackStore, StateChangeNotifier},
+    coordination::Author,
+    port::{SettingsStore, StackStore, StateChangeNotifier},
     settings::Settings,
     value::{ProcessName, ProjectRoot},
 };
 
 /// The one use case the CLI and MCP drive to edit stored state: each method
 /// writes through its store and, once that write committed, tells the notifier.
+/// The store keeps an agent's edit in the project's edit log in that same
+/// write.
 #[derive(TypedBuilder)]
 pub struct StackEditor<'a> {
     /// Where each project's processes are stored.
     stacks: &'a dyn StackStore,
     /// Where the settings are stored.
     settings: &'a dyn SettingsStore,
-    /// Where agent edits are kept for the user.
-    edits: &'a dyn StackEditLog,
     /// Told after each successful write.
     notifier: &'a dyn StateChangeNotifier,
 }
 
 impl StackEditor<'_> {
-    /// Adds `draft` to the project at `root`, filling what it leaves out from
-    /// the `default_*` settings and registering `root` when it is new.
+    /// Adds `draft` for `author` to the project at `root`, filling what it
+    /// leaves out from the `default_*` settings and registering `root` when
+    /// it is new.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the settings cannot be read or the store
@@ -35,14 +37,16 @@ impl StackEditor<'_> {
         &self,
         root: &ProjectRoot,
         draft: ProcessDraft,
+        author: &Author,
     ) -> Result<(Registration, ProcessSpec), ConfigError> {
         let spec = draft.complete(&self.settings.load()?.process_defaults());
-        let registration = self.stacks.add_process(root, &spec)?;
+        let registration = self.stacks.add_process(root, &spec, author)?;
         self.notifier.stack_changed(root);
         Ok((registration, spec))
     }
 
-    /// Applies `change` to the process `name` and returns its new definition.
+    /// Applies `change` for `author` to the process `name` and returns its
+    /// new definition.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the project or process is unknown or the
@@ -52,13 +56,14 @@ impl StackEditor<'_> {
         root: &ProjectRoot,
         name: &ProcessName,
         change: &ProcessChange,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError> {
-        let spec = self.stacks.change_process(root, name, change)?;
+        let spec = self.stacks.change_process(root, name, change, author)?;
         self.notifier.stack_changed(root);
         Ok(spec)
     }
 
-    /// Removes the process `name` and returns what it was.
+    /// Removes the process `name` for `author` and returns what it was.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the project or process is unknown or the
@@ -67,8 +72,9 @@ impl StackEditor<'_> {
         &self,
         root: &ProjectRoot,
         name: &ProcessName,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError> {
-        let spec = self.stacks.remove_process(root, name)?;
+        let spec = self.stacks.remove_process(root, name, author)?;
         self.notifier.stack_changed(root);
         Ok(spec)
     }
@@ -100,16 +106,6 @@ impl StackEditor<'_> {
         self.notifier.settings_changed();
         Ok(settings)
     }
-
-    /// Keeps `edit`, an agent's committed edit to the stack of the project at
-    /// `root`, in its edit log, so the user is told of it whether or not a
-    /// service runs.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the log cannot be written.
-    pub fn announce(&self, root: &ProjectRoot, edit: &StackEdit) -> Result<(), ConfigError> {
-        self.edits.record_edit(root, edit)
-    }
 }
 
 #[cfg(test)]
@@ -119,8 +115,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         color_scheme::ColorScheme,
-        config::{Environment, McpStackEdits, RecordedEdit, Stack},
-        coordination::Author,
+        config::{Environment, McpStackEdits, Stack},
         port::StackReader,
         process::{RestartPolicy, StopSignal},
         project::Project,
@@ -133,10 +128,10 @@ mod tests {
     enum Step {
         /// A store committed a write.
         Wrote,
+        /// The stack store committed a write for this author.
+        WroteFor(Author),
         /// The notifier heard a stack change.
         StackChanged(ProjectRoot),
-        /// The edit log kept an agent's edit, as the user reads it.
-        Announced(String),
         /// The notifier heard a settings change.
         SettingsChanged,
     }
@@ -163,17 +158,26 @@ mod tests {
             StackEditor::builder()
                 .stacks(self)
                 .settings(self)
-                .edits(self)
                 .notifier(self)
                 .build()
         }
 
         /// Records a write, or refuses it when failing.
         fn write(&self) -> Result<(), ConfigError> {
+            self.record(Step::Wrote)
+        }
+
+        /// Records a stack write for `author`, or refuses it when failing.
+        fn write_for(&self, author: &Author) -> Result<(), ConfigError> {
+            self.record(Step::WroteFor(author.clone()))
+        }
+
+        /// Records `step`, or refuses it when failing.
+        fn record(&self, step: Step) -> Result<(), ConfigError> {
             if self.fail {
                 return Err(ConfigError::Storage("refused".into()));
             }
-            self.log.borrow_mut().push(Step::Wrote);
+            self.log.borrow_mut().push(step);
             Ok(())
         }
 
@@ -200,8 +204,9 @@ mod tests {
             &self,
             _root: &ProjectRoot,
             spec: &ProcessSpec,
+            author: &Author,
         ) -> Result<Registration, ConfigError> {
-            self.write()?;
+            self.write_for(author)?;
             self.added.borrow_mut().push(spec.clone());
             Ok(registration())
         }
@@ -211,8 +216,9 @@ mod tests {
             _root: &ProjectRoot,
             _name: &ProcessName,
             change: &ProcessChange,
+            author: &Author,
         ) -> Result<ProcessSpec, ConfigError> {
-            self.write()?;
+            self.write_for(author)?;
             Ok(spec().with_change(change))
         }
 
@@ -220,8 +226,9 @@ mod tests {
             &self,
             _root: &ProjectRoot,
             _name: &ProcessName,
+            author: &Author,
         ) -> Result<ProcessSpec, ConfigError> {
-            self.write()?;
+            self.write_for(author)?;
             Ok(spec())
         }
 
@@ -250,20 +257,6 @@ mod tests {
             let changed = self.settings.borrow().clone().with_change(change);
             *self.settings.borrow_mut() = changed.clone();
             Ok(changed)
-        }
-    }
-
-    impl StackEditLog for Fakes {
-        fn record_edit(&self, _root: &ProjectRoot, edit: &StackEdit) -> Result<(), ConfigError> {
-            self.write()?;
-            self.log
-                .borrow_mut()
-                .push(Step::Announced(edit.to_string()));
-            Ok(())
-        }
-
-        fn edits(&self, _root: &ProjectRoot) -> Result<Vec<RecordedEdit>, ConfigError> {
-            Ok(Vec::new())
         }
     }
 
@@ -329,15 +322,22 @@ mod tests {
     }
 
     /// The write commits first, then the notifier hears the project's root.
-    fn assert_wrote_then_notified(fakes: &Fakes) {
-        assert_eq!(fakes.steps(), [Step::Wrote, Step::StackChanged(root())]);
+    fn assert_wrote_then_notified(fakes: &Fakes, write: Step) {
+        assert_eq!(fakes.steps(), [write, Step::StackChanged(root())]);
+    }
+
+    fn agent() -> Author {
+        Author::agent("claude")
     }
 
     #[test]
     fn add_completes_the_draft_from_the_default_settings() {
         let fakes = Fakes::new(false);
 
-        let (registration, spec) = fakes.editor().add(&root(), draft()).unwrap();
+        let (registration, spec) = fakes
+            .editor()
+            .add(&root(), draft(), &Author::human())
+            .unwrap();
 
         assert!(*registration.newly_registered());
         assert!(*spec.autostart());
@@ -346,29 +346,30 @@ mod tests {
         assert_eq!(*spec.stop().grace_period(), grace(7));
         assert_eq!(spec.environment(), &Environment::empty());
         assert_eq!(*fakes.added.borrow(), [spec]);
-        assert_wrote_then_notified(&fakes);
+        assert_wrote_then_notified(&fakes, Step::WroteFor(Author::human()));
     }
 
+    /// The agent making a change reaches the store's write, which records it.
     #[test]
     fn change_returns_the_new_definition_after_its_write() {
         let fakes = Fakes::new(false);
 
         let changed = fakes
             .editor()
-            .change(&root(), &name(), &change_of())
+            .change(&root(), &name(), &change_of(), &agent())
             .unwrap();
 
         assert!(!*changed.autostart());
-        assert_wrote_then_notified(&fakes);
+        assert_wrote_then_notified(&fakes, Step::WroteFor(agent()));
     }
 
     #[test]
     fn remove_notifies_after_its_write() {
         let fakes = Fakes::new(false);
 
-        fakes.editor().remove(&root(), &name()).unwrap();
+        fakes.editor().remove(&root(), &name(), &agent()).unwrap();
 
-        assert_wrote_then_notified(&fakes);
+        assert_wrote_then_notified(&fakes, Step::WroteFor(agent()));
     }
 
     #[test]
@@ -381,7 +382,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(*plan.added(), [name()]);
-        assert_wrote_then_notified(&fakes);
+        assert_wrote_then_notified(&fakes, Step::Wrote);
     }
 
     /// The change the `change` edits apply.
@@ -404,34 +405,19 @@ mod tests {
         assert_eq!(fakes.steps(), [Step::Wrote, Step::SettingsChanged]);
     }
 
-    /// An agent's edit lands in the edit log as the user reads it, and a log
-    /// that refuses the write is reported rather than dropped.
-    #[test]
-    fn announce_keeps_the_edit_in_the_log() {
-        let fakes = Fakes::new(false);
-        let edit = StackEdit::Removed {
-            author: Author::agent("claude"),
-            name: name(),
-        };
-
-        fakes.editor().announce(&root(), &edit).unwrap();
-
-        assert_eq!(fakes.steps(), [
-            Step::Wrote,
-            Step::Announced(edit.to_string())
-        ]);
-        assert!(Fakes::new(true).editor().announce(&root(), &edit).is_err());
-    }
-
     /// A refused write is never announced.
     #[test]
     fn a_failed_write_notifies_nothing() {
         let fakes = Fakes::new(true);
         let editor = fakes.editor();
 
-        assert!(editor.add(&root(), draft()).is_err());
-        assert!(editor.change(&root(), &name(), &change_of()).is_err());
-        assert!(editor.remove(&root(), &name()).is_err());
+        assert!(editor.add(&root(), draft(), &agent()).is_err());
+        assert!(
+            editor
+                .change(&root(), &name(), &change_of(), &agent())
+                .is_err()
+        );
+        assert!(editor.remove(&root(), &name(), &agent()).is_err());
         assert!(
             editor
                 .import(&root(), &[spec()], ImportMode::Merge)

@@ -349,6 +349,7 @@ mod tests {
         adapter::store::test_support::spec,
         domain::{
             config::SettingChange,
+            coordination::Author,
             port::{ProjectStore, SettingsStore, StackReader, StackStore},
             value::{ProjectRoot, StackRevision},
         },
@@ -448,7 +449,7 @@ mod tests {
             Some(StackRevision::new(0))
         );
         store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
         assert_eq!(
             store.stack_revision(&root).unwrap(),

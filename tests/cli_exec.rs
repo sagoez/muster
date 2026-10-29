@@ -34,15 +34,17 @@ use muster::{
         },
         open_files::OpenFilesLimit,
         service::{
-            BatchOutcome, LaunchEnvironment, Notice, NoticeLevel, ProcessAction, ProcessStatus,
-            ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest,
-            ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
+            BatchOutcome, EventKind, LaunchEnvironment, Notice, NoticeLevel, ProcessAction,
+            ProcessStatus, ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError,
+            ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
     },
     domain::{
-        port::{Notifier, PortOccupants},
+        config::ProcessChange,
+        coordination::Author,
+        port::{Notifier, PortOccupants, StackStore},
         process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
@@ -492,7 +494,8 @@ fn in_process_service(
             .ports(Box::new(QuietPorts))
             .metrics(None)
             .stacks(Box::new(store.clone()))
-            .settings(Box::new(store))
+            .settings(Box::new(store.clone()))
+            .edits(Box::new(store))
             .listening(None)
             .build();
         ServiceRuntime::run(singleton, deps)
@@ -1228,6 +1231,67 @@ fn config_lists_reads_and_changes_settings() {
         stderr(&typo).contains("default-stop-grace"),
         "{}",
         shown(&typo)
+    );
+}
+
+/// `muster notices` reads an agent's stored edit without starting the
+/// service and says none runs; once one runs, the edit is also a `notice`
+/// event, as MCP `stack_events` reads them, and the note is gone.
+#[test]
+fn notices_read_stored_edits_without_starting_the_service() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let store = SqliteStore::open(&scratch.database()).unwrap();
+    store
+        .change_process(
+            &root(&project),
+            &ProcessName::try_new("api").unwrap(),
+            &ProcessChange::builder().autostart(Some(false)).build(),
+            &Author::agent("claude"),
+        )
+        .unwrap();
+    let edit = "agent claude changed autostart of 'api'";
+
+    let (idle, notices) = scratch.json_on(&project, &["notices"]);
+
+    assert!(idle.status.success(), "{}", shown(&idle));
+    assert!(
+        notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice["message"] == edit),
+        "{notices}"
+    );
+    assert!(
+        stderr(&idle).contains("the service is not running"),
+        "{}",
+        shown(&idle)
+    );
+    assert!(processes_under(SERVICE_SUBCOMMAND, &scratch.path()).is_empty());
+    assert!(!protocol::socket_path(&scratch.state_dir()).exists());
+
+    let ps = scratch.on(&project, &["ps"]);
+    assert!(ps.status.success(), "{}", shown(&ps));
+    let ServiceResponse::Events(page) = scratch.send(&ServiceRequest::Events {
+        project: root(&project),
+        since: None,
+        kinds: vec![EventKind::Notice],
+        wait: Duration::ZERO,
+    }) else {
+        panic!("events answer with a page");
+    };
+    assert!(
+        page.events().iter().any(|event| event.detail() == edit
+            && event.process().as_ref().map(AsRef::as_ref) == Some("api")),
+        "{page:?}"
+    );
+    let live = scratch.on(&project, &["notices"]);
+    assert!(live.status.success(), "{}", shown(&live));
+    assert!(
+        !stderr(&live).contains("the service is not running"),
+        "{}",
+        shown(&live)
     );
 }
 

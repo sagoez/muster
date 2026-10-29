@@ -43,11 +43,11 @@ use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        port::{ProcessHandle, SettingsStore, StackReader},
+        port::{ProcessHandle, SettingsStore, StackEditLog, StackReader},
         project::Project,
         pty::PtyError,
         settings::Settings,
-        value::{Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
+        value::{EditId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
     },
 };
 
@@ -135,6 +135,8 @@ pub struct ServiceRuntime {
     stacks: Box<dyn StackReader>,
     /// Reads the user's settings.
     settings_store: Box<dyn SettingsStore>,
+    /// Reads the agent edits each project's stack took.
+    edits: Box<dyn StackEditLog>,
     /// The settings every supervisor launches with, as last read.
     settings: Settings,
     /// Where processes, timers, workers and clients deliver events.
@@ -146,6 +148,9 @@ pub struct ServiceRuntime {
     /// The stored stack revision each loaded supervisor last applied, so a
     /// write whose notice never arrived is still caught.
     stack_revisions: HashMap<ProjectRoot, Option<StackRevision>>,
+    /// The newest stored agent edit of each loaded project already raised as
+    /// an event.
+    raised_edits: HashMap<ProjectRoot, EditId>,
     /// Loaded projects that are no longer registered, kept only until the
     /// processes they still ran have stopped.
     unregistered: HashSet<ProjectRoot>,
@@ -211,6 +216,7 @@ impl ServiceRuntime {
             metrics,
             stacks,
             settings: settings_store,
+            edits,
             listening,
         } = deps;
         Self {
@@ -220,6 +226,7 @@ impl ServiceRuntime {
             ports,
             stacks,
             settings_store,
+            edits,
             settings,
             probes: ProbeWorker::spawn(events.clone()),
             port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
@@ -229,6 +236,7 @@ impl ServiceRuntime {
             notices: Notices::shared(Some(protocol::log_path(state_dir))),
             supervisors: HashMap::new(),
             stack_revisions: HashMap::new(),
+            raised_edits: HashMap::new(),
             unregistered: HashSet::new(),
             event_log: EventLog::shared(),
             event_waiters: Vec::new(),
@@ -364,6 +372,7 @@ impl ServiceRuntime {
             self.unregistered.remove(&root);
             self.supervisors.remove(&root);
             self.stack_revisions.remove(&root);
+            self.raised_edits.remove(&root);
         }
     }
 
@@ -483,7 +492,8 @@ impl ServiceRuntime {
             },
             ServiceRequest::Ps {
                 project: Some(project),
-            } => self.refresh_stack(project)?,
+            }
+            | ServiceRequest::Events { project, .. } => self.refresh_stack(project)?,
             ServiceRequest::Ps { project: None } => {
                 let loaded: Vec<ProjectRoot> = self.supervisors.keys().cloned().collect();
                 for project in &loaded {
@@ -493,7 +503,6 @@ impl ServiceRuntime {
             ServiceRequest::Hello { .. }
             | ServiceRequest::Down { .. }
             | ServiceRequest::Wait { .. }
-            | ServiceRequest::Events { .. }
             | ServiceRequest::Locate { .. }
             | ServiceRequest::Log { .. }
             | ServiceRequest::Screen { .. }
@@ -655,6 +664,42 @@ impl ServiceRuntime {
             },
         };
         supervisor.apply_stack(&stack);
+        self.raise_edits(project)
+    }
+
+    /// Raises each agent edit stored for `project` since the newest one
+    /// already raised as a `notice` event, at the time it was recorded. A
+    /// project no longer registered has none, and starts afresh if it is
+    /// registered again.
+    ///
+    /// # Errors
+    /// Returns the refusal when the edit log cannot be read.
+    fn raise_edits(&mut self, project: &ProjectRoot) -> Result<(), ServiceErrorBody> {
+        let edits = self.edits.edits(project).map_err(store_refusal)?;
+        let raised = self.raised_edits.get(project).copied();
+        let mut log = self
+            .event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for edit in edits
+            .iter()
+            .filter(|edit| raised.is_none_or(|raised| *edit.id() > raised))
+        {
+            log.record_at(
+                EventDraft::builder()
+                    .project(Some(project.clone()))
+                    .process(Some(edit.process().clone()))
+                    .kind(EventKind::Notice)
+                    .detail(edit.message().clone())
+                    .build(),
+                *edit.at(),
+            );
+        }
+        drop(log);
+        match edits.last() {
+            Some(newest) => self.raised_edits.insert(project.clone(), *newest.id()),
+            None => self.raised_edits.remove(project),
+        };
         Ok(())
     }
 
@@ -824,6 +869,7 @@ impl ServiceRuntime {
             },
             None => return Err(unknown_project(project)),
         };
+        self.raise_edits(project)?;
         let shared = SharedHolders::new(Arc::clone(&self.holders));
         let deps = SupervisorDeps::builder()
             .runner(Box::new(shared.clone()))
@@ -1070,7 +1116,8 @@ mod tests {
             },
             ipc,
             service::{
-                BatchOutcome, ProcessStatus, StateGoal, WaitCondition, WaitSpec, WaitStatus,
+                BatchOutcome, EventPage, ProcessStatus, StateGoal, WaitCondition, WaitSpec,
+                WaitStatus,
                 supervisor::{
                     ChannelOutputSink, HolderAdopter, SpawnGeneration,
                     testing::{KillCountHandle, Orphan, test_settings, test_stop},
@@ -1081,9 +1128,10 @@ mod tests {
         },
         domain::{
             config::{
-                Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-                SettingChange,
+                Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, RecordedEdit,
+                Registration, SettingChange,
             },
+            coordination::Author,
             port::{
                 Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessInput, ProcessRunner,
                 StackStore,
@@ -1160,6 +1208,8 @@ mod tests {
         /// The writes made so far, and the revision of each registered stack.
         revisions: Arc<Mutex<(i64, HashMap<ProjectRoot, StackRevision>)>>,
         settings: Arc<Mutex<Settings>>,
+        /// Every agent edit kept, oldest first, with the project it belongs to.
+        edits: Arc<Mutex<Vec<(ProjectRoot, RecordedEdit)>>>,
     }
 
     impl MemoryStore {
@@ -1168,7 +1218,26 @@ mod tests {
                 stacks: Arc::default(),
                 revisions: Arc::default(),
                 settings: Arc::new(Mutex::new(test_settings())),
+                edits: Arc::default(),
             }
+        }
+
+        /// Keeps an agent edit to `process` of `root` reading `message`,
+        /// moving the stack's revision with it as the real store's write does.
+        fn record_edit(&self, root: &ProjectRoot, process: &str, message: &str) {
+            let mut edits = self.edits.lock().unwrap();
+            let id = i64::try_from(edits.len()).unwrap() + 1;
+            edits.push((
+                root.clone(),
+                RecordedEdit::builder()
+                    .id(EditId::new(id))
+                    .at(SystemTime::UNIX_EPOCH)
+                    .process(ProcessName::try_new(process).unwrap())
+                    .message(message.to_string())
+                    .build(),
+            ));
+            drop(edits);
+            self.bump(root);
         }
 
         /// Registers `root` with `processes`, replacing its stack.
@@ -1220,6 +1289,7 @@ mod tests {
             &self,
             root: &ProjectRoot,
             spec: &ProcessSpec,
+            _author: &Author,
         ) -> Result<Registration, ConfigError> {
             let mut stacks = self.stacks.lock().unwrap();
             let newly_registered = !stacks.contains_key(root);
@@ -1236,6 +1306,7 @@ mod tests {
             root: &ProjectRoot,
             name: &ProcessName,
             change: &ProcessChange,
+            _author: &Author,
         ) -> Result<ProcessSpec, ConfigError> {
             let mut stacks = self.stacks.lock().unwrap();
             let spec = stacks
@@ -1252,6 +1323,7 @@ mod tests {
             &self,
             root: &ProjectRoot,
             name: &ProcessName,
+            _author: &Author,
         ) -> Result<ProcessSpec, ConfigError> {
             let mut stacks = self.stacks.lock().unwrap();
             let processes = stacks
@@ -1273,6 +1345,19 @@ mod tests {
             _mode: ImportMode,
         ) -> Result<(Registration, ImportPlan), ConfigError> {
             Err(ConfigError::Storage("not used by these tests".into()))
+        }
+    }
+
+    impl StackEditLog for MemoryStore {
+        fn edits(&self, root: &ProjectRoot) -> Result<Vec<RecordedEdit>, ConfigError> {
+            Ok(self
+                .edits
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(project, _)| project == root)
+                .map(|(_, edit)| edit.clone())
+                .collect())
         }
     }
 
@@ -1602,7 +1687,8 @@ mod tests {
                     .ports(Box::new(TestPorts))
                     .metrics(None)
                     .stacks(Box::new(store.clone()))
-                    .settings(Box::new(store))
+                    .settings(Box::new(store.clone()))
+                    .edits(Box::new(store))
                     .listening(None)
                     .build();
                 ServiceRuntime::run(singleton, deps)
@@ -2631,6 +2717,87 @@ mod tests {
         assert_eq!(
             service.send(ServiceRequest::Ps { project: None }),
             ServiceResponse::Status(Vec::new())
+        );
+        service.stop();
+    }
+
+    /// The `notice` events of `project` after `since`.
+    fn edit_events(service: &Running, project: &ProjectRoot, since: Option<EventSeq>) -> EventPage {
+        let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+            project: project.clone(),
+            since,
+            kinds: vec![EventKind::Notice],
+            wait: Duration::ZERO,
+        }) else {
+            panic!("events answer with a page");
+        };
+        page
+    }
+
+    /// The detail and process of each event of `page`.
+    fn told(page: &EventPage) -> Vec<(String, Option<String>)> {
+        page.events()
+            .iter()
+            .map(|event| {
+                (
+                    event.detail().clone(),
+                    event.process().as_ref().map(ToString::to_string),
+                )
+            })
+            .collect()
+    }
+
+    /// Every stored agent edit is a `notice` event on its process, at the
+    /// time it was recorded and in cursor order with the other events: one
+    /// stored before the project loads arrives as it loads, a later one with
+    /// the writer's stack change, and one whose change notice was missed with
+    /// the next read; none is raised twice.
+    #[test]
+    fn a_stored_agent_edit_is_a_notice_event_in_cursor_order() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        fixture
+            .store
+            .record_edit(&project, "api", "agent claude added 'api'");
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let loaded = edit_events(&service, &project, None);
+        assert_eq!(told(&loaded), [(
+            "agent claude added 'api'".to_string(),
+            Some("api".to_string())
+        )]);
+        assert_eq!(*loaded.events()[0].at(), SystemTime::UNIX_EPOCH);
+
+        fixture
+            .store
+            .record_edit(&project, "api", "agent claude changed autostart of 'api'");
+        for _ in 0..2 {
+            assert_eq!(
+                service.send(ServiceRequest::StackChanged {
+                    project: project.clone()
+                }),
+                ServiceResponse::Ok
+            );
+        }
+        let changed = edit_events(&service, &project, Some(*loaded.cursor()));
+        assert_eq!(told(&changed), [(
+            "agent claude changed autostart of 'api'".to_string(),
+            Some("api".to_string())
+        )]);
+        assert!(changed.events()[0].seq() > loaded.events()[0].seq());
+
+        fixture
+            .store
+            .record_edit(&project, "api", "agent claude removed 'api'");
+        let missed = edit_events(&service, &project, Some(*changed.cursor()));
+        assert_eq!(told(&missed), [(
+            "agent claude removed 'api'".to_string(),
+            Some("api".to_string())
+        )]);
+        assert!(
+            edit_events(&service, &project, Some(*missed.cursor()))
+                .events()
+                .is_empty()
         );
         service.stop();
     }

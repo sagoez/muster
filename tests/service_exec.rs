@@ -27,6 +27,7 @@ use muster::{
     },
     domain::{
         config::{Environment, ProcessSpec, SettingChange},
+        coordination::Author,
         port::{SettingsStore, StackStore},
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
@@ -220,7 +221,7 @@ impl Scratch {
         let root = ProjectRoot::try_new(fs::canonicalize(dir).unwrap()).unwrap();
         let store = self.store();
         for spec in processes {
-            store.add_process(&root, spec).unwrap();
+            store.add_process(&root, spec, &Author::human()).unwrap();
         }
         root
     }
@@ -604,10 +605,18 @@ fn a_stack_change_adds_updates_and_stops_live() {
     let store = scratch.store();
 
     store
-        .add_process(&project, &process("docs", SLEEPER, RestartPolicy::Never))
+        .add_process(
+            &project,
+            &process("docs", SLEEPER, RestartPolicy::Never),
+            &Author::human(),
+        )
         .unwrap();
     store
-        .remove_process(&project, &ProcessName::try_new("web").unwrap())
+        .remove_process(
+            &project,
+            &ProcessName::try_new("web").unwrap(),
+            &Author::human(),
+        )
         .unwrap();
     assert_eq!(
         scratch.send(ServiceRequest::StackChanged {
@@ -639,7 +648,11 @@ fn a_process_removed_while_the_service_was_down_is_stopped_at_start() {
 
     scratch
         .store()
-        .remove_process(&project, &ProcessName::try_new("api").unwrap())
+        .remove_process(
+            &project,
+            &ProcessName::try_new("api").unwrap(),
+            &Author::human(),
+        )
         .unwrap();
     let successor = scratch.start_service();
 
@@ -758,10 +771,15 @@ fn a_stack_write_whose_notice_was_missed_reaches_the_next_request() {
         .add_process(
             &project,
             &process("docs", SLEEPER, RestartPolicy::Never).with_autostart(false),
+            &Author::human(),
         )
         .unwrap();
     store
-        .remove_process(&project, &ProcessName::try_new("api").unwrap())
+        .remove_process(
+            &project,
+            &ProcessName::try_new("api").unwrap(),
+            &Author::human(),
+        )
         .unwrap();
 
     assert_eq!(

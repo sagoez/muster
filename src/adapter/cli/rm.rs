@@ -22,6 +22,7 @@ use crate::{
     application::StackEditor,
     domain::{
         config::ConfigError,
+        coordination::Author,
         port::StackStore,
         project::Project,
         value::{ProcessName, ProcessRef},
@@ -98,7 +99,7 @@ pub fn remove(
     ready_to_send(watch)?;
     let sent = SystemTime::now();
     for name in names {
-        editor.remove(project.root(), name)?;
+        editor.remove(project.root(), name, &Author::human())?;
     }
     let report = settle_removed(client, project, &before, names, sent, UNBOUNDED, watch)?;
     Ok(RmView::builder()

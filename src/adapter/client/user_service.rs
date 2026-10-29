@@ -3,7 +3,7 @@ use super::{
     service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{ProjectStatus, ServiceRequest},
+    adapter::service::{Notice, ProjectStatus, ServiceRequest},
     domain::value::ProjectRoot,
 };
 
@@ -18,6 +18,10 @@ impl ServiceAccess for UserService {
 
     fn loaded_status(&self, project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
         ServiceClient::loaded_status(project)
+    }
+
+    fn running_notices(&self, project: &ProjectRoot) -> Result<Option<Vec<Notice>>, ClientError> {
+        ServiceClient::running_notices(project)
     }
 
     fn status(&self) -> Result<ServiceStatus, ClientError> {

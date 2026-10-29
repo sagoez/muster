@@ -20,7 +20,8 @@ use crate::{
         holder::{detached, reap},
         private_dir::{prepare_state_dir, state_dir},
         service::{
-            ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
+            Notice, ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
+            ServiceVersion,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
     },
@@ -144,6 +145,25 @@ impl ServiceClient {
             ServiceResponse::Status(statuses) => Ok(statuses
                 .into_iter()
                 .find(|status| status.project().root() == project)),
+            other => Err(ClientError::UnexpectedAnswer((&other).into())),
+        }
+    }
+
+    /// The recent notices a running service raised about `project` and
+    /// itself, without starting the service; none when no service runs.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when a service holds the socket but does not
+    /// answer.
+    pub fn running_notices(project: &ProjectRoot) -> Result<Option<Vec<Notice>>, ClientError> {
+        let client = Self::local()?;
+        if !matches!(client.probe()?, Probe::Running(_)) {
+            return Ok(None);
+        }
+        match client.exchange(&ServiceRequest::Notices {
+            project: project.clone(),
+        })? {
+            ServiceResponse::Notices(notices) => Ok(Some(notices)),
             other => Err(ClientError::UnexpectedAnswer((&other).into())),
         }
     }

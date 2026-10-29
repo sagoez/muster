@@ -607,7 +607,9 @@ mod tests {
         let dir = scratch.path().join(relative);
         fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
-        store.add_process(&root, &spec("web", "true")).unwrap();
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
         root
     }
 

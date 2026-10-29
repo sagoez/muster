@@ -42,7 +42,7 @@ use crate::{
         workspace_request::WorkspaceRequest,
     },
     domain::{
-        config::{ConfigError, StackEdit},
+        config::ConfigError,
         process::PatternKind,
         project::Project,
         value::{OutputCursor, ProcessName, ProcessRef},
@@ -324,12 +324,7 @@ impl MusterMcp {
                 deps.allow_stack_edit(PROCESS_ADD)?;
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
-                let editor = deps.editor();
-                let (registration, spec) = editor.add(&root, draft)?;
-                editor.announce(&root, &StackEdit::Added {
-                    author,
-                    spec: spec.clone(),
-                })?;
+                let (registration, spec) = deps.editor().add(&root, draft, &author)?;
                 Ok((registration.project().clone(), spec))
             })
             .await?;
@@ -376,13 +371,9 @@ impl MusterMcp {
                 if change.is_empty() {
                     return Err(ToolError::NothingToChange(PROCESS_SET));
                 }
-                let editor = deps.editor();
-                let spec = editor.change(project.root(), &name, &change)?;
-                editor.announce(project.root(), &StackEdit::Changed {
-                    author,
-                    fields: change.fields(),
-                    spec: spec.clone(),
-                })?;
+                let spec = deps
+                    .editor()
+                    .change(project.root(), &name, &change, &author)?;
                 let running =
                     process::runs_now(deps.service().as_ref(), project.root(), spec.name());
                 Ok((project, spec, running))
@@ -432,12 +423,7 @@ impl MusterMcp {
                 let client = deps.service().connect()?;
                 let before = process::status(&client, &project)?;
                 let sent = SystemTime::now();
-                let editor = deps.editor();
-                editor.remove(project.root(), &name)?;
-                editor.announce(project.root(), &StackEdit::Removed {
-                    author,
-                    name: name.clone(),
-                })?;
+                deps.editor().remove(project.root(), &name, &author)?;
                 let names = [name];
                 let report = process::settle_removed(
                     &client,

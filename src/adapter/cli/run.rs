@@ -19,6 +19,7 @@ use crate::{
     application::StackEditor,
     domain::{
         config::ProcessDraft,
+        coordination::Author,
         port::LocalState,
         project::Project,
         value::{ProcessName, ProjectName},
@@ -99,7 +100,7 @@ impl RunPlan {
         ready_to_send(watch)?;
         let name = self.draft.name().clone();
         let (registration, _) = editor
-            .add(self.target.root(), self.draft)
+            .add(self.target.root(), self.draft, &Author::human())
             .map_err(|error| CliError::adding(error, self.target.name(), RUN_NAME_HINT))?;
         let project = registration.project().clone();
         let report = start_added(client, &project, name, watch)?;

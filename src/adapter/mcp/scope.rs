@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::store::{SqliteStore, test_support::spec},
-        domain::{port::StackStore, value::ProjectRoot},
+        domain::{coordination::Author, port::StackStore, value::ProjectRoot},
     };
 
     /// Registers the folder `dir` as a project by adding a process to it.
@@ -80,6 +80,7 @@ mod tests {
             .add_process(
                 &ProjectRoot::try_new(dir.to_path_buf()).unwrap(),
                 &spec("web", "true"),
+                &Author::human(),
             )
             .unwrap();
     }

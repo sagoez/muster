@@ -77,6 +77,11 @@ impl EventLog {
     /// Records `draft` as the newest event, its detail made printable, and
     /// returns its seq. The oldest event is dropped once the ring is full.
     pub fn record(&mut self, draft: EventDraft) -> EventSeq {
+        self.record_at(draft, SystemTime::now())
+    }
+
+    /// Records `draft` as [`Self::record`] does, as having happened `at`.
+    pub fn record_at(&mut self, draft: EventDraft, at: SystemTime) -> EventSeq {
         let EventDraft {
             project,
             process,
@@ -92,7 +97,7 @@ impl EventLog {
         self.ring.push_back(
             StackEvent::builder()
                 .seq(seq)
-                .at(SystemTime::now())
+                .at(at)
                 .project(project)
                 .process(process)
                 .kind(kind)

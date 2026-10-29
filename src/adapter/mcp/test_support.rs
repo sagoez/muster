@@ -23,7 +23,7 @@ use crate::{
     adapter::{
         client::{ClientError, ServiceAccess, ServiceClient, ServiceStatus},
         no_state_dir::NoStateDir,
-        service::{ProjectStatus, ServiceRequest},
+        service::{Notice, ProjectStatus, ServiceRequest},
         store::SqliteStore,
     },
     domain::{
@@ -49,6 +49,10 @@ impl ServiceAccess for NoService {
     }
 
     fn loaded_status(&self, _project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
+        Ok(None)
+    }
+
+    fn running_notices(&self, _project: &ProjectRoot) -> Result<Option<Vec<Notice>>, ClientError> {
         Ok(None)
     }
 

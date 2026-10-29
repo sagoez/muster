@@ -18,6 +18,7 @@ use crate::{
     adapter::client::{DefinitionView, ProjectIdentityView},
     domain::{
         config::{Environment, ProcessDraft},
+        coordination::Author,
         value::{Description, ProcessName},
     },
 };
@@ -88,7 +89,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .build();
     let (registration, spec) = invocation
         .editor(store.as_ref())
-        .add(&root, draft)
+        .add(&root, draft, &Author::human())
         .map_err(|error| CliError::adding(error, target.name(), ""))?;
     Ok(AddView::builder()
         .project(ProjectIdentityView::from(registration.project()))

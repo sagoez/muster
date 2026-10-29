@@ -163,7 +163,8 @@ fn run_service() -> Result<(), MusterError> {
         .ports(Box::new(LocalPorts))
         .metrics(Some(Box::new(SysinfoMetrics::default())))
         .stacks(Box::new(store.clone()))
-        .settings(Box::new(store))
+        .settings(Box::new(store.clone()))
+        .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)

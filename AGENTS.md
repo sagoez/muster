@@ -57,8 +57,8 @@ plugs into a port.
     injects fakes and never reaches the user's real database or socket.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
-    the database through read-only ports (`StackReader`, `SettingsStore`);
-    writers tell it what changed.
+    the database through read-only ports (`StackReader`, `SettingsStore`,
+    `StackEditLog`); writers tell it what changed.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service.
   - **driven adapters** `adapter/pty` (portable-pty implements

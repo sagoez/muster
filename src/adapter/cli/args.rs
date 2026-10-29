@@ -267,8 +267,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show what the muster service reported about this project: failed
-    /// starts, forced stops, crashes, and the stack edits agents made.
+    /// Show this project's notices: the stack edits agents made, and failed
+    /// starts, forced stops and crashes when the service runs. Never starts it.
     Notices {
         /// Print the result as JSON.
         #[arg(long)]

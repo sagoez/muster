@@ -1,14 +1,19 @@
 use super::StackReader;
 use crate::domain::{
     config::{ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration},
+    coordination::Author,
     value::{ProcessName, ProjectRoot},
 };
 
 /// Driven port: each project's process definitions, read and written. Every
 /// write is one atomic transaction, and moves the project's
-/// [`StackRevision`](crate::domain::value::StackRevision).
+/// [`StackRevision`](crate::domain::value::StackRevision). An edit `author`
+/// makes that [`StackEdit::is_logged`](crate::domain::config::StackEdit::is_logged)
+/// keeps is recorded in the project's [`StackEditLog`](super::StackEditLog)
+/// in that same transaction, so the edit and its entry never exist apart.
 pub trait StackStore: StackReader {
-    /// Adds `spec`, registering `root` first when it is not a project.
+    /// Adds `spec` for `author`, registering `root` first when it is not a
+    /// project.
     ///
     /// # Errors
     /// Returns [`ConfigError::DuplicateProcessName`] when the name is taken, or
@@ -17,9 +22,11 @@ pub trait StackStore: StackReader {
         &self,
         root: &ProjectRoot,
         spec: &ProcessSpec,
+        author: &Author,
     ) -> Result<Registration, ConfigError>;
 
-    /// Applies `change` to the process `name` and returns the result.
+    /// Applies `change` to the process `name` for `author` and returns the
+    /// result.
     ///
     /// # Errors
     /// Returns [`ConfigError::UnknownProject`] or [`ConfigError::UnknownProcess`]
@@ -30,9 +37,10 @@ pub trait StackStore: StackReader {
         root: &ProjectRoot,
         name: &ProcessName,
         change: &ProcessChange,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError>;
 
-    /// Removes the process `name` and returns what it was.
+    /// Removes the process `name` for `author` and returns what it was.
     ///
     /// # Errors
     /// Returns [`ConfigError::UnknownProject`] or [`ConfigError::UnknownProcess`]
@@ -42,6 +50,7 @@ pub trait StackStore: StackReader {
         &self,
         root: &ProjectRoot,
         name: &ProcessName,
+        author: &Author,
     ) -> Result<ProcessSpec, ConfigError>;
 
     /// Plans and applies an import in one transaction, registering `root` when new.

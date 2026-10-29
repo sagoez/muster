@@ -201,7 +201,7 @@ CLI alone.
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
 | `muster init [--yes]` | Detect a stack in the folder and add it |
 | `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read, or remove one with its processes and coordination state |
-| `muster notices` | Show failed starts, forced stops and crashes the service recorded, and the stack edits agents made |
+| `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes a running service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
@@ -357,9 +357,10 @@ with the user's rights at the next start:
   setting; `allow` lets them through again. Only the CLI changes it.
 - Every edit an agent makes is recorded as a notice naming the agent, the
   process and the fields changed, with the new command and working directory
-  when it set them. It is kept in muster's database, the newest 50 per
-  project, so it shows in `muster notices` and in `stack_status` whether or
-  not the service was running at the time.
+  when it set them. It is kept in muster's database with the edit itself, in
+  one transaction, the newest 50 per project, so it shows in `muster notices`,
+  in `stack_status` and as a `notice` event in `stack_events` whether or not
+  the service was running at the time.
 - A `working_dir` must be a folder inside the project root; one outside it, or
   a symlink leading out of it, is refused.
 - A definition an agent reads back lists its `environment` by variable name

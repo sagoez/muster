@@ -53,7 +53,7 @@ use super::{
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
     project_log_slice::ProjectLogSlice,
     projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
-    report::{Report, Row, RowKind, print_error},
+    report::{Report, Row, RowKind, print_error, print_note},
     rm::{removable, remove as remove_processes, rm_rows},
     run::RunPlan,
     service_stopped::ServiceStopped,
@@ -97,6 +97,8 @@ const COORDINATION_TITLE: &str = "muster coordination";
 const COMPLETIONS_TITLE: &str = "muster completions";
 /// How `projects rm` ends when the person declined.
 const NOTHING_REMOVED: &str = "nothing removed";
+/// What `notices` adds when no service runs to raise its own.
+const NO_SERVICE_NOTICES: &str = "the service is not running; showing the stored notices only";
 /// The command words of `muster projects rm`, for its title.
 const PROJECTS_RM_WORDS: &str = "projects rm";
 /// Environment variable naming the user's shell, for the completions probe.
@@ -701,22 +703,34 @@ fn finish_attach(presenter: Presenter, name: &ProcessName, end: &AttachEnd) {
     }
 }
 
-/// Prints the current project's recent notices and the service's.
+/// Prints the current project's stored notices, with the service's own when
+/// one already runs, never starting it.
 fn notices(invocation: &Invocation<'_>, json: bool) {
     let project = project_or_fail(invocation, json);
     let result = invocation.store().and_then(|store| {
-        let client = invocation.connect()?;
-        Ok(process::notices(&client, store.as_ref(), &project)?)
+        Ok(process::stored_notices(
+            invocation.service(),
+            store.as_ref(),
+            &project,
+        )?)
     });
     match result {
-        Ok(notices) => {
-            let views: Vec<NoticeView> = notices
+        Ok(log) => {
+            let views: Vec<NoticeView> = log
+                .notices()
                 .iter()
                 .map(|notice| NoticeView::for_project(notice, &project))
                 .collect();
             print_result(json, &views, |_| {
-                show(&output::notices_rows(&project, &notices, SystemTime::now()));
+                show(&output::notices_rows(
+                    &project,
+                    log.notices(),
+                    SystemTime::now(),
+                ));
             });
+            if !log.service_running() {
+                print_note(APP_NAME, NO_SERVICE_NOTICES);
+            }
         },
         Err(error) => fail_command(json, &error),
     }

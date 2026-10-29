@@ -224,9 +224,11 @@ mod tests {
         let root = folder(&scratch, "shop");
 
         let first = store
-            .add_process(&root, &spec("web", "npm run dev"))
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
             .unwrap();
-        let second = store.add_process(&root, &spec("api", "cargo run")).unwrap();
+        let second = store
+            .add_process(&root, &spec("api", "cargo run"), &Author::human())
+            .unwrap();
 
         assert!(*first.newly_registered());
         assert!(!*second.newly_registered());
@@ -252,7 +254,11 @@ mod tests {
             .into_iter()
             .map(|relative| {
                 store
-                    .add_process(&folder(&scratch, relative), &spec("web", "true"))
+                    .add_process(
+                        &folder(&scratch, relative),
+                        &spec("web", "true"),
+                        &Author::human(),
+                    )
                     .unwrap()
                     .project()
                     .name()
@@ -277,8 +283,12 @@ mod tests {
         let (store, scratch) = fresh_store();
         let outer = folder(&scratch, "a");
         let inner = folder(&scratch, "a/b");
-        store.add_process(&outer, &spec("web", "true")).unwrap();
-        store.add_process(&inner, &spec("web", "true")).unwrap();
+        store
+            .add_process(&outer, &spec("web", "true"), &Author::human())
+            .unwrap();
+        store
+            .add_process(&inner, &spec("web", "true"), &Author::human())
+            .unwrap();
         let inside = |relative: &str| scratch.path().canonicalize().unwrap().join(relative);
 
         let found = |dir: PathBuf| {
@@ -309,8 +319,12 @@ mod tests {
             EnvName::try_new("PORT").unwrap(),
             EnvValue::try_new("3000").unwrap(),
         ));
-        store.add_process(&root, &with_port).unwrap();
-        store.add_process(&other, &with_port).unwrap();
+        store
+            .add_process(&root, &with_port, &Author::human())
+            .unwrap();
+        store
+            .add_process(&other, &with_port, &Author::human())
+            .unwrap();
         store
             .set_value(
                 &root,

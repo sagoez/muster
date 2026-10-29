@@ -51,6 +51,21 @@ impl StackEdit {
             Self::Removed { name, .. } => name,
         }
     }
+
+    /// Who made the edit.
+    pub fn author(&self) -> &Author {
+        match self {
+            Self::Added { author, .. }
+            | Self::Changed { author, .. }
+            | Self::Removed { author, .. } => author,
+        }
+    }
+
+    /// Whether the project's edit log keeps this edit: only an agent's edits
+    /// are kept, since the human made theirs at the CLI.
+    pub fn is_logged(&self) -> bool {
+        !self.author().is_human()
+    }
 }
 
 impl Display for StackEdit {

@@ -49,7 +49,6 @@ impl McpDeps {
         StackEditor::builder()
             .stacks(self.stacks.as_ref())
             .settings(self.settings.as_ref())
-            .edits(self.edits.as_ref())
             .notifier(self.notifier.as_ref())
             .build()
     }

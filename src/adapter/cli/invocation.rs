@@ -99,7 +99,6 @@ impl<'a> Invocation<'a> {
         StackEditor::builder()
             .stacks(store)
             .settings(store)
-            .edits(store)
             .notifier(&self.notifier)
             .build()
     }
@@ -207,7 +206,7 @@ mod tests {
             cli::mcp_launch::McpLaunch,
             client::{ClientError, ServiceStatus},
             no_state_dir::NoStateDir,
-            service::{ProjectStatus, ServiceRequest},
+            service::{Notice, ProjectStatus, ServiceRequest},
             store::{
                 SqliteStore,
                 test_support::{fresh_store, spec},
@@ -236,6 +235,13 @@ mod tests {
             &self,
             _project: &ProjectRoot,
         ) -> Result<Option<ProjectStatus>, ClientError> {
+            Ok(None)
+        }
+
+        fn running_notices(
+            &self,
+            _project: &ProjectRoot,
+        ) -> Result<Option<Vec<Notice>>, ClientError> {
             Ok(None)
         }
 

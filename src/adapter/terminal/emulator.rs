@@ -354,6 +354,11 @@ impl TerminalEmulator {
                 },
                 Observation::ShiftOut => self.shift_out = true,
                 Observation::ShiftIn => self.shift_out = false,
+                Observation::Dropped => {
+                    self.parser.advance(&mut self.term, &bytes[start..index]);
+                    self.parser = ansi::Processor::new();
+                    start = index + 1;
+                },
                 observation @ (Observation::SetTabStop
                 | Observation::ClearTabStop
                 | Observation::ClearAllTabStops) => {
@@ -916,7 +921,10 @@ mod tests {
         CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND, TerminalEmulator, resolve_color,
         to_color,
     };
-    use crate::domain::value::{Cols, Rows};
+    use crate::{
+        adapter::terminal::bounded_parser::MAX_PENDING_BYTES,
+        domain::value::{Cols, Rows},
+    };
 
     fn rows(count: u16) -> Rows {
         Rows::try_new(count).unwrap()
@@ -1207,6 +1215,24 @@ mod tests {
         let text = emulator.screen_text();
         let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
         assert_eq!(lines, vec!["hello", "world"]);
+    }
+
+    /// A multi-megabyte OSC that is never terminated in time is dropped by
+    /// the emulator's own parser too: the text around it lands and a later
+    /// title still applies, fed in chunks as a PTY delivers it.
+    #[test]
+    fn an_endless_osc_is_dropped_and_the_screen_carries_on() {
+        let mut emulator = TerminalEmulator::new(rows(4), cols(20), 0, ColorScheme::Dark);
+        let flood = vec![b'x'; 4 * MAX_PENDING_BYTES];
+
+        emulator.process(b"left\x1b]0;");
+        for chunk in flood.chunks(4096) {
+            emulator.process(chunk);
+        }
+        emulator.process(b"\x07right");
+
+        let text = emulator.screen_text();
+        assert_eq!(text.lines().next(), Some("leftright"));
     }
 
     /// The background query reports the configured scheme's background.

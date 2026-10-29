@@ -15,11 +15,12 @@
 
 use std::{fmt, mem};
 
-use alacritty_terminal::vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Perform};
 
 #[cfg(test)]
 use super::keyboard_protocol::KeyboardProtocol;
 use super::{
+    bounded_parser::BoundedParser,
     escape::{
         ALT_SCREEN_MODES, CSI, FULL_RESET_FINAL, KITTY_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL,
         SET_MODE_FINAL, param_values,
@@ -73,7 +74,7 @@ struct ScreenState {
 #[derive(Default)]
 pub struct KittyKeyboardTracker {
     /// The VT parser, kept across chunks so a split sequence still completes.
-    parser: Parser,
+    parser: BoundedParser,
     /// What the parsed sequences negotiated.
     keyboard: Keyboard,
 }

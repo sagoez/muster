@@ -5,11 +5,15 @@
 
 use std::fmt;
 
-use alacritty_terminal::vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Perform};
 
-use super::escape::{
-    ALT_SCREEN_MODES, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL, SCROLL_REGION_FINAL,
-    SET_MODE_FINAL, param_values,
+use super::{
+    bounded_parser::BoundedParser,
+    escape::{
+        ALT_SCREEN_MODES, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL, SCROLL_REGION_FINAL,
+        SET_MODE_FINAL, param_values,
+    },
+    fed::Fed,
 };
 
 /// Shift Out: makes G1 the active charset, even inside a sequence.
@@ -64,6 +68,11 @@ pub enum Observation {
     ShiftOut,
     /// This byte makes G0 the active charset.
     ShiftIn,
+    /// This byte belongs to a sequence that ran past
+    /// [`MAX_PENDING_BYTES`](super::bounded_parser::MAX_PENDING_BYTES), which
+    /// is dropped up to its terminator; a parser fed the same stream drops it
+    /// too.
+    Dropped,
 }
 
 /// Byte-at-a-time recognizer for the sequences in [`Observation`], built on
@@ -74,7 +83,7 @@ pub enum Observation {
 #[derive(Default)]
 pub struct ModeScanner {
     /// The VT parser, kept across bytes.
-    parser: Parser,
+    parser: BoundedParser,
     /// What the parsed sequences established.
     modes: Modes,
 }
@@ -115,8 +124,10 @@ impl ModeScanner {
     /// Consumes one output byte and reports what, if anything, it completed.
     pub fn feed(&mut self, byte: u8) -> Observation {
         self.modes.observed = Observation::Nothing;
-        self.parser.advance(&mut self.modes, &[byte]);
-        self.modes.observed
+        match self.parser.advance_byte(&mut self.modes, byte) {
+            Fed::Kept => self.modes.observed,
+            Fed::Dropped => Observation::Dropped,
+        }
     }
 }
 

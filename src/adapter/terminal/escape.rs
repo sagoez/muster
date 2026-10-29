@@ -5,6 +5,12 @@ use alacritty_terminal::vte::Params;
 
 /// Escape byte that introduces every sequence.
 pub const ESC: u8 = 0x1B;
+/// BEL, which also ends an OSC string.
+pub const BEL: u8 = 0x07;
+/// CAN, which cancels any sequence in progress.
+pub const CAN: u8 = 0x18;
+/// SUB, which cancels any sequence in progress.
+pub const SUB: u8 = 0x1A;
 /// Control Sequence Introducer.
 pub const CSI: &str = "\x1b[";
 /// Intermediate that marks a DEC private sequence (`CSI ? ...`).

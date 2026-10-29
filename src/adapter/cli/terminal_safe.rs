@@ -5,9 +5,9 @@
 
 use std::io::{self, Write};
 
-use alacritty_terminal::vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Perform};
 
-use crate::adapter::terminal::escape::CSI;
+use crate::adapter::terminal::{bounded_parser::BoundedParser, escape::CSI};
 
 /// The control characters that only lay text out, kept as they are: line
 /// feed, carriage return, tab and backspace.
@@ -29,7 +29,7 @@ pub struct TerminalSafe<W: Write> {
     /// Where the safe bytes go.
     out: W,
     /// The parser, kept across writes.
-    parser: Parser,
+    parser: BoundedParser,
     /// The safe bytes of the write being parsed.
     kept: Kept,
 }
@@ -39,7 +39,7 @@ impl<W: Write> TerminalSafe<W> {
     pub fn new(out: W) -> Self {
         Self {
             out,
-            parser: Parser::new(),
+            parser: BoundedParser::new(),
             kept: Kept::default(),
         }
     }

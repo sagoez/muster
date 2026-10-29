@@ -2,7 +2,9 @@
 //! escape sequences removed and carriage returns applied as overwrites, so a
 //! progress bar collapses to its last state.
 
-use alacritty_terminal::vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Perform};
+
+use crate::adapter::terminal::bounded_parser::BoundedParser;
 
 /// Returns the cursor to the start of the line.
 const CARRIAGE_RETURN: u8 = b'\r';
@@ -106,7 +108,7 @@ impl Perform for LineScreen {
 /// terminal would, invalid UTF-8 replaced and trailing whitespace trimmed.
 pub fn strip_line(raw: &[u8]) -> String {
     let mut screen = LineScreen::default();
-    Parser::new().advance(&mut screen, raw);
+    BoundedParser::new().advance(&mut screen, raw);
     let text: String = screen.cells.into_iter().collect();
     text.trim_end().to_string()
 }

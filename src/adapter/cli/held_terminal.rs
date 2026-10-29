@@ -145,7 +145,8 @@ impl HeldTerminal {
                 | Observation::ClearTabStop
                 | Observation::ClearAllTabStops
                 | Observation::ShiftOut
-                | Observation::ShiftIn => {},
+                | Observation::ShiftIn
+                | Observation::Dropped => {},
             }
         }
         self.output.write_all(bytes)

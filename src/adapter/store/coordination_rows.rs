@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params}
 use super::{
     lock_rows,
     project_rows::require_project,
-    sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param},
+    sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param, refused},
     store_error::StoreError,
 };
 use crate::{
@@ -82,7 +82,7 @@ fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
     let body: String = row.get("body").map_err(db_error)?;
     let author: String = row.get("author").map_err(db_error)?;
     Ok(Scratchpad::builder()
-        .key(ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error))?)
+        .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", error))?)
         .body(body)
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
@@ -108,12 +108,12 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
         None => None,
     };
     Ok(Todo::builder()
-        .id(TodoId::try_new(id).map_err(|error| corrupt("todo id", error))?)
-        .title(TodoTitle::try_new(title).map_err(|error| corrupt("todo title", error))?)
+        .id(TodoId::try_new(id).map_err(|error| refused("todo id", error))?)
+        .title(TodoTitle::try_new(title).map_err(|error| refused("todo title", error))?)
         .status(
             status
                 .parse()
-                .map_err(|error| corrupt("todo status", error))?,
+                .map_err(|error| refused("todo status", error))?,
         )
         .deps(serde_json::from_str(&deps).map_err(|error| corrupt("todo deps", error))?)
         .claim(claim)
@@ -128,7 +128,7 @@ fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
     let value: String = row.get("value").map_err(db_error)?;
     let author: String = row.get("author").map_err(db_error)?;
     Ok(KeyValue::builder()
-        .key(KvKey::try_new(key).map_err(|error| corrupt("kv key", error))?)
+        .key(KvKey::try_new(key).map_err(|error| refused("kv key", error))?)
         .value(value)
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
@@ -139,7 +139,7 @@ fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
 /// row.
 fn position(row: &Row) -> Result<EntryPosition, ConfigError> {
     let position: i64 = row.get("position").map_err(db_error)?;
-    EntryPosition::try_new(position).map_err(|error| corrupt("entry position", error))
+    EntryPosition::try_new(position).map_err(|error| refused("entry position", error))
 }
 
 /// Reads a [`SCRATCHPAD_PAGE`] row.
@@ -149,7 +149,7 @@ fn note_header_from_row(row: &Row) -> Result<(EntryPosition, NoteHeader), Config
     Ok((
         position(row)?,
         NoteHeader::builder()
-            .key(ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error))?)
+            .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", error))?)
             .author(author_from(&author)?)
             .updated_at(updated_at(row)?)
             .build(),
@@ -413,7 +413,7 @@ impl CoordinationStore for SqliteStore {
                 conn,
                 "SELECT key FROM scratchpads WHERE project_id = ?1 ORDER BY rowid",
                 project_id,
-                |key| ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error)),
+                |key| ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", error)),
             )
         })
     }
@@ -569,7 +569,7 @@ impl CoordinationStore for SqliteStore {
             match next {
                 None => Ok(Claim::NothingClaimable),
                 Some(next) => {
-                    let next = TodoId::try_new(next).map_err(|error| corrupt("todo id", error))?;
+                    let next = TodoId::try_new(next).map_err(|error| refused("todo id", error))?;
                     claim_by_id(conn, project_id, me, &next, until, now)
                 },
             }
@@ -621,7 +621,7 @@ impl CoordinationStore for SqliteStore {
                 conn,
                 "SELECT key FROM kv WHERE project_id = ?1 ORDER BY rowid",
                 project_id,
-                |key| KvKey::try_new(key).map_err(|error| corrupt("kv key", error)),
+                |key| KvKey::try_new(key).map_err(|error| refused("kv key", error)),
             )
         })
     }

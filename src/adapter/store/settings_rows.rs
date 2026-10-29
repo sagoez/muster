@@ -4,7 +4,7 @@ use rusqlite::{Connection, Row, params};
 use super::{
     edit_log_rows::record_edit_everywhere,
     sqlite_store::{
-        SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
+        SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
     store_error::StoreError,
 };
@@ -39,37 +39,37 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
     let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
-        .map_err(|error| corrupt("log size", error))
+        .map_err(|error| refused("log size", error))
         .and_then(|bytes| {
-            ByteSize::try_new(RawByteSize::b(bytes)).map_err(|error| corrupt("log size", error))
+            ByteSize::try_new(RawByteSize::b(bytes)).map_err(|error| refused("log size", error))
         })
-        .and_then(|size| LogMaxSize::try_new(size).map_err(|error| corrupt("log size", error)))?;
+        .and_then(|size| LogMaxSize::try_new(size).map_err(|error| refused("log size", error)))?;
     let scrollback = usize::try_from(scrollback)
-        .map_err(|error| corrupt("scrollback", error))
+        .map_err(|error| refused("scrollback", error))
         .and_then(|lines| {
-            ScrollbackLines::try_new(lines).map_err(|error| corrupt("scrollback", error))
+            ScrollbackLines::try_new(lines).map_err(|error| refused("scrollback", error))
         })?;
     Ok(Settings::builder()
         .desktop_notifications(row.get("desktop_notifications").map_err(db_error)?)
         .default_size(default_size)
-        .detach_key(DetachKey::try_new(detach_key).map_err(|error| corrupt("detach key", error))?)
+        .detach_key(DetachKey::try_new(detach_key).map_err(|error| refused("detach key", error))?)
         .log_max_size(log_max_size)
         .scrollback(scrollback)
         .color_scheme(
             color_scheme
                 .parse()
-                .map_err(|error| corrupt("color scheme", error))?,
+                .map_err(|error| refused("color scheme", error))?,
         )
         .default_autostart(row.get("default_autostart").map_err(db_error)?)
         .default_restart(
             default_restart
                 .parse()
-                .map_err(|error| corrupt("default restart policy", error))?,
+                .map_err(|error| refused("default restart policy", error))?,
         )
         .default_stop_signal(
             default_stop_signal
                 .parse()
-                .map_err(|error| corrupt("default stop signal", error))?,
+                .map_err(|error| refused("default stop signal", error))?,
         )
         .default_stop_grace(grace_from_millis(
             "default stop grace",
@@ -78,7 +78,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
         .mcp_stack_edits(
             mcp_stack_edits
                 .parse()
-                .map_err(|error| corrupt("MCP stack edits", error))?,
+                .map_err(|error| refused("MCP stack edits", error))?,
         )
         .build())
 }

@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    fmt::Display,
+    fmt::{Debug, Display},
     fs::{OpenOptions, Permissions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
@@ -23,8 +23,24 @@ use crate::{
     },
 };
 
-/// Nanoseconds in a millisecond, for rounding a grace period up.
+/// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;
+/// Each kind of validator refusal, as its error's debug form names it, and
+/// the sentence it reads as after the value it refused.
+const REFUSAL_REASONS: [(&str, &str); 7] = [
+    ("NotEmptyViolated", "it is empty"),
+    ("LenCharMaxViolated", "it is longer than muster allows"),
+    ("LenCharMinViolated", "it is shorter than muster allows"),
+    (
+        "GreaterOrEqualViolated",
+        "it is below the least muster allows",
+    ),
+    ("LessOrEqualViolated", "it is above the most muster allows"),
+    ("TryFromIntError", "it is out of range"),
+    ("VariantNotFound", "it is not one muster knows"),
+];
+/// The sentence any other refusal reads as.
+const UNACCEPTED: &str = "it is not a value muster accepts";
 /// The database file under muster's state directory.
 pub const DATABASE_FILE: &str = "muster.db";
 /// How long a connection waits for another process's write lock before
@@ -233,13 +249,13 @@ fn pending_from(conn: &Connection) -> Result<Option<usize>, ConfigError> {
     let found: u32 = conn
         .pragma_query_value(None, USER_VERSION, |row| row.get(0))
         .map_err(db_error)?;
-    let applied = usize::try_from(found).map_err(|error| corrupt(USER_VERSION, error))?;
+    let applied = usize::try_from(found).map_err(|error| refused(USER_VERSION, error))?;
     match applied.cmp(&latest) {
         Ordering::Less => Ok(Some(applied)),
         Ordering::Equal => Ok(None),
         Ordering::Greater => Err(ConfigError::UnsupportedSchema {
             found,
-            supported: u32::try_from(latest).map_err(|error| corrupt(USER_VERSION, error))?,
+            supported: u32::try_from(latest).map_err(|error| refused(USER_VERSION, error))?,
         }),
     }
 }
@@ -272,13 +288,28 @@ pub(super) fn db_error(error: SqliteError) -> ConfigError {
     StoreError::Sqlite(error).into()
 }
 
-/// The error for a stored value the domain refuses: the row was edited by
-/// hand or written by a different muster.
-pub(super) fn corrupt(what: &str, error: impl Display) -> ConfigError {
+/// The error for a stored value the domain refuses, saying why in words: the
+/// row was edited by hand or written by a different muster.
+pub(super) fn corrupt(what: &str, reason: impl Display) -> ConfigError {
     ConfigError::CorruptRow {
         what: what.to_string(),
-        reason: error.to_string(),
+        reason: reason.to_string(),
     }
+}
+
+/// As [`corrupt`], for a validator's `error`, whose own text names a Rust
+/// type: the reason is the plain sentence its kind reads as.
+pub(super) fn refused(what: &str, error: impl Debug) -> ConfigError {
+    corrupt(what, refusal_reason(&format!("{error:?}")))
+}
+
+/// The sentence a validator error reads as, from the kind its `debugged`
+/// form names; [`UNACCEPTED`] for any other.
+fn refusal_reason(debugged: &str) -> &'static str {
+    REFUSAL_REASONS
+        .iter()
+        .find(|(kind, _)| debugged.contains(kind))
+        .map_or(UNACCEPTED, |(_, reason)| reason)
 }
 
 /// `value` as the integer SQLite stores.
@@ -306,7 +337,7 @@ pub(super) fn duration_millis(what: &str, duration: Duration) -> Result<i64, Con
 /// Returns [`ConfigError::CorruptRow`] naming `what` when it is negative.
 pub(super) fn duration_from_millis(what: &str, millis: i64) -> Result<Duration, ConfigError> {
     u64::try_from(millis)
-        .map_err(|error| corrupt(what, error))
+        .map_err(|error| refused(what, error))
         .map(Duration::from_millis)
 }
 
@@ -319,7 +350,7 @@ pub(super) fn positive_from_millis(
     millis: i64,
 ) -> Result<PositiveDuration, ConfigError> {
     PositiveDuration::try_new(duration_from_millis(what, millis)?)
-        .map_err(|error| corrupt(what, error))
+        .map_err(|error| refused(what, error))
 }
 
 /// The stop grace a millisecond column holds.
@@ -328,7 +359,7 @@ pub(super) fn positive_from_millis(
 /// Returns [`ConfigError::CorruptRow`] naming `what` when it is not a grace
 /// muster accepts.
 pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<StopGrace, ConfigError> {
-    StopGrace::try_new(duration_from_millis(what, millis)?).map_err(|error| corrupt(what, error))
+    StopGrace::try_new(duration_from_millis(what, millis)?).map_err(|error| refused(what, error))
 }
 
 /// `at` as a seconds column holds it, held at the latest second SQLite can
@@ -344,7 +375,7 @@ pub(super) fn epoch_param(at: EpochSeconds) -> i64 {
 pub(super) fn epoch_from_secs(what: &str, secs: i64) -> Result<EpochSeconds, ConfigError> {
     u64::try_from(secs)
         .map(EpochSeconds::new)
-        .map_err(|error| corrupt(what, error))
+        .map_err(|error| refused(what, error))
 }
 
 #[cfg(test)]
@@ -363,7 +394,8 @@ mod tests {
                 CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsReader,
                 SettingsStore, StackEditLog, StackReader, StackStore,
             },
-            value::{ProjectRoot, StackRevision},
+            process::StopSignal,
+            value::{COMMAND_MAX_CHARS, CommandLine, ProcessName, ProjectRoot, StackRevision},
         },
     };
 
@@ -561,6 +593,54 @@ mod tests {
             Err(ConfigError::CorruptRow { .. })
         ));
         assert!(positive_from_millis("timeout", 0).is_err());
+    }
+
+    /// A stored value a validator refuses reads as a sentence naming the
+    /// field, never the validator's type or test.
+    #[test]
+    fn a_refused_value_reads_as_a_sentence_naming_the_field() {
+        let reason = |error: ConfigError| error.to_string();
+
+        assert_eq!(
+            reason(refused(
+                "process name",
+                ProcessName::try_new("  ").unwrap_err()
+            )),
+            "stored process name is invalid: it is empty"
+        );
+        let unsafe_name = reason(refused(
+            "process name",
+            ProcessName::try_new("a\u{7}").unwrap_err(),
+        ));
+        assert_eq!(
+            unsafe_name,
+            "stored process name is invalid: it is not a value muster accepts"
+        );
+        assert_eq!(
+            reason(refused(
+                "command",
+                CommandLine::try_new("x".repeat(COMMAND_MAX_CHARS + 1)).unwrap_err()
+            )),
+            "stored command is invalid: it is longer than muster allows"
+        );
+        assert_eq!(
+            reason(refused("lock count", usize::try_from(-1_i64).unwrap_err())),
+            "stored lock count is invalid: it is out of range"
+        );
+        let signal = reason(refused(
+            "stop signal",
+            "nope".parse::<StopSignal>().unwrap_err(),
+        ));
+        assert_eq!(
+            signal,
+            "stored stop signal is invalid: it is not one muster knows"
+        );
+        for text in [&unsafe_name, &signal] {
+            assert!(
+                !text.contains("predicate") && !text.contains("Matching"),
+                "{text}"
+            );
+        }
     }
 
     /// A duration too long for a millisecond column is refused, never

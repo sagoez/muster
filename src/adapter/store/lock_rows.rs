@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use super::{
     coordination_rows::{author_from, collect},
-    sqlite_store::{corrupt, db_error, epoch_from_secs, epoch_param},
+    sqlite_store::{db_error, epoch_from_secs, epoch_param, refused},
     store_error::StoreError,
 };
 use crate::domain::{
@@ -37,12 +37,12 @@ fn lock_from_row(row: &Row) -> Result<Lock, ConfigError> {
     let note: Option<String> = row.get("note").map_err(db_error)?;
     let expires_at: i64 = row.get("expires_at").map_err(db_error)?;
     Ok(Lock::builder()
-        .name(LockName::try_new(name).map_err(|error| corrupt("lock name", error))?)
+        .name(LockName::try_new(name).map_err(|error| refused("lock name", error))?)
         .owner(author_from(&owner)?)
         .note(
             note.map(LockNote::try_new)
                 .transpose()
-                .map_err(|error| corrupt("lock note", error))?,
+                .map_err(|error| refused("lock note", error))?,
         )
         .expires_at(epoch_from_secs("lock expiry", expires_at)?)
         .build())
@@ -88,7 +88,7 @@ fn other_live_locks(
             |row| row.get(0),
         )
         .map_err(db_error)?;
-    usize::try_from(count).map_err(|error| corrupt("lock count", error))
+    usize::try_from(count).map_err(|error| refused("lock count", error))
 }
 
 /// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`,

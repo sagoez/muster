@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::{
     project_rows::find_project,
     sqlite_store::{
-        SqliteStore, column_integer, corrupt, db_error, duration_from_millis, duration_millis,
+        SqliteStore, column_integer, db_error, duration_from_millis, duration_millis, refused,
     },
 };
 use crate::domain::{
@@ -42,7 +42,7 @@ fn edit_from_row(row: &Row) -> Result<RecordedEdit, ConfigError> {
             process
                 .map(ProcessName::try_new)
                 .transpose()
-                .map_err(|error| corrupt(PROCESS, error))?,
+                .map_err(|error| refused(PROCESS, error))?,
         )
         .message(printable(&message))
         .build())

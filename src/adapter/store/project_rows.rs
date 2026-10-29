@@ -1,7 +1,4 @@
-use std::{
-    fmt::Display,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Params, Row, params};
 
@@ -12,7 +9,7 @@ use crate::{
         config::{ConfigError, Registration, UnreadableProject},
         port::ProjectStore,
         project::Project,
-        value::{ProjectName, ProjectRoot},
+        value::{ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
     },
 };
 
@@ -20,10 +17,12 @@ use crate::{
 const SELECT_PROJECT: &str = "SELECT id, root, name FROM projects";
 /// What an unreadable project's refusal calls it, before its folder.
 const PROJECT_AT: &str = "project at ";
-/// The part of a project row naming its folder.
-const FOLDER: &str = "folder";
-/// The part of a project row naming it.
-const NAME: &str = "name";
+/// Why a stored folder that is not absolute is refused.
+const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
+/// Why a blank stored name is refused.
+const NAME_EMPTY: &str = "its name is empty";
+/// Why a stored name that could drive a terminal is refused.
+const NAME_UNSAFE: &str = "its name holds a control or format character";
 
 /// A project with the row id other tables key it by.
 pub(super) type ProjectRow = (i64, Project);
@@ -50,19 +49,22 @@ fn project_from_row(row: &Row) -> Result<Result<ProjectRow, UnreadableProject>, 
     let id: i64 = row.get("id").map_err(db_error)?;
     let root: String = row.get("root").map_err(db_error)?;
     let name: String = row.get("name").map_err(db_error)?;
-    let unreadable = |part: &str, error: &dyn Display| {
+    let unreadable = |reason: &str| {
         UnreadableProject::builder()
             .root(PathBuf::from(&root))
-            .reason(format!("its {part} is refused: {error}"))
+            .reason(reason.to_string())
             .build()
     };
     let project_root = match ProjectRoot::try_new(PathBuf::from(&root)) {
         Ok(project_root) => project_root,
-        Err(error) => return Ok(Err(unreadable(FOLDER, &error))),
+        Err(ProjectRootError::PredicateViolated) => {
+            return Ok(Err(unreadable(FOLDER_NOT_ABSOLUTE)));
+        },
     };
     let name = match ProjectName::try_new(name) {
         Ok(name) => name,
-        Err(error) => return Ok(Err(unreadable(NAME, &error))),
+        Err(ProjectNameError::NotEmptyViolated) => return Ok(Err(unreadable(NAME_EMPTY))),
+        Err(ProjectNameError::PredicateViolated) => return Ok(Err(unreadable(NAME_UNSAFE))),
     };
     Ok(Ok((
         id,
@@ -465,6 +467,7 @@ mod tests {
         assert_eq!(unreadable.len(), 1);
         let stored = unreadable[0].root().clone();
         assert_eq!(stored, PathBuf::from("relative/blog"));
+        assert_eq!(unreadable[0].reason(), FOLDER_NOT_ABSOLUTE);
 
         assert!(!store.remove_unreadable_project(shop.as_ref()).unwrap());
         assert!(store.remove_unreadable_project(&stored).unwrap());
@@ -524,6 +527,7 @@ mod tests {
         let unreadable = store.unreadable_projects().unwrap();
         assert_eq!(unreadable.len(), 1);
         assert_eq!(unreadable[0].root(), blog.as_ref());
+        assert_eq!(unreadable[0].reason(), NAME_UNSAFE);
 
         assert!(store.remove_project(&blog).unwrap());
         assert!(store.unreadable_projects().unwrap().is_empty());

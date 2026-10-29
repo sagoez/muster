@@ -6,6 +6,7 @@ use super::{
     project_rows::find_project,
     sqlite_store::{
         SqliteStore, column_integer, corrupt, db_error, duration_from_millis, duration_millis,
+        refused,
     },
 };
 use crate::domain::{
@@ -36,16 +37,16 @@ fn run_from_row(row: &Row) -> Result<EndedRun, ConfigError> {
     let outcome = match (status, signal) {
         (Some(0), None) => ExitOutcome::Succeeded,
         (Some(status), None) => ExitOutcome::Failed(ExitCause::Status(
-            u32::try_from(status).map_err(|error| corrupt(EXIT_STATUS, error))?,
+            u32::try_from(status).map_err(|error| refused(EXIT_STATUS, error))?,
         )),
         (None, Some(signal)) => ExitOutcome::Failed(ExitCause::Signal(
-            SignalName::try_new(signal).map_err(|error| corrupt(EXIT_SIGNAL, error))?,
+            SignalName::try_new(signal).map_err(|error| refused(EXIT_SIGNAL, error))?,
         )),
         (None, None) => ExitOutcome::FAILED_UNKNOWN,
         (Some(_), Some(_)) => return Err(corrupt(EXIT_SIGNAL, "a status and a signal")),
     };
     Ok(EndedRun::builder()
-        .process(ProcessName::try_new(name).map_err(|error| corrupt(NAME, error))?)
+        .process(ProcessName::try_new(name).map_err(|error| refused(NAME, error))?)
         .outcome(outcome)
         .at(UNIX_EPOCH + duration_from_millis(ENDED_AT, ended_ms)?)
         .build())

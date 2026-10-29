@@ -1,3 +1,4 @@
+mod applied_change;
 mod applied_settings;
 mod environment;
 mod error;
@@ -22,6 +23,7 @@ mod unconfined_dir;
 mod unreadable_project;
 mod working_dir;
 
+pub use applied_change::*;
 pub use applied_settings::*;
 pub use environment::*;
 pub use error::*;

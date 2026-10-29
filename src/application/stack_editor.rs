@@ -2,8 +2,8 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{
-        ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft, ProcessSpec,
-        Registration, SettingChange,
+        AppliedChange, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft,
+        ProcessSpec, Registration, SettingChange,
     },
     coordination::Author,
     port::{SettingsStore, StackStore, StateChangeNotifier},
@@ -46,7 +46,8 @@ impl StackEditor<'_> {
     }
 
     /// Applies `change` for `author` to the process `name` and returns its
-    /// new definition.
+    /// new definition and whether it changed; a change to the stored values
+    /// tells the notifier nothing.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the project or process is unknown or the
@@ -57,10 +58,12 @@ impl StackEditor<'_> {
         name: &ProcessName,
         change: &ProcessChange,
         author: &Author,
-    ) -> Result<ProcessSpec, ConfigError> {
-        let spec = self.stacks.change_process(root, name, change, author)?;
-        self.notifier.stack_changed(root);
-        Ok(spec)
+    ) -> Result<AppliedChange, ConfigError> {
+        let applied = self.stacks.change_process(root, name, change, author)?;
+        if applied.changed() {
+            self.notifier.stack_changed(root);
+        }
+        Ok(applied)
     }
 
     /// Removes the process `name` for `author` and returns what it was.
@@ -170,8 +173,28 @@ mod tests {
             .change(&root(), &name(), &change_of(), &agent())
             .unwrap();
 
-        assert!(!*changed.autostart());
+        assert!(changed.changed());
+        assert!(!*changed.spec().autostart());
         assert_wrote_then_notified(&fakes, EditorStep::WroteFor(agent()));
+    }
+
+    /// A change to the values already stored succeeds saying it changed
+    /// nothing, and is never announced.
+    #[test]
+    fn a_change_to_the_stored_values_notifies_nothing() {
+        let fakes = EditorFakes::new(false);
+        let same = ProcessChange::builder()
+            .autostart(Some(*spec().autostart()))
+            .build();
+
+        let applied = fakes
+            .editor()
+            .change(&root(), &name(), &same, &agent())
+            .unwrap();
+
+        assert!(!applied.changed());
+        assert_eq!(applied.spec(), &spec());
+        assert_eq!(fakes.steps(), [EditorStep::WroteFor(agent())]);
     }
 
     #[test]

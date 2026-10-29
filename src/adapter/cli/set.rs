@@ -25,6 +25,8 @@ use crate::{
 const SET_WORD: &str = "set";
 /// Opens the line naming the changed process.
 const UPDATED: &str = "updated";
+/// Follows the name of a process a set left as it was.
+const NOTHING_CHANGED: &str = "nothing changed: it already holds these values";
 /// Between a name and what changed.
 const GAP: &str = "  ";
 /// Between the changes listed.
@@ -60,6 +62,10 @@ pub struct SetView {
     /// The process as stored now.
     #[getset(get = "pub")]
     process: DefinitionView,
+    /// Whether the stored definition changed; a set to the values already
+    /// stored succeeds and changes nothing.
+    #[getset(get_copy = "pub")]
+    changed: bool,
     /// Whether a running service reports it running, so the change waits
     /// for its next start.
     #[getset(get_copy = "pub")]
@@ -140,15 +146,17 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
             root: root.as_ref().clone(),
         })?;
     let name = resolve_among(stack.names(), &project, args.name())?;
-    let spec = invocation
-        .editor(store.as_ref())
-        .change(root, &name, &change, &Author::human())?;
-    let running = runs_now(invocation.service(), root, spec.name());
+    let applied =
+        invocation
+            .editor(store.as_ref())
+            .change(root, &name, &change, &Author::human())?;
+    let running = runs_now(invocation.service(), root, applied.spec().name());
     Ok(SetView::builder()
         .project(ProjectIdentityView::from(&project))
-        .process(DefinitionView::from(&spec))
+        .process(DefinitionView::from(applied.spec()))
+        .changed(applied.changed())
         .running(running)
-        .needs_restart(change.needs_restart())
+        .needs_restart(applied.changed() && change.needs_restart())
         .changes(change_words(&change))
         .build())
 }
@@ -223,9 +231,16 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
 }
 
 /// The human report of `view`: what changed, and how a running process
-/// takes a change that needs a restart.
+/// takes a change that needs a restart, or that nothing changed.
 pub fn set_rows(view: &SetView) -> Report {
     let name = view.process().name();
+    let title = project_title(SET_WORD, view.project().name());
+    if !view.changed() {
+        return Report::new(title, vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("{name}{GAP}{NOTHING_CHANGED}"),
+        )]);
+    }
     let mut rows = vec![Row::unlabeled(
         RowKind::Ok,
         format!(
@@ -242,7 +257,7 @@ pub fn set_rows(view: &SetView) -> Report {
             ),
         ));
     }
-    Report::new(project_title(SET_WORD, view.project().name()), rows)
+    Report::new(title, rows)
 }
 
 #[cfg(test)]
@@ -282,10 +297,31 @@ mod tests {
                     .build(),
             )
             .process(DefinitionView::from(&spec))
+            .changed(true)
             .running(true)
             .needs_restart(change.needs_restart())
             .changes(change_words(change))
             .build()
+    }
+
+    /// A set that changed nothing says so, with no restart hint, and its
+    /// JSON says `changed: false`.
+    #[test]
+    fn a_set_that_changed_nothing_says_so() {
+        let command = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("bin/api").unwrap()))
+            .build();
+        let view = SetView::builder()
+            .project(running_view(&command).project().clone())
+            .process(running_view(&command).process().clone())
+            .changed(false)
+            .running(true)
+            .needs_restart(false)
+            .changes(change_words(&command))
+            .build();
+
+        assert_eq!(plain(&set_rows(&view)), format!("api  {NOTHING_CHANGED}"));
+        assert_eq!(serde_json::to_value(&view).unwrap()["changed"], false);
     }
 
     /// A running process is told to restart only for a change it reads at

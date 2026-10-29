@@ -115,7 +115,9 @@ after `--`, `--no-cwd`, `--no-description` and `--no-ready` to clear, `--env` to
 add or replace a variable and `--unset-env` to remove one. A running process keeps its
 current run; `muster restart <name>` applies a change to its command, working
 directory, environment, stop policy or readiness check, and `set` says so when
-one needs it. `muster rm <name>...`
+one needs it. A `set` to the values already stored succeeds and says nothing
+changed (`"changed": false` with `--json`); `process_set` answers the same.
+`muster rm <name>...`
 stops each process it removes and waits for it to end. A name cannot be
 changed: remove the process and add it again.
 
@@ -246,7 +248,7 @@ crashed or exited rather than started.
 |---|---|
 | 0 | Success |
 | 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds) |
-| 2 | The command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled |
+| 2 | The command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
 | 4 | An invalid value: not a project, an unknown project or process, a refused argument, or an unusable file |
 | 130 | Interrupted with Ctrl-C while it waited at a terminal |

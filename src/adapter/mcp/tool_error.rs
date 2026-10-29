@@ -107,7 +107,7 @@ pub enum ToolError {
         source: PatternError,
     },
     /// A call that edits fields was given none to change.
-    #[error("{0} changed nothing; pass at least one field to change")]
+    #[error("{0} names nothing to change; pass at least one field to change")]
     NothingToChange(&'static str),
     /// A note key was blank.
     #[error("'{0}' is not a valid note key")]

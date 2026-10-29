@@ -18,8 +18,8 @@ use super::{
 };
 use crate::domain::{
     config::{
-        ConfigError, Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-        Stack, StackEdit,
+        AppliedChange, ConfigError, Environment, ImportMode, ImportPlan, ProcessChange,
+        ProcessSpec, Registration, Stack, StackEdit,
     },
     coordination::Author,
     port::{StackReader, StackStore},
@@ -380,7 +380,7 @@ impl StackStore for SqliteStore {
         name: &ProcessName,
         change: &ProcessChange,
         author: &Author,
-    ) -> Result<ProcessSpec, ConfigError> {
+    ) -> Result<AppliedChange, ConfigError> {
         self.write(|conn| {
             let project = require_project(conn, root)?;
             let project_id = project.0;
@@ -388,7 +388,10 @@ impl StackStore for SqliteStore {
             let changed = before.clone().with_change(change)?;
             let fields = before.differing_fields(&changed);
             if fields.is_empty() {
-                return Ok(changed);
+                return Ok(AppliedChange::builder()
+                    .spec(changed)
+                    .changed(false)
+                    .build());
             }
             update_process(conn, project_id, &changed)?;
             bump_revision(conn, project_id)?;
@@ -397,7 +400,7 @@ impl StackStore for SqliteStore {
                 fields,
                 spec: changed.clone(),
             })?;
-            Ok(changed)
+            Ok(AppliedChange::builder().spec(changed).changed(true).build())
         })
     }
 
@@ -606,7 +609,8 @@ mod tests {
         let changed = store
             .change_process(&root, &name("web"), &cleared, &Author::human())
             .unwrap();
-        assert_eq!(changed.unconfined_dir(), None);
+        assert!(changed.changed());
+        assert_eq!(changed.spec().unconfined_dir(), None);
         stored("../..");
         store
             .remove_process(&root, &name("web"), &Author::human())
@@ -656,10 +660,12 @@ mod tests {
             .stop_signal(Some(StopSignal::Interrupt))
             .build();
 
-        let changed = store
+        let applied = store
             .change_process(&root, &name("web"), &change, &Author::human())
             .unwrap();
+        let changed = applied.spec().clone();
 
+        assert!(applied.changed());
         assert_eq!(
             changed,
             full_spec()
@@ -706,6 +712,7 @@ mod tests {
             store
                 .change_process(&root, &name("web"), &set, &Author::human())
                 .unwrap()
+                .spec()
                 .ready(),
             &Some(http)
         );
@@ -980,9 +987,10 @@ mod tests {
             .command(Some(CommandLine::try_new("npm run dev").unwrap()))
             .working_dir(FieldEdit::Clear)
             .build();
-        store
+        let unchanged = store
             .change_process(&root, &name("web"), &same, &agent)
             .unwrap();
+        assert!(!unchanged.changed());
         assert_eq!(store.stack_revision(&root).unwrap(), revision);
         assert_eq!(store.edits(&root).unwrap().len(), logged);
 
@@ -990,9 +998,12 @@ mod tests {
             .command(Some(CommandLine::try_new("npm run dev").unwrap()))
             .autostart(Some(true))
             .build();
-        store
-            .change_process(&root, &name("web"), &one, &agent)
-            .unwrap();
+        assert!(
+            store
+                .change_process(&root, &name("web"), &one, &agent)
+                .unwrap()
+                .changed()
+        );
         assert_ne!(store.stack_revision(&root).unwrap(), revision);
         assert_eq!(
             store.edits(&root).unwrap().last().unwrap().message(),

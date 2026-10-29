@@ -64,6 +64,7 @@ const GREP_OR_ERRORS: &str = "grep or errors_only, not both";
 /// Keys of the results built here.
 const PROJECT: &str = "project";
 const PROCESS: &str = "process";
+const CHANGED: &str = "changed";
 const RUNNING: &str = "running";
 const SCREEN: &str = "screen";
 const SENT: &str = "sent";
@@ -367,17 +368,18 @@ impl MusterMcp {
             timeout in seconds; null removes the readiness check). The change is shown \
             to the human as a notice naming the fields changed. A running process keeps its \
             current run: restart it to apply the change. Returns {project, process: the \
-            stored definition, its environment as variable names only, running}. An unknown \
-            name, an invalid value, a working_dir outside the project, a call that changes \
-            nothing, or a call while the user's mcp-stack-edits setting is read-only is \
-            flagged isError."
+            stored definition, its environment as variable names only, changed, running}; \
+            changed is false, and nothing is recorded, when every field already held the \
+            value given. An unknown name, an invalid value, a working_dir outside the \
+            project, a call naming no field, or a call while the user's mcp-stack-edits \
+            setting is read-only is flagged isError."
     )]
     pub(super) async fn process_set(
         &self,
         Parameters(arg): Parameters<ProcessSetArg>,
     ) -> ToolResult {
         let author = self.identity.author().clone();
-        let (project, spec, running) = self
+        let (project, applied, running) = self
             .blocking(move |deps| {
                 deps.allow_stack_edit(PROCESS_SET)?;
                 let project = deps.project(arg.project().as_deref())?;
@@ -386,24 +388,31 @@ impl MusterMcp {
                 if change.is_empty() {
                     return Err(ToolError::NothingToChange(PROCESS_SET));
                 }
-                let spec = deps
+                let applied = deps
                     .editor()
                     .change(project.root(), &name, &change, &author)?;
-                let running =
-                    process::runs_now(deps.service().as_ref(), project.root(), spec.name());
-                Ok((project, spec, running))
+                let running = process::runs_now(
+                    deps.service().as_ref(),
+                    project.root(),
+                    applied.spec().name(),
+                );
+                Ok((project, applied, running))
             })
             .await?;
         structured(
             with_field(
                 with_field(
                     with_field(
-                        object(),
-                        PROJECT,
-                        json(&ProjectIdentityView::from(&project))?,
+                        with_field(
+                            object(),
+                            PROJECT,
+                            json(&ProjectIdentityView::from(&project))?,
+                        ),
+                        PROCESS,
+                        json(&DefinitionView::for_agent(applied.spec()))?,
                     ),
-                    PROCESS,
-                    json(&DefinitionView::for_agent(&spec))?,
+                    CHANGED,
+                    Value::Bool(applied.changed()),
                 ),
                 RUNNING,
                 Value::Bool(running),
@@ -1033,6 +1042,7 @@ mod tests {
         assert!(!changed.to_string().contains("3000"), "{changed}");
         assert_eq!(changed[PROJECT]["name"], "shop");
         assert_eq!(changed[RUNNING], false);
+        assert_eq!(changed[CHANGED], true);
         assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), 2);
         let edits = edits(&fixture);
         assert_eq!(
@@ -1048,10 +1058,10 @@ mod tests {
         assert!(!edits.iter().any(|edit| edit.contains("3000")));
     }
 
-    /// A `process_set` that changes nothing, or names no process, is the
+    /// A `process_set` naming no field, or an unknown process, is the
     /// caller's mistake; an unknown name lists the valid ones.
     #[test]
-    fn process_set_refuses_no_change_and_an_unknown_name() {
+    fn process_set_refuses_no_field_and_an_unknown_name() {
         let fixture = fixture();
         register(&fixture);
 
@@ -1062,7 +1072,7 @@ mod tests {
                     .process_set(set(serde_json::json!({ "name": "web" })))
                     .await,
             );
-            assert!(nothing.contains("changed nothing"), "{nothing}");
+            assert!(nothing.contains("names nothing to change"), "{nothing}");
             let unknown = refusal(
                 fixture
                     .server()
@@ -1071,6 +1081,34 @@ mod tests {
             );
             assert!(unknown.contains("'web'"), "{unknown}");
         });
+    }
+
+    /// A `process_set` to the values already stored succeeds saying it
+    /// changed nothing, and is neither recorded nor announced.
+    #[test]
+    fn process_set_to_the_stored_values_succeeds_unchanged() {
+        let fixture = fixture();
+        register(&fixture);
+        let told = fixture.notifier().stacks().lock().unwrap().len();
+        let logged = edits(&fixture).len();
+
+        let same = runtime().block_on(async {
+            content(
+                fixture
+                    .server()
+                    .process_set(set(serde_json::json!({
+                        "name": "web",
+                        "command": "npm run dev",
+                        "restart": "never",
+                    })))
+                    .await,
+            )
+        });
+
+        assert_eq!(same[CHANGED], false, "{same}");
+        assert_eq!(same[PROCESS]["command"], "npm run dev");
+        assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), told);
+        assert_eq!(edits(&fixture).len(), logged);
     }
 
     /// `process_remove` of an unknown name lists the valid ones and removes

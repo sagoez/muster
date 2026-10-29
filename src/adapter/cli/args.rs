@@ -43,7 +43,7 @@ const AFTER_HELP: &str = "\
 Exit codes:
     0  success
     1  a process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds)
-    2  the command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled
+    2  the command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled
     3  the muster service is unavailable or runs a newer version
     4  an invalid value: not a project, an unknown project or process, a refused argument, or an unusable file
   130  interrupted with Ctrl-C while it waited at a terminal

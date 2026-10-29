@@ -7,8 +7,8 @@ use std::{
 use super::supervisor::testing::test_settings;
 use crate::domain::{
     config::{
-        AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec,
-        RecordedEdit, Registration, SettingChange, Stack, StackEdit,
+        AppliedChange, AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange,
+        ProcessSpec, RecordedEdit, Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
     port::{
@@ -136,16 +136,20 @@ impl StackStore for MemoryStore {
         name: &ProcessName,
         change: &ProcessChange,
         _author: &Author,
-    ) -> Result<ProcessSpec, ConfigError> {
+    ) -> Result<AppliedChange, ConfigError> {
         let mut stacks = self.stacks.lock().unwrap();
         let spec = stacks
             .get_mut(root)
             .and_then(|processes| processes.iter_mut().find(|spec| spec.name() == name))
             .ok_or_else(|| ConfigError::Storage(name.to_string().into()))?;
-        *spec = spec.clone().with_change(change)?;
-        let changed = spec.clone();
+        let changed = spec.clone().with_change(change)?;
+        let applied = AppliedChange::builder()
+            .changed(changed != *spec)
+            .spec(changed.clone())
+            .build();
+        *spec = changed;
         self.bump(root);
-        Ok(changed)
+        Ok(applied)
     }
 
     fn remove_process(

@@ -940,11 +940,22 @@ fn add_up_set_rm_against_a_real_service() {
     let (set, changed) = scratch.json_on(&folder, &["set", "web", "--restart", "on-failure"]);
     assert!(set.status.success(), "{}", shown(&set));
     assert_eq!(changed["process"]["restart"], "on-failure");
+    assert_eq!(changed["changed"], true);
     assert_eq!(changed["running"], true);
     assert_eq!(
         scratch.row(&folder, "web")["pid"],
         pid,
         "a change waits for the next start"
+    );
+    let (same, unchanged) = scratch.json_on(&folder, &["set", "web", "--restart", "on-failure"]);
+    assert!(same.status.success(), "{}", shown(&same));
+    assert_eq!(unchanged["changed"], false);
+    let same = scratch.on(&folder, &["set", "web", "--restart", "on-failure"]);
+    assert!(same.status.success(), "{}", shown(&same));
+    assert!(
+        stdout(&same).contains("nothing changed"),
+        "{}",
+        shown(&same)
     );
     let human = scratch.on(&folder, &["set", "web", "--description", "the site"]);
     assert!(human.status.success(), "{}", shown(&human));
@@ -2139,9 +2150,10 @@ fn a_project_row_with_a_relative_root_is_removed_by_its_listed_text() {
     assert_eq!(projects[0]["name"], "shop");
 }
 
-/// A setting or field past its bound is refused as invalid input, never as a
-/// database error, and changes nothing; `config set` answers with the value
-/// the database holds.
+/// A setting or field past its bound, or a duration finer than a
+/// millisecond, is refused as invalid input, never as a database error, and
+/// changes nothing; `config set` answers with the value the database holds,
+/// which `config get` shows as text `config set` takes back unchanged.
 #[test]
 fn values_past_their_bounds_are_invalid_input() {
     let scratch = Scratch::new();
@@ -2152,6 +2164,7 @@ fn values_past_their_bounds_are_invalid_input() {
         ("log-max-size", "2GiB"),
         ("default-stop-grace", "2h"),
         ("default-stop-grace", "300000000y"),
+        ("default-stop-grace", "1500us"),
     ] {
         let refused = scratch.muster(&["config", "set", key, value]);
         assert_eq!(
@@ -2169,9 +2182,16 @@ fn values_past_their_bounds_are_invalid_input() {
     let (_, scrollback) = scratch.json(&["config", "get", "scrollback"]);
     assert_eq!(scrollback["value"], "1000");
 
-    let (set, stored) = scratch.json(&["config", "set", "default-stop-grace", "1500us"]);
+    let (set, stored) = scratch.json(&["config", "set", "default-stop-grace", "1500ms"]);
     assert!(set.status.success(), "{}", shown(&set));
-    assert_eq!(stored["value"], "2ms");
+    assert_eq!(stored["value"], "1s 500ms");
+    let (set, stored) = scratch.json(&["config", "set", "log-max-size", "1000001"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(stored["value"], "1000001B");
+    let shown_size = stored["value"].as_str().unwrap().to_string();
+    let (set, again) = scratch.json(&["config", "set", "log-max-size", &shown_size]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(again["value"], "1000001B");
 
     let dir = scratch.path().join("shop");
     fs::create_dir_all(&dir).unwrap();

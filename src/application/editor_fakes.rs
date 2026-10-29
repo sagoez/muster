@@ -7,8 +7,8 @@ use super::{
 };
 use crate::domain::{
     config::{
-        AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec,
-        Registration, SettingChange, Stack,
+        AppliedChange, AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange,
+        ProcessSpec, Registration, SettingChange, Stack,
     },
     coordination::Author,
     port::{SettingsReader, SettingsStore, StackReader, StackStore, StateChangeNotifier},
@@ -106,9 +106,13 @@ impl StackStore for EditorFakes {
         _name: &ProcessName,
         change: &ProcessChange,
         author: &Author,
-    ) -> Result<ProcessSpec, ConfigError> {
+    ) -> Result<AppliedChange, ConfigError> {
         self.write_for(author)?;
-        Ok(spec().with_change(change)?)
+        let changed = spec().with_change(change)?;
+        Ok(AppliedChange::builder()
+            .changed(changed != spec())
+            .spec(changed)
+            .build())
     }
 
     fn remove_process(

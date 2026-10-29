@@ -953,7 +953,10 @@ mod tests {
                     ))
                     .await,
             );
-            assert!(nothing.contains("todo_update changed nothing"), "{nothing}");
+            assert!(
+                nothing.contains("todo_update names nothing to change"),
+                "{nothing}"
+            );
             let name = refusal(
                 fixture
                     .server()

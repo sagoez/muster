@@ -1,6 +1,9 @@
 use super::StackReader;
 use crate::domain::{
-    config::{ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration},
+    config::{
+        AppliedChange, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec,
+        Registration,
+    },
     coordination::Author,
     value::{ProcessName, ProjectRoot},
 };
@@ -26,7 +29,8 @@ pub trait StackStore: StackReader {
     ) -> Result<Registration, ConfigError>;
 
     /// Applies `change` to the process `name` for `author` and returns the
-    /// result.
+    /// result, and whether it changed anything; one that changed nothing
+    /// writes nothing.
     ///
     /// # Errors
     /// Returns [`ConfigError::UnknownProject`] or [`ConfigError::UnknownProcess`]
@@ -38,7 +42,7 @@ pub trait StackStore: StackReader {
         name: &ProcessName,
         change: &ProcessChange,
         author: &Author,
-    ) -> Result<ProcessSpec, ConfigError>;
+    ) -> Result<AppliedChange, ConfigError>;
 
     /// Removes the process `name` for `author` and returns what it was.
     ///

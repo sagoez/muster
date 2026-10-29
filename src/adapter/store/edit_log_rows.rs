@@ -246,7 +246,9 @@ mod tests {
         let change = ProcessChange::builder().autostart(Some(true)).build();
         let changed = store
             .change_process(&root, &name("web"), &change, &agent())
-            .unwrap();
+            .unwrap()
+            .spec()
+            .clone();
         store.remove_process(&root, &name("web"), &agent()).unwrap();
 
         let edits = store.edits(&root).unwrap();

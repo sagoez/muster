@@ -2038,6 +2038,129 @@ fn mcp_tools_work_with_the_service_autostarted() {
     });
 }
 
+/// The agent's loop against a real service: a stored readiness check gates
+/// a start with wait=true, a restart's wait sees only the new run, the log
+/// reads the current run from `run_start` and nothing after its own cursor,
+/// a wait that runs out of time is not an error, and a crash while waiting
+/// is, carrying its last lines, an alert and an event.
+#[test]
+fn mcp_waits_reads_logs_and_hears_crashes() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[
+            entry("api", "echo booting; echo ready on $$; sleep 600", false),
+            entry("flaky", "echo boom; exit 3", false),
+        ]),
+    );
+    let mut mcp = McpSession::start(&mut scratch, &project);
+
+    let set = mcp.result(
+        "process_set",
+        serde_json::json!({ "name": "api", "ready": { "log": "ready on", "timeout": "30s" } }),
+    );
+    assert_eq!(
+        set["structuredContent"]["process"]["ready"],
+        serde_json::json!({ "log": "ready on", "timeout": "30s" }),
+        "{set}"
+    );
+    let started = mcp.result(
+        "process_start",
+        serde_json::json!({ "name": "api", "wait": true }),
+    );
+    assert_eq!(started["isError"], false, "{started}");
+    let wait = &started["structuredContent"]["wait"];
+    assert_eq!(wait["status"], "matched", "{started}");
+    assert_eq!(wait["until"], serde_json::json!({ "ready": true }));
+    let run_start = |mcp: &mut McpSession| {
+        let status = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
+        assert_eq!(status["processes"][0]["ready"], "ready", "{status}");
+        status["processes"][0]["run_start"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let first_run = run_start(&mut mcp);
+
+    let restarted = mcp.result(
+        "process_restart",
+        serde_json::json!({ "name": "api", "wait": { "log": "ready on" } }),
+    );
+    assert_eq!(
+        restarted["structuredContent"]["wait"]["status"], "matched",
+        "{restarted}"
+    );
+    let second_run = run_start(&mut mcp);
+    assert_ne!(first_run, second_run);
+    let logs = mcp.result(
+        "process_logs",
+        serde_json::json!({ "name": "api", "since": second_run }),
+    );
+    let slice = &logs["structuredContent"];
+    assert_eq!(slice["lines_returned"], 2, "{logs}");
+    assert!(
+        slice["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("booting\nready on"),
+        "{logs}"
+    );
+    assert!(result_text(&logs).starts_with("api o:"), "{logs}");
+    let after = mcp.result(
+        "process_logs",
+        serde_json::json!({ "name": "api", "since": slice["cursor"] }),
+    );
+    assert_eq!(after["structuredContent"]["lines_returned"], 0, "{after}");
+
+    let waiting = mcp.result(
+        "process_wait",
+        serde_json::json!({ "name": "api", "until": { "log": "never printed" }, "timeout_s": 1 }),
+    );
+    assert_eq!(waiting["isError"], false, "{waiting}");
+    assert_eq!(waiting["structuredContent"]["status"], "waiting");
+    assert!(
+        waiting["structuredContent"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("since=o:"),
+        "{waiting}"
+    );
+
+    let crashed = mcp.result(
+        "process_start",
+        serde_json::json!({ "name": "flaky", "wait": { "log": "never printed" } }),
+    );
+    assert_eq!(crashed["isError"], true, "{crashed}");
+    assert_eq!(crashed["structuredContent"]["wait"]["status"], "crashed");
+    assert!(result_text(&crashed).contains("boom"), "{crashed}");
+    let alerted = |result: &Value| {
+        result["structuredContent"]["alerts"]
+            .as_array()
+            .is_some_and(|alerts| alerts.iter().any(|alert| alert["kind"] == "crashed"))
+    };
+    let mut heard = alerted(&crashed);
+    wait_until("the crash to arrive as an alert", || {
+        heard = heard || alerted(&mcp.result("stack_status", serde_json::json!({})));
+        heard
+    });
+    let events = mcp.result(
+        "stack_events",
+        serde_json::json!({ "kinds": ["crashed", "ready"] }),
+    )["structuredContent"]
+        .clone();
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"crashed") && kinds.contains(&"ready"),
+        "{events}"
+    );
+    mcp.result("process_stop", serde_json::json!({ "name": "api" }));
+}
+
 /// An agent's MCP server in a folder that is not yet a project registers it
 /// with `process_add`, sees a running process through `process_set`, and
 /// `process_remove` stops it through the service before answering; the

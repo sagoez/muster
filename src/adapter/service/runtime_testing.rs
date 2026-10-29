@@ -8,8 +8,9 @@ use super::{
 pub(super) use crate::adapter::test_wait::{POLL, WAIT, wait_until};
 use crate::domain::{
     config::{Environment, ProcessSpec},
+    occupancy::ShellId,
     process::RestartPolicy,
-    value::{CommandLine, ProcessName},
+    value::{CommandLine, Pid, ProcessName, StartToken},
 };
 
 /// Prefix of every test scratch directory.
@@ -40,6 +41,14 @@ pub(super) fn commands(entries: &[(&str, bool)]) -> Vec<ProcessSpec> {
         .iter()
         .map(|(name, autostart)| sleeper(name, *autostart))
         .collect()
+}
+
+/// The shell running as `pid`, started at `start`.
+pub(super) fn test_shell(pid: u32, start: u64) -> ShellId {
+    ShellId::builder()
+        .pid(Pid::try_new(pid).unwrap())
+        .start(StartToken::try_new(start).unwrap())
+        .build()
 }
 
 /// A client asking with no environment of its own.

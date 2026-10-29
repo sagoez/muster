@@ -1,9 +1,53 @@
 use std::time::Instant;
 
 use super::entity::Supervisor;
-use crate::{adapter::service::OccupancyStatus, domain::value::IdleStop};
+use crate::{
+    adapter::service::{BatchOutcome, OccupancyStatus},
+    domain::value::IdleStop,
+};
 
 impl Supervisor {
+    /// Takes `occupants` as the live shells inside: the last one leaving
+    /// arms the idle stop at `now`, and any shell inside cancels it.
+    pub fn set_occupants(&mut self, occupants: u32, now: Instant) {
+        if occupants > 0 {
+            self.left_at = None;
+        } else if self.occupants > 0 {
+            self.left_at = Some(now);
+        }
+        self.occupants = occupants;
+    }
+
+    /// Arms the idle stop at `now` when no shell is inside, as a service
+    /// starting does.
+    pub fn arm_idle(&mut self, now: Instant) {
+        if self.occupants == 0 {
+            self.left_at = Some(now);
+        }
+    }
+
+    /// Cancels a pending idle stop, since a client brought the project or
+    /// one of its processes up; it arms again at the next leave or start.
+    pub fn hold_up(&mut self) {
+        self.left_at = None;
+    }
+
+    /// Stops the project through each process's stop policy once its idle
+    /// stop is due and it runs anything; a due stop clears either way.
+    /// Returns what it stopped.
+    pub fn idle_stop_if_due(&mut self, now: Instant) -> Option<BatchOutcome> {
+        if self.idle_deadline()? > now {
+            return None;
+        }
+        self.left_at = None;
+        let runs_anything = self
+            .workspace
+            .processes()
+            .iter()
+            .any(|process| process.state().may_be_running());
+        runs_anything.then(|| self.down())
+    }
+
     /// How long this project keeps running with no shell in it: its own
     /// override, else the setting.
     pub fn idle_stop(&self) -> IdleStop {
@@ -37,12 +81,229 @@ mod tests {
 
     use crate::{
         adapter::service::supervisor::testing::*,
-        domain::{project::Project, value::IdleStop},
+        domain::{
+            config::Stack,
+            process::{ProcessState, RestartPolicy},
+            project::Project,
+            pty::{ExitOutcome, ProcessOutput},
+            value::{IdleStop, PaneId, PositiveDuration},
+        },
     };
 
     /// A harness over no processes.
     fn harness() -> Harness {
         Harness::over(Box::new(FakeRunner), &[])
+    }
+
+    /// A harness whose process `web` runs, restarting under `restart`.
+    fn running(restart: RestartPolicy) -> Harness {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[
+            spec("web", "true", restart).with_autostart(true)
+        ]);
+        harness.up();
+        harness
+    }
+
+    /// The test project with its own idle stop `idle_stop`.
+    fn project_with(idle_stop: Option<IdleStop>) -> Project {
+        Project::builder()
+            .root(test_project().root().clone())
+            .name(test_project().name().clone())
+            .idle_stop(idle_stop)
+            .build()
+    }
+
+    /// An idle stop of `seconds`.
+    fn after(seconds: u64) -> IdleStop {
+        IdleStop::After(PositiveDuration::try_new(Duration::from_secs(seconds)).unwrap())
+    }
+
+    /// The setting's idle stop the test settings carry.
+    fn setting() -> Duration {
+        test_settings().idle_stop().after().unwrap()
+    }
+
+    #[test]
+    fn the_last_shell_leaving_arms_and_a_shell_entering_cancels() {
+        let mut harness = harness();
+        let supervisor = harness.supervisor_mut();
+        let start = Instant::now();
+
+        supervisor.set_occupants(0, start);
+        assert_eq!(supervisor.idle_deadline(), None, "nobody left");
+        supervisor.set_occupants(2, start);
+        supervisor.set_occupants(1, start + Duration::from_secs(1));
+        assert_eq!(supervisor.idle_deadline(), None, "a shell is still in it");
+
+        let left = start + Duration::from_secs(2);
+        supervisor.set_occupants(0, left);
+        assert_eq!(supervisor.idle_deadline(), Some(left + setting()));
+        supervisor.set_occupants(0, left + Duration::from_secs(5));
+        assert_eq!(
+            supervisor.idle_deadline(),
+            Some(left + setting()),
+            "still nobody: the leave instant holds"
+        );
+        assert_eq!(supervisor.occupancy_status(left).shells(), 0);
+
+        supervisor.set_occupants(1, left + Duration::from_secs(9));
+        assert_eq!(supervisor.idle_deadline(), None);
+        assert_eq!(supervisor.occupancy_status(left).shells(), 1);
+    }
+
+    #[test]
+    fn arm_idle_arms_only_an_unoccupied_project_and_hold_up_cancels() {
+        let mut harness = harness();
+        let supervisor = harness.supervisor_mut();
+        let now = Instant::now();
+
+        supervisor.set_occupants(1, now);
+        supervisor.arm_idle(now);
+        assert_eq!(supervisor.idle_deadline(), None);
+
+        supervisor.set_occupants(0, now);
+        supervisor.hold_up();
+        assert_eq!(supervisor.idle_deadline(), None, "an up holds it");
+        supervisor.arm_idle(now);
+        assert_eq!(supervisor.idle_deadline(), Some(now + setting()));
+    }
+
+    #[test]
+    fn a_due_idle_stop_stops_what_runs_once() {
+        let mut harness = running(RestartPolicy::Never);
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+        supervisor.arm_idle(left);
+        let due = left + setting();
+
+        assert_eq!(
+            supervisor.idle_stop_if_due(due - Duration::from_secs(1)),
+            None
+        );
+        let outcome = supervisor.idle_stop_if_due(due).unwrap();
+
+        assert_eq!(outcome.acted(), &[name("web")]);
+        assert_eq!(supervisor.idle_deadline(), None, "the stop clears it");
+        assert_eq!(supervisor.idle_stop_if_due(due), None);
+        assert_ne!(
+            *supervisor.workspace().processes()[0].state(),
+            ProcessState::Running,
+            "stopped through its stop policy"
+        );
+    }
+
+    #[test]
+    fn a_due_idle_stop_of_a_project_running_nothing_only_clears() {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[spec(
+            "web",
+            "true",
+            RestartPolicy::Never,
+        )]);
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+        supervisor.arm_idle(left);
+
+        assert_eq!(supervisor.idle_stop_if_due(left + setting()), None);
+        assert_eq!(supervisor.idle_deadline(), None);
+    }
+
+    #[test]
+    fn idle_stop_never_arms_nothing() {
+        let mut harness = running(RestartPolicy::Never);
+        let supervisor = harness.supervisor_mut();
+        supervisor.project = project_with(Some(IdleStop::Never));
+        let left = Instant::now();
+
+        supervisor.set_occupants(1, left);
+        supervisor.set_occupants(0, left);
+
+        assert_eq!(supervisor.idle_deadline(), None);
+        assert_eq!(supervisor.occupancy_status(left).stops_in(), None);
+        assert_eq!(supervisor.idle_stop_if_due(left + setting() * 100), None);
+        assert_eq!(
+            *supervisor.workspace().processes()[0].state(),
+            ProcessState::Running
+        );
+    }
+
+    /// Review Focus 6: the deadline follows the setting as it is now, from
+    /// the same leave instant.
+    #[test]
+    fn a_settings_change_moves_a_pending_deadline() {
+        let mut harness = running(RestartPolicy::Never);
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+        supervisor.arm_idle(left);
+
+        supervisor.apply_settings(&test_settings().with_idle_stop(after(1)));
+
+        assert_eq!(
+            supervisor.idle_deadline(),
+            Some(left + Duration::from_secs(1))
+        );
+        assert!(
+            supervisor
+                .idle_stop_if_due(left + Duration::from_secs(1))
+                .is_some()
+        );
+    }
+
+    /// A project's own idle stop, applied with its stack, beats the setting
+    /// and moves a pending deadline at once; clearing it follows the
+    /// setting again.
+    #[test]
+    fn an_override_applied_with_the_stack_moves_a_pending_deadline() {
+        let mut harness = running(RestartPolicy::Never);
+        let processes = vec![spec("web", "true", RestartPolicy::Never).with_autostart(true)];
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+        supervisor.arm_idle(left);
+
+        supervisor.apply_stack(
+            &Stack::builder()
+                .project(project_with(Some(after(2))))
+                .processes(processes.clone())
+                .build(),
+        );
+        assert_eq!(supervisor.idle_stop(), after(2));
+        assert_eq!(
+            supervisor.idle_deadline(),
+            Some(left + Duration::from_secs(2))
+        );
+
+        supervisor.apply_stack(
+            &Stack::builder()
+                .project(project_with(None))
+                .processes(processes)
+                .build(),
+        );
+        assert_eq!(supervisor.idle_deadline(), Some(left + setting()));
+    }
+
+    /// A restart its policy makes is no client bringing the project up: the
+    /// pending stop stands.
+    #[test]
+    fn a_policy_respawn_keeps_a_pending_timer() {
+        let mut harness = running(RestartPolicy::Always);
+        let left = Instant::now();
+        harness.supervisor_mut().arm_idle(left);
+        let pane = PaneId::new(0);
+        let generation = harness.supervisor().generations()[&pane];
+
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
+        );
+        let respawn = harness.supervisor().generations()[&pane];
+        harness.supervisor_mut().handle_respawn(pane, respawn);
+
+        assert_eq!(
+            *harness.supervisor().workspace().processes()[0].state(),
+            ProcessState::Running,
+            "it was respawned"
+        );
+        assert_eq!(harness.supervisor().idle_deadline(), Some(left + setting()));
     }
 
     #[test]

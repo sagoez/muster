@@ -11,6 +11,7 @@ use super::{
 use crate::{
     adapter::holder::HolderRecord,
     domain::{
+        occupancy::ShellId,
         port::{ListeningSocket, PortOccupant, ProcessHandle},
         pty::{ProcessOutput, PtyError},
         value::{LocalPort, PaneId, Pid, ProjectRoot},
@@ -166,6 +167,11 @@ pub enum ServiceEvent {
     PortsSampled {
         /// The sockets of each root pid that has any.
         ports: HashMap<Pid, Vec<ListeningSocket>>,
+    },
+    /// A sweep found these shells ended; their projects lose them.
+    ShellsGone {
+        /// The shells that no longer run.
+        shells: Vec<ShellId>,
     },
     /// A client's request, to be answered on `reply`.
     Request {

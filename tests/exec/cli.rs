@@ -35,6 +35,7 @@ use muster::{
             Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
+        shell::ShellFiles,
         store::SqliteStore,
     },
     constants::APP_NAME,
@@ -300,6 +301,7 @@ fn in_process_service(
             .raised_writes(Box::new(recorder_store))
             .edits(Box::new(store))
             .listening(None)
+            .shells(Arc::new(ShellFiles::under(&state_dir)))
             .exit_signals(None)
             .build();
         ServiceRuntime::run(singleton, deps)

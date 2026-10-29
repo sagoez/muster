@@ -194,6 +194,7 @@ fn run_service() -> Result<(), MusterError> {
         .raised_writes(Box::new(recorder_store))
         .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
+        .shells(Arc::new(ShellFiles::under(&state_dir)))
         .exit_signals(Some(Signals::new(SERVICE_EXIT_SIGNALS)?))
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)

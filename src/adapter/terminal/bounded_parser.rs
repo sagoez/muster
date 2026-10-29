@@ -42,7 +42,7 @@ impl BoundedParser {
         Self::default()
     }
 
-    /// Feeds `bytes` to `performer` in slices of at most [`SLICE`] bytes cut
+    /// Feeds `bytes` to `performer` in slices of a few KiB cut
     /// between characters, so the parser parses them as it parses one
     /// chunk. It then holds at most [`MAX_PENDING_BYTES`] plus one slice.
     pub fn advance<P: Perform>(&mut self, performer: &mut P, mut bytes: &[u8]) {

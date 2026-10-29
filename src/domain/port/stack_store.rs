@@ -47,7 +47,7 @@ pub trait StackStore: StackReader {
     /// Plans and applies an import in one transaction, registering `root` when new.
     ///
     /// # Errors
-    /// Returns what [`Stack::plan_import`] refuses, or another [`ConfigError`]
+    /// Returns what [`Stack::plan_import`](crate::domain::config::Stack::plan_import) refuses, or another [`ConfigError`]
     /// when the store cannot be written; nothing is written on an error.
     fn import(
         &self,

@@ -59,7 +59,7 @@ impl Supervisor {
         }
         self.deactivate(pane);
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.unsupervised = Some(child);
+            target.set_unsupervised(Some(child));
         }
         self.workspace.set_state(pane, ProcessState::Unsupervised);
         true
@@ -69,7 +69,7 @@ impl Supervisor {
     pub(super) fn is_unsupervised(&self, pane: PaneId) -> bool {
         self.panes
             .get(&pane)
-            .is_some_and(|target| target.unsupervised.is_some())
+            .is_some_and(|target| target.unsupervised().is_some())
     }
 
     /// Whether `pane` has a process that may still run: a live handle, one
@@ -82,7 +82,7 @@ impl Supervisor {
     pub(super) fn running_unsupervised_pid(&self, pane: PaneId) -> Option<Pid> {
         self.panes
             .get(&pane)
-            .and_then(|target| target.unsupervised)
+            .and_then(|target| target.unsupervised())
             .filter(UnsupervisedChild::is_running)
             .map(|child| child.pid())
     }
@@ -143,7 +143,7 @@ impl Supervisor {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        if !force && !target.exit_intent.accepts_stop_request() {
+        if !force && !target.exit_intent().accepts_stop_request() {
             return;
         }
         let (signal, grace_deadline) = match policy {
@@ -153,7 +153,7 @@ impl Supervisor {
             ),
             None => (Signal::KILL, None),
         };
-        if let Some(child) = target.unsupervised.as_mut() {
+        if let Some(child) = target.unsupervised_mut().as_mut() {
             child.begin_stop(grace_deadline);
         }
         let wait = grace_deadline.map_or(UNSUPERVISED_EXIT_POLL, poll_within);
@@ -169,7 +169,7 @@ impl Supervisor {
         let Some(child) = self
             .panes
             .get_mut(&pane)
-            .and_then(|target| target.unsupervised.as_mut())
+            .and_then(|target| target.unsupervised_mut().as_mut())
         else {
             return;
         };
@@ -203,7 +203,11 @@ impl Supervisor {
     /// same child, then settles the exit if it is gone, or waits `wait` before
     /// checking again. A pid now held by another process is never signalled.
     fn signal_unsupervised(&mut self, pane: PaneId, signal: Signal, wait: Duration) {
-        let Some(child) = self.panes.get(&pane).and_then(|target| target.unsupervised) else {
+        let Some(child) = self
+            .panes
+            .get(&pane)
+            .and_then(|target| target.unsupervised())
+        else {
             return;
         };
         if !child.is_running() {
@@ -225,7 +229,7 @@ impl Supervisor {
             return;
         }
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.exit_intent = target.exit_intent.request_stop().stop_delivered();
+            target.change_intent(|intent| intent.request_stop().stop_delivered());
         }
         self.workspace.set_state(pane, ProcessState::Stopping);
         self.check_unsupervised_after(pane, wait);
@@ -245,7 +249,7 @@ impl Supervisor {
     /// Leaves an unsupervised stop that could not finish for another try.
     fn give_up_unsupervised_stop(&mut self, pane: PaneId) {
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.exit_intent = target.exit_intent.request_stop().stop_delivery_failed();
+            target.change_intent(|intent| intent.request_stop().stop_delivery_failed());
         }
         self.workspace.set_state(pane, ProcessState::Unsupervised);
     }
@@ -256,12 +260,12 @@ impl Supervisor {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        target.unsupervised = None;
-        if target.config_membership == ConfigMembership::RetireOnExit {
+        target.set_unsupervised(None);
+        if target.config_membership() == ConfigMembership::RetireOnExit {
             self.retire_pane(pane);
             return;
         }
-        target.exit_intent = ExitIntent::FollowPolicy;
+        target.set_exit_intent(ExitIntent::FollowPolicy);
         self.bump_generation(pane);
         self.deactivate(pane);
         self.workspace.set_state(pane, ProcessState::Exited);

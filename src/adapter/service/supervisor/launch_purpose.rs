@@ -1,7 +1,7 @@
 use super::carried_pane::CarriedPane;
 
 /// Why a pane is starting, which decides how its result is settled.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum LaunchPurpose {
     /// A new process is being launched.
     Spawn {

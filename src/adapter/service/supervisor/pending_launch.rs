@@ -1,3 +1,5 @@
+use getset::CopyGetters;
+
 use super::{
     config_membership::ConfigMembership, launch_purpose::LaunchPurpose,
     pending_intent::PendingIntent, spawn_generation::SpawnGeneration,
@@ -11,24 +13,30 @@ pub(super) const EARLY_OUTPUT_CAP: usize = 256;
 
 /// A launch or adoption handed to a worker, from the moment the pane starts
 /// until its result is settled on the loop.
-#[derive(Debug)]
+#[derive(Debug, CopyGetters)]
 pub(crate) struct PendingLaunch {
     /// The spawn generation the result must still match to be installed.
-    pub(super) generation: SpawnGeneration,
+    #[getset(get_copy = "pub(super)")]
+    generation: SpawnGeneration,
     /// The state before the pane started, restored when an adoption fails.
-    pub(super) prior_state: ProcessState,
+    #[getset(get_copy = "pub(super)")]
+    prior_state: ProcessState,
     /// Why the pane is starting.
-    pub(super) purpose: LaunchPurpose,
+    #[getset(get_copy = "pub(super)")]
+    purpose: LaunchPurpose,
     /// Output the new connection delivered before its result arrived,
     /// replayed in order once the process is installed; at most
     /// [`EARLY_OUTPUT_CAP`] events.
-    pub(super) early: Vec<ProcessOutput>,
+    early: Vec<ProcessOutput>,
     /// The latest stop, kill or restart asked for while starting.
-    pub(super) intent: Option<PendingIntent>,
+    #[getset(get_copy = "pub(super)")]
+    intent: Option<PendingIntent>,
     /// The latest pause (`true`) or resume (`false`) asked for while starting.
-    pub(super) suspend: Option<bool>,
+    #[getset(get_copy = "pub(super)")]
+    suspend: Option<bool>,
     /// The config membership a reconcile gave the pane while starting.
-    pub(super) membership: Option<ConfigMembership>,
+    #[getset(get_copy = "pub(super)")]
+    membership: Option<ConfigMembership>,
 }
 
 impl PendingLaunch {
@@ -67,6 +75,35 @@ impl PendingLaunch {
             self.early.remove(oldest);
         }
         self.early.push(output);
+    }
+
+    /// Takes the output kept for replay, in order.
+    pub(super) fn into_early(self) -> Vec<ProcessOutput> {
+        self.early
+    }
+
+    /// Marks a launch of a new process as a restart, which `ps` counts.
+    pub(super) fn mark_restarting(&mut self) {
+        if let LaunchPurpose::Spawn { restarting } = &mut self.purpose {
+            *restarting = true;
+        }
+    }
+
+    /// Records the latest stop, kill or restart asked for while starting.
+    pub(super) fn record_intent(&mut self, intent: PendingIntent) {
+        self.intent = Some(intent);
+    }
+
+    /// Records the latest pause (`true`) or resume (`false`) asked for while
+    /// starting.
+    pub(super) fn record_suspend(&mut self, pause: bool) {
+        self.suspend = Some(pause);
+    }
+
+    /// Records the config membership a reconcile gave the pane while
+    /// starting.
+    pub(super) fn record_membership(&mut self, membership: ConfigMembership) {
+        self.membership = Some(membership);
     }
 }
 

@@ -232,6 +232,9 @@ than passing bare `u16`/`usize`.
   field keeps its domain type with `#[serde(with = "...::wire::form")]`
   (`optional_form`, `form_list`). Only validated newtypes derive serde.
 - Fields are private; expose access through `Getters`, never `pub` fields.
+  The one exception is a deps struct (`SupervisorDeps`, `ServiceDeps`):
+  its boxed ports are moved out once by the controller it builds, which
+  destructures it, so its fields are `pub(super)` and it has no getters.
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]

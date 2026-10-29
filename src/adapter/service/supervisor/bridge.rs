@@ -28,8 +28,8 @@ impl Supervisor {
         let Some(target) = self.panes.get(&pane) else {
             return ScreenReply::Ready(String::new());
         };
-        let fallback = target.screen.clone();
-        let source = target.handle.as_ref().map(|handle| handle.screen_source());
+        let fallback = target.screen().clone();
+        let source = target.handle().as_ref().map(|handle| handle.screen_source());
         match (source, self.generations.get(&pane)) {
             (Some(ScreenSource::Served(socket)), Some(generation)) => ScreenReply::ReadHolder(
                 HolderScreen::builder()
@@ -64,14 +64,14 @@ impl Supervisor {
         }
         match read {
             Ok(text) => {
-                self.failing_screen_reads.remove(&pane);
+                self.attention.end_screen_read_streak(pane);
                 if let Some(target) = self.panes.get_mut(&pane) {
-                    target.screen.clone_from(&text);
+                    target.set_screen(text.clone());
                 }
                 text
             },
             Err(error) => {
-                if self.failing_screen_reads.insert(pane) {
+                if self.attention.screen_read_failed(pane) {
                     self.notify(
                         NoticeLevel::Warning,
                         Some(pane),
@@ -89,7 +89,7 @@ impl Supervisor {
     pub fn send_input(&mut self, name: &ProcessName, data: &[u8]) -> bool {
         self.pane_named(name)
             .and_then(|pane| self.panes.get_mut(&pane))
-            .and_then(|target| target.handle.as_mut())
+            .and_then(|target| target.handle_mut().as_mut())
             .is_some_and(|handle| handle.write_input(data).is_ok())
     }
 }
@@ -441,7 +441,7 @@ mod tests {
             "a stale read is still answered"
         );
         assert_eq!(warnings(&harness), 0);
-        assert!(harness.supervisor.failing_screen_reads.is_empty());
+        assert!(!harness.supervisor.attention.has_failing_screen_reads());
     }
 
     #[test]

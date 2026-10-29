@@ -211,7 +211,7 @@ mod tests {
         assert!(orphan.end_with(libc::SIGKILL).is_some(), "the orphan ended");
         let pane = PaneId::new(0);
         let spawn = harness.supervisor.generations()[&pane];
-        let shutdown = harness.supervisor.panes()[&pane].shutdown_generation;
+        let shutdown = harness.supervisor.panes()[&pane].shutdown_generation();
         harness.supervisor.handle_force_stop(pane, spawn, shutdown);
 
         assert!(harness.supervisor.workspace().is_empty());

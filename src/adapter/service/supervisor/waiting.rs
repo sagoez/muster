@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    sync::PoisonError,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -253,11 +252,12 @@ impl Supervisor {
     /// Records the ports each live process tree listens on, from a sample
     /// keyed by root pid; a process missing from it listens on none.
     pub fn take_ports(&mut self, sample: &HashMap<Pid, Vec<ListeningSocket>>) {
-        self.ports = self
+        let ports = self
             .live_pids()
             .into_iter()
             .filter_map(|(pane, pid)| sample.get(&pid).map(|sockets| (pane, sockets.clone())))
             .collect();
+        self.metrics.replace_ports(ports);
     }
 
     /// The pid of every live process, to sample their ports.
@@ -287,7 +287,7 @@ impl Supervisor {
     /// each is taken to begin at the run's start, and a run that ends at once
     /// still has them as its tail.
     pub(super) fn observe_first_screen(&mut self, pane: PaneId) {
-        let Some(text) = self.panes.get(&pane).map(|target| target.screen.clone()) else {
+        let Some(text) = self.panes.get(&pane).map(|target| target.screen().clone()) else {
             return;
         };
         let at = self
@@ -379,7 +379,7 @@ impl Supervisor {
         let since = self
             .panes
             .get(&pane)
-            .map_or(now, |target| target.started_at);
+            .map_or(now, |target| target.started_at());
         let timeout = check.timeout().into_inner();
         let deadline = since + timeout;
         match (deadline > now, check.probe()) {
@@ -437,16 +437,19 @@ impl Supervisor {
         next: ProcessState,
         detail: &str,
     ) {
-        self.run_ends.insert(pane, RunEnd {
-            generation,
-            at: SystemTime::now(),
-            reason,
-        });
+        self.restarts.end_run(
+            pane,
+            RunEnd::builder()
+                .generation(generation)
+                .at(SystemTime::now())
+                .reason(reason)
+                .build(),
+        );
         if let Some(readiness) = self.readiness.get_mut(&pane) {
             readiness.state = readiness.state.on_exit();
             readiness.matcher = None;
         }
-        self.ports.remove(&pane);
+        self.metrics.clear_ports(pane);
         if let Some(probes) = &self.probes {
             probes.forget(self.root(), pane);
         }
@@ -504,18 +507,15 @@ impl Supervisor {
         let cursor = pane
             .and_then(|pane| self.taps.get(&pane))
             .map(OutputTap::cursor);
-        self.event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(
-                EventDraft::builder()
-                    .project(Some(self.root().clone()))
-                    .process(process)
-                    .kind(kind)
-                    .detail(detail)
-                    .cursor(cursor)
-                    .build(),
-            );
+        self.attention.record(
+            EventDraft::builder()
+                .project(Some(self.root().clone()))
+                .process(process)
+                .kind(kind)
+                .detail(detail)
+                .cursor(cursor)
+                .build(),
+        );
     }
 
     /// `pane`'s current spawn generation.
@@ -619,11 +619,11 @@ impl Supervisor {
             return None;
         }
         if let Some(end) = self
-            .run_ends
-            .get(&pane)
-            .filter(|end| waiter.pin().is_fresh() && waiter.pin().counts(end.generation))
+            .restarts
+            .run_end(pane)
+            .filter(|end| waiter.pin().is_fresh() && waiter.pin().counts(end.generation()))
         {
-            return Some(end.reason.wait_status());
+            return Some(end.reason().wait_status());
         }
         let state = self.workspace.process(pane).map(|process| *process.state());
         match waiter.pin() {

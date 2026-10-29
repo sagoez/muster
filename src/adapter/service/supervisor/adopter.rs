@@ -15,7 +15,7 @@ use crate::{
         config::{Environment, ProcessSpec},
         port::{OutputSink, ProcessHandle},
         process::{ExitIntent, ProcessState, RestartPolicy},
-        pty::{ExitOutcome, PtyError, SpawnHistory},
+        pty::{ExitOutcome, PtyError},
         value::{PaneId, Pid},
     },
 };
@@ -169,22 +169,15 @@ impl Supervisor {
     /// the adopter allows it, and settles in [`Self::handle_adopted`].
     pub(super) fn reconnect(&mut self, pane: PaneId) {
         let state = self.workspace.process(pane).map(|process| *process.state());
-        let Some(target) = self.panes.get_mut(&pane) else {
+        let Some(carried) = self
+            .panes
+            .get_mut(&pane)
+            .and_then(|target| target.carry_over(state))
+        else {
             return;
         };
-        let Some(handle) = target.handle.take() else {
-            return;
-        };
-        let carried = CarriedPane {
-            intent: target.exit_intent,
-            membership: target.config_membership,
-            started_at: target.started_at,
-            state,
-            pid: handle.process_id(),
-        };
-        drop(handle);
         let record = carried
-            .pid
+            .pid()
             .and_then(|pid| self.adopter.as_ref()?.locate(pid));
         match record {
             Some(record) => self.begin_adoption(&record, Some((pane, carried))),
@@ -209,7 +202,7 @@ impl Supervisor {
     ) {
         let start_token = record.and_then(HolderRecord::child_start_token);
         let running = carried
-            .pid
+            .pid()
             .is_some_and(|pid| self.leave_unsupervised(pane, pid, start_token));
         if let (Some(record), false) = (record, running) {
             collect_exit(record);
@@ -220,7 +213,7 @@ impl Supervisor {
                 self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
             },
             (None, _) => {
-                let pid = carried.pid.map(|pid| pid.to_string()).unwrap_or_default();
+                let pid = carried.pid().map(|pid| pid.to_string()).unwrap_or_default();
                 self.notify(
                     NoticeLevel::Error,
                     Some(pane),
@@ -233,12 +226,11 @@ impl Supervisor {
             (Some(_), None) => {},
         }
         if running {
-            self.continue_stop_unsupervised(pane, carried.intent);
+            self.continue_stop_unsupervised(pane, carried.intent());
             return;
         }
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.exit_intent = carried.intent;
-            target.config_membership = carried.membership;
+            target.restore(carried);
         }
         self.apply_exit(pane, ExitOutcome::FAILED_UNKNOWN);
     }
@@ -289,8 +281,8 @@ impl Supervisor {
             return;
         };
         if reconnecting.is_none() {
-            self.launch_environments
-                .insert(pane, record.launch_environment().iter().cloned().collect());
+            self.launches
+                .set_environment(pane, record.launch_environment().iter().cloned().collect());
         }
         let carried = reconnecting.map(|(_, carried)| carried);
         let generation = self.bump_generation(pane);
@@ -318,7 +310,7 @@ impl Supervisor {
             .workspace
             .process(pane)
             .map_or(ProcessState::Pending, |process| *process.state());
-        self.launches.insert(
+        self.launches.begin(
             pane,
             PendingLaunch::new(generation, prior_state, LaunchPurpose::Adopt { carried }),
         );
@@ -351,7 +343,7 @@ impl Supervisor {
     fn stop_removed(&mut self, pane: PaneId) {
         self.notify(NoticeLevel::Warning, Some(pane), ADOPT_REMOVED_NOTICE);
         self.set_membership(pane, ConfigMembership::RetireOnExit);
-        if self.record_intent(pane, PendingIntent::Stop) {
+        if self.launches.record_intent(pane, PendingIntent::Stop) {
             return;
         }
         if self.holds_process(pane) {
@@ -433,25 +425,17 @@ impl Supervisor {
             }
             return;
         };
-        let PendingLaunch {
-            prior_state,
-            purpose,
-            early,
-            intent,
-            suspend,
-            membership,
-            ..
-        } = launch;
-        let LaunchPurpose::Adopt { carried, .. } = purpose else {
+        let prior_state = launch.prior_state();
+        let intent = launch.intent();
+        let suspend = launch.suspend();
+        let membership = launch.membership();
+        let LaunchPurpose::Adopt { carried, .. } = launch.purpose() else {
             if let Ok(handle) = result {
                 handle.abandon();
             }
             return;
         };
-        let carried = carried.map(|carried| CarriedPane {
-            membership: membership.unwrap_or(carried.membership),
-            ..carried
-        });
+        let carried = carried.map(|carried| carried.with_membership(membership));
         let handle = match result {
             Ok(handle) => handle,
             Err(error) => {
@@ -476,37 +460,24 @@ impl Supervisor {
         };
         self.install_pane(pane, handle);
         if carried.is_none() {
-            self.take_history(pane, record.history());
+            self.restarts.take_history(pane, record.history());
             self.adopt_run(pane);
         }
         self.arm_probes(pane);
         if let Some(carried) = carried {
             if let Some(target) = self.panes.get_mut(&pane) {
-                target.exit_intent = carried.intent;
-                target.config_membership = carried.membership;
-                target.started_at = carried.started_at;
+                target.restore(carried);
             }
-            if let Some(state) = carried.state {
+            if let Some(state) = carried.state() {
                 self.workspace.set_state(pane, state);
             }
-            if carried.intent.awaits_force_stop() {
+            if carried.intent().awaits_force_stop() {
                 self.rearm_force_stop(pane);
             }
         }
-        self.replay(pane, generation, early);
+        self.replay(pane, generation, launch.into_early());
         let suspend = suspend.filter(|_| self.runs_launch(pane, generation));
         self.apply_pending(pane, membership, suspend, intent);
-    }
-
-    /// Takes over the restart count and last exit a holder record carries
-    /// from the service that spawned its child, so `ps` keeps showing them.
-    fn take_history(&mut self, pane: PaneId, history: &SpawnHistory) {
-        if history.restarts() > 0 {
-            self.restarts.insert(pane, history.restarts());
-        }
-        if let Some(last_exit) = history.last_exit() {
-            self.last_exits.insert(pane, last_exit.clone());
-        }
     }
 
     /// Reports an adoption that failed after a later action superseded it,
@@ -1303,8 +1274,9 @@ mod tests {
         let pane = PaneId::new(PANE);
         let started_at = Instant::now() - EARLIER;
         if let Some(target) = harness.supervisor.panes.get_mut(&pane) {
-            target.config_membership = ConfigMembership::RetireOnExit;
-            target.started_at = started_at;
+            target
+                .set_config_membership(ConfigMembership::RetireOnExit)
+                .set_started_at(started_at);
         }
 
         break_stream(&mut harness);
@@ -1391,12 +1363,12 @@ mod tests {
         let orphan = Orphan::spawn();
         let (mut harness, _) = configured_unsupervised(&orphan);
         if let Some(target) = harness.supervisor.panes.get_mut(&PaneId::new(PANE)) {
-            target.unsupervised = Some(
+            target.set_unsupervised(Some(
                 UnsupervisedChild::builder()
                     .pid(orphan.pid())
                     .start_token(Some(StartToken::try_new(FOREIGN_TOKEN).unwrap()))
                     .build(),
-            );
+            ));
         }
 
         harness.supervisor.force_kill(&p());

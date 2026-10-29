@@ -19,10 +19,10 @@ impl Supervisor {
     /// The ports this project's live processes listen on, each with who
     /// holds it.
     pub fn held_ports(&self) -> Vec<(u16, PortHolder)> {
-        self.ports
-            .iter()
+        self.metrics
+            .listening()
             .filter_map(|(pane, sockets)| {
-                let process = self.workspace.process(*pane)?;
+                let process = self.workspace.process(pane)?;
                 let holder = PortHolder::builder()
                     .project(self.project.name().clone())
                     .process(process.name().clone())
@@ -40,7 +40,7 @@ impl Supervisor {
     /// Takes `held`, every port a supervised process of any project listens
     /// on, which a start checks its own port against.
     pub fn set_held_ports(&mut self, held: HashMap<u16, PortHolder>) {
-        self.held_ports = held;
+        self.metrics.set_held_ports(held);
     }
 
     /// Refuses to launch `pane` when another process listens on the port its
@@ -50,7 +50,7 @@ impl Supervisor {
     /// whether it refused.
     pub(super) fn refuse_blocked_launch(&mut self, pane: PaneId) -> bool {
         let Some(block) = self.port_block(pane) else {
-            self.blocks.remove(&pane);
+            self.metrics.clear_block(pane);
             return false;
         };
         let message = format!(
@@ -60,7 +60,7 @@ impl Supervisor {
         );
         self.notify(NoticeLevel::Error, Some(pane), message.clone());
         self.record_event(Some(pane), EventKind::Blocked, message);
-        self.blocks.insert(pane, block);
+        self.metrics.set_block(pane, block);
         self.workspace.set_state(pane, ProcessState::Blocked);
         true
     }
@@ -76,10 +76,10 @@ impl Supervisor {
             .project(self.project.name().clone())
             .process(process.name().clone())
             .build();
-        let owner = match self.held_ports.get(&port.into_inner()) {
+        let owner = match self.metrics.holder_of(port.into_inner()) {
             Some(holder) if *holder == me => return None,
             Some(holder) => PortOwner::Supervised(holder.clone()),
-            None => PortOwner::Other(self.port_occupants.as_mut()?.occupant(port.into_inner())?),
+            None => PortOwner::Other(self.metrics.occupant(port.into_inner())?),
         };
         Some(PortBlock::builder().port(port).holder(owner).build())
     }
@@ -194,6 +194,7 @@ mod tests {
         let mut harness = Harness::over(Box::new(PidRunner), &[on_port("web")]);
         harness
             .supervisor
+            .metrics
             .set_port_occupants(Box::new(Occupied(Some(outsider()))));
 
         let batch = harness.supervisor.up(&LaunchEnvironment::default());

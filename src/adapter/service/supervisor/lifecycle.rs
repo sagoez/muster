@@ -24,7 +24,7 @@ use crate::{
         notification::Notification,
         port::ProcessHandle,
         process::{ExitIntent, ProcessState, StopPolicy},
-        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnHistory, SpawnRequest},
+        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
         value::{PaneId, ProcessName},
     },
 };
@@ -75,10 +75,10 @@ impl Supervisor {
             .map(|process| *process.id())
             .filter(|pane| self.is_live(*pane) || self.is_starting(*pane))
             .collect();
-        self.batch_refusals.replace(Some(Vec::new()));
+        self.attention.begin_batch();
         for pane in self.autostart_panes() {
             // Bringing a process up, like starting it, begins a new streak.
-            self.crash_streaks.remove(&pane);
+            self.restarts.end_crash_streak(pane);
             self.spawn_with(pane, Some(environment));
         }
         let acted: Vec<ProcessName> = self
@@ -106,9 +106,8 @@ impl Supervisor {
     /// refusals.
     fn finish_batch(&self, acted: Vec<ProcessName>, left_stopped: Vec<Refusal>) -> BatchOutcome {
         let mut refused: Vec<Refusal> = self
-            .batch_refusals
-            .take()
-            .unwrap_or_default()
+            .attention
+            .end_batch()
             .into_iter()
             .filter(|refusal| !acted.contains(refusal.name()))
             .collect();
@@ -129,17 +128,11 @@ impl Supervisor {
             .filter(|process| process.state().may_be_running())
             .map(|process| (*process.id(), process.name().clone()))
             .collect();
-        self.batch_refusals.replace(Some(Vec::new()));
+        self.attention.begin_batch();
         for (pane, _) in &processes {
             self.stop_pane(*pane);
         }
-        let refused: Vec<ProcessName> = self
-            .batch_refusals
-            .borrow()
-            .iter()
-            .flatten()
-            .map(|refusal| refusal.name().clone())
-            .collect();
+        let refused = self.attention.refused_so_far();
         let acted = processes
             .into_iter()
             .map(|(_, name)| name)
@@ -197,7 +190,7 @@ impl Supervisor {
     /// Makes `environment` the one `pane` is launched with, now and on its
     /// policy restarts.
     fn set_launch_environment(&mut self, pane: PaneId, environment: &LaunchEnvironment) {
-        self.launch_environments.insert(pane, environment.to_os());
+        self.launches.set_environment(pane, environment.to_os());
     }
 
     /// Starts `pane` with `environment` unless it is already running or
@@ -207,8 +200,7 @@ impl Supervisor {
             return;
         }
         // A start the user asks for begins a new streak, so its failure is told.
-        self.failing_spawns.remove(&pane);
-        self.crash_streaks.remove(&pane);
+        self.restarts.end_streaks(pane);
         self.spawn_with(pane, Some(environment));
     }
 
@@ -217,19 +209,18 @@ impl Supervisor {
     /// at once. The respawn runs with `environment` when given, which is only
     /// taken once the restart goes ahead.
     pub(crate) fn restart_pane(&mut self, pane: PaneId, environment: Option<&LaunchEnvironment>) {
-        if self.record_intent(pane, PendingIntent::Restart) {
+        if self.launches.record_intent(pane, PendingIntent::Restart) {
             if let Some(environment) = environment {
                 self.set_launch_environment(pane, environment);
             }
             return;
         }
-        self.failing_spawns.remove(&pane);
-        self.crash_streaks.remove(&pane);
+        self.restarts.end_streaks(pane);
         if self.is_live(pane) {
             if self
                 .panes
                 .get(&pane)
-                .is_some_and(|target| !target.exit_intent.accepts_restart_request())
+                .is_some_and(|target| !target.exit_intent().accepts_restart_request())
             {
                 return;
             }
@@ -250,19 +241,15 @@ impl Supervisor {
             return;
         }
         if self.is_live(pane) {
-            self.count_restart(pane);
-        } else if let Some(LaunchPurpose::Spawn { restarting }) = self
-            .launches
-            .get_mut(&pane)
-            .map(|launch| &mut launch.purpose)
-        {
-            *restarting = true;
+            self.restarts.count_restart(pane);
+        } else {
+            self.launches.mark_restarting(pane);
         }
     }
 
     /// Stops `pane` without letting its restart policy respawn it.
     pub(crate) fn stop_pane(&mut self, pane: PaneId) {
-        if self.record_intent(pane, PendingIntent::Stop) {
+        if self.launches.record_intent(pane, PendingIntent::Stop) {
             return;
         }
         if self.is_unsupervised(pane) {
@@ -270,7 +257,7 @@ impl Supervisor {
             return;
         }
         if self.panes.get(&pane).is_some_and(|target| {
-            target.handle.is_some() && !target.exit_intent.accepts_stop_request()
+            target.handle().is_some() && !target.exit_intent().accepts_stop_request()
         }) {
             return;
         }
@@ -293,7 +280,7 @@ impl Supervisor {
     /// Suspends `pane`'s live process unless it is already paused. A pane
     /// still starting is paused once its launch settles.
     pub(crate) fn pause_pane(&mut self, pane: PaneId) {
-        if self.record_suspend(pane, true) {
+        if self.launches.record_suspend(pane, true) {
             return;
         }
         if !self.is_paused(pane) {
@@ -305,7 +292,7 @@ impl Supervisor {
     /// has a pause asked for meanwhile cancelled, or is resumed once its
     /// launch settles.
     pub(crate) fn resume_pane(&mut self, pane: PaneId) {
-        if self.record_suspend(pane, false) {
+        if self.launches.record_suspend(pane, false) {
             return;
         }
         if self.is_paused(pane) {
@@ -313,21 +300,9 @@ impl Supervisor {
         }
     }
 
-    /// Records a pause (`pause`) or resume for `pane` when it is starting, to
-    /// apply once its launch settles. Returns whether it was recorded.
-    fn record_suspend(&mut self, pane: PaneId, pause: bool) -> bool {
-        match self.launches.get_mut(&pane) {
-            Some(launch) => {
-                launch.suspend = Some(pause);
-                true
-            },
-            None => false,
-        }
-    }
-
     /// Immediately force-kills `pane` and cancels a pending respawn.
     pub(crate) fn force_kill_pane(&mut self, pane: PaneId) {
-        if self.record_intent(pane, PendingIntent::Kill) {
+        if self.launches.record_intent(pane, PendingIntent::Kill) {
             return;
         }
         if self.is_unsupervised(pane) {
@@ -341,14 +316,14 @@ impl Supervisor {
         self.advance_shutdown_generation(pane);
         let mut delivered = false;
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.exit_intent = target.exit_intent.request_stop();
-            if let Some(handle) = target.handle.as_mut() {
+            target.change_intent(ExitIntent::request_stop);
+            if let Some(handle) = target.handle_mut().as_mut() {
                 delivered = handle.kill().is_ok();
-                target.exit_intent = if delivered {
-                    target.exit_intent.stop_delivered()
+                target.change_intent(if delivered {
+                    ExitIntent::stop_delivered
                 } else {
-                    target.exit_intent.stop_delivery_failed()
-                };
+                    ExitIntent::stop_delivery_failed
+                });
             }
         }
         if delivered {
@@ -362,7 +337,7 @@ impl Supervisor {
     pub(crate) fn is_live(&self, pane: PaneId) -> bool {
         self.panes
             .get(&pane)
-            .is_some_and(|target| target.handle.is_some())
+            .is_some_and(|target| target.handle().is_some())
     }
 
     /// Whether `pane`'s process is paused.
@@ -378,10 +353,10 @@ impl Supervisor {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        if target.exit_intent != ExitIntent::FollowPolicy {
+        if target.exit_intent() != ExitIntent::FollowPolicy {
             return;
         }
-        let Some(handle) = target.handle.as_mut() else {
+        let Some(handle) = target.handle_mut().as_mut() else {
             return;
         };
         let signalled = if pause {
@@ -410,14 +385,9 @@ impl Supervisor {
         if self.generations.get(&pane) != Some(&generation) {
             return;
         }
-        if let Some(launch) = self
-            .launches
-            .get_mut(&pane)
-            .filter(|launch| launch.generation == generation)
-        {
-            launch.keep(output);
+        let Some(output) = self.launches.keep_early(pane, generation, output) else {
             return;
-        }
+        };
         match output {
             ProcessOutput::Chunk(bytes) => {
                 if self.panes.contains_key(&pane) {
@@ -435,7 +405,7 @@ impl Supervisor {
             },
             ProcessOutput::Attached(writable_clients) => {
                 if self.is_live(pane) {
-                    self.set_pane_attached(pane, writable_clients);
+                    self.attach.set_attached(pane, writable_clients);
                 }
             },
             ProcessOutput::Unreadable(reason) => {
@@ -454,7 +424,7 @@ impl Supervisor {
     /// last screen, when the pane has one.
     fn keep_screen(&mut self, pane: PaneId, repaint: &[u8], size: PtySize) {
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.screen = repaint_text(repaint, size);
+            target.set_screen(repaint_text(repaint, size));
         }
     }
 
@@ -480,24 +450,24 @@ impl Supervisor {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
-        if target.shutdown_generation != shutdown_generation
-            || !target.exit_intent.awaits_force_stop()
+        if target.shutdown_generation() != shutdown_generation
+            || !target.exit_intent().awaits_force_stop()
         {
             return;
         }
-        target.shutdown_generation = target.shutdown_generation.next();
-        if target.unsupervised.is_some() {
+        target.advance_shutdown();
+        if target.unsupervised().is_some() {
             self.escalate_unsupervised(pane);
             return;
         }
-        let Some(handle) = target.handle.as_mut() else {
+        let Some(handle) = target.handle_mut().as_mut() else {
             return;
         };
         if handle.kill().is_ok() {
             self.workspace.set_state(pane, ProcessState::Stopping);
             self.notify(NoticeLevel::Warning, Some(pane), FORCE_STOP_NOTICE);
         } else {
-            target.exit_intent = target.exit_intent.force_stop_delivery_failed();
+            target.change_intent(ExitIntent::force_stop_delivery_failed);
             self.notify(NoticeLevel::Error, Some(pane), STOP_DELIVERY_FAILED_NOTICE);
         }
     }
@@ -527,26 +497,14 @@ impl Supervisor {
                 .command(process.command().clone())
                 .working_dir(Some(process.spec().launch_dir(root)))
                 .project(Some(root.as_ref().clone()))
-                .launch_environment(
-                    self.launch_environments
-                        .get(&pane)
-                        .cloned()
-                        .unwrap_or_default(),
-                )
+                .launch_environment(self.launches.environment(pane))
                 .environment(environment)
                 .size(*self.settings.default_size())
                 .scrollback(self.settings.scrollback().into_inner())
                 .log_max_size(self.settings.log_max_size().into_inner())
                 .color_scheme(*self.settings.color_scheme())
                 .stop(*process.stop())
-                .history(
-                    SpawnHistory::builder()
-                        .restarts(
-                            self.restarts.get(&pane).copied().unwrap_or(0) + u32::from(restarting),
-                        )
-                        .last_exit(self.last_exits.get(&pane).cloned())
-                        .build(),
-                )
+                .history(self.restarts.history(pane, restarting))
                 .build(),
         )
     }
@@ -581,12 +539,12 @@ impl Supervisor {
             return;
         };
         // A fresh process on this pane has a new pid, so drop the prior sample.
-        self.usage.remove(&pane);
+        self.metrics.clear_usage(pane);
         let generation = self.bump_generation(pane);
         self.begin_run(pane);
         let sink =
             ChannelOutputSink::new(self.root().clone(), pane, generation, self.events.clone());
-        self.launches.insert(
+        self.launches.begin(
             pane,
             PendingLaunch::new(generation, prior_state, LaunchPurpose::Spawn { restarting }),
         );
@@ -642,28 +600,23 @@ impl Supervisor {
                     release.release(handle);
                 },
                 (StaleRelease::Detach, Err(_)) => {
-                    self.held_exits.remove(&pane);
+                    self.attach.release(pane);
                 },
                 (StaleRelease::Discard, Ok(handle)) => release.release(handle),
                 (StaleRelease::Discard, Err(_)) => {},
             }
             return;
         };
-        let PendingLaunch {
-            purpose,
-            early,
-            intent,
-            suspend,
-            membership,
-            ..
-        } = launch;
-        let LaunchPurpose::Spawn { restarting } = purpose else {
+        let LaunchPurpose::Spawn { restarting } = launch.purpose() else {
             if let Ok(handle) = result {
                 handle.abandon();
             }
             return;
         };
-        let installed = self.install_spawned(pane, generation, result, restarting, early);
+        let (membership, suspend, intent) =
+            (launch.membership(), launch.suspend(), launch.intent());
+        let installed =
+            self.install_spawned(pane, generation, result, restarting, launch.into_early());
         self.apply_pending(pane, membership, suspend.filter(|_| installed), intent);
     }
 
@@ -681,15 +634,15 @@ impl Supervisor {
         match result {
             Ok(handle) => {
                 if restarting {
-                    self.count_restart(pane);
+                    self.restarts.count_restart(pane);
                 }
-                self.failing_spawns.remove(&pane);
+                self.restarts.spawned(pane);
                 self.release_held_exit(pane);
                 self.install_pane(pane, handle);
                 let pid = self
                     .panes
                     .get(&pane)
-                    .and_then(|target| target.handle.as_ref())
+                    .and_then(|target| target.handle().as_ref())
                     .and_then(|handle| handle.process_id());
                 self.record_event(
                     Some(pane),
@@ -704,7 +657,7 @@ impl Supervisor {
             Err(error) => {
                 self.deactivate(pane);
                 let message = format!("{SPAWN_FAILED_NOTICE}: {error}");
-                if self.failing_spawns.insert(pane) {
+                if self.restarts.spawn_failed(pane) {
                     self.alert_desktop(pane, &message);
                     self.notify(NoticeLevel::Error, Some(pane), message.clone());
                 }
@@ -730,11 +683,6 @@ impl Supervisor {
     /// installed, rather than none or one a later launch replaced it with.
     pub(super) fn runs_launch(&self, pane: PaneId, generation: SpawnGeneration) -> bool {
         self.is_live(pane) && self.generations.get(&pane) == Some(&generation)
-    }
-
-    /// Records one more restart of `pane`, for `ps`.
-    fn count_restart(&mut self, pane: PaneId) {
-        *self.restarts.entry(pane).or_default() += 1;
     }
 
     /// Supervises `handle` as `pane`'s live process, keeping the screen the
@@ -772,75 +720,44 @@ impl Supervisor {
 
     /// Whether `pane` has a launch or adoption in flight.
     pub(super) fn is_starting(&self, pane: PaneId) -> bool {
-        self.launches.contains_key(&pane)
+        self.launches.is_starting(pane)
     }
 
     /// Whether `pane` has a new process being launched, as opposed to a
     /// holder being adopted.
     pub(super) fn is_spawning(&self, pane: PaneId) -> bool {
-        self.launches
-            .get(&pane)
-            .is_some_and(|launch| matches!(launch.purpose, LaunchPurpose::Spawn { .. }))
+        self.launches.is_spawning(pane)
     }
 
     /// Launches and adoptions handed to a worker whose results have not
     /// come back yet, for a host that waits for them as it exits.
     pub fn launches_in_flight(&self) -> usize {
-        self.launches.len()
-    }
-
-    /// Drops `pane`'s launch at `generation`, whose result came back after a
-    /// later action or a shutdown superseded it. Returns whether it was
-    /// still recorded, which only a shutdown leaves it.
-    fn forget_launch(&mut self, pane: PaneId, generation: SpawnGeneration) -> bool {
-        let recorded = self
-            .launches
-            .get(&pane)
-            .is_some_and(|launch| launch.generation == generation);
-        if recorded {
-            self.launches.remove(&pane);
-        }
-        recorded
+        self.launches.in_flight()
     }
 
     /// Forgets `pane`'s stale launch at `generation` and says how to let go
     /// of its process: detached only when a shutdown superseded that launch,
     /// so its holder keeps it for the next service; discarded when a user's
-    /// stop, kill or a removal superseded it.
+    /// stop, kill or a removal superseded it. Only a shutdown leaves a
+    /// superseded launch recorded.
     pub(super) fn stale_release(
         &mut self,
         pane: PaneId,
         generation: SpawnGeneration,
     ) -> StaleRelease {
-        if self.forget_launch(pane, generation) && self.detaching {
+        if self.launches.take(pane, generation).is_some() && self.launches.is_detaching() {
             StaleRelease::Detach
         } else {
             StaleRelease::Discard
         }
     }
 
-    /// Records `intent` for `pane` when it is starting, to apply once its
-    /// launch or adoption settles: until then there is no process to signal,
-    /// and superseding the launch could leave an adopted child running behind
-    /// a row that claims it stopped. Returns whether it was recorded.
-    pub(super) fn record_intent(&mut self, pane: PaneId, intent: PendingIntent) -> bool {
-        match self.launches.get_mut(&pane) {
-            Some(launch) => {
-                launch.intent = Some(intent);
-                true
-            },
-            None => false,
-        }
-    }
-
     /// Gives `pane` the stack `membership`, or records it for the pane's
     /// launch to take when it settles if the pane is starting.
     pub(super) fn set_membership(&mut self, pane: PaneId, membership: ConfigMembership) {
-        if let Some(launch) = self.launches.get_mut(&pane) {
-            launch.membership = Some(membership);
-        }
+        self.launches.record_membership(pane, membership);
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.config_membership = membership;
+            target.set_config_membership(membership);
         }
     }
 
@@ -860,7 +777,7 @@ impl Supervisor {
     ) {
         if let Some(membership) = membership {
             if let Some(target) = self.panes.get_mut(&pane) {
-                target.config_membership = membership;
+                target.set_config_membership(membership);
             }
             if membership == ConfigMembership::RetireOnExit && !self.holds_process(pane) {
                 self.retire_pane(pane);
@@ -887,13 +804,8 @@ impl Supervisor {
         pane: PaneId,
         generation: SpawnGeneration,
     ) -> Option<PendingLaunch> {
-        let current = self.generations.get(&pane) == Some(&generation)
-            && self
-                .launches
-                .get(&pane)
-                .is_some_and(|launch| launch.generation == generation);
-        if current {
-            self.launches.remove(&pane)
+        if self.generations.get(&pane) == Some(&generation) {
+            self.launches.take(pane, generation)
         } else {
             None
         }
@@ -916,7 +828,7 @@ impl Supervisor {
         let attached = handle
             .as_ref()
             .map_or(0, |handle| handle.attached_clients());
-        self.set_pane_attached(pane, attached);
+        self.attach.set_attached(pane, attached);
         self.panes.insert(
             pane,
             Pane::builder()
@@ -935,7 +847,7 @@ impl Supervisor {
     /// Invalidates pending respawns and any launch in flight, and returns the
     /// new generation.
     pub(super) fn bump_generation(&mut self, pane: PaneId) -> SpawnGeneration {
-        self.launches.remove(&pane);
+        self.launches.cancel(pane);
         self.advance_generation(pane)
     }
 
@@ -955,20 +867,18 @@ impl Supervisor {
         &mut self,
         pane: PaneId,
     ) -> Option<ShutdownGeneration> {
-        let target = self.panes.get_mut(&pane)?;
-        target.shutdown_generation = target.shutdown_generation.next();
-        Some(target.shutdown_generation)
+        self.panes.get_mut(&pane).map(Pane::advance_shutdown)
     }
 
     /// Drops `pane`'s live handle and the state that only matters while it
     /// runs: its usage sample and its attached clients, which an exit or a
     /// lost holder leaves nobody to report.
     pub(super) fn deactivate(&mut self, pane: PaneId) {
-        self.usage.remove(&pane);
-        self.attached.remove(&pane);
+        self.metrics.clear_usage(pane);
+        self.attach.set_attached(pane, 0);
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.handle = None;
-            target.exit_intent = ExitIntent::FollowPolicy;
+            target.take_handle();
+            target.set_exit_intent(ExitIntent::FollowPolicy);
         }
     }
 
@@ -980,23 +890,17 @@ impl Supervisor {
         }
         self.taps.remove(&pane);
         self.readiness.remove(&pane);
-        self.run_ends.remove(&pane);
-        self.ports.remove(&pane);
         self.panes.remove(&pane);
         // Advance the spawn generation rather than dropping it. A retired pane can
         // still have a `ForceStop` or a delayed `Respawn` queued in a timer thread;
         // dropping the counter would let a process that later reuses this pane id
         // match those stale events.
         self.bump_generation(pane);
-        self.restart_attempts.remove(&pane);
-        self.restarts.remove(&pane);
-        self.failing_spawns.remove(&pane);
-        self.crash_streaks.remove(&pane);
-        self.failing_screen_reads.remove(&pane);
-        self.last_exits.remove(&pane);
-        self.attached.remove(&pane);
-        self.usage.remove(&pane);
-        self.launch_environments.remove(&pane);
+        self.restarts.forget(pane);
+        self.attention.end_screen_read_streak(pane);
+        self.attach.set_attached(pane, 0);
+        self.metrics.forget(pane);
+        self.launches.forget(pane);
         self.workspace.remove(pane);
     }
 
@@ -1007,14 +911,14 @@ impl Supervisor {
         let Some(finished) = self
             .panes
             .get_mut(&pane)
-            .and_then(|target| target.handle.take())
+            .and_then(|target| target.take_handle())
         else {
             self.apply_exit(pane, outcome);
             return;
         };
         let retired = self.apply_exit(pane, outcome);
         if retired != Some(true) && self.awaits_respawn(pane) {
-            if let Some(displaced) = self.held_exits.insert(pane, finished) {
+            if let Some(displaced) = self.attach.hold_exit(pane, finished) {
                 self.acknowledge(pane, displaced);
             }
         } else {
@@ -1048,7 +952,7 @@ impl Supervisor {
     /// Acknowledges `pane`'s exit held for a restart, once the respawn is
     /// installed or the restart will not happen.
     fn release_held_exit(&mut self, pane: PaneId) {
-        if let Some(handle) = self.held_exits.remove(&pane) {
+        if let Some(handle) = self.attach.release(pane) {
             self.acknowledge(pane, handle);
         }
     }
@@ -1058,9 +962,9 @@ impl Supervisor {
     /// The host runs it after each event it hands the supervisor.
     pub fn release_settled_exits(&mut self) {
         let settled: Vec<PaneId> = self
-            .held_exits
-            .keys()
-            .copied()
+            .attach
+            .holding()
+            .into_iter()
             .filter(|pane| !self.awaits_respawn(*pane))
             .collect();
         for pane in settled {
@@ -1073,9 +977,9 @@ impl Supervisor {
     pub(super) fn apply_exit(&mut self, pane: PaneId, outcome: ExitOutcome) -> Option<bool> {
         let (exit_intent, config_membership, started_at) = self.panes.get(&pane).map(|target| {
             (
-                target.exit_intent,
-                target.config_membership,
-                target.started_at,
+                target.exit_intent(),
+                target.config_membership(),
+                target.started_at(),
             )
         })?;
         let decision = ProcessLifecycle::after_exit(
@@ -1099,7 +1003,7 @@ impl Supervisor {
             next,
             &outcome.to_string(),
         );
-        self.last_exits.insert(pane, outcome);
+        self.restarts.record_exit(pane, outcome);
         match decision {
             ExitDecision::Retire => {
                 self.retire_pane(pane);
@@ -1110,7 +1014,7 @@ impl Supervisor {
                 self.workspace.set_state(pane, ProcessState::Exited);
             },
             ExitDecision::RestartNow => {
-                self.restart_attempts.remove(&pane);
+                self.restarts.reset_backoff(pane);
                 self.workspace.set_state(pane, ProcessState::Restarting);
                 self.deactivate(pane);
                 self.spawn(pane);
@@ -1143,12 +1047,12 @@ impl Supervisor {
         outcome: &ExitOutcome,
     ) {
         if started_at.elapsed() >= RESTART_STABLE_RUN {
-            self.crash_streaks.remove(&pane);
+            self.restarts.end_crash_streak(pane);
         }
         if exit_intent.is_stop() || exit_intent.is_restart() || !outcome.is_failure() {
             return;
         }
-        if self.workspace.process(pane).is_some() && self.crash_streaks.insert(pane) {
+        if self.workspace.process(pane).is_some() && self.restarts.crashed(pane) {
             let message = format!("{CRASHED_NOTICE}: {outcome}");
             self.alert_desktop(pane, &message);
             self.notify(NoticeLevel::Error, Some(pane), message);
@@ -1161,10 +1065,10 @@ impl Supervisor {
         if !*self.settings.desktop_notifications() {
             return;
         }
-        let (Some(notifier), Some(process)) = (&self.notifier, self.workspace.process(pane)) else {
+        let Some(process) = self.workspace.process(pane) else {
             return;
         };
-        notifier.notify(
+        self.attention.alert_desktop(
             &Notification::builder()
                 .pane(pane)
                 .source(process.name().clone())
@@ -1175,14 +1079,11 @@ impl Supervisor {
 
     /// Schedules a backoff restart and tags it with the current generation.
     fn schedule_restart(&mut self, pane: PaneId, started_at: Instant) {
-        let attempts = if started_at.elapsed() >= RESTART_STABLE_RUN {
-            0
-        } else {
-            self.restart_attempts.get(&pane).copied().unwrap_or(0)
-        };
+        let attempts = self
+            .restarts
+            .next_attempt(pane, started_at.elapsed() >= RESTART_STABLE_RUN);
         let delay = (RESTART_BACKOFF_BASE * 2u32.pow(attempts.min(RESTART_BACKOFF_MAX_EXP)))
             .min(RESTART_BACKOFF_MAX);
-        self.restart_attempts.insert(pane, attempts + 1);
         let generation = self.bump_generation(pane);
         let sender = self.events.clone();
         let project = self.root().clone();
@@ -1235,8 +1136,8 @@ impl Supervisor {
         let mut used_fallback = false;
         let mut delivered = false;
         if let Some(target) = self.panes.get_mut(&pane) {
-            target.exit_intent = request(target.exit_intent);
-            if let Some(handle) = target.handle.as_mut() {
+            target.change_intent(request);
+            if let Some(handle) = target.handle_mut().as_mut() {
                 delivered = match handle.terminate(*policy.signal(), grace_period) {
                     Ok(()) => {
                         awaiting_grace = true;
@@ -1247,12 +1148,12 @@ impl Supervisor {
                         handle.kill().is_ok()
                     },
                 };
-                target.exit_intent = match (restart, delivered) {
-                    (true, true) => target.exit_intent.restart_delivered(),
-                    (true, false) => target.exit_intent.restart_delivery_failed(),
-                    (false, true) => target.exit_intent.stop_delivered(),
-                    (false, false) => target.exit_intent.stop_delivery_failed(),
-                };
+                target.change_intent(match (restart, delivered) {
+                    (true, true) => ExitIntent::restart_delivered,
+                    (true, false) => ExitIntent::restart_delivery_failed,
+                    (false, true) => ExitIntent::stop_delivered,
+                    (false, false) => ExitIntent::stop_delivery_failed,
+                });
             }
         }
         if delivered {
@@ -1323,7 +1224,7 @@ mod tests {
     use crate::{
         adapter::service::{
             LastExit, ProcessUsage,
-            supervisor::{entity::UNKNOWN_PROCESS_NOTICE, testing::*},
+            supervisor::{lookup::UNKNOWN_PROCESS_NOTICE, testing::*},
         },
         domain::{
             config::{Environment, ProcessSpec},
@@ -1413,12 +1314,12 @@ mod tests {
 
     /// The test pane's current graceful-stop generation.
     fn current_shutdown_gen(harness: &Harness) -> ShutdownGeneration {
-        harness.supervisor.panes()[&pane()].shutdown_generation
+        harness.supervisor.panes()[&pane()].shutdown_generation()
     }
 
     /// What the test pane's next exit means.
     fn exit_intent(harness: &Harness) -> ExitIntent {
-        harness.supervisor.panes()[&pane()].exit_intent
+        harness.supervisor.panes()[&pane()].exit_intent()
     }
 
     /// Whether the test pane has a live process.
@@ -1456,7 +1357,7 @@ mod tests {
     #[test]
     fn retiring_a_pane_drops_its_usage_sample() {
         let mut harness = running(RestartPolicy::Never);
-        harness.supervisor.usage.insert(
+        harness.supervisor.metrics.set_usage(
             pane(),
             ProcessUsage::builder()
                 .pid(Pid::try_new(4242).unwrap())
@@ -1467,7 +1368,7 @@ mod tests {
 
         harness.supervisor.retire_pane(pane());
 
-        assert!(!harness.supervisor.usage().contains_key(&pane()));
+        assert!(harness.supervisor.metrics.usage(pane()).is_none());
     }
 
     /// A start for a pane with no process entity is refused with a notice
@@ -1616,7 +1517,7 @@ mod tests {
 
         assert_eq!(state(&harness), ProcessState::Restarting);
         assert!(
-            harness.supervisor.restart_attempts.contains_key(&pane()),
+            harness.supervisor.restarts.backs_off(pane()),
             "a backoff retry must be scheduled after a failed spawn"
         );
     }
@@ -1717,7 +1618,7 @@ mod tests {
             .panes
             .get_mut(&pane())
             .unwrap()
-            .started_at = Instant::now() - RESTART_STABLE_RUN;
+            .set_started_at(Instant::now() - RESTART_STABLE_RUN);
         harness.supervisor.apply_exit(pane(), crash());
         assert_eq!(
             harness.notice_messages().len(),
@@ -1732,7 +1633,10 @@ mod tests {
     fn a_crash_reaches_the_desktop_only_while_desktop_notifications_are_on() {
         let notifier = RecordingNotifier::default();
         let mut harness = running(RestartPolicy::Always);
-        harness.supervisor.set_notifier(Box::new(notifier.clone()));
+        harness
+            .supervisor
+            .attention
+            .set_notifier(Box::new(notifier.clone()));
         harness
             .supervisor
             .apply_settings(&test_settings().with_desktop_notifications(true));
@@ -2341,7 +2245,7 @@ mod tests {
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 
         assert_eq!(acks.load(Ordering::SeqCst), 1, "the displaced exit");
-        assert_eq!(harness.supervisor.held_exits.len(), 1);
+        assert_eq!(harness.supervisor.attach.held_count(), 1);
     }
 
     /// `down` stops every running process and leaves stopped ones alone.
@@ -2489,7 +2393,7 @@ mod tests {
         assert!(again.is_empty(), "{again:?}");
         assert_eq!(state(&harness), ProcessState::Running);
         assert_eq!(
-            harness.supervisor.launch_environments.get(&pane),
+            harness.supervisor.launches.environment_of(pane),
             Some(&client_env("FROM", "first").to_os())
         );
     }

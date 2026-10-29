@@ -13,7 +13,7 @@ impl Supervisor {
     /// Whether a usage sample means anything here: a process is live, or
     /// usage is still cached for one that is no longer sampled.
     pub fn wants_usage(&self) -> bool {
-        !self.live_pids().is_empty() || !self.usage.is_empty()
+        !self.live_pids().is_empty() || self.metrics.has_usage()
     }
 
     /// The pid of every live process whose usage is sampled.
@@ -41,9 +41,7 @@ impl Supervisor {
                 })
             })
             .collect();
-        let changed = updated != self.usage;
-        self.usage = updated;
-        changed
+        self.metrics.replace_usage(updated)
     }
 
     /// The pane and process id of every live process that reports one.
@@ -52,7 +50,7 @@ impl Supervisor {
             .iter()
             .filter_map(|(pane, target)| {
                 target
-                    .handle
+                    .handle()
                     .as_ref()
                     .and_then(|handle| handle.process_id())
                     .map(|pid| (*pane, pid))

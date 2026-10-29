@@ -18,6 +18,7 @@ use super::{
     notice::Notice,
     notice_level::NoticeLevel,
     notices::{Notices, SharedNotices},
+    port_holder::PortHolder,
     port_sampler::{PORT_SAMPLE_INTERVAL, PortSampler},
     probe_worker::ProbeWorker,
     process_action::ProcessAction,
@@ -411,6 +412,7 @@ impl ServiceRuntime {
                 for supervisor in self.supervisors.values_mut() {
                     supervisor.take_ports(&ports);
                 }
+                self.share_held_ports();
             },
             ServiceEvent::Request { request, reply } => return self.request(request, reply),
             ServiceEvent::HolderRead {
@@ -453,6 +455,12 @@ impl ServiceRuntime {
         request: ServiceRequest,
         reply: &Sender<ServiceResponse>,
     ) -> Result<Reply, ServiceErrorBody> {
+        if let ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } =
+            &request
+        {
+            self.supervisor(project)?;
+            self.share_held_ports();
+        }
         let response = match request {
             ServiceRequest::Replace | ServiceRequest::Stop => return Ok(Reply::Exit),
             ServiceRequest::Screen { project, name } => {
@@ -695,6 +703,19 @@ impl ServiceRuntime {
             .message(format!("{UNKNOWN_PROCESS}: {name}"))
             .candidates(supervisor.process_names())
             .build())
+    }
+
+    /// Tells every supervisor which ports the supervised processes of every
+    /// project listen on, so a start can refuse a port another one holds.
+    fn share_held_ports(&mut self) {
+        let held: HashMap<u16, PortHolder> = self
+            .supervisors
+            .values()
+            .flat_map(Supervisor::held_ports)
+            .collect();
+        for supervisor in self.supervisors.values_mut() {
+            supervisor.set_held_ports(held.clone());
+        }
     }
 
     /// The supervisor of `project`, loading it on first use from its stored

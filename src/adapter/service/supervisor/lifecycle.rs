@@ -83,6 +83,9 @@ impl Supervisor {
             .collect();
         self.batch_refusals.replace(Some(Vec::new()));
         for pane in self.autostart_panes() {
+            if self.refuse_blocked_launch(pane) {
+                continue;
+            }
             // Bringing a process up, like starting it, begins a new streak.
             self.crash_streaks.remove(&pane);
             self.set_launch_environment(pane, environment);
@@ -204,7 +207,7 @@ impl Supervisor {
     /// Starts `pane` with `environment` unless it is already running or
     /// starting.
     fn start_pane(&mut self, pane: PaneId, environment: &LaunchEnvironment) {
-        if self.is_live(pane) || self.is_starting(pane) {
+        if self.is_live(pane) || self.is_starting(pane) || self.refuse_blocked_launch(pane) {
             return;
         }
         // A start the user asks for begins a new streak, so its failure is told.
@@ -232,6 +235,9 @@ impl Supervisor {
                 return;
             }
             self.request_graceful_transition(pane, ExitIntent::request_restart, true);
+            return;
+        }
+        if self.refuse_blocked_launch(pane) {
             return;
         }
         // A pane already in restart backoff is counted by `spawn` itself.

@@ -5,6 +5,7 @@
 
 mod adopter;
 mod apply_stack;
+mod blocking;
 mod bridge;
 mod carried_pane;
 mod channel_output_sink;

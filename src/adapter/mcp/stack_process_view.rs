@@ -2,7 +2,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::last_exit_view::LastExitView;
+use super::{blocked_view::BlockedView, last_exit_view::LastExitView};
 use crate::{
     adapter::service::{ProcessStatus, StackUrl},
     domain::{
@@ -62,6 +62,10 @@ pub struct StackProcessView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get = "pub")]
     last_exit: Option<LastExitView>,
+    /// Why its last start was refused, while it is not running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[getset(get = "pub")]
+    blocked_on: Option<BlockedView>,
 }
 
 impl From<&ProcessStatus> for StackProcessView {
@@ -80,6 +84,7 @@ impl From<&ProcessStatus> for StackProcessView {
             cpu_percent: usage.map(|usage| *usage.cpu_percent()),
             memory_bytes: usage.map(|usage| *usage.memory_bytes()),
             last_exit: status.last_exit().as_ref().map(LastExitView::from),
+            blocked_on: status.blocked_on().as_ref().map(BlockedView::from),
         }
     }
 }

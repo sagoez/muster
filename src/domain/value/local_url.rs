@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nutype::nutype;
 
-use super::ValueParseError;
+use super::{LocalPort, ValueParseError};
 
 /// The one scheme a probe speaks: probes carry no TLS.
 const HTTP_SCHEME: &str = "http://";
@@ -33,36 +33,45 @@ fn is_loopback_url(url: &str) -> bool {
     }) {
         return false;
     }
-    let Some(rest) = url
-        .get(..HTTP_SCHEME.len())
-        .filter(|scheme| scheme.eq_ignore_ascii_case(HTTP_SCHEME))
-        .map(|_| &url[HTTP_SCHEME.len()..])
-    else {
+    let Some((host, port)) = host_and_port(url) else {
         return false;
     };
-    let authority = rest.split(AUTHORITY_END).next().unwrap_or_default();
-    if authority.contains(USERINFO_MARK) {
-        return false;
-    }
-    let (host, port) = match authority.strip_prefix(IPV6_OPEN) {
-        Some(_) => match authority.find(IPV6_CLOSE) {
-            Some(close) => authority.split_at(close + IPV6_CLOSE.len_utf8()),
-            None => return false,
-        },
-        None => authority
-            .find(PORT_SEPARATOR)
-            .map_or((authority, ""), |at| authority.split_at(at)),
-    };
-    let port_ok = port.is_empty()
-        || port
-            .strip_prefix(PORT_SEPARATOR)
-            .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|digits| digits.parse::<u16>().ok())
-            .is_some_and(|port| port > 0);
+    let port_ok = port.is_empty() || port_number(port).is_some_and(|port| port > 0);
     port_ok
         && LOOPBACK_HOSTS
             .iter()
             .any(|loopback| host.eq_ignore_ascii_case(loopback))
+}
+
+/// The host of an `http` URL, and its `:port` suffix (empty when none), or
+/// none for another scheme, credentials or an unclosed IPv6 host.
+fn host_and_port(url: &str) -> Option<(&str, &str)> {
+    let rest = url
+        .get(..HTTP_SCHEME.len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case(HTTP_SCHEME))
+        .map(|_| &url[HTTP_SCHEME.len()..])?;
+    let authority = rest.split(AUTHORITY_END).next().unwrap_or_default();
+    if authority.contains(USERINFO_MARK) {
+        return None;
+    }
+    match authority.strip_prefix(IPV6_OPEN) {
+        Some(_) => authority
+            .find(IPV6_CLOSE)
+            .map(|close| authority.split_at(close + IPV6_CLOSE.len_utf8())),
+        None => Some(
+            authority
+                .find(PORT_SEPARATOR)
+                .map_or((authority, ""), |at| authority.split_at(at)),
+        ),
+    }
+}
+
+/// The number of a `:port` suffix, or none when it is not one.
+fn port_number(suffix: &str) -> Option<u16> {
+    suffix
+        .strip_prefix(PORT_SEPARATOR)
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse().ok())
 }
 
 /// An `http` URL on this machine's loopback interface, which a readiness
@@ -74,6 +83,15 @@ fn is_loopback_url(url: &str) -> bool {
     derive(Debug, Clone, PartialEq, Eq, Hash, AsRef, Display, Serialize, Deserialize)
 )]
 pub struct LocalUrl(String);
+
+impl LocalUrl {
+    /// The port the URL names, when it names one.
+    pub fn port(&self) -> Option<LocalPort> {
+        host_and_port(self.as_ref())
+            .and_then(|(_, suffix)| port_number(suffix))
+            .and_then(|port| LocalPort::try_new(port).ok())
+    }
+}
 
 impl FromStr for LocalUrl {
     type Err = ValueParseError;
@@ -115,6 +133,19 @@ mod tests {
                 .as_ref(),
             "http://localhost:3000"
         );
+    }
+
+    #[test]
+    fn the_port_is_read_when_named() {
+        let port = |raw: &str| {
+            raw.parse::<LocalUrl>()
+                .unwrap()
+                .port()
+                .map(LocalPort::into_inner)
+        };
+        assert_eq!(port("http://localhost:3000/health"), Some(3000));
+        assert_eq!(port("http://[::1]:5173"), Some(5173));
+        assert_eq!(port("http://127.0.0.1/"), None);
     }
 
     /// A probe must not become a way to reach another host: other hosts,

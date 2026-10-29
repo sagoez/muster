@@ -112,6 +112,16 @@ impl ReadyProbe {
         }
     }
 
+    /// The local port this probe needs its process to listen on, when it
+    /// names one.
+    pub fn port(&self) -> Option<LocalPort> {
+        match self {
+            Self::Log(_) => None,
+            Self::Port(port) => Some(*port),
+            Self::Http(url) => url.port(),
+        }
+    }
+
     /// The kind and target this probe is stored as, which
     /// [`Self::from_stored`] reads back.
     pub fn stored(&self) -> (ReadyKind, String) {

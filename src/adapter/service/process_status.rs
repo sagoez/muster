@@ -4,7 +4,9 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::{last_exit::LastExit, process_usage::ProcessUsage, stack_url::StackUrl};
+use super::{
+    last_exit::LastExit, port_block::PortBlock, process_usage::ProcessUsage, stack_url::StackUrl,
+};
 use crate::domain::{
     port::ListeningSocket,
     process::{ProcessState, Readiness},
@@ -49,4 +51,8 @@ pub struct ProcessStatus {
     /// How long a graceful stop waits before it kills.
     #[serde(with = "humantime_serde")]
     stop_grace: Duration,
+    /// Why its last start was refused, while it is not running: another
+    /// process holds the port its readiness check names.
+    #[builder(default)]
+    blocked_on: Option<PortBlock>,
 }

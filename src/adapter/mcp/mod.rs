@@ -6,6 +6,7 @@
 mod agent_wait_view;
 mod alerts;
 mod alerts_view;
+mod blocked_view;
 mod bounds;
 mod condition_arg;
 mod config_get_arg;

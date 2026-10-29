@@ -16,9 +16,9 @@ use super::{
 };
 use crate::{
     adapter::service::{
-        EventDraft, EventKind, ExitReason, LastExit, Notice, NoticeLevel, OutputTap, ProbeWorker,
-        ProcessStatus, ProcessUsage, ProjectStatus, Refusal, ServiceEvent, SharedEventLog,
-        SharedNotices, StackUrl, UrlSource, WaitGroup, Waiter,
+        EventDraft, EventKind, ExitReason, LastExit, Notice, NoticeLevel, OutputTap, PortBlock,
+        PortHolder, ProbeWorker, ProcessStatus, ProcessUsage, ProjectStatus, Refusal, ServiceEvent,
+        SharedEventLog, SharedNotices, StackUrl, UrlSource, WaitGroup, Waiter,
     },
     application::{StackSync, Workspace},
     domain::{
@@ -127,6 +127,11 @@ pub struct Supervisor {
     pub(super) run_ends: HashMap<PaneId, RunEnd>,
     /// The ports each live pane's process tree was last seen listening on.
     pub(super) ports: HashMap<PaneId, Vec<ListeningSocket>>,
+    /// Every port a supervised process of any project listens on, and who
+    /// holds it, as the service last shared it.
+    pub(super) held_ports: HashMap<u16, PortHolder>,
+    /// Each pane whose last start was refused for a held port, and why.
+    pub(super) blocks: HashMap<PaneId, PortBlock>,
 }
 
 impl Supervisor {
@@ -179,6 +184,8 @@ impl Supervisor {
             readiness: HashMap::new(),
             run_ends: HashMap::new(),
             ports: HashMap::new(),
+            held_ports: HashMap::new(),
+            blocks: HashMap::new(),
         }
     }
 
@@ -283,6 +290,12 @@ impl Supervisor {
                                 .flatten(),
                         )
                         .stop_grace(process.stop().grace_period().into_inner())
+                        .blocked_on(
+                            self.blocks
+                                .get(&pane)
+                                .filter(|_| !state.may_be_running())
+                                .cloned(),
+                        )
                         .build(),
                 )
             })

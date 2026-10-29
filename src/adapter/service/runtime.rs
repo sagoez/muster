@@ -3132,6 +3132,8 @@ mod tests {
     const SHELL_VALUE: &str = "from-the-shell";
     /// The hook load every test shell reports from.
     const HOOK_LOAD: u64 = 1;
+    /// The folder a test shell outside every project reports from.
+    const OUTSIDE: &str = "/";
 
     /// Sends `shell`'s report at prompt `seq` that its folder is in
     /// `project`, as one that may enter it with an empty environment, and
@@ -3146,11 +3148,12 @@ mod tests {
     }
 
     /// `shell`'s report at prompt `seq` of [`HOOK_LOAD`] that its folder is
-    /// in `project`.
+    /// `project`'s, or [`OUTSIDE`] with none.
     fn shell_record(shell: ShellId, seq: u64, project: Option<&ProjectRoot>) -> ShellRecord {
         ShellRecord::builder()
             .shell(shell)
             .stamp(stamp(HOOK_LOAD, seq))
+            .folder(project.map_or_else(|| PathBuf::from(OUTSIDE), |root| root.as_ref().clone()))
             .project(project.cloned())
             .build()
     }
@@ -3304,6 +3307,45 @@ mod tests {
         assert_eq!(status.occupancy().shells(), 1);
         assert!(!process(&status, "api").state().may_be_running());
         assert!(fixture.runner().live_records().is_empty());
+        service.stop();
+    }
+
+    /// Correctness M1: a project registered inside the one a shell is in
+    /// counts the shell from its next report on, starts nothing, and leaves
+    /// the outer project occupied, holding off its idle stop, until the
+    /// shell leaves its tree.
+    #[test]
+    fn a_project_registered_under_a_shell_starts_nothing_and_keeps_the_outer_one() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", false)]));
+        let admin = fixture.project_in("shop/admin", commands(&[("panel", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&shop));
+
+        let registered = ShellRecord::builder()
+            .shell(shell)
+            .stamp(stamp(HOOK_LOAD, 2))
+            .folder(admin.as_ref().clone())
+            .project(Some(admin.clone()))
+            .held(vec![shop.clone()])
+            .build();
+        let response = service.send(ServiceRequest::ShellReport {
+            record: registered,
+            environment: None,
+        });
+
+        assert_eq!(response, ServiceResponse::ShellNotes(Vec::new()));
+        let nested = service.status(&admin);
+        assert_eq!(nested.occupancy().shells(), 1);
+        assert!(!process(&nested, "panel").state().may_be_running());
+        let outer = occupancy(&service, &shop);
+        assert_eq!((outer.shells(), outer.stops_in()), (1, None));
+
+        report(&service, shell, 3, None);
+        assert!(occupancy(&service, &shop).stops_in().is_some(), "left");
         service.stop();
     }
 

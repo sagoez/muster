@@ -3,14 +3,14 @@ use std::collections::{BTreeSet, HashMap};
 use super::{OccupancyChange, ReportStamp, ShellId, ShellRecord};
 use crate::domain::value::ProjectRoot;
 
-/// What the table knows of one shell: its newest report and the project that
-/// report put it in.
+/// What the table knows of one shell: its newest report and the projects
+/// that report counts it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
     /// The newest report applied.
     stamp: ReportStamp,
-    /// The project it is in, or `None` outside every project.
-    project: Option<ProjectRoot>,
+    /// The project it is in and those it holds.
+    projects: BTreeSet<ProjectRoot>,
 }
 
 impl Seen {
@@ -18,13 +18,13 @@ impl Seen {
     fn of(record: &ShellRecord) -> Self {
         Self {
             stamp: *record.stamp(),
-            project: record.project().clone(),
+            projects: record
+                .project()
+                .iter()
+                .chain(record.held())
+                .cloned()
+                .collect(),
         }
-    }
-
-    /// The projects the shell counts in.
-    fn projects(&self) -> BTreeSet<ProjectRoot> {
-        self.project.iter().cloned().collect()
     }
 }
 
@@ -72,7 +72,7 @@ impl Occupancy {
         let before = self
             .shells
             .remove(shell)
-            .map(|seen| seen.projects())
+            .map(|seen| seen.projects)
             .unwrap_or_default();
         self.recount(&before, &BTreeSet::new())
     }
@@ -116,11 +116,11 @@ impl Occupancy {
     /// projects that move made lose their last shell or gain their first.
     fn put(&mut self, record: &ShellRecord) -> Vec<OccupancyChange> {
         let seen = Seen::of(record);
-        let after = seen.projects();
+        let after = seen.projects.clone();
         let before = self
             .shells
             .insert(*record.shell(), seen)
-            .map(|seen| seen.projects())
+            .map(|seen| seen.projects)
             .unwrap_or_default();
         self.recount(&before, &after)
     }
@@ -167,6 +167,8 @@ mod tests {
 
     /// The hook load most tests report from.
     const LOAD: u64 = 1;
+    /// The folder every report is made from; the table never reads it.
+    const FOLDER: &str = "/home/me";
 
     /// The shell running as `pid`, started at `start`.
     fn shell(pid: u32, start: u64) -> ShellId {
@@ -187,6 +189,7 @@ mod tests {
         ShellRecord::builder()
             .shell(shell)
             .stamp(stamp(load, seq))
+            .folder(PathBuf::from(FOLDER))
             .project(project.map(root))
             .build()
     }
@@ -335,6 +338,32 @@ mod tests {
         assert_eq!(table.occupants(&root("shop")), 1);
         table.remove(&shell(200, 1));
         assert_eq!(table.occupants(&root("shop")), 0);
+    }
+
+    /// A shell holding the outer project a nested one was registered in
+    /// counts in both, so the outer one sees no leave until the shell
+    /// leaves its tree, and then both see theirs.
+    #[test]
+    fn a_held_project_counts_the_shell_until_it_lets_go() {
+        let mut table = Occupancy::new();
+        table.report(&at(shell(100, 1), 1, Some("shop")));
+
+        let nested = ShellRecord::builder()
+            .shell(shell(100, 1))
+            .stamp(stamp(LOAD, 2))
+            .folder(PathBuf::from(FOLDER))
+            .project(Some(root("shop/admin")))
+            .held(vec![root("shop")])
+            .build();
+        assert_eq!(table.report(&nested), [OccupancyChange::Entered(root(
+            "shop/admin"
+        ))]);
+        assert_eq!(table.occupants(&root("shop")), 1, "shop is held");
+
+        assert_eq!(table.report(&at(shell(100, 1), 3, None)), [
+            OccupancyChange::Left(root("shop")),
+            OccupancyChange::Left(root("shop/admin"))
+        ]);
     }
 
     /// A shell restored from its record and then found gone leaves the

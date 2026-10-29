@@ -23,7 +23,8 @@ use serde_json::Value;
 use strum::IntoEnumIterator;
 
 use crate::common::{
-    Scratch, ShellSession, WAIT, entry, on_path, processes_under, runnable_shell, stack, wait_until,
+    BINARY, Scratch, ShellSession, WAIT, entry, on_path, processes_under, runnable_shell, stack,
+    wait_until,
 };
 
 /// How many times a prompt fits in a report blocked on the frozen service:
@@ -317,6 +318,60 @@ fn a_shell_that_execs_itself_still_enters_a_project() {
         session.settle();
         session.wait_drawn("muster: shop: starting api");
     });
+}
+
+/// Correctness M1: `add --autostart` run from inside a hooked shell starts
+/// nothing, in a fresh folder or nested in the project the shell is in,
+/// though the shell counts in the new project from its next prompt; the
+/// outer project stays occupied, its idle stop held off, until the shell
+/// leaves its tree.
+#[test]
+fn registering_a_project_from_inside_a_shell_starts_nothing() {
+    each_shell("registering", |scratch, shell, program| {
+        let shop = shop(scratch);
+        let fresh = scratch.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let admin = shop.join("admin");
+        fs::create_dir_all(&admin).unwrap();
+        let session = ShellSession::start(scratch, shell, program);
+        enter(scratch, &session, &shop);
+
+        for (folder, name) in [(&fresh, "dev"), (&admin, "panel")] {
+            session.cd(folder);
+            session.run(&add_autostart(folder, name));
+            wait_recorded_in(&session, folder);
+            session.wait_reports_done();
+
+            assert!(!running(scratch, folder, name), "{shell}: {name} started");
+            assert_eq!(
+                ps(scratch, folder)[0]["occupancy"]["shells"],
+                1,
+                "{shell}: {name}"
+            );
+        }
+        let outer = ps(scratch, &shop);
+        assert_eq!(outer[0]["occupancy"]["shells"], 1, "{shell}: {outer}");
+        assert!(
+            outer[0]["occupancy"]["stops_in"].is_null(),
+            "{shell}: {outer}"
+        );
+
+        session.cd(Path::new("/"));
+        session.wait_reports_done();
+        let left = ps(scratch, &shop);
+        assert!(
+            !left[0]["occupancy"]["stops_in"].is_null(),
+            "{shell}: {left}"
+        );
+    });
+}
+
+/// The line that adds `name`, autostarting, to the project in `folder`, as
+/// typed at a hooked shell's prompt.
+fn add_autostart(folder: &Path, name: &str) -> String {
+    let binary = shlex::try_quote(BINARY).unwrap();
+    let folder = shlex::try_quote(folder.to_str().unwrap()).unwrap();
+    format!("{binary} -p {folder} add {name} --autostart -- sleep 600")
 }
 
 /// The hook hands the last command's exit status on to the next one.

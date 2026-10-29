@@ -245,6 +245,8 @@ mod tests {
     const WRONG_START: u64 = 1;
     /// The hook load the records are reported from.
     const LOAD: u64 = 7;
+    /// The folder a record outside every project is reported from.
+    const OUTSIDE: &str = "/";
 
     /// Shell files under a fresh scratch state directory.
     fn files() -> (TempDir, ShellFiles) {
@@ -266,6 +268,7 @@ mod tests {
         ShellRecord::builder()
             .shell(shell)
             .stamp(stamp(load, seq))
+            .folder(PathBuf::from(project.unwrap_or(OUTSIDE)))
             .project(project.map(|root| ProjectRoot::try_new(PathBuf::from(root)).unwrap()))
             .build()
     }
@@ -368,7 +371,7 @@ mod tests {
         fs::write(files.notes_dir().join("7.json"), b"{not json").unwrap();
         fs::write(
             files.notes_dir().join("8.json"),
-            br#"{"pid":8,"start":3,"load":1,"seq":1,"project":null,"extra":true}"#,
+            br#"{"pid":8,"start":3,"load":1,"seq":1,"folder":"/","project":null,"held":[],"extra":true}"#,
         )
         .unwrap();
 

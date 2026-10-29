@@ -165,6 +165,7 @@ mod tests {
                         .build(),
                 )
                 .stamp(stamp(9, 3))
+                .folder(PathBuf::from("/home/me/shop"))
                 .project(Some(
                     ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap(),
                 ))
@@ -177,7 +178,7 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(
             json,
-            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"seq":3,"project":"/home/me/shop"},"environment":{"PATH":"/usr/bin"}}}"#
+            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"seq":3,"folder":"/home/me/shop","project":"/home/me/shop","held":[]},"environment":{"PATH":"/usr/bin"}}}"#
         );
         assert_eq!(
             serde_json::from_str::<ServiceRequest>(&json).unwrap(),

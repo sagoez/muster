@@ -20,7 +20,9 @@ use crate::{
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
 /// gives, in the folder `cwd`. A running service is always told; with none
 /// running, one is started only when `cwd` is inside a registered project,
-/// and otherwise only the shell's record is kept. The notes the service
+/// and otherwise only the shell's record is kept. The shell's environment
+/// goes along only when the report may enter its project: one registered
+/// around the shell since its last report is not entered. The notes the service
 /// answers are left for the hook, then the record is written; a report that
 /// fails writes neither, so the next prompt reports the same move again. It
 /// never prints.
@@ -55,12 +57,14 @@ pub fn shell_report(
             .map(|project| project.root().clone()),
         None => None,
     };
-    let entering = project.is_some();
+    let in_project = project.is_some();
     let record = ShellRecord::builder()
         .shell(shell)
         .stamp(stamp)
+        .folder(cwd.to_path_buf())
         .project(project)
-        .build();
+        .build()
+        .following(previous.as_ref());
     let request = ServiceRequest::ShellReport {
         environment: record
             .may_enter(previous.as_ref())
@@ -70,7 +74,7 @@ pub fn shell_report(
     let service = ports.service();
     let answer = match service.ask_if_running(&request)? {
         Some(answer) => answer,
-        None if entering => service.connect()?.send(&request)?,
+        None if in_project => service.connect()?.send(&request)?,
         None => {
             shells.save_if_newer(&record)?;
             return Ok(());
@@ -199,6 +203,7 @@ mod tests {
                 ShellRecord::builder()
                     .shell(identified(&ports))
                     .stamp(seq(1))
+                    .folder(scratch.path().to_path_buf())
                     .project(None)
                     .build()
             )
@@ -286,6 +291,7 @@ mod tests {
                 &ShellRecord::builder()
                     .shell(identified(&ports))
                     .stamp(seq(5))
+                    .folder(shop.clone())
                     .build(),
             )
             .unwrap();
@@ -315,6 +321,7 @@ mod tests {
                 &ShellRecord::builder()
                     .shell(identified(&ports))
                     .stamp(stamp(LOAD, 500))
+                    .folder(shop.clone())
                     .build(),
             )
             .unwrap();
@@ -352,6 +359,44 @@ mod tests {
             })
             .collect();
         assert_eq!(sent, [true, false, false]);
+    }
+
+    /// Correctness M1: a project registered around a shell, at its root or
+    /// nested in the project the shell was in, is told with no environment,
+    /// so nothing starts; the nested one holds the outer project.
+    #[test]
+    fn a_project_registered_around_the_shell_is_told_as_no_entering() {
+        let (ports, shop, _scratch) = shop_ports(FakeService::default().answering(started()));
+        let admin = shop.join("admin");
+        fs::create_dir_all(&admin).unwrap();
+        let shop_root = ProjectRoot::try_new(shop).unwrap();
+        let admin_root = ProjectRoot::try_new(admin.clone()).unwrap();
+
+        shell_report(&ports, this_shell(), seq(1), &admin).unwrap();
+        ports
+            .store()
+            .import(&admin_root, &[spec("panel", "true")], ImportMode::Strict)
+            .unwrap();
+        shell_report(&ports, this_shell(), seq(2), &admin).unwrap();
+
+        let asked = ports.fake_service().asked();
+        let [
+            ServiceRequest::ShellReport {
+                record: walked,
+                environment: Some(_),
+            },
+            ServiceRequest::ShellReport {
+                record: registered,
+                environment: None,
+            },
+        ] = &asked[..]
+        else {
+            panic!("an entering, then a registration: {asked:?}");
+        };
+        assert_eq!(walked.project().as_ref(), Some(&shop_root));
+        assert_eq!(registered.project().as_ref(), Some(&admin_root));
+        assert_eq!(registered.held(), &[shop_root]);
+        assert_eq!(record(&ports).as_ref(), Some(registered));
     }
 
     /// A report run as a user that does not own the state directory, as in

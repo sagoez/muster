@@ -53,7 +53,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::adapter::store::test_support::fresh_store;
+    use crate::adapter::{client::FailureKind, store::test_support::fresh_store};
 
     /// Where the hook names the notes folder, in the snapshot.
     const NOTES_PLACEHOLDER: &str = "<notes>";
@@ -89,10 +89,7 @@ mod tests {
         let refused = shell_init(&ports, HookShell::Bash, Path::new("/opt/mu\0ster")).unwrap_err();
 
         assert!(matches!(refused, CliError::Unhookable(_)), "{refused}");
-        assert_eq!(
-            refused.kind(),
-            crate::adapter::client::FailureKind::InvalidInput
-        );
+        assert_eq!(refused.kind(), FailureKind::InvalidInput);
     }
 
     /// bash and zsh evaluate the printed hook; fish sources it.

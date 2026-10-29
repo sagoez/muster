@@ -64,16 +64,20 @@ plugs into a port.
     imports the other. Each takes its state, the service and what tells the
     service of a stored change as ports (`LocalState`, `ServiceAccess`,
     `StateChangeNotifier`) from the composition root, so a test injects fakes
-    and never reaches the user's real database or socket.
+    and never reaches the user's real database or socket. The CLI also takes
+    the `ShellRegistry` port, for the shell records and notes its hidden
+    `__shell-report` command keeps.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,
     `StackEditLog`); writers tell it what changed. What it writes, through
     `RunHistory` and `RaisedEdits` from a thread of its own, is how each
-    process last ended and which agent edits it raised. Shell occupancy lives
-    in the loop (`Occupancy`, in `domain/occupancy`); a `ShellSweeper` thread
-    only checks that reported shells are alive and posts the ended ones back
-    as an event, and the loop starts an entered project and stops an idle one.
+    process last ended and which agent edits it raised; through
+    `ShellRegistry` it deletes the record and notes of each shell that has
+    ended. Shell occupancy lives in the loop (`Occupancy`, in
+    `domain/occupancy`); a `ShellSweeper` thread checks that reported shells
+    are alive, deletes the files of the ended ones and posts them back as an
+    event, and the loop starts an entered project and stops an idle one.
   - **`adapter/shell`** - the hook each shell loads (`hook_script`, over the
     scripts in `adapter/shell/scripts`) and `ShellFiles`, the shell records
     and pending notes kept under `shells/` in the state directory, behind the
@@ -120,9 +124,9 @@ src/
     process/           # Process, ProcessState, restart and stop policies, readiness checks
     config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
     coordination/      # shared notes, todos, key-value entries and locks
-    occupancy/         # which shell is in which project: Occupancy, ShellRecord, ShellRegistry
+    occupancy/         # which shell is in which project: Occupancy, ShellRecord
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    port/              # ProcessRunner, StackStore, StackReader, LocalState, Notifier, ... (traits)
+    port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
     project.rs, settings.rs, color_scheme.rs, notification.rs
   application/         # StackEditor, StackSync, Workspace, ProcessLifecycle

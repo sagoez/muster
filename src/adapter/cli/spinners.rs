@@ -1,11 +1,14 @@
 use std::ops::ControlFlow;
 
-use cliclack::{ProgressBar, spinner};
+use cliclack::ProgressBar;
 use console::Term;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
 
-use super::interrupt_guard::InterruptGuard;
+use super::{
+    interrupt_guard::InterruptGuard,
+    presenter::{clear_spinner, start_spinner, update_spinner},
+};
 use crate::adapter::{
     client::{Action, SettleWatch},
     service::ProcessStatus,
@@ -44,7 +47,7 @@ impl Spinners {
     /// Takes the spinner off the screen, if one is there.
     fn clear(&mut self) {
         if let Some(spinner) = self.spinner.take() {
-            spinner.clear();
+            clear_spinner(&spinner);
         }
     }
 }
@@ -82,12 +85,8 @@ impl SettleWatch for Spinners {
             width.saturating_sub(SPINNER_COLUMNS),
         );
         match &self.spinner {
-            Some(spinner) => spinner.set_message(message),
-            None => {
-                let started = spinner();
-                started.start(message);
-                self.spinner = Some(started);
-            },
+            Some(spinner) => update_spinner(spinner, message),
+            None => self.spinner = Some(start_spinner(message)),
         }
         ControlFlow::Continue(())
     }

@@ -8,7 +8,9 @@ use std::{
     io::{self, Write},
 };
 
-use cliclack::{confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme};
+use cliclack::{
+    ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,
+};
 use console::{Term, style};
 use unicode_width::UnicodeWidthStr;
 
@@ -330,6 +332,23 @@ pub(super) fn asked<T>(ask: impl FnOnce() -> io::Result<T>) -> Result<T, CliErro
         return Err(CliError::Cancelled);
     }
     answer
+}
+
+/// A spinner line drawn on the terminal, showing `message`.
+pub(super) fn start_spinner(message: String) -> ProgressBar {
+    let line = spinner();
+    line.start(message);
+    line
+}
+
+/// Shows `message` on the spinner line `line`.
+pub(super) fn update_spinner(line: &ProgressBar, message: String) {
+    line.set_message(message);
+}
+
+/// Takes the spinner line `line` off the terminal.
+pub(super) fn clear_spinner(line: &ProgressBar) {
+    line.clear();
 }
 
 /// The failure of a prompt: cancelled when the person pressed Esc or

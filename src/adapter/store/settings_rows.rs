@@ -171,6 +171,7 @@ mod tests {
         },
     };
 
+    /// The change setting `key` to `raw`.
     fn parsed(key: SettingKey, raw: &str) -> SettingChange {
         SettingChange::parse(key, raw).unwrap()
     }

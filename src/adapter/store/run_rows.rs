@@ -142,10 +142,12 @@ mod tests {
         domain::{coordination::Author, port::StackStore},
     };
 
+    /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {
         ProcessName::try_new(raw).unwrap()
     }
 
+    /// The run of `process` that ended with `outcome`, at a fixed moment.
     fn ended(process: &str, outcome: ExitOutcome) -> EndedRun {
         EndedRun::builder()
             .process(name(process))

@@ -54,10 +54,12 @@ impl FromIterator<(EnvName, EnvValue)> for Environment {
 mod tests {
     use super::*;
 
+    /// The variable name `raw`.
     fn name(raw: &str) -> EnvName {
         EnvName::try_new(raw).unwrap()
     }
 
+    /// The variable value `raw`.
     fn value(raw: &str) -> EnvValue {
         EnvValue::try_new(raw).unwrap()
     }

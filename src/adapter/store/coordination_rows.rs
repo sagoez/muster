@@ -627,6 +627,7 @@ mod tests {
         ScratchpadKey::try_new(name).unwrap()
     }
 
+    /// The agent every entry is written by.
     fn author() -> Author {
         Author::agent("tester")
     }

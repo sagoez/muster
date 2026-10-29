@@ -477,16 +477,19 @@ mod tests {
     /// `café` with `e` and a combining acute accent.
     const CAFE_DECOMPOSED: &str = "cafe\u{301}";
 
+    /// The `shop` folder under `scratch`, created, as a project root.
     fn root(scratch: &TempDir) -> ProjectRoot {
         let dir = scratch.path().join("shop");
         fs::create_dir_all(&dir).unwrap();
         ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap()
     }
 
+    /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {
         ProcessName::try_new(raw).unwrap()
     }
 
+    /// A `web` process with every optional field set.
     fn full_spec() -> ProcessSpec {
         spec("web", "npm run dev")
             .with_working_dir(Some(PathBuf::from("frontend")))
@@ -506,6 +509,7 @@ mod tests {
             .with_restart(RestartPolicy::OnFailure)
     }
 
+    /// The names of `stack`'s processes, in stack order.
     fn names_of(stack: &Stack) -> Vec<String> {
         stack.names().iter().map(ToString::to_string).collect()
     }
@@ -518,6 +522,7 @@ mod tests {
             .build()
     }
 
+    /// The readiness target stored for `process`, read straight from its row.
     fn ready_target(store: &SqliteStore, process: &str) -> Option<String> {
         store
             .read(|conn| {

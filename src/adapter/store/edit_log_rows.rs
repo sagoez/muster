@@ -196,14 +196,17 @@ mod tests {
     const REFUSE_EDITS: &str = "CREATE TRIGGER refuse_edits BEFORE INSERT ON stack_edits \
                                 BEGIN SELECT RAISE(ABORT, 'refused'); END;";
 
+    /// The agent every logged edit is made by.
     fn agent() -> Author {
         Author::agent("claude")
     }
 
+    /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {
         ProcessName::try_new(raw).unwrap()
     }
 
+    /// The `shop` folder under `scratch`, created.
     fn folder(scratch: &TempDir) -> ProjectRoot {
         let dir = scratch.path().join("shop");
         fs::create_dir_all(&dir).unwrap();
@@ -219,6 +222,7 @@ mod tests {
         root
     }
 
+    /// How the log reads the agent removing the process `raw`.
     fn removal(raw: &str) -> String {
         StackEdit::Removed {
             author: agent(),

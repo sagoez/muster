@@ -138,6 +138,8 @@ mod tests {
         value::{CommandLine, EnvName, EnvValue, StopGrace},
     };
 
+    /// A `web` process with a working dir, a secret variable and every policy
+    /// set.
     fn spec() -> ProcessSpec {
         ProcessSpec::builder()
             .name(ProcessName::try_new("web").unwrap())
@@ -158,6 +160,7 @@ mod tests {
             .build()
     }
 
+    /// The agent every edit is made by.
     fn agent() -> Author {
         Author::agent("claude-code@builder")
     }

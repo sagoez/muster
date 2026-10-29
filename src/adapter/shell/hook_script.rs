@@ -68,7 +68,6 @@ mod tests {
     use std::{
         ffi::OsStr,
         fs,
-        io::ErrorKind,
         os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
         path::PathBuf,
         process::{Command, Output},
@@ -118,6 +117,8 @@ mod tests {
     /// Lines the drivers leave as two note files, in seq order; the second
     /// holds what a shell could expand and an escape sanitizing writes.
     const NOTE_LINES: [&str; 2] = ["first line", "second $line \\x1b"];
+    /// What a probe runs to learn whether a shell runs here.
+    const PROBE_SCRIPT: &str = "exit 0";
 
     /// Each shell's driver: loads the hook twice, leaves two notes for this
     /// shell, fails a command, runs one prompt, then prints the status the
@@ -177,14 +178,26 @@ mod tests {
             command.arg(shell.to_string());
         }
         command.args(args).env_remove(MUSTER_SHELL_ENV);
-        match command.output() {
-            Ok(output) => Some(output),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                eprintln!("{shell} is not installed: its check is skipped");
-                None
-            },
-            Err(error) => panic!("cannot run {shell}: {error}"),
+        shell_runs(shell, "check").then(|| {
+            command
+                .output()
+                .unwrap_or_else(|error| panic!("cannot run {shell}: {error}"))
+        })
+    }
+
+    /// Whether `shell` runs here at all, probed with an empty command; a
+    /// shell that is missing, or a shim that refuses to run it, has its
+    /// `check` skipped with a printed reason rather than failed.
+    fn shell_runs(shell: HookShell, check: &str) -> bool {
+        let runs = Command::new(shell.to_string())
+            .args(["-c", PROBE_SCRIPT])
+            .env_remove(MUSTER_SHELL_ENV)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !runs {
+            eprintln!("{shell} is not installed or does not run: its {check} is skipped");
         }
+        runs
     }
 
     /// The hook for `shell`, written under `scratch`, running a fake muster
@@ -275,18 +288,14 @@ mod tests {
                 HookShell::Bash | HookShell::Zsh => "-n",
                 HookShell::Fish => "--no-execute",
             };
-            let output = match Command::new(shell.to_string())
+            if !shell_runs(shell, "syntax check") {
+                continue;
+            }
+            let output = Command::new(shell.to_string())
                 .arg(check)
                 .arg(&script)
                 .output()
-            {
-                Ok(output) => output,
-                Err(error) if error.kind() == ErrorKind::NotFound => {
-                    eprintln!("{shell} is not installed: its syntax check is skipped");
-                    continue;
-                },
-                Err(error) => panic!("cannot run {shell}: {error}"),
-            };
+                .unwrap_or_else(|error| panic!("cannot run {shell}: {error}"));
             assert!(output.status.success(), "{shell}: {output:?}");
             assert!(output.stderr.is_empty(), "{shell}: {output:?}");
         }

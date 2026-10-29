@@ -318,8 +318,9 @@ impl MusterMcp {
             a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
             {\"port\": 3000, \"timeout\": 30} or {\"http\": \
             \"http://localhost:3000/health\", \"timeout\": 30}. Durations are numbers of \
-            seconds in both directions, as results report them: text such as \"30s\" is \
-            refused. Fields left out take the \
+            seconds in both directions, as results report them, in whole milliseconds: \
+            text such as \"30s\" and a fraction such as 0.0004 are refused. Fields left out \
+            take the \
             default-* settings that config_get shows. The change is saved atomically, is \
             visible to the human's muster ps at once and is shown to them as a notice. Does \
             not start it: call process_start. Returns {project, process: the stored \

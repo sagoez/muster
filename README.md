@@ -455,7 +455,9 @@ optional `status`), `{"state": "running"}` or `{"ready": true}`. A `port` or
 the same shape with a `timeout` in seconds, such as `{"log": "Listening on",
 "timeout": 60}`; `process_set` with `ready: null` removes it. Durations go in
 as they come out, as numbers of seconds: `stop_grace` is `5`, never `"5s"`,
-and text is refused naming seconds.
+and text is refused naming seconds. A stored duration is whole milliseconds,
+so `1.5` is taken and `0.0004` is refused, at the CLI (`1500us`), over MCP
+and in `muster import`, and what you set is what reads back.
 
 Cursors are offsets in a process's output that run on across restarts, so
 `process_logs` with `since` set to a wait's `cursor`, or to `run_start` from

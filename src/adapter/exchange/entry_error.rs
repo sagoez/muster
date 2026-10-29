@@ -84,8 +84,9 @@ pub enum EntryError {
         /// What is wrong with it.
         reason: String,
     },
-    /// `stop.grace_period` is zero or longer than muster allows.
-    #[error("stop.grace_period must be longer than zero and at most 1h")]
+    /// `stop.grace_period` is zero, longer than muster allows or finer than a
+    /// millisecond.
+    #[error("stop.grace_period must be longer than zero and at most 1h, in whole milliseconds")]
     GraceOutOfRange,
     /// An earlier entry has a name with the same key.
     #[error("a process with this name appears earlier in the file")]

@@ -19,8 +19,8 @@ const ONE_PROBE: &str = "name exactly one of log, port or http";
 const REGEX_WITHOUT_LOG: &str = "regex goes only with log";
 /// Why port zero is refused.
 const ZERO_PORT: &str = "port must be from 1 to 65535";
-/// Why a zero timeout is refused.
-const ZERO_TIMEOUT: &str = "timeout must be longer than zero";
+/// Why a zero timeout, or one finer than a millisecond, is refused.
+const ZERO_TIMEOUT: &str = "timeout must be longer than zero, in whole milliseconds";
 
 /// An exported process's readiness check, as the stack file writes it:
 /// exactly one of `log`, `port` or `http`, and a `timeout`.

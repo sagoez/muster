@@ -729,7 +729,7 @@ mod tests {
         let root = root(&scratch);
         let endless = ReadyCheck::builder()
             .probe(ReadyProbe::from_stored("port", "3000").unwrap())
-            .timeout(PositiveDuration::try_new(Duration::MAX).unwrap())
+            .timeout(PositiveDuration::try_new(Duration::from_millis(u64::MAX)).unwrap())
             .build();
 
         let error = store

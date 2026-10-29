@@ -42,7 +42,7 @@ pub(super) const STOP_GRACE_FIELD: &str = "stop_grace";
 /// The `key` field of the config tools.
 pub(super) const KEY_FIELD: &str = "key";
 /// The form a stop grace is written in, followed by its maximum.
-const STOP_GRACE_FORM: &str = "a positive number of seconds up to ";
+const STOP_GRACE_FORM: &str = "a positive number of seconds in whole milliseconds up to ";
 /// The form a working directory is written in.
 const WORKING_DIR_FORM: &str = "an existing directory inside the project root";
 /// The form a description is written in.
@@ -218,7 +218,7 @@ pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBu
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::symlink};
+    use std::{fs, os::unix::fs::symlink, time::Duration};
 
     use tempfile::TempDir;
 
@@ -306,8 +306,8 @@ mod tests {
         assert!(refused.contains("MUSTER_PROJECT"), "{refused}");
     }
 
-    /// A grace period reads as seconds and refuses zero, a negative number
-    /// or more than the maximum, naming seconds.
+    /// A grace period reads as seconds and refuses zero, a negative number,
+    /// more than the maximum or a fraction of a millisecond, naming the rule.
     #[test]
     fn a_stop_grace_must_be_positive() {
         let seconds = |json| serde_json::from_value::<SecondsArg>(json).unwrap();
@@ -324,7 +324,13 @@ mod tests {
                 .to_string(),
             "500ms"
         );
-        for refused in [0.0, -1.0, 7200.0, 1e300] {
+        assert_eq!(
+            stop_grace(&seconds(serde_json::json!(1.001)))
+                .unwrap()
+                .into_inner(),
+            Duration::from_millis(1_001)
+        );
+        for refused in [0.0, -1.0, 7200.0, 1e300, 0.0004, 1.0007] {
             let refused = stop_grace(&seconds(serde_json::json!(refused))).unwrap_err();
             assert!(
                 matches!(refused, ToolError::InvalidField {
@@ -333,7 +339,7 @@ mod tests {
                 }),
                 "{refused}"
             );
-            let named = format!("seconds up to {}", MAX_STOP_GRACE.as_secs());
+            let named = format!("whole milliseconds up to {}", MAX_STOP_GRACE.as_secs());
             assert!(refused.to_string().contains(&named), "{refused}");
         }
     }

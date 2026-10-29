@@ -542,8 +542,8 @@ mod tests {
         assert_eq!(user_version(&path), newer);
     }
 
-    /// A sub-millisecond grace is stored rounded up, never as zero, and a
-    /// non-positive stored grace is refused.
+    /// A sub-millisecond duration, such as a write time, is stored rounded
+    /// up, never as zero, and a non-positive stored grace is refused.
     #[test]
     fn a_grace_rounds_up_to_whole_milliseconds() {
         let millis = |nanos| duration_millis("grace", Duration::from_nanos(nanos)).unwrap();

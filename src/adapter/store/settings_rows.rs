@@ -285,22 +285,25 @@ mod tests {
         }
     }
 
-    /// A change answers with the value the database holds, which rounds a
-    /// grace up to whole milliseconds.
+    /// A change answers with the value the database holds, which is the
+    /// value given, since a grace is whole milliseconds.
     #[test]
     fn a_change_answers_with_the_stored_value() {
         let (store, _scratch) = fresh_store();
 
         let applied = store
             .apply(
-                &parsed(SettingKey::DefaultStopGrace, "1500us"),
+                &parsed(SettingKey::DefaultStopGrace, "1500ms"),
                 &Author::human(),
             )
             .unwrap();
 
         assert!(applied.changed());
         let settings = applied.settings();
-        assert_eq!(settings.value_text(SettingKey::DefaultStopGrace), "2ms");
+        assert_eq!(
+            settings.value_text(SettingKey::DefaultStopGrace),
+            "1s 500ms"
+        );
         assert_eq!(settings, &store.load().unwrap());
     }
 
@@ -324,10 +327,10 @@ mod tests {
             assert!(!applied.changed());
         }
         let first = store
-            .apply(&parsed(SettingKey::DefaultStopGrace, "1500us"), &agent)
+            .apply(&parsed(SettingKey::DefaultStopGrace, "1500ms"), &agent)
             .unwrap();
         let again = store
-            .apply(&parsed(SettingKey::DefaultStopGrace, "2ms"), &agent)
+            .apply(&parsed(SettingKey::DefaultStopGrace, "1s 500ms"), &agent)
             .unwrap();
 
         assert!(first.changed());
@@ -361,7 +364,7 @@ mod tests {
             .unwrap();
         store
             .apply(
-                &parsed(SettingKey::DefaultStopGrace, "1500us"),
+                &parsed(SettingKey::DefaultStopGrace, "2ms"),
                 &Author::agent("claude"),
             )
             .unwrap();

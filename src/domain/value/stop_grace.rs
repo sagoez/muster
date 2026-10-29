@@ -2,21 +2,25 @@ use std::{fmt, str::FromStr, time::Duration};
 
 use nutype::nutype;
 
-use super::ValueParseError;
+use super::{ValueParseError, positive_duration::is_whole_millis};
 
 /// The longest grace a graceful stop waits before it kills.
 pub const MAX_STOP_GRACE: Duration = Duration::from_secs(60 * 60);
 /// The form a stop grace is written in.
-const STOP_GRACE_FORM: &str = "a positive duration up to 1h, such as 5s or 1m 30s";
+const STOP_GRACE_FORM: &str =
+    "a positive duration in whole milliseconds up to 1h, such as 5s or 1m 30s";
 
-/// Whether `duration` is longer than zero and at most [`MAX_STOP_GRACE`].
+/// Whether `duration` is longer than zero, at most [`MAX_STOP_GRACE`] and in
+/// whole milliseconds.
 const fn is_grace(duration: &Duration) -> bool {
-    !duration.is_zero() && duration.as_nanos() <= MAX_STOP_GRACE.as_nanos()
+    !duration.is_zero()
+        && duration.as_nanos() <= MAX_STOP_GRACE.as_nanos()
+        && is_whole_millis(duration)
 }
 
-/// How long a graceful stop waits before it kills: longer than zero and at
-/// most [`MAX_STOP_GRACE`]. Its constructor is `const`, so a constant one is
-/// checked at compile time.
+/// How long a graceful stop waits before it kills: longer than zero, at most
+/// [`MAX_STOP_GRACE`] and in whole milliseconds. Its constructor is `const`,
+/// so a constant one is checked at compile time.
 #[nutype(
     const_fn,
     validate(predicate = is_grace),

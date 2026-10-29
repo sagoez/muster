@@ -21,7 +21,7 @@ const ONE_PROBE_FORM: &str = "exactly one of log, port or http, and a timeout";
 /// What `regex` needs beside it.
 const REGEX_FORM: &str = "regex only together with log";
 /// The form a timeout is written in.
-const TIMEOUT_FORM: &str = "a positive number of seconds such as 30";
+const TIMEOUT_FORM: &str = "a positive number of seconds in whole milliseconds, such as 30 or 1.5";
 /// Separates the probes a refused check named.
 const PROBE_SEPARATOR: &str = ", ";
 /// How a check naming no probe is described.
@@ -150,6 +150,18 @@ mod tests {
             assert!(refused.contains("invalid ready"), "{refused}");
         }
         assert!(serde_json::from_value::<ReadyArg>(serde_json::json!({ "port": 1 })).is_err());
+    }
+
+    /// A timeout finer than a millisecond is refused naming the rule, so the
+    /// stored timeout always reads back as it was sent.
+    #[test]
+    fn a_timeout_is_whole_milliseconds() {
+        for fine in [0.0004, 1.0007] {
+            let refused = read(serde_json::json!({ "port": 1, "timeout": fine }))
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains("whole milliseconds"), "{refused}");
+        }
     }
 
     /// A timeout written as humantime text is refused naming seconds, the

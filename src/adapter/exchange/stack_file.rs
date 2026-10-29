@@ -362,13 +362,18 @@ processes:
             refusal(&entry_with("description: '  '")),
             "processes[0] (web): description must not be empty; leave the key out instead"
         );
-        assert_eq!(
-            refusal(&entry_with("").replace("grace_period: 5s", "grace_period: 0s")),
-            "processes[0] (web): stop.grace_period must be longer than zero and at most 1h"
-        );
-        assert_eq!(
-            refusal(&entry_with("").replace("grace_period: 5s", "grace_period: 2h")),
-            "processes[0] (web): stop.grace_period must be longer than zero and at most 1h"
+        for grace in ["0s", "2h", "1500us"] {
+            assert_eq!(
+                refusal(
+                    &entry_with("").replace("grace_period: 5s", &format!("grace_period: {grace}"))
+                ),
+                "processes[0] (web): stop.grace_period must be longer than zero and at most \
+                 1h, in whole milliseconds"
+            );
+        }
+        assert!(
+            refusal(&entry_with("ready:\n  port: 3000\n  timeout: 1500us"))
+                .contains("in whole milliseconds")
         );
         assert_eq!(
             refusal(&entry_with("").replace("command: npm run dev", "command: '  '")),

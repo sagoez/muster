@@ -94,7 +94,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        process::StopSignal,
+        process::{ReadyProbe, StopSignal},
         value::{EnvName, EnvValue, StopGrace},
     };
 
@@ -128,7 +128,42 @@ mod tests {
 
         assert_eq!(*process.state(), ProcessState::Pending);
         assert_eq!(process.spec(), original);
-        assert_eq!(process.launch_ports(), original.launch_ports());
+    }
+
+    /// The port `raw`.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
+
+    #[test]
+    fn launch_ports_join_declared_and_readiness_ports_once_in_order() {
+        let ready = |target: &str| {
+            Some(
+                ReadyCheck::builder()
+                    .probe(ReadyProbe::from_stored("port", target).unwrap())
+                    .timeout("30s".parse().unwrap())
+                    .build(),
+            )
+        };
+        let launched = |ports: &[u16], ready: Option<ReadyCheck>| {
+            spec("npm run dev")
+                .with_ports(DeclaredPorts::of(ports.iter().copied().map(port)).unwrap())
+                .with_ready(ready)
+                .to_process(PaneId::new(4))
+                .launch_ports()
+        };
+
+        assert_eq!(launched(&[5173, 3000], ready("3000")), [
+            port(3000),
+            port(5173)
+        ]);
+        assert_eq!(launched(&[5173, 3000], ready("4000")), [
+            port(3000),
+            port(4000),
+            port(5173)
+        ]);
+        assert_eq!(launched(&[], ready("4000")), [port(4000)]);
+        assert!(launched(&[], None).is_empty());
     }
 
     /// A changed definition keeps the pane and its state.

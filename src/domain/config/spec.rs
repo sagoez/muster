@@ -110,12 +110,6 @@ impl ProcessSpec {
         })
     }
 
-    /// The ports a launch checks are free: those declared and the readiness
-    /// port, each once, ascending.
-    pub fn launch_ports(&self) -> Vec<LocalPort> {
-        launch_ports(&self.ports, self.ready.as_ref())
-    }
-
     /// The fields `after` holds a different value in, in definition order.
     pub fn differing_fields(&self, after: &Self) -> Vec<ProcessField> {
         ProcessField::iter()
@@ -223,7 +217,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         config::{ENV_VARS_MAX, FieldEdit},
-        process::{ProcessState, ReadyProbe, StopSignal},
+        process::{ProcessState, StopSignal},
         value::{ENV_VALUE_MAX_CHARS, EnvName, EnvValue, PROCESS_NAME_MAX_CHARS, StopGrace},
     };
 
@@ -340,33 +334,6 @@ mod tests {
             "a change naming no ports keeps them"
         );
         assert_eq!(declared.differing_fields(&replaced), [ProcessField::Ports]);
-    }
-
-    #[test]
-    fn launch_ports_join_declared_and_readiness_ports_once_in_order() {
-        let ready = |target: &str| {
-            Some(
-                ReadyCheck::builder()
-                    .probe(ReadyProbe::from_stored("port", target).unwrap())
-                    .timeout("30s".parse().unwrap())
-                    .build(),
-            )
-        };
-        let declared = spec().with_ports(DeclaredPorts::of([port(5173), port(3000)]).unwrap());
-
-        assert_eq!(declared.clone().with_ready(ready("3000")).launch_ports(), [
-            port(3000),
-            port(5173)
-        ]);
-        assert_eq!(declared.clone().with_ready(ready("4000")).launch_ports(), [
-            port(3000),
-            port(4000),
-            port(5173)
-        ]);
-        assert_eq!(spec().with_ready(ready("4000")).launch_ports(), [port(
-            4000
-        )]);
-        assert!(spec().launch_ports().is_empty());
     }
 
     #[test]

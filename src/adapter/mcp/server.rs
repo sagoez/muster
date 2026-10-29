@@ -1,6 +1,8 @@
 use std::{
-    path::{Path, PathBuf},
-    time::Duration,
+    collections::BTreeMap,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
 };
 
 use rmcp::{
@@ -11,24 +13,43 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Serialize;
+use strum::IntoEnumIterator;
 use tokio::task;
 
 use super::{
-    key_arg::KeyArg, kv_set_arg::KvSetArg, list_arg::ListArg, mcp_error::McpError,
-    name_arg::NameArg, scratchpad_entry::ScratchpadEntry, scratchpad_set_arg::ScratchpadSetArg,
-    send_input_arg::SendInputArg, todo_add_arg::TodoAddArg, todo_id_arg::TodoIdArg,
-    todo_status_arg::TodoStatusArg, tool_failure::ToolFailure,
+    config_get_arg::ConfigGetArg,
+    config_set_arg::ConfigSetArg,
+    key_arg::KeyArg,
+    kv_set_arg::KvSetArg,
+    list_arg::ListArg,
+    mcp_deps::McpDeps,
+    mcp_error::McpError,
+    name_arg::NameArg,
+    process_add_arg::ProcessAddArg,
+    process_fields::{KEY_FIELD, choice, process_name},
+    process_set_arg::ProcessSetArg,
+    removed_process::RemovedProcess,
+    scratchpad_entry::ScratchpadEntry,
+    scratchpad_set_arg::ScratchpadSetArg,
+    send_input_arg::SendInputArg,
+    setting_entry::SettingEntry,
+    todo_add_arg::TodoAddArg,
+    todo_id_arg::TodoIdArg,
+    todo_status_arg::TodoStatusArg,
+    tool_failure::ToolFailure,
 };
 use crate::{
     adapter::{
-        bridge::{SessionSummary, WorkspaceRequest},
-        cli::{ActionReport, CliError, ProjectView, ServiceClient, Unwatched, process},
-        service::{ProcessAction, ServiceRequest, ServiceResponse},
+        bridge::WorkspaceRequest,
+        cli::{
+            ActionReport, CliError, DefinitionView, ProjectView, ServiceClient, Unwatched, process,
+        },
+        service::{ProcessAction, ServiceRequest},
     },
     domain::{
-        coordination::{Author, KvKey, ScratchpadKey, TodoId, TodoStatus, TodoTitle},
-        port::CoordinationStore,
-        value::ProcessRef,
+        config::{ConfigError, SettingChange, SettingKey},
+        coordination::{KvKey, ScratchpadKey, TodoId, TodoStatus, TodoTitle},
+        value::{ProcessName, ProcessRef, ProjectRoot},
     },
 };
 
@@ -39,18 +60,20 @@ const MCP_SERVER_NAME: &str = "muster-coordination";
 const MCP_CONNECTION_KEY: &str = "muster";
 /// Subcommand an agent invokes to start the server.
 const MCP_SUBCOMMAND: &str = "mcp";
-/// Config-path flag passed to the server subcommand.
-const MCP_CONFIG_FLAG: &str = "--config";
+/// Flag that names the project the server serves.
+const MCP_PROJECT_FLAG: &str = "--project";
 /// Server version reported to connecting agents.
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Guidance shown to agents that connect to the coordination server.
-const MCP_INSTRUCTIONS: &str = "Shared coordination state for this muster project: durable \
-    scratchpad notes, structured todos, and key-values that every agent and the human read and \
-    write. Use scratchpads to pass context and feedback, todos to track work, and key-values for \
-    small shared facts (a chosen port, a build id). The process_* tools and session_list \
-    work on the project's live processes by name, through the muster service, which starts \
-    on demand. A mistake in a call, such as an unknown name, comes back as a result flagged \
-    isError whose text says what to do.";
+/// Guidance shown to agents that connect to the server.
+const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, workers, \
+    watchers) and holds coordination state that agents and the human share. The process_* \
+    tools read and drive the live processes by name through the muster service, which starts \
+    on demand. process_add, process_set and process_remove edit the project's stack, which the \
+    human's `muster ps` shows at once; process_add registers this folder as a project when it \
+    is not one. config_get and config_set read and change the machine's settings. Use \
+    scratchpads to pass context and feedback, todos to track work, and key-values for small \
+    shared facts (a chosen port, a build id). A mistake in a call, such as an unknown name, \
+    comes back as a result flagged isError whose text says what to do.";
 /// Entries a list tool returns when the caller does not ask for a size.
 const DEFAULT_LIST_LIMIT: usize = 50;
 /// Hard cap on a list tool's page, so one call cannot flood the caller's context.
@@ -58,6 +81,8 @@ const MAX_LIST_LIMIT: usize = 200;
 /// Longest a lifecycle tool waits for its process to settle, under the 60
 /// seconds many MCP clients give a call.
 const SETTLE_BOUND: Duration = Duration::from_secs(45);
+/// Pause between looks at a removed process while it stops.
+const REMOVAL_POLL: Duration = Duration::from_millis(50);
 /// Acknowledgement of input written to a process's terminal.
 const SENT: &str = "sent";
 /// Carriage return that submits a line typed into a terminal.
@@ -68,26 +93,30 @@ const SCRATCHPADS: &str = "scratchpads";
 const TODOS: &str = "todos";
 /// Key of the list in `kv_list`'s result.
 const ENTRIES: &str = "entries";
-/// Key of the list in `session_list`'s result.
-const SESSIONS: &str = "sessions";
+/// Key of the definition in `process_set`'s result.
+const PROCESS: &str = "process";
+/// Key of whether the process runs in `process_set`'s result.
+const RUNNING: &str = "running";
 /// Why a status given to `todo_set_status` was refused.
 const INVALID_STATUS: &str = "is not a valid status; use pending, in-progress or done";
+/// Why a `process_set` call that changes nothing was refused.
+const NOTHING_TO_CHANGE: &str = "process_set changed nothing; pass at least one field besides name";
 
 /// What a tool answers: its result, or why it has none.
 type ToolResult = Result<CallToolResult, ToolFailure>;
 
 /// Builds the pretty-printed JSON snippet an agent pastes into its MCP-servers
-/// config to launch muster's coordination server for `project`. `executable` is
+/// config to launch muster's server for the project at `root`. `executable` is
 /// the muster binary path, so the entry works even when muster is not on `PATH`.
-pub fn connection_config(executable: &Path, project: &Path) -> String {
+pub fn connection_config(executable: &Path, root: &ProjectRoot) -> String {
     let value = serde_json::json!({
         "mcpServers": {
             MCP_CONNECTION_KEY: {
                 "command": executable.display().to_string(),
                 "args": [
                     MCP_SUBCOMMAND,
-                    MCP_CONFIG_FLAG,
-                    project.display().to_string(),
+                    MCP_PROJECT_FLAG,
+                    root.as_ref().display().to_string(),
                 ],
             },
         },
@@ -95,19 +124,15 @@ pub fn connection_config(executable: &Path, project: &Path) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
 
-/// Serves the coordination store for `project` as an MCP server over stdio,
-/// blocking until the client disconnects. Intended to run as a child process an
-/// agent spawns, so the OS process boundary is the trust boundary; no port and no
+/// Serves the project of `deps` as an MCP server over stdio, blocking until
+/// the client disconnects. Intended to run as a child process an agent
+/// spawns, so the OS process boundary is the trust boundary; no port and no
 /// token are exposed.
 ///
 /// # Errors
 /// Returns [`McpError`] if the server cannot be initialized or stops abnormally.
-pub async fn serve_stdio(
-    store: Box<dyn CoordinationStore + Send + Sync>,
-    project: PathBuf,
-    author: Author,
-) -> Result<(), McpError> {
-    let service = CoordinationMcp::new(store, project, author)
+pub async fn serve_stdio(deps: McpDeps) -> Result<(), McpError> {
+    let service = CoordinationMcp::new(deps)
         .serve(stdio())
         .await
         .map_err(|error| McpError::Serve(error.to_string()))?;
@@ -123,13 +148,11 @@ fn page_size(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT)
 }
 
-/// MCP driving adapter exposing one project's [`CoordinationStore`] as tools.
-/// Writes are attributed to `author` - the agent this server was launched for -
-/// so every coordination entry an agent creates carries its identity.
+/// MCP driving adapter exposing one project's stack, processes, settings and
+/// coordination state as tools. Coordination writes are attributed to the
+/// author in its deps - the agent this server was launched for.
 pub struct CoordinationMcp {
-    store: Box<dyn CoordinationStore + Send + Sync>,
-    project: PathBuf,
-    author: Author,
+    deps: McpDeps,
 }
 
 /// The process reference an agent typed as `name`.
@@ -153,40 +176,78 @@ fn action_result(report: &ActionReport) -> ToolResult {
     })
 }
 
-/// Types `data` into the terminal of the process `name` of `project`.
+/// Types `data` into the terminal of the process `name` of the project at
+/// `root`.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the name matches no process, the process is
 /// not running, or the service cannot be reached.
 fn send_input(
     client: &ServiceClient,
-    project: &Path,
+    root: &ProjectRoot,
     name: &ProcessRef,
     data: String,
 ) -> Result<(), CliError> {
-    let name = process::resolve(&process::status(client, project)?, project, name)?;
+    let name = process::resolve(&process::status(client, root)?, root, name)?;
     let request = ServiceRequest::Workspace {
-        project: project.to_path_buf(),
+        project: root.clone(),
         request: WorkspaceRequest::SendInput {
             name: name.clone(),
             data,
         },
     };
-    process::expect_ok(client.send(&request)?, project, Some(&name))
+    process::expect_ok(client.send(&request)?, root, Some(&name))
 }
 
-/// This project's durable agent sessions.
+/// Whether the process `name` of the project at `root` may have a run
+/// alive, as the service lists it.
 ///
 /// # Errors
-/// Returns a [`CliError`] when the service cannot be reached or cannot read
-/// its session store.
-fn sessions(client: &ServiceClient, project: &Path) -> Result<Vec<SessionSummary>, CliError> {
-    match client.send(&ServiceRequest::Workspace {
-        project: project.to_path_buf(),
-        request: WorkspaceRequest::ListSessions,
-    })? {
-        ServiceResponse::Sessions(sessions) => Ok(sessions),
-        other => Err(process::unexpected(other, project, None)),
+/// Returns a [`CliError`] when the service cannot be reached or refuses.
+fn alive(client: &ServiceClient, root: &ProjectRoot, name: &ProcessName) -> Result<bool, CliError> {
+    Ok(process::status(client, root)?
+        .processes()
+        .iter()
+        .any(|process| process.name() == name && process.state().may_be_running()))
+}
+
+/// Whether a service that already runs has the project at `root` loaded and
+/// lists `name` as running. It never starts the service, and an answer it
+/// cannot get reads as not running, since the edit it reports on is already
+/// committed.
+fn runs(root: &ProjectRoot, name: &ProcessName) -> bool {
+    let loaded = ServiceClient::status().is_ok_and(|service| {
+        *service.running()
+            && service
+                .projects()
+                .iter()
+                .any(|project| project == root.as_ref())
+    });
+    loaded
+        && ServiceClient::connect()
+            .and_then(|client| alive(&client, root, name))
+            .unwrap_or(false)
+}
+
+/// Waits until the removed process `name` no longer runs, at most
+/// [`SETTLE_BOUND`], and tells whether it still ran when the wait ended.
+///
+/// # Errors
+/// Returns a [`CliError`] when the service cannot be reached.
+fn settle_removal(
+    client: &ServiceClient,
+    root: &ProjectRoot,
+    name: &ProcessName,
+) -> Result<bool, CliError> {
+    let deadline = Instant::now() + SETTLE_BOUND;
+    loop {
+        if !alive(client, root, name)? {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            return Ok(true);
+        }
+        thread::sleep(REMOVAL_POLL);
     }
 }
 
@@ -200,7 +261,7 @@ fn text(body: impl Into<String>) -> CallToolResult {
 ///
 /// # Errors
 /// Returns an internal error if the value cannot be serialized, which cannot
-/// happen for the coordination entities.
+/// happen for the entities the tools return.
 fn structured<T: Serialize>(value: &T) -> ToolResult {
     serde_json::to_value(value)
         .map(CallToolResult::structured)
@@ -216,20 +277,20 @@ fn listing<T: Serialize>(key: &str, items: &[T]) -> ToolResult {
     structured(&serde_json::json!({ key: items }))
 }
 
+/// The setting key an agent typed as `raw`.
+///
+/// # Errors
+/// Returns the caller's mistake for a key that names no setting, listing
+/// every key.
+fn setting_key(raw: &str) -> Result<SettingKey, CliError> {
+    choice(KEY_FIELD, raw)
+}
+
 #[tool_router]
 impl CoordinationMcp {
-    /// Builds the server over `store`, scoped to the absolute config path
-    /// `project` and writing as `author`.
-    pub fn new(
-        store: Box<dyn CoordinationStore + Send + Sync>,
-        project: PathBuf,
-        author: Author,
-    ) -> Self {
-        Self {
-            store,
-            project,
-            author,
-        }
+    /// Builds the server over `deps`.
+    pub fn new(deps: McpDeps) -> Self {
+        Self { deps }
     }
 
     /// Lists every scratchpad in this project as structured objects.
@@ -240,7 +301,7 @@ impl CoordinationMcp {
             so a project of long notes cannot flood you. Read a body with scratchpad_get."
     )]
     async fn scratchpad_list(&self, Parameters(arg): Parameters<ListArg>) -> ToolResult {
-        let notes = self.store.scratchpads(&self.project)?;
+        let notes = self.deps.coordination().scratchpads(self.deps.root())?;
         let page: Vec<ScratchpadEntry> = notes
             .iter()
             .take(page_size(arg.limit()))
@@ -262,7 +323,11 @@ impl CoordinationMcp {
     )]
     async fn scratchpad_get(&self, Parameters(arg): Parameters<KeyArg>) -> ToolResult {
         let key = scratchpad_key(arg.key())?;
-        match self.store.scratchpad(&self.project, &key)? {
+        match self
+            .deps
+            .coordination()
+            .scratchpad(self.deps.root(), &key)?
+        {
             Some(note) => structured(&note),
             None => Err(CliError::UnknownNote(key.as_ref().to_string()).into()),
         }
@@ -276,8 +341,12 @@ impl CoordinationMcp {
     )]
     async fn scratchpad_set(&self, Parameters(arg): Parameters<ScratchpadSetArg>) -> ToolResult {
         let key = scratchpad_key(arg.key())?;
-        self.store
-            .set_scratchpad(&self.project, &self.author, &key, arg.body())?;
+        self.deps.coordination().set_scratchpad(
+            self.deps.root(),
+            self.deps.author(),
+            &key,
+            arg.body(),
+        )?;
         Ok(text(format!("saved '{}'", key.as_ref())))
     }
 
@@ -288,7 +357,10 @@ impl CoordinationMcp {
     )]
     async fn scratchpad_delete(&self, Parameters(arg): Parameters<KeyArg>) -> ToolResult {
         let key = scratchpad_key(arg.key())?;
-        let removed = self.store.delete_scratchpad(&self.project, &key)?;
+        let removed = self
+            .deps
+            .coordination()
+            .delete_scratchpad(self.deps.root(), &key)?;
         Ok(text(if removed {
             format!("deleted '{}'", key.as_ref())
         } else {
@@ -303,7 +375,7 @@ impl CoordinationMcp {
             todo depends on), author, updated_at (Unix seconds)}]}."
     )]
     async fn todo_list(&self, Parameters(arg): Parameters<ListArg>) -> ToolResult {
-        let todos = self.store.todos(&self.project)?;
+        let todos = self.deps.coordination().todos(self.deps.root())?;
         let page: Vec<_> = todos.into_iter().take(page_size(arg.limit())).collect();
         listing(TODOS, &page)
     }
@@ -315,7 +387,7 @@ impl CoordinationMcp {
     )]
     async fn todo_get(&self, Parameters(arg): Parameters<TodoIdArg>) -> ToolResult {
         let id = todo_id(arg.id())?;
-        match self.store.todo(&self.project, &id)? {
+        match self.deps.coordination().todo(self.deps.root(), &id)? {
             Some(todo) => structured(&todo),
             None => Err(CliError::UnknownTodo(id.as_ref().to_string()).into()),
         }
@@ -335,9 +407,12 @@ impl CoordinationMcp {
             .iter()
             .map(|dep| todo_id(dep))
             .collect::<Result<Vec<_>, _>>()?;
-        let created = self
-            .store
-            .add_todo(&self.project, &self.author, &title, &deps)?;
+        let created = self.deps.coordination().add_todo(
+            self.deps.root(),
+            self.deps.author(),
+            &title,
+            &deps,
+        )?;
         structured(&created)
     }
 
@@ -352,10 +427,12 @@ impl CoordinationMcp {
             .status()
             .parse::<TodoStatus>()
             .map_err(|_| CliError::Usage(format!("'{}' {INVALID_STATUS}", arg.status())))?;
-        if self
-            .store
-            .set_todo_status(&self.project, &self.author, &id, status)?
-        {
+        if self.deps.coordination().set_todo_status(
+            self.deps.root(),
+            self.deps.author(),
+            &id,
+            status,
+        )? {
             Ok(text(format!("{id} is {status}")))
         } else {
             Err(CliError::UnknownTodo(id.as_ref().to_string()).into())
@@ -369,7 +446,10 @@ impl CoordinationMcp {
     )]
     async fn todo_delete(&self, Parameters(arg): Parameters<TodoIdArg>) -> ToolResult {
         let id = todo_id(arg.id())?;
-        let removed = self.store.delete_todo(&self.project, &id)?;
+        let removed = self
+            .deps
+            .coordination()
+            .delete_todo(self.deps.root(), &id)?;
         Ok(text(if removed {
             format!("deleted '{id}'")
         } else {
@@ -383,7 +463,7 @@ impl CoordinationMcp {
             50, at most 200). Returns {entries: [{key, value, author, updated_at (Unix seconds)}]}."
     )]
     async fn kv_list(&self, Parameters(arg): Parameters<ListArg>) -> ToolResult {
-        let entries = self.store.values(&self.project)?;
+        let entries = self.deps.coordination().values(self.deps.root())?;
         let page: Vec<_> = entries.into_iter().take(page_size(arg.limit())).collect();
         listing(ENTRIES, &page)
     }
@@ -395,7 +475,7 @@ impl CoordinationMcp {
     )]
     async fn kv_get(&self, Parameters(arg): Parameters<KeyArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
-        match self.store.value(&self.project, &key)? {
+        match self.deps.coordination().value(self.deps.root(), &key)? {
             Some(entry) => structured(&entry),
             None => Err(CliError::UnknownValue(key.as_ref().to_string()).into()),
         }
@@ -408,8 +488,12 @@ impl CoordinationMcp {
     )]
     async fn kv_set(&self, Parameters(arg): Parameters<KvSetArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
-        self.store
-            .set_value(&self.project, &self.author, &key, arg.value())?;
+        self.deps.coordination().set_value(
+            self.deps.root(),
+            self.deps.author(),
+            &key,
+            arg.value(),
+        )?;
         Ok(text(format!("saved '{}'", key.as_ref())))
     }
 
@@ -420,7 +504,10 @@ impl CoordinationMcp {
     )]
     async fn kv_delete(&self, Parameters(arg): Parameters<KeyArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
-        let removed = self.store.delete_value(&self.project, &key)?;
+        let removed = self
+            .deps
+            .coordination()
+            .delete_value(self.deps.root(), &key)?;
         Ok(text(if removed {
             format!("deleted '{}'", key.as_ref())
         } else {
@@ -430,17 +517,15 @@ impl CoordinationMcp {
 
     /// Lists this project's processes.
     #[tool(
-        description = "List this project's processes (agents, terminals and commands) in \
-            muster.yml order. Takes no arguments. Returns {project, processes}, where project is \
-            the config path and each process is {name, kind (agent|terminal|command), state \
+        description = "List this project's processes in stack order. Takes no arguments. \
+            Returns {project, processes}, where each process is {name, state \
             (pending|starting|running|paused|stopping|exited|crashed|restarting|unsupervised), \
-            activity (idle|working|awaiting-input), pid, uptime (whole seconds), restarts, \
-            cpu_percent, memory_bytes, attached (how many clients are attached to type into its \
-            terminal), last_exit ({status: exit code or null, signal: the signal that ended it by \
-            its lowercase POSIX name such as sigterm or sigkill, signal-<number> for one with no \
-            POSIX name, or null}, while it is not running), stop_grace (whole \
-            seconds a stop waits before it kills)}. A null field has no value right now. Use a \
-            process's name with the other process_* tools."
+            pid, uptime (whole seconds), restarts, cpu_percent, memory_bytes, attached (how many \
+            clients are attached to type into its terminal), last_exit ({status: exit code or \
+            null, signal: the signal that ended it by its lowercase POSIX name such as sigterm \
+            or sigkill, signal-<number> for one with no POSIX name, or null}, while it is not \
+            running), stop_grace (whole seconds a stop waits before it kills)}. A null field has \
+            no value right now. Use a process's name with the other process_* tools."
     )]
     async fn process_list(&self) -> ToolResult {
         let status = self.ask(process::status).await?;
@@ -449,30 +534,17 @@ impl CoordinationMcp {
 
     /// Reads the visible screen of a process's terminal.
     #[tool(
-        description = "Read what a process's terminal shows right now - what a dev server, test \
-            run or agent last printed. Takes the process's name. Returns the screen as text \
-            without its trailing blank lines, empty when the process has not started. An unknown \
-            name is a result flagged isError that lists the valid names."
+        description = "Read what a process's terminal shows right now - what a dev server or \
+            test run last printed. Takes the process's name. Returns the screen as text without \
+            its trailing blank lines, empty when the process has not started. An unknown name is \
+            a result flagged isError that lists the valid names."
     )]
     async fn process_output(&self, Parameters(arg): Parameters<NameArg>) -> ToolResult {
         let name = reference(arg.name())?;
         let screen = self
-            .ask(move |client, project| {
-                process::logs(client, project, process::named(project, &name), true)
-            })
+            .ask(move |client, root| process::logs(client, root, process::named(root, &name), true))
             .await?;
         Ok(text(screen.text().trim_end()))
-    }
-
-    /// Lists this project's durable agent sessions.
-    #[tool(
-        description = "List this project's agent sessions. Takes no arguments. Returns \
-            {sessions: [{name, tool (claude|codex|gemini|amp|opencode|copilot|kimi|custom), state \
-            (pending|open|closed), resumable}]}; resumable means the agent's conversation was \
-            captured, so it can be resumed rather than started fresh."
-    )]
-    async fn session_list(&self) -> ToolResult {
-        listing(SESSIONS, &self.ask(sessions).await?)
     }
 
     /// Starts a process.
@@ -538,16 +610,157 @@ impl CoordinationMcp {
         } else {
             arg.text().clone()
         };
-        self.ask(move |client, project| send_input(client, project, &name, data))
+        self.ask(move |client, root| send_input(client, root, &name, data))
             .await?;
         Ok(text(SENT))
+    }
+
+    /// Adds a process to this project's stack.
+    #[tool(
+        description = "Add a process to this project's stack, registering this folder as a \
+            project if it is not one. Takes name, command (a shell command), and optionally \
+            working_dir (relative to the project root), description, environment (an object of \
+            variable names to values), autostart (whether muster up starts it), restart \
+            (never|on-failure|always), stop_signal (terminate|interrupt) and stop_grace (a \
+            duration such as 5s); fields left out take the default-* settings that config_get \
+            shows. It does not start the process: call process_start. Returns the stored \
+            definition {name, command, working_dir, description, environment, autostart, \
+            restart, stop: {signal, grace (seconds)}}. A taken name or an invalid value is a \
+            result flagged isError that names the field."
+    )]
+    async fn process_add(&self, Parameters(arg): Parameters<ProcessAddArg>) -> ToolResult {
+        let (_, spec) = self
+            .blocking(move |deps| {
+                let draft = arg.draft(deps.root())?;
+                Ok(deps.editor().add(deps.root(), draft)?)
+            })
+            .await?;
+        structured(&DefinitionView::from(&spec))
+    }
+
+    /// Changes fields of a process in this project's stack.
+    #[tool(
+        description = "Change fields of a process in this project's stack; fields left out keep \
+            their value. Takes name and any of command, working_dir (relative to the project \
+            root, or null to run it in the root), description (null removes it), \
+            environment_set (an object of variables to add or replace), environment_unset (an \
+            array of names to remove), autostart, restart, stop_signal and stop_grace. A running \
+            process keeps its current run: call process_restart to apply the change. Returns \
+            {process: the stored definition, as process_add returns it, running}. An unknown \
+            name, an invalid value, or a call that changes nothing is a result flagged isError."
+    )]
+    async fn process_set(&self, Parameters(arg): Parameters<ProcessSetArg>) -> ToolResult {
+        let (spec, running) = self
+            .blocking(move |deps| {
+                let name = process_name(arg.name())?;
+                let change = arg.change(deps.root())?;
+                if change.is_empty() {
+                    return Err(CliError::Usage(NOTHING_TO_CHANGE.to_string()));
+                }
+                let spec = deps.editor().change(deps.root(), &name, &change)?;
+                let running = runs(deps.root(), spec.name());
+                Ok((spec, running))
+            })
+            .await?;
+        structured(&serde_json::json!({
+            PROCESS: DefinitionView::from(&spec),
+            RUNNING: running,
+        }))
+    }
+
+    /// Removes a process from this project's stack.
+    #[tool(
+        description = "Remove a process from this project's stack, stopping it first when it \
+            runs. Takes the process's name. It stops through its stop policy, and this tool \
+            waits at most 45 seconds. Returns {name, stopped (it was running and has ended), \
+            still_stopping (it had not ended when the wait ended; it still ends, so follow it \
+            with process_list)}. An unknown name is a result flagged isError that lists the \
+            valid names."
+    )]
+    async fn process_remove(&self, Parameters(arg): Parameters<NameArg>) -> ToolResult {
+        let removed = self
+            .blocking(move |deps| {
+                let typed = process_name(arg.name())?;
+                let stack = deps.stacks().stack(deps.root())?.ok_or_else(|| {
+                    ConfigError::UnknownProject {
+                        root: deps.root().as_ref().clone(),
+                    }
+                })?;
+                let name = stack.require(&typed)?.name().clone();
+                let client = ServiceClient::connect()?;
+                let was_alive = alive(&client, deps.root(), &name)?;
+                deps.editor().remove(deps.root(), &name)?;
+                let still_alive = was_alive && settle_removal(&client, deps.root(), &name)?;
+                Ok(RemovedProcess::builder()
+                    .name(name)
+                    .stopped(was_alive && !still_alive)
+                    .still_stopping(still_alive)
+                    .build())
+            })
+            .await?;
+        structured(&removed)
+    }
+
+    /// Reads one setting, or all of them.
+    #[tool(
+        description = "Read the machine's muster settings. Takes key (optional). With key, \
+            returns {key, value}; without, an object of every setting's key to its value. \
+            Values are written as config_set reads them. An unknown key is a result flagged \
+            isError that lists the valid keys."
+    )]
+    async fn config_get(&self, Parameters(arg): Parameters<ConfigGetArg>) -> ToolResult {
+        let key = arg.key().as_deref().map(setting_key).transpose()?;
+        let settings = self.deps.settings().load()?;
+        match key {
+            Some(key) => structured(&SettingEntry::read(&settings, key)),
+            None => structured(
+                &SettingKey::iter()
+                    .map(|key| (key.to_string(), settings.value_text(key)))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+        }
+    }
+
+    /// Changes one setting.
+    #[tool(
+        description = "Change one of the machine's muster settings. Takes key and value, the \
+            value written as config_get shows it (true, 24x80, 10MiB, on-failure, 5s). The \
+            default-* settings apply to processes added afterwards; default-size, scrollback, \
+            log-max-size and color-scheme to processes started afterwards. Returns {key, value}. \
+            An unknown key or an invalid value is a result flagged isError that names the \
+            accepted form."
+    )]
+    async fn config_set(&self, Parameters(arg): Parameters<ConfigSetArg>) -> ToolResult {
+        let key = setting_key(arg.key())?;
+        let change = SettingChange::parse(key, arg.value())?;
+        let settings = self
+            .blocking(move |deps| Ok(deps.editor().configure(&change)?))
+            .await?;
+        structured(&SettingEntry::read(&settings, key))
     }
 }
 
 impl CoordinationMcp {
+    /// Runs `work` over this server's deps on a blocking thread, since it may
+    /// write the database, reach the service or wait for a process.
+    ///
+    /// # Errors
+    /// Returns the caller's mistake, such as an unknown name, or a fault of
+    /// muster's.
+    async fn blocking<T, Work>(&self, work: Work) -> Result<T, ToolFailure>
+    where
+        T: Send + 'static,
+        Work: FnOnce(&McpDeps) -> Result<T, CliError> + Send + 'static,
+    {
+        let deps = self.deps.clone();
+        task::spawn_blocking(move || work(&deps))
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?
+            .map_err(ToolFailure::from)
+    }
+
     /// Runs `query` against this project through the service, starting or
-    /// replacing the service as the CLI does. It runs on a blocking thread,
-    /// since a query may wait for a process to settle.
+    /// replacing the service as the CLI does.
     ///
     /// # Errors
     /// Returns the caller's mistake, such as an unknown name, or the fault of
@@ -555,15 +768,12 @@ impl CoordinationMcp {
     async fn ask<T, Query>(&self, query: Query) -> Result<T, ToolFailure>
     where
         T: Send + 'static,
-        Query: FnOnce(&ServiceClient, &Path) -> Result<T, CliError> + Send + 'static,
+        Query: FnOnce(&ServiceClient, &ProjectRoot) -> Result<T, CliError> + Send + 'static,
     {
-        let project = self.project.clone();
-        task::spawn_blocking(move || {
-            ServiceClient::connect().and_then(|client| query(&client, &project))
+        self.blocking(move |deps| {
+            ServiceClient::connect().and_then(|client| query(&client, deps.root()))
         })
         .await
-        .map_err(|error| ErrorData::internal_error(error.to_string(), None))?
-        .map_err(ToolFailure::from)
     }
 
     /// Applies `action` to the process an agent named `name` and reports what
@@ -575,11 +785,11 @@ impl CoordinationMcp {
     async fn control(&self, name: &str, action: ProcessAction) -> ToolResult {
         let name = reference(name)?;
         let report = self
-            .ask(move |client, project| {
+            .ask(move |client, root| {
                 process::control_within(
                     client,
-                    project,
-                    process::named(project, &name),
+                    root,
+                    process::named(root, &name),
                     action,
                     SETTLE_BOUND,
                     &mut Unwatched,
@@ -631,164 +841,82 @@ impl ServerHandler for CoordinationMcp {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use tempfile::TempDir;
 
     use super::*;
     use crate::{
-        adapter::cli::{Action, Outcome, ProcessOutcome, WaitEnd},
+        adapter::{
+            cli::{Action, Outcome, ProcessOutcome, WaitEnd},
+            store::SqliteStore,
+        },
         domain::{
-            config::ConfigError,
-            coordination::{Author, KeyValue, Scratchpad, Todo},
-            value::ProcessName,
+            coordination::{Author, Todo},
+            port::{ProjectStore, StackStore, StateChangeNotifier},
         },
     };
 
-    /// The project every test serves.
-    const PROJECT: &str = "/repo/muster.yml";
+    /// The database file each test's store opens.
+    const DATABASE: &str = "muster.db";
+    /// The project folder each test serves, inside its temporary directory.
+    const PROJECT_DIR: &str = "shop";
 
-    /// A server for [`PROJECT`] over an in-memory store.
-    fn server() -> CoordinationMcp {
-        CoordinationMcp::new(
-            Box::new(FakeStore::default()),
-            PathBuf::from(PROJECT),
-            Author::agent("test"),
-        )
-    }
-
-    /// An in-memory, thread-safe coordination store recording scratchpads.
+    /// A [`StateChangeNotifier`] that records what it was told.
     #[derive(Default)]
-    struct FakeStore {
-        notes: Mutex<Vec<Scratchpad>>,
+    struct RecordingNotifier {
+        stacks: Mutex<Vec<ProjectRoot>>,
+        settings: Mutex<usize>,
     }
 
-    impl CoordinationStore for FakeStore {
-        fn scratchpads(&self, _project: &Path) -> Result<Vec<Scratchpad>, ConfigError> {
-            Ok(self.notes.lock().unwrap().clone())
+    impl StateChangeNotifier for RecordingNotifier {
+        fn stack_changed(&self, root: &ProjectRoot) {
+            self.stacks.lock().unwrap().push(root.clone());
         }
 
-        fn scratchpad(
-            &self,
-            _project: &Path,
-            key: &ScratchpadKey,
-        ) -> Result<Option<Scratchpad>, ConfigError> {
-            Ok(self
-                .notes
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|note| note.key() == key)
-                .cloned())
-        }
-
-        fn set_scratchpad(
-            &self,
-            _project: &Path,
-            author: &Author,
-            key: &ScratchpadKey,
-            body: &str,
-        ) -> Result<(), ConfigError> {
-            let note = Scratchpad::builder()
-                .key(key.clone())
-                .body(body.to_owned())
-                .author(author.clone())
-                .updated_at(0)
-                .build();
-            let mut notes = self.notes.lock().unwrap();
-            notes.retain(|existing| existing.key() != key);
-            notes.push(note);
-            Ok(())
-        }
-
-        fn delete_scratchpad(
-            &self,
-            _project: &Path,
-            _key: &ScratchpadKey,
-        ) -> Result<bool, ConfigError> {
-            unreachable!("this test never deletes scratchpads")
-        }
-
-        fn todos(&self, _project: &Path) -> Result<Vec<Todo>, ConfigError> {
-            unreachable!("this test never touches todos")
-        }
-
-        fn todo(&self, _project: &Path, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-            unreachable!("this test never touches todos")
-        }
-
-        fn add_todo(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _title: &TodoTitle,
-            _deps: &[TodoId],
-        ) -> Result<Todo, ConfigError> {
-            unreachable!("this test never touches todos")
-        }
-
-        fn set_todo_status(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _id: &TodoId,
-            _status: TodoStatus,
-        ) -> Result<bool, ConfigError> {
-            unreachable!("this test never touches todos")
-        }
-
-        fn delete_todo(&self, _project: &Path, _id: &TodoId) -> Result<bool, ConfigError> {
-            unreachable!("this test never touches todos")
-        }
-
-        fn values(&self, _project: &Path) -> Result<Vec<KeyValue>, ConfigError> {
-            unreachable!("this test never touches key-values")
-        }
-
-        fn value(&self, _project: &Path, _key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {
-            unreachable!("this test never touches key-values")
-        }
-
-        fn set_value(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _key: &KvKey,
-            _value: &str,
-        ) -> Result<(), ConfigError> {
-            unreachable!("this test never touches key-values")
-        }
-
-        fn delete_value(&self, _project: &Path, _key: &KvKey) -> Result<bool, ConfigError> {
-            unreachable!("this test never touches key-values")
-        }
-
-        fn import(
-            &self,
-            _project: &Path,
-            _scratchpads: &[Scratchpad],
-            _todos: &[Todo],
-            _values: &[KeyValue],
-        ) -> Result<(), ConfigError> {
-            unreachable!("these tests never import")
+        fn settings_changed(&self) {
+            *self.settings.lock().unwrap() += 1;
         }
     }
 
-    /// A start report for `api` whose outcome is `outcome` and whose wait
-    /// ended as `wait_ended`.
-    fn report(outcome: Outcome, wait_ended: WaitEnd) -> ActionReport {
-        ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
-            .action(Action::Start)
-            .processes(vec![
-                ProcessOutcome::builder()
-                    .name(ProcessName::try_new("api").unwrap())
-                    .outcome(outcome)
-                    .status(None)
-                    .build(),
-            ])
-            .notices(Vec::new())
-            .other_notices(Vec::new())
-            .wait_ended(wait_ended)
-            .build()
+    /// A server over a fresh database, serving a folder no project claims
+    /// yet, with the store and notifier it writes through.
+    struct Fixture {
+        _dir: TempDir,
+        root: ProjectRoot,
+        store: SqliteStore,
+        notifier: Arc<RecordingNotifier>,
+        server: CoordinationMcp,
+    }
+
+    /// A [`Fixture`] whose folder is not yet a project.
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join(PROJECT_DIR);
+        fs::create_dir(&folder).unwrap();
+        fs::create_dir(folder.join("frontend")).unwrap();
+        let root = ProjectRoot::try_new(fs::canonicalize(&folder).unwrap()).unwrap();
+        let store = SqliteStore::open(&dir.path().join(DATABASE)).unwrap();
+        let notifier = Arc::new(RecordingNotifier::default());
+        let deps = McpDeps::builder()
+            .root(root.clone())
+            .author(Author::agent("test"))
+            .coordination(Arc::new(store.clone()))
+            .stacks(Arc::new(store.clone()))
+            .settings(Arc::new(store.clone()))
+            .notifier(notifier.clone())
+            .build();
+        Fixture {
+            _dir: dir,
+            root,
+            store,
+            notifier,
+            server: CoordinationMcp::new(deps),
+        }
     }
 
     /// Builds a single-threaded runtime for the async tool calls.
@@ -811,6 +939,13 @@ mod tests {
         result.or_else(ToolFailure::answer)
     }
 
+    /// The text of the error result an agent receives for `result`.
+    fn refusal(result: ToolResult) -> String {
+        let answer = answered(result).expect("a result, not a protocol error");
+        assert_eq!(answer.is_error, Some(true));
+        result_text(&answer)
+    }
+
     /// The scratchpad `key` with `body`, to set.
     fn note(key: &str, body: &str) -> Parameters<ScratchpadSetArg> {
         Parameters(
@@ -821,12 +956,62 @@ mod tests {
         )
     }
 
+    /// `process_add` arguments for `name` running `command`.
+    fn add(name: &str, command: &str) -> ProcessAddArg {
+        ProcessAddArg::builder()
+            .name(name.to_string())
+            .command(command.to_string())
+            .build()
+    }
+
+    /// `process_set` arguments read from the JSON an agent sends.
+    fn set(json: serde_json::Value) -> Parameters<ProcessSetArg> {
+        Parameters(serde_json::from_value(json).unwrap())
+    }
+
+    /// The process `name` as a tool argument.
+    fn named(name: &str) -> Parameters<NameArg> {
+        Parameters(NameArg::builder().name(name.to_string()).build())
+    }
+
+    /// Registers the fixture's folder by adding a `web` process to it.
+    fn register(fixture: &Fixture) {
+        runtime().block_on(async {
+            fixture
+                .server
+                .process_add(Parameters(add("web", "npm run dev")))
+                .await
+                .unwrap();
+        });
+    }
+
+    /// A start report for `api` whose outcome is `outcome` and whose wait
+    /// ended as `wait_ended`.
+    fn report(outcome: Outcome, wait_ended: WaitEnd) -> ActionReport {
+        ActionReport::builder()
+            .project(PathBuf::from("/repo"))
+            .action(Action::Start)
+            .processes(vec![
+                ProcessOutcome::builder()
+                    .name(ProcessName::try_new("api").unwrap())
+                    .outcome(outcome)
+                    .status(None)
+                    .build(),
+            ])
+            .notices(Vec::new())
+            .other_notices(Vec::new())
+            .wait_ended(wait_ended)
+            .build()
+    }
+
     /// A `scratchpad_set` tool call writes through to the store, and
     /// `scratchpad_list` reads it back as structured data - the store-backed
     /// round trip an agent depends on.
     #[test]
     fn a_set_tool_call_writes_through_to_the_store() {
-        let server = server();
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server;
 
         runtime().block_on(async {
             let saved = server
@@ -867,14 +1052,27 @@ mod tests {
         });
     }
 
+    /// Coordination in a folder no project claims is the caller's mistake,
+    /// answered with the tool that registers the folder.
+    #[test]
+    fn coordination_outside_a_project_names_process_add() {
+        let fixture = fixture();
+
+        runtime().block_on(async {
+            let text = refusal(fixture.server.scratchpad_set(note("plan", "x")).await);
+            assert!(text.contains("process_add"), "{text}");
+            assert!(!text.contains("`muster"), "{text}");
+        });
+    }
+
     /// A blank key is the caller's mistake, answered as an error result
     /// before the store is touched.
     #[test]
     fn a_blank_key_is_an_error_result() {
-        let server = server();
+        let fixture = fixture();
 
         runtime().block_on(async {
-            let result = answered(server.scratchpad_set(note("   ", "x")).await).unwrap();
+            let result = answered(fixture.server.scratchpad_set(note("   ", "x")).await).unwrap();
             assert_eq!(result.is_error, Some(true));
             assert_eq!(
                 result.structured_content.expect("structured")["error"]["kind"],
@@ -887,34 +1085,294 @@ mod tests {
     /// service is asked.
     #[test]
     fn a_blank_process_name_is_an_error_result() {
-        let server = server();
+        let fixture = fixture();
         runtime().block_on(async {
-            let result = answered(
-                server
-                    .process_output(Parameters(
-                        NameArg::builder().name("   ".to_string()).build(),
-                    ))
-                    .await,
-            )
-            .unwrap();
-            assert_eq!(result.is_error, Some(true));
+            refusal(fixture.server.process_output(named("   ")).await);
         });
     }
 
-    /// The connection snippet is valid JSON that launches this binary with the
-    /// project's config path under the muster server key.
+    /// `process_add` in a folder no project claims registers it, stores the
+    /// definition with the default settings for what it left out, and tells
+    /// a running service which project changed.
+    #[test]
+    fn process_add_registers_the_folder() {
+        let fixture = fixture();
+        assert!(fixture.store.project_at(&fixture.root).unwrap().is_none());
+
+        runtime().block_on(async {
+            let added = fixture
+                .server
+                .process_add(Parameters(
+                    ProcessAddArg::builder()
+                        .name("web".to_string())
+                        .command("npm run dev".to_string())
+                        .working_dir(Some("frontend".to_string()))
+                        .environment(Some([("PORT".to_string(), "5173".to_string())].into()))
+                        .restart(Some("on-failure".to_string()))
+                        .build(),
+                ))
+                .await
+                .unwrap();
+            let definition = added.structured_content.expect("the stored definition");
+            assert_eq!(definition["name"], "web");
+            assert_eq!(definition["command"], "npm run dev");
+            assert_eq!(definition["working_dir"], "frontend");
+            assert_eq!(definition["environment"]["PORT"], "5173");
+            assert_eq!(definition["restart"], "on-failure");
+            assert_eq!(definition["autostart"], false, "the seeded default");
+            assert_eq!(definition["stop"]["signal"], "terminate");
+        });
+
+        assert!(fixture.store.project_at(&fixture.root).unwrap().is_some());
+        let stack = fixture
+            .store
+            .stack(&fixture.root)
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
+        assert_eq!(*fixture.notifier.stacks.lock().unwrap(), vec![
+            fixture.root.clone()
+        ]);
+    }
+
+    /// A taken name and an invalid field are the caller's mistakes; neither
+    /// writes nor notifies.
+    #[test]
+    fn process_add_refuses_a_taken_name_and_an_invalid_field() {
+        let fixture = fixture();
+        register(&fixture);
+
+        runtime().block_on(async {
+            let taken = refusal(
+                fixture
+                    .server
+                    .process_add(Parameters(add("web", "true")))
+                    .await,
+            );
+            assert!(taken.contains("already exists"), "{taken}");
+
+            let invalid = refusal(
+                fixture
+                    .server
+                    .process_add(Parameters(
+                        ProcessAddArg::builder()
+                            .name("worker".to_string())
+                            .command("bin/worker".to_string())
+                            .restart(Some("sometimes".to_string()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(invalid.contains("restart"), "{invalid}");
+            assert!(invalid.contains("on-failure"), "{invalid}");
+        });
+
+        let stack = fixture
+            .store
+            .stack(&fixture.root)
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names().len(), 1);
+        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
+    }
+
+    /// `process_set` changes only the fields it is given and reports the
+    /// process as not running when no service has it loaded.
+    #[test]
+    fn process_set_changes_the_given_fields() {
+        let fixture = fixture();
+        register(&fixture);
+
+        runtime().block_on(async {
+            let changed = fixture
+                .server
+                .process_set(set(serde_json::json!({
+                    "name": "web",
+                    "restart": "always",
+                    "environment_set": { "PORT": "3000" },
+                    "working_dir": "frontend",
+                })))
+                .await
+                .unwrap();
+            let content = changed.structured_content.expect("structured");
+            assert_eq!(content[PROCESS]["restart"], "always");
+            assert_eq!(content[PROCESS]["environment"]["PORT"], "3000");
+            assert_eq!(content[PROCESS]["working_dir"], "frontend");
+            assert_eq!(content[PROCESS]["command"], "npm run dev");
+            assert_eq!(content[RUNNING], false);
+
+            let cleared = fixture
+                .server
+                .process_set(set(
+                    serde_json::json!({ "name": "web", "working_dir": null }),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                cleared.structured_content.expect("structured")[PROCESS]["working_dir"].is_null()
+            );
+        });
+
+        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 3);
+    }
+
+    /// A `process_set` that changes nothing, or names no process, is the
+    /// caller's mistake; an unknown name lists the valid ones.
+    #[test]
+    fn process_set_refuses_no_change_and_an_unknown_name() {
+        let fixture = fixture();
+        register(&fixture);
+
+        runtime().block_on(async {
+            let nothing = refusal(
+                fixture
+                    .server
+                    .process_set(set(serde_json::json!({ "name": "web" })))
+                    .await,
+            );
+            assert!(nothing.contains("changed nothing"), "{nothing}");
+
+            let unknown = refusal(
+                fixture
+                    .server
+                    .process_set(set(serde_json::json!({ "name": "wbe", "autostart": true })))
+                    .await,
+            );
+            assert!(unknown.contains("'web'"), "{unknown}");
+        });
+
+        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
+    }
+
+    /// `process_remove` of an unknown name lists the valid ones and removes
+    /// nothing, before any service is reached.
+    #[test]
+    fn process_remove_refuses_an_unknown_name() {
+        let fixture = fixture();
+        register(&fixture);
+
+        runtime().block_on(async {
+            let unknown = refusal(fixture.server.process_remove(named("wbe")).await);
+            assert!(unknown.contains("'web'"), "{unknown}");
+        });
+
+        let stack = fixture
+            .store
+            .stack(&fixture.root)
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names().len(), 1);
+    }
+
+    /// `config_get` reads every setting or one; an unknown key lists the
+    /// valid ones.
+    #[test]
+    fn config_get_reads_one_or_every_setting() {
+        let fixture = fixture();
+
+        runtime().block_on(async {
+            let all = fixture
+                .server
+                .config_get(Parameters(ConfigGetArg::builder().build()))
+                .await
+                .unwrap()
+                .structured_content
+                .expect("structured");
+            for key in SettingKey::iter() {
+                assert!(all.get(key.to_string()).is_some(), "{key} is listed");
+            }
+
+            let one = fixture
+                .server
+                .config_get(Parameters(
+                    ConfigGetArg::builder()
+                        .key(Some("default-restart".to_string()))
+                        .build(),
+                ))
+                .await
+                .unwrap()
+                .structured_content
+                .expect("structured");
+            assert_eq!(
+                one,
+                serde_json::json!({ "key": "default-restart", "value": "never" })
+            );
+
+            let unknown = refusal(
+                fixture
+                    .server
+                    .config_get(Parameters(
+                        ConfigGetArg::builder()
+                            .key(Some("restart".to_string()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(unknown.contains("default-restart"), "{unknown}");
+        });
+    }
+
+    /// `config_set` stores a value `config_get` reads back and tells a
+    /// running service; an invalid value names the accepted form and stores
+    /// nothing.
+    #[test]
+    fn config_set_stores_and_announces_a_setting() {
+        let fixture = fixture();
+        let server = &fixture.server;
+
+        runtime().block_on(async {
+            let stored = server
+                .config_set(Parameters(
+                    ConfigSetArg::builder()
+                        .key("default-restart".to_string())
+                        .value("on-failure".to_string())
+                        .build(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.structured_content.expect("structured"),
+                serde_json::json!({ "key": "default-restart", "value": "on-failure" })
+            );
+
+            let invalid = refusal(
+                server
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-stop-grace".to_string())
+                            .value("0s".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(invalid.contains("default-stop-grace"), "{invalid}");
+
+            let added = server
+                .process_add(Parameters(add("web", "npm run dev")))
+                .await
+                .unwrap();
+            assert_eq!(
+                added.structured_content.expect("structured")["restart"],
+                "on-failure",
+                "a new process takes the changed default"
+            );
+        });
+
+        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 1);
+    }
+
+    /// The connection snippet is valid JSON that launches this binary for the
+    /// project's folder under the muster server key.
     #[test]
     fn connection_config_is_valid_and_points_at_this_binary() {
-        let json = connection_config(
-            Path::new("/usr/local/bin/muster"),
-            Path::new("/repo/muster.yml"),
-        );
+        let root = ProjectRoot::try_new(PathBuf::from("/repo")).unwrap();
+        let json = connection_config(Path::new("/usr/local/bin/muster"), &root);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let entry = &parsed["mcpServers"][MCP_CONNECTION_KEY];
         assert_eq!(entry["command"], "/usr/local/bin/muster");
         assert_eq!(
             entry["args"],
-            serde_json::json!(["mcp", "--config", "/repo/muster.yml"])
+            serde_json::json!(["mcp", "--project", "/repo"])
         );
     }
 
@@ -931,7 +1389,9 @@ mod tests {
     /// many notes cannot flood the caller in one call.
     #[test]
     fn scratchpad_list_honours_the_limit() {
-        let server = server();
+        let fixture = fixture();
+        register(&fixture);
+        let server = &fixture.server;
         runtime().block_on(async {
             for key in ["a", "b", "c"] {
                 server.scratchpad_set(note(key, "x")).await.unwrap();
@@ -993,19 +1453,19 @@ mod tests {
     /// object.
     #[test]
     fn a_listing_is_an_object() {
-        let listed = listing(SESSIONS, &Vec::<SessionSummary>::new()).unwrap();
+        let listed = listing(TODOS, &Vec::<Todo>::new()).unwrap();
         assert_eq!(
             listed.structured_content,
-            Some(serde_json::json!({ "sessions": [] }))
+            Some(serde_json::json!({ "todos": [] }))
         );
     }
 
-    /// The advertised server info names the coordination server and enables the
-    /// tools capability.
+    /// The advertised server info names the server and enables the tools
+    /// capability.
     #[test]
     fn server_info_advertises_tools() {
-        let server = server();
-        let info = server.get_info();
+        let fixture = fixture();
+        let info = fixture.server.get_info();
         assert_eq!(info.server_info.name, MCP_SERVER_NAME);
         assert!(info.capabilities.tools.is_some());
     }

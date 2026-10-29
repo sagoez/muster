@@ -20,6 +20,10 @@ const RESTART_SERVER: &str = "restart the muster MCP server";
 const CALL_AGAIN: &str = "the muster service is shutting down; call the tool again";
 /// What an agent does about a process that is not running.
 const CALL_PROCESS_START: &str = "call process_start to start it";
+/// What an agent does in a folder that is not a project.
+const CALL_PROCESS_ADD: &str = "call process_add to register this folder as a project";
+/// What an agent does about a name the project already has.
+const CHOOSE_ANOTHER_NAME: &str = "choose another name";
 
 /// Why a tool call did not succeed. The caller's mistake is answered as a
 /// result flagged `isError`, which the agent reads and can act on; a fault of
@@ -64,8 +68,10 @@ impl From<CliError> for ToolFailure {
 }
 
 impl From<ConfigError> for ToolFailure {
+    /// Classifies a store's refusal as a [`CliError`] does, so a wrong name
+    /// or value is the caller's mistake and an unreadable database muster's.
     fn from(error: ConfigError) -> Self {
-        Self::Server(ErrorData::internal_error(error.to_string(), None))
+        CliError::from(error).into()
     }
 }
 
@@ -105,21 +111,13 @@ pub fn agent_message(error: &CliError) -> String {
             "the muster service answered with `{answer}`, which this MCP server does not expect; {RESTART_SERVER}"
         ),
         CliError::Refused { kind, message } => refusal_message(*kind, message),
-        CliError::NoProjectConfig(path) => {
-            format!(
-                "no muster config at {}; create muster.yml there",
-                path.display()
-            )
-        },
-        CliError::MissingWorkspaceFile(path) => {
-            format!("{} not found; create muster.yml there", path.display())
-        },
-        CliError::InvalidProjectConfig { path, message } => format!(
-            "{} does not load: {message}; fix it and call the tool again",
-            path.display()
+        CliError::Config(config) => config_message(config),
+        CliError::NotAProject { dir } => format!(
+            "no muster project in {} or above; {CALL_PROCESS_ADD}",
+            dir.display()
         ),
-        CliError::RunNameTaken { name, project } => format!(
-            "a process named {} already exists in {}; choose another name",
+        CliError::ProcessNameTaken { name, project } => format!(
+            "a process named {} already exists in {}; {CHOOSE_ANOTHER_NAME}",
             name.shell_quoted(),
             project.display()
         ),
@@ -163,7 +161,12 @@ pub fn agent_message(error: &CliError) -> String {
         | CliError::InvalidName(_)
         | CliError::EmptyCommand
         | CliError::InvalidCommand
-        | CliError::Config(_)
+        | CliError::NothingToChange
+        | CliError::ImportConflict { .. }
+        | CliError::StackFile { .. }
+        | CliError::UnsupportedStackVersion { .. }
+        | CliError::FileExists { .. }
+        | CliError::InvalidSetting { .. }
         | CliError::UnrepresentablePath(_)
         | CliError::InvalidProjectFolder(_)
         | CliError::UnknownProjectAmong { .. }
@@ -177,6 +180,31 @@ pub fn agent_message(error: &CliError) -> String {
         | CliError::Log { .. }
         | CliError::Output(_)
         | CliError::Terminal(_) => error.to_string(),
+    }
+}
+
+/// A store's refusal `error` worded for an agent: the two whose message names
+/// a command name a tool instead.
+fn config_message(error: &ConfigError) -> String {
+    match error {
+        ConfigError::UnknownProject { root } => format!(
+            "no muster project at {}; {CALL_PROCESS_ADD}",
+            root.display()
+        ),
+        ConfigError::DuplicateProcessName { name } => format!(
+            "a process named {} already exists in this project; {CHOOSE_ANOTHER_NAME}",
+            name.shell_quoted()
+        ),
+        ConfigError::Write { .. }
+        | ConfigError::NoStateDir
+        | ConfigError::CoordinationId(_)
+        | ConfigError::Database(_)
+        | ConfigError::UnsupportedSchema { .. }
+        | ConfigError::UnknownProcess { .. }
+        | ConfigError::ImportConflict { .. }
+        | ConfigError::InvalidSetting { .. }
+        | ConfigError::InvalidDefaultSize { .. }
+        | ConfigError::RootNotADirectory { .. } => error.to_string(),
     }
 }
 
@@ -209,14 +237,19 @@ mod tests {
         let api = ProcessName::try_new("api").unwrap();
         vec![
             CliError::NotRunning(api.clone()),
-            CliError::MissingWorkspaceFile(PathBuf::from("/repo/muster.yml")),
-            CliError::RunNameTaken {
-                name: api.clone(),
-                project: PathBuf::from("/repo/muster.yml"),
+            CliError::NotAProject {
+                dir: PathBuf::from("/repo"),
             },
+            CliError::ProcessNameTaken {
+                name: api.clone(),
+                project: PathBuf::from("/repo"),
+            },
+            CliError::Config(ConfigError::UnknownProject {
+                root: PathBuf::from("/repo"),
+            }),
             CliError::NotPickedUp {
                 name: api,
-                project: PathBuf::from("/repo/muster.yml"),
+                project: PathBuf::from("/repo"),
                 waited: Duration::from_secs(5),
             },
             CliError::NotATerminal,
@@ -233,11 +266,6 @@ mod tests {
             CliError::Refused {
                 kind: ServiceErrorKind::InvalidRequest,
                 message: "unknown request".to_string(),
-            },
-            CliError::NoProjectConfig(PathBuf::from("/repo/muster.yml")),
-            CliError::InvalidProjectConfig {
-                path: PathBuf::from("/repo/muster.yml"),
-                message: "bad yaml".to_string(),
             },
         ]
     }
@@ -263,6 +291,35 @@ mod tests {
             agent_message(&CliError::UnexpectedAnswer("ok")).contains(RESTART_SERVER),
             "a version skew is fixed by a restart"
         );
+        let outside = CliError::Config(ConfigError::UnknownProject {
+            root: PathBuf::from("/repo"),
+        });
+        assert!(
+            agent_message(&outside).contains("call process_add"),
+            "a folder that is not a project is registered by process_add"
+        );
+    }
+
+    /// A store's refusal of a wrong name is the caller's mistake listing the
+    /// valid names; a database it cannot read is muster's fault.
+    #[test]
+    fn a_store_refusal_is_classified_by_its_cause() {
+        let unknown = ConfigError::UnknownProcess {
+            name: ProcessName::try_new("wbe").unwrap(),
+            valid: vec![ProcessName::try_new("web").unwrap()],
+        };
+
+        let result = ToolFailure::from(unknown).answer().unwrap();
+
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.expect("structured")["error"]["candidates"],
+            serde_json::json!(["web"])
+        );
+        let broken = ToolFailure::from(ConfigError::Database("disk I/O error".to_string()))
+            .answer()
+            .unwrap_err();
+        assert_eq!(broken.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     }
 
     /// A wrong name is an error result carrying the valid names in its text
@@ -272,7 +329,7 @@ mod tests {
     fn a_wrong_name_is_an_error_result_and_an_unreachable_service_a_protocol_error() {
         let unknown = CliError::UnknownProcess {
             name: "echo".to_string(),
-            project: PathBuf::from("/repo/muster.yml"),
+            project: PathBuf::from("/repo"),
             valid: vec![
                 ProcessName::try_new("echo box").unwrap(),
                 ProcessName::try_new("api").unwrap(),
@@ -306,7 +363,7 @@ mod tests {
     fn an_unreadable_store_is_a_protocol_error() {
         let unreadable = CliError::Refused {
             kind: ServiceErrorKind::Internal,
-            message: "could not read this project's agent sessions".to_string(),
+            message: "could not read this project's stack".to_string(),
         };
 
         let error = ToolFailure::from(unreadable).answer().unwrap_err();

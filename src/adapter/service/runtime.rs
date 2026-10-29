@@ -407,6 +407,16 @@ impl ServiceRuntime {
         }
     }
 
+    /// Tells the loaded supervisors of `projects` how many known shells are
+    /// in each as of `now`, as [`Self::recount`] does for every project.
+    fn recount_in(&mut self, projects: impl IntoIterator<Item = ProjectRoot>, now: Instant) {
+        for root in projects {
+            if let Some(supervisor) = self.supervisors.get_mut(&root) {
+                supervisor.set_occupants(occupants(&self.occupancy, &root), now);
+            }
+        }
+    }
+
     /// Handles events until a client asks the service to exit, waking for the
     /// supervisors' metrics deadlines in between. Returns where to answer
     /// that client.
@@ -561,12 +571,14 @@ impl ServiceRuntime {
                 }
             },
             ServiceEvent::ShellsGone { shells } => {
+                let mut left = Vec::new();
                 for shell in shells {
                     self.shell_notes.forget(&shell);
                     self.entering.forget_shell(&shell);
+                    left.extend(self.occupancy.project_of(&shell).cloned());
                     self.occupancy.remove(&shell);
                 }
-                self.recount(Instant::now());
+                self.recount_in(left, Instant::now());
             },
             ServiceEvent::Adopted {
                 project,
@@ -892,8 +904,9 @@ impl ServiceRuntime {
                 SHELL_TABLE_FULL.to_string(),
             ));
         }
-        let changes = self.occupancy.report(shell, seq, project);
-        self.recount(Instant::now());
+        let before = self.occupancy.project_of(&shell).cloned();
+        let changes = self.occupancy.report(shell, seq, project.clone());
+        self.recount_in(before.into_iter().chain(project), Instant::now());
         let mut notes = self.shell_notes.take(&shell);
         for change in changes {
             match change {
@@ -3767,6 +3780,36 @@ mod tests {
             none.stops_in()
                 .is_some_and(|left| left <= LONG_IDLE && left > LONG_IDLE - WAIT)
         );
+        service.stop();
+    }
+
+    /// A shell moving between projects is counted out of the one it left
+    /// and into the one it entered, while the other shell in the first
+    /// keeps it occupied with no idle stop pending.
+    #[test]
+    fn a_shell_moving_between_projects_is_recounted_in_both() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", false)]));
+        let blog = fixture.project_in("blog", commands(&[("web", false)]));
+        let (moving, staying) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(moving);
+        fixture.shells().open(staying);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, moving, 1, Some(&shop));
+        report(&service, staying, 1, Some(&shop));
+        report(&service, moving, 2, Some(&blog));
+
+        let left = occupancy(&service, &shop);
+        assert_eq!((left.shells(), left.stops_in()), (1, None));
+        let entered = occupancy(&service, &blog);
+        assert_eq!((entered.shells(), entered.stops_in()), (1, None));
+
+        report(&service, staying, 2, Some(&blog));
+        let emptied = occupancy(&service, &shop);
+        assert_eq!(emptied.shells(), 0);
+        assert!(emptied.stops_in().is_some(), "the last shell out arms it");
+        assert_eq!(occupancy(&service, &blog).shells(), 2);
         service.stop();
     }
 }

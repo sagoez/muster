@@ -89,6 +89,12 @@ impl Occupancy {
             .count()
     }
 
+    /// The project `shell` is in, or `None` when it is outside every project
+    /// or unknown.
+    pub fn project_of(&self, shell: &ShellId) -> Option<&ProjectRoot> {
+        self.shells.get(shell)?.project.as_ref()
+    }
+
     /// Every shell the table knows, in order.
     pub fn shells(&self) -> Vec<ShellId> {
         let mut shells: Vec<ShellId> = self.shells.keys().copied().collect();
@@ -265,6 +271,33 @@ mod tests {
         assert!(table.remove(&shell(200, 1)).is_empty());
         assert!(table.remove(&shell(300, 1)).is_empty(), "an unknown shell");
         assert!(table.is_empty());
+    }
+
+    /// A shell's project follows its newest report and its restored record,
+    /// and is gone once it leaves every project or is removed.
+    #[test]
+    fn the_project_of_a_shell_follows_its_newest_report() {
+        let mut table = Occupancy::new();
+        assert_eq!(table.project_of(&shell(100, 1)), None, "an unknown shell");
+
+        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        assert_eq!(table.project_of(&shell(100, 1)), Some(&root("shop")));
+        table.report(shell(100, 1), seq(2), Some(root("blog")));
+        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        assert_eq!(table.project_of(&shell(100, 1)), Some(&root("blog")));
+        table.report(shell(100, 1), seq(3), None);
+        assert_eq!(table.project_of(&shell(100, 1)), None);
+
+        table.restore(
+            &ShellRecord::builder()
+                .shell(shell(200, 1))
+                .seq(seq(4))
+                .project(Some(root("shop")))
+                .build(),
+        );
+        assert_eq!(table.project_of(&shell(200, 1)), Some(&root("shop")));
+        table.remove(&shell(200, 1));
+        assert_eq!(table.project_of(&shell(200, 1)), None);
     }
 
     #[test]

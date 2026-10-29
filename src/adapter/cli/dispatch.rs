@@ -35,9 +35,10 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        DoctorView, any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
+        any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
         processes_probe, project_probe, projects_probe,
     },
+    doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
     export::{Exported, export, export_rows},

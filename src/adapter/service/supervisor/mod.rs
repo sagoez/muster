@@ -28,6 +28,7 @@ mod lookup;
 mod metrics;
 mod metrics_book;
 mod pane;
+mod pane_retry;
 mod pending_intent;
 mod pending_launch;
 mod restart_book;

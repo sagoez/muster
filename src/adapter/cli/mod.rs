@@ -22,6 +22,7 @@ mod detach_scanner;
 mod dispatch;
 mod doctor;
 mod doctor_check;
+mod doctor_view;
 #[cfg(test)]
 mod embedding;
 mod emit;
@@ -64,6 +65,7 @@ mod output;
 mod parsed;
 mod presenter;
 mod presenter_theme;
+mod probe;
 mod probe_outcome;
 mod process;
 mod process_args;

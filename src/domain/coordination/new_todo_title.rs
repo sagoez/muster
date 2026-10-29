@@ -1,20 +1,7 @@
-use thiserror::Error;
-
-use super::todo_title::TodoTitle;
+use super::{new_todo_title_error::NewTodoTitleError, todo_title::TodoTitle};
 
 /// Most characters a todo's title holds when it is written.
 pub const TODO_TITLE_MAX_CHARS: usize = 500;
-
-/// Why a title cannot be written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum NewTodoTitleError {
-    /// The title is blank once trimmed.
-    #[error("a todo title cannot be blank")]
-    Blank,
-    /// The title runs past [`TODO_TITLE_MAX_CHARS`].
-    #[error("a todo title holds at most {TODO_TITLE_MAX_CHARS} characters")]
-    TooLong,
-}
 
 /// A title being written to a todo: a [`TodoTitle`] at most
 /// [`TODO_TITLE_MAX_CHARS`] long, so one write cannot flood a listing. Titles

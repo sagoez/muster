@@ -1,24 +1,12 @@
 use std::{collections::HashMap, time::Duration};
 
+use super::pane_retry::PaneRetry;
 use crate::domain::value::{PaneId, Pid};
 
 /// Wait before the first timed retry of an adoption that failed.
 const FIRST_RETRY: Duration = Duration::from_secs(30);
 /// Longest wait between timed retries of an adoption that keeps failing.
 const MAX_RETRY: Duration = Duration::from_secs(10 * 60);
-
-/// One pane's retries of adopting the holder of a child left running
-/// unsupervised.
-#[derive(Debug, Clone, Copy)]
-struct PaneRetry {
-    /// The holder whose failed adoption was already told, so a retry that
-    /// fails the same way is not told again.
-    told: Option<Pid>,
-    /// Wait before the next timed retry.
-    delay: Duration,
-    /// The current try; a result or timer of any other is stale.
-    current: u64,
-}
 
 /// The retries of every pane left unsupervised by a failed adoption: each
 /// tries again on a timer that backs off, or when a start asks, and the

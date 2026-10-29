@@ -6,15 +6,13 @@ use std::{
 };
 
 use clap::ValueEnum;
-use getset::{CopyGetters, Getters};
-use serde::Serialize;
-use typed_builder::TypedBuilder;
 
 use super::{
     completions::{CompletionShell, registration_line},
     doctor_check::DoctorCheck,
     error::CliError,
     output::COLUMN_GAP,
+    probe::Probe,
     probe_outcome::ProbeOutcome,
     report::Report,
     row::Row,
@@ -72,31 +70,6 @@ const ELVISH_RC: &str = ".elvish/rc.elv";
 const ELVISH_XDG_RC: &str = "elvish/rc.elv";
 /// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
-
-/// One diagnostic line: what was probed, how it went, and the detail text.
-#[derive(Debug, Serialize, Getters, CopyGetters, TypedBuilder)]
-pub struct Probe {
-    /// What was probed.
-    #[getset(get_copy = "pub")]
-    check: DoctorCheck,
-    /// Severity of the result.
-    #[getset(get_copy = "pub")]
-    outcome: ProbeOutcome,
-    /// Human detail for the line.
-    #[getset(get = "pub")]
-    detail: String,
-}
-
-/// What `muster doctor --json` prints: every probe, and whether one failed.
-#[derive(Debug, Serialize, Getters, CopyGetters, TypedBuilder)]
-pub struct DoctorView<'a> {
-    /// The probes, in the order they ran.
-    #[getset(get = "pub")]
-    checks: &'a [Probe],
-    /// Whether any failed, which makes the command exit non-zero.
-    #[getset(get_copy = "pub")]
-    failed: bool,
-}
 
 /// Builds one probe.
 fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
@@ -387,7 +360,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
-            cli::{embedding::Embedding, wrapped::Wrapped},
+            cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
             client::fixed_projects::FixedProjects,
         },
         domain::{

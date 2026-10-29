@@ -7,7 +7,10 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
-use signal_hook::iterator::{Handle as SignalsHandle, Signals};
+use signal_hook::{
+    iterator::{Handle as SignalsHandle, Signals},
+    low_level::emulate_default_handler,
+};
 
 use super::{
     acceptor::Acceptor,
@@ -187,13 +190,10 @@ impl ServiceRuntime {
         let signals = deps
             .exit_signals
             .take()
-            .map(|signals| relay_exit_signals(signals, sender.clone()));
+            .map(|signals| relay_exit_signals(signals, sender.clone(), exit_at_once));
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         let exit = runtime.serve(&events);
-        if let Some(signals) = signals {
-            signals.close();
-        }
         runtime.shutdown();
         acceptor.close();
         protocol::withdraw_socket(&state_dir, &socket);
@@ -208,6 +208,9 @@ impl ServiceRuntime {
         runtime.event_waiters.clear();
         drop(events);
         drop(singleton);
+        if let Some(signals) = signals {
+            signals.close();
+        }
         if let Some(reply) = exit {
             let _ = reply.send(ServiceResponse::Ok);
         }
@@ -1179,19 +1182,36 @@ fn release_unrecorded(result: Result<Box<dyn ProcessHandle>, PtyError>) {
 
 /// Turns the first of `signals` into a stop request on `events`, on a thread
 /// of its own, so a terminate or hangup takes the same exit as a client's
-/// stop. Returns the handle that ends that thread.
-fn relay_exit_signals(mut signals: Signals, events: Sender<ServiceEvent>) -> SignalsHandle {
+/// stop, which ends within [`SERVICE_EXIT_BOUND`]. A second one while that
+/// exit runs is handed to `force`, which ends the service at once. Returns
+/// the handle that ends that thread once the exit is done.
+fn relay_exit_signals(
+    mut signals: Signals,
+    events: Sender<ServiceEvent>,
+    force: impl FnOnce(i32) + Send + 'static,
+) -> SignalsHandle {
     let handle = signals.handle();
     thread::spawn(move || {
-        if signals.forever().next().is_some() {
-            let (reply, _) = bounded(1);
-            let _ = events.send(ServiceEvent::Request {
-                request: ServiceRequest::Stop,
-                reply,
-            });
+        let mut caught = signals.forever();
+        if caught.next().is_none() {
+            return;
+        }
+        let (reply, _) = bounded(1);
+        let _ = events.send(ServiceEvent::Request {
+            request: ServiceRequest::Stop,
+            reply,
+        });
+        if let Some(again) = caught.next() {
+            force(again);
         }
     });
     handle
+}
+
+/// Ends the service at once on `signal`, as its default action does, for a
+/// second terminate or hangup while a graceful exit runs.
+fn exit_at_once(signal: i32) {
+    let _ = emulate_default_handler(signal);
 }
 
 /// Applies `action` to the process `name` of `supervisor`; a start or restart
@@ -1256,6 +1276,9 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    use crossbeam_channel::unbounded;
+    use signal_hook::{consts::SIGUSR2, low_level::raise};
+
     use super::*;
     use crate::{
         adapter::{
@@ -1317,6 +1340,34 @@ mod tests {
     const FLOOD_WAIT: Duration = Duration::from_secs(60);
     /// How a resync screen starts: a full terminal reset.
     const RESYNC_PREFIX: &[u8] = b"\x1bc";
+
+    /// The first exit signal asks the loop to stop, as a client's stop does;
+    /// a second one while that exit runs is handed on to end the service at
+    /// once, rather than swallowed.
+    #[test]
+    fn a_second_exit_signal_ends_the_service_at_once() {
+        let signals = Signals::new([SIGUSR2]).unwrap();
+        let (sender, events) = unbounded();
+        let (forced, forcing) = unbounded();
+        let handle = relay_exit_signals(signals, sender, move |signal| {
+            let _ = forced.send(signal);
+        });
+
+        raise(SIGUSR2).unwrap();
+        let first = events.recv_timeout(WAIT).unwrap();
+        assert!(
+            matches!(first, ServiceEvent::Request {
+                request: ServiceRequest::Stop,
+                ..
+            }),
+            "the first signal asks for a stop"
+        );
+        assert!(forcing.try_recv().is_err(), "the first signal was forced");
+        raise(SIGUSR2).unwrap();
+
+        assert_eq!(forcing.recv_timeout(WAIT), Ok(SIGUSR2));
+        handle.close();
+    }
 
     #[test]
     fn service_adopts_live_holders_on_start_and_ps_reports_them_running() {

@@ -259,11 +259,11 @@ impl ServiceClient {
             Ok(ServiceResponse::Hello { .. } | ServiceResponse::Error(_)) => return Ok(None),
             Ok(other) => return Err(ClientError::UnexpectedAnswer((&other).into())),
             Err(error) if not_listening(&error) || gone(&error) => return Ok(None),
-            Err(source) => return Err(self.io_error(source)),
+            Err(failure) => return Err(io_error(failure)),
         }
         self.send_once(request, NOTIFY_TIMEOUT)
             .map(Some)
-            .map_err(|source| self.io_error(source))
+            .map_err(io_error)
     }
 
     /// The client of the service under this user's state directory, started

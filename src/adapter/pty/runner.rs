@@ -1,6 +1,6 @@
 use std::{
     env,
-    ffi::CStr,
+    ffi::{CStr, c_int},
     fmt::Display,
     io::{Read, Write},
     sync::{Arc, Mutex},
@@ -9,7 +9,11 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
-use portable_pty::{CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system};
+use libc::strsignal;
+use portable_pty::{
+    ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize as PortablePtySize,
+    native_pty_system,
+};
 use rustix::process::Signal;
 use signal_hook::low_level;
 
@@ -248,9 +252,9 @@ impl ProcessInput for PtyInput {
 
 /// Live handle to a PTY-backed process.
 struct PtyProcessHandle {
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    master: Box<dyn MasterPty + Send>,
     input: PtyInput,
-    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
     grace_tx: Sender<Duration>,
     pid: Option<Pid>,
 }
@@ -320,7 +324,7 @@ impl PtyProcessHandle {
 /// Reported when a child has no pid to signal.
 const NO_PID: &str = "no pid to signal";
 /// Highest signal number tried when recovering a signal from its description.
-const MAX_SIGNAL: libc::c_int = 64;
+const MAX_SIGNAL: c_int = 64;
 /// How portable-pty describes a signal `strsignal` has no text for.
 const UNDESCRIBED_SIGNAL_PREFIX: &str = "Signal ";
 /// Name of a signal with no POSIX name, before its number.
@@ -362,7 +366,7 @@ fn exit_outcome(status: &ExitStatus) -> ExitOutcome {
 fn signal_name(described: &str) -> Option<SignalName> {
     let number = described
         .strip_prefix(UNDESCRIBED_SIGNAL_PREFIX)
-        .and_then(|number| number.parse::<libc::c_int>().ok())
+        .and_then(|number| number.parse::<c_int>().ok())
         .or_else(|| {
             (1..=MAX_SIGNAL).find(|&number| strsignal_text(number).as_deref() == Some(described))
         })?;
@@ -374,11 +378,11 @@ fn signal_name(described: &str) -> Option<SignalName> {
 }
 
 /// How `strsignal` describes the signal `number` in this process's locale.
-fn strsignal_text(number: libc::c_int) -> Option<String> {
+fn strsignal_text(number: c_int) -> Option<String> {
     // SAFETY: `strsignal` returns null or a NUL-terminated string that stays
     // valid until the next call on this thread; it is copied out at once.
     unsafe {
-        let text = libc::strsignal(number);
+        let text = strsignal(number);
         (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
     }
 }
@@ -416,7 +420,7 @@ pub(crate) fn signal_group(pid: Pid, signal: Signal) -> Result<(), PtyError> {
 /// Returns a `PtyError` when neither termination mechanism succeeds.
 fn terminate_group(
     pid: Option<Pid>,
-    killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    killer: &mut Box<dyn ChildKiller + Send + Sync>,
 ) -> Result<(), PtyError> {
     let group_result = signallable(pid).and_then(|pid| signal_group(pid, Signal::KILL));
     let child_result = killer.kill().map_err(system_error);
@@ -461,7 +465,7 @@ mod tests {
     /// final sleep models cleanup that remains active after its last log line.
     const DESCENDANT_CLEANUP_COMMAND: &str = r#"sh -c 'trap "" TERM HUP; printf ready; sleep 1; printf descendant-clean; sleep 1' & trap 'exit 0' TERM; wait"#;
 
-    struct ChannelSink(crossbeam_channel::Sender<ProcessOutput>);
+    struct ChannelSink(Sender<ProcessOutput>);
 
     impl OutputSink for ChannelSink {
         fn send(&self, output: ProcessOutput) {
@@ -843,7 +847,7 @@ mod tests {
     #[test]
     fn a_signal_is_named_from_its_number() {
         assert_eq!(
-            signal_name(&strsignal_text(libc::SIGTERM).unwrap()),
+            signal_name(&strsignal_text(Signal::TERM.as_raw()).unwrap()),
             Some(SignalName::try_new("sigterm").unwrap())
         );
         assert_eq!(
@@ -877,7 +881,7 @@ mod tests {
             }
         }
 
-        let expected = std::env::current_dir().unwrap();
+        let expected = env::current_dir().unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains(expected.to_str().unwrap()));
     }
 

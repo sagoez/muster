@@ -151,7 +151,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::Refused { kind, message } => refusal_message(*kind, message),
         ClientError::Config(config) => config_message(config),
         ClientError::CursorAhead { .. } => format!("invalid since: {error}; {PASS_CURSOR}"),
-        ClientError::NoStateDir
+        ClientError::NoStateDir(_)
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }
         | ClientError::UnknownProcess { .. }
@@ -208,8 +208,13 @@ fn refusal_message(kind: ServiceErrorKind, message: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use rmcp::model::ErrorCode;
+
     use super::*;
-    use crate::domain::value::{ProcessName, ProjectName};
+    use crate::{
+        adapter::no_state_dir::NoStateDir,
+        domain::value::{ProcessName, ProjectName},
+    };
 
     /// Failures whose command-line wording names a muster command or flag.
     fn command_naming_failures() -> Vec<ToolError> {
@@ -284,7 +289,7 @@ mod tests {
         let broken = ToolFailure::from(ConfigError::Storage("disk I/O error".into()))
             .answer()
             .unwrap_err();
-        assert_eq!(broken.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(broken.code, ErrorCode::INTERNAL_ERROR);
     }
 
     /// A wrong name is an error result carrying the valid names in its text
@@ -312,10 +317,10 @@ mod tests {
         assert_eq!(error["kind"], "unknown-process");
         assert_eq!(error["candidates"], serde_json::json!(["echo box", "api"]));
 
-        let unreachable = ToolFailure::from(ClientError::NoStateDir)
+        let unreachable = ToolFailure::from(ClientError::NoStateDir(NoStateDir))
             .answer()
             .unwrap_err();
-        assert_eq!(unreachable.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(unreachable.code, ErrorCode::INTERNAL_ERROR);
         assert_eq!(
             unreachable.data.expect("the failure rides along")["error"]["kind"],
             "service-unavailable"
@@ -333,6 +338,6 @@ mod tests {
 
         let error = ToolFailure::from(unreadable).answer().unwrap_err();
 
-        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
     }
 }

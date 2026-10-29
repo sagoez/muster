@@ -137,12 +137,13 @@ impl MusterMcp {
     #[tool(
         description = "Start a process unless it is running. wait=true waits until it is ready \
             (its readiness check, or running when it has none); wait can also be a condition, \
-            as in process_wait. Without wait, waits at most 45 seconds for it to settle. Returns \
-            {project, process, outcome, reason, status, notices, wait_ended, alerts}, or with \
-            wait {process, wait, alerts}. outcome is started, already-running, refused (with \
-            reason), crashed, exited, not-started, still-starting or unsupervised. Flagged \
-            isError when it failed, crashed or exited while waiting; a wait that ran out of time \
-            is status waiting, not an error: continue with process_wait."
+            as in process_wait. Without wait, waits at most <call-bound-s> seconds for it to \
+            settle. Returns {project, process, outcome, reason, status, notices, wait_ended, \
+            alerts}, or with wait {process, wait, alerts}. outcome is started, already-running, \
+            refused (with reason), crashed, exited, not-started, still-starting or \
+            unsupervised. Flagged isError when it failed, crashed or exited while waiting; a \
+            wait that ran out of time is status waiting, not an error: continue with \
+            process_wait."
     )]
     pub(super) async fn process_start(
         &self,
@@ -155,9 +156,10 @@ impl MusterMcp {
     /// Stops a process.
     #[tool(
         description = "Stop a process gracefully, without its restart policy respawning it. \
-            Waits at most 45 seconds. Returns {project, process, outcome (stopped, \
+            Waits at most <call-bound-s> seconds. Returns {project, process, outcome (stopped, \
             was-not-running, still-stopping), status, notices, wait_ended, alerts}. \
-            still-stopping after the 45 seconds is not an error; check with stack_status."
+            still-stopping after the <call-bound-s> seconds is not an error; check with \
+            stack_status."
     )]
     pub(super) async fn process_stop(
         &self,
@@ -194,10 +196,10 @@ impl MusterMcp {
             reached, or until.ready=true when its readiness check passes. Default until: ready \
             when the process has a readiness check, else running. Only output after since \
             counts; without since, only output after this call. Waits at most timeout_s \
-            (default 30, at most 45). Returns {process, status, until, match, cursor, \
-            elapsed_ms, tail, hint, alerts}. status waiting is not an error: call again with \
-            since=cursor. exited, crashed, stopped, not-running and ready-timeout are flagged \
-            isError and include the last 30 lines in tail."
+            (default <default-wait-s>, at most <call-bound-s>). Returns {process, status, until, \
+            match, cursor, elapsed_ms, tail, hint, alerts}. status waiting is not an error: call \
+            again with since=cursor. exited, crashed, stopped, not-running and ready-timeout are \
+            flagged isError and include the last <failure-tail-lines> lines in tail."
     )]
     pub(super) async fn process_wait(
         &self,
@@ -210,14 +212,14 @@ impl MusterMcp {
     /// Reads a process's log.
     #[tool(
         description = "Read a process's output log, with terminal escapes removed, whether or \
-            not it is running. Without since, returns the last lines lines (default 100, at most \
-            2000); with since (a cursor from any earlier result), returns only output after it. \
-            grep keeps matching lines (regex=true for a regex); errors_only keeps error lines \
-            with their stack traces. Capped at max_bytes (default 16384, at most 65536), keeping \
-            the newest lines and saying how many were omitted. Returns {process, text, cursor, \
-            from, run_start, lines_returned, omitted_lines, rotated_away_bytes, alerts}; pass \
-            cursor as since next time to get only new output, or run_start to read only the \
-            current run."
+            not it is running. Without since, returns the last lines lines (default \
+            <default-log-lines>, at most <max-log-lines>); with since (a cursor from any earlier \
+            result), returns only output after it. grep keeps matching lines (regex=true for a \
+            regex); errors_only keeps error lines with their stack traces. Capped at max_bytes \
+            (default <default-log-bytes>, at most <max-log-bytes>), keeping the newest lines and \
+            saying how many were omitted. Returns {process, text, cursor, from, run_start, \
+            lines_returned, omitted_lines, rotated_away_bytes, alerts}; pass cursor as since \
+            next time to get only new output, or run_start to read only the current run."
     )]
     pub(super) async fn process_logs(
         &self,
@@ -407,11 +409,11 @@ impl MusterMcp {
     /// Removes a process from a project's stack.
     #[tool(
         description = "Remove a process from this project's stack, stopping it first if it \
-            runs, waiting at most 45 seconds. Returns {project, name, stopped (it was running \
-            and has ended), still_stopping (it had not ended when the wait ended; it still \
-            ends), alerts}. The removal is shown to the human as a notice. An unknown name is \
-            flagged isError, listing the valid names, and so is any call while the user's \
-            mcp-stack-edits setting is read-only."
+            runs, waiting at most <call-bound-s> seconds. Returns {project, name, stopped (it \
+            was running and has ended), still_stopping (it had not ended when the wait ended; \
+            it still ends), alerts}. The removal is shown to the human as a notice. An unknown \
+            name is flagged isError, listing the valid names, and so is any call while the \
+            user's mcp-stack-edits setting is read-only."
     )]
     pub(super) async fn process_remove(&self, Parameters(arg): Parameters<NameArg>) -> ToolResult {
         let alerts = self.alerts.clone();
@@ -623,6 +625,8 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use rmcp::model::ErrorCode;
+
     use super::*;
     use crate::{
         adapter::mcp::test_support::{
@@ -630,13 +634,13 @@ mod tests {
         },
         domain::{
             config::{McpStackEdits, SettingChange},
-            port::{ProjectStore, SettingsStore, StackStore},
+            port::{ProjectStore, SettingsStore, StackReader},
             value::ProcessName,
         },
     };
 
     /// `process_set` arguments read from the JSON an agent sends.
-    fn set(json: serde_json::Value) -> Parameters<ProcessSetArg> {
+    fn set(json: Value) -> Parameters<ProcessSetArg> {
         Parameters(serde_json::from_value(json).unwrap())
     }
 
@@ -646,7 +650,7 @@ mod tests {
     }
 
     /// The `process_logs` arguments an agent sent as `json`.
-    fn logs(json: serde_json::Value) -> ProcessLogsArg {
+    fn logs(json: Value) -> ProcessLogsArg {
         serde_json::from_value(json).unwrap()
     }
 
@@ -1072,7 +1076,7 @@ mod tests {
             .unwrap_err()
             .answer()
             .unwrap_err();
-        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
         assert_eq!(
             error.data.expect("the failure rides along")["error"]["kind"],
             "service-unavailable"

@@ -37,6 +37,7 @@ use crate::{
         sanitize::printable,
         service::{Located, ServiceRequest, ServiceResponse},
     },
+    constants::APP_NAME,
     domain::{
         project::Project,
         value::{DetachKey, ProcessName},
@@ -58,8 +59,8 @@ const HINT_ATTACHED: &str = "attached to";
 const HINT_READ_ONLY: &str = " (read-only)";
 /// Closes the hint, after the detach key.
 const HINT_DETACH: &str = "to detach";
-/// Opens the window title shown while attached.
-const TITLE_PREFIX: &str = "muster:";
+/// Follows the app's name in the window title shown while attached.
+const TITLE_SEPARATOR: &str = ":";
 /// Said after the session when the holder dropped typed input.
 const DROPPED_INPUT: &str =
     "some of what was typed did not reach it: it was not reading its input fast enough";
@@ -180,7 +181,7 @@ impl AttachSession {
         .map_err(CliError::Terminal)
         .and_then(|mut screen| {
             screen
-                .set_title(&format!("{TITLE_PREFIX} {hint}"))
+                .set_title(&format!("{APP_NAME}{TITLE_SEPARATOR} {hint}"))
                 .map_err(CliError::Terminal)?;
             let mut pump = AttachPump::new(
                 &name,
@@ -235,7 +236,19 @@ fn connect(
             ClientError::NotRunning(name.clone()).into()
         },
         HolderError::NoSnapshot(_) => ClientError::NotRunning(name.clone()).into(),
-        _ => CliError::AttachLost {
+        HolderError::Io(_)
+        | HolderError::Pty(_)
+        | HolderError::Json(_)
+        | HolderError::UnexpectedFrame(_)
+        | HolderError::MalformedPayload(_)
+        | HolderError::MissingProject
+        | HolderError::MissingChildPid
+        | HolderError::UnrecordablePid(_)
+        | HolderError::MissingChildInput
+        | HolderError::InsecureSocketDir(_)
+        | HolderError::NotReady(_)
+        | HolderError::FailedToStart { .. }
+        | HolderError::CursorAhead { .. } => CliError::AttachLost {
             name: name.clone(),
             source,
         },
@@ -352,6 +365,7 @@ mod tests {
             },
             signal_target::SignalTarget,
             terminal::emulator::RESET_TERMINAL,
+            test_scratch::short_scratch,
         },
         domain::{
             color_scheme::ColorScheme,
@@ -360,9 +374,6 @@ mod tests {
             value::{ByteSize, CommandLine, OutputCursor, Pid, StopGrace},
         },
     };
-
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
 
     /// Output a fake holder sends; an attach client ignores where it lies.
     fn live_output(bytes: &[u8]) -> HolderMessage {
@@ -424,10 +435,7 @@ mod tests {
 
     /// A scratch directory under a short root, removed even on a panic.
     fn scratch() -> TempDir {
-        tempfile::Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap()
+        short_scratch(SCRATCH_PREFIX)
     }
 
     /// A repaint as a holder sends it: a full reset, then `text`.

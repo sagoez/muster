@@ -17,11 +17,11 @@ use crate::domain::{
     value::ProjectRoot,
 };
 
-/// Selects a scratchpad in the order [`scratchpad_from_row`] reads it.
+/// Selects the scratchpad columns [`scratchpad_from_row`] reads by name.
 const SELECT_SCRATCHPAD: &str = "SELECT key, body, author, updated_at FROM scratchpads";
 /// The columns [`todo_from_row`] reads, in order.
 const TODO_COLUMNS: &str = "id, title, status, deps, author, updated_at, owner, claimed_until";
-/// Selects a key-value in the order [`key_value_from_row`] reads it.
+/// Selects the key-value columns [`key_value_from_row`] reads by name.
 const SELECT_KV: &str = "SELECT key, value, author, updated_at FROM kv";
 /// Claims the todo `:id` for `:me` when it is pending, its lease ran out, or
 /// `:me` already holds it; run with `RETURNING` [`TODO_COLUMNS`].
@@ -49,9 +49,10 @@ fn now() -> u64 {
     now_epoch_secs() as u64
 }
 
-/// A stored write time, which the store only ever stamps from the clock.
-fn updated_at(row: &Row, index: usize) -> Result<u64, ConfigError> {
-    let stamp: i64 = row.get(index).map_err(db_error)?;
+/// A row's stored write time, which the store only ever stamps from the
+/// clock.
+fn updated_at(row: &Row) -> Result<u64, ConfigError> {
+    let stamp: i64 = row.get("updated_at").map_err(db_error)?;
     u64::try_from(stamp).map_err(|error| corrupt("write time", error))
 }
 
@@ -62,26 +63,26 @@ fn deps_json(deps: &[TodoId]) -> Result<String, ConfigError> {
 
 /// Reads a [`SELECT_SCRATCHPAD`] row.
 fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
-    let key: String = row.get(0).map_err(db_error)?;
-    let body: String = row.get(1).map_err(db_error)?;
-    let author: String = row.get(2).map_err(db_error)?;
+    let key: String = row.get("key").map_err(db_error)?;
+    let body: String = row.get("body").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
     Ok(Scratchpad::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error))?)
         .body(body)
         .author(Author::from_label(&author))
-        .updated_at(updated_at(row, 3)?)
+        .updated_at(updated_at(row)?)
         .build())
 }
 
 /// Reads a todo row selected as [`TODO_COLUMNS`].
 fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
-    let id: String = row.get(0).map_err(db_error)?;
-    let title: String = row.get(1).map_err(db_error)?;
-    let status: String = row.get(2).map_err(db_error)?;
-    let deps: String = row.get(3).map_err(db_error)?;
-    let author: String = row.get(4).map_err(db_error)?;
-    let owner: Option<String> = row.get(6).map_err(db_error)?;
-    let claimed_until: Option<i64> = row.get(7).map_err(db_error)?;
+    let id: String = row.get("id").map_err(db_error)?;
+    let title: String = row.get("title").map_err(db_error)?;
+    let status: String = row.get("status").map_err(db_error)?;
+    let deps: String = row.get("deps").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
+    let owner: Option<String> = row.get("owner").map_err(db_error)?;
+    let claimed_until: Option<i64> = row.get("claimed_until").map_err(db_error)?;
     let claim = match owner.zip(claimed_until) {
         Some((owner, until)) => Some(
             TodoClaim::builder()
@@ -102,20 +103,20 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
         .deps(serde_json::from_str(&deps).map_err(|error| corrupt("todo deps", error))?)
         .claim(claim)
         .author(Author::from_label(&author))
-        .updated_at(updated_at(row, 5)?)
+        .updated_at(updated_at(row)?)
         .build())
 }
 
 /// Reads a [`SELECT_KV`] row.
 fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
-    let key: String = row.get(0).map_err(db_error)?;
-    let value: String = row.get(1).map_err(db_error)?;
-    let author: String = row.get(2).map_err(db_error)?;
+    let key: String = row.get("key").map_err(db_error)?;
+    let value: String = row.get("value").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
     Ok(KeyValue::builder()
         .key(KvKey::try_new(key).map_err(|error| corrupt("kv key", error))?)
         .value(value)
         .author(Author::from_label(&author))
-        .updated_at(updated_at(row, 3)?)
+        .updated_at(updated_at(row)?)
         .build())
 }
 

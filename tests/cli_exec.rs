@@ -8,7 +8,7 @@
 
 use std::{
     fs,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::{
         fd::OwnedFd,
         unix::{
@@ -25,6 +25,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, unbounded};
+use libc::O_NOCTTY;
 use muster::{
     adapter::{
         holder::{
@@ -48,12 +49,15 @@ use muster::{
         value::{ProcessName, ProjectName, ProjectRoot},
     },
 };
+use rusqlite::Connection;
 use rustix::{
+    process::{Pid, Signal, ioctl_tiocsctty, kill_process, kill_process_group, setsid},
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
+    stdio::stdin,
     termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize},
 };
 use serde_json::Value;
-use tempfile::TempDir;
+use tempfile::{Builder, TempDir};
 
 /// The muster binary cargo built for this test.
 const BINARY: &str = env!("CARGO_BIN_EXE_muster");
@@ -253,7 +257,7 @@ impl Scratch {
     /// A fresh scratch directory short enough to bind sockets in, with
     /// desktop notifications turned off in its database.
     fn new() -> Self {
-        let root = tempfile::Builder::new()
+        let root = Builder::new()
             .prefix(SCRATCH_PREFIX)
             .tempdir_in(SHORT_TEMP_ROOT)
             .unwrap();
@@ -388,10 +392,9 @@ impl Drop for Scratch {
             .chain(processes_under(SERVICE_SUBCOMMAND, self.root.path()))
             .chain(processes_under(HOLDER_SUBCOMMAND, self.root.path()))
         {
-            // SAFETY: `kill` takes plain integers and touches no memory.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            if let Some(pid) = Pid::from_raw(pid as i32) {
+                let _ = kill_process_group(pid, Signal::KILL);
+                let _ = kill_process(pid, Signal::KILL);
             }
         }
     }
@@ -471,7 +474,7 @@ fn in_process_service(
         let singleton = Singleton::acquire(&state_dir)?.expect("no other service runs");
         let exec = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
-            .open_files(OpenFilesLimit::current().expect("the open-files limit reads"))
+            .open_files(OpenFilesLimit::current())
             .build();
         let launcher: Box<dyn HolderLauncher> = if held {
             Box::new(HeldLauncher(exec))
@@ -1151,7 +1154,7 @@ fn add_up_set_rm_against_a_real_service() {
         shown(&bad_regex)
     );
     let (_, cleared) = scratch.json_on(&folder, &["set", "web", "--no-ready"]);
-    assert_eq!(cleared["process"]["ready"], serde_json::Value::Null);
+    assert_eq!(cleared["process"]["ready"], Value::Null);
 
     let (rm, removed) = scratch.json_on(&folder, &["rm", "web"]);
     assert!(rm.status.success(), "{}", shown(&rm));
@@ -1511,7 +1514,7 @@ fn a_service_that_cannot_start_shows_why() {
         "an older failure from another day\n",
     )
     .unwrap();
-    rusqlite::Connection::open(scratch.database())
+    Connection::open(scratch.database())
         .unwrap()
         .pragma_update(None, "user_version", FUTURE_SCHEMA)
         .unwrap();
@@ -1827,7 +1830,7 @@ fn a_corrupt_process_row_breaks_only_its_project() {
     let scratch = Scratch::new();
     scratch.project("shop", &shop());
     scratch.project("blog", &single());
-    rusqlite::Connection::open(scratch.database())
+    Connection::open(scratch.database())
         .unwrap()
         .execute(
             "UPDATE processes SET stop_grace_ms = 7200000 WHERE project_id = \
@@ -1963,7 +1966,7 @@ fn values_past_their_bounds_are_invalid_input() {
 /// Completing `--project` reads an existing database and never creates one.
 #[test]
 fn completing_a_project_never_creates_the_database() {
-    let root = tempfile::Builder::new()
+    let root = Builder::new()
         .prefix(SCRATCH_PREFIX)
         .tempdir_in(SHORT_TEMP_ROOT)
         .unwrap();
@@ -2540,7 +2543,7 @@ impl Pty {
         let slave: OwnedFd = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NOCTTY)
+            .custom_flags(O_NOCTTY)
             .open(path.to_str().unwrap())
             .unwrap()
             .into();
@@ -2615,13 +2618,13 @@ impl Pty {
             .stdin(stdio())
             .stdout(stdio())
             .stderr(stdio());
-        // SAFETY: `setsid` and `ioctl` are async-signal-safe and touch only
-        // the child's own session and its standard input.
+        // SAFETY: the hook runs between fork and exec and only makes the
+        // `setsid` and `TIOCSCTTY` system calls, which are async-signal-safe
+        // and touch only the child's own session and its standard input.
         unsafe {
             command.pre_exec(|| {
-                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                setsid()?;
+                ioctl_tiocsctty(stdin())?;
                 Ok(())
             });
         }

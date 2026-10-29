@@ -206,6 +206,7 @@ mod tests {
         adapter::{
             cli::mcp_launch::McpLaunch,
             client::{ClientError, ServiceStatus},
+            no_state_dir::NoStateDir,
             service::{ProjectStatus, ServiceRequest},
             store::{
                 SqliteStore,
@@ -214,7 +215,7 @@ mod tests {
         },
         domain::{
             config::{ConfigError, ImportMode},
-            port::StackStore,
+            port::StackReader,
             value::ProjectRoot,
         },
         error::MusterError,
@@ -228,7 +229,7 @@ mod tests {
 
     impl ServiceAccess for RecordingService {
         fn connect(&self) -> Result<ServiceClient, ClientError> {
-            Err(ClientError::NoStateDir)
+            Err(ClientError::NoStateDir(NoStateDir))
         }
 
         fn loaded_status(
@@ -239,7 +240,7 @@ mod tests {
         }
 
         fn status(&self) -> Result<ServiceStatus, ClientError> {
-            Err(ClientError::NoStateDir)
+            Err(ClientError::NoStateDir(NoStateDir))
         }
 
         fn stop(&self) -> Result<bool, ClientError> {
@@ -321,7 +322,7 @@ mod tests {
         ]);
         assert!(matches!(
             invocation.connect(),
-            Err(CliError::Client(ClientError::NoStateDir))
+            Err(CliError::Client(ClientError::NoStateDir(NoStateDir)))
         ));
         assert!(!invocation.service().stop().unwrap());
     }

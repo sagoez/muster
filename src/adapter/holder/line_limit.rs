@@ -3,7 +3,7 @@ use nutype::nutype;
 /// The most lines one log read returns.
 pub const MAX_LOG_LINES: usize = 2000;
 /// Lines a log read returns when the caller names no limit.
-const DEFAULT_LOG_LINES: usize = 100;
+pub const DEFAULT_LOG_LINES: usize = 100;
 
 /// How many lines a log read returns at most: 1 to [`MAX_LOG_LINES`].
 #[nutype(

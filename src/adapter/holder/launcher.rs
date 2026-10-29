@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    fs,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -7,6 +7,7 @@ use std::{
 };
 
 use getset::Getters;
+use rustix::process::setsid;
 use typed_builder::TypedBuilder;
 
 use super::{
@@ -91,13 +92,12 @@ pub(crate) fn detached(command: &mut Command) -> &mut Command {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: the hook runs between fork and exec and only calls `setsid`,
-    // which is async-signal-safe and touches no memory.
+    // SAFETY: the hook runs between fork and exec and only makes the `setsid`
+    // system call, which is async-signal-safe, allocates nothing and touches
+    // no memory.
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
+            setsid()?;
             Ok(())
         })
     }

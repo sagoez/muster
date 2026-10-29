@@ -405,11 +405,10 @@ mod tests {
     use crossbeam_channel::{RecvTimeoutError, Sender, unbounded};
 
     use super::*;
+    use crate::adapter::test_scratch::short_scratch;
 
     /// Bound on every wait in these tests; reaching it fails the test.
     const WAIT: Duration = Duration::from_secs(10);
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mh-";
     /// A socket path nothing serves, so a lost connection finds no holder.
@@ -514,10 +513,7 @@ mod tests {
     /// connect probe reached the listener first.
     #[test]
     fn a_holder_whose_listener_outlives_the_connection_briefly_is_lost() {
-        let scratch = tempfile::Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
+        let scratch = short_scratch(SCRATCH_PREFIX);
         let socket = scratch.path().join("holder.sock");
         let dying = UnixListener::bind(&socket).unwrap();
         let (service, holder) = greeted_pair();
@@ -539,10 +535,7 @@ mod tests {
     /// nothing: the process lives on under its new supervisor.
     #[test]
     fn an_evicted_supervisor_reports_nothing() {
-        let scratch = tempfile::Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
+        let scratch = short_scratch(SCRATCH_PREFIX);
         let socket = scratch.path().join("holder.sock");
         let _serving = UnixListener::bind(&socket).unwrap();
         let (service, holder) = greeted_pair();

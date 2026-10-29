@@ -2,14 +2,18 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use getset::Getters;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{
+    Deserialize, Deserializer,
+    de::{DeserializeOwned, Error as DeError},
+};
+use serde_json::{Map, Value};
 use typed_builder::TypedBuilder;
 
 use super::{
-    nullable::nullable,
     process_fields::{
-        ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice,
-        command, description, env_name, env_vars, stop_grace, working_dir,
+        DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD, RESTART_FIELD,
+        STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice, command, description,
+        env_name, env_vars, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
 };
@@ -22,9 +26,36 @@ use crate::{
     },
 };
 
+/// The field naming the project.
+const PROJECT_FIELD: &str = "project";
+/// The field naming the process.
+const NAME_FIELD: &str = "name";
+/// The field holding the new command.
+const COMMAND_FIELD: &str = "command";
+/// The field saying whether `muster up` starts it.
+const AUTOSTART_FIELD: &str = "autostart";
+/// The field holding the readiness check.
+const READY_FIELD: &str = "ready";
+/// Every field the arguments may hold.
+const FIELDS: &[&str] = &[
+    PROJECT_FIELD,
+    NAME_FIELD,
+    COMMAND_FIELD,
+    WORKING_DIR_FIELD,
+    DESCRIPTION_FIELD,
+    ENVIRONMENT_SET_FIELD,
+    ENVIRONMENT_UNSET_FIELD,
+    AUTOSTART_FIELD,
+    RESTART_FIELD,
+    STOP_SIGNAL_FIELD,
+    STOP_GRACE_FIELD,
+    READY_FIELD,
+];
+
 /// The changes to make to one process of the project's stack. Fields left
-/// out keep their value.
-#[derive(Debug, Deserialize, JsonSchema, Getters, TypedBuilder)]
+/// out keep their value; `working_dir`, `description` and `ready` also take
+/// `null`, which clears them, so they are read by hand.
+#[derive(Debug, JsonSchema, Getters, TypedBuilder)]
 #[serde(deny_unknown_fields)]
 #[getset(get = "pub")]
 pub struct ProcessSetArg {
@@ -38,11 +69,9 @@ pub struct ProcessSetArg {
     #[builder(default)]
     command: Option<String>,
     /// Where it runs, relative to the project root; null runs it in the root.
-    #[serde(default, deserialize_with = "nullable")]
     #[builder(default)]
     working_dir: Option<Option<String>>,
     /// A one-line note about it; null removes it.
-    #[serde(default, deserialize_with = "nullable")]
     #[builder(default)]
     description: Option<Option<String>>,
     /// Environment variables to add or replace, by name.
@@ -64,9 +93,65 @@ pub struct ProcessSetArg {
     #[builder(default)]
     stop_grace: Option<String>,
     /// A readiness check as process_add takes; null removes it.
-    #[serde(default, deserialize_with = "nullable")]
     #[builder(default)]
     ready: Option<Option<ReadyArg>>,
+}
+
+impl<'de> Deserialize<'de> for ProcessSetArg {
+    /// Reads the arguments object field by field: an absent field keeps its
+    /// value, and a nullable one given as `null` clears it. A field this
+    /// struct does not name is refused.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let arg = Self {
+            project: given(&mut fields, PROJECT_FIELD)?,
+            name: given(&mut fields, NAME_FIELD)?
+                .ok_or_else(|| D::Error::missing_field(NAME_FIELD))?,
+            command: given(&mut fields, COMMAND_FIELD)?,
+            working_dir: nullable(&mut fields, WORKING_DIR_FIELD)?,
+            description: nullable(&mut fields, DESCRIPTION_FIELD)?,
+            environment_set: given(&mut fields, ENVIRONMENT_SET_FIELD)?,
+            environment_unset: given(&mut fields, ENVIRONMENT_UNSET_FIELD)?,
+            autostart: given(&mut fields, AUTOSTART_FIELD)?,
+            restart: given(&mut fields, RESTART_FIELD)?,
+            stop_signal: given(&mut fields, STOP_SIGNAL_FIELD)?,
+            stop_grace: given(&mut fields, STOP_GRACE_FIELD)?,
+            ready: nullable(&mut fields, READY_FIELD)?,
+        };
+        match fields.keys().next() {
+            Some(unknown) => Err(D::Error::unknown_field(unknown, FIELDS)),
+            None => Ok(arg),
+        }
+    }
+}
+
+/// The value of `field`, taken out of `fields`: none when it is absent or
+/// `null`.
+///
+/// # Errors
+/// Returns the error of a value that is not a `T`.
+fn given<T: DeserializeOwned, E: DeError>(
+    fields: &mut Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<T>, E> {
+    Ok(nullable(fields, field)?.flatten())
+}
+
+/// The value of `field`, taken out of `fields`: none when it is absent, and
+/// `Some(None)` when it is `null`.
+///
+/// # Errors
+/// Returns the error of a value that is not a `T`.
+fn nullable<T: DeserializeOwned, E: DeError>(
+    fields: &mut Map<String, Value>,
+    field: &'static str,
+) -> Result<Option<Option<T>>, E> {
+    fields
+        .remove(field)
+        .map(|value| {
+            serde_json::from_value(value).map_err(|error| E::custom(format!("{field}: {error}")))
+        })
+        .transpose()
 }
 
 impl ProcessSetArg {
@@ -153,10 +238,12 @@ impl ProcessSetArg {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     /// The arguments an agent sends as `json`.
-    fn arg(json: serde_json::Value) -> ProcessSetArg {
+    fn arg(json: Value) -> ProcessSetArg {
         serde_json::from_value(json).unwrap()
     }
 
@@ -198,6 +285,23 @@ mod tests {
             serde_json::json!({ "name": "web", "cwd": "frontend" }),
         );
 
-        assert!(refused.is_err());
+        assert!(refused.unwrap_err().to_string().contains("cwd"));
+    }
+
+    /// The name is required, a value of the wrong type is refused naming
+    /// its field, and a plain field given as null keeps its value.
+    #[test]
+    fn a_missing_name_and_a_mistyped_field_are_refused() {
+        let nameless = serde_json::from_value::<ProcessSetArg>(serde_json::json!({}));
+        let mistyped = serde_json::from_value::<ProcessSetArg>(
+            serde_json::json!({ "name": "web", "autostart": "yes" }),
+        );
+
+        assert!(nameless.unwrap_err().to_string().contains(NAME_FIELD));
+        assert!(mistyped.unwrap_err().to_string().contains(AUTOSTART_FIELD));
+        assert_eq!(
+            *arg(serde_json::json!({ "name": "web", "command": null })).command(),
+            None
+        );
     }
 }

@@ -57,8 +57,7 @@ pub fn read_capped(reader: impl Read, max: u64) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
     use tempfile::TempDir;
 
     use super::*;
@@ -84,9 +83,7 @@ mod tests {
         );
 
         let fifo = dir.path().join("fifo");
-        let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `raw` is a valid NUL-terminated path for the call's span.
-        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
         assert_eq!(
             read_bounded(&fifo, 64).unwrap_err().kind(),
             io::ErrorKind::InvalidInput

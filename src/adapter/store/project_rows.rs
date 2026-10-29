@@ -31,9 +31,9 @@ pub(super) fn root_text(root: &ProjectRoot) -> Result<&str, ConfigError> {
 
 /// Reads a `SELECT_PROJECT` row.
 fn project_from_row(row: &Row) -> Result<ProjectRow, ConfigError> {
-    let id: i64 = row.get(0).map_err(db_error)?;
-    let root: String = row.get(1).map_err(db_error)?;
-    let name: String = row.get(2).map_err(db_error)?;
+    let id: i64 = row.get("id").map_err(db_error)?;
+    let root: String = row.get("root").map_err(db_error)?;
+    let name: String = row.get("name").map_err(db_error)?;
     let project = Project::builder()
         .root(
             ProjectRoot::try_new(PathBuf::from(root))
@@ -194,7 +194,7 @@ mod tests {
         domain::{
             config::Environment,
             coordination::{Author, KvKey},
-            port::{CoordinationStore, StackStore},
+            port::{CoordinationStore, StackReader, StackStore},
             value::{EnvName, EnvValue},
         },
     };

@@ -1,4 +1,5 @@
 use nutype::nutype;
+use uuid::Uuid;
 
 /// Unique identity of one holder, safe to use as a file name: non-empty ASCII
 /// alphanumerics, hyphens and underscores only.
@@ -26,7 +27,7 @@ impl HolderId {
     /// Returns the newtype's validation error if a UUID's simple form ever
     /// stops satisfying the file-name rule.
     pub fn generate() -> Result<Self, HolderIdError> {
-        Self::try_new(uuid::Uuid::new_v4().simple().to_string())
+        Self::try_new(Uuid::new_v4().simple().to_string())
     }
 }
 

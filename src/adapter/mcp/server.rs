@@ -19,6 +19,7 @@ use tokio::task;
 use super::{
     alerts::{ALERT_KINDS, Alerts},
     alerts_view::AlertsView,
+    described::described,
     identity::Identity,
     mcp_deps::McpDeps,
     mcp_error::McpError,
@@ -107,7 +108,7 @@ pub struct MusterMcp {
     /// The events this connection has been told about.
     pub(super) alerts: Arc<Alerts>,
     /// Every tool, from the stack, process, coordination and config routers.
-    tool_router: ToolRouter<Self>,
+    pub(super) tool_router: ToolRouter<Self>,
 }
 
 impl MusterMcp {
@@ -118,10 +119,12 @@ impl MusterMcp {
             deps,
             identity,
             alerts: Arc::new(Alerts::default()),
-            tool_router: Self::stack_router()
-                + Self::process_router()
-                + Self::coordination_router()
-                + Self::config_router(),
+            tool_router: described(
+                Self::stack_router()
+                    + Self::process_router()
+                    + Self::coordination_router()
+                    + Self::config_router(),
+            ),
         }
     }
 

@@ -257,10 +257,10 @@ impl MusterMcp {
     /// Claims a todo.
     #[tool(
         description = "Take a todo so no other agent works on it. Without id, takes the oldest \
-            claimable todo. Claiming one you hold renews its lease (lease_s, default 1800, at \
-            most 28800). Returns {claimed: true, todo}, or {claimed: false, owner, \
-            expires_in_s} when another agent holds it, or {claimed: false} when nothing is \
-            claimable."
+            claimable todo. Claiming one you hold renews its lease (lease_s, default \
+            <default-lease-s>, at most <max-lease-s>). Returns {claimed: true, todo}, or \
+            {claimed: false, owner, expires_in_s} when another agent holds it, or {claimed: \
+            false} when nothing is claimable."
     )]
     pub(super) async fn todo_claim(&self, Parameters(arg): Parameters<TodoClaimArg>) -> ToolResult {
         let id = arg.id().as_deref().map(todo_id).transpose()?;
@@ -372,10 +372,10 @@ impl MusterMcp {
     /// Takes a named lock.
     #[tool(
         description = "Take a short named lock, such as \"migrations\" or \"db-reset\", before \
-            work that two agents must not do at once. Expires after ttl_s (default 300, at most \
-            3600); acquiring it again renews it. With wait_s (at most 45), waits for it to free \
-            up. Returns {acquired: true, expires_in_s}, or {acquired: false, owner, note, \
-            expires_in_s}."
+            work that two agents must not do at once. Expires after ttl_s (default \
+            <default-ttl-s>, at most <max-ttl-s>); acquiring it again renews it. With wait_s (at \
+            most <call-bound-s>), waits for it to free up. Returns {acquired: true, \
+            expires_in_s}, or {acquired: false, owner, note, expires_in_s}."
     )]
     pub(super) async fn lock_acquire(
         &self,
@@ -419,8 +419,9 @@ impl MusterMcp {
     /// Reads one note, or lists them.
     #[tool(
         description = "Without key, lists the shared notes {notes: [{key, author, updated_at}]} \
-            without bodies (limit, default 50, at most 200). With key, returns {key, body, \
-            author, updated_at}; an unknown key is flagged isError."
+            without bodies (limit, default <default-list-limit>, at most <max-list-limit>). \
+            With key, returns {key, body, author, updated_at}; an unknown key is flagged \
+            isError."
     )]
     pub(super) async fn note_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(note_key).transpose()?;
@@ -485,8 +486,8 @@ impl MusterMcp {
     /// Reads one key-value entry, or lists them.
     #[tool(
         description = "Without key, lists the shared key-values {entries: [{key, value, author, \
-            updated_at}]} (limit, default 50, at most 200). With key, returns that entry; an \
-            unknown key is flagged isError."
+            updated_at}]} (limit, default <default-list-limit>, at most <max-list-limit>). With \
+            key, returns that entry; an unknown key is flagged isError."
     )]
     pub(super) async fn kv_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(kv_key).transpose()?;

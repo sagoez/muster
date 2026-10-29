@@ -15,7 +15,7 @@ use crate::domain::{
     value::{ByteSize, DetachKey, LogMaxSize, ScrollbackLines},
 };
 
-/// Selects the settings row in the order [`settings_from_row`] reads it.
+/// Selects the settings columns [`settings_from_row`] reads by name.
 const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, default_cols, \
                                detach_key, log_max_size_bytes, scrollback_lines, color_scheme, \
                                default_autostart, default_restart, default_stop_signal, \
@@ -24,16 +24,16 @@ const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, defau
 /// Reads a [`SELECT_SETTINGS`] row, validating each value through the domain
 /// so a hand edit cannot smuggle in a value a write would refuse.
 fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
-    let rows: u16 = row.get(1).map_err(db_error)?;
-    let cols: u16 = row.get(2).map_err(db_error)?;
-    let detach_key: String = row.get(3).map_err(db_error)?;
-    let log_max_size: i64 = row.get(4).map_err(db_error)?;
-    let scrollback: i64 = row.get(5).map_err(db_error)?;
-    let color_scheme: String = row.get(6).map_err(db_error)?;
-    let default_restart: String = row.get(8).map_err(db_error)?;
-    let default_stop_signal: String = row.get(9).map_err(db_error)?;
-    let default_stop_grace_ms: i64 = row.get(10).map_err(db_error)?;
-    let mcp_stack_edits: String = row.get(11).map_err(db_error)?;
+    let rows: u16 = row.get("default_rows").map_err(db_error)?;
+    let cols: u16 = row.get("default_cols").map_err(db_error)?;
+    let detach_key: String = row.get("detach_key").map_err(db_error)?;
+    let log_max_size: i64 = row.get("log_max_size_bytes").map_err(db_error)?;
+    let scrollback: i64 = row.get("scrollback_lines").map_err(db_error)?;
+    let color_scheme: String = row.get("color_scheme").map_err(db_error)?;
+    let default_restart: String = row.get("default_restart").map_err(db_error)?;
+    let default_stop_signal: String = row.get("default_stop_signal").map_err(db_error)?;
+    let default_stop_grace_ms: i64 = row.get("default_stop_grace_ms").map_err(db_error)?;
+    let mcp_stack_edits: String = row.get("mcp_stack_edits").map_err(db_error)?;
     let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
@@ -48,7 +48,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
             ScrollbackLines::try_new(lines).map_err(|error| corrupt("scrollback", error))
         })?;
     Ok(Settings::builder()
-        .desktop_notifications(row.get(0).map_err(db_error)?)
+        .desktop_notifications(row.get("desktop_notifications").map_err(db_error)?)
         .default_size(default_size)
         .detach_key(DetachKey::try_new(detach_key).map_err(|error| corrupt("detach key", error))?)
         .log_max_size(log_max_size)
@@ -58,7 +58,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
                 .parse()
                 .map_err(|error| corrupt("color scheme", error))?,
         )
-        .default_autostart(row.get(7).map_err(db_error)?)
+        .default_autostart(row.get("default_autostart").map_err(db_error)?)
         .default_restart(
             default_restart
                 .parse()

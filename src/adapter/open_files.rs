@@ -1,56 +1,42 @@
-use std::{io, os::unix::process::CommandExt, process::Command};
+use std::{os::unix::process::CommandExt, process::Command};
 
 use nutype::nutype;
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
-/// A soft limit on open files. The service records its own before `sysinfo`
-/// raises it to the hard limit, and starts every holder back at it, so a child
-/// runs with the limit the user gave muster.
+/// A soft limit on open files, `None` when unlimited. The service records its
+/// own before `sysinfo` raises it to the hard limit, and starts every holder
+/// back at it, so a child runs with the limit the user gave muster.
 #[nutype(derive(Debug, Clone, Copy, PartialEq, Eq))]
-pub struct OpenFilesLimit(libc::rlim_t);
+pub struct OpenFilesLimit(Option<u64>);
 
 impl OpenFilesLimit {
     /// The calling process's current soft limit on open files.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] when the limit cannot be read.
-    pub fn current() -> io::Result<Self> {
-        let limits = open_files_limits()?;
-        Ok(Self::new(limits.rlim_cur))
+    pub fn current() -> Self {
+        Self::new(getrlimit(Resource::Nofile).current)
     }
 
     /// Makes `command` start with this soft limit, capped at its hard limit.
     pub fn restore_in(self, command: &mut Command) -> &mut Command {
         let soft = self.into_inner();
-        // SAFETY: the hook runs between fork and exec and only calls
-        // `getrlimit` and `setrlimit`, which are async-signal-safe and touch
-        // only the stack value they are given.
+        // SAFETY: the hook runs between fork and exec and only makes the
+        // `getrlimit` and `setrlimit` system calls, which are
+        // async-signal-safe, allocate nothing and touch only stack values.
         unsafe {
             command.pre_exec(move || {
-                let mut limits = open_files_limits()?;
-                limits.rlim_cur = soft.min(limits.rlim_max);
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
+                let limits = getrlimit(Resource::Nofile);
+                let current = match (soft, limits.maximum) {
+                    (Some(soft), Some(hard)) => Some(soft.min(hard)),
+                    (Some(soft), None) => Some(soft),
+                    (None, hard) => hard,
+                };
+                setrlimit(Resource::Nofile, Rlimit {
+                    current,
+                    maximum: limits.maximum,
+                })?;
                 Ok(())
             })
         }
     }
-}
-
-/// The calling process's soft and hard limits on open files.
-///
-/// # Errors
-/// Returns an [`io::Error`] when they cannot be read.
-fn open_files_limits() -> io::Result<libc::rlimit> {
-    let mut limits = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `getrlimit` only writes the struct it is handed.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(limits)
 }
 
 #[cfg(test)]
@@ -58,7 +44,7 @@ mod tests {
     use super::*;
 
     /// A soft limit below any hard limit a test host has.
-    const LOWERED: libc::rlim_t = 64;
+    const LOWERED: Option<u64> = Some(64);
     /// Prints the shell's soft limit on open files.
     const PRINT_SOFT_LIMIT: &str = "ulimit -Sn";
 
@@ -76,18 +62,16 @@ mod tests {
 
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
-            LOWERED.to_string()
+            LOWERED.unwrap().to_string()
         );
     }
 
     /// The current limit reads the calling process's own soft limit.
     #[test]
     fn the_current_limit_is_the_soft_limit() {
-        let limits = open_files_limits().unwrap();
-
         assert_eq!(
-            OpenFilesLimit::current().unwrap().into_inner(),
-            limits.rlim_cur
+            OpenFilesLimit::current().into_inner(),
+            getrlimit(Resource::Nofile).current
         );
     }
 }

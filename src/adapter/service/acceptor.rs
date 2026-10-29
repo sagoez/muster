@@ -15,6 +15,8 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use serde_json::Value;
+use uuid::Uuid;
 
 use super::{
     event::ServiceEvent, service_error::ServiceError, service_error_body::ServiceErrorBody,
@@ -117,7 +119,7 @@ fn bind_private(socket: &Path) -> Result<UnixListener, ServiceError> {
     let staging = parent.join(format!(
         "{STAGING_PREFIX}{}-{}",
         process::id(),
-        uuid::Uuid::new_v4().simple()
+        Uuid::new_v4().simple()
     ));
     DirBuilder::new()
         .mode(STAGING_DIR_MODE)
@@ -158,9 +160,7 @@ fn spawn_acceptor(
             let alive = alive.clone();
             thread::spawn(move || {
                 let _alive = alive;
-                let _ = ipc::serve_connection(stream, |request: serde_json::Value| {
-                    answer(&events, request)
-                });
+                let _ = ipc::serve_connection(stream, |request: Value| answer(&events, request));
             });
         }
     })
@@ -172,7 +172,7 @@ fn spawn_acceptor(
 /// unbounded on purpose: the loop holds the only reply sender, so it either
 /// answers or drops it, and a client never sees an error for a request the
 /// loop later carries out.
-fn answer(events: &Sender<ServiceEvent>, request: serde_json::Value) -> ServiceResponse {
+fn answer(events: &Sender<ServiceEvent>, request: Value) -> ServiceResponse {
     let request = match serde_json::from_value::<ServiceRequest>(request) {
         Ok(request) => request,
         Err(error) => {
@@ -202,18 +202,16 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::adapter::test_scratch::short_scratch;
 
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
+    /// Prefix of every test scratch directory.
+    const SCRATCH_PREFIX: &str = "ma-";
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
 
     /// A scratch directory short enough to bind sockets in.
     fn scratch() -> TempDir {
-        tempfile::Builder::new()
-            .prefix("ma-")
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap()
+        short_scratch(SCRATCH_PREFIX)
     }
 
     /// The socket is its owner's alone from the moment it is reachable, and a

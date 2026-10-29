@@ -44,6 +44,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use rustix::process::Signal;
+
     use crate::{
         adapter::service::{LaunchEnvironment, supervisor::testing::*},
         domain::{
@@ -208,7 +210,7 @@ mod tests {
 
         harness.supervisor.apply_stack(&stack(&[]));
         assert_eq!(state_of(&harness, "web"), ProcessState::Stopping);
-        assert!(orphan.end_with(libc::SIGKILL).is_some(), "the orphan ended");
+        assert!(orphan.end_with(Signal::KILL).is_some(), "the orphan ended");
         let pane = PaneId::new(0);
         let spawn = harness.supervisor.generations()[&pane];
         let shutdown = harness.supervisor.panes()[&pane].shutdown_generation();

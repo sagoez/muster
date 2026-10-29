@@ -3,7 +3,7 @@ use nutype::nutype;
 /// The most bytes of text one log read returns.
 pub const MAX_LOG_BYTES: usize = 64 * 1024;
 /// Bytes of text a log read returns when the caller names no limit.
-const DEFAULT_LOG_BYTES: usize = 16 * 1024;
+pub const DEFAULT_LOG_BYTES: usize = 16 * 1024;
 
 /// How many bytes of text a log read returns at most: 1 to
 /// [`MAX_LOG_BYTES`], counting each line and its line feed.

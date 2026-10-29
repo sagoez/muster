@@ -420,11 +420,8 @@ fn reported_failure(socket: &Path, error_file: &Path) -> Option<HolderError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        os::{
-            fd::AsRawFd,
-            unix::net::{UnixDatagram, UnixListener},
-        },
+        fs, mem,
+        os::unix::net::{UnixDatagram, UnixListener},
         path::PathBuf,
         process,
         sync::{
@@ -435,7 +432,7 @@ mod tests {
     };
 
     use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-    use rustix::process::Signal;
+    use rustix::{net::listen, process::Signal};
     use tempfile::TempDir;
 
     use super::*;
@@ -448,6 +445,7 @@ mod tests {
                 testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
             },
             terminal::TerminalEmulator,
+            test_scratch::short_scratch,
         },
         domain::{
             color_scheme::ColorScheme,
@@ -464,8 +462,6 @@ mod tests {
     /// Longest one screen probe waits for the holder, far below [`WAIT`] so a
     /// polling loop stays within its bound.
     const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mr-";
     /// PTY rows of every test child.
@@ -697,10 +693,7 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let scratch = tempfile::Builder::new()
-                .prefix(SCRATCH_PREFIX)
-                .tempdir_in(SHORT_TEMP_ROOT)
-                .unwrap();
+            let scratch = short_scratch(SCRATCH_PREFIX);
             let root = scratch.path();
             let dirs = HolderDirs::builder()
                 .sockets(root.join("sock"))
@@ -791,7 +784,7 @@ mod tests {
                 abandon(record.socket());
             }
             let started = Instant::now();
-            let holders = std::mem::take(&mut *self.holders.lock().unwrap());
+            let holders = mem::take(&mut *self.holders.lock().unwrap());
             for holder in holders {
                 while !holder.is_finished() && started.elapsed() < WAIT {
                     thread::sleep(POLL);
@@ -1129,9 +1122,7 @@ mod tests {
         fixture.dirs.prepare_sockets().unwrap();
         let record = save_reused_pid_record(&fixture, own_pid(), foreign_start_token());
         let listener = UnixListener::bind(record.socket()).unwrap();
-        // SAFETY: `listen` takes the listener's open descriptor and a plain
-        // integer, and only lowers its backlog so one queued connect fills it.
-        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        listen(&listener, 0).unwrap();
         let _queued = UnixStream::connect(record.socket()).unwrap();
 
         let (sender, probed) = bounded(1);

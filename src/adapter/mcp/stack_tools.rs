@@ -93,10 +93,10 @@ impl MusterMcp {
     #[tool(
         description = "Start every autostart process of this project that is not running. With \
             wait=true, waits until each one is ready (or running, when it has no readiness \
-            check), at most timeout_s (default 30, at most 45). Returns {project, started, \
-            already_running, refused: [{name, reason}], others: [{name, outcome}] (crashed, \
-            exited or not settled in time), notices, waits, alerts}. Flagged isError when any \
-            process failed to start or crashed while waiting."
+            check), at most timeout_s (default <default-wait-s>, at most <call-bound-s>). \
+            Returns {project, started, already_running, refused: [{name, reason}], others: \
+            [{name, outcome}] (crashed, exited or not settled in time), notices, waits, alerts}. \
+            Flagged isError when any process failed to start or crashed while waiting."
     )]
     pub(super) async fn stack_up(
         &self,
@@ -110,9 +110,10 @@ impl MusterMcp {
     #[tool(
         description = "Lifecycle events of this project after the cursor since: started, ready, \
             ready-timeout, exited, crashed, restarting, stopped, blocked, notice. Without since, \
-            returns the last 20. With wait_s (at most 45), blocks until at least one new event \
-            arrives. Returns {events: [{seq, at, process, kind, detail}], cursor, gap, alerts}; \
-            pass cursor as since next time. gap=true means older events were dropped."
+            returns the last <events-without-since>. With wait_s (at most <call-bound-s>), \
+            blocks until at least one new event arrives. Returns {events: [{seq, at, process, \
+            kind, detail}], cursor, gap, alerts}; pass cursor as since next time. gap=true \
+            means older events were dropped."
     )]
     pub(super) async fn stack_events(
         &self,
@@ -199,6 +200,8 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
+    use rmcp::model::ErrorCode;
+
     use super::*;
     use crate::adapter::mcp::test_support::{answered, fixture, refusal, register, runtime};
 
@@ -266,7 +269,7 @@ mod tests {
                     .await,
             )
             .unwrap_err();
-            assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+            assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
         });
     }
 }

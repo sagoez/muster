@@ -1,5 +1,6 @@
 use std::{io, path::PathBuf};
 
+use serde_json::Error as JsonError;
 use thiserror::Error;
 
 use super::frame::FrameTag;
@@ -16,7 +17,7 @@ pub enum HolderError {
     Pty(#[from] PtyError),
     /// A message body could not be encoded or decoded.
     #[error("holder message is not valid json: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(#[from] JsonError),
     /// A frame arrived that this side of the protocol never receives.
     #[error("unexpected holder frame: {0:?}")]
     UnexpectedFrame(FrameTag),

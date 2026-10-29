@@ -9,7 +9,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
+use rusqlite::{
+    Connection, Error as SqliteError, ErrorCode, OpenFlags, Result as SqliteResult,
+    TransactionBehavior,
+};
 
 use super::StoreError;
 use crate::{
@@ -66,7 +69,7 @@ impl SqliteStore {
     /// Returns a [`StoreError::NoStateDir`] storage failure without a state
     /// directory, or what [`SqliteStore::open`] returns.
     pub fn open_default() -> Result<Self, ConfigError> {
-        let dir = state_dir().ok_or(StoreError::NoStateDir)?;
+        let dir = state_dir().map_err(StoreError::from)?;
         Self::open(&dir.join(DATABASE_FILE))
     }
 
@@ -244,7 +247,7 @@ fn pending_from(conn: &Connection) -> Result<Option<usize>, ConfigError> {
 ///
 /// # Errors
 /// Returns the driver's error, or the busy error once the time is up.
-fn switch_to_wal(conn: &Connection) -> rusqlite::Result<()> {
+fn switch_to_wal(conn: &Connection) -> SqliteResult<()> {
     let deadline = Instant::now() + BUSY_TIMEOUT;
     loop {
         match conn.execute_batch(CONNECTION_PRAGMAS) {
@@ -261,7 +264,7 @@ fn switch_to_wal(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Maps a driver error to the domain error, keeping `rusqlite` out of the
 /// domain.
-pub(super) fn db_error(error: rusqlite::Error) -> ConfigError {
+pub(super) fn db_error(error: SqliteError) -> ConfigError {
     StoreError::Sqlite(error).into()
 }
 
@@ -346,7 +349,7 @@ mod tests {
         adapter::store::test_support::spec,
         domain::{
             config::SettingChange,
-            port::{ProjectStore, SettingsStore, StackStore},
+            port::{ProjectStore, SettingsStore, StackReader, StackStore},
             value::{ProjectRoot, StackRevision},
         },
     };

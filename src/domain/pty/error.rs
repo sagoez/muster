@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
@@ -9,7 +9,7 @@ use crate::domain::value::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS};
 pub enum PtyError {
     /// An I/O failure reading from or writing to the PTY.
     #[error("pty i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     /// The underlying PTY system reported a failure.
     #[error("pty operation failed: {0}")]
     System(String),

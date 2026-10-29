@@ -58,38 +58,38 @@ const NO_KIND: &str = "none";
 #[serde(deny_unknown_fields)]
 pub struct ConditionArg {
     /// A line of output containing this text; a regex with regex=true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get = "pub")]
     log: Option<String>,
     /// Read log as a regex over one line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     regex: Option<bool>,
     /// A TCP port on localhost that accepts a connection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     port: Option<u16>,
     /// A URL on localhost that answers below 500 (or with status).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get = "pub")]
     http: Option<String>,
     /// The HTTP status to wait for, with http.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     status: Option<u16>,
     /// A lifecycle state as stack_status shows it; stopped means not running
     /// for any reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get = "pub")]
     state: Option<String>,
     /// true waits until the process's stored readiness check passes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     ready: Option<bool>,
@@ -189,6 +189,8 @@ fn state_goal(field: &'static str, raw: &str) -> Result<StateGoal, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use crate::adapter::client::ConditionView;
 
@@ -196,14 +198,14 @@ mod tests {
     const FIELD: &str = "until";
 
     /// The condition an agent sent as `json`.
-    fn read(json: serde_json::Value) -> Result<WaitCondition, ToolError> {
+    fn read(json: Value) -> Result<WaitCondition, ToolError> {
         serde_json::from_value::<ConditionArg>(json)
             .unwrap()
             .condition(FIELD)
     }
 
     /// The refusal text of the condition an agent sent as `json`.
-    fn refused(json: serde_json::Value) -> String {
+    fn refused(json: Value) -> String {
         read(json).unwrap_err().to_string()
     }
 

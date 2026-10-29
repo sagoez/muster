@@ -1,26 +1,13 @@
+use super::StackReader;
 use crate::domain::{
-    config::{
-        ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration, Stack,
-    },
-    value::{ProcessName, ProjectRoot, StackRevision},
+    config::{ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration},
+    value::{ProcessName, ProjectRoot},
 };
 
-/// Driven port: each project's process definitions. Every write is one atomic
-/// transaction, and moves the project's [`StackRevision`].
-pub trait StackStore {
-    /// The project's stack, or none when `root` is not registered.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the store cannot be read.
-    fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError>;
-
-    /// The revision the project's stack is at, or none when `root` is not
-    /// registered.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the store cannot be read.
-    fn stack_revision(&self, root: &ProjectRoot) -> Result<Option<StackRevision>, ConfigError>;
-
+/// Driven port: each project's process definitions, read and written. Every
+/// write is one atomic transaction, and moves the project's
+/// [`StackRevision`](crate::domain::value::StackRevision).
+pub trait StackStore: StackReader {
     /// Adds `spec`, registering `root` first when it is not a project.
     ///
     /// # Errors

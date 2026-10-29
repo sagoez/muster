@@ -763,8 +763,6 @@ pub enum CoordinationCommand {
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
-
     use super::*;
 
     /// Completions and usage must register the binary name, not the package
@@ -782,7 +780,7 @@ mod tests {
 
     /// Appends the help of `command`, invoked as `invocation`, and of each of
     /// its visible subcommands to `helps`.
-    fn collect_help(command: &mut clap::Command, invocation: &str, helps: &mut Vec<String>) {
+    fn collect_help(command: &mut ClapCommand, invocation: &str, helps: &mut Vec<String>) {
         helps.push(format!("$ {invocation} --help\n{}", command.render_help()));
         for sub in command
             .get_subcommands_mut()

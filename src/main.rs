@@ -141,8 +141,8 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
 /// Returns a [`MusterError`] when the state directory, database or service
 /// cannot be set up.
 fn run_service() -> Result<(), MusterError> {
-    let open_files = OpenFilesLimit::current()?;
-    let state_dir = state_dir().ok_or(ServiceError::NoStateDir)?;
+    let open_files = OpenFilesLimit::current();
+    let state_dir = state_dir().map_err(ServiceError::from)?;
     prepare_state_dir(&state_dir)?;
     redirect_stderr(&protocol::log_path(&state_dir))?;
     let Some(singleton) = Singleton::acquire(&state_dir)? else {

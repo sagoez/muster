@@ -35,22 +35,18 @@ const NO_PROBE: &str = "none";
 pub struct ReadyArg {
     /// Ready once a line of output contains this text; a regex with
     /// regex=true.
-    #[serde(default)]
     #[builder(default)]
     #[getset(get = "pub")]
     log: Option<String>,
     /// Read log as a regex over one line.
-    #[serde(default)]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     regex: Option<bool>,
     /// Ready once this localhost TCP port accepts a connection.
-    #[serde(default)]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     port: Option<u16>,
     /// Ready once this localhost URL answers below 500.
-    #[serde(default)]
     #[builder(default)]
     #[getset(get = "pub")]
     http: Option<String>,
@@ -104,10 +100,12 @@ impl ReadyArg {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     /// The check an agent sent as `json`.
-    fn read(json: serde_json::Value) -> Result<ReadyCheck, ToolError> {
+    fn read(json: Value) -> Result<ReadyCheck, ToolError> {
         serde_json::from_value::<ReadyArg>(json).unwrap().check()
     }
 

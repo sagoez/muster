@@ -7,7 +7,7 @@
 
 use std::{
     ffi::OsString,
-    fs, io,
+    fs,
     os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -32,7 +32,10 @@ use muster::{
         value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
     },
 };
-use tempfile::TempDir;
+use rustix::process::{
+    Pid as RawPid, Resource, Rlimit, Signal, getrlimit, kill_process, kill_process_group, setrlimit,
+};
+use tempfile::{Builder, TempDir};
 
 /// The muster binary cargo built for this test.
 const BINARY: &str = env!("CARGO_BIN_EXE_muster");
@@ -81,7 +84,7 @@ const REMOVED_NOTICE: &str = "stopped: removed from the project";
 const OPEN_FILES_ROW: &str = "Max open files";
 /// The open-files soft limit a service is started with, below the hard limit
 /// `sysinfo` would raise it to.
-const SERVICE_OPEN_FILES: libc::rlim_t = 1000;
+const SERVICE_OPEN_FILES: u64 = 1000;
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -112,16 +115,8 @@ fn processes_under(subcommand: &str, root: &Path) -> Vec<u32> {
 }
 
 /// This process's soft and hard limits on open files.
-fn open_files_limits() -> libc::rlimit {
-    let mut limits = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `getrlimit` only writes the struct it is handed.
-    unsafe {
-        libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits);
-    }
-    limits
+fn open_files_limits() -> Rlimit {
+    getrlimit(Resource::Nofile)
 }
 
 /// The soft limit on open files of the process `pid`.
@@ -183,7 +178,7 @@ impl Scratch {
     /// A fresh scratch directory short enough to bind sockets in, whose
     /// database has desktop notifications off.
     fn new() -> Self {
-        let root = tempfile::Builder::new()
+        let root = Builder::new()
             .prefix(SCRATCH_PREFIX)
             .tempdir_in(SHORT_TEMP_ROOT)
             .unwrap();
@@ -329,17 +324,17 @@ impl Scratch {
 
     /// Starts `muster __service` with an open-files soft limit of `soft`, as
     /// a user's own `ulimit` would leave it, and waits until it accepts.
-    fn start_service_with_open_files(&self, soft: libc::rlim_t) -> Child {
+    fn start_service_with_open_files(&self, soft: u64) -> Child {
         let mut command = self.service_command();
-        // SAFETY: the hook only calls `getrlimit` and `setrlimit`, which are
-        // async-signal-safe and touch only the stack value they are given.
+        // SAFETY: the hook runs between fork and exec and only makes the
+        // `getrlimit` and `setrlimit` system calls, which are
+        // async-signal-safe and touch only stack values.
         unsafe {
             command.pre_exec(move || {
-                let mut limits = open_files_limits();
-                limits.rlim_cur = soft;
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
+                setrlimit(Resource::Nofile, Rlimit {
+                    current: Some(soft),
+                    maximum: open_files_limits().maximum,
+                })?;
                 Ok(())
             });
         }
@@ -392,10 +387,9 @@ impl Drop for Scratch {
             .chain(processes_under(SERVICE_SUBCOMMAND, self.root.path()))
             .chain(processes_under(HOLDER_SUBCOMMAND, self.root.path()))
         {
-            // SAFETY: `kill` takes plain integers and touches no memory.
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            if let Some(pid) = RawPid::from_raw(pid as i32) {
+                let _ = kill_process_group(pid, Signal::KILL);
+                let _ = kill_process(pid, Signal::KILL);
             }
         }
     }
@@ -403,14 +397,13 @@ impl Drop for Scratch {
 
 /// Sends SIGKILL to the process `pid`, as a crash or the OOM killer would.
 fn kill_hard(pid: u32) {
-    signal(pid, libc::SIGKILL);
+    signal(pid, Signal::KILL);
 }
 
 /// Sends `signal` to the process `pid`.
-fn signal(pid: u32, signal: libc::c_int) {
-    // SAFETY: `kill` takes plain integers and touches no memory.
-    unsafe {
-        libc::kill(pid as libc::pid_t, signal);
+fn signal(pid: u32, signal: Signal) {
+    if let Some(pid) = RawPid::from_raw(pid as i32) {
+        let _ = kill_process(pid, signal);
     }
 }
 
@@ -513,7 +506,7 @@ fn a_holder_killed_with_its_child_is_told_as_a_crash() {
     let child = scratch.up_running(&project).pid().unwrap().into_inner();
     let holder = scratch.holders()[0];
 
-    signal(holder, libc::SIGSTOP);
+    signal(holder, Signal::STOP);
     kill_hard(child);
     wait_until("the child to die unreaped", || exited(child));
     kill_hard(holder);
@@ -713,7 +706,7 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
 /// `sysinfo` raised the service's own to.
 #[test]
 fn a_child_keeps_the_open_files_limit_the_service_started_with() {
-    let hard = open_files_limits().rlim_max;
+    let hard = open_files_limits().maximum.unwrap_or(u64::MAX);
     assert!(
         hard > SERVICE_OPEN_FILES,
         "the hard limit leaves room to raise"

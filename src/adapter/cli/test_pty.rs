@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use libc::O_NOCTTY;
 use rustix::{
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
     termios::{Termios, Winsize, tcgetattr, tcsetwinsize},
@@ -61,7 +62,7 @@ impl TestPty {
         let slave: OwnedFd = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NOCTTY)
+            .custom_flags(O_NOCTTY)
             .open(path.to_str().unwrap())
             .unwrap()
             .into();

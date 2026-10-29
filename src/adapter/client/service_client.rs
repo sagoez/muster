@@ -164,7 +164,7 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when there is no state directory or the binary
     /// cannot be found.
     fn local() -> Result<Self, ClientError> {
-        let state_dir = state_dir().ok_or(ClientError::NoStateDir)?;
+        let state_dir = state_dir()?;
         let socket = protocol::socket_path(&state_dir);
         let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),

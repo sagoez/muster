@@ -25,10 +25,10 @@ RETURNING expires_at";
 
 /// Reads a lock row selected as [`LOCK_COLUMNS`].
 fn lock_from_row(row: &Row) -> Result<Lock, ConfigError> {
-    let name: String = row.get(0).map_err(db_error)?;
-    let owner: String = row.get(1).map_err(db_error)?;
-    let note: Option<String> = row.get(2).map_err(db_error)?;
-    let expires_at: i64 = row.get(3).map_err(db_error)?;
+    let name: String = row.get("name").map_err(db_error)?;
+    let owner: String = row.get("owner").map_err(db_error)?;
+    let note: Option<String> = row.get("note").map_err(db_error)?;
+    let expires_at: i64 = row.get("expires_at").map_err(db_error)?;
     Ok(Lock::builder()
         .name(LockName::try_new(name).map_err(|error| corrupt("lock name", error))?)
         .owner(Author::from_label(&owner))

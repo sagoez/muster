@@ -4,6 +4,7 @@ use getset::Getters;
 use nutype::nutype;
 use strum::{Display, EnumString};
 use typed_builder::TypedBuilder;
+use uuid::Uuid;
 
 use crate::domain::coordination::{Author, TodoChange, TodoUpdate};
 
@@ -32,7 +33,7 @@ impl TodoId {
     /// Returns the generated newtype's validation error if its invariant ever
     /// diverges from UUID's non-empty textual representation.
     pub fn generate() -> Result<Self, TodoIdError> {
-        Self::try_new(uuid::Uuid::new_v4().to_string())
+        Self::try_new(Uuid::new_v4().to_string())
     }
 }
 

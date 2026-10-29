@@ -9,9 +9,13 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use rustix::process::geteuid;
+
+use super::no_state_dir::NoStateDir;
+use crate::constants::APP_NAME;
 
 /// Application directory name under the platform's state location.
-const APP_DIR: &str = "muster";
+const APP_DIR: &str = APP_NAME;
 
 /// Mode of a private directory: its owner's alone.
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
@@ -20,12 +24,17 @@ pub const GROUP_OTHER_BITS: u32 = 0o077;
 
 /// Muster's platform state directory (`~/.local/state/muster` on Linux),
 /// falling back to local data on platforms without a distinct state location.
-pub fn state_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", APP_DIR).map(|dirs| {
-        dirs.state_dir()
-            .unwrap_or_else(|| dirs.data_local_dir())
-            .to_path_buf()
-    })
+///
+/// # Errors
+/// Returns [`NoStateDir`] when the platform offers no such location.
+pub fn state_dir() -> Result<PathBuf, NoStateDir> {
+    ProjectDirs::from("", "", APP_DIR)
+        .map(|dirs| {
+            dirs.state_dir()
+                .unwrap_or_else(|| dirs.data_local_dir())
+                .to_path_buf()
+        })
+        .ok_or(NoStateDir)
 }
 
 /// Creates `dir` and any missing parents owner-only. An existing directory is
@@ -52,8 +61,7 @@ pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
 pub fn prepare_state_dir(state_dir: &Path) -> io::Result<()> {
     create_private_dir_all(state_dir)?;
     let metadata = fs::metadata(state_dir)?;
-    // SAFETY: `geteuid` takes no arguments, touches no memory and cannot fail.
-    let user = unsafe { libc::geteuid() };
+    let user = geteuid().as_raw();
     if metadata.uid() != user {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -120,8 +128,7 @@ mod tests {
     /// as it is.
     #[test]
     fn a_state_dir_another_user_owns_is_refused() {
-        // SAFETY: `geteuid` takes no arguments and touches no memory.
-        if unsafe { libc::geteuid() } == 0 {
+        if geteuid().is_root() {
             return;
         }
         let root = Path::new(ROOT_OWNED_DIR);

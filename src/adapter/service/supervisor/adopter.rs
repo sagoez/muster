@@ -510,7 +510,9 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    use crossbeam_channel::bounded;
+    use crossbeam_channel::{Receiver, bounded};
+    use rustix::process::Signal;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::{
@@ -523,6 +525,7 @@ mod tests {
                     unsupervised::UNSUPERVISED_ROW_REMOVED, unsupervised_child::UnsupervisedChild,
                 },
             },
+            test_scratch::short_scratch,
         },
         domain::{
             port::{ProcessInput, ProcessRunner},
@@ -556,8 +559,6 @@ mod tests {
     /// Within this a stopped child's early exit is seen, well inside
     /// [`LONG_STOP_GRACE`].
     const EARLY_EXIT_BOUND: Duration = Duration::from_secs(2);
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "ma-";
 
@@ -778,17 +779,14 @@ mod tests {
     /// supervisor, tells it the child exited, and reports whether the exit
     /// was collected.
     struct ExitedHolder {
-        _scratch: tempfile::TempDir,
+        _scratch: TempDir,
         socket: PathBuf,
-        collected: crossbeam_channel::Receiver<()>,
+        collected: Receiver<()>,
     }
 
     impl ExitedHolder {
         fn serve() -> Self {
-            let scratch = tempfile::Builder::new()
-                .prefix(SCRATCH_PREFIX)
-                .tempdir_in(SHORT_TEMP_ROOT)
-                .unwrap();
+            let scratch = short_scratch(SCRATCH_PREFIX);
             let socket = scratch.path().join("h.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             let (sender, collected) = bounded(1);
@@ -1347,7 +1345,7 @@ mod tests {
     fn an_orphan_that_exits_on_its_own_no_longer_blocks_a_start() {
         let orphan = Orphan::spawn();
         let (mut harness, spawns) = configured_unsupervised(&orphan);
-        assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
+        assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
         assert_eq!(*harness.supervisor.snapshot().processes()[0].pid(), None);
         harness.supervisor.start(&p(), &no_env());
@@ -1375,8 +1373,8 @@ mod tests {
 
         assert_eq!(state(&harness), ProcessState::Exited);
         assert_eq!(
-            orphan.end_with(libc::SIGUSR1),
-            Some(libc::SIGUSR1),
+            orphan.end_with(Signal::USR1),
+            Some(Signal::USR1.as_raw()),
             "the stop sent the reused pid nothing"
         );
     }
@@ -1460,7 +1458,7 @@ mod tests {
         harness.supervisor.stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
         let stopped = Instant::now();
-        assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
+        assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
         drive_until_exited(&mut harness);
 
         assert!(
@@ -1476,7 +1474,7 @@ mod tests {
     fn a_gone_unsupervised_child_shows_as_exited() {
         let orphan = Orphan::spawn();
         let (harness, _) = configured_unsupervised(&orphan);
-        assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
+        assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
         let status = harness.supervisor.snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Exited);
@@ -1507,7 +1505,7 @@ mod tests {
         let (mut harness, spawns) = configured_unsupervised(&orphan);
         let old = PaneId::new(PANE);
         harness.supervisor.apply_stack(&stack(&[]));
-        assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
+        assert_eq!(orphan.end_with(Signal::KILL), Some(Signal::KILL.as_raw()));
 
         harness.supervisor.start(&p(), &no_env());
 

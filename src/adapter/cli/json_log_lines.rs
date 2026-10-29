@@ -133,6 +133,8 @@ fn incomplete_tail(bytes: &[u8]) -> usize {
 mod tests {
     use std::{path::PathBuf, thread};
 
+    use serde_json::Value;
+
     use super::*;
     use crate::{
         adapter::client::ProjectIdentityView,
@@ -175,7 +177,7 @@ mod tests {
             .unwrap()
             .lines()
             .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line).unwrap()["text"]
+                serde_json::from_str::<Value>(line).unwrap()["text"]
                     .as_str()
                     .unwrap()
                     .to_string()
@@ -299,7 +301,7 @@ mod tests {
             lines.flush().unwrap();
         }
 
-        let objects: Vec<serde_json::Value> = String::from_utf8(out)
+        let objects: Vec<Value> = String::from_utf8(out)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())

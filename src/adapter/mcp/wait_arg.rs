@@ -43,6 +43,8 @@ impl WaitArg {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use crate::adapter::service::WaitCondition;
 
@@ -50,7 +52,7 @@ mod tests {
     const BOUND: Duration = Duration::from_secs(30);
 
     /// The wait an agent sent as `json`.
-    fn read(json: serde_json::Value) -> Option<WaitSpec> {
+    fn read(json: Value) -> Option<WaitSpec> {
         serde_json::from_value::<WaitArg>(json)
             .unwrap()
             .spec(BOUND)

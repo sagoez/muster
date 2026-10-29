@@ -122,7 +122,7 @@ fn status_words(status: WaitStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, thread};
 
     use super::*;
     use crate::{
@@ -183,7 +183,7 @@ mod tests {
             Some(Duration::from_millis(1)),
             |spec| {
                 assert!(*spec.timeout() <= Duration::from_millis(1));
-                std::thread::sleep(Duration::from_millis(5));
+                thread::sleep(Duration::from_millis(5));
                 Ok(outcome(WaitStatus::Waiting, 0))
             },
             |_| panic!("the limit passed"),

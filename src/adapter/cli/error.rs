@@ -298,7 +298,45 @@ impl CliError {
         match self {
             Self::Client(error) => error.candidates(),
             Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
-            _ => &[],
+            Self::Config(_)
+            | Self::UnknownProject(_)
+            | Self::NotAProject { .. }
+            | Self::NothingRunning(_)
+            | Self::UnknownNote(_)
+            | Self::UnknownTodo(_)
+            | Self::UnknownValue(_)
+            | Self::Output(_)
+            | Self::Terminal(_)
+            | Self::AttachLost { .. }
+            | Self::ReadFile { .. }
+            | Self::WriteFile { .. }
+            | Self::CurrentDir(_)
+            | Self::Usage(_)
+            | Self::Cancelled
+            | Self::NothingToChange
+            | Self::NeedsYes(_)
+            | Self::NotATerminal
+            | Self::CannotAsk { .. }
+            | Self::NothingToChoose(_)
+            | Self::InvalidNoteKey(_)
+            | Self::InvalidTodoTitle(_)
+            | Self::InvalidTodoId(_)
+            | Self::HeldByOther { .. }
+            | Self::InvalidLockName(_)
+            | Self::InvalidKvKey(_)
+            | Self::InvalidName(_)
+            | Self::EmptyCommand
+            | Self::InvalidCommand
+            | Self::InvalidEnv(_)
+            | Self::InvalidPattern(_)
+            | Self::EmptyDescription
+            | Self::NotADirectory(_)
+            | Self::UnrepresentablePath(_)
+            | Self::ProcessNameTaken { .. }
+            | Self::StackFile { .. }
+            | Self::SnapshotFile { .. }
+            | Self::FileExists(_)
+            | Self::Unexportable { .. } => &[],
         }
     }
 
@@ -330,7 +368,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::Refused { kind, .. } => format!("{error}{}", refusal_hint(*kind)),
         ClientError::Interrupted => format!("{error}, {INTERRUPTED_HINT}"),
         ClientError::CursorAhead { .. } => format!("{error}; {CURSOR_HINT}"),
-        ClientError::NoStateDir
+        ClientError::NoStateDir(_)
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }
         | ClientError::UnknownProcess { .. }

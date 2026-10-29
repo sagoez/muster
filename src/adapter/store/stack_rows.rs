@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, Row, ffi, params, params_from_iter, types::Value};
+use rusqlite::{
+    Connection, Error as SqliteError, OptionalExtension, Row, ffi, params, params_from_iter,
+    types::Value,
+};
 
 use super::{
     project_rows::{ProjectRow, find_project, register, require_project, root_text},
@@ -17,14 +20,13 @@ use crate::domain::{
         ConfigError, Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
         Stack,
     },
-    port::StackStore,
+    port::{StackReader, StackStore},
     process::{ReadyCheck, ReadyProbe, StopPolicy},
     project::Project,
     value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StackRevision},
 };
 
-/// Selects a process's definition columns in the order
-/// [`process_from_row`] reads them.
+/// Selects the definition columns [`process_from_row`] reads by name.
 const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description, autostart, \
                               restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
                               ready_timeout_ms FROM processes";
@@ -47,18 +49,18 @@ fn process_from_row(
     row: &Row,
     environments: &mut HashMap<i64, Environment>,
 ) -> Result<ProcessSpec, ConfigError> {
-    let id: i64 = row.get(0).map_err(db_error)?;
-    let name: String = row.get(1).map_err(db_error)?;
-    let command: String = row.get(2).map_err(db_error)?;
-    let working_dir: Option<String> = row.get(3).map_err(db_error)?;
-    let description: Option<String> = row.get(4).map_err(db_error)?;
-    let autostart: bool = row.get(5).map_err(db_error)?;
-    let restart: String = row.get(6).map_err(db_error)?;
-    let stop_signal: String = row.get(7).map_err(db_error)?;
-    let stop_grace_ms: i64 = row.get(8).map_err(db_error)?;
-    let ready_kind: Option<String> = row.get(9).map_err(db_error)?;
-    let ready_target: Option<String> = row.get(10).map_err(db_error)?;
-    let ready_timeout_ms: Option<i64> = row.get(11).map_err(db_error)?;
+    let id: i64 = row.get("id").map_err(db_error)?;
+    let name: String = row.get("name").map_err(db_error)?;
+    let command: String = row.get("command").map_err(db_error)?;
+    let working_dir: Option<String> = row.get("working_dir").map_err(db_error)?;
+    let description: Option<String> = row.get("description").map_err(db_error)?;
+    let autostart: bool = row.get("autostart").map_err(db_error)?;
+    let restart: String = row.get("restart").map_err(db_error)?;
+    let stop_signal: String = row.get("stop_signal").map_err(db_error)?;
+    let stop_grace_ms: i64 = row.get("stop_grace_ms").map_err(db_error)?;
+    let ready_kind: Option<String> = row.get("ready_kind").map_err(db_error)?;
+    let ready_target: Option<String> = row.get("ready_target").map_err(db_error)?;
+    let ready_timeout_ms: Option<i64> = row.get("ready_timeout_ms").map_err(db_error)?;
     let ready = match (ready_kind, ready_target, ready_timeout_ms) {
         (Some(kind), Some(target), Some(timeout_ms)) => Some(
             ReadyCheck::builder()
@@ -117,9 +119,9 @@ fn environments_of(
     let mut rows = statement.query(params![project_id]).map_err(db_error)?;
     let mut environments: HashMap<i64, Environment> = HashMap::new();
     while let Some(row) = rows.next().map_err(db_error)? {
-        let process_id: i64 = row.get(0).map_err(db_error)?;
-        let name: String = row.get(1).map_err(db_error)?;
-        let value: String = row.get(2).map_err(db_error)?;
+        let process_id: i64 = row.get("process_id").map_err(db_error)?;
+        let name: String = row.get("name").map_err(db_error)?;
+        let value: String = row.get("value").map_err(db_error)?;
         let name = EnvName::try_new(name).map_err(|error| corrupt("variable name", error))?;
         let value = EnvValue::try_new(value).map_err(|error| corrupt("variable value", error))?;
         let environment = environments
@@ -168,7 +170,7 @@ fn insert_environment(
 }
 
 /// Whether `error` is a `UNIQUE` constraint failure.
-fn is_unique_violation(error: &rusqlite::Error) -> bool {
+fn is_unique_violation(error: &SqliteError) -> bool {
     error.sqlite_extended_error_code() == Some(ffi::SQLITE_CONSTRAINT_UNIQUE)
 }
 
@@ -311,7 +313,7 @@ fn named<'a>(processes: &'a [ProcessSpec], name: &ProcessName) -> Option<&'a Pro
     processes.iter().find(|spec| spec.name().key() == key)
 }
 
-impl StackStore for SqliteStore {
+impl StackReader for SqliteStore {
     fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
         self.read(|conn| {
             find_project(conn, root)?
@@ -332,7 +334,9 @@ impl StackStore for SqliteStore {
             .map_err(db_error)
         })
     }
+}
 
+impl StackStore for SqliteStore {
     fn add_process(
         &self,
         root: &ProjectRoot,

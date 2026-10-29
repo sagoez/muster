@@ -89,6 +89,7 @@ fn mirror(log: Option<&Path>, notice: &Notice) {
 mod tests {
     use std::{fs, time::SystemTime};
 
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::*;
@@ -195,7 +196,7 @@ mod tests {
         notices.push(notice(&project, "two"));
 
         let written = fs::read_to_string(log).unwrap();
-        let lines: Vec<serde_json::Value> = written
+        let lines: Vec<Value> = written
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();

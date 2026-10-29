@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::{failure_kind::FailureKind, unavailable_reason::UnavailableReason};
 use crate::{
-    adapter::service::ServiceErrorKind,
+    adapter::{no_state_dir::NoStateDir, service::ServiceErrorKind},
     domain::{
         config::ConfigError,
         value::{OutputCursor, ProcessName, ProjectName},
@@ -23,8 +23,8 @@ const NO_PROCESSES: &str = "the project has no processes";
 #[derive(Debug, Error)]
 pub enum ClientError {
     /// muster has no state directory to find the service in.
-    #[error("cannot find muster's state directory; set HOME or XDG_STATE_HOME")]
-    NoStateDir,
+    #[error(transparent)]
+    NoStateDir(#[from] NoStateDir),
     /// The service could not be started, or did not answer.
     #[error("{}", unavailable(reason, log, tail))]
     ServiceUnavailable {
@@ -139,7 +139,7 @@ impl ClientError {
     /// caller is at fault.
     pub fn kind(&self) -> FailureKind {
         match self {
-            Self::NoStateDir | Self::ServiceUnavailable { .. } | Self::ServiceIo { .. } => {
+            Self::NoStateDir(_) | Self::ServiceUnavailable { .. } | Self::ServiceIo { .. } => {
                 FailureKind::ServiceUnavailable
             },
             Self::UnexpectedAnswer(_)
@@ -162,7 +162,7 @@ impl ClientError {
             Self::UnknownProcess { valid, .. }
             | Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
             Self::AmbiguousProcess { candidates, .. } => candidates,
-            Self::NoStateDir
+            Self::NoStateDir(_)
             | Self::ServiceUnavailable { .. }
             | Self::ServiceIo { .. }
             | Self::UnexpectedAnswer(_)

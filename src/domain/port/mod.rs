@@ -8,6 +8,7 @@ mod process_runner;
 mod project_store;
 mod settings_store;
 mod stack_edit_log;
+mod stack_reader;
 mod stack_store;
 mod state_change_notifier;
 
@@ -21,5 +22,6 @@ pub use process_runner::*;
 pub use project_store::*;
 pub use settings_store::*;
 pub use stack_edit_log::*;
+pub use stack_reader::*;
 pub use stack_store::*;
 pub use state_change_notifier::*;

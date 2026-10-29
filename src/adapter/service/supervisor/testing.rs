@@ -16,6 +16,7 @@ use std::{
 
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
+use libc::{SIG_IGN, SIGINT, SIGTERM, signal};
 use rustix::process::Signal;
 
 use super::{SpawnGeneration, Supervisor, SupervisorDeps};
@@ -238,12 +239,13 @@ impl Orphan {
     fn command() -> Command {
         let mut command = Command::new(ORPHAN_PROGRAM);
         command.arg(ORPHAN_SECONDS).process_group(0);
-        // SAFETY: the hook only resets two signal dispositions, which is
-        // async-signal-safe between fork and exec.
+        // SAFETY: the hook runs between fork and exec and only resets two
+        // signal dispositions with `signal`, which is async-signal-safe and
+        // allocates nothing; rustix offers no safe way to set one.
         unsafe {
             command.pre_exec(|| {
-                libc::signal(libc::SIGINT, libc::SIG_IGN);
-                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                signal(SIGINT, SIG_IGN);
+                signal(SIGTERM, SIG_IGN);
                 Ok(())
             });
         }
@@ -263,10 +265,8 @@ impl Orphan {
     /// Sends `signal` to a reaped orphan and returns the signal that ended
     /// it, waiting at most [`ORPHAN_REAP_WAIT`]. A signal something else sent
     /// first shows up as that signal instead.
-    pub(crate) fn end_with(&self, signal: i32) -> Option<i32> {
-        if let Some(signal) = Signal::from_named_raw(signal) {
-            let _ = SignalTarget::Process(self.pid).send(signal);
-        }
+    pub(crate) fn end_with(&self, signal: Signal) -> Option<i32> {
+        let _ = SignalTarget::Process(self.pid).send(signal);
         self.ended_by
             .as_ref()?
             .recv_timeout(ORPHAN_REAP_WAIT)

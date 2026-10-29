@@ -2,7 +2,7 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use crate::domain::config::ConfigError;
+use crate::{adapter::no_state_dir::NoStateDir, domain::config::ConfigError};
 
 /// Why the service could not start or keep running.
 #[derive(Debug, Error)]
@@ -11,8 +11,8 @@ pub enum ServiceError {
     #[error("service i/o error: {0}")]
     Io(#[from] io::Error),
     /// No state directory is available on this platform.
-    #[error("no state directory is available for the service")]
-    NoStateDir,
+    #[error(transparent)]
+    NoStateDir(#[from] NoStateDir),
     /// The socket path is in use by something this service cannot replace.
     #[error("could not bind the service socket {path}: {source}")]
     Bind {

@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 use super::{
     holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
 };
-use crate::domain::port::{ListeningPorts, ProcessMetrics, SettingsStore, StackStore};
+use crate::domain::port::{ListeningPorts, ProcessMetrics, SettingsStore, StackReader};
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
 #[derive(TypedBuilder)]
@@ -23,7 +23,7 @@ pub struct ServiceDeps {
     /// absent where usage is not reported.
     pub(super) metrics: Option<Box<dyn ProcessMetrics>>,
     /// Reads each project's stack as it is loaded and as it changes.
-    pub(super) stacks: Box<dyn StackStore>,
+    pub(super) stacks: Box<dyn StackReader>,
     /// Reads the user's settings at start and as they change.
     pub(super) settings: Box<dyn SettingsStore>,
     /// Finds the ports running process trees listen on; absent where ports

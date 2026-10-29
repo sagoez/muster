@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod listening;
 pub mod mcp;
 pub mod metrics;
+pub mod no_state_dir;
 pub mod notifier;
 pub mod open_files;
 pub mod path;
@@ -23,4 +24,6 @@ pub mod service;
 pub mod signal_target;
 pub mod store;
 pub mod terminal;
+#[cfg(test)]
+pub(crate) mod test_scratch;
 pub mod wire;

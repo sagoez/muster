@@ -13,7 +13,7 @@
 //! Kitty mode, and keys such as Ctrl-C would be sent as `CSI u` instead of a
 //! legacy control byte.
 
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 use alacritty_terminal::vte::{Params, Perform};
 
@@ -126,7 +126,7 @@ impl KittyKeyboardTracker {
     /// screen switch that would disturb an already repainted grid.
     pub fn restore_sequence(&self) -> Vec<u8> {
         let screen = self.keyboard.active();
-        let mut levels = screen.stack.iter().chain(std::iter::once(&screen.flags));
+        let mut levels = screen.stack.iter().chain(iter::once(&screen.flags));
         let mut sequence = Vec::new();
         if let Some(&oldest) = levels.next() {
             sequence.extend(kitty_sequence(SET_INTRODUCER, oldest));
@@ -393,8 +393,8 @@ mod tests {
     fn a_trailing_escape_does_not_grow_unbounded() {
         let mut tracker = KittyKeyboardTracker::default();
         let mut flood = CSI.as_bytes().to_vec();
-        flood.extend(std::iter::repeat_n(b'0', 128));
-        flood.extend(std::iter::repeat_n(b';', 128));
+        flood.extend(iter::repeat_n(b'0', 128));
+        flood.extend(iter::repeat_n(b';', 128));
         tracker.observe(&flood);
         tracker.observe(b"\x1b[>1u");
         assert_eq!(tracker.protocol(), KeyboardProtocol::Kitty { flags: 1 });

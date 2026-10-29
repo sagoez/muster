@@ -26,6 +26,7 @@ use crate::{
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
     },
+    constants::APP_NAME,
     domain::{
         config::Stack,
         process::{ProcessState, Readiness},
@@ -57,7 +58,7 @@ const READY_WAITING: &str = "waiting";
 /// The READY cell of a run that did not pass its readiness check in time.
 const READY_TIMEOUT: &str = "timeout";
 /// Gap between two table columns, and between a project's name and folder.
-const COLUMN_GAP: &str = "  ";
+pub(super) const COLUMN_GAP: &str = "  ";
 /// Shown in a table cell with nothing to show.
 const EMPTY_CELL: &str = "-";
 /// Indent of a project's table under its heading in `ps --all`.
@@ -119,7 +120,7 @@ const DETAIL_SEPARATOR: &str = ": ";
 /// Between a notice's age and its message.
 const AGE_SEPARATOR: &str = " ago: ";
 /// Prefix of a report's title.
-const TITLE_PREFIX: &str = "muster";
+const TITLE_PREFIX: &str = APP_NAME;
 /// The command word of `muster attach`.
 const ATTACH_COMMAND_WORD: &str = "attach";
 /// The command word of `muster logs`.
@@ -276,6 +277,16 @@ fn short_duration(duration: Duration) -> String {
 /// `rows` aligned in columns by display width, so names with wide or
 /// combining characters line up, each line indented by `indent`.
 fn table(rows: &[Vec<String>], indent: &str) -> String {
+    table_lines(rows)
+        .iter()
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Each of `rows` as one line, its cells aligned in columns by display width
+/// and separated by [`COLUMN_GAP`].
+pub(super) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
     let columns = rows.first().map_or(0, Vec::len);
     let widths: Vec<usize> = (0..columns)
         .map(|column| {
@@ -296,10 +307,9 @@ fn table(rows: &[Vec<String>], indent: &str) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(COLUMN_GAP);
-            format!("{indent}{}", line.trim_end())
+            line.trim_end().to_string()
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// The human report of `report`: one row per process saying what became of

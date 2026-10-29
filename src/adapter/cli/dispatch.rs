@@ -1177,7 +1177,10 @@ fn doctor(invocation: &Invocation<'_>) {
     }
     let config_dir =
         ProjectDirs::from("", "", APP_NAME).map(|dirs| dirs.config_dir().to_path_buf());
-    probes.push(legacy_probe(state_dir().as_deref(), config_dir.as_deref()));
+    probes.push(legacy_probe(
+        state_dir().ok().as_deref(),
+        config_dir.as_deref(),
+    ));
     let shell = env::var(SHELL_ENV).ok();
     let home = BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())

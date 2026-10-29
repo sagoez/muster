@@ -5,12 +5,14 @@ use std::{
     sync::Arc,
 };
 
+use clap::ValueEnum;
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{
     completions::{CompletionShell, registration_line},
     error::CliError,
+    output::COLUMN_GAP,
     report::{Report, Row, RowKind},
 };
 use crate::{
@@ -48,8 +50,6 @@ const LEGACY_HINT: &str = "muster no longer reads them; delete them";
 const DETAIL_SEPARATOR: &str = "; ";
 /// Between the items a probe lists.
 const LIST_SEPARATOR: &str = ", ";
-/// Between a project's name and folder.
-const COLUMN_GAP: &str = "  ";
 /// Between the messages of an error and its sources.
 const CHAIN_SEPARATOR: &str = ": ";
 /// Files an older muster kept in the state directory.
@@ -276,14 +276,7 @@ fn registers_completions(content: &str, shell: CompletionShell) -> bool {
 /// The completion shell inferred from a `$SHELL` path.
 fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
     let name = Path::new(shell_path).file_name()?.to_str()?;
-    match name {
-        "bash" => Some(CompletionShell::Bash),
-        "zsh" => Some(CompletionShell::Zsh),
-        "fish" => Some(CompletionShell::Fish),
-        "elvish" => Some(CompletionShell::Elvish),
-        "pwsh" | "powershell" => Some(CompletionShell::Powershell),
-        _ => None,
-    }
+    CompletionShell::from_str(name, false).ok()
 }
 
 /// The rc files probed for each shell, relative to home. Fish returns two

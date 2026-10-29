@@ -43,7 +43,9 @@ impl Supervisor {
                     .fallback(fallback)
                     .build(),
             ),
-            _ => ScreenReply::Ready(fallback),
+            (Some(ScreenSource::Served(_)), None) | (Some(ScreenSource::Kept) | None, _) => {
+                ScreenReply::Ready(fallback)
+            },
         }
     }
 
@@ -111,6 +113,7 @@ mod tests {
         adapter::{
             holder::{ClientMessage, HolderMessage},
             service::{LaunchEnvironment, supervisor::testing::*},
+            test_scratch::short_scratch,
         },
         domain::{
             port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
@@ -125,8 +128,6 @@ mod tests {
     const NAME: &str = "p";
     /// A name no process has.
     const UNKNOWN: &str = "nobody";
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mb-";
     /// What the fake holder's screen shows.
@@ -371,10 +372,7 @@ mod tests {
     /// emulator is authoritative, not from the last screen the service saw.
     #[test]
     fn output_of_a_holder_run_process_is_read_from_its_holder() {
-        let scratch = tempfile::Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap();
+        let scratch = short_scratch(SCRATCH_PREFIX);
         let socket = scratch.path().join("holder.sock");
         let server = serve_one_screen(UnixListener::bind(&socket).unwrap());
         let mut harness = holder_run(&socket);

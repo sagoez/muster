@@ -5,11 +5,10 @@ use std::path::Path;
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     error::CliError,
-    output::action_rows,
+    output::{COLUMN_GAP, action_rows, table_lines},
     report::{Report, Row, RowKind},
 };
 use crate::{
@@ -29,8 +28,6 @@ const PROJECTS_TITLE: &str = "muster projects";
 const CURRENT_MARKER: &str = "* ";
 /// Aligns the other projects with the marked one.
 const OTHER_INDENT: &str = "  ";
-/// Between the columns of a project's line.
-const COLUMN_GAP: &str = "  ";
 /// One process, counted.
 const PROCESS: &str = "process";
 /// Several processes, counted.
@@ -130,46 +127,34 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
             NO_PROJECTS,
         )]);
     }
-    let width = |column: fn(&ProjectListing) -> String| {
-        listings
-            .iter()
-            .map(|listing| UnicodeWidthStr::width(column(listing).as_str()))
-            .max()
-            .unwrap_or(0)
-    };
-    let name = |listing: &ProjectListing| listing.project().name().to_string();
-    let root = |listing: &ProjectListing| listing.project().root().display().to_string();
-    let (name_width, root_width) = (width(name), width(root));
-    let rows = listings
+    let cells: Vec<Vec<String>> = listings
         .iter()
         .map(|listing| {
-            let marker = if listing.current() {
-                CURRENT_MARKER
-            } else {
-                OTHER_INDENT
-            };
             let contents = match (listing.processes(), listing.invalid()) {
                 (Some(1), _) => format!("1 {PROCESS}"),
                 (Some(count), _) => format!("{count} {PROCESSES}"),
                 (None, reason) => format!("{INVALID}{}", reason.as_deref().unwrap_or_default()),
             };
-            Row::unlabeled(
-                RowKind::Plain,
-                format!(
-                    "{marker}{}{COLUMN_GAP}{}{COLUMN_GAP}{contents}",
-                    pad(&name(listing), name_width),
-                    pad(&root(listing), root_width),
-                ),
-            )
+            vec![
+                listing.project().name().to_string(),
+                listing.project().root().display().to_string(),
+                contents,
+            ]
+        })
+        .collect();
+    let rows = listings
+        .iter()
+        .zip(table_lines(&cells))
+        .map(|(listing, line)| {
+            let marker = if listing.current() {
+                CURRENT_MARKER
+            } else {
+                OTHER_INDENT
+            };
+            Row::unlabeled(RowKind::Plain, format!("{marker}{line}"))
         })
         .collect();
     Report::new(PROJECTS_TITLE, rows)
-}
-
-/// `text` padded with spaces to the display width `width`.
-fn pad(text: &str, width: usize) -> String {
-    let fill = width.saturating_sub(UnicodeWidthStr::width(text));
-    format!("{text}{}", " ".repeat(fill))
 }
 
 /// Stops every process of `project` through `client`, then forgets the

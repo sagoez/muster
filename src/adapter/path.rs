@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -64,7 +64,7 @@ pub fn absolutize(path: &Path) -> PathBuf {
     let absolute = if expanded.is_absolute() {
         expanded
     } else {
-        match std::env::current_dir() {
+        match env::current_dir() {
             Ok(cwd) => cwd.join(&expanded),
             Err(_) => expanded,
         }
@@ -151,7 +151,12 @@ fn parent_step(prefix: &Path) -> ParentStep {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        process,
+    };
+
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -172,7 +177,7 @@ mod tests {
     /// project root: the canonical folder.
     #[test]
     fn project_root_canonicalizes_aliases_of_one_folder() {
-        let scratch = tempfile::TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
         let real = scratch.path().join("real");
         let link = scratch.path().join("link");
         fs::create_dir(&real).unwrap();
@@ -193,7 +198,7 @@ mod tests {
     /// A missing folder or a file is not a project root.
     #[test]
     fn project_root_refuses_a_missing_folder_or_a_file() {
-        let scratch = tempfile::TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
         let file = scratch.path().join("file");
         fs::write(&file, "").unwrap();
 
@@ -212,7 +217,7 @@ mod tests {
     fn project_root_refuses_a_path_that_is_not_utf8() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-        let scratch = tempfile::TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
         let folder = scratch.path().join(OsStr::from_bytes(b"caf\xe9"));
         fs::create_dir(&folder).unwrap();
 
@@ -225,7 +230,7 @@ mod tests {
     /// An absolute location retains a symlink alias.
     #[test]
     fn absolutize_preserves_a_symlink_path() {
-        let dir = std::env::temp_dir().join(format!("muster-path-link-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("muster-path-link-{}", process::id()));
         let target = dir.join("target.yml");
         let link = dir.join("muster.yml");
         fs::create_dir_all(&dir).unwrap();
@@ -249,7 +254,7 @@ mod tests {
             PathBuf::from("/etc/passwd"),
             "excess parent components at the root are dropped"
         );
-        let real = std::env::temp_dir().join(format!("muster-abs-dot-{}", std::process::id()));
+        let real = env::temp_dir().join(format!("muster-abs-dot-{}", process::id()));
         let sub = real.join("sub");
         fs::create_dir_all(&sub).unwrap();
         assert_eq!(
@@ -289,7 +294,7 @@ mod tests {
     /// lexically toward a different, accessible workspace.
     #[test]
     fn traversal_in_an_unsearchable_directory_is_preserved() {
-        let base = std::env::temp_dir().join(format!("muster-denied-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-denied-{}", process::id()));
         let locked = base.join("locked");
         let inner = locked.join("inner");
         fs::create_dir_all(&inner).unwrap();
@@ -308,7 +313,7 @@ mod tests {
     /// traversal, so normalization must not rewrite it to a valid path.
     #[test]
     fn parent_of_a_regular_file_is_preserved() {
-        let base = std::env::temp_dir().join(format!("muster-file-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-file-dotdot-{}", process::id()));
         let blocker = base.join("blocker");
         fs::create_dir_all(&base).unwrap();
         fs::write(&blocker, "").unwrap();
@@ -324,7 +329,7 @@ mod tests {
     /// `..` after an existing real directory still pops, matching the OS.
     #[test]
     fn parent_of_a_real_directory_pops() {
-        let base = std::env::temp_dir().join(format!("muster-dir-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-dir-dotdot-{}", process::id()));
         let sub = base.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
@@ -339,7 +344,7 @@ mod tests {
     /// of the link's target, not of the link itself.
     #[test]
     fn parent_of_a_symlink_resolves_through_the_filesystem() {
-        let base = std::env::temp_dir().join(format!("muster-link-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-link-dotdot-{}", process::id()));
         let real_sub = base.join("real/sub");
         let link = base.join("link");
         fs::create_dir_all(&real_sub).unwrap();

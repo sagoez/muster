@@ -1,13 +1,16 @@
+use clap::ValueEnum;
 use strum::Display;
 
-/// Shells supported by the dynamic completion engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Display)]
+/// Shells supported by the dynamic completion engine, named as their
+/// binaries are, so `$SHELL` reads as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum CompletionShell {
     Bash,
     Zsh,
     Fish,
     Elvish,
+    #[value(alias = "pwsh")]
     Powershell,
 }
 

@@ -11,7 +11,9 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock},
 };
+use serde_json::Value;
 use tempfile::TempDir;
+use tokio::runtime::{Builder, Runtime};
 
 use super::{
     mcp_deps::McpDeps, process_add_arg::ProcessAddArg, scope::Scope, server::MusterMcp,
@@ -20,6 +22,7 @@ use super::{
 use crate::{
     adapter::{
         client::{ClientError, ServiceAccess, ServiceClient, ServiceStatus},
+        no_state_dir::NoStateDir,
         service::{ProjectStatus, ServiceRequest},
         store::SqliteStore,
     },
@@ -42,7 +45,7 @@ pub struct NoService;
 
 impl ServiceAccess for NoService {
     fn connect(&self) -> Result<ServiceClient, ClientError> {
-        Err(ClientError::NoStateDir)
+        Err(ClientError::NoStateDir(NoStateDir))
     }
 
     fn loaded_status(&self, _project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
@@ -50,7 +53,7 @@ impl ServiceAccess for NoService {
     }
 
     fn status(&self) -> Result<ServiceStatus, ClientError> {
-        Err(ClientError::NoStateDir)
+        Err(ClientError::NoStateDir(NoStateDir))
     }
 
     fn stop(&self) -> Result<bool, ClientError> {
@@ -178,11 +181,8 @@ pub fn register(fixture: &Fixture) {
 }
 
 /// Builds a single-threaded runtime for the async tool calls.
-pub fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
+pub fn runtime() -> Runtime {
+    Builder::new_current_thread().enable_time().build().unwrap()
 }
 
 /// The text of a tool result's first content block.
@@ -206,7 +206,7 @@ pub fn refusal(result: Result<CallToolResult, ToolFailure>) -> String {
 }
 
 /// The structured content of the successful result `result`.
-pub fn content(result: Result<CallToolResult, ToolFailure>) -> serde_json::Value {
+pub fn content(result: Result<CallToolResult, ToolFailure>) -> Value {
     let answer = answered(result).expect("a result, not a protocol error");
     assert_ne!(answer.is_error, Some(true), "{:?}", answer.content);
     answer.structured_content.expect("structured content")

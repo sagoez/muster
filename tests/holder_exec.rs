@@ -26,8 +26,8 @@ use muster::{
         value::{ByteSize, CommandLine, ProcessName, StopGrace},
     },
 };
-use rustix::process::Signal;
-use tempfile::TempDir;
+use rustix::process::{Pid, Signal, kill_process};
+use tempfile::{Builder, TempDir};
 
 /// The muster binary cargo built for this test.
 const BINARY: &str = env!("CARGO_BIN_EXE_muster");
@@ -122,7 +122,7 @@ struct Scratch {
 
 impl Scratch {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
+        let root = Builder::new()
             .prefix(SCRATCH_PREFIX)
             .tempdir_in(SHORT_TEMP_ROOT)
             .unwrap();
@@ -137,7 +137,7 @@ impl Scratch {
     fn runner(&self) -> HolderRunner {
         let launcher = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
-            .open_files(OpenFilesLimit::current().unwrap())
+            .open_files(OpenFilesLimit::current())
             .build();
         HolderRunner::new(Box::new(launcher), self.dirs.clone())
     }
@@ -171,9 +171,8 @@ impl Drop for Scratch {
             }
         }
         for holder in holders_under(self.root.path()) {
-            // SAFETY: `kill` takes plain integers and touches no memory.
-            unsafe {
-                libc::kill(holder as libc::pid_t, libc::SIGKILL);
+            if let Some(holder) = Pid::from_raw(holder as i32) {
+                let _ = kill_process(holder, Signal::KILL);
             }
         }
     }

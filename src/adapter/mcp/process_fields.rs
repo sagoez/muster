@@ -164,13 +164,15 @@ pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBu
 mod tests {
     use std::{fs, os::unix::fs::symlink};
 
+    use tempfile::TempDir;
+
     use super::*;
     use crate::domain::process::RestartPolicy;
 
     /// The canonical root of a fresh project folder with a `frontend` folder
     /// inside it, held alive by the returned directory.
-    fn project() -> (tempfile::TempDir, ProjectRoot) {
-        let dir = tempfile::tempdir().unwrap();
+    fn project() -> (TempDir, ProjectRoot) {
+        let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join("frontend")).unwrap();
         let root = ProjectRoot::try_new(fs::canonicalize(dir.path()).unwrap()).unwrap();
         (dir, root)

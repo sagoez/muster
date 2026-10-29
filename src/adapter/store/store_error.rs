@@ -1,16 +1,18 @@
 use std::{io, path::PathBuf};
 
+use rusqlite::Error as SqliteError;
+use serde_json::Error as JsonError;
 use thiserror::Error;
 
-use crate::domain::config::ConfigError;
+use crate::{adapter::no_state_dir::NoStateDir, domain::config::ConfigError};
 
 /// Failures of the SQLite store itself, which reach the domain as an opaque
 /// [`ConfigError::Storage`] so no database or filesystem detail leaks into it.
 #[derive(Debug, Error)]
 pub enum StoreError {
     /// No state directory could be located on this platform.
-    #[error("no state directory is available")]
-    NoStateDir,
+    #[error(transparent)]
+    NoStateDir(#[from] NoStateDir),
     /// The state directory or the database file could not be prepared.
     #[error("could not write {}: {source}", path.display())]
     Prepare {
@@ -21,7 +23,7 @@ pub enum StoreError {
     },
     /// SQLite failed to open, read or write the database.
     #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[from] SqliteError),
     /// A previous user of the shared connection panicked while holding it.
     #[error("database error: the database connection lock is poisoned")]
     Poisoned,
@@ -36,7 +38,7 @@ pub enum StoreError {
     NotUtf8(PathBuf),
     /// A value could not be encoded into the JSON its column holds.
     #[error("database error: {0}")]
-    Encode(#[from] serde_json::Error),
+    Encode(#[from] JsonError),
 }
 
 impl From<StoreError> for ConfigError {

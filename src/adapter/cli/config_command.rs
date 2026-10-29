@@ -6,6 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{
     error::CliError,
     invocation::Invocation,
+    output::COLUMN_GAP,
     report::{Report, Row, RowKind},
 };
 use crate::{
@@ -18,8 +19,6 @@ use crate::{
 
 /// Title of the `config set` report.
 const CONFIG_TITLE: &str = "muster config";
-/// Between a key and its value in the list and in the `set` line.
-const COLUMN_GAP: &str = "  ";
 /// Between a key and its new value in the `set` line.
 const ASSIGNS: &str = " = ";
 

@@ -499,7 +499,7 @@ impl Read for SpanReader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{ops::Range, path::PathBuf};
 
     use bytesize::ByteSize as RawByteSize;
     use tempfile::TempDir;
@@ -572,7 +572,7 @@ mod tests {
         )
     }
 
-    fn numbered(range: std::ops::Range<usize>) -> String {
+    fn numbered(range: Range<usize>) -> String {
         range.map(|line| format!("line {line}\n")).collect()
     }
 

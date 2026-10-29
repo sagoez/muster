@@ -10,6 +10,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     error::CliError,
+    output::COLUMN_GAP,
     report::{Report, Row, RowKind},
 };
 use crate::{
@@ -31,8 +32,6 @@ pub const INIT_TITLE: &str = "muster init";
 const CHOSEN_MARK: &str = "[x]";
 /// Marks a candidate that is not suggested.
 const UNCHOSEN_MARK: &str = "[ ]";
-/// Between the columns of a candidate's line.
-const COLUMN_GAP: &str = "  ";
 /// How the plain list ends.
 const YES_HINT: &str = "`muster init --yes` adds the suggested ones";
 /// Said when nothing was found.

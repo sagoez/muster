@@ -121,6 +121,7 @@ mod tests {
         color_scheme::ColorScheme,
         config::{Environment, McpStackEdits, RecordedEdit, Stack},
         coordination::Author,
+        port::StackReader,
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
@@ -181,7 +182,7 @@ mod tests {
         }
     }
 
-    impl StackStore for Fakes {
+    impl StackReader for Fakes {
         fn stack(&self, _root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
             Ok(None)
         }
@@ -192,7 +193,9 @@ mod tests {
         ) -> Result<Option<StackRevision>, ConfigError> {
             Ok(None)
         }
+    }
 
+    impl StackStore for Fakes {
         fn add_process(
             &self,
             _root: &ProjectRoot,

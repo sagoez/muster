@@ -1,5 +1,7 @@
+#[cfg(not(target_os = "linux"))]
+use std::process::Command;
 #[cfg(target_os = "linux")]
-use std::fs;
+use std::{fs, path::Path};
 
 use crate::{
     adapter::signal_target::SignalTarget,
@@ -17,6 +19,24 @@ const STAT_START_TIME: usize = 19;
 /// and dead.
 #[cfg(target_os = "linux")]
 const EXITED_STATES: &[&str] = &["Z", "X"];
+/// The root of the per-process status folders.
+#[cfg(target_os = "linux")]
+const PROC_ROOT: &str = "/proc";
+/// A process's status file under its folder.
+#[cfg(target_os = "linux")]
+const STAT_FILE: &str = "stat";
+/// What ends the parenthesized command name in a stat line, which may itself
+/// hold spaces and parentheses.
+#[cfg(target_os = "linux")]
+const COMMAND_END: &str = ") ";
+/// The program that reports a process's start time where there is no
+/// `/proc`.
+#[cfg(not(target_os = "linux"))]
+const PS_PROGRAM: &str = "ps";
+/// The `ps` arguments that print only the start time of the process whose
+/// pid follows.
+#[cfg(not(target_os = "linux"))]
+const PS_START_TIME_ARGS: [&str; 3] = ["-o", "lstart=", "-p"];
 
 /// Offset basis for a deterministic process-start-text fingerprint.
 #[cfg(not(target_os = "linux"))]
@@ -82,10 +102,9 @@ impl LocalProcessIdentity {
 
     #[cfg(not(target_os = "linux"))]
     fn platform_start_token(process_id: Pid) -> Option<StartToken> {
-        use std::process::Command;
-
-        let output = Command::new("ps")
-            .args(["-o", "lstart=", "-p", &process_id.into_inner().to_string()])
+        let output = Command::new(PS_PROGRAM)
+            .args(PS_START_TIME_ARGS)
+            .arg(process_id.into_inner().to_string())
             .output()
             .ok()?;
         let started = String::from_utf8(output.stdout).ok()?;
@@ -103,9 +122,12 @@ impl LocalProcessIdentity {
 /// hold spaces and parentheses.
 #[cfg(target_os = "linux")]
 fn stat_fields(process_id: Pid) -> Option<Vec<String>> {
-    let stat = fs::read_to_string(format!("/proc/{}/stat", process_id.into_inner())).ok()?;
+    let path = Path::new(PROC_ROOT)
+        .join(process_id.into_inner().to_string())
+        .join(STAT_FILE);
+    let stat = fs::read_to_string(path).ok()?;
     Some(
-        stat.rsplit_once(") ")?
+        stat.rsplit_once(COMMAND_END)?
             .1
             .split_whitespace()
             .map(str::to_owned)

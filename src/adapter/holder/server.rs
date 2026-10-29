@@ -961,6 +961,7 @@ mod tests {
             },
             signal_target::SignalTarget,
             terminal::TerminalEmulator,
+            test_scratch::short_scratch,
         },
         domain::{
             color_scheme::ColorScheme,
@@ -978,8 +979,6 @@ mod tests {
     const SHORT_SUPERVISOR_DEADLINE: Duration = Duration::from_millis(300);
     /// Interval between checks of a polled condition.
     const POLL: Duration = Duration::from_millis(10);
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mh-";
     /// Initial PTY rows of every test child.
@@ -1043,10 +1042,7 @@ mod tests {
 
     /// A scratch directory under a short root, removed even when a test panics.
     fn scratch() -> TempDir {
-        tempfile::Builder::new()
-            .prefix(SCRATCH_PREFIX)
-            .tempdir_in(SHORT_TEMP_ROOT)
-            .unwrap()
+        short_scratch(SCRATCH_PREFIX)
     }
 
     /// A running holder on a thread, with its scratch directory.

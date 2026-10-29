@@ -1,5 +1,7 @@
 use std::fmt;
 
+use uuid::Uuid;
+
 use crate::domain::coordination::{Author, HUMAN_LABEL};
 
 /// The flag-free environment variable naming an agent explicitly.
@@ -100,7 +102,7 @@ fn slug(raw: &str) -> Option<String> {
 
 /// A random `session-<hex>` identity, unique per MCP server process.
 fn session_id() -> String {
-    let hex = uuid::Uuid::new_v4().simple().to_string();
+    let hex = Uuid::new_v4().simple().to_string();
     format!("{SESSION_PREFIX}{}", &hex[..SESSION_HEX_DIGITS])
 }
 

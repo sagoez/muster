@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
@@ -19,29 +20,32 @@ const MAX_REQUEST_BYTES: u64 = 1 << 20;
 
 /// Binds a listener at `path`, creating its parent directory.
 ///
-/// A socket file that another live workspace is serving is never stolen: the path
-/// is probed first, and a successful connect means an owner exists. Only a stale
-/// file left by a crashed run (nothing accepting) is cleared and rebound.
+/// A socket file that another live server is serving is never stolen: the
+/// path is probed first, and a successful connect means an owner exists. Only
+/// a stale file left by a crashed run (nothing accepting) is cleared and
+/// rebound.
 ///
 /// # Errors
-/// Returns [`io::ErrorKind::AddrInUse`] when another workspace already serves this
-/// project, or an [`io::Error`] if the directory or socket cannot be created.
+/// Returns [`io::ErrorKind::AddrInUse`] when another server already serves
+/// the socket, or an [`io::Error`] if the directory or socket cannot be
+/// created.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
     match UnixStream::connect(path) {
-        // Someone is accepting: this project already has a live workspace.
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
-                "another muster workspace is already serving this project",
+                format!(
+                    "another muster process already serves the socket {}",
+                    path.display()
+                ),
             ));
         },
-        // Nothing there at all: a clean first bind.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {},
         // The file exists but nothing accepts: stale, safe to replace.
-        Err(_) => match std::fs::remove_file(path) {
+        Err(_) => match fs::remove_file(path) {
             Ok(()) => {},
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
             Err(error) => return Err(error),
@@ -68,18 +72,18 @@ pub fn connect_within(path: &Path, timeout: Duration) -> io::Result<UnixStream> 
         .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
 }
 
-/// Removes a workspace socket file, ignoring an already-absent path. Called on
-/// clean shutdown so sockets do not accumulate in the state directory.
+/// Removes a socket file, ignoring an already-absent path. Called on clean
+/// shutdown so sockets do not accumulate in the state directory.
 pub fn unlink(path: &Path) {
-    let _ = std::fs::remove_file(path);
+    let _ = fs::remove_file(path);
 }
 
-/// Sends `request` to the workspace socket at `path` and returns its response,
-/// one newline-delimited JSON message each way.
+/// Sends `request` to the socket at `path` and returns its response, one
+/// newline-delimited JSON message each way.
 ///
 /// # Errors
-/// Returns an [`io::Error`] if the socket cannot be reached (no running
-/// workspace) or the exchange fails.
+/// Returns an [`io::Error`] if the socket cannot be reached (no server
+/// running) or the exchange fails.
 pub fn request<Req, Resp>(path: &Path, request: &Req) -> io::Result<Resp>
 where
     Req: Serialize,
@@ -174,9 +178,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, thread};
+    use std::{env, path::PathBuf, thread};
 
     use serde::Deserialize;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -194,7 +199,7 @@ mod tests {
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches
     /// the 104-byte limit, so these tests bind under `/tmp` directly.
     fn short_socket_path() -> PathBuf {
-        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let unique = Uuid::new_v4().simple().to_string();
         Path::new("/tmp").join(format!("mstr-{}.sock", &unique[..8]))
     }
 
@@ -219,7 +224,7 @@ mod tests {
         unlink(&path);
     }
 
-    /// A live workspace's socket is never stolen by a second instance, but a
+    /// A live server's socket is never stolen by a second instance, but a
     /// stale file left by a crashed run is reclaimed.
     #[test]
     fn bind_refuses_a_live_socket_and_reclaims_a_stale_one() {
@@ -265,11 +270,10 @@ mod tests {
     }
 
     /// Connecting when nothing listens is an error the caller reads as "no
-    /// running workspace".
+    /// server running".
     #[test]
     fn connecting_with_no_listener_errors() {
-        let path =
-            std::env::temp_dir().join(format!("muster-absent-{}.sock", uuid::Uuid::new_v4()));
+        let path = env::temp_dir().join(format!("muster-absent-{}.sock", Uuid::new_v4()));
         let result: io::Result<Pong> = request(&path, &Ping::Ping);
         assert!(result.is_err());
     }

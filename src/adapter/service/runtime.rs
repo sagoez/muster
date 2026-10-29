@@ -42,7 +42,7 @@ use crate::{
     adapter::{bridge::WorkspaceRequest, holder::HolderRecord},
     domain::{
         config::{ConfigError, Stack},
-        port::{ProcessHandle, SettingsStore, StackStore},
+        port::{ProcessHandle, SettingsStore, StackReader},
         project::Project,
         pty::PtyError,
         settings::Settings,
@@ -131,7 +131,7 @@ pub struct ServiceRuntime {
     /// Builds each project's driven adapters.
     ports: Box<dyn ProjectPorts>,
     /// Reads each project's stack.
-    stacks: Box<dyn StackStore>,
+    stacks: Box<dyn StackReader>,
     /// Reads the user's settings.
     settings_store: Box<dyn SettingsStore>,
     /// The settings every supervisor launches with, as last read.
@@ -489,7 +489,19 @@ impl ServiceRuntime {
                     self.refresh_stack(project)?;
                 }
             },
-            _ => {},
+            ServiceRequest::Hello { .. }
+            | ServiceRequest::Down { .. }
+            | ServiceRequest::Wait { .. }
+            | ServiceRequest::Events { .. }
+            | ServiceRequest::Locate { .. }
+            | ServiceRequest::Log { .. }
+            | ServiceRequest::Screen { .. }
+            | ServiceRequest::Notices { .. }
+            | ServiceRequest::Workspace { .. }
+            | ServiceRequest::StackChanged { .. }
+            | ServiceRequest::SettingsChanged
+            | ServiceRequest::Replace
+            | ServiceRequest::Stop => {},
         }
         let response = match request {
             ServiceRequest::Replace | ServiceRequest::Stop => return Ok(Reply::Exit),
@@ -1034,7 +1046,7 @@ fn store_refusal(error: ConfigError) -> ServiceErrorBody {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs, io,
+        fs, io, mem,
         os::unix::net::{UnixListener, UnixStream},
         process,
         sync::{
@@ -1064,6 +1076,7 @@ mod tests {
                 },
             },
             signal_target::SignalTarget,
+            test_scratch::short_scratch,
         },
         domain::{
             config::{
@@ -1072,6 +1085,7 @@ mod tests {
             },
             port::{
                 Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessInput, ProcessRunner,
+                StackStore,
             },
             process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, ScreenSource, SpawnRequest},
@@ -1083,8 +1097,6 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(10);
     /// Interval between checks of a polled condition.
     const POLL: Duration = Duration::from_millis(10);
-    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
-    const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "ms-";
     /// The version the test services report.
@@ -1187,7 +1199,7 @@ mod tests {
         }
     }
 
-    impl StackStore for MemoryStore {
+    impl StackReader for MemoryStore {
         fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
             Ok(self.stacks.lock().unwrap().get(root).map(|processes| {
                 Stack::builder()
@@ -1200,7 +1212,9 @@ mod tests {
         fn stack_revision(&self, root: &ProjectRoot) -> Result<Option<StackRevision>, ConfigError> {
             Ok(self.revisions.lock().unwrap().1.get(root).copied())
         }
+    }
 
+    impl StackStore for MemoryStore {
         fn add_process(
             &self,
             root: &ProjectRoot,
@@ -1500,10 +1514,7 @@ mod tests {
         /// A fresh scratch directory short enough to bind sockets in.
         fn new() -> Self {
             Self {
-                scratch: tempfile::Builder::new()
-                    .prefix(SCRATCH_PREFIX)
-                    .tempdir_in(SHORT_TEMP_ROOT)
-                    .unwrap(),
+                scratch: short_scratch(SCRATCH_PREFIX),
                 holders: Arc::default(),
                 store: MemoryStore::new(),
             }
@@ -1617,7 +1628,7 @@ mod tests {
                 abandon(record.socket());
             }
             let started = Instant::now();
-            let holders = std::mem::take(&mut *self.holders.lock().unwrap());
+            let holders = mem::take(&mut *self.holders.lock().unwrap());
             for holder in holders {
                 while !holder.is_finished() && started.elapsed() < WAIT {
                     thread::sleep(POLL);

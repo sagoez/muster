@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use getset::Getters;
 use serde::{Deserialize, Serialize};
-use serde_yaml_ng::Value;
+use serde_yaml_ng::{Error as YamlError, Value};
 use typed_builder::TypedBuilder;
 
 use super::{EntryError, EnvExport, ExchangeError, ProcessEntry};
@@ -129,7 +129,7 @@ fn check_version(document: &Value) -> Result<(), ExchangeError> {
 }
 
 /// The error for text that does not parse as a stack file.
-fn malformed(error: serde_yaml_ng::Error) -> ExchangeError {
+fn malformed(error: YamlError) -> ExchangeError {
     ExchangeError::Malformed {
         reason: error.to_string(),
     }

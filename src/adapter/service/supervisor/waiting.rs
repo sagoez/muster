@@ -1009,7 +1009,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::service::{LaunchEnvironment, StackEvent, StateGoal, supervisor::testing::*},
+        adapter::service::{
+            LaunchEnvironment, StackEvent, StateGoal,
+            supervisor::testing::{name as process_name, spec as process_spec, *},
+        },
         domain::{
             config::ProcessSpec,
             process::{LogPattern, PatternKind, PatternText, RestartPolicy},
@@ -1050,7 +1053,7 @@ mod tests {
 
     /// The process `api` under `restart`, with `check`.
     fn api(restart: RestartPolicy, check: Option<ReadyCheck>) -> ProcessSpec {
-        super::super::testing::spec("api", "true", restart).with_ready(check)
+        process_spec("api", "true", restart).with_ready(check)
     }
 
     /// A harness running `processes`, every one brought up.
@@ -1064,7 +1067,7 @@ mod tests {
     fn print(harness: &mut Harness, name: &str, bytes: &[u8]) {
         let pane = harness
             .supervisor_mut()
-            .pane_named(&super::super::testing::name(name))
+            .pane_named(&process_name(name))
             .unwrap();
         let generation = harness.supervisor_mut().current_generation(pane);
         harness.supervisor_mut().handle_output(
@@ -1078,7 +1081,7 @@ mod tests {
     fn end(harness: &mut Harness, name: &str, outcome: ExitOutcome) {
         let pane = harness
             .supervisor_mut()
-            .pane_named(&super::super::testing::name(name))
+            .pane_named(&process_name(name))
             .unwrap();
         let generation = harness.supervisor_mut().current_generation(pane);
         harness
@@ -1096,7 +1099,7 @@ mod tests {
         let (reply, answers) = unbounded();
         let prepared = harness
             .supervisor_mut()
-            .prepare_wait(&super::super::testing::name(name), wait)
+            .prepare_wait(&process_name(name), wait)
             .unwrap();
         harness.supervisor_mut().begin_wait(prepared, after, reply);
         answers
@@ -1130,7 +1133,7 @@ mod tests {
     fn a_wait_from_past_the_end_is_refused() {
         let mut harness = up(&[api(RestartPolicy::Never, None)]);
         print(&mut harness, "api", b"Listening on :3000\n");
-        let name = super::super::testing::name("api");
+        let name = process_name("api");
 
         let Err(refused) = harness
             .supervisor_mut()
@@ -1158,7 +1161,7 @@ mod tests {
         )]);
         harness.up();
         print(&mut harness, "api", b"Listening on :3000\n");
-        let name = super::super::testing::name("api");
+        let name = process_name("api");
         let log_end = OutputCursor::new(LOGGED_AHEAD_END);
 
         assert!(
@@ -1251,7 +1254,7 @@ mod tests {
     #[test]
     fn a_wait_riding_on_a_restart_never_sees_the_old_run() {
         let mut harness = up(&[api(RestartPolicy::Never, None)]);
-        let name = super::super::testing::name("api");
+        let name = process_name("api");
         let before = harness.supervisor_mut().generation_of(&name);
         harness
             .supervisor_mut()
@@ -1458,7 +1461,7 @@ mod tests {
         )]);
         let pane = harness
             .supervisor_mut()
-            .pane_named(&super::super::testing::name("api"))
+            .pane_named(&process_name("api"))
             .unwrap();
         let current = harness.supervisor_mut().current_generation(pane);
         let stale = SpawnGeneration::initial();
@@ -1491,9 +1494,7 @@ mod tests {
             None,
         );
 
-        harness
-            .supervisor_mut()
-            .stop(&super::super::testing::name("api"));
+        harness.supervisor_mut().stop(&process_name("api"));
         end(
             &mut harness,
             "api",
@@ -1513,7 +1514,7 @@ mod tests {
     fn an_up_with_a_wait_answers_one_batch_once_every_wait_ended() {
         let mut harness = Harness::over(Box::new(FakeRunner), &[
             api(RestartPolicy::Never, None),
-            super::super::testing::spec("web", "true", RestartPolicy::Never),
+            process_spec("web", "true", RestartPolicy::Never),
         ]);
         let (reply, answers) = unbounded();
 
@@ -1550,7 +1551,7 @@ mod tests {
                 .kind(PatternKind::Regex)
                 .build(),
         );
-        let name = super::super::testing::name("api");
+        let name = process_name("api");
 
         for until in [regex, WaitCondition::Ready] {
             let refusal = harness
@@ -1569,7 +1570,7 @@ mod tests {
             &[api(RestartPolicy::Never, None)],
         );
         harness.up();
-        let name = super::super::testing::name("api");
+        let name = process_name("api");
         let before = harness.supervisor_mut().generation_of(&name);
         harness
             .supervisor_mut()
@@ -1632,10 +1633,9 @@ mod tests {
         assert_eq!(*outcome.tail(), ["booting", "boom"]);
 
         let past = end.advanced(1);
-        let prepared = harness.supervisor_mut().prepare_wait(
-            &super::super::testing::name("api"),
-            &spec(never, Some(past)),
-        );
+        let prepared = harness
+            .supervisor_mut()
+            .prepare_wait(&process_name("api"), &spec(never, Some(past)));
         assert!(prepared.is_err(), "a since past the log's end is refused");
     }
 

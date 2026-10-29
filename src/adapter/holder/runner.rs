@@ -47,7 +47,7 @@ const SUPERVISOR_DEADLINE_FACTOR: u32 = 2;
 /// Interval between attempts to reach a launching holder's socket.
 const READY_POLL: Duration = Duration::from_millis(10);
 /// Longest the runner spends stopping a holder it gave up on.
-const ABANDON_TIMEOUT: Duration = Duration::from_secs(2);
+pub const ABANDON_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest a probe of whether a holder still accepts connections waits.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Most bytes of a log's end read back for a process no supervisor saw run.

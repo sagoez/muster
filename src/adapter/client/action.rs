@@ -8,9 +8,11 @@ use crate::{
     domain::process::ProcessState,
 };
 
-/// Longest a command waits for a launch to settle. Above a holder's 5 s
-/// ready timeout and the 2 s to stop a holder that failed, so a launch that
-/// fails is reported as failed rather than as still starting.
+/// Longest a command waits for a launch to settle. Above a holder's
+/// [`HOLDER_READY_TIMEOUT`](crate::adapter::holder::HOLDER_READY_TIMEOUT) and
+/// the [`ABANDON_TIMEOUT`](crate::adapter::holder::ABANDON_TIMEOUT) to stop a
+/// holder that failed, so a launch that fails is reported as failed rather
+/// than as still starting.
 const LAUNCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long past a process's stop grace a command waits for its stop to
 /// settle: the kill after the grace, the holder draining the child's last
@@ -136,6 +138,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::adapter::holder::{ABANDON_TIMEOUT, HOLDER_READY_TIMEOUT};
 
     #[test]
     fn a_launch_waits_out_starting_and_a_restart_its_stop_too() {
@@ -171,6 +174,16 @@ mod tests {
             grace + STOP_SETTLE_MARGIN + LAUNCH_SETTLE_TIMEOUT
         );
         assert_eq!(Action::Start.settle_timeout(grace), LAUNCH_SETTLE_TIMEOUT);
+    }
+
+    /// A launch waits past a holder's ready timeout and the stop of one that
+    /// failed, so a failed launch is reported as failed.
+    #[test]
+    fn a_launch_outwaits_a_failing_holder() {
+        assert!(
+            LAUNCH_SETTLE_TIMEOUT > HOLDER_READY_TIMEOUT.into_inner() + ABANDON_TIMEOUT,
+            "a failed launch would read as still starting"
+        );
     }
 
     /// Every action has the one word a spinner shows while it is under way.

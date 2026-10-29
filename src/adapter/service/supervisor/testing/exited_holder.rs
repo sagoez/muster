@@ -53,7 +53,10 @@ impl ExitedHolder {
                         let _ = sender.send(());
                         return;
                     },
-                    _ => {},
+                    ClientMessage::Control(_)
+                    | ClientMessage::Hello { .. }
+                    | ClientMessage::Input(_)
+                    | ClientMessage::Resize(_) => {},
                 }
             }
         });

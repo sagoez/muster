@@ -77,7 +77,10 @@ impl TestClient {
                 self.screen = Some(screen);
                 self.snapshots += 1;
             },
-            _ => {},
+            HolderMessage::Exited(_)
+            | HolderMessage::Rejected(_)
+            | HolderMessage::Warning(_)
+            | HolderMessage::Attached(_) => {},
         }
         message
     }

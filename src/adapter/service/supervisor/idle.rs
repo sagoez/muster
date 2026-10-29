@@ -7,27 +7,21 @@ use crate::{
 };
 
 impl Supervisor {
-    /// Takes `occupants` as the live shells inside: the last one leaving
-    /// arms the idle stop at `now`, and any shell inside cancels it.
-    pub fn set_occupants(&mut self, occupants: u32, now: Instant) {
-        if occupants > 0 {
-            self.left_at = None;
-        } else if self.occupants > 0 {
-            self.left_at = Some(now);
-        }
-        self.occupants = occupants;
+    /// Counts `shells` as the live shells inside, for its status; arming and
+    /// cancelling the idle stop follow the leaves and entries the shell
+    /// table reports, never this count.
+    pub fn set_shells(&mut self, shells: u32) {
+        self.occupants = shells;
     }
 
-    /// Arms the idle stop at `now` when no shell is inside, as a service
-    /// starting does.
+    /// Arms the idle stop at `now`, as its last shell leaving does.
     pub fn arm_idle(&mut self, now: Instant) {
-        if self.occupants == 0 {
-            self.left_at = Some(now);
-        }
+        self.left_at = Some(now);
     }
 
-    /// Cancels a pending idle stop, since a client brought the project or
-    /// one of its processes up; it arms again at the next leave or start.
+    /// Cancels a pending idle stop, since a shell entered or a client
+    /// brought the project or one of its processes up; it arms again at the
+    /// next leave.
     pub fn hold_up(&mut self) {
         self.left_at = None;
     }
@@ -123,49 +117,41 @@ mod tests {
         test_settings().idle_stop().after().unwrap()
     }
 
+    /// The shell count is only shown: no count arms or cancels anything.
     #[test]
-    fn the_last_shell_leaving_arms_and_a_shell_entering_cancels() {
-        let mut harness = harness();
-        let supervisor = harness.supervisor_mut();
-        let start = Instant::now();
-
-        supervisor.set_occupants(0, start);
-        assert_eq!(supervisor.idle_deadline(), None, "nobody left");
-        supervisor.set_occupants(2, start);
-        supervisor.set_occupants(1, start + Duration::from_secs(1));
-        assert_eq!(supervisor.idle_deadline(), None, "a shell is still in it");
-
-        let left = start + Duration::from_secs(2);
-        supervisor.set_occupants(0, left);
-        assert_eq!(supervisor.idle_deadline(), Some(left + setting()));
-        supervisor.set_occupants(0, left + Duration::from_secs(5));
-        assert_eq!(
-            supervisor.idle_deadline(),
-            Some(left + setting()),
-            "still nobody: the leave instant holds"
-        );
-        assert_eq!(supervisor.occupancy_status(left).shells(), 0);
-
-        supervisor.set_occupants(1, left + Duration::from_secs(9));
-        assert_eq!(supervisor.idle_deadline(), None);
-        assert_eq!(supervisor.occupancy_status(left).shells(), 1);
-    }
-
-    #[test]
-    fn arm_idle_arms_only_an_unoccupied_project_and_hold_up_cancels() {
+    fn the_shell_count_is_shown_and_arms_nothing() {
         let mut harness = harness();
         let supervisor = harness.supervisor_mut();
         let now = Instant::now();
 
-        supervisor.set_occupants(1, now);
-        supervisor.arm_idle(now);
-        assert_eq!(supervisor.idle_deadline(), None);
+        supervisor.set_shells(2);
+        supervisor.set_shells(0);
 
-        supervisor.set_occupants(0, now);
+        assert_eq!(supervisor.idle_deadline(), None, "a count is no leave");
+        assert_eq!(supervisor.occupancy_status(now).shells(), 0);
+        supervisor.set_shells(1);
+        assert_eq!(supervisor.occupancy_status(now).shells(), 1);
+    }
+
+    /// A leave arms the stop from its instant, and an entry or an up
+    /// cancels it.
+    #[test]
+    fn arm_idle_arms_from_the_leave_and_hold_up_cancels() {
+        let mut harness = harness();
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+
+        supervisor.arm_idle(left);
+        assert_eq!(supervisor.idle_deadline(), Some(left + setting()));
+        supervisor.set_shells(0);
+        assert_eq!(
+            supervisor.idle_deadline(),
+            Some(left + setting()),
+            "a recount keeps the leave instant"
+        );
+
         supervisor.hold_up();
-        assert_eq!(supervisor.idle_deadline(), None, "an up holds it");
-        supervisor.arm_idle(now);
-        assert_eq!(supervisor.idle_deadline(), Some(now + setting()));
+        assert_eq!(supervisor.idle_deadline(), None);
     }
 
     #[test]
@@ -214,8 +200,7 @@ mod tests {
         supervisor.project = project_with(Some(IdleStop::Never));
         let left = Instant::now();
 
-        supervisor.set_occupants(1, left);
-        supervisor.set_occupants(0, left);
+        supervisor.arm_idle(left);
 
         assert_eq!(supervisor.idle_deadline(), None);
         assert_eq!(supervisor.occupancy_status(left).stops_in(), None);

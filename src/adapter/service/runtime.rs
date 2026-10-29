@@ -381,38 +381,51 @@ impl ServiceRuntime {
 
     /// Takes over the shells an earlier service knew from their records, as
     /// they stand at start, before any client is served: a live shell is put
-    /// back where it was, never as an entering, and the record of an ended
-    /// one is forgotten. Each loaded project then counts its shells, and one
-    /// with none arms its idle stop at `now`.
+    /// back where it was, never as an entering. An ended one is put back and
+    /// removed, its record forgotten, so a project it was the last shell in
+    /// sees it leave and arms its idle stop at `now`. A project no record
+    /// names arms nothing, so what a client brought up without the hook keeps
+    /// running across a restart or an upgrade.
     fn restore_shells(&mut self, now: Instant) {
-        for record in self.shells.records() {
-            if !self.shells.is_live(record.shell()) {
-                self.shells.forget(record.shell());
-            } else if self.occupancy.len() < MAX_SHELLS {
-                self.occupancy.restore(&record);
+        let (live, ended): (Vec<ShellRecord>, Vec<ShellRecord>) = self
+            .shells
+            .records()
+            .into_iter()
+            .partition(|record| self.shells.is_live(record.shell()));
+        for record in &live {
+            if self.occupancy.len() < MAX_SHELLS {
+                self.occupancy.restore(record);
             }
         }
-        self.recount(now);
-        for supervisor in self.supervisors.values_mut() {
-            supervisor.arm_idle(now);
+        let mut changes = Vec::new();
+        for record in &ended {
+            self.shells.forget(record.shell());
+            self.occupancy.restore(record);
+            changes.extend(self.occupancy.remove(record.shell()));
         }
+        self.occupancy_changed(&changes, now);
     }
 
-    /// Tells every loaded supervisor how many known shells are in its
-    /// project as of `now`, so a project its last shell left arms its idle
-    /// stop and one a shell is in cancels it.
-    fn recount(&mut self, now: Instant) {
+    /// Takes what a change to the shell table did: every loaded project
+    /// counts its shells as the table now has them, a project its last shell
+    /// left arms its idle stop at `now`, and one a shell entered holds it
+    /// off. These changes are the only leaves and entries there are.
+    fn occupancy_changed(&mut self, changes: &[OccupancyChange], now: Instant) {
         for (root, supervisor) in &mut self.supervisors {
-            supervisor.set_occupants(occupants(&self.occupancy, root), now);
+            supervisor.set_shells(occupants(&self.occupancy, root));
         }
-    }
-
-    /// Tells the loaded supervisors of `projects` how many known shells are
-    /// in each as of `now`, as [`Self::recount`] does for every project.
-    fn recount_in(&mut self, projects: impl IntoIterator<Item = ProjectRoot>, now: Instant) {
-        for root in projects {
-            if let Some(supervisor) = self.supervisors.get_mut(&root) {
-                supervisor.set_occupants(occupants(&self.occupancy, &root), now);
+        for change in changes {
+            match change {
+                OccupancyChange::Left(root) => {
+                    if let Some(supervisor) = self.supervisors.get_mut(root) {
+                        supervisor.arm_idle(now);
+                    }
+                },
+                OccupancyChange::Entered(root) => {
+                    if let Some(supervisor) = self.supervisors.get_mut(root) {
+                        supervisor.hold_up();
+                    }
+                },
             }
         }
     }
@@ -571,14 +584,13 @@ impl ServiceRuntime {
                 }
             },
             ServiceEvent::ShellsGone { shells } => {
-                let mut left = Vec::new();
+                let mut changes = Vec::new();
                 for shell in shells {
                     self.shell_notes.forget(&shell);
                     self.entering.forget_shell(&shell);
-                    left.extend(self.occupancy.project_of(&shell).cloned());
-                    self.occupancy.remove(&shell);
+                    changes.extend(self.occupancy.remove(&shell));
                 }
-                self.recount_in(left, Instant::now());
+                self.occupancy_changed(&changes, Instant::now());
             },
             ServiceEvent::Adopted {
                 project,
@@ -899,19 +911,12 @@ impl ServiceRuntime {
                 SHELL_TABLE_FULL.to_string(),
             ));
         }
-        let before = self.occupancy.project_of(&shell).cloned();
         let changes = self.occupancy.report(record);
-        self.recount_in(
-            before.into_iter().chain(record.project().clone()),
-            Instant::now(),
-        );
+        self.occupancy_changed(&changes, Instant::now());
         let mut notes = self.shell_notes.take(&shell);
         for change in changes {
-            match change {
-                OccupancyChange::Left(_) => {},
-                OccupancyChange::Entered(root) => {
-                    notes.extend(self.enter(&root, shell, environment));
-                },
+            if let OccupancyChange::Entered(root) = change {
+                notes.extend(self.enter(&root, shell, environment));
             }
         }
         Ok(notes)
@@ -1288,7 +1293,7 @@ impl ServiceRuntime {
         let mut supervisor =
             Supervisor::new(stack.project().clone(), &stack, deps).with_adopter(Box::new(shared));
         supervisor.restore_ends(&ended);
-        supervisor.set_occupants(occupants(&self.occupancy, project), Instant::now());
+        supervisor.set_shells(occupants(&self.occupancy, project));
         for record in held {
             supervisor.adopt(record.clone());
         }
@@ -3563,27 +3568,62 @@ mod tests {
         second.stop();
     }
 
+    /// CR-1, the upgrade case: a project a client brought up with no shell
+    /// in it, adopted by the next service, is never idle-stopped for want
+    /// of a shell no record says it had, though other shells are known.
     #[test]
-    fn an_unoccupied_running_project_is_armed_at_service_start() {
+    fn a_project_brought_up_without_the_hook_is_not_armed_across_a_restart() {
         let fixture = Fixture::new();
         set_idle_stop(&fixture, idle_after(LONG_IDLE));
         let project = fixture.project(commands(&[("api", true)]));
+        let elsewhere = test_shell(500, 1);
+        fixture.shells().open(elsewhere);
+        fixture.shells().put(shell_record(elsewhere, 1, None));
         let first = fixture.start(Arc::new(fixture.runner()));
         first.up(&project);
         first.wait_for(&project, "api", ProcessState::Running);
-        assert_eq!(
-            occupancy(&first, &project).stops_in(),
-            None,
-            "an up holds it"
-        );
         first.stop();
 
         let second = fixture.start(Arc::new(fixture.runner()));
 
         second.wait_for(&project, "api", ProcessState::Running);
-        let armed = occupancy(&second, &project);
-        assert_eq!(armed.shells(), 0);
-        assert!(armed.stops_in().is_some_and(|left| left <= LONG_IDLE));
+        let adopted = occupancy(&second, &project);
+        assert_eq!(adopted.shells(), 0);
+        assert_eq!(adopted.stops_in(), None, "no leave was seen");
+        second.stop();
+    }
+
+    /// A shell whose record puts it in a running project, found dead when
+    /// the next service starts, left that project: its idle stop arms. A
+    /// live shell's project and a project no record names arm nothing.
+    #[test]
+    fn a_shell_found_dead_at_service_start_arms_the_project_it_left() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", true)]));
+        let blog = fixture.project_in("blog", commands(&[("web", true)]));
+        let (closing, staying) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(closing);
+        fixture.shells().open(staying);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, closing, 1, Some(&shop));
+        report(&first, staying, 1, Some(&blog));
+        first.wait_for(&shop, "api", ProcessState::Running);
+        first.wait_for(&blog, "web", ProcessState::Running);
+        first.stop();
+        fixture.shells().put(shell_record(closing, 1, Some(&shop)));
+        fixture.shells().put(shell_record(staying, 1, Some(&blog)));
+        fixture.shells().close(&closing);
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        second.wait_for(&shop, "api", ProcessState::Running);
+        let left = occupancy(&second, &shop);
+        assert_eq!(left.shells(), 0);
+        assert!(left.stops_in().is_some_and(|due| due <= LONG_IDLE));
+        let occupied = occupancy(&second, &blog);
+        assert_eq!((occupied.shells(), occupied.stops_in()), (1, None));
+        assert_eq!(fixture.shells().forgotten(), [closing]);
         second.stop();
     }
 

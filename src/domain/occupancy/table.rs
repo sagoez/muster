@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use super::{OccupancyChange, ReportStamp, ShellId, ShellRecord};
 use crate::domain::value::ProjectRoot;
@@ -21,15 +21,24 @@ impl Seen {
             project: record.project().clone(),
         }
     }
+
+    /// The projects the shell counts in.
+    fn projects(&self) -> BTreeSet<ProjectRoot> {
+        self.project.iter().cloned().collect()
+    }
 }
 
 /// Which live shell is in which project. A project is occupied while at least
 /// one shell is in it; each report says where a shell now is, and the table
 /// answers with the projects that gained their first shell or lost their
-/// last.
+/// last. Those changes are the only leaves and entries there are: a count
+/// alone never says a shell left.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Occupancy {
+    /// What the table knows of each shell.
     shells: HashMap<ShellId, Seen>,
+    /// How many shells count in each project that has any.
+    counts: HashMap<ProjectRoot, usize>,
 }
 
 impl Occupancy {
@@ -39,61 +48,38 @@ impl Occupancy {
     }
 
     /// Applies `record`, a report that its shell is now in its project; a
-    /// report not newer than the shell's last is ignored. Returns a leave
-    /// before an enter.
+    /// report not newer than the shell's last is ignored. Returns each leave
+    /// before each entry.
     pub fn report(&mut self, record: &ShellRecord) -> Vec<OccupancyChange> {
         if !self.is_newer(record) {
             return Vec::new();
         }
-        let project = record.project().clone();
-        let before = self
-            .shells
-            .insert(*record.shell(), Seen::of(record))
-            .and_then(|seen| seen.project);
-        if before == project {
-            return Vec::new();
-        }
-        let left = before
-            .filter(|root| self.occupants(root) == 0)
-            .map(OccupancyChange::Left);
-        let entered = project
-            .filter(|root| self.occupants(root) == 1)
-            .map(OccupancyChange::Entered);
-        left.into_iter().chain(entered).collect()
+        self.put(record)
     }
 
-    /// Takes a record as known state: never yields a change. A record not
-    /// newer than what the table knows of its shell is ignored.
+    /// Takes a record as known state, as a service starting does: its
+    /// shell counts where the record says, and nothing enters or leaves. A
+    /// record not newer than what the table knows of its shell is ignored.
     pub fn restore(&mut self, record: &ShellRecord) {
         if self.is_newer(record) {
-            self.shells.insert(*record.shell(), Seen::of(record));
+            self.put(record);
         }
     }
 
-    /// Forgets `shell`, returning the leave of its project when it was that
-    /// project's last shell.
+    /// Forgets `shell`, returning the leave of each project it was the last
+    /// shell of.
     pub fn remove(&mut self, shell: &ShellId) -> Vec<OccupancyChange> {
-        self.shells
+        let before = self
+            .shells
             .remove(shell)
-            .and_then(|seen| seen.project)
-            .filter(|root| self.occupants(root) == 0)
-            .map(OccupancyChange::Left)
-            .into_iter()
-            .collect()
+            .map(|seen| seen.projects())
+            .unwrap_or_default();
+        self.recount(&before, &BTreeSet::new())
     }
 
     /// How many shells are in `project`.
     pub fn occupants(&self, project: &ProjectRoot) -> usize {
-        self.shells
-            .values()
-            .filter(|seen| seen.project.as_ref() == Some(project))
-            .count()
-    }
-
-    /// The project `shell` is in, or `None` when it is outside every project
-    /// or unknown.
-    pub fn project_of(&self, shell: &ShellId) -> Option<&ProjectRoot> {
-        self.shells.get(shell)?.project.as_ref()
+        self.counts.get(project).copied().unwrap_or_default()
     }
 
     /// Every shell the table knows, in order.
@@ -124,6 +110,48 @@ impl Occupancy {
         self.shells
             .get(record.shell())
             .is_none_or(|seen| record.stamp().supersedes(&seen.stamp))
+    }
+
+    /// Keeps `record` as what the table knows of its shell, returning the
+    /// projects that move made lose their last shell or gain their first.
+    fn put(&mut self, record: &ShellRecord) -> Vec<OccupancyChange> {
+        let seen = Seen::of(record);
+        let after = seen.projects();
+        let before = self
+            .shells
+            .insert(*record.shell(), seen)
+            .map(|seen| seen.projects())
+            .unwrap_or_default();
+        self.recount(&before, &after)
+    }
+
+    /// Moves one shell from counting in `before` to counting in `after`.
+    /// Returns each project left with no shell, then each that gained its
+    /// first.
+    fn recount(
+        &mut self,
+        before: &BTreeSet<ProjectRoot>,
+        after: &BTreeSet<ProjectRoot>,
+    ) -> Vec<OccupancyChange> {
+        let mut changes = Vec::new();
+        for root in before.difference(after) {
+            let Some(count) = self.counts.get_mut(root) else {
+                continue;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.counts.remove(root);
+                changes.push(OccupancyChange::Left(root.clone()));
+            }
+        }
+        for root in after.difference(before) {
+            let count = self.counts.entry(root.clone()).or_default();
+            *count += 1;
+            if *count == 1 {
+                changes.push(OccupancyChange::Entered(root.clone()));
+            }
+        }
+        changes
     }
 }
 
@@ -289,25 +317,43 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// A shell's project follows its newest report and its restored record,
-    /// and is gone once it leaves every project or is removed.
+    /// A shell counts where its newest report or restored record puts it,
+    /// and nowhere once it leaves every project or is removed.
     #[test]
-    fn the_project_of_a_shell_follows_its_newest_report() {
+    fn a_shell_counts_where_its_newest_report_puts_it() {
         let mut table = Occupancy::new();
-        assert_eq!(table.project_of(&shell(100, 1)), None, "an unknown shell");
 
         table.report(&at(shell(100, 1), 1, Some("shop")));
-        assert_eq!(table.project_of(&shell(100, 1)), Some(&root("shop")));
         table.report(&at(shell(100, 1), 2, Some("blog")));
         table.report(&at(shell(100, 1), 1, Some("shop")));
-        assert_eq!(table.project_of(&shell(100, 1)), Some(&root("blog")));
+        assert_eq!(table.occupants(&root("shop")), 0);
+        assert_eq!(table.occupants(&root("blog")), 1);
         table.report(&at(shell(100, 1), 3, None));
-        assert_eq!(table.project_of(&shell(100, 1)), None);
+        assert_eq!(table.occupants(&root("blog")), 0);
 
         table.restore(&at(shell(200, 1), 4, Some("shop")));
-        assert_eq!(table.project_of(&shell(200, 1)), Some(&root("shop")));
+        assert_eq!(table.occupants(&root("shop")), 1);
         table.remove(&shell(200, 1));
-        assert_eq!(table.project_of(&shell(200, 1)), None);
+        assert_eq!(table.occupants(&root("shop")), 0);
+    }
+
+    /// A shell restored from its record and then found gone leaves the
+    /// project it was the last in: a service starting sees that leave.
+    #[test]
+    fn a_restored_shell_removed_leaves_its_project_unless_another_stays() {
+        let mut table = Occupancy::new();
+        table.restore(&at(shell(100, 1), 1, Some("shop")));
+        table.restore(&at(shell(200, 1), 1, Some("blog")));
+        table.restore(&at(shell(300, 1), 1, Some("blog")));
+
+        assert_eq!(table.remove(&shell(100, 1)), [OccupancyChange::Left(root(
+            "shop"
+        ))]);
+        assert!(
+            table.remove(&shell(200, 1)).is_empty(),
+            "blog still has one"
+        );
+        assert_eq!(table.occupants(&root("blog")), 1);
     }
 
     #[test]

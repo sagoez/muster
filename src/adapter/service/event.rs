@@ -96,6 +96,32 @@ pub enum ServiceEvent {
         /// The adopted process, or why its holder could not be adopted.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     },
+    /// The wait before retrying the adoption of a child left running
+    /// unsupervised has passed; look for its holder, unless a later try
+    /// superseded this one.
+    AdoptionRetryDue {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane of the unsupervised child.
+        pane: PaneId,
+        /// The try that is due.
+        attempt: u64,
+    },
+    /// A worker looked for a holder serving a child left running
+    /// unsupervised; adopt it, unless a later try superseded this one.
+    AdoptionProbed {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane of the unsupervised child.
+        pane: PaneId,
+        /// The try the look was for.
+        attempt: u64,
+        /// Whether a start asked for it, so a holder not found is told.
+        asked: bool,
+        /// The record of the holder serving the child, if one does, boxed so
+        /// this rare event does not size every other one.
+        record: Option<Box<HolderRecord>>,
+    },
     /// A port or HTTP probe passed for one run of a process; a pass for a run
     /// that is no longer current is ignored.
     ProbePassed {

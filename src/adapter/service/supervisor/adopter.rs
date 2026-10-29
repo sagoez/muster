@@ -190,36 +190,134 @@ impl Supervisor {
         }
     }
 
-    /// Adopts again the holder of `pane`'s child left running unsupervised
-    /// after an adoption failed, once a holder serves that child. Returns
-    /// whether an adoption began; one that fails again leaves the child
-    /// unsupervised as before.
-    pub(super) fn retry_adoption(&mut self, pane: PaneId) -> bool {
-        let Some(record) = self
-            .running_unsupervised_pid(pane)
-            .and_then(|pid| self.adopter.as_ref()?.serving(pid))
-        else {
+    /// Tries again, as a start asks, to adopt the holder of `pane`'s child
+    /// left running unsupervised: a worker looks for a holder serving it, and
+    /// [`Self::handle_adoption_probed`] adopts it or says none does. Returns
+    /// whether a try began, which it does not while the child is being
+    /// stopped or no adopter is wired.
+    pub(super) fn retry_adoption_now(&mut self, pane: PaneId) -> bool {
+        if self.adopter.is_none() || self.retryable_pid(pane).is_none() {
             return false;
-        };
-        if let Some(target) = self.panes.get_mut(&pane) {
-            target.set_unsupervised(None);
         }
-        self.begin_adoption(&record, None);
+        let attempt = self.adoption_retries.begin(pane);
+        self.probe_adoption(pane, attempt, true);
         true
     }
 
-    /// Retries the adoption of every child left running unsupervised whose
-    /// holder serves again, as a `ps` finds them.
-    pub fn retry_adoptions(&mut self) {
-        let unsupervised: Vec<PaneId> = self
-            .panes
-            .keys()
-            .copied()
-            .filter(|pane| self.is_unsupervised(*pane))
-            .collect();
-        for pane in unsupervised {
-            self.retry_adoption(pane);
+    /// Looks again for the holder of `pane`'s unsupervised child once the
+    /// backoff of try `attempt` has passed, unless a later try superseded it
+    /// or the child is no longer left alone.
+    pub fn handle_adoption_retry_due(&mut self, pane: PaneId, attempt: u64) {
+        if self.adoption_retries.is_current(pane, attempt) && self.retryable_pid(pane).is_some() {
+            self.probe_adoption(pane, attempt, false);
         }
+    }
+
+    /// Settles a worker's look for the holder of `pane`'s unsupervised child
+    /// for try `attempt`: adopts `record` when a holder serves that child, and
+    /// otherwise schedules the next timed try, telling a start that asked
+    /// that the child still runs unsupervised. A superseded try, or a child
+    /// no longer left alone, is ignored.
+    pub fn handle_adoption_probed(
+        &mut self,
+        pane: PaneId,
+        attempt: u64,
+        asked: bool,
+        record: Option<HolderRecord>,
+    ) {
+        if !self.adoption_retries.is_current(pane, attempt) {
+            return;
+        }
+        let Some(pid) = self.retryable_pid(pane) else {
+            return;
+        };
+        match record.filter(|record| record.child_pid() == pid) {
+            Some(record) => {
+                if let Some(target) = self.panes.get_mut(&pane) {
+                    target.set_unsupervised(None);
+                }
+                self.begin_adoption(&record, None);
+            },
+            None => {
+                if asked {
+                    self.refuse_unsupervised_start(pane, pid);
+                }
+                self.schedule_adoption_retry(pane);
+            },
+        }
+    }
+
+    /// The pid of `pane`'s unsupervised child while it runs and is left
+    /// alone: neither stopped nor being stopped.
+    fn retryable_pid(&self, pane: PaneId) -> Option<Pid> {
+        let left_alone = self
+            .workspace
+            .process(pane)
+            .is_some_and(|process| *process.state() == ProcessState::Unsupervised);
+        left_alone
+            .then(|| self.running_unsupervised_pid(pane))
+            .flatten()
+    }
+
+    /// Looks for a holder serving `pane`'s unsupervised child for try
+    /// `attempt`, on a worker when the adopter allows it, since reading the
+    /// holder records and probing a socket may block, and inline otherwise.
+    fn probe_adoption(&mut self, pane: PaneId, attempt: u64, asked: bool) {
+        let (Some(pid), Some(adopter)) = (self.retryable_pid(pane), self.adopter.as_ref()) else {
+            return;
+        };
+        let Some(detached) = adopter.detached() else {
+            let record = adopter.serving(pid);
+            self.handle_adoption_probed(pane, attempt, asked, record);
+            return;
+        };
+        let events = self.events.clone();
+        let project = self.root().clone();
+        thread::spawn(move || {
+            let record = detached.serving(pid).map(Box::new);
+            let _ = events.send(ServiceEvent::AdoptionProbed {
+                project,
+                pane,
+                attempt,
+                asked,
+                record,
+            });
+        });
+    }
+
+    /// Schedules the next timed try at adopting the holder of `pane`'s
+    /// unsupervised child, backing off from the last.
+    fn schedule_adoption_retry(&mut self, pane: PaneId) {
+        let (attempt, delay) = self.adoption_retries.schedule(pane);
+        let events = self.events.clone();
+        let project = self.root().clone();
+        thread::spawn(move || {
+            thread::sleep(delay);
+            let _ = events.send(ServiceEvent::AdoptionRetryDue {
+                project,
+                pane,
+                attempt,
+            });
+        });
+    }
+
+    /// Settles an adoption of `pane` that failed while its child runs on:
+    /// tells why, once per holder however often a retry fails the same way,
+    /// and schedules the next timed try.
+    fn adoption_failed_unsupervised(
+        &mut self,
+        pane: PaneId,
+        record: &HolderRecord,
+        error: &PtyError,
+    ) {
+        if self
+            .adoption_retries
+            .first_failure(pane, record.holder_pid())
+        {
+            let notice = format!("{ADOPT_FAILED_NOTICE}{LEFT_RUNNING}: {error}");
+            self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
+        }
+        self.schedule_adoption_retry(pane);
     }
 
     /// Settles a reconnect that could not supervise the holder again: the
@@ -242,8 +340,11 @@ impl Supervisor {
             collect_exit(record);
         }
         match (record, error) {
+            (Some(record), Some(error)) if running => {
+                self.adoption_failed_unsupervised(pane, record, &error);
+            },
             (Some(record), Some(error)) => {
-                let notice = format!("{ADOPT_FAILED_NOTICE}{}: {error}", outcome(running));
+                let notice = format!("{ADOPT_FAILED_NOTICE}{SINCE_EXITED}: {error}");
                 self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
             },
             (None, _) => {
@@ -482,17 +583,18 @@ impl Supervisor {
                     }
                     return;
                 }
-                let running =
-                    self.leave_unsupervised(pane, record.child_pid(), record.child_start_token());
-                if !running {
+                if self.leave_unsupervised(pane, record.child_pid(), record.child_start_token()) {
+                    self.adoption_failed_unsupervised(pane, record, &error);
+                } else {
                     collect_exit(record);
+                    let notice = format!("{ADOPT_FAILED_NOTICE}{SINCE_EXITED}: {error}");
+                    self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
                 }
-                let notice = format!("{ADOPT_FAILED_NOTICE}{}: {error}", outcome(running));
-                self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
                 self.apply_pending(pane, membership, None, intent);
                 return;
             },
         };
+        self.adoption_retries.forget(pane);
         let backlog = self.install_pane(pane, handle);
         if carried.is_none() {
             self.restarts.take_history(pane, record.history());
@@ -553,8 +655,11 @@ mod tests {
             service::{
                 LaunchEnvironment, ServiceEvent,
                 supervisor::{
-                    ConfigMembership, SpawnGeneration, lifecycle::FORCE_STOP_NOTICE, testing::*,
-                    unsupervised::UNSUPERVISED_ROW_REMOVED, unsupervised_child::UnsupervisedChild,
+                    ConfigMembership, SpawnGeneration,
+                    lifecycle::FORCE_STOP_NOTICE,
+                    testing::*,
+                    unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
+                    unsupervised_child::UnsupervisedChild,
                 },
             },
         },
@@ -1087,37 +1192,108 @@ mod tests {
         }
     }
 
+    /// A harness of `p` left unsupervised as `orphan` by a failed adoption of
+    /// a live holder that refuses `refusals` adoptions in all, plus its spawn
+    /// count and the adoptions tried.
+    fn refused_adoption(
+        orphan: &Orphan,
+        refusals: usize,
+    ) -> (Harness, Arc<AtomicUsize>, Rc<Cell<usize>>) {
+        let record = record_with_pid("p", orphan.pid());
+        let attempts = Rc::new(Cell::new(0));
+        let (mut harness, spawns) = reconnectable_over(
+            orphan.pid(),
+            RecoveringAdopter::builder()
+                .record(record.clone())
+                .refusals(refusals)
+                .attempts(Rc::clone(&attempts))
+                .build(),
+        );
+        harness.supervisor_mut().adopt(record);
+        assert_eq!(state(&harness), ProcessState::Unsupervised);
+        (harness, spawns, attempts)
+    }
+
+    /// Lets the timed retry of `p`'s adoption come due now.
+    fn retry_due(harness: &mut Harness) {
+        let pane = PaneId::new(PANE);
+        let attempt = harness
+            .supervisor()
+            .adoption_retries
+            .current(pane)
+            .expect("a retry is scheduled");
+        harness
+            .supervisor_mut()
+            .handle_adoption_retry_due(pane, attempt);
+    }
+
     /// A child left unsupervised by a failed adoption is adopted again once
-    /// its holder serves: a `ps` retries it, and so does a start, which then
-    /// launches no second copy.
+    /// its holder serves: its timed retry does it, and so does a start, which
+    /// then launches no second copy. A `ps` never retries.
     #[test]
     fn a_failed_adoption_is_retried_once_the_holder_serves() {
         for retry_by_start in [false, true] {
             let orphan = Orphan::spawn();
-            let record = record_with_pid("p", orphan.pid());
-            let attempts = Rc::new(Cell::new(0));
-            let (mut harness, spawns) = reconnectable_over(
-                orphan.pid(),
-                RecoveringAdopter::builder()
-                    .record(record.clone())
-                    .attempts(Rc::clone(&attempts))
-                    .build(),
-            );
-            harness.supervisor_mut().adopt(record);
-            assert_eq!(state(&harness), ProcessState::Unsupervised);
+            let (mut harness, spawns, attempts) = refused_adoption(&orphan, 1);
 
+            harness.supervisor_mut().snapshot();
+            assert_eq!(attempts.get(), 1, "a ps retries nothing");
+            let stale = harness
+                .supervisor()
+                .adoption_retries
+                .current(PaneId::new(PANE))
+                .unwrap();
             if retry_by_start {
                 harness.supervisor_mut().start(&p(), &no_env());
             } else {
-                harness.supervisor_mut().retry_adoptions();
+                retry_due(&mut harness);
             }
 
             assert_eq!(state(&harness), ProcessState::Running, "{retry_by_start}");
             assert_eq!(attempts.get(), 2);
             assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
-            harness.supervisor_mut().retry_adoptions();
+            harness
+                .supervisor_mut()
+                .handle_adoption_retry_due(PaneId::new(PANE), stale);
             assert_eq!(attempts.get(), 2, "a supervised child is left alone");
         }
+    }
+
+    /// A live holder that never lets itself be adopted leaves its child
+    /// unsupervised after every retry, and is told once, not once a retry.
+    #[test]
+    fn a_holder_that_keeps_refusing_is_told_once_and_stays_unsupervised() {
+        let orphan = Orphan::spawn();
+        let (mut harness, _, attempts) = refused_adoption(&orphan, usize::MAX);
+
+        retry_due(&mut harness);
+        retry_due(&mut harness);
+
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(state(&harness), ProcessState::Unsupervised);
+        let told = harness
+            .notice_messages()
+            .iter()
+            .filter(|message| message.starts_with(ADOPT_FAILED_NOTICE))
+            .count();
+        assert_eq!(told, 1, "{:?}", harness.notice_messages());
+    }
+
+    /// A stop of a child left unsupervised by a holder that refuses adoption
+    /// is never undone by a retry coming due: the retry leaves it alone and
+    /// the stop escalates to a kill that ends the child.
+    #[test]
+    fn a_stop_of_an_unsupervised_child_survives_a_due_retry() {
+        let orphan = Orphan::spawn();
+        let (mut harness, _, attempts) = refused_adoption(&orphan, usize::MAX);
+
+        harness.supervisor_mut().stop(&p());
+        retry_due(&mut harness);
+
+        assert_eq!(attempts.get(), 1, "a retry never interrupts a stop");
+        assert_eq!(state(&harness), ProcessState::Stopping);
+        drive_until_exited(&mut harness);
+        assert!(!orphan.alive(), "the stop killed the child");
     }
 
     /// A holder that cannot be adopted at startup, while its child runs, is
@@ -1322,19 +1498,29 @@ mod tests {
         });
     }
 
-    /// A child that survives every kill, here a zombie nobody reaps, ends the
-    /// stop after the kill limit: an error names it and the process returns to
-    /// `Unsupervised` with the stop retryable.
-    #[cfg(target_os = "linux")]
+    /// A child that survives every kill, standing in for one stuck in the
+    /// kernel, ends the stop after the kill limit: an error names it and the
+    /// process returns to `Unsupervised` with the stop retryable.
     #[test]
     fn a_child_that_survives_every_kill_leaves_the_stop_retryable() {
-        let orphan = Orphan::unreaped();
+        let orphan = Orphan::spawn();
         let (mut harness, _) = configured_unsupervised(&orphan);
 
         harness.supervisor_mut().stop(&p());
+        let child = harness
+            .supervisor_mut()
+            .panes_mut()
+            .get_mut(&PaneId::new(PANE))
+            .and_then(|target| target.unsupervised_mut().as_mut())
+            .unwrap();
+        child.end_grace();
+        for _ in 0..UNSUPERVISED_KILL_LIMIT {
+            child.count_kill();
+        }
         drive_until(&mut harness, "the kills to give up", |harness| {
             state(harness) == ProcessState::Unsupervised
         });
+        assert!(orphan.alive(), "no kill was sent past the limit");
 
         assert!(
             harness

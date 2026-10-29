@@ -8,6 +8,7 @@
 
 mod adopter;
 mod adoption;
+mod adoption_retries;
 mod apply_stack;
 mod attach_book;
 mod attention;

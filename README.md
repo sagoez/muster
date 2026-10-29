@@ -341,9 +341,12 @@ next service finds the holders, reconnects and rebuilds each screen before it
 answers, keeping each process's uptime, restart count, size and attached
 clients, and carrying out any restart that was pending. A process removed from
 its stack while the service was down is stopped when the service finds it. A
-process whose holder dies while it keeps running is shown as `unsupervised` and
-never started a second time. A newer muster binary replaces an older running
-service in place.
+process whose holder dies while it keeps running, or whose live holder cannot
+be reconnected to, is shown as `unsupervised` and never started a second time:
+`stop` and `kill` signal it directly, and the service tries the holder again
+on a backing-off timer or when you `start` or `restart` it, telling a failure
+once per holder. A newer muster binary replaces an older running service in
+place.
 
 ## MCP
 

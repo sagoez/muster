@@ -442,6 +442,31 @@ impl ServiceRuntime {
                 Some(supervisor) => supervisor.handle_adopted(pane, generation, &record, result),
                 None => release_unrecorded(result),
             },
+            ServiceEvent::AdoptionRetryDue {
+                project,
+                pane,
+                attempt,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_adoption_retry_due(pane, attempt);
+                }
+            },
+            ServiceEvent::AdoptionProbed {
+                project,
+                pane,
+                attempt,
+                asked,
+                record,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_adoption_probed(
+                        pane,
+                        attempt,
+                        asked,
+                        record.map(|record| *record),
+                    );
+                }
+            },
             ServiceEvent::ProbePassed {
                 project,
                 pane,
@@ -597,17 +622,8 @@ impl ServiceRuntime {
             },
             ServiceRequest::Ps {
                 project: Some(project),
-            } => {
-                let supervisor = self.supervisor(&project)?;
-                supervisor.retry_adoptions();
-                ServiceResponse::Status(vec![supervisor.snapshot()])
-            },
-            ServiceRequest::Ps { project: None } => {
-                for supervisor in self.supervisors.values_mut() {
-                    supervisor.retry_adoptions();
-                }
-                ServiceResponse::Status(self.statuses())
-            },
+            } => ServiceResponse::Status(vec![self.supervisor(&project)?.snapshot()]),
+            ServiceRequest::Ps { project: None } => ServiceResponse::Status(self.statuses()),
             ServiceRequest::Control {
                 project,
                 name,

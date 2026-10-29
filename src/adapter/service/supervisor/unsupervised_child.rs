@@ -52,12 +52,14 @@ impl UnsupervisedChild {
         )
     }
 
-    /// Whether this same child still runs: its pid exists and, when a start
-    /// token was recorded and one can be read now, the two match. A token that
-    /// cannot be read counts as still running, so a transient read failure
-    /// never lets a second copy start.
+    /// Whether this same child still runs: its pid exists, is not dead and
+    /// waiting to be reaped, as the child of a stopped holder stays once
+    /// killed, and, when a start token was recorded and one can be read now,
+    /// the two match. A token that cannot be read counts as still running, so
+    /// a transient read failure never lets a second copy start.
     pub(crate) fn is_running(&self) -> bool {
         LocalProcessIdentity::is_same_process(self.pid, self.start_token)
+            && !LocalProcessIdentity::has_exited(self.pid)
     }
 
     /// Counts one more kill sent while waiting for the child to die, and
@@ -111,14 +113,14 @@ mod tests {
     }
 
     /// A child that died but was not yet reaped, as a holder's child is for a
-    /// moment after both were killed, is not left unsupervised.
+    /// moment after both were killed, is not left unsupervised, and one
+    /// already observed no longer runs once it dies.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_child_that_died_unreaped_is_not_observed() {
         let mut child = Command::new("sleep").arg(CHILD_SLEEP).spawn().unwrap();
-        assert!(
-            UnsupervisedChild::observe_expected(Pid::try_new(child.id()).unwrap(), None).is_some()
-        );
+        let observed =
+            UnsupervisedChild::observe_expected(Pid::try_new(child.id()).unwrap(), None).unwrap();
         child.kill().unwrap();
         let pid = Pid::try_new(child.id()).unwrap();
         let started = Instant::now();
@@ -134,6 +136,7 @@ mod tests {
         assert!(
             UnsupervisedChild::observe_expected(Pid::try_new(child.id()).unwrap(), None).is_none()
         );
+        assert!(!observed.is_running(), "a dead child no longer runs");
         child.wait().unwrap();
     }
 

@@ -90,6 +90,10 @@ const SERVICE_OPEN_FILES: u64 = 1000;
 /// How long a test holds the database's write lock: past the 5 s the store
 /// waits for another writer.
 const LOCK_HELD: Duration = Duration::from_secs(6);
+/// How a failed adoption's notice starts.
+const ADOPT_FAILED: &str = "could not reconnect to a running process";
+/// How many `ps` calls a test makes to see a state hold.
+const PS_REPEATS: usize = 4;
 /// Longest a `ps` may take while another writer holds the database.
 const QUICK_ANSWER: Duration = Duration::from_secs(1);
 
@@ -512,6 +516,43 @@ fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice()
     assert_eq!(scratch.api(&project).pid().map(Pid::into_inner), pid);
 
     kill_hard(pid.unwrap());
+    scratch.stop_service(successor);
+}
+
+/// A live holder a successor cannot adopt, here one stopped by SIGSTOP,
+/// leaves its child unsupervised: repeated `ps` calls leave it so and raise
+/// no further notice, and a stop ends the child through the unsupervised path.
+#[test]
+fn an_unadoptable_live_holder_stays_unsupervised_and_a_stop_ends_its_child() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project();
+    let service = scratch.start_service();
+    let child = scratch.up_running(&project).pid().unwrap().into_inner();
+    let holder = scratch.holders()[0];
+    scratch.stop_service(service);
+
+    signal(holder, Signal::STOP);
+    let successor = scratch.start_service();
+    wait_until("the adoption to fail", || {
+        *scratch.api(&project).state() == ProcessState::Unsupervised
+    });
+    for _ in 0..PS_REPEATS {
+        thread::sleep(SETTLE);
+        assert_eq!(*scratch.api(&project).state(), ProcessState::Unsupervised);
+    }
+    let told = scratch
+        .notices(&project)
+        .iter()
+        .filter(|(_, message)| message.starts_with(ADOPT_FAILED))
+        .count();
+    assert_eq!(told, 1, "{:?}", scratch.notices(&project));
+
+    scratch.control(&project, ProcessAction::Stop);
+    wait_until("the stop to end the child", || exited(child));
+    wait_until("the stop to settle", || {
+        *scratch.api(&project).state() == ProcessState::Exited
+    });
+    kill_hard(holder);
     scratch.stop_service(successor);
 }
 

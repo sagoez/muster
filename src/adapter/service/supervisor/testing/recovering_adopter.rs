@@ -13,13 +13,14 @@ use crate::{
     },
 };
 
-/// An adopter of `record` whose holder refuses the first adoption and serves
-/// every later one, as a holder busy when the service started does; counts
-/// the adoptions tried.
+/// An adopter of `record` whose live holder refuses its first `refusals`
+/// adoptions and takes every later one, as a holder busy or wedged when the
+/// service started does; counts the adoptions tried.
 #[derive(Getters, TypedBuilder)]
 #[getset(get = "pub(crate)")]
 pub(crate) struct RecoveringAdopter {
     record: HolderRecord,
+    refusals: usize,
     attempts: Rc<Cell<usize>>,
 }
 
@@ -29,7 +30,7 @@ impl HolderAdopter for RecoveringAdopter {
     }
 
     fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
-        self.locate(child_pid).filter(|_| self.attempts.get() > 0)
+        self.locate(child_pid)
     }
 
     fn adopt(
@@ -40,7 +41,7 @@ impl HolderAdopter for RecoveringAdopter {
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         let attempt = self.attempts.get();
         self.attempts.set(attempt + 1);
-        if attempt == 0 {
+        if attempt < self.refusals {
             return Err(PtyError::System(REFUSAL.to_string()));
         }
         Ok(Box::new(FixedPidHandle::new(record.child_pid())))

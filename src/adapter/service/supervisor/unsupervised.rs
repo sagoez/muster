@@ -20,7 +20,7 @@ use crate::{
 const UNSUPERVISED_EXIT_POLL: Duration = Duration::from_millis(100);
 /// Most kills sent to an unsupervised process before the stop gives up and
 /// leaves it for another try: five seconds of polling.
-const UNSUPERVISED_KILL_LIMIT: u32 = 50;
+pub(super) const UNSUPERVISED_KILL_LIMIT: u32 = 50;
 /// Prefix for a launch refused because the process still runs unsupervised;
 /// the pid follows.
 const UNSUPERVISED_START_REFUSED: &str =
@@ -101,24 +101,19 @@ impl Supervisor {
     }
 
     /// Refuses a launch of `pane` while its child may still run unsupervised,
-    /// which would put a second copy beside it; when a holder serves that
-    /// child again, it is adopted instead. A recorded child found gone is
-    /// settled first and no longer blocks, unless settling it retired a row
-    /// already removed from the project. Returns whether the launch was
-    /// refused.
+    /// which would put a second copy beside it; instead a worker looks for a
+    /// holder serving that child, which is adopted when one does. A recorded
+    /// child found gone is settled first and no longer blocks, unless
+    /// settling it retired a row already removed from the project. Returns
+    /// whether the launch was refused.
     pub(super) fn refuse_unsupervised_launch(&mut self, pane: PaneId) -> bool {
         if !self.is_unsupervised(pane) {
             return false;
         }
         if let Some(pid) = self.running_unsupervised_pid(pane) {
-            if self.retry_adoption(pane) {
-                return true;
+            if !self.retry_adoption_now(pane) {
+                self.refuse_unsupervised_start(pane, pid);
             }
-            self.notify(
-                NoticeLevel::Error,
-                Some(pane),
-                format!("{UNSUPERVISED_START_REFUSED} {pid}"),
-            );
             return true;
         }
         let name = self
@@ -135,6 +130,16 @@ impl Supervisor {
             return true;
         }
         false
+    }
+
+    /// Tells that a start of `pane` was refused because its child still runs
+    /// unsupervised as `pid`.
+    pub(super) fn refuse_unsupervised_start(&self, pane: PaneId, pid: Pid) {
+        self.notify(
+            NoticeLevel::Error,
+            Some(pane),
+            format!("{UNSUPERVISED_START_REFUSED} {pid}"),
+        );
     }
 
     /// Stops `pane`'s unsupervised child through its process group: the stop

@@ -4,9 +4,10 @@ use crossbeam_channel::Sender;
 use getset::{Getters, MutGetters};
 
 use super::{
-    adopter::HolderAdopter, attach_book::AttachBook, attention::Attention, deps::SupervisorDeps,
-    launch_book::LaunchBook, metrics_book::MetricsBook, pane::Pane, restart_book::RestartBook,
-    run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
+    adopter::HolderAdopter, adoption_retries::AdoptionRetries, attach_book::AttachBook,
+    attention::Attention, deps::SupervisorDeps, launch_book::LaunchBook, metrics_book::MetricsBook,
+    pane::Pane, restart_book::RestartBook, run_readiness::RunReadiness,
+    spawn_generation::SpawnGeneration,
 };
 use crate::{
     adapter::service::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter},
@@ -36,6 +37,8 @@ pub struct Supervisor {
     pub(super) runner: Box<dyn ProcessRunner>,
     /// Takes over holders a previous service left running.
     pub(super) adopter: Option<Box<dyn HolderAdopter>>,
+    /// The retries of adoptions that failed while their child runs on.
+    pub(super) adoption_retries: AdoptionRetries,
     /// Where output, restart timers and stop deadlines are delivered.
     pub(super) events: Sender<ServiceEvent>,
     /// The last screen and live handle of every pane that has run.
@@ -96,6 +99,7 @@ impl Supervisor {
             workspace: StackSync::apply(&empty, stack.processes(), |_| false).into_workspace(),
             runner,
             adopter: None,
+            adoption_retries: AdoptionRetries::default(),
             events,
             panes: HashMap::new(),
             generations: HashMap::new(),

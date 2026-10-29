@@ -2,6 +2,7 @@ pub mod form;
 pub mod form_list;
 pub mod optional_form;
 
+mod author_wire;
 mod epoch_seconds_wire;
 mod exit_cause_wire;
 mod exit_outcome_wire;

@@ -61,12 +61,6 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn todos(&self, project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError>;
 
-    /// The todo identified by `id` under `project`, if present.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
-    fn todo(&self, project: &ProjectRoot, id: &TodoId) -> Result<Option<Todo>, ConfigError>;
-
     /// Adds a new pending todo under `project` with `title` and `deps`, assigning
     /// a fresh id and stamping `author` and the write time. Returns the created
     /// todo.

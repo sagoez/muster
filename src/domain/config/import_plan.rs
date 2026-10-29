@@ -17,6 +17,7 @@ pub struct ImportPlan {
 
 impl ImportPlan {
     /// Whether the import changes nothing.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.updated.is_empty() && self.removed.is_empty()
     }

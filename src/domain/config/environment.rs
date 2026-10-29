@@ -35,6 +35,7 @@ impl Environment {
     }
 
     /// Whether no variable is set.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.vars.is_empty()
     }

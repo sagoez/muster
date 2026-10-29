@@ -1,11 +1,15 @@
 //! The messages a holder and its clients exchange, each carried in one
 //! [`Frame`]. Byte streams travel raw; structured bodies are JSON.
 
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 
+#[cfg(test)]
+use super::frame::write_frame;
 use super::{
     error::HolderError,
-    frame::{Frame, read_frame, write_frame},
+    frame::{Frame, read_frame},
     frame_tag::FrameTag,
     reject_reason::RejectReason,
 };
@@ -80,6 +84,7 @@ impl HolderMessage {
     ///
     /// # Errors
     /// Returns a [`HolderError`] when encoding or the write fails.
+    #[cfg(test)]
     pub fn write_to(self, writer: &mut impl Write) -> Result<(), HolderError> {
         Ok(write_frame(writer, &Frame::try_from(self)?)?)
     }

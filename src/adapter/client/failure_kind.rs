@@ -29,8 +29,6 @@ pub enum FailureKind {
     NotRunning,
     /// The service is shutting down.
     Busy,
-    /// A process the request acted on did not reach the state asked for.
-    ProcessFailed,
     /// Reading a log, writing the output, driving the terminal, keeping an
     /// attached process's connection, or reading or writing stored state
     /// failed.
@@ -63,7 +61,6 @@ impl FailureKind {
             | Self::UnknownNote
             | Self::UnknownKey
             | Self::NotRunning
-            | Self::ProcessFailed
             | Self::InvalidInput
             | Self::NotAllowed
             | Self::Conflict

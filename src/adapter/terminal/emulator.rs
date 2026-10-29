@@ -429,6 +429,7 @@ impl TerminalEmulator {
 
     /// The visible cursor position as viewport `(row, col)`, or `None` when the
     /// cursor is hidden or the viewport is scrolled up into history.
+    #[cfg(test)]
     pub fn cursor(&self) -> Option<(u16, u16)> {
         if !self.term.mode().contains(TermMode::SHOW_CURSOR)
             || self.term.grid().display_offset() != 0

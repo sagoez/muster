@@ -53,10 +53,7 @@ impl From<FailureKind> for CliExit {
             | FailureKind::UnknownKey
             | FailureKind::InvalidInput
             | FailureKind::NotAllowed => Self::InvalidInput,
-            FailureKind::NotRunning
-            | FailureKind::ProcessFailed
-            | FailureKind::Conflict
-            | FailureKind::Io => Self::ActionFailed,
+            FailureKind::NotRunning | FailureKind::Conflict | FailureKind::Io => Self::ActionFailed,
             FailureKind::Usage => Self::Usage,
             FailureKind::Interrupted => Self::Interrupted,
         }

@@ -19,8 +19,6 @@ pub struct StackSync {
     workspace: Workspace,
     /// New panes, waiting in `Pending`.
     added: Vec<PaneId>,
-    /// Kept panes whose definition changed; they keep running as they are.
-    changed: Vec<PaneId>,
     /// Live panes no longer in the stack, kept until they exit.
     retiring: Vec<PaneId>,
     /// Panes no longer in the stack and not live, already dropped.
@@ -49,15 +47,11 @@ impl StackSync {
         let mut synced = Vec::with_capacity(processes.len());
         let mut matched = HashSet::new();
         let mut added = Vec::new();
-        let mut changed = Vec::new();
         for spec in processes {
             match by_key.remove(&spec.name().key()) {
                 Some(existing) => {
                     let mut process = existing.clone();
-                    if process.spec() != *spec {
-                        process.set_spec(spec);
-                        changed.push(*process.id());
-                    }
+                    process.set_spec(spec);
                     matched.insert(*process.id());
                     synced.push(process);
                 },
@@ -86,7 +80,6 @@ impl StackSync {
         Self::builder()
             .workspace(Workspace::builder().processes(synced).build())
             .added(added)
-            .changed(changed)
             .retiring(retiring)
             .removed(removed)
             .build()
@@ -182,7 +175,6 @@ mod tests {
         );
 
         assert!(sync.added().is_empty());
-        assert!(sync.changed().is_empty());
         assert!(sync.retiring().is_empty());
         assert!(sync.removed().is_empty());
         let after = sync.into_workspace();
@@ -208,7 +200,6 @@ mod tests {
             is_live(&before),
         );
 
-        assert_eq!(*sync.changed(), [PaneId::new(0)]);
         let web = sync.workspace().process(PaneId::new(0)).unwrap();
         assert_eq!(web.command().as_ref(), "pnpm dev");
         assert_eq!(*web.state(), ProcessState::Running);
@@ -269,7 +260,6 @@ mod tests {
         let sync = StackSync::apply(&before, &[spec(CAFE_DECOMPOSED, "true")], is_live(&before));
 
         assert!(sync.added().is_empty());
-        assert_eq!(*sync.changed(), [PaneId::new(0)]);
         assert_eq!(
             sync.workspace().processes()[0].name().as_ref(),
             CAFE_DECOMPOSED

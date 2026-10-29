@@ -15,8 +15,6 @@ pub const MAX_NOTICES: usize = 256;
 pub struct Notices {
     /// The most recent notices, oldest first.
     ring: VecDeque<Notice>,
-    /// How many notices were ever pushed, so a reader can tell new ones apart.
-    pushed: u64,
     /// Writes each notice to the log, when there is one.
     mirror: Option<NoticeMirror>,
 }
@@ -26,7 +24,6 @@ impl Notices {
     pub fn new(log: Option<PathBuf>) -> Self {
         Self {
             ring: VecDeque::with_capacity(MAX_NOTICES),
-            pushed: 0,
             mirror: log.map(NoticeMirror::spawn),
         }
     }
@@ -59,7 +56,6 @@ impl Notices {
             self.ring.pop_front();
         }
         self.ring.push_back(notice);
-        self.pushed += 1;
     }
 
     /// The held notices for `project` and for the service as a whole, oldest
@@ -70,11 +66,6 @@ impl Notices {
             .filter(|notice| notice.project().as_ref().is_none_or(|root| root == project))
             .cloned()
             .collect()
-    }
-
-    /// How many notices were ever pushed.
-    pub fn pushed(&self) -> u64 {
-        self.pushed
     }
 }
 
@@ -116,7 +107,6 @@ mod tests {
         let recent = notices.recent(&project);
         assert_eq!(recent.len(), MAX_NOTICES);
         assert_eq!(recent[0].message(), "1");
-        assert_eq!(notices.pushed(), (MAX_NOTICES + 1) as u64);
     }
 
     #[test]

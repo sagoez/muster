@@ -1,6 +1,6 @@
 use crate::domain::{
     color_scheme::ColorScheme,
-    coordination::{Author, TodoStatus},
+    coordination::TodoStatus,
     process::{PatternKind, ProcessState, Readiness, RestartPolicy, StopSignal},
 };
 
@@ -8,7 +8,6 @@ use crate::domain::{
 /// `FromStr` reads back, so it takes its [`super::WireForm`] from that text.
 pub trait TextForm {}
 
-impl TextForm for Author {}
 impl TextForm for ColorScheme {}
 impl TextForm for PatternKind {}
 impl TextForm for ProcessState {}

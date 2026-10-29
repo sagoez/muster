@@ -24,6 +24,7 @@ pub struct BatchOutcome {
 
 impl BatchOutcome {
     /// Whether it acted on nothing and refused nothing.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.acted.is_empty() && self.refused.is_empty()
     }

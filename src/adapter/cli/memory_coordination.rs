@@ -71,10 +71,6 @@ impl CoordinationStore for MemoryCoordination {
         unreachable!("note and kv commands never touch todos")
     }
 
-    fn todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-        unreachable!("note and kv commands never touch todos")
-    }
-
     fn add_todo(
         &self,
         _project: &ProjectRoot,

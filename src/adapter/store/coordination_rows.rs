@@ -372,13 +372,6 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
-    fn todo(&self, project: &ProjectRoot, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-        self.read(|conn| {
-            let (project_id, _) = require_project(conn, project)?;
-            find_todo(conn, project_id, id)
-        })
-    }
-
     fn add_todo(
         &self,
         project: &ProjectRoot,
@@ -620,6 +613,16 @@ mod tests {
         root
     }
 
+    /// The todo `id` under `root`, read back through the listing.
+    fn stored_todo(store: &SqliteStore, root: &ProjectRoot, id: &TodoId) -> Option<Todo> {
+        store
+            .todos(root)
+            .unwrap()
+            .into_iter()
+            .find(|todo| todo.id() == id)
+    }
+
+    /// A scratchpad key named `name`.
     fn key(name: &str) -> ScratchpadKey {
         ScratchpadKey::try_new(name).unwrap()
     }
@@ -770,7 +773,7 @@ mod tests {
             .unwrap();
         assert_eq!(*created.status(), TodoStatus::Pending);
         assert_eq!(
-            store.todo(&root, created.id()).unwrap().as_ref(),
+            stored_todo(&store, &root, created.id()).as_ref(),
             Some(&created)
         );
 
@@ -785,7 +788,7 @@ mod tests {
         else {
             panic!("an unclaimed todo updates");
         };
-        let reread = store.todo(&root, created.id()).unwrap().unwrap();
+        let reread = stored_todo(&store, &root, created.id()).unwrap();
         assert_eq!(reread, updated, "the result is what was stored");
         assert_eq!(*reread.status(), TodoStatus::Done);
         assert_eq!(
@@ -900,7 +903,7 @@ mod tests {
         assert_eq!(*held.status(), TodoStatus::InProgress);
         assert_eq!(held.claim().as_ref().unwrap().owner(), &claude);
         assert_eq!(held.author(), &claude);
-        assert_eq!(store.todo(&root, task.id()).unwrap().unwrap(), held);
+        assert_eq!(stored_todo(&store, &root, task.id()).unwrap(), held);
 
         let Claim::HeldBy { owner, expires_in } = store
             .claim_todo(&root, &codex, Some(task.id()), lease)
@@ -1105,7 +1108,7 @@ mod tests {
         };
         assert_eq!(*forced.status(), TodoStatus::Done);
         assert_eq!(
-            store.todo(&root, task.id()).unwrap().unwrap().claim(),
+            stored_todo(&store, &root, task.id()).unwrap().claim(),
             &None
         );
     }

@@ -80,6 +80,7 @@ impl BoundedParser {
 
     /// Bytes fed since the parser last dispatched anything, which bounds the
     /// payload it holds.
+    #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.pending
     }

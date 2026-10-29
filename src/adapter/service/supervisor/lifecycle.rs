@@ -1154,7 +1154,6 @@ impl Supervisor {
         };
         self.attention.alert_desktop(
             &Notification::builder()
-                .pane(pane)
                 .source(process.name().clone())
                 .body(Some(message.to_string()))
                 .build(),

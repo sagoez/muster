@@ -1,37 +1,21 @@
-# muster.yml - a sample workspace.
-#
-# Every section (agents, terminals, commands) must be present. Use an empty
-# list `[]` for a section with no processes. Every process states `autostart`:
-# `true` starts it with `muster up`, `false` leaves it for `muster start`.
-# `restart` is optional and defaults to `never`; valid values are `never`,
-# `on-failure`, `always`. Commands stop with `terminate` and a 5-second grace
-# period by default, and may override that with `stop`, using a `terminate` or
-# `interrupt` signal and a human-readable grace period before Muster
-# force-kills the process group.
-
-agents:
-  - name: Claude Code
-    command: claude
-    description: Primary coding agent
-    autostart: false
-  - name: Codex
-    command: codex
-    autostart: false
-
-terminals:
-  - name: Blank terminal
-    command: bash
-    autostart: true
-
-commands:
-  - name: dev server
+# muster stack: `muster import` loads it into a project.
+version: 1
+processes:
+  - name: web
     command: npm run dev
+    working_dir: frontend
+    description: Vite dev server
+    environment:
+      PORT: "5173"
     autostart: true
     restart: on-failure
     stop:
       signal: terminate
       grace_period: 5s
   - name: worker
-    command: sleep 1000
+    command: bin/worker
     autostart: false
     restart: always
+    stop:
+      signal: interrupt
+      grace_period: 10s

@@ -7,25 +7,30 @@
 ## Project Overview
 
 **muster** - the supervisor and control plane behind your terminal. A headless
-per-user service runs each project's dev processes and CLI agents under their
-own holder processes, keeps their logs and screens, restarts them by policy,
-detects agent work and idle state, and holds shared coordination state (notes,
-todos, key-value). Users and agents drive it through the CLI and an MCP server;
-`muster attach` shows a process in the user's own terminal. muster draws no
-panes.
+per-user service runs each project's dev processes (servers, workers, watchers)
+under their own holder processes, keeps their logs and screens, and restarts
+them by policy. One SQLite database, `muster.db` in the state directory, holds
+every project's stack, the machine's settings and the shared coordination state
+(notes, todos, key-value). A project is a folder, registered by the first
+process added to it. Users and agents drive muster through the CLI and an MCP
+server; `muster attach` shows a process in the user's own terminal. muster draws
+no panes, and agents and interactive terminals live in herdr.
 
-> Architecture and the config schema are agreed in discussion before
+> Architecture and the database schema are agreed in discussion before
 > implementation. This file governs *how* we write the code, not *what* it does.
 
 ## Compatibility (pre-1.0)
 
-Until muster reaches v1.0.0, breaking changes are allowed. State-file and config
-schema changes need no backward-compat shim or migration: do not add serde
-defaults, version bumps, or fallbacks purely to keep an old `agent-sessions.yml`,
-`muster.yml`, or `settings.yml` readable. It is fine for an existing on-disk file
-to stop loading across a change - the user recreates or migrates it. Ignore
-code-review findings whose only concern is backward compatibility with pre-1.0
-on-disk files.
+Until muster reaches v1.0.0, breaking changes are allowed. Holder records, the
+export file and the service protocol need no backward-compat shim: do not add
+serde defaults, version bumps, or fallbacks purely to keep an old file readable.
+Ignore code-review findings whose only concern is backward compatibility with
+pre-1.0 on-disk files.
+
+The database is the exception: it is the only copy of the user's stack, so it
+migrates forward. Its schema version is `PRAGMA user_version`, and each schema
+change is a new numbered SQL file under `src/adapter/store/migrations/`. A
+shipped migration is never edited.
 
 ## Architecture: Ports and Adapters (hexagonal)
 
@@ -35,22 +40,25 @@ plugs into a port.
 
 - **`domain`** - the core. Entities, value objects, and **ports** (traits the
   core needs the outside world to fulfil, e.g. `ProcessRunner`,
-  `ProjectRegistry`, `Notifier`). No I/O, no framework types, no `async`. Fully
+  `StackStore`, `Notifier`). No I/O, no framework types, no `async`. Fully
   unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
-  (`Workspace`, `Reconciliation`, `ProcessLifecycle`, `SessionRestorer`).
-  Depends on `domain` only.
+  (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
+  `domain` only.
 - **`adapter`** - infrastructure:
   - **driving adapters** `adapter/cli` (clap commands, `attach`, the service
-    client) and `adapter/mcp` (the rmcp server); they drive the service.
+    client) and `adapter/mcp` (the rmcp server). Both edit stored state through
+    `StackEditor` and drive the service.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
-    supervisor per loaded project, the socket protocol, notices and the config
-    watcher.
+    supervisor per loaded project, the socket protocol and notices. It only
+    reads the database; writers tell it what changed.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service.
   - **driven adapters** `adapter/pty` (portable-pty implements
-    `ProcessRunner`), `adapter/config` (YAML and SQLite stores), `adapter/terminal`
-    (the VT emulator and signal readers), notifier, metrics, hooks.
+    `ProcessRunner`), `adapter/store` (one `SqliteStore` implements every store
+    port), `adapter/exchange` (the export file), `adapter/detect` (stack
+    detection for `muster init`), `adapter/terminal` (the VT emulator and
+    keyboard tracker), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs.
 
@@ -66,29 +74,31 @@ src/
   error.rs             # MusterError (transparent aggregate of domain/adapter errors)
   constants.rs         # crate-wide named constants (app identity, ...)
   domain/
-    process/           # Process, ProcessKind, ProcessState, policies
-    config/            # WorkspaceConfig, ProcessSpec
+    process/           # Process, ProcessState, restart and stop policies
+    config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, settings keys
     coordination/      # shared notes, todos and key-value entries
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    port/              # ProcessRunner, ProjectRegistry, Notifier, ... (traits)
-    value/             # validated newtypes (ProcessName, Cols, Rows, ...)
-  application/         # Workspace, Reconciliation, ProcessLifecycle, SessionRestorer
+    port/              # ProcessRunner, StackStore, SettingsStore, Notifier, ... (traits)
+    value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
+  application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
   adapter/
     cli/               # driving: commands, attach, the service client
     mcp/               # driving: the MCP server over stdio
     bridge/            # the MCP-to-service requests the service protocol lacks
     service/           # the per-user service and its supervisors
     holder/            # one detached process per child, owning its PTY
-    terminal/          # VT emulator, signal reader, keyboard tracker
+    terminal/          # VT emulator, keyboard tracker
     pty/               # driven: ProcessRunner via portable-pty
-    config/            # driven: YAML config, registry, settings, sessions, SQLite
+    store/             # driven: SqliteStore, migrations
+    exchange/          # driven: the `muster export` / `muster import` file
+    detect/            # driven: stack detection for `muster init`
 ```
 
 ## Dependencies and libraries
 
 - **Do not reinvent the wheel.** If a crate does the job, use it instead of
   hand-rolling (PTY handling, VT parsing, newtype validation, backoff, arg
-  parsing, file-watching, ...).
+  parsing, atomic writes, ...).
 - **Prefer maintained crates.** A crate that is quiet but feature-complete and
   stable is fine; a crate that is genuinely stale relative to the ecosystem is
   not. Use judgement, and prefer the actively-maintained option when choosing.
@@ -112,11 +122,10 @@ Chosen libraries (extend deliberately, same rules apply):
 | CLI styling | `anstream` + `anstyle` |
 | Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter |
 | MCP server | `rmcp` on `tokio` |
-| File watching | `notify` |
 | Desktop notifications | `notify-rust` |
 | Process usage | `sysinfo` |
-| Coordination store | `rusqlite` |
-| Config (de)serialize | `serde` + `serde_yaml_ng`, `toml_edit` for provider hooks |
+| State: projects, stacks, settings, coordination | `rusqlite` |
+| Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
 | Durations | `humantime` + `humantime-serde` |
 | Atomic file writes | `atomic-write-file` |
 | Errors | `thiserror` |
@@ -168,7 +177,7 @@ Chosen libraries (extend deliberately, same rules apply):
 
 ### Enums over dangling strings
 Prefer enums over raw string literals for any fixed set of domain values compared
-or matched (process state, process kind, process action, error kind, ...). Give them
+or matched (process state, restart policy, process action, error kind, ...). Give them
 `Display`/`FromStr` via `strum` or a manual impl. Never stringly-typed.
 
 ### Enum derivations
@@ -208,15 +217,17 @@ than passing bare `u16`/`usize`.
   `HolderServer`, `Supervisor`): these use a hand-written constructor, and a
   small private helper struct local to such a controller may use a plain struct
   literal.
-- **Config structs additionally derive `WithSetters`, `Serialize`,
-  `Deserialize`** with `#[set_with]` and `#[getset(get = "pub", set_with =
-  "pub")]`.
+- **Domain definitions are not serde types.** `ProcessSpec`, `Settings` and
+  their kin derive `WithSetters` with `#[set_with]` and `#[getset(get = "pub",
+  set_with = "pub")]` where they are edited by value. The export file has its
+  own serde DTOs in `adapter/exchange`, each with `#[serde(deny_unknown_fields)]`
+  and converted to and from the domain with `TryFrom`/`From`.
 - Fields are private; expose access through `Getters`, never `pub` fields.
 
 ```rust
-#[derive(Clone, Serialize, Deserialize, Debug, Getters, WithSetters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]
 #[set_with]
-pub struct ProcessConfig {
+pub struct ProcessSpec {
     #[getset(get = "pub", set_with = "pub")]
     name: ProcessName,
     #[getset(get = "pub", set_with = "pub")]
@@ -224,9 +235,11 @@ pub struct ProcessConfig {
 }
 ```
 
-### Config defaults
-- **Never use `#[serde(default)]` on config fields.** All defaults live in the
-  shipped config file, not in Rust, so every value is explicit and visible.
+### Defaults
+- **Defaults live in the database, never in Rust or serde.** The initial
+  migration seeds the settings row, and a new process takes the `default_*`
+  settings for every field `muster add` leaves out, so every stored value is
+  explicit. Never use `#[serde(default)]` on an export-file field.
 
 ### Secret config fields
 Secrets must use a non-empty newtype, add `#[serde(skip_serializing)]`, and use a
@@ -260,11 +273,11 @@ A folder is for **grouping**, not decoration.
 ```rust
 // domain/process/mod.rs
 mod entity;
-mod kind;
+mod restart;
 mod state;
 
 pub use entity::*;
-pub use kind::*;
+pub use restart::*;
 pub use state::*;
 ```
 
@@ -274,7 +287,7 @@ pub use state::*;
 - The service and each holder run one synchronous loop that owns all of their
   state: `ServiceRuntime` owns every project's `Supervisor`, `HolderServer` owns
   its child's emulator, keyboard tracker and log. Every other thread (socket
-  acceptor, client readers, PTY reader, timers, the config watcher) only sends
+  acceptor, client readers, PTY reader, timers) only sends
   events to that loop over a `crossbeam-channel`; none of them touches the state.
 - Nothing blocking runs on a loop. A socket read, a holder round trip or a
   bounded wait goes to a helper thread whose result comes back as an event.
@@ -335,7 +348,8 @@ Every new feature passes this gate before it is called done:
 1. **Four adversarial reviewers**, run in parallel as independent subagents.
    Each gets the full diff and one lens: correctness and edge cases;
    concurrency, process lifecycle and failure paths; security and untrusted
-   input (MCP, IPC, hooks, config); architecture and the rules in this file.
+   input (MCP, IPC, the database, the export file); architecture and the rules
+   in this file.
    Each reviewer tries to break the change, and every finding is verified
    against the code before it is acted on. Each finding that survives owes a
    regression test that fails without its fix.

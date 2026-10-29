@@ -2,7 +2,7 @@
 #   cargo build
 #   mise exec vhs@0.11.0 ttyd@latest -- vhs docs/demo.tape
 # Runs target/debug/muster with every XDG directory under /tmp/muster-vhs, so
-# the real registry, settings, sessions and running service stay untouched.
+# the real database and running service stay untouched.
 
 Output docs/muster-demo.gif
 
@@ -19,13 +19,13 @@ Type `export PATH="$PWD/target/debug:$PATH" TERM=xterm-256color`
 Enter
 Type "unset NO_COLOR; export XDG_CONFIG_HOME=/tmp/muster-vhs/config XDG_STATE_HOME=/tmp/muster-vhs/state XDG_DATA_HOME=/tmp/muster-vhs/data"
 Enter
-Type "rm -rf /tmp/muster-vhs && mkdir -p /tmp/muster-vhs/config/muster /tmp/muster-vhs/shop && cd /tmp/muster-vhs/shop"
+Type "rm -rf /tmp/muster-vhs && mkdir -p /tmp/muster-vhs/shop && cd /tmp/muster-vhs/shop"
 Enter
-Type `printf 'desktop_notifications: false\ndefault_size:\n  rows: 24\n  cols: 80\ndetach_key: "ctrl-\\\\"\nlog_max_size: 10MiB\nscrollback: 1000\ncolor_scheme: dark\n' > ../config/muster/settings.yml`
+Type "muster config set desktop-notifications false > /dev/null"
 Enter
-Type `printf 'agents: []\nterminals: []\ncommands:\n  - name: web\n    command: while true; do echo "$(date +%%T) GET /api/cart 200 $((RANDOM %% 40 + 5))ms"; sleep 0.7; done\n    autostart: true\n  - name: worker\n    command: trap "sleep 1.5; exit 0" TERM; n=0; while true; do n=$((n + 1)); echo "$(date +%%T) job $n done"; sleep 1; done\n    autostart: true\n' > muster.yml`
+Type `muster add web --autostart -- 'while true; do echo "$(date +%T) GET /api/cart 200 $((RANDOM % 40 + 5))ms"; sleep 0.7; done' > /dev/null`
 Enter
-Type "muster projects add . > /dev/null && clear"
+Type `muster add worker --autostart -- 'trap "sleep 1.5; exit 0" TERM; n=0; while true; do n=$((n + 1)); echo "$(date +%T) job $n done"; sleep 1; done' > /dev/null && clear`
 Enter
 Show
 

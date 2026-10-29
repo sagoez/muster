@@ -2,11 +2,12 @@
 
 The supervisor and control plane behind your terminal.
 
-muster owns what runs in a project: its dev servers, watchers, shells and CLI
-agents. A per-user background service starts them, restarts them, keeps their
-logs and screens, and answers a CLI and an MCP server. Your terminal stays your
-choice: muster draws no panes, and `muster attach` shows any process in the
-terminal you are already in.
+muster runs a project's dev stack: its servers, workers and watchers. A
+per-user background service starts them, restarts them, keeps their logs and
+screens, and answers a CLI and an MCP server. Your terminal stays your choice:
+muster draws no panes, and `muster attach` shows any process in the terminal
+you are already in. Agents and interactive shells live in
+[herdr](https://herdr.dev), which reaches the stack through muster's MCP server.
 
 **Status: Beta.** Linux and macOS.
 
@@ -18,82 +19,136 @@ Requires a recent Rust toolchain.
 
 ```sh
 cargo install muster-workspace
-muster init           # write a muster.yml here and register the folder
-muster up             # start its autostart processes
-muster hooks setup    # let agent CLIs report their session ids, for resume
+muster add web -- npm run dev   # register this folder and add a process
+muster up                       # start its autostart processes
 ```
 
 There is no daemon to start. The first `muster` command that needs the service
 starts it in the background.
 
-## muster.yml
+## Projects and stacks
 
-A project is a `muster.yml` with three sections, `agents`, `terminals` and
-`commands`. Every section is present; use `[]` for an empty one.
+A project is a folder. The first `muster add`, `muster run`, `muster import` or
+`muster init` that adds a process to a folder registers it, named after the
+folder (`shop`, then `shop-2` for a second folder of that name). Its stack is
+the list of processes it defines, in the order they were added.
+
+Everything muster stores lives in one SQLite database, `muster.db` in muster's
+state directory (`~/.local/state/muster` on Linux,
+`~/Library/Application Support/muster` on macOS), readable by its owner only:
+every project's stack, the machine's settings and the shared notes, todos and
+key-values. The CLI and the MCP server write it directly and tell a running
+service what changed, so an edit reaches the service at once and works without
+it.
+
+Commands act on the project given by `--project` (a registered name, or a
+folder when the value contains `/` or starts with `.` or `~`), then
+`$MUSTER_PROJECT` (set inside every process muster runs), then the deepest
+registered folder containing the current directory. Bare `muster` is
+`muster ps` inside a project and `muster ps --all` outside one.
+
+### Adding and changing processes
+
+```sh
+muster add web --cwd frontend --env PORT=5173 --restart on-failure -- npm run dev
+muster add worker --stop-signal interrupt --stop-grace 10s -- bin/worker
+muster set web --autostart --description "the dev server"
+muster rm worker
+```
+
+`muster add <name> -- <command>` adds a process. One argument after `--` is
+taken as a shell expression; several are joined as shell words. Each process
+has:
+
+- a name, unique within the project, that every command addresses it by;
+- a command, run by the shell;
+- `--cwd`, where it runs, stored relative to the project folder when inside it;
+  the project folder when left out;
+- `--env KEY=VALUE`, repeatable, the variables it runs with;
+- `--description`, a one-line note;
+- `--autostart` or `--no-autostart`, whether `muster up` starts it;
+- `--restart`: `never`, `on-failure` or `always`; restarts back off;
+- `--stop-signal`: `terminate` (SIGTERM) or `interrupt` (SIGINT), and
+  `--stop-grace`, how long a stop waits before SIGKILL.
+
+A field left out takes the matching `default-*` setting, and the process stores
+that value, so changing a default later changes only processes added after it.
+`muster add` never starts anything.
+
+`muster set <name>` changes the fields it is given: `--command` or a new command
+after `--`, `--no-cwd` and `--no-description` to clear, `--env` to add or
+replace a variable and `--unset-env` to remove one. A running process keeps its
+current run; `muster restart <name>` applies the change. `muster rm <name>...`
+stops each process it removes and waits for it to end. A name cannot be
+changed: remove the process and add it again.
+
+### Sharing a stack
+
+`muster export [FILE]` writes the project's stack to `muster.yml` in the project
+folder, or to `FILE` (`-` for stdout), and refuses to overwrite a file without
+`--force`. Environment variables are written by name with a null placeholder;
+`--with-env` writes their values too. `muster import [FILE]` loads such a file
+into the current folder, registering it when needed. By default it refuses
+names the project already defines; `--merge` replaces those, `--replace` makes
+the stack exactly the file and stops what it removes, and `--dry-run` prints
+the plan. An import refuses a file whose environment still holds a placeholder.
 
 ```yaml
-agents:
-  - name: claude
-    command: claude
-    autostart: false
-
-terminals:
-  - name: shell
-    command: null          # null runs your login shell
-    autostart: true
-
-commands:
+# muster stack: `muster import` loads it into a project.
+version: 1
+processes:
   - name: web
     command: npm run dev
-    description: the dev server
+    working_dir: frontend
+    environment:
+      PORT: "5173"
     autostart: true
     restart: on-failure
     stop:
-      signal: interrupt
-      grace_period: 10s
+      signal: terminate
+      grace_period: 5s
 ```
 
-Each process takes:
+[examples/muster.yml](examples/muster.yml) is a complete example. The file
+never names the project: the folder that imports it is the project.
 
-- `name`: unique within the project, and how every command addresses it.
-- `autostart`: required. `true` starts the process with `muster up`; `false`
-  leaves it for `muster start`.
-- `command`: the shell command. `null` on a terminal runs your login shell.
-- `working_dir`: where it runs, relative to the project folder. Defaults to the
-  project folder.
-- `description`: an optional one-line note.
-- `restart`: `never` (the default), `on-failure` or `always`. Restarts back off.
-- `stop`: commands only. `signal` is `terminate` (SIGTERM) or `interrupt`
-  (SIGINT), and `grace_period` is how long muster waits before SIGKILL. The
-  default is `terminate` with `5s`.
+### Detecting a stack
 
-muster reconciles edits to `muster.yml` live: new entries appear, removed ones
-retire, and a running process whose entry is unchanged keeps running.
+`muster init` reads `package.json` scripts, `Procfile`, `justfile`, `Makefile`
+and compose files in the folder and offers what it finds, with the likely dev
+commands preselected. It only reads files and never runs them. At a terminal it
+asks which to add; elsewhere it prints the candidates, and `muster init --yes`
+adds the suggested ones.
 
-Machine-wide settings live in `settings.yml` in muster's config directory
-(`~/.config/muster` on Linux, `~/Library/Application Support/muster` on
-macOS), written with explicit defaults on first run:
+## Settings
 
-- `desktop_notifications`: whether failures raise a desktop notification.
-- `default_size`: the terminal size a process starts with, 1 to 1000 rows by
-  2 to 2000 columns. An attached terminal outside that range is clamped to it.
-- `detach_key`: the key that ends `muster attach`.
-- `log_max_size`: the size at which a process's log rotates.
-- `scrollback`: the lines of history each process's terminal keeps.
-- `color_scheme`: `dark` or `light`, the default colors a process's terminal
-  reports when an agent asks for them, so it themes for your terminal.
+`muster config` lists the machine's settings, `muster config get <key>` prints
+one and `muster config set <key> <value>` changes it.
+
+| Key | Value |
+|---|---|
+| `desktop-notifications` | `true` or `false`: whether failures raise a desktop notification |
+| `default-size` | `ROWSxCOLS`, such as `24x80`: the terminal size a process starts with, 1 to 1000 rows by 2 to 2000 columns |
+| `detach-key` | a Control chord, such as `ctrl-\`: the key that ends `muster attach` |
+| `log-max-size` | a size, such as `10MiB`: when a process's log rotates |
+| `scrollback` | lines of history each process's terminal keeps |
+| `color-scheme` | `dark` or `light`: the default colors a process's terminal reports |
+| `default-autostart` | `true` or `false` for a new process |
+| `default-restart` | `never`, `on-failure` or `always` for a new process |
+| `default-stop-signal` | `terminate` or `interrupt` for a new process |
+| `default-stop-grace` | a duration, such as `5s`, for a new process |
+
+`detach-key` applies at the next attach, `desktop-notifications` at once, the
+size, scrollback, log size and color scheme to processes started afterwards, and
+the `default-*` settings to processes added afterwards.
 
 ## Commands
-
-Process commands act on the project of `--config`, then `$MUSTER_PROJECT` (set
-inside every process muster runs), then `./muster.yml`, then the first
-registered project. Bare `muster` is `muster ps`.
 
 | Command | What it does |
 |---|---|
 | `muster ps [--all]` | List processes with state, pid, uptime, restarts and usage |
-| `muster up` | Start every `autostart: true` process |
-| `muster down [--agents [--yes]]` | Stop commands and terminals, and agents with `--agents` |
+| `muster up` | Start every autostart process |
+| `muster down` | Stop every process |
 | `muster start [name]` | Start a process |
 | `muster stop [name]` | Stop a process through its stop policy |
 | `muster restart [name]` | Restart a process |
@@ -101,18 +156,21 @@ registered project. Bare `muster` is `muster ps`.
 | `muster kill [name]` | Kill a process at once |
 | `muster logs [name] [-f] [--screen]` | Print a process's log, follow it, or print its current screen |
 | `muster attach [name] [--read-only]` | Show a process in this terminal and type into it |
-| `muster run [--name] [--kind] -- <command>` | Add a command to the project, start it and attach |
-| `muster agent new <tool> [--command] [--resume]` / `close <name>` / `reopen` | Open, close and reopen agent sessions |
+| `muster add <name> [options] -- <command>` | Add a process to the project, registering the folder |
+| `muster set <name> [options]` | Change a process's fields |
+| `muster rm <name>...` | Remove processes, stopping them first |
+| `muster run [--name] -- <command>` | Add a command to the project, start it and attach |
+| `muster config [list\|get\|set]` | Read and change the machine's settings |
+| `muster export [FILE] [--force] [--with-env]` | Write the project's stack to a file |
+| `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
+| `muster init [--yes]` | Detect a stack in the folder and add it |
+| `muster projects` / `projects rm <project>` | List registered projects, or remove one with its processes and coordination state |
 | `muster notices` | Show failed starts, forced stops and crashes the service recorded |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
-| `muster init` | Write a `muster.yml`, asking for its processes, and register the folder |
-| `muster check` | Validate a `muster.yml` |
-| `muster projects [add\|remove]` | List and manage registered projects |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state |
 | `muster coordination export\|import` | Move that shared state as YAML |
 | `muster mcp [--print-config]` | Serve the project to an agent over MCP |
-| `muster hooks setup` | Install the agent session hooks |
-| `muster doctor` | Diagnose config, projects, sessions, hooks and completions |
+| `muster doctor` | Diagnose the database, projects and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
 ### Exit codes
@@ -121,9 +179,9 @@ registered project. Bare `muster` is `muster ps`.
 |---|---|
 | 0 | Success |
 | 1 | A process did not end up as asked, or the action failed |
-| 2 | The command line could not be parsed, or a question was cancelled with Esc or Ctrl-C |
+| 2 | The command line could not be parsed, `set` changed nothing, a confirmation is missing, or a question was cancelled with Esc or Ctrl-C |
 | 3 | The service is unavailable or runs a newer version |
-| 4 | An unknown project or process name, or an invalid config |
+| 4 | Not a project, an unknown project or process, a taken name, an invalid value, an import conflict, or an unusable stack file |
 | 130 | Interrupted with Ctrl-C while it waited at a terminal |
 
 ### At a terminal
@@ -136,7 +194,7 @@ do, with a spinner naming the processes still starting or stopping:
 ```text
 ┌  muster up · shop
 │
-├  /home/me/shop/muster.yml
+├  /home/me/shop
 │
 ●  web     running (pid 4123)
 │
@@ -148,31 +206,32 @@ do, with a spinner naming the processes still starting or stopping:
 Ctrl-C closes the frame and exits with 130: before the request is sent it
 cancels the command with nothing changed, and under the spinner the service
 still finishes what it was asked. Data a command prints, such as a note, a
-listing or the completions line, is never framed.
+setting, a listing or the completions line, is never framed.
 
 A command that needs a process name and was given none offers the project's
 processes to choose from: `start`, `stop`, `restart`, `pause`, `resume`,
-`kill` and `logs`, and `attach` offers the running ones. While an agent
-runs, `muster down --agents` asks before it stops the agents; `--yes`
-answers for it, and answering no stops nothing and exits with 0. `muster
-init` asks for each process's name, kind, command, autostart and restart
-policy, then writes them to `muster.yml`.
+`kill` and `logs`, and `attach` offers the running ones. `muster projects rm`
+asks before it removes a project.
 
 Anywhere else muster prints one plain line per fact and asks nothing. A
 question it might have to ask fails with exit code 4 and names the argument
-that answers it, before it reaches the service: a missing name, and
-`down --agents` without `--yes` whether or not an agent runs. `muster init`
-writes a starter `muster.yml` with one terminal.
+that answers it, before it reaches the service, and `muster projects rm` needs
+`--yes`.
 
 ### JSON
 
-`ps`, `up`, `down`, `start`, `stop`, `restart`, `pause`, `resume`, `kill`,
-`logs`, `attach`, `run`, `agent new`, `agent close`, `agent reopen`,
-`notices`, `service status` and `service stop` take `--json` and print
-results and failures as JSON on stdout. Keys are snake_case, enum values are
-kebab-case (`on-failure`, `in-progress`), durations are whole seconds and
-times are RFC 3339 in UTC. `muster logs -f --json` prints one object per
-line.
+The commands take `--json` and print results and failures as JSON on stdout.
+Keys are snake_case, enum values are kebab-case (`on-failure`, `in-progress`),
+durations are seconds and times are RFC 3339 in UTC. A process definition
+reads:
+
+```json
+{"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
+ "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
+ "stop": {"signal": "terminate", "grace": 5.0}}
+```
+
+`muster logs -f --json` prints one object per line.
 
 ## Attach
 
@@ -180,19 +239,15 @@ line.
 paints the process's screen at once, follows resizes and passes your keys
 through. Without a name it offers the project's processes first. A one-line
 hint, kept in the window title while attached, names the detach key: `ctrl-\`
-by default (`detach_key` in `settings.yml`). Several clients may attach to one
+by default (`muster config set detach-key`). Several clients may attach to one
 process; `--read-only` watches without typing or resizing.
 
 ## Logs
 
-Each process writes its raw output to a log under the state directory
-(`~/.local/state/muster/logs` on Linux,
-`~/Library/Application Support/muster/logs` on macOS), across restarts and
-after it exits. A log rotates at `log_max_size`, keeping one older file. The
-state directory, its logs and the coordination database are readable by their
-owner only.
-`muster logs` reads it; `muster logs --screen` prints what the terminal shows
-now.
+Each process writes its raw output to a log under the state directory, across
+restarts and after it exits. A log rotates at `log-max-size`, keeping one older
+file. `muster logs` reads it; `muster logs --screen` prints what the terminal
+shows now.
 
 ## Processes outlive the service
 
@@ -200,50 +255,39 @@ Every process runs under its own small holder process that owns its terminal.
 Stopping, upgrading or crashing the service leaves every process running: the
 next service finds the holders, reconnects and rebuilds each screen before it
 answers, keeping each process's uptime, restart count, size and attached
-clients, and carrying out any restart that was pending. A process whose holder
-dies while it keeps running is shown as `unsupervised` and never started a
-second time. A newer muster binary replaces an older running service in place.
-
-## Agents
-
-`muster agent new claude` opens an agent session in the project; `muster agent
-close <name>` moves it into history and `muster agent reopen` resumes the latest
-closed conversation. Agents listed under `agents:` in `muster.yml` resume their
-own conversation when they start. Run `muster hooks setup` once so Claude,
-Codex, Gemini, Amp, OpenCode, Copilot and Kimi report their session ids, and
-again after upgrading muster: `muster doctor` reports hooks an older muster
-installed, and a capture from one asks for the same.
-
-Any other agent runs as `custom` with its own command:
-
-```sh
-muster agent new custom --name scout --command mycodex \
-  --resume 'mycodex resume {session_id}'
-```
-
-`--resume` is optional. In it, `{session_id}` stands for the agent's
-conversation id and must be a whole unquoted word; without it muster appends
-the id to the template. muster refuses a template whose placeholder is quoted
-or embedded in another word. Such an agent reports its id through the
-[agent protocol](docs/agent-protocol.md).
+clients, and carrying out any restart that was pending. A process removed from
+its stack while the service was down is stopped when the service finds it. A
+process whose holder dies while it keeps running is shown as `unsupervised` and
+never started a second time. A newer muster binary replaces an older running
+service in place.
 
 ## MCP
 
 `muster mcp --print-config` prints the snippet that adds muster to an agent's
-MCP servers. The server exposes the project to the agent:
+MCP servers for the current project. The server exposes the project to the
+agent:
 
-- processes: `process_list`, `process_output`, `process_start`, `process_stop`,
-  `process_restart`, `process_send`, `session_list`;
+- the stack: `process_add`, `process_set` and `process_remove`, which edit it
+  exactly as `muster add`, `set` and `rm` do; `process_add` registers the folder
+  when it is not yet a project;
+- live processes: `process_list`, `process_output`, `process_start`,
+  `process_stop`, `process_restart`, `process_send`;
+- settings: `config_get`, `config_set`;
 - shared notes: `scratchpad_list`, `scratchpad_get`, `scratchpad_set`,
   `scratchpad_delete`;
 - shared todos: `todo_list`, `todo_get`, `todo_add`, `todo_set_status`,
   `todo_delete`;
 - shared key-value state: `kv_list`, `kv_get`, `kv_set`, `kv_delete`.
 
+A mistake in a call, such as an unknown name or an invalid value, comes back as
+a result flagged `isError` whose text names the field or the valid names.
+
 ## Using it with herdr
 
-muster works in any terminal. In [herdr](https://herdr.dev), a custom command
-can open a process in a pane of its own:
+Agents and interactive terminals run in [herdr](https://herdr.dev) panes, each
+agent with muster's MCP server, so it can read and drive the stack its human
+sees in `muster ps`. A herdr custom command can also open a process in a pane
+of its own:
 
 ```toml
 [[keys.command]]

@@ -76,9 +76,14 @@ impl MusterMcp {
         description = "Start every autostart process of this project that is not running. With \
             wait=true, waits until each one is ready (or running, when it has no readiness \
             check), at most timeout_s (default <default-wait-s>, at most <call-bound-s>). \
-            Returns {project, started, already_running, refused: [{name, reason}], others: \
-            [{name, outcome}] (crashed, exited or not settled in time), notices, waits, alerts}. \
-            Flagged isError when any process failed to start or crashed while waiting."
+            Returns {project, started, already_running, refused: [{name, outcome, reason, \
+            block, status}], others (crashed, exited or not settled in time, each shaped as \
+            refused), notices, waits, alerts}. block is {port, holder} when a held port kept \
+            it from starting, holder being {kind: supervised, project, process} or {kind: \
+            other, pid, command}, and null otherwise; status is how muster ps --json lists it \
+            now, null once it is no longer listed. A \
+            port found held after the answer shows as blocked_on in stack_status. Flagged \
+            isError when any process failed to start or crashed while waiting."
     )]
     pub(super) async fn stack_up(
         &self,
@@ -210,6 +215,8 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
+
     use rmcp::model::ErrorCode;
     use serde_json::Value;
     use strum::IntoEnumIterator;
@@ -217,6 +224,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
+            client::{Outcome, PortBlockView, ProcessOutcome},
             mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
             service::{OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus},
         },
@@ -404,6 +412,72 @@ mod tests {
         let schema = Value::Object(tool.input_schema.as_ref().clone());
         let kinds = schema["properties"]["kinds"]["description"].to_string();
         assert!(kinds.contains("idle-stopped"), "{kinds}");
+    }
+
+    /// The keys of `value`, and of every object nested in it.
+    fn keys(value: &Value) -> Vec<String> {
+        match value {
+            Value::Object(fields) => fields
+                .iter()
+                .flat_map(|(key, value)| iter::once(key.clone()).chain(keys(value)))
+                .collect(),
+            Value::Array(items) => items.iter().flat_map(keys).collect(),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Vec::new(),
+        }
+    }
+
+    /// `stack_up`'s description names every field a refused entry carries,
+    /// its block and each kind of holder included.
+    #[test]
+    fn stack_up_describes_the_refused_shape() {
+        let fixture = fixture();
+        let description = fixture
+            .server()
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "stack_up")
+            .unwrap()
+            .description
+            .unwrap_or_default();
+        let port = LocalPort::try_new(5173).unwrap();
+        let holders = [
+            PortOwner::Supervised(
+                PortHolder::builder()
+                    .project(ProjectName::try_new("admin").unwrap())
+                    .process(ProcessName::try_new("web").unwrap())
+                    .build(),
+            ),
+            PortOwner::Other(
+                PortOccupant::builder()
+                    .pid(Pid::try_new(4242).unwrap())
+                    .command("python3".to_string())
+                    .build(),
+            ),
+        ];
+        for holder in holders {
+            let refused = ProcessOutcome::builder()
+                .name(ProcessName::try_new("web").unwrap())
+                .outcome(Outcome::Refused)
+                .reason(Some("port 5173 is held".to_string()))
+                .block(Some(PortBlockView::from(
+                    &PortBlock::builder().port(port).holder(holder).build(),
+                )))
+                .status(None)
+                .build();
+            let json = serde_json::to_value(&refused).unwrap();
+            for key in keys(&json) {
+                assert!(description.contains(&key), "{key}: {description}");
+            }
+            let kind = json["block"]["holder"]["kind"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                description.contains(&format!("kind: {kind}")),
+                "{kind}: {description}"
+            );
+        }
     }
 
     /// A malformed cursor or kind is the caller's mistake, refused before

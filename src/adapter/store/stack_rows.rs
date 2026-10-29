@@ -42,6 +42,8 @@ const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description
 const STOP_GRACE: &str = "stop grace";
 /// A process's readiness timeout, as its errors name it.
 const READY_TIMEOUT: &str = "readiness timeout";
+/// A port a process declares, as its errors name it.
+const DECLARED_PORT: &str = "declared port";
 
 /// The text a path column holds.
 ///
@@ -135,8 +137,12 @@ fn ports_of(
     let mut ports: HashMap<i64, BTreeSet<LocalPort>> = HashMap::new();
     while let Some(row) = rows.next().map_err(db_error)? {
         let process_id: i64 = row.get("process_id").map_err(db_error)?;
-        let port: u16 = row.get("port").map_err(db_error)?;
-        let port = LocalPort::try_new(port).map_err(|error| corrupt("port", error))?;
+        let port: i64 = row.get("port").map_err(db_error)?;
+        let port = u16::try_from(port)
+            .map_err(|error| refused(DECLARED_PORT, &error))
+            .and_then(|port| {
+                LocalPort::try_new(port).map_err(|error| refused(DECLARED_PORT, &error))
+            })?;
         ports.entry(process_id).or_default().insert(port);
     }
     Ok(ports)
@@ -824,6 +830,38 @@ mod tests {
             read_after("DELETE FROM process_env; UPDATE processes SET name = 'web' || char(7)"),
             "stored process name is invalid: it holds a control or format character"
         );
+    }
+
+    /// A declared port the schema check was bypassed for is refused on read
+    /// with a sentence naming the rule.
+    #[test]
+    fn a_hand_edited_port_past_the_schema_names_the_rule() {
+        for (port, reason) in [
+            ("0", "it is not a port from 1 to 65535"),
+            ("70000", "it is out of range"),
+        ] {
+            let (store, scratch) = fresh_store();
+            let root = root(&scratch);
+            store
+                .add_process(&root, &full_spec(), &Author::human())
+                .unwrap();
+            store
+                .write(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA ignore_check_constraints = ON;
+                         UPDATE process_ports SET port = {port};
+                         PRAGMA ignore_check_constraints = OFF;"
+                    ))
+                    .map_err(db_error)
+                })
+                .unwrap();
+
+            assert_eq!(
+                store.stack(&root).unwrap_err().to_string(),
+                format!("stored declared port is invalid: {reason}"),
+                "{port}"
+            );
+        }
     }
 
     #[test]

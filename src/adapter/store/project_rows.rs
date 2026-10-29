@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, Params, Row, params};
 
 use super::{
+    idle_stop_refusal::IdleStopRefusal,
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
     sqlite_store::{SqliteStore, corrupt, db_error, epoch_param},
 };
@@ -26,8 +27,11 @@ const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
 const NAME_EMPTY: &str = "its name is empty";
 /// Why a stored name that could drive a terminal is refused.
 const NAME_UNSAFE: &str = "its name holds a control or format character";
-/// Why a stored idle stop the domain refuses is refused.
-const IDLE_STOP_UNREADABLE: &str = "its idle stop is not one muster can read";
+/// Why stored idle-stop columns that do not go together are refused.
+const IDLE_STOP_MISMATCHED: &str =
+    "its idle stop names a kind muster does not know, or milliseconds that kind does not take";
+/// Why a stored idle stop that is not a positive duration is refused.
+const IDLE_STOP_NOT_POSITIVE: &str = "its idle stop is not a positive whole number of milliseconds";
 
 /// A project with the row id other tables key it by.
 pub(super) type ProjectRow = (i64, Project);
@@ -78,7 +82,8 @@ fn project_from_row(row: &Row) -> Result<Result<ProjectRow, UnreadableProject>, 
         .transpose()
     {
         Ok(idle_stop) => idle_stop,
-        Err(_) => return Ok(Err(unreadable(IDLE_STOP_UNREADABLE))),
+        Err(IdleStopRefusal::Mismatched) => return Ok(Err(unreadable(IDLE_STOP_MISMATCHED))),
+        Err(IdleStopRefusal::NotPositive) => return Ok(Err(unreadable(IDLE_STOP_NOT_POSITIVE))),
     };
     Ok(Ok((
         id,
@@ -655,27 +660,42 @@ mod tests {
         store
             .add_process(&shop, &spec("web", "true"), &Author::human())
             .unwrap();
-        let endless = IdleStop::After(PositiveDuration::try_new(Duration::MAX).unwrap());
+        let endless =
+            IdleStop::After(PositiveDuration::try_new(Duration::from_millis(u64::MAX)).unwrap());
 
         let refused = store.set_idle_stop(&shop, Some(endless)).unwrap_err();
 
         assert!(matches!(refused, ConfigError::TooLarge { .. }), "{refused}");
         assert_eq!(*store.project_at(&shop).unwrap().unwrap().idle_stop(), None);
-        store
-            .write(|conn| {
-                conn.execute_batch(
-                    "PRAGMA ignore_check_constraints = ON;
-                     UPDATE projects SET idle_stop_kind = 'after', idle_stop_ms = NULL;
-                     PRAGMA ignore_check_constraints = OFF;",
-                )
-                .map_err(db_error)
-            })
-            .unwrap();
-        let message = store.project_at(&shop).unwrap_err().to_string();
-        assert!(message.contains("idle stop"), "{message}");
-        let unreadable = store.unreadable_projects().unwrap();
-        assert_eq!(unreadable.len(), 1);
-        assert_eq!(unreadable[0].root(), shop.as_ref());
+        let hand_edited = |columns: &str| {
+            store
+                .write(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA ignore_check_constraints = ON;
+                         UPDATE projects SET {columns};
+                         PRAGMA ignore_check_constraints = OFF;"
+                    ))
+                    .map_err(db_error)
+                })
+                .unwrap();
+            let unreadable = store.unreadable_projects().unwrap();
+            assert_eq!(unreadable.len(), 1);
+            assert_eq!(unreadable[0].root(), shop.as_ref());
+            (
+                store.project_at(&shop).unwrap_err().to_string(),
+                unreadable[0].reason().clone(),
+            )
+        };
+
+        let (message, reason) = hand_edited("idle_stop_kind = 'after', idle_stop_ms = NULL");
+        assert!(message.contains(IDLE_STOP_MISMATCHED), "{message}");
+        assert_eq!(reason, IDLE_STOP_MISMATCHED);
+        for not_positive in ["0", "-5"] {
+            let (_, reason) = hand_edited(&format!(
+                "idle_stop_kind = 'after', idle_stop_ms = {not_positive}"
+            ));
+            assert_eq!(reason, IDLE_STOP_NOT_POSITIVE, "{not_positive}");
+        }
     }
 
     /// Removing a project takes its processes, environment and coordination

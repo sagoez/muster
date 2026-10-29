@@ -324,15 +324,16 @@ mod tests {
             .ports(Some(BTreeSet::new()))
             .build();
 
-        let replaced = declared.clone().with_change(&replace);
-        let cleared = declared.clone().with_change(&clear);
+        let replaced = declared.clone().with_change(&replace).unwrap();
+        let cleared = declared.clone().with_change(&clear).unwrap();
 
         assert_eq!(replaced.ports(), &BTreeSet::from([port(8080)]));
         assert!(cleared.ports().is_empty());
         assert_eq!(
             declared
                 .clone()
-                .with_change(&ProcessChange::builder().build()),
+                .with_change(&ProcessChange::builder().build())
+                .unwrap(),
             declared,
             "a change naming no ports keeps them"
         );

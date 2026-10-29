@@ -1,11 +1,13 @@
+use std::time::Duration;
+
 use bytesize::ByteSize as RawByteSize;
 use rusqlite::{Connection, Row, params};
 
 use super::{
     edit_log_rows::record_edit_everywhere,
+    idle_stop_refusal::IdleStopRefusal,
     sqlite_store::{
-        SqliteStore, column_integer, corrupt, db_error, duration_millis, grace_from_millis,
-        positive_from_millis, refused,
+        SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
     store_error::StoreError,
 };
@@ -15,7 +17,7 @@ use crate::domain::{
     port::{SettingsReader, SettingsStore},
     pty::PtySize,
     settings::Settings,
-    value::{ByteSize, DetachKey, IdleStop, LogMaxSize, ScrollbackLines},
+    value::{ByteSize, DetachKey, IdleStop, LogMaxSize, PositiveDuration, ScrollbackLines},
 };
 
 /// Selects the settings columns [`settings_from_row`] reads by name.
@@ -51,21 +53,21 @@ pub(super) fn idle_stop_columns(
 /// The idle stop the `idle_stop_kind` and `idle_stop_ms` columns hold.
 ///
 /// # Errors
-/// Returns [`ConfigError::CorruptRow`] for an unknown kind, a duration that is
-/// not positive, or milliseconds that do not match the kind.
+/// Returns [`IdleStopRefusal::Mismatched`] for an unknown kind or milliseconds
+/// that do not match the kind, and [`IdleStopRefusal::NotPositive`] for a
+/// duration that is not positive.
 pub(super) fn idle_stop_from_columns(
     kind: &str,
     millis: Option<i64>,
-) -> Result<IdleStop, ConfigError> {
+) -> Result<IdleStop, IdleStopRefusal> {
     match (kind, millis) {
-        (IDLE_STOP_AFTER, Some(millis)) => {
-            positive_from_millis(IDLE_STOP, millis).map(IdleStop::After)
-        },
+        (IDLE_STOP_AFTER, Some(millis)) => u64::try_from(millis)
+            .ok()
+            .and_then(|millis| PositiveDuration::try_new(Duration::from_millis(millis)).ok())
+            .map(IdleStop::After)
+            .ok_or(IdleStopRefusal::NotPositive),
         (IDLE_STOP_NEVER, None) => Ok(IdleStop::Never),
-        _ => Err(corrupt(
-            IDLE_STOP,
-            format!("kind {kind} does not go with {millis:?} milliseconds"),
-        )),
+        _ => Err(IdleStopRefusal::Mismatched),
     }
 }
 
@@ -128,7 +130,10 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
                 .parse()
                 .map_err(|error| refused("MCP stack edits", &error))?,
         )
-        .idle_stop(idle_stop_from_columns(&idle_stop_kind, idle_stop_ms)?)
+        .idle_stop(
+            idle_stop_from_columns(&idle_stop_kind, idle_stop_ms)
+                .map_err(|error| refused(IDLE_STOP, &error))?,
+        )
         .build())
 }
 
@@ -302,6 +307,40 @@ mod tests {
             assert!(edit(accepted).is_ok(), "{accepted}");
         }
         assert_eq!(*store.load().unwrap().idle_stop(), IdleStop::Never);
+    }
+
+    /// Idle-stop columns the schema checks were bypassed for are refused on
+    /// read with a sentence naming the rule, never the stored text.
+    #[test]
+    fn a_hand_edited_idle_stop_past_the_schema_names_the_rule() {
+        for (columns, reason) in [
+            (
+                "idle_stop_kind = 'soon' || char(27), idle_stop_ms = NULL",
+                "it names a kind muster does not know, or milliseconds that kind does not take",
+            ),
+            (
+                "idle_stop_kind = 'after', idle_stop_ms = -1",
+                "it is not a positive whole number of milliseconds",
+            ),
+        ] {
+            let (store, _scratch) = fresh_store();
+            store
+                .write(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA ignore_check_constraints = ON;
+                         UPDATE settings SET {columns};
+                         PRAGMA ignore_check_constraints = OFF;"
+                    ))
+                    .map_err(db_error)
+                })
+                .unwrap();
+
+            assert_eq!(
+                store.load().unwrap_err().to_string(),
+                format!("stored idle stop is invalid: {reason}"),
+                "{columns}"
+            );
+        }
     }
 
     /// Every setting written reads back, through another connection too.

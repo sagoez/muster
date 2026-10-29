@@ -1,5 +1,6 @@
 mod coordination_rows;
 mod edit_log_rows;
+mod idle_stop_refusal;
 mod lock_rows;
 mod project_rows;
 mod refusal;

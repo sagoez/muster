@@ -1,50 +1,12 @@
-use std::{fmt, time::Duration};
+use std::fmt;
 
-use getset::Getters;
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumIter, EnumString};
-use typed_builder::TypedBuilder;
 
+use super::state_goal::StateGoal;
 use crate::domain::{
-    process::{LogPattern, ProcessState},
-    value::{LocalPort, LocalUrl, OutputCursor},
+    process::LogPattern,
+    value::{LocalPort, LocalUrl},
 };
-
-/// A lifecycle state a wait can be for: one `ps` shows, or `stopped` for not
-/// running for any reason.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, Serialize, Deserialize,
-)]
-#[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
-pub enum StateGoal {
-    /// Running.
-    Running,
-    /// Paused.
-    Paused,
-    /// Exited with status 0.
-    Exited,
-    /// Crashed.
-    Crashed,
-    /// Waiting out a restart backoff.
-    Restarting,
-    /// Not running, whatever the reason.
-    Stopped,
-}
-
-impl StateGoal {
-    /// Whether a process in `state` has reached this goal.
-    pub fn reached(self, state: ProcessState) -> bool {
-        match self {
-            Self::Running => state == ProcessState::Running,
-            Self::Paused => state == ProcessState::Paused,
-            Self::Exited => state == ProcessState::Exited,
-            Self::Crashed => state == ProcessState::Crashed,
-            Self::Restarting => state == ProcessState::Restarting,
-            Self::Stopped => !state.may_be_running(),
-        }
-    }
-}
 
 /// What a wait waits for. One shape serves waits, starts with a wait, and
 /// stored readiness.
@@ -97,26 +59,10 @@ impl fmt::Display for WaitCondition {
     }
 }
 
-/// One wait as a client asks for it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-#[serde(rename_all = "kebab-case")]
-pub struct WaitSpec {
-    /// What to wait for; the process's default when absent.
-    #[builder(default)]
-    until: Option<WaitCondition>,
-    /// Output after this cursor counts; without it, only output after the
-    /// request does.
-    #[builder(default)]
-    since: Option<OutputCursor>,
-    /// Longest to wait before answering that it is still waiting.
-    #[serde(with = "humantime_serde")]
-    timeout: Duration,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::process::ProcessState;
 
     #[test]
     fn stopped_means_not_running_for_any_reason() {

@@ -11,7 +11,9 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use super::{
     acceptor::Acceptor,
     event::ServiceEvent,
+    event_kind::EventKind,
     event_log::{EventDraft, EventLog, SharedEventLog},
+    event_seq::EventSeq,
     holder_pool::HolderPool,
     launch_environment::LaunchEnvironment,
     located::Located,
@@ -34,7 +36,6 @@ use super::{
     service_version::ServiceVersion,
     shared_holders::SharedHolders,
     singleton::Singleton,
-    stack_event::{EventKind, EventSeq},
     supervisor::{HolderScreen, ScreenReply, StaleRelease, Supervisor, SupervisorDeps},
     usage_sampler::UsageSampler,
 };

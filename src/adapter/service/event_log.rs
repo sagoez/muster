@@ -7,7 +7,9 @@ use std::{
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::stack_event::{EventKind, EventPage, EventSeq, StackEvent};
+use super::{
+    event_kind::EventKind, event_page::EventPage, event_seq::EventSeq, stack_event::StackEvent,
+};
 use crate::{
     adapter::sanitize::printable,
     domain::value::{OutputCursor, ProcessName, ProjectRoot},

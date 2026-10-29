@@ -3,11 +3,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    launch_environment::LaunchEnvironment,
-    process_action::ProcessAction,
-    service_version::ServiceVersion,
-    stack_event::{EventKind, EventSeq},
-    wait_condition::WaitSpec,
+    event_kind::EventKind, event_seq::EventSeq, launch_environment::LaunchEnvironment,
+    process_action::ProcessAction, service_version::ServiceVersion, wait_spec::WaitSpec,
 };
 use crate::{
     adapter::workspace_request::WorkspaceRequest,

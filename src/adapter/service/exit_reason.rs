@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
-use super::wait_outcome::WaitStatus;
+use super::wait_status::WaitStatus;
 use crate::domain::pty::{ExitCause, ExitOutcome};
 
 /// Why a process's run ended.

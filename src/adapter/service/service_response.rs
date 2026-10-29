@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 
 use super::{
-    batch_outcome::BatchOutcome, located::Located, notice::Notice, project_status::ProjectStatus,
-    service_error_body::ServiceErrorBody, service_version::ServiceVersion, stack_event::EventPage,
-    wait_outcome::WaitOutcome,
+    batch_outcome::BatchOutcome, event_page::EventPage, located::Located, notice::Notice,
+    project_status::ProjectStatus, service_error_body::ServiceErrorBody,
+    service_version::ServiceVersion, wait_outcome::WaitOutcome,
 };
 
 /// The service's answer to one [`ServiceRequest`](super::ServiceRequest), as

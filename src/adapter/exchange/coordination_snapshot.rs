@@ -104,6 +104,27 @@ mod tests {
         assert!(blank.contains("author label must not be empty"), "{blank}");
     }
 
+    /// An imported time written at an offset or with a fraction of a second
+    /// reads as the UTC second it names.
+    #[test]
+    fn an_imported_time_reads_at_any_rfc3339_offset() {
+        let file = |at: &str| {
+            format!(
+                "version: 1\nscratchpads:\n- key: plan\n  body: b\n  author: human\n  updated_at: {at}\ntodos: []\nvalues: []\n"
+            )
+        };
+        let read = |at: &str| {
+            *serde_yaml_ng::from_str::<CoordinationSnapshot>(&file(at))
+                .unwrap()
+                .scratchpads()[0]
+                .updated_at()
+        };
+
+        let utc = read("1970-01-01T00:00:07Z");
+        assert_eq!(read("1970-01-01T02:00:07+02:00"), utc);
+        assert_eq!(read("1970-01-01T00:00:07.9Z"), utc);
+    }
+
     /// A snapshot with a field this muster does not know is refused.
     #[test]
     fn an_unknown_field_is_refused() {

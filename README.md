@@ -307,7 +307,9 @@ in the shapes the matching MCP tools do (`{"notes": [...]}`, a todo, `{"key",
 says whether one `failed`, exiting 1 when one did.
 Keys are snake_case, enum values are kebab-case (`on-failure`, `in-progress`),
 durations are numbers of seconds and times are RFC 3339 in UTC to the second
-(`"updated_at": "2026-10-29T15:34:41Z"`). A setting's `value` is the exception:
+(`"updated_at": "2026-10-29T15:34:41Z"`); `muster coordination import` reads
+any RFC 3339 time, at an offset or with a fraction, as the UTC second it
+names. A setting's `value` is the exception:
 it is the text `config set` takes, such as `"5s"`. A process definition reads:
 
 ```json

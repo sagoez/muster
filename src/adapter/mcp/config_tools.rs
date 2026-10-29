@@ -1,0 +1,157 @@
+//! The settings tools: the machine's muster settings, read and changed.
+
+use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
+
+use super::{
+    config_get_arg::ConfigGetArg,
+    config_set_arg::ConfigSetArg,
+    process_fields::{KEY_FIELD, choice},
+    server::{MusterMcp, ToolResult, json, structured},
+    tool_error::ToolError,
+};
+use crate::{
+    adapter::client::{SettingView, SettingsView},
+    domain::config::{SettingChange, SettingKey},
+};
+
+/// The setting key an agent typed as `raw`.
+///
+/// # Errors
+/// Returns the caller's mistake for a key that names no setting, listing
+/// every key.
+fn setting_key(raw: &str) -> Result<SettingKey, ToolError> {
+    choice(KEY_FIELD, raw)
+}
+
+#[tool_router(router = config_router, vis = "pub(super)")]
+impl MusterMcp {
+    /// Reads one setting, or all of them.
+    #[tool(
+        description = "Read the machine's muster settings. Takes key (optional). With key, \
+            returns {key, value}; without, {settings: [{key, value}]} listing every setting. \
+            Values are written as config_set reads them. An unknown key is a result flagged \
+            isError that lists the valid keys."
+    )]
+    pub(super) async fn config_get(&self, Parameters(arg): Parameters<ConfigGetArg>) -> ToolResult {
+        let key = arg.key().as_deref().map(setting_key).transpose()?;
+        let settings = self.deps.settings().load()?;
+        match key {
+            Some(key) => structured(json(&SettingView::of(&settings, key))?, false),
+            None => structured(json(&SettingsView::from(&settings))?, false),
+        }
+    }
+
+    /// Changes one setting.
+    #[tool(
+        description = "Change one of the machine's muster settings. Takes key and value, the \
+            value written as config_get shows it (true, 24x80, 10MiB, on-failure, 5s). The \
+            default-* settings apply to processes added afterwards; default-size, scrollback, \
+            log-max-size and color-scheme to processes started afterwards. Returns {key, value}. \
+            An unknown key or an invalid value is a result flagged isError that names the \
+            accepted form."
+    )]
+    pub(super) async fn config_set(&self, Parameters(arg): Parameters<ConfigSetArg>) -> ToolResult {
+        let key = setting_key(arg.key())?;
+        let change = SettingChange::parse(key, arg.value())?;
+        let settings = self
+            .blocking(move |deps| Ok(deps.editor().configure(&change)?))
+            .await?;
+        structured(json(&SettingView::of(&settings, key))?, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use strum::IntoEnumIterator;
+
+    use super::*;
+    use crate::adapter::mcp::test_support::{add, content, fixture, refusal, runtime};
+
+    /// `config_get` reads every setting or one; an unknown key lists the
+    /// valid ones.
+    #[test]
+    fn config_get_reads_one_or_every_setting() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let all = content(
+                fixture
+                    .server
+                    .config_get(Parameters(ConfigGetArg::builder().build()))
+                    .await,
+            );
+            let listed = all["settings"].as_array().expect("a list of settings");
+            assert_eq!(listed.len(), SettingKey::iter().count());
+
+            let one = content(
+                fixture
+                    .server
+                    .config_get(Parameters(
+                        ConfigGetArg::builder()
+                            .key(Some("default-restart".to_string()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(
+                one,
+                serde_json::json!({ "key": "default-restart", "value": "never" })
+            );
+
+            let unknown = refusal(
+                fixture
+                    .server
+                    .config_get(Parameters(
+                        ConfigGetArg::builder()
+                            .key(Some("restart".to_string()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(unknown.contains("default-restart"), "{unknown}");
+        });
+    }
+
+    /// `config_set` stores a value a new process takes and tells a running
+    /// service; an invalid value names the accepted form.
+    #[test]
+    fn config_set_stores_and_announces_a_setting() {
+        let fixture = fixture();
+        let server = &fixture.server;
+        runtime().block_on(async {
+            let stored = content(
+                server
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-restart".to_string())
+                            .value("on-failure".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(
+                stored,
+                serde_json::json!({ "key": "default-restart", "value": "on-failure" })
+            );
+
+            let invalid = refusal(
+                server
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("default-stop-grace".to_string())
+                            .value("0s".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(invalid.contains("default-stop-grace"), "{invalid}");
+
+            let added = content(
+                server
+                    .process_add(Parameters(add("web", "npm run dev")))
+                    .await,
+            );
+            assert_eq!(added["process"]["restart"], "on-failure");
+        });
+        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 1);
+    }
+}

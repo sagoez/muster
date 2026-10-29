@@ -61,6 +61,13 @@ impl<'a> Invocation<'a> {
         env::current_dir().map_err(CliError::CurrentDir)
     }
 
+    /// Whether `--project` or the environment muster gives its processes
+    /// names the project, rather than the current folder.
+    pub fn names_project(&self) -> bool {
+        self.project.is_some()
+            || env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from)).is_some()
+    }
+
     /// The project the command acts on, registered or not, by the one rule
     /// every command follows.
     ///

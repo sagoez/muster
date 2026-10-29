@@ -1698,8 +1698,10 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// The JSON-RPC version every MCP message carries.
 const JSON_RPC_VERSION: &str = "2.0";
 /// The tools that act on one process, each of which takes its `name`.
-const PROCESS_TOOLS: [&str; 5] = [
-    "process_output",
+const PROCESS_TOOLS: [&str; 7] = [
+    "process_screen",
+    "process_logs",
+    "process_wait",
     "process_send",
     "process_start",
     "process_stop",
@@ -1727,7 +1729,7 @@ impl McpSession {
     /// Starts `muster mcp` for `project` over `scratch` and initializes it.
     fn start(scratch: &mut Scratch, project: &Path) -> Self {
         let mut child = scratch
-            .command(&["-p", project.to_str().unwrap(), "mcp"])
+            .command(&["-p", project.to_str().unwrap(), "mcp", "--as", "test-agent"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1883,10 +1885,17 @@ fn mcp_tools_work_with_the_service_autostarted() {
             .find(|listed| listed["name"] == tool)
             .unwrap_or_else(|| panic!("no tool {tool}: {tools}"))["inputSchema"];
         assert!(schema["properties"]["name"].is_object(), "{tool}: {schema}");
+        assert!(
+            schema["properties"]["project"].is_object(),
+            "{tool}: {schema}"
+        );
         assert!(schema["properties"]["id"].is_null(), "{tool}: {schema}");
     }
 
-    let listed = mcp.result("process_list", serde_json::json!({}))["structuredContent"].clone();
+    let listed = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
+    assert_eq!(listed["project"]["name"], "shop", "{listed}");
+    assert_eq!(listed["you"], "cli-exec@test-agent", "{listed}");
+    assert!(listed["alerts"].is_array(), "{listed}");
     let names: Vec<&str> = listed["processes"]
         .as_array()
         .unwrap()
@@ -1905,31 +1914,25 @@ fn mcp_tools_work_with_the_service_autostarted() {
     let started = mcp.result("process_start", serde_json::json!({ "name": "echo box" }));
     assert_eq!(started["isError"], false, "{started}");
     let report = &started["structuredContent"];
-    assert_eq!(report["action"], "start");
-    assert_eq!(report["processes"][0]["name"], "echo box");
-    assert_eq!(report["processes"][0]["outcome"], "started");
-    assert_eq!(report["processes"][0]["status"]["state"], "running");
+    assert_eq!(report["process"], "echo box");
+    assert_eq!(report["outcome"], "started");
+    assert_eq!(report["status"]["state"], "running");
 
-    assert_eq!(
-        mcp.text(
-            "process_send",
-            serde_json::json!({ "name": "echo box", "text": "hello muster", "enter": true }),
-        ),
-        "sent"
+    let sent = mcp.result(
+        "process_send",
+        serde_json::json!({ "name": "echo box", "text": "hello muster", "enter": true }),
     );
+    assert_eq!(sent["structuredContent"]["sent"], true, "{sent}");
     wait_until("the echo to reach the screen", || {
-        mcp.text("process_output", serde_json::json!({ "name": "echo box" }))
+        mcp.text("process_screen", serde_json::json!({ "name": "echo box" }))
             .contains("hello muster")
     });
 
     let accented = mcp.result(
         "process_start",
-        serde_json::json!({ "name": "cafe\u{301}" }),
+        serde_json::json!({ "name": "cafe\u{301}", "project": "shop" }),
     );
-    assert_eq!(
-        accented["structuredContent"]["processes"][0]["name"],
-        "caf\u{e9}"
-    );
+    assert_eq!(accented["structuredContent"]["process"], "caf\u{e9}");
 
     let unknown = mcp.mistake("process_stop", serde_json::json!({ "name": "echo" }));
     let text = result_text(&unknown);
@@ -1942,19 +1945,16 @@ fn mcp_tools_work_with_the_service_autostarted() {
     assert_eq!(error["candidates"], serde_json::json!(["echo box", "café"]));
 
     let restarted = mcp.result("process_restart", serde_json::json!({ "name": "echo box" }));
-    assert_eq!(
-        restarted["structuredContent"]["processes"][0]["outcome"],
-        "restarted"
-    );
+    assert_eq!(restarted["structuredContent"]["outcome"], "restarted");
     for name in ["echo box", "café"] {
         let stopped = mcp.result("process_stop", serde_json::json!({ "name": name }));
         assert_eq!(
-            stopped["structuredContent"]["processes"][0]["outcome"], "stopped",
+            stopped["structuredContent"]["outcome"], "stopped",
             "{stopped}"
         );
     }
     assert_eq!(
-        mcp.result("process_list", serde_json::json!({}))["structuredContent"]["processes"][1]["last_exit"]
+        mcp.result("stack_status", serde_json::json!({}))["structuredContent"]["processes"][1]["last_exit"]
             ["signal"],
         "sigterm",
         "a signal is named by its POSIX name, whatever the locale"
@@ -1997,8 +1997,12 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     fs::create_dir_all(&folder).unwrap();
     let mut mcp = McpSession::start(&mut scratch, &folder);
 
-    let outside = mcp.mistake("process_list", serde_json::json!({}));
+    let outside = mcp.mistake("stack_status", serde_json::json!({}));
     assert!(result_text(&outside).contains("process_add"), "{outside}");
+    assert_eq!(
+        outside["structuredContent"]["error"]["kind"],
+        "unknown-project"
+    );
     assert!(
         processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
         "a folder that is not a project starts no service"
@@ -2008,18 +2012,25 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
         "process_add",
         serde_json::json!({ "name": "web", "command": "echo home-$HOME; sleep 600" }),
     );
-    assert_eq!(added["structuredContent"]["name"], "web", "{added}");
+    assert_eq!(
+        added["structuredContent"]["process"]["name"], "web",
+        "{added}"
+    );
+    assert_eq!(
+        added["structuredContent"]["project"]["name"], "fresh",
+        "{added}"
+    );
     let started = mcp.result("process_start", serde_json::json!({ "name": "web" }));
     assert_eq!(
-        started["structuredContent"]["processes"][0]["outcome"], "started",
+        started["structuredContent"]["outcome"], "started",
         "{started}"
     );
-    let pid = started["structuredContent"]["processes"][0]["status"]["pid"]
+    let pid = started["structuredContent"]["status"]["pid"]
         .as_u64()
         .unwrap();
     scratch.children.push(pid as u32);
     wait_until("the launch to carry the server's environment", || {
-        mcp.text("process_output", serde_json::json!({ "name": "web" }))
+        mcp.text("process_screen", serde_json::json!({ "name": "web" }))
             .contains("home-/")
     });
 
@@ -2030,12 +2041,12 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     assert_eq!(changed["structuredContent"]["running"], true, "{changed}");
 
     let removed = mcp.result("process_remove", serde_json::json!({ "name": "web" }));
-    assert_eq!(
-        removed["structuredContent"],
-        serde_json::json!({ "name": "web", "stopped": true, "still_stopping": false })
-    );
+    let removed = &removed["structuredContent"];
+    assert_eq!(removed["name"], "web", "{removed}");
+    assert_eq!(removed["stopped"], true, "{removed}");
+    assert_eq!(removed["still_stopping"], false, "{removed}");
     assert!(!alive(pid as u32), "the removed process was stopped");
-    let listed = mcp.result("process_list", serde_json::json!({}));
+    let listed = mcp.result("stack_status", serde_json::json!({}));
     assert_eq!(
         listed["structuredContent"]["processes"],
         serde_json::json!([])

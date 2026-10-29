@@ -63,9 +63,10 @@ use crate::{
     adapter::{
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectView, RunningServiceNotifier,
-            ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
+            ServiceClient, SettingView, SettingsView, SettleWatch, UserService, WaitView,
+            process,
         },
-        mcp::{self, McpDeps},
+        mcp::{self, McpDeps, Scope},
         private_dir::state_dir,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         store::SqliteStore,
@@ -226,8 +227,8 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Coordination { command }) => coordinate(invocation, command),
         Some(Command::Mcp {
             print_config,
-            author,
-        }) => serve_mcp(invocation, print_config, author),
+            agent,
+        }) => serve_mcp(invocation, print_config, agent),
         Some(Command::Doctor) => doctor(invocation),
         Some(Command::Completions { shell }) => completions(shell),
         Some(Command::Holder { spec }) => internal(ports.run_holder(&spec)),
@@ -976,24 +977,30 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path) -> PathBuf {
         .unwrap_or_else(|error| fail_command(false, &error))
 }
 
-/// Serves the invocation's project to agents as an MCP server over stdio,
-/// blocking until the connecting agent disconnects; with `print_config`,
-/// prints the paste-in config snippet instead. The folder need not be a
-/// project yet: the first process an agent adds registers it.
-fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, author: Option<String>) {
+/// Serves muster to agents as an MCP server over stdio, blocking until the
+/// connecting agent disconnects; with `print_config`, prints the paste-in
+/// config snippet, which names no project, instead. Each call resolves its
+/// project from the folder `--project` names, or else the current one, so a
+/// folder registered later is found and one entry serves every project.
+fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
+    if print_config {
+        let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
+        emit_line(&mcp::connection_config(&executable));
+        return;
+    }
     let prepared = invocation.store().and_then(|store| {
-        let target = invocation.target(&store)?;
-        Ok((store, target))
+        let cwd = invocation.cwd()?;
+        let base = if invocation.names_project() {
+            invocation.target(&store)?.root().as_ref().clone()
+        } else {
+            cwd.clone()
+        };
+        Ok((store, Scope::builder().cwd(cwd).base(base).build()))
     });
-    let (store, target) = match prepared {
+    let (store, scope) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => fail_command(false, &error),
     };
-    if print_config {
-        let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
-        emit_line(&mcp::connection_config(&executable, target.root()));
-        return;
-    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1002,8 +1009,9 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, author: Option<Str
         Err(error) => fail_with(&MusterError::Io(error)),
     };
     let deps = McpDeps::builder()
-        .root(target.root().clone())
-        .author(Author::agent(author.as_deref().unwrap_or_default()))
+        .scope(scope)
+        .agent(agent)
+        .service(Arc::new(UserService))
         .projects(Arc::new(store.clone()))
         .coordination(Arc::new(store.clone()))
         .stacks(Arc::new(store.clone()))

@@ -176,7 +176,7 @@ answers in the same shapes.
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
 | `muster coordination export\|import` | Move that shared state as YAML |
-| `muster mcp [--print-config]` | Serve the project to an agent over MCP |
+| `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
 | `muster doctor` | Diagnose the database, projects and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
@@ -271,23 +271,55 @@ service in place.
 ## MCP
 
 `muster mcp --print-config` prints the snippet that adds muster to an agent's
-MCP servers for the current project. The server exposes the project to the
-agent:
+MCP servers. It names no project, so one entry serves every project: each tool
+call acts on the project its `project` argument names (a registered project's
+name, or a folder), else on the deepest registered project containing the
+folder the server runs in, or the one `--project` names. Resolution runs per
+call, so a folder registered after the server started is found. Every result
+about a project names it.
 
-- the stack: `process_add`, `process_set` and `process_remove`, which edit it
-  exactly as `muster add`, `set` and `rm` do; `process_add` registers the folder
-  when it is not yet a project;
-- live processes: `process_list`, `process_output`, `process_start`,
-  `process_stop`, `process_restart`, `process_send`;
+`--as NAME` sets the id the agent's coordination writes and locks carry; it
+defaults to `MUSTER_AGENT`, then `herdr-pane-<HERDR_PANE_ID>`, then a random
+session id, and is prefixed with the client's name (`claude-code@herdr-pane-3`).
+`stack_status` and the first write result say which label is yours. When the
+server exits cleanly it releases the locks it holds.
+
+An agent's loop is: `stack_status` to see what runs; after a code change,
+`process_restart` with `wait: true`; when something breaks, `process_logs` with
+`errors_only: true`, then again with `since` set to the returned cursor to read
+only new output. The tools:
+
+- the stack: `stack_status`, `stack_up` and `stack_events` (lifecycle events
+  after a cursor, optionally long-polled); there is no `stack_down`, which is
+  left to the person at the CLI;
+- processes: `process_start`, `process_stop`, `process_restart`,
+  `process_wait`, `process_logs`, `process_screen` (what the terminal shows
+  now), `process_send`;
+- the stack definition: `process_add`, `process_set` and `process_remove`, which
+  edit it exactly as `muster add`, `set` and `rm` do; `process_add` registers
+  the folder when it is not yet a project, and `ready` stores a readiness check;
 - settings: `config_get`, `config_set`;
-- shared notes: `scratchpad_list`, `scratchpad_get`, `scratchpad_set`,
-  `scratchpad_delete`;
-- shared todos: `todo_list`, `todo_get`, `todo_add`, `todo_set_status`,
-  `todo_delete`;
-- shared key-value state: `kv_list`, `kv_get`, `kv_set`, `kv_delete`.
+- coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
+  `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
+  `note_delete`, `kv_read`, `kv_write`, `kv_delete`.
 
-A mistake in a call, such as an unknown name or an invalid value, comes back as
-a result flagged `isError` whose text names the field or the valid names.
+A wait takes one condition: `{"log": "Listening on"}` (add `"regex": true` for a
+regex), `{"port": 3000}`, `{"http": "http://localhost:3000/health"}` (with an
+optional `status`), `{"state": "running"}` or `{"ready": true}`. A `port` or
+`http` condition only reaches loopback hosts.
+
+No call blocks longer than 45 seconds; a wait that has not finished answers with
+status `waiting` and a cursor to continue from, and a request carrying a
+progress token hears progress every 5 seconds. Output is stripped of terminal
+escapes and capped, saying what it dropped. Every stack and process result
+carries `alerts`: crashes, readiness timeouts and blocked starts since the
+agent's last call, so it learns of a crash without polling.
+
+A mistake in a call, such as an unknown name, a malformed cursor or an invalid
+value, comes back as a result flagged `isError` whose text says what to do and
+whose `error` names its `kind` and up to 20 `candidates`. So does a wait ended
+by an exit or a crash, with the run's last lines. A wait that ran out of time,
+and a lock or todo someone else holds, are not errors.
 
 ## Using it with herdr
 

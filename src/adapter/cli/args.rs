@@ -344,19 +344,19 @@ pub enum Command {
         #[command(subcommand)]
         command: CoordinationCommand,
     },
-    /// Serve this project to agents as an MCP server over stdio: its
-    /// processes and shared coordination state (spawned as a child process
-    /// by a connecting agent).
+    /// Serve muster to agents as an MCP server over stdio (spawned as a
+    /// child process by a connecting agent). Each call acts on the project
+    /// containing this folder, or the one --project names, unless it names
+    /// another.
     Mcp {
         /// Print the JSON config snippet to add muster to an agent's MCP
         /// servers, then exit instead of serving.
         #[arg(long)]
         print_config: bool,
-        /// Identity this server stamps on coordination writes (the connecting
-        /// agent's name), so entries are attributable. Defaults to a generic
-        /// agent label.
+        /// The agent's id on coordination writes and locks; defaults to
+        /// MUSTER_AGENT, then herdr's pane, then a random session id.
         #[arg(long = "as", value_name = "NAME")]
-        author: Option<String>,
+        agent: Option<String>,
     },
     /// Diagnose muster's database, projects and completions.
     Doctor,

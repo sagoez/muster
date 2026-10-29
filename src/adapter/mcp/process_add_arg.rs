@@ -5,9 +5,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use typed_builder::TypedBuilder;
 
-use super::process_fields::{
-    ENVIRONMENT_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command, description, env_vars,
-    process_name, stop_grace, working_dir,
+use super::{
+    process_fields::{
+        ENVIRONMENT_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command, description,
+        env_vars, process_name, stop_grace, working_dir,
+    },
+    ready_arg::ReadyArg,
 };
 use crate::{
     adapter::mcp::tool_error::ToolError,
@@ -23,6 +26,11 @@ use crate::{
 #[serde(deny_unknown_fields)]
 #[getset(get = "pub")]
 pub struct ProcessAddArg {
+    /// A registered project's name or a folder; defaults to the project
+    /// containing the server's working directory, or that directory itself,
+    /// which this registers.
+    #[builder(default)]
+    project: Option<String>,
     /// The process's name, unique in this project.
     name: String,
     /// The shell command it runs.
@@ -48,6 +56,11 @@ pub struct ProcessAddArg {
     /// How long a stop waits before it kills, such as `5s`.
     #[builder(default)]
     stop_grace: Option<String>,
+    /// A readiness check such as {"log": "Listening on", "timeout": "60s"},
+    /// {"port": 3000, "timeout": "30s"} or {"http":
+    /// "http://localhost:3000/health", "timeout": "30s"}.
+    #[builder(default)]
+    ready: Option<ReadyArg>,
 }
 
 impl ProcessAddArg {

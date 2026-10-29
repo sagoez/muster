@@ -7,10 +7,12 @@ use typed_builder::TypedBuilder;
 
 use super::{
     nullable::nullable,
+    pending::ReadyCheck,
     process_fields::{
         ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice,
         command, description, env_name, env_vars, stop_grace, working_dir,
     },
+    ready_arg::ReadyArg,
 };
 use crate::{
     adapter::mcp::tool_error::ToolError,
@@ -26,6 +28,10 @@ use crate::{
 #[serde(deny_unknown_fields)]
 #[getset(get = "pub")]
 pub struct ProcessSetArg {
+    /// A registered project's name or a folder; defaults to the project
+    /// containing the server's working directory.
+    #[builder(default)]
+    project: Option<String>,
     /// The process's name.
     name: String,
     /// The new shell command.
@@ -57,6 +63,10 @@ pub struct ProcessSetArg {
     /// How long a stop waits before it kills, such as `5s`.
     #[builder(default)]
     stop_grace: Option<String>,
+    /// A readiness check as process_add takes; null removes it.
+    #[serde(default, deserialize_with = "nullable")]
+    #[builder(default)]
+    ready: Option<Option<ReadyArg>>,
 }
 
 impl ProcessSetArg {
@@ -112,6 +122,18 @@ impl ProcessSetArg {
                 Some(dir) => FieldEdit::Set(dir),
                 None => FieldEdit::Clear,
             },
+        })
+    }
+
+    /// The edit `ready` asks for.
+    ///
+    /// # Errors
+    /// Returns the refusal of a readiness check out of form.
+    pub fn ready_edit(&self) -> Result<FieldEdit<ReadyCheck>, ToolError> {
+        Ok(match &self.ready {
+            None => FieldEdit::Keep,
+            Some(None) => FieldEdit::Clear,
+            Some(Some(ready)) => FieldEdit::Set(ready.check()?),
         })
     }
 

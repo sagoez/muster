@@ -3,28 +3,29 @@ use std::sync::Arc;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
+use super::{scope::Scope, scope_target::ScopeTarget, tool_error::ToolError};
 use crate::{
+    adapter::client::ServiceAccess,
     application::StackEditor,
     domain::{
-        config::ConfigError,
-        coordination::Author,
         port::{CoordinationStore, ProjectStore, SettingsStore, StackStore, StateChangeNotifier},
         project::Project,
-        value::ProjectRoot,
     },
 };
 
-/// What the MCP server works with: the project it serves, who it writes as,
-/// and the stores and notifier its tools drive. Cheap to clone, so a tool can
-/// carry it onto a blocking thread.
+/// What the MCP server works with: where it resolves projects from, the
+/// identity it was given, the service it drives, and the stores and notifier
+/// its tools write through. Cheap to clone, so a tool can carry it onto a
+/// blocking thread.
 #[derive(Clone, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct McpDeps {
-    /// The project's folder, registered or not; the first `process_add`
-    /// registers it.
-    root: ProjectRoot,
-    /// Who coordination writes are attributed to.
-    author: Author,
+    /// Where each call resolves its project from.
+    scope: Scope,
+    /// The `--as` name, which beats every other source of the agent's id.
+    agent: Option<String>,
+    /// How the server reaches the muster service.
+    service: Arc<dyn ServiceAccess>,
     /// The registered projects.
     projects: Arc<dyn ProjectStore + Send + Sync>,
     /// The shared notes, todos and key-values.
@@ -47,16 +48,21 @@ impl McpDeps {
             .build()
     }
 
-    /// The project at the served root.
+    /// The registered project a call acts on, from its `project` argument.
     ///
     /// # Errors
-    /// Returns [`ConfigError::UnknownProject`] while the folder is not yet a
-    /// project, or the store's failure.
-    pub fn project(&self) -> Result<Project, ConfigError> {
-        self.projects
-            .project_at(&self.root)?
-            .ok_or_else(|| ConfigError::UnknownProject {
-                root: self.root.as_ref().clone(),
-            })
+    /// Returns the caller's mistake for a project that does not resolve, or
+    /// the store's failure.
+    pub fn project(&self, project: Option<&str>) -> Result<Project, ToolError> {
+        self.scope.project(project, self.projects.as_ref())
+    }
+
+    /// The project `process_add` adds to, registered or not.
+    ///
+    /// # Errors
+    /// Returns the caller's mistake for a project that does not resolve, or
+    /// the store's failure.
+    pub fn target(&self, project: Option<&str>) -> Result<ScopeTarget, ToolError> {
+        self.scope.target(project, self.projects.as_ref())
     }
 }

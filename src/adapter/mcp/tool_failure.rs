@@ -25,6 +25,14 @@ const CALL_PROCESS_START: &str = "call process_start to start it";
 const CALL_PROCESS_ADD: &str = "call process_add to register this folder as a project";
 /// What an agent does about a name the project already has.
 const CHOOSE_ANOTHER_NAME: &str = "choose another name";
+/// What an agent does about a note key that names no note.
+const CALL_NOTE_READ: &str = "note_read without key lists the notes";
+/// What an agent does about a todo id that names no todo.
+const CALL_TODO_LIST: &str = "todo_list lists the todos";
+/// What an agent does about a key that names no value.
+const CALL_KV_READ: &str = "kv_read without key lists the entries";
+/// What an agent does about a project name that names no project.
+const PASS_PROJECT: &str = "pass a registered project's name or a folder as project";
 
 /// Why a tool call did not succeed. The caller's mistake is answered as a
 /// result flagged `isError`, which the agent reads and can act on; a fault of
@@ -98,7 +106,7 @@ fn failure(error: &ToolError, message: &str) -> Value {
     FailureView::builder()
         .kind(error.kind())
         .message(message.to_string())
-        .candidates(error.candidates().to_vec())
+        .candidates(error.candidates())
         .build()
         .to_json()
 }
@@ -109,17 +117,21 @@ pub fn agent_message(error: &ToolError) -> String {
     match error {
         ToolError::Client(client) => client_message(client),
         ToolError::Config(config) => config_message(config),
-        ToolError::InvalidName(_)
+        ToolError::UnknownNote { .. } => format!("{error}; {CALL_NOTE_READ}"),
+        ToolError::UnknownTodo { .. } => format!("{error}; {CALL_TODO_LIST}"),
+        ToolError::UnknownValue { .. } => format!("{error}; {CALL_KV_READ}"),
+        ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
+        ToolError::Pending(_) => format!("{error}; {RESTART_SERVER}"),
+        ToolError::NoProjectHere { .. }
+        | ToolError::InvalidName(_)
         | ToolError::EmptyCommand
         | ToolError::InvalidField { .. }
-        | ToolError::NothingToChange
+        | ToolError::NothingToChange(_)
         | ToolError::InvalidNoteKey(_)
-        | ToolError::UnknownNote(_)
         | ToolError::InvalidTodoTitle(_)
         | ToolError::InvalidTodoId(_)
-        | ToolError::UnknownTodo(_)
-        | ToolError::InvalidKvKey(_)
-        | ToolError::UnknownValue(_) => error.to_string(),
+        | ToolError::HeldByOther { .. }
+        | ToolError::InvalidKvKey(_) => error.to_string(),
     }
 }
 

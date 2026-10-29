@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{args::WaitArgs, error::CliError};
+use super::{error::CliError, wait_args::WaitArgs};
 use crate::{
     adapter::{
         client::ClientError,

@@ -1,7 +1,7 @@
-use std::{error::Error, fmt::Display, path::PathBuf, str::FromStr, sync::LazyLock};
+use std::{error::Error, fmt::Display, str::FromStr, sync::LazyLock};
 
 use clap::{
-    Command as ClapCommand, CommandFactory, Parser, Subcommand,
+    Command as ClapCommand, CommandFactory, Parser,
     builder::{
         PossibleValuesParser, TypedValueParser,
         styling::{AnsiColor, Styles},
@@ -10,26 +10,17 @@ use clap::{
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use strum::IntoEnumIterator;
 
-use super::{
-    cli_ports::CliPorts,
-    completions::CompletionShell,
-    error::CliError,
-    process_flags::{ProcessFlags, READY_GROUP},
-};
+use super::{cli_ports::CliPorts, command::Command};
 use crate::{
     adapter::{
-        holder::{HOLDER_SUBCOMMAND, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_LINES},
-        service::{StateGoal, protocol::SERVICE_SUBCOMMAND},
+        holder::{LineLimit, MAX_LOG_LINES},
+        service::StateGoal,
     },
     constants::APP_NAME,
     domain::{
         config::SettingKey,
-        coordination::TodoStatus,
-        process::{PatternKind, RestartPolicy, StopSignal},
-        value::{
-            CommandLine, CommandLineError, LocalPort, LocalUrl, OutputCursor, PositiveDuration,
-            ProcessRef, StopGrace,
-        },
+        process::{RestartPolicy, StopSignal},
+        value::{CommandLine, CommandLineError, PositiveDuration, StopGrace},
     },
 };
 
@@ -63,10 +54,10 @@ RFC 3339 in UTC.";
 const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";
 /// The `muster logs` flags that print the whole raw log or follow it, which
 /// a filtered read conflicts with.
-const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
+pub(super) const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
 
 /// The names `config` accepts for a setting.
-static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
+pub(super) static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
 /// The names `--restart` accepts.
 static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<RestartPolicy>);
 /// The names `--stop-signal` accepts.
@@ -99,7 +90,7 @@ pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> 
 }
 
 /// Parses a `muster wait --state`.
-fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
+pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
     one_of(&STATE_GOALS)
 }
 
@@ -133,7 +124,7 @@ pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, String> {
 ///
 /// # Errors
 /// Returns the form expected for anything else.
-fn line_limit(raw: &str) -> Result<LineLimit, String> {
+pub(super) fn line_limit(raw: &str) -> Result<LineLimit, String> {
     raw.trim()
         .parse()
         .ok()
@@ -187,583 +178,13 @@ pub struct Args {
     pub command: Option<Command>,
 }
 
-/// Subcommands. Absent, muster prints `ps`.
-#[derive(Subcommand)]
-pub enum Command {
-    /// List this project's processes: state, pid, uptime, restarts and usage.
-    Ps {
-        /// List every project the muster service has loaded.
-        #[arg(long)]
-        all: bool,
-        /// Add a COMMAND column with each process's stored command, so an
-        /// edit made by an agent shows.
-        #[arg(long)]
-        commands: bool,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Start this project's processes that autostart.
-    Up {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop every process of this project.
-    Down {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Start a process.
-    Start(StartArgs),
-    /// Stop a process through its stop policy.
-    Stop(ProcessArgs),
-    /// Restart a process.
-    Restart(StartArgs),
-    /// Wait until a process prints a line, accepts a connection, answers a
-    /// URL, reaches a state, or passes its readiness check.
-    ///
-    /// Without a condition, waits for its readiness check, or for it to run
-    /// when it has none.
-    Wait(WaitArgs),
-    /// Suspend a process, leaving it alive.
-    Pause(ProcessArgs),
-    /// Resume a paused process.
-    Resume(ProcessArgs),
-    /// Kill a process at once, skipping its graceful stop.
-    Kill(ProcessArgs),
-    /// Print a process's output log, kept across its runs and after it exits.
-    Logs {
-        /// The process, as `muster ps` lists it; quote a name with spaces.
-        /// Chosen from a list at a terminal when absent.
-        name: Option<ProcessRef>,
-        /// Keep printing what the process writes, across restarts, until
-        /// interrupted.
-        #[arg(short, long, conflicts_with = "screen")]
-        follow: bool,
-        /// Print the process's current terminal screen instead of its log.
-        #[arg(long)]
-        screen: bool,
-        #[command(flatten)]
-        filter: LogFilterArgs,
-        /// Print the result as JSON; with --follow, one JSON object per log
-        /// line.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show a running process in this terminal and type into it.
-    ///
-    /// The detach key (`muster config get detach-key`) returns to the shell
-    /// and leaves the process running.
-    Attach {
-        /// The process, as `muster ps` lists it; quote a name with spaces.
-        /// Chosen from a list at a terminal when absent.
-        name: Option<ProcessRef>,
-        /// Watch without typing into the process or resizing it.
-        #[arg(long)]
-        read_only: bool,
-        /// Print a refusal or failure as JSON; an attach prints nothing else.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show this project's notices: the stack edits agents made, and failed
-    /// starts, forced stops and crashes when the service runs. Never starts it.
-    Notices {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show or stop the muster service. Processes keep running either way.
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
-    /// Add a process to this project, registering the folder as a project
-    /// when it is not one yet. Nothing is started.
-    Add(AddArgs),
-    /// Change a process's definition; a running process takes it at its next
-    /// start.
-    Set(SetArgs),
-    /// Remove processes from this project, stopping those that run.
-    Rm {
-        /// The processes, as `muster ps` lists them.
-        #[arg(required = true)]
-        names: Vec<ProcessRef>,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show or change muster's settings.
-    Config {
-        #[command(subcommand)]
-        command: Option<ConfigCommand>,
-        /// Print the result as JSON.
-        #[arg(long, global = true)]
-        json: bool,
-    },
-    /// Write this project's processes to a stack file.
-    Export {
-        /// The file to write; `-` prints it. Defaults to muster.yml in the
-        /// project's folder.
-        file: Option<String>,
-        /// Overwrite an existing file.
-        #[arg(long)]
-        force: bool,
-        /// Write environment values too; without it each variable is
-        /// written with no value, to be filled in before importing.
-        #[arg(long)]
-        with_env: bool,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Load processes from a stack file into this project, registering the
-    /// folder when it is not a project yet.
-    Import {
-        /// The file to read; `-` reads stdin. Defaults to muster.yml in the
-        /// project's folder.
-        file: Option<String>,
-        /// Replace same-named processes and keep the others.
-        #[arg(long, conflicts_with = "replace")]
-        merge: bool,
-        /// Make the project's processes exactly the file's, stopping and
-        /// removing the others.
-        #[arg(long)]
-        replace: bool,
-        /// Print what would change and change nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Find processes in this folder's package.json, Procfile, justfile,
-    /// Makefile or Compose file and add the ones chosen.
-    ///
-    /// At a terminal it asks which to add; elsewhere it lists them and adds
-    /// the suggested ones with --yes.
-    Init {
-        /// Add the suggested processes without asking.
-        #[arg(short, long)]
-        yes: bool,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Add a command to this project, start it and attach to it.
-    ///
-    /// Without a terminal, or with --json, the start is reported instead.
-    Run(RunArgs),
-    /// List registered projects, or remove one.
-    Projects {
-        #[command(subcommand)]
-        command: Option<ProjectsCommand>,
-        /// Print the result as JSON.
-        #[arg(long, global = true)]
-        json: bool,
-    },
-    /// Read or write shared scratchpad notes for the current project.
-    Note {
-        #[command(subcommand)]
-        command: Option<NoteCommand>,
-    },
-    /// List or manage the current project's shared todos.
-    Todo {
-        #[command(subcommand)]
-        command: Option<TodoCommand>,
-    },
-    /// Read or write the current project's shared key-value state.
-    Kv {
-        #[command(subcommand)]
-        command: Option<KvCommand>,
-    },
-    /// List the locks agents hold on the current project, or release one.
-    Lock {
-        #[command(subcommand)]
-        command: Option<LockCommand>,
-    },
-    /// Export or restore this project's coordination state as portable YAML.
-    Coordination {
-        #[command(subcommand)]
-        command: CoordinationCommand,
-    },
-    /// Serve muster to agents as an MCP server over stdio (spawned as a
-    /// child process by a connecting agent). Each call acts on the project
-    /// containing this folder, or the one --project or $MUSTER_PROJECT
-    /// names, unless it names another.
-    Mcp {
-        /// Print the JSON config snippet to add muster to an agent's MCP
-        /// servers, then exit instead of serving.
-        #[arg(long)]
-        print_config: bool,
-        /// The agent's id on coordination writes and locks; defaults to
-        /// MUSTER_AGENT, then herdr's pane, then a random session id.
-        #[arg(long = "as", value_name = "NAME")]
-        agent: Option<String>,
-    },
-    /// Diagnose muster's database, projects and completions.
-    Doctor,
-    /// Print the shell hook that enables completions.
-    Completions {
-        /// Shell to print the hook for.
-        #[arg(value_enum)]
-        shell: CompletionShell,
-    },
-    /// Internal: runs one process holder from the spec file it is handed.
-    #[command(name = HOLDER_SUBCOMMAND, hide = true)]
-    Holder {
-        /// The holder's spec, written by the launcher and deleted once read.
-        #[arg(long, value_name = "PATH")]
-        spec: PathBuf,
-    },
-    /// Internal: runs this user's service in the current process, unless one
-    /// already runs.
-    #[command(name = SERVICE_SUBCOMMAND, hide = true)]
-    RunService,
-}
-
-/// The process a lifecycle command acts on.
-#[derive(clap::Args)]
-pub struct ProcessArgs {
-    /// The process, as `muster ps` lists it; quote a name with spaces.
-    /// Chosen from a list at a terminal when absent.
-    pub name: Option<ProcessRef>,
-    /// Print the result as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// The process a start or restart acts on, and whether to wait for it.
-#[derive(clap::Args)]
-pub struct StartArgs {
-    /// The process and output form.
-    #[command(flatten)]
-    pub target: ProcessArgs,
-    /// Wait until its new run passes its readiness check, or runs when it has
-    /// none.
-    #[arg(long)]
-    pub wait: bool,
-    /// With --wait, the longest to wait, such as 60s; unbounded when absent.
-    #[arg(long, requires = "wait", value_name = "DURATION", value_parser = positive_duration)]
-    pub timeout: Option<PositiveDuration>,
-}
-
-/// `muster wait`: a process and what to wait for.
-#[derive(clap::Args)]
-pub struct WaitArgs {
-    /// The process, as `muster ps` lists it; quote a name with spaces.
-    /// Chosen from a list at a terminal when absent.
-    pub name: Option<ProcessRef>,
-    /// Wait for an output line containing this text.
-    #[arg(long, group = "until", value_name = "TEXT")]
-    pub log: Option<String>,
-    /// Read --log as a regular expression.
-    #[arg(long, requires = "log")]
-    pub regex: bool,
-    /// Wait until a TCP connection to this localhost port succeeds.
-    #[arg(long, group = "until", value_name = "PORT")]
-    pub port: Option<LocalPort>,
-    /// Wait until this localhost URL answers below 500.
-    #[arg(long, group = "until", value_name = "URL")]
-    pub http: Option<LocalUrl>,
-    /// With --http, the status to wait for instead.
-    #[arg(long, requires = "http", value_name = "CODE")]
-    pub status: Option<u16>,
-    /// Wait for a lifecycle state; `stopped` means not running at all.
-    #[arg(long, group = "until", value_parser = state_goal_parser())]
-    pub state: Option<StateGoal>,
-    /// The longest to wait, such as 60s; unbounded when absent.
-    #[arg(long, value_name = "DURATION", value_parser = positive_duration)]
-    pub timeout: Option<PositiveDuration>,
-    /// Count output after this cursor, from an earlier wait's result, as
-    /// well as output after the command started.
-    #[arg(long, value_name = "CURSOR")]
-    pub since: Option<OutputCursor>,
-    /// Print the result as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// `muster logs` flags that read the log as stripped, filtered lines rather
-/// than the raw bytes; any one of them switches to that read.
-#[derive(clap::Args)]
-pub struct LogFilterArgs {
-    /// Print only the newest N lines, escapes removed (at most 2000).
-    #[arg(short = 'n', long, value_name = "N", value_parser = line_limit, conflicts_with_all = RAW_LOG_FLAGS)]
-    pub lines: Option<LineLimit>,
-    /// Print only output after this cursor, from an earlier `muster wait` or
-    /// `muster logs --json`.
-    #[arg(long, value_name = "CURSOR", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub since: Option<OutputCursor>,
-    /// Print only lines containing this text.
-    #[arg(long, value_name = "TEXT", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub grep: Option<String>,
-    /// Read --grep as a regular expression.
-    #[arg(long, requires = "grep")]
-    pub regex: bool,
-    /// Print only error lines, each with its stack trace.
-    #[arg(long, conflicts_with = "grep", conflicts_with_all = RAW_LOG_FLAGS)]
-    pub errors: bool,
-}
-
-impl LogFilterArgs {
-    /// Whether any filter flag was given.
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_none() && self.since.is_none() && self.grep.is_none() && !self.errors
-    }
-
-    /// The log read these flags ask for, its pattern compiled first.
-    ///
-    /// # Errors
-    /// Returns [`CliError::InvalidPattern`] for a blank or overlong `--grep`
-    /// or a `--regex` that does not compile.
-    pub fn query(&self) -> Result<LogQuery, CliError> {
-        let filter = match &self.grep {
-            Some(grep) => LineFilter::Grep(LineMatcher::of_text(
-                grep,
-                PatternKind::of_regex(self.regex),
-            )?),
-            None if self.errors => LineFilter::ErrorsOnly,
-            None => LineFilter::All,
-        };
-        Ok(LogQuery::builder()
-            .since(self.since)
-            .lines(self.lines.unwrap_or_default())
-            .filter(filter)
-            .build())
-    }
-}
-
-/// `muster add`: a new process's definition.
-#[derive(clap::Args)]
-pub struct AddArgs {
-    /// Its name, unique in the project.
-    pub name: String,
-    /// Its working directory, read from the current folder; stored relative
-    /// to the project when inside it. Defaults to the project's folder.
-    #[arg(long, value_name = "DIR")]
-    pub cwd: Option<PathBuf>,
-    /// A one-line description.
-    #[arg(long, value_name = "TEXT")]
-    pub description: Option<String>,
-    #[command(flatten)]
-    pub flags: ProcessFlags,
-    /// Print the result as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// The command, after `--`: one argument is a shell expression, several
-    /// are joined as the shell split them.
-    #[arg(last = true, required = true, value_name = "COMMAND")]
-    pub command: Vec<String>,
-}
-
-/// `muster set`: the changes to a process's definition.
-#[derive(clap::Args)]
-pub struct SetArgs {
-    /// The process, as `muster ps` lists it.
-    pub name: ProcessRef,
-    /// A new command, as one shell expression.
-    #[arg(long, value_name = "CMD", value_parser = command_line, conflicts_with = "words")]
-    pub command: Option<CommandLine>,
-    /// A new working directory, read from the current folder.
-    #[arg(long, value_name = "DIR", conflicts_with = "no_cwd")]
-    pub cwd: Option<PathBuf>,
-    /// Run in the project's folder again.
-    #[arg(long)]
-    pub no_cwd: bool,
-    /// A new one-line description.
-    #[arg(long, value_name = "TEXT", conflicts_with = "no_description")]
-    pub description: Option<String>,
-    /// Remove the description.
-    #[arg(long)]
-    pub no_description: bool,
-    /// Remove an environment variable (repeatable); one that is not set is
-    /// left alone.
-    #[arg(long = "unset-env", value_name = "KEY")]
-    pub unset_env: Vec<String>,
-    /// Remove the readiness check.
-    #[arg(long, conflicts_with = READY_GROUP)]
-    pub no_ready: bool,
-    #[command(flatten)]
-    pub flags: ProcessFlags,
-    /// Print the result as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// A new command, after `--`, joined as `muster add` joins it.
-    #[arg(last = true, value_name = "COMMAND")]
-    pub words: Vec<String>,
-}
-
-/// `muster run`: a command to add, start and attach to.
-#[derive(clap::Args)]
-pub struct RunArgs {
-    /// Its name. Defaults to the command's first word.
-    #[arg(short, long)]
-    pub name: Option<String>,
-    /// Print the report as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// The command, e.g. `-- npm run dev`.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
-    pub command: Vec<String>,
-}
-
-/// Settings actions under `muster config`. Absent, every setting is listed.
-#[derive(Subcommand)]
-pub enum ConfigCommand {
-    /// List every setting and its value.
-    List,
-    /// Print one setting's value.
-    Get {
-        /// The setting.
-        #[arg(value_parser = one_of::<SettingKey>(&SETTING_KEYS))]
-        key: SettingKey,
-    },
-    /// Change one setting.
-    Set {
-        /// The setting.
-        #[arg(value_parser = one_of::<SettingKey>(&SETTING_KEYS))]
-        key: SettingKey,
-        /// Its new value, in the form `muster config get` prints.
-        value: String,
-    },
-}
-
-/// Service actions under `muster service`.
-#[derive(Subcommand)]
-pub enum ServiceCommand {
-    /// Show whether the service runs, its version and what it has loaded,
-    /// without starting it.
-    Status {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop the service. Every process keeps running under its holder, and
-    /// the next muster command starts the service again.
-    Stop {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-/// Project actions under `muster projects`. Absent, projects are listed.
-#[derive(Subcommand)]
-pub enum ProjectsCommand {
-    /// Stop a project's processes and forget it with its processes and
-    /// coordination state; its folder is untouched.
-    Rm {
-        /// The project's name, or its folder.
-        project: String,
-        /// Remove without asking; required where nobody can be asked.
-        #[arg(short, long)]
-        yes: bool,
-    },
-}
-
-/// Scratchpad actions under `muster note`. Absent, notes are listed.
-#[derive(Subcommand)]
-pub enum NoteCommand {
-    /// Print a note's body by key.
-    Get {
-        /// Note key.
-        key: String,
-    },
-    /// Create or replace a note.
-    Set {
-        /// Note key.
-        key: String,
-        /// Markdown body.
-        body: String,
-    },
-    /// Delete a note by key.
-    Rm {
-        /// Note key.
-        key: String,
-    },
-}
-
-/// Todo actions under `muster todo`. Absent, todos are listed.
-#[derive(Subcommand)]
-pub enum TodoCommand {
-    /// Add a new pending todo.
-    Add {
-        /// What the task is.
-        title: String,
-        /// Id of a todo this one depends on (repeatable).
-        #[arg(long = "dep")]
-        deps: Vec<String>,
-    },
-    /// Set a todo's status: pending, in-progress, or done.
-    Status {
-        /// Todo id.
-        id: String,
-        /// New status.
-        status: TodoStatus,
-        /// Change it even though an agent holds it.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Delete a todo by id.
-    Rm {
-        /// Todo id.
-        id: String,
-    },
-}
-
-/// Lock actions under `muster lock`. Absent, held locks are listed.
-#[derive(Subcommand)]
-pub enum LockCommand {
-    /// Release a lock whoever holds it, to clear one an agent left behind.
-    Release {
-        /// Lock name.
-        name: String,
-    },
-}
-
-/// Key-value actions under `muster kv`. Absent, entries are listed.
-#[derive(Subcommand)]
-pub enum KvCommand {
-    /// Print a value by key.
-    Get {
-        /// Entry key.
-        key: String,
-    },
-    /// Create or replace a value.
-    Set {
-        /// Entry key.
-        key: String,
-        /// Value to store.
-        value: String,
-    },
-    /// Delete an entry by key.
-    Rm {
-        /// Entry key.
-        key: String,
-    },
-}
-
-/// Snapshot actions under `muster coordination`.
-#[derive(Subcommand)]
-pub enum CoordinationCommand {
-    /// Write this project's scratchpads, todos, and key-values to a YAML file.
-    Export {
-        /// File to write.
-        file: PathBuf,
-    },
-    /// Restore entries from a YAML file, preserving ids, authors, and timestamps.
-    /// Entries merge; those absent from the file are left alone.
-    Import {
-        /// File to read.
-        file: PathBuf,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::{
+        cli::process_args::ProcessArgs, holder::HOLDER_SUBCOMMAND,
+        service::protocol::SERVICE_SUBCOMMAND,
+    };
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.

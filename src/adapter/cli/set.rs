@@ -6,8 +6,8 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
-    args::SetArgs, command_words::command_string, error::CliError, invocation::Invocation,
-    output::project_title, process_flags::env_name, report::Report, row::Row, row_kind::RowKind,
+    command_words::command_string, error::CliError, invocation::Invocation, output::project_title,
+    process_flags::env_name, report::Report, row::Row, row_kind::RowKind, set_args::SetArgs,
     working_dir::stored_working_dir,
 };
 use crate::{

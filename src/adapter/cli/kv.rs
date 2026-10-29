@@ -1,4 +1,6 @@
-use super::{args::KvCommand, error::CliError, report::attribution, row::Row, row_kind::RowKind};
+use super::{
+    error::CliError, kv_command::KvCommand, report::attribution, row::Row, row_kind::RowKind,
+};
 use crate::domain::{
     coordination::{Author, KvKey},
     port::CoordinationStore,

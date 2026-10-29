@@ -1,4 +1,4 @@
-use super::{args::LockCommand, error::CliError, row::Row, row_kind::RowKind};
+use super::{error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind};
 use crate::{
     adapter::store::now_epoch_secs,
     domain::{

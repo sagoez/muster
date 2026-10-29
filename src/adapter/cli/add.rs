@@ -6,7 +6,7 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
-    args::AddArgs, command_words::command_string, error::CliError, invocation::Invocation,
+    add_args::AddArgs, command_words::command_string, error::CliError, invocation::Invocation,
     output::project_title, report::Report, row::Row, row_kind::RowKind,
     working_dir::stored_working_dir,
 };

@@ -578,6 +578,11 @@ mod tests {
     const STOP_GRACE: Duration = Duration::from_millis(300);
     /// Longest a test waits for an unsupervised stop to settle.
     const SETTLE_WAIT: Duration = Duration::from_secs(10);
+    /// A grace far longer than an early exit takes to be seen.
+    const LONG_STOP_GRACE: Duration = Duration::from_secs(8);
+    /// Within this a stopped child's early exit is seen, well inside
+    /// [`LONG_STOP_GRACE`].
+    const EARLY_EXIT_BOUND: Duration = Duration::from_secs(2);
     /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
     const SHORT_TEMP_ROOT: &str = "/tmp";
     /// Prefix of every test scratch directory.
@@ -1436,6 +1441,45 @@ mod tests {
             state(&harness),
             ProcessState::Stopping,
             "the stop is retried"
+        );
+    }
+
+    /// A stopped unsupervised child that exits early in its grace is settled
+    /// within a poll, not once the whole grace has passed.
+    #[test]
+    fn an_unsupervised_stop_finishes_once_the_child_is_gone() {
+        let orphan = Orphan::spawn();
+        let long_grace = StopPolicy::builder()
+            .signal(StopSignal::Terminate)
+            .grace_period(PositiveDuration::try_new(LONG_STOP_GRACE).unwrap())
+            .build();
+        let mut harness = with_adopter(
+            Harness::over(
+                Box::new(FixedPidRunner {
+                    pid: orphan.pid(),
+                    spawns: Arc::new(AtomicUsize::new(0)),
+                }),
+                &[spec("p", "true", RestartPolicy::Never).with_stop(long_grace)],
+            ),
+            Box::new(ReconnectingAdopter {
+                record: None,
+                refuses: true,
+                adoptions: Rc::new(Cell::new(0)),
+            }),
+        );
+        harness.supervisor.adopt(record_with_pid("p", orphan.pid()));
+        assert_eq!(state(&harness), ProcessState::Unsupervised);
+
+        harness.supervisor.stop(&p());
+        assert_eq!(state(&harness), ProcessState::Stopping);
+        let stopped = Instant::now();
+        assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
+        drive_until_exited(&mut harness);
+
+        assert!(
+            stopped.elapsed() < EARLY_EXIT_BOUND,
+            "settled after {:?}",
+            stopped.elapsed()
         );
     }
 

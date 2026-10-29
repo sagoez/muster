@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, time::Instant};
 
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
@@ -22,6 +22,11 @@ pub(crate) struct UnsupervisedChild {
     #[builder(default)]
     #[getset(get_copy = "pub(crate)")]
     kill_polls: u32,
+    /// When the grace of a graceful stop in progress ends, until which the
+    /// child is only watched for its exit.
+    #[builder(default)]
+    #[getset(get_copy = "pub(crate)")]
+    grace_deadline: Option<Instant>,
 }
 
 impl UnsupervisedChild {
@@ -61,9 +66,16 @@ impl UnsupervisedChild {
         self.kill_polls
     }
 
-    /// Starts the kill count afresh, for a new stop.
-    pub(crate) fn reset_kills(&mut self) {
+    /// Starts a stop afresh: no kills counted yet, and the grace a graceful
+    /// stop gives the child until `grace_deadline`, `None` for none.
+    pub(crate) fn begin_stop(&mut self, grace_deadline: Option<Instant>) {
         self.kill_polls = 0;
+        self.grace_deadline = grace_deadline;
+    }
+
+    /// Ends the grace of a graceful stop, so the next check kills.
+    pub(crate) fn end_grace(&mut self) {
+        self.grace_deadline = None;
     }
 }
 

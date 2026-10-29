@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     config_membership::ConfigMembership, entity::Supervisor, unsupervised_child::UnsupervisedChild,
@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-/// Interval between checks that a killed unsupervised process is gone.
+/// Interval between checks that a signalled unsupervised process is gone.
 const UNSUPERVISED_EXIT_POLL: Duration = Duration::from_millis(100);
 /// Most kills sent to an unsupervised process before the stop gives up and
 /// leaves it for another try: five seconds of polling.
@@ -121,30 +121,33 @@ impl Supervisor {
     /// Stops `pane`'s unsupervised child through its process group: the stop
     /// policy's signal, or a kill when `force` is set. The exit is reported
     /// only once the child is gone; until then the generation-guarded
-    /// force-stop timer escalates to a kill and checks again.
+    /// force-stop timer checks every [`UNSUPERVISED_EXIT_POLL`], and kills
+    /// once the grace has passed.
     pub(super) fn stop_unsupervised(&mut self, pane: PaneId, force: bool) {
+        let policy = (!force).then(|| self.stop_policy_of(pane)).flatten();
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };
         if !force && !target.exit_intent.accepts_stop_request() {
             return;
         }
-        if let Some(child) = target.unsupervised.as_mut() {
-            child.reset_kills();
-        }
-        let policy = (!force).then(|| self.stop_policy_of(pane)).flatten();
-        let (signal, wait) = match policy {
+        let (signal, grace_deadline) = match policy {
             Some(policy) => (
                 unix_signal(*policy.signal()),
-                policy.grace_period().into_inner(),
+                Some(Instant::now() + policy.grace_period().into_inner()),
             ),
-            None => (libc::SIGKILL, UNSUPERVISED_EXIT_POLL),
+            None => (libc::SIGKILL, None),
         };
+        if let Some(child) = target.unsupervised.as_mut() {
+            child.begin_stop(grace_deadline);
+        }
+        let wait = grace_deadline.map_or(UNSUPERVISED_EXIT_POLL, poll_within);
         self.signal_unsupervised(pane, signal, wait);
     }
 
-    /// Escalates an unsupervised stop whose deadline elapsed: kills the group
-    /// and checks again, until the child is gone or
+    /// Follows an unsupervised stop whose check came due: within the grace it
+    /// settles a child found gone or checks again, and past it kills the
+    /// group and checks again, until the child is gone or
     /// [`UNSUPERVISED_KILL_LIMIT`] kills were sent, when the stop is left to
     /// be retried.
     pub(super) fn escalate_unsupervised(&mut self, pane: PaneId) {
@@ -155,10 +158,21 @@ impl Supervisor {
         else {
             return;
         };
+        if let Some(deadline) = child.grace_deadline() {
+            if !child.is_running() {
+                self.settle_unsupervised_exit(pane);
+                return;
+            }
+            if Instant::now() < deadline {
+                self.check_unsupervised_after(pane, poll_within(deadline));
+                return;
+            }
+            child.end_grace();
+        }
         let kills = child.count_kill();
         let pid = child.pid();
         if kills > UNSUPERVISED_KILL_LIMIT && child.is_running() {
-            child.reset_kills();
+            child.begin_stop(None);
             self.give_up_unsupervised_stop(pane);
             self.notify(
                 NoticeLevel::Error,
@@ -195,11 +209,17 @@ impl Supervisor {
             );
             return;
         }
-        let shutdown_generation = self.advance_shutdown_generation(pane);
         if let Some(target) = self.panes.get_mut(&pane) {
             target.exit_intent = target.exit_intent.request_stop().stop_delivered();
         }
         self.workspace.set_state(pane, ProcessState::Stopping);
+        self.check_unsupervised_after(pane, wait);
+    }
+
+    /// Schedules the next check of `pane`'s unsupervised stop after `wait`,
+    /// superseding any check already scheduled.
+    fn check_unsupervised_after(&mut self, pane: PaneId, wait: Duration) {
+        let shutdown_generation = self.advance_shutdown_generation(pane);
         if let (Some(spawn_generation), Some(shutdown_generation)) =
             (self.generations.get(&pane).copied(), shutdown_generation)
         {
@@ -231,4 +251,10 @@ impl Supervisor {
         self.deactivate(pane);
         self.workspace.set_state(pane, ProcessState::Exited);
     }
+}
+
+/// How long to wait before the next check of a stop whose grace ends at
+/// `deadline`: one poll, or what is left of the grace when that is shorter.
+fn poll_within(deadline: Instant) -> Duration {
+    UNSUPERVISED_EXIT_POLL.min(deadline.saturating_duration_since(Instant::now()))
 }

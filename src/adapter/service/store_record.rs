@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crossbeam_channel::Sender;
 
 use crate::domain::{
@@ -29,6 +31,11 @@ pub enum StoreRecord {
         /// The newest edit raised.
         through: EditId,
     },
-    /// Answers once every earlier write was applied.
-    Flush(Sender<()>),
+    /// Answers once every earlier write was applied or given up.
+    Flush {
+        /// Where the answer goes.
+        done: Sender<()>,
+        /// The drain deadline this flush set, ended once it is answered.
+        drain_by: Instant,
+    },
 }

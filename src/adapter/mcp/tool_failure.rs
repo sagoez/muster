@@ -180,6 +180,7 @@ fn config_message(error: &ConfigError) -> String {
         ),
         ConfigError::CoordinationId(_)
         | ConfigError::Storage(_)
+        | ConfigError::Busy(_)
         | ConfigError::CorruptRow { .. }
         | ConfigError::TooLarge { .. }
         | ConfigError::UnsupportedSchema { .. }

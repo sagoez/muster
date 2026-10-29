@@ -1,13 +1,14 @@
 use std::{io, path::PathBuf};
 
-use rusqlite::Error as SqliteError;
+use rusqlite::{Error as SqliteError, ErrorCode};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
 use crate::{adapter::no_state_dir::NoStateDir, domain::config::ConfigError};
 
 /// Failures of the SQLite store itself, which reach the domain as an opaque
-/// [`ConfigError::Storage`] so no database or filesystem detail leaks into it.
+/// [`ConfigError::Storage`] or [`ConfigError::Busy`] so no database or
+/// filesystem detail leaks into it.
 #[derive(Debug, Error)]
 pub enum StoreError {
     /// No state directory could be located on this platform.
@@ -41,15 +42,35 @@ pub enum StoreError {
     Encode(#[from] JsonError),
 }
 
+impl StoreError {
+    /// Whether SQLite refused because another writer held the database.
+    fn is_busy(&self) -> bool {
+        match self {
+            Self::Sqlite(error) => matches!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+            ),
+            _ => false,
+        }
+    }
+}
+
 impl From<StoreError> for ConfigError {
-    /// Hands a store failure to the domain as an opaque storage failure.
+    /// Hands a store failure to the domain opaque: as a busy store when
+    /// another writer held it, else as a storage failure.
     fn from(error: StoreError) -> Self {
-        Self::Storage(Box::new(error))
+        if error.is_busy() {
+            Self::Busy(Box::new(error))
+        } else {
+            Self::Storage(Box::new(error))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::ffi::{Error as FfiError, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_LOCKED};
+
     use super::*;
 
     /// A store failure reaches the domain opaque, speaking with its own words.
@@ -62,5 +83,22 @@ mod tests {
             error.to_string(),
             "database error: the settings row is missing"
         );
+    }
+
+    /// A busy or locked database reaches the domain as busy, so a writer may
+    /// retry it; any other SQLite failure does not.
+    #[test]
+    fn only_a_busy_or_locked_database_is_busy() {
+        let failure = |code| {
+            ConfigError::from(StoreError::Sqlite(SqliteError::SqliteFailure(
+                FfiError::new(code),
+                None,
+            )))
+        };
+
+        assert!(failure(SQLITE_BUSY).is_busy());
+        assert!(failure(SQLITE_LOCKED).is_busy());
+        assert!(!failure(SQLITE_CONSTRAINT).is_busy());
+        assert!(!ConfigError::from(StoreError::MissingSettings).is_busy());
     }
 }

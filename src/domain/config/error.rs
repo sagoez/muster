@@ -25,6 +25,11 @@ pub enum ConfigError {
     /// detail leaks into the domain.
     #[error(transparent)]
     Storage(Box<dyn StdError + Send + Sync + 'static>),
+    /// The store stayed busy or locked by another writer past its own wait:
+    /// the same write may land if tried again later. Opaque like
+    /// [`ConfigError::Storage`].
+    #[error(transparent)]
+    Busy(Box<dyn StdError + Send + Sync + 'static>),
     /// A stored row holds a value the domain refuses: it was edited by hand
     /// or written by a different muster.
     #[error("stored {what} is invalid: {reason}")]
@@ -120,6 +125,14 @@ pub enum ConfigError {
         /// The registered project inside it.
         project: ProjectName,
     },
+}
+
+impl ConfigError {
+    /// Whether the store was only busy, so the same write may land later.
+    #[must_use]
+    pub const fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
 }
 
 /// `names` joined for an error message.

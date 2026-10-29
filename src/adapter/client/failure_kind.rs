@@ -107,6 +107,7 @@ impl From<&ConfigError> for FailureKind {
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
             ConfigError::CoordinationId(_)
             | ConfigError::Storage(_)
+            | ConfigError::Busy(_)
             | ConfigError::CorruptRow { .. } => Self::Io,
         }
     }

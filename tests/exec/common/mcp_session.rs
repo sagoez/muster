@@ -102,6 +102,40 @@ impl McpSession {
         }
     }
 
+    /// Calls the tool `name` once with each of `calls`, every request
+    /// written before any answer is read, as an agent's parallel calls
+    /// arrive; returns the responses in the order of `calls`.
+    pub fn pipelined(&mut self, name: &str, calls: Vec<Value>) -> Vec<Value> {
+        let first = self.next_id + 1;
+        for arguments in calls {
+            self.next_id += 1;
+            let id = self.next_id;
+            self.write(&serde_json::json!({
+                "jsonrpc": JSON_RPC_VERSION,
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": arguments },
+            }));
+        }
+        let mut answers: Vec<Option<Value>> =
+            vec![None; usize::try_from(self.next_id + 1 - first).unwrap()];
+        while answers.iter().any(Option::is_none) {
+            let message = self
+                .lines
+                .recv_timeout(WAIT)
+                .unwrap_or_else(|_| panic!("no answer to every {name}"))
+                .unwrap_or_else(|line| panic!("stdout carried a non-JSON line: {line:?}"));
+            if let Some(slot) = message["id"]
+                .as_u64()
+                .and_then(|id| id.checked_sub(first))
+                .and_then(|index| answers.get_mut(usize::try_from(index).ok()?))
+            {
+                *slot = Some(message);
+            }
+        }
+        answers.into_iter().flatten().collect()
+    }
+
     /// Calls the tool `name` with `arguments` and returns the response.
     pub fn call(&mut self, name: &str, arguments: Value) -> Value {
         self.request(

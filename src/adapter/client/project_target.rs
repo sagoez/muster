@@ -55,7 +55,8 @@ impl ProjectTarget {
 
     /// This target, unless it is a folder that may not become a project: the
     /// filesystem root, `home` or a folder above it, or one holding a
-    /// registered project.
+    /// registered project strictly inside it. A folder another writer
+    /// registered since it was resolved is that registered project.
     ///
     /// # Errors
     /// Returns [`ResolveError::Unregistrable`] naming why the folder is
@@ -76,8 +77,11 @@ impl ProjectTarget {
         } else if home.is_some_and(|home| home.starts_with(dir)) {
             Some(RefusedFolder::AboveHome)
         } else {
-            projects
-                .projects()?
+            let registered = projects.projects()?;
+            if let Some(project) = registered.iter().find(|project| project.root() == root) {
+                return Ok(Self::Registered(project.clone()));
+            }
+            registered
                 .into_iter()
                 .find(|project| project.root().as_ref().starts_with(dir))
                 .map(|project| RefusedFolder::HoldsProject(project.name().clone()))
@@ -317,6 +321,21 @@ mod tests {
             ProjectTarget::Registered(web)
                 .registrable(Some(&home), &projects)
                 .is_ok()
+        );
+    }
+
+    /// A folder resolved as unregistered that another writer registered in
+    /// the meantime is that project, never a folder holding itself.
+    #[test]
+    fn a_folder_registered_since_it_was_resolved_is_that_project() {
+        let (_scratch, base) = tree();
+        let web = project("web", &base.join("shop/web"));
+        let projects = FixedProjects::new(vec![web.clone()]);
+        let raced = ProjectTarget::Unregistered(web.root().clone());
+
+        assert_eq!(
+            raced.registrable(None, &projects).unwrap(),
+            ProjectTarget::Registered(web)
         );
     }
 

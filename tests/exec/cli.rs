@@ -39,7 +39,7 @@ use muster::{
     domain::{
         config::{ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-        port::StackStore,
+        port::{StackReader, StackStore},
         process::ProcessState,
         project::Project,
         pty::PtySize,
@@ -2635,6 +2635,62 @@ fn a_filtered_event_read_leaves_a_crash_alert_for_the_next_call() {
             .is_some_and(|alerts| alerts.iter().any(|alert| alert["kind"] == "crashed")),
         "{status}"
     );
+}
+
+/// Adds racing to register one new folder all land, whichever registers it:
+/// parallel CLI adds, and parallel `process_add` calls on one MCP
+/// connection, are never refused as a folder holding themselves.
+#[test]
+fn parallel_first_adds_in_a_new_folder_all_land() {
+    const ADDS: usize = 8;
+    let mut scratch = Scratch::new();
+    let cli_folder = scratch.path().join("cli");
+    let mcp_folder = scratch.path().join("mcp");
+    fs::create_dir_all(&cli_folder).unwrap();
+    fs::create_dir_all(&mcp_folder).unwrap();
+
+    let adds: Vec<Child> = (0..ADDS)
+        .map(|index| {
+            scratch
+                .command(&["add", &format!("n{index}"), "--", "true"])
+                .current_dir(&cli_folder)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for add in adds {
+        let output = add.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", shown(&output));
+    }
+    let mut mcp = McpSession::start(&mut scratch, &mcp_folder);
+    let answers = mcp.pipelined(
+        "process_add",
+        (0..ADDS)
+            .map(|index| serde_json::json!({ "name": format!("m{index}"), "command": "true" }))
+            .collect(),
+    );
+    for answer in &answers {
+        assert_ne!(answer["result"]["isError"], true, "{answer}");
+        assert!(answer["error"].is_null(), "{answer}");
+    }
+
+    let store = scratch.store();
+    for (folder, prefix) in [(&cli_folder, "n"), (&mcp_folder, "m")] {
+        let root = ProjectRoot::try_new(folder.canonicalize().unwrap()).unwrap();
+        let mut names: Vec<String> = store
+            .stack(&root)
+            .unwrap()
+            .unwrap()
+            .names()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        names.sort();
+        let expected: Vec<String> = (0..ADDS).map(|index| format!("{prefix}{index}")).collect();
+        assert_eq!(names, expected);
+    }
 }
 
 /// An agent's MCP server in a folder that is not yet a project registers it

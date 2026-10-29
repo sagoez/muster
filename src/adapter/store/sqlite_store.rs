@@ -353,10 +353,17 @@ mod tests {
         domain::{
             config::SettingChange,
             coordination::Author,
-            port::{ProjectStore, SettingsStore, StackReader, StackStore},
+            port::{
+                CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsStore,
+                StackEditLog, StackReader, StackStore,
+            },
             value::{ProjectRoot, StackRevision},
         },
     };
+
+    /// The schema version the stack edit log shipped at, the last before the
+    /// setting edits, lock sessions and service records.
+    const EDIT_LOG_SCHEMA: usize = 4;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -459,6 +466,51 @@ mod tests {
             Some(StackRevision::new(1))
         );
         assert!(SqliteStore::open_existing(&path).unwrap().is_some());
+    }
+
+    /// A database at the schema the stack edit log shipped with migrates
+    /// through the setting edits, lock sessions and service records, keeping
+    /// its edit log and its locks, which belong to no session.
+    #[test]
+    fn an_edit_log_schema_database_migrates_forward_keeping_its_edits_and_locks() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        let dir = scratch.path().join("shop");
+        fs::create_dir(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        let shipped = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..EDIT_LOG_SCHEMA] {
+            shipped.execute_batch(migration).unwrap();
+        }
+        shipped
+            .pragma_update(None, USER_VERSION, EDIT_LOG_SCHEMA as u32)
+            .unwrap();
+        shipped
+            .execute(
+                "INSERT INTO projects (root, name, created_at) VALUES (?1, 'shop', 0)",
+                [root.as_ref().to_str().unwrap()],
+            )
+            .unwrap();
+        shipped
+            .execute_batch(
+                "INSERT INTO stack_edits (project_id, at_ms, process, message)
+                     VALUES (1, 5, 'web', 'agent claude added web');
+                 INSERT INTO locks (project_id, name, owner, note, expires_at)
+                     VALUES (1, 'deploy', 'claude', NULL, 4102444800);",
+            )
+            .unwrap();
+        drop(shipped);
+
+        let store = SqliteStore::open(&path).unwrap();
+
+        assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
+        let edits = store.edits(&root).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].process().as_ref().unwrap().as_ref(), "web");
+        assert_eq!(edits[0].message(), "agent claude added web");
+        assert_eq!(store.locks(&root).unwrap().len(), 1);
+        assert_eq!(store.raised_through(&root).unwrap(), None);
+        assert!(store.ended_runs(&root).unwrap().is_empty());
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

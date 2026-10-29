@@ -1,18 +1,8 @@
 use getset::{Getters, WithSetters};
-use strum::{Display, EnumIter, EnumString};
 use typed_builder::TypedBuilder;
 
+use super::stop_signal::StopSignal;
 use crate::domain::value::StopGrace;
-
-/// Graceful signal sent before a command is force-killed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
-#[strum(serialize_all = "kebab-case")]
-pub enum StopSignal {
-    /// Requests the conventional service shutdown path (SIGTERM on Unix).
-    Terminate,
-    /// Requests the conventional interactive interrupt path (SIGINT on Unix).
-    Interrupt,
-}
 
 /// Graceful shutdown policy for one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Getters, WithSetters, TypedBuilder)]
@@ -24,18 +14,4 @@ pub struct StopPolicy {
     /// Time allowed for graceful exit before an unconditional force-kill.
     #[getset(get = "pub", set_with = "pub")]
     grace_period: StopGrace,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_signals_by_kebab_case_name() {
-        assert_eq!(
-            "interrupt".parse::<StopSignal>().unwrap(),
-            StopSignal::Interrupt
-        );
-        assert!("kill".parse::<StopSignal>().is_err());
-    }
 }

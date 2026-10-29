@@ -2,21 +2,11 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::condition_view::ConditionView;
+use super::{condition_view::ConditionView, match_view::MatchView};
 use crate::{
     adapter::service::{WaitOutcome, WaitStatus},
     domain::value::{OutputCursor, ProcessName},
 };
-
-/// The line a wait matched, as `--json` shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct MatchView {
-    /// The line, escapes removed.
-    line: String,
-    /// Where it began in the output.
-    at: OutputCursor,
-}
 
 /// How a wait ended, as `--json` shows it: elapsed time in whole
 /// milliseconds, the condition in words, cursors in their text form.
@@ -60,9 +50,11 @@ impl From<&WaitOutcome> for WaitView {
             until: ConditionView::from(outcome.until()),
             elapsed_ms: u64::try_from(outcome.elapsed().as_millis()).unwrap_or(u64::MAX),
             cursor: *outcome.cursor(),
-            matched: outcome.matched().as_ref().map(|matched| MatchView {
-                line: matched.line().clone(),
-                at: *matched.at(),
+            matched: outcome.matched().as_ref().map(|matched| {
+                MatchView::builder()
+                    .line(matched.line().clone())
+                    .at(*matched.at())
+                    .build()
             }),
             tail: outcome.tail().clone(),
             scanned_from: *outcome.scanned_from(),

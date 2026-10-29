@@ -1,72 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use getset::Getters;
-use nutype::nutype;
-use strum::{Display, EnumString};
 use typed_builder::TypedBuilder;
-use uuid::Uuid;
 
-use crate::domain::coordination::{Author, TodoChange, TodoUpdate};
-
-/// Stable identity of a todo within a project, generated when the todo is added.
-#[nutype(
-    sanitize(trim),
-    validate(not_empty),
-    derive(
-        Debug,
-        Clone,
-        PartialEq,
-        Eq,
-        Hash,
-        AsRef,
-        Display,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct TodoId(String);
-
-impl TodoId {
-    /// Creates a globally unique identity for a new todo.
-    ///
-    /// # Errors
-    /// Returns the generated newtype's validation error if its invariant ever
-    /// diverges from UUID's non-empty textual representation.
-    pub fn generate() -> Result<Self, TodoIdError> {
-        Self::try_new(Uuid::new_v4().to_string())
-    }
-}
-
-/// A todo's human-readable title. Trimmed and non-empty, so a blank line can
-/// never masquerade as a task.
-#[nutype(
-    sanitize(trim),
-    validate(not_empty),
-    derive(
-        Debug,
-        Clone,
-        PartialEq,
-        Eq,
-        Hash,
-        AsRef,
-        Display,
-        Serialize,
-        Deserialize
-    )
-)]
-pub struct TodoTitle(String);
-
-/// Where a todo sits in its lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString)]
-#[strum(serialize_all = "kebab-case")]
-pub enum TodoStatus {
-    /// Not started.
-    Pending,
-    /// Actively being worked.
-    InProgress,
-    /// Finished.
-    Done,
-}
+use crate::domain::coordination::{
+    Author, ClaimState, TodoChange, TodoClaim, TodoId, TodoStatus, TodoTitle, TodoUpdate,
+};
 
 /// A structured unit of shared work: a titled task with a lifecycle status and
 /// optional dependencies on other todos, so agents and the human coordinate who
@@ -159,50 +98,6 @@ impl Todo {
     }
 }
 
-/// An agent's hold on an in-progress todo: who works it, and the Unix second
-/// its lease runs out.
-#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct TodoClaim {
-    /// The agent working the todo.
-    owner: Author,
-    /// Unix epoch seconds after which the lease has run out.
-    claimed_until: u64,
-}
-
-impl TodoClaim {
-    /// Whether the lease still holds at `now`.
-    #[must_use]
-    pub fn is_live(&self, now: u64) -> bool {
-        self.claimed_until >= now
-    }
-
-    /// How long the lease has left at `now`; zero once it has run out.
-    #[must_use]
-    pub fn expires_in(&self, now: u64) -> Duration {
-        Duration::from_secs(self.claimed_until.saturating_sub(now))
-    }
-}
-
-/// Who holds a todo at a moment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClaimState<'a> {
-    /// Nobody claimed it.
-    Unclaimed,
-    /// An agent holds it under a live lease.
-    Held {
-        /// The agent holding it.
-        owner: &'a Author,
-        /// How long the lease has left.
-        expires_in: Duration,
-    },
-    /// An agent claimed it and let the lease run out.
-    Stale {
-        /// The agent whose lease ran out.
-        owner: &'a Author,
-    },
-}
-
 /// The todos of one project an agent can claim at `now`, oldest first: the
 /// ones [`Todo::is_claimable`] accepts, reading dependencies from `todos`.
 pub fn claimable(todos: &[Todo], now: u64) -> impl Iterator<Item = &Todo> {
@@ -217,6 +112,8 @@ pub fn claimable(todos: &[Todo], now: u64) -> impl Iterator<Item = &Todo> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// Generated ids are unique and non-empty.

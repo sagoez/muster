@@ -1,15 +1,27 @@
 mod entity;
 mod exit_intent;
+mod log_pattern;
+mod pattern_kind;
+mod pattern_text;
 mod readiness;
 mod ready;
+mod ready_kind;
+mod ready_probe;
 mod restart;
 mod state;
 mod stop;
+mod stop_signal;
 
 pub use entity::*;
 pub use exit_intent::*;
+pub use log_pattern::*;
+pub use pattern_kind::*;
+pub use pattern_text::{PATTERN_MAX_CHARS, PatternText, PatternTextError};
 pub use readiness::*;
 pub use ready::*;
+pub use ready_kind::*;
+pub use ready_probe::*;
 pub use restart::*;
 pub use state::*;
 pub use stop::*;
+pub use stop_signal::*;

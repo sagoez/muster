@@ -26,6 +26,9 @@ pub struct OutputTap {
     next: OutputCursor,
     /// Where the current run began, once one has.
     run_start: Option<OutputCursor>,
+    /// Whether the cursor stands where the output really ends: a run began
+    /// here, or the log's end was read.
+    placed: bool,
 }
 
 impl OutputTap {
@@ -38,6 +41,7 @@ impl OutputTap {
             partial_at: start,
             next: start,
             run_start: None,
+            placed: false,
         }
     }
 
@@ -51,10 +55,25 @@ impl OutputTap {
         self.run_start
     }
 
+    /// Whether the cursor stands where the output really ends, from a run
+    /// this tap saw begin or the log's end it was seeded with.
+    pub fn is_placed(&self) -> bool {
+        self.placed
+    }
+
+    /// Takes `bytes`, the last of a log that starts at `at`, of output from
+    /// runs this tap never saw begin: the cursor moves to their end and their
+    /// lines are kept, but no run is claimed, so no run start is made up.
+    pub fn seed_at(&mut self, at: OutputCursor, bytes: &[u8]) {
+        self.feed(Some(at), bytes);
+        self.placed = true;
+    }
+
     /// Starts a new run here: the previous run's unfinished line ends.
     pub fn begin_run(&mut self) {
         self.flush_partial();
         self.run_start = Some(self.next);
+        self.placed = true;
     }
 
     /// Starts a new run at `start`, the offset its log says it began at,
@@ -71,6 +90,7 @@ impl OutputTap {
             self.partial_at = start;
         }
         self.run_start = Some(start);
+        self.placed = true;
     }
 
     /// Takes one chunk of raw output, whose first byte is at `at` when the
@@ -282,6 +302,22 @@ mod tests {
         assert_eq!(lines[0].at(), OutputCursor::new(4096));
         assert_eq!(tap.cursor(), OutputCursor::new(4106));
         assert_eq!(tap.tail(5), ["Listening"]);
+    }
+
+    /// A log's tail seeds where the output ends and its lines, but claims no
+    /// run, so no run start is made up for output this tap never saw begin.
+    #[test]
+    fn a_seeded_tail_places_the_cursor_without_a_run() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        assert!(!tap.is_placed());
+
+        tap.seed_at(OutputCursor::new(4096), b"39999\n40000\n");
+
+        assert!(tap.is_placed());
+        assert_eq!(tap.run_start(), None);
+        assert_eq!(tap.cursor(), OutputCursor::new(4108));
+        let (lines, _) = tap.scan_from(OutputCursor::new(4096));
+        assert_eq!(lines.len(), 2);
     }
 
     /// Placing the current run again keeps what was seen of it, and no run

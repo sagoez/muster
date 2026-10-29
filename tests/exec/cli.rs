@@ -64,6 +64,8 @@ const USAGE: i32 = 2;
 const SERVICE_UNAVAILABLE: i32 = 3;
 /// Exit code of an unknown name or project.
 const INVALID_INPUT: i32 = 4;
+/// A run that logs far more than the tail a wait reads back, then crashes.
+const LONG_RUN_COMMAND: &str = "echo FIRSTRUN; seq 1 40000; exit 1";
 /// Exit code of a command a person interrupted with Ctrl-C at a terminal.
 const INTERRUPTED: i32 = 130;
 /// How long the slow service takes to answer `ps`.
@@ -3695,6 +3697,31 @@ fn a_wait_after_a_service_restart_answers_from_the_log() {
         "{}",
         shown(&refused)
     );
+}
+
+/// After a service restart, a wait on a stopped process whose log is longer
+/// than the tail it reads makes up no run: `stack_status`, `process_logs`
+/// and `logs --json` give no `run_start`, since the service never saw it.
+#[test]
+fn a_wait_after_a_service_restart_makes_up_no_run_start() {
+    let mut scratch = Scratch::new();
+    let shop = scratch.project("shop", &stack(&[entry("long", LONG_RUN_COMMAND, false)]));
+    scratch.on(&shop, &["start", "long"]);
+    let (_, crashed) = scratch.json_on(&shop, &["wait", "long", "--state", "crashed"]);
+    assert_eq!(crashed["status"], "matched", "{crashed}");
+    let (stopped, _) = scratch.json(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+
+    let (_, waited) = scratch.json_on(&shop, &["wait", "long", "--state", "crashed"]);
+    assert_eq!(waited["status"], "matched", "{waited}");
+
+    let (_, logs) = scratch.json_on(&shop, &["logs", "long", "-n", "2"]);
+    assert!(logs["run_start"].is_null(), "{logs}");
+    let mut mcp = McpSession::start(&mut scratch, &shop);
+    let status = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
+    assert!(status["processes"][0]["run_start"].is_null(), "{status}");
+    let read = mcp.result("process_logs", serde_json::json!({ "name": "long" }));
+    assert!(read["structuredContent"]["run_start"].is_null(), "{read}");
 }
 
 /// A state directory whose holder sockets fit serves, however long: the

@@ -225,9 +225,7 @@ impl Supervisor {
         };
         if self.knows_no_output(pane) {
             let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
-            let tap = self.tap(pane);
-            tap.begin_run_at(at);
-            tap.feed(Some(at), &bytes);
+            self.tap(pane).seed_at(at, &bytes);
         }
         for HeldWait {
             prepared,
@@ -250,15 +248,13 @@ impl Supervisor {
     }
 
     /// Whether `pane` neither runs nor starts and this service never placed a
-    /// run of it, so where its output ends is known only from its log.
+    /// run of it nor read its log's end, so where its output ends is known
+    /// only from its log.
     fn knows_no_output(&self, pane: PaneId) -> bool {
         self.adopter.is_some()
             && !self.is_live(pane)
             && !self.is_starting(pane)
-            && self
-                .taps
-                .get(&pane)
-                .is_none_or(|tap| tap.run_start().is_none())
+            && self.taps.get(&pane).is_none_or(|tap| !tap.is_placed())
     }
 
     /// Reads the end of `pane`'s log on a worker when the adopter allows it,
@@ -566,14 +562,15 @@ impl Supervisor {
 
     /// The end of `pane`'s output as far as its tap has caught up with the
     /// log: `None` while a launch or adoption is in flight, or before this
-    /// service placed a run, when a later cursor may still be valid.
+    /// service placed a run or read the log's end, when a later cursor may
+    /// still be valid.
     fn known_output_end(&self, pane: PaneId) -> Option<OutputCursor> {
         if self.is_starting(pane) {
             return None;
         }
         self.taps
             .get(&pane)
-            .filter(|tap| tap.run_start().is_some())
+            .filter(|tap| tap.is_placed())
             .map(OutputTap::cursor)
     }
 

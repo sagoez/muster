@@ -142,13 +142,21 @@ fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == RECORD_EXTENSION))
-        .map(|path| {
-            let record = fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-            (path, record)
-        })
+        .filter_map(|path| read_record(&path).map(|record| (path, record)))
         .collect()
+}
+
+/// The record file at `path`, parsed, or `None` inside when it cannot be read
+/// or parsed. A file removed since it was listed, as a finishing holder
+/// removes its own, is absent: none at all.
+fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
+    match fs::read(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        read => Some(
+            read.ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +255,23 @@ mod tests {
     fn a_missing_directory_holds_no_records() {
         let scratch = TempDir::new().unwrap();
         assert!(HolderRecord::load_all(&scratch.path().join("absent")).is_empty());
+    }
+
+    /// A record removed between listing and reading, as a finishing holder
+    /// removes its own, is absent rather than unreadable; one that does not
+    /// parse is unreadable.
+    #[test]
+    fn a_record_gone_before_it_is_read_is_absent() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path().join("records");
+        let saved = record();
+        saved.save(&dir).unwrap();
+        let path = saved.path_in(&dir);
+
+        assert!(matches!(read_record(&path), Some(Some(_))));
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(read_record(&path), Some(None));
+        fs::remove_file(&path).unwrap();
+        assert_eq!(read_record(&path), None);
     }
 }

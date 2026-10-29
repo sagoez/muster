@@ -180,15 +180,30 @@ impl OutputTap {
             .build();
         self.partial.clear();
         self.partial_at = self.next;
+        self.keep(line.clone());
+        Some(line)
+    }
+
+    /// Keeps `lines` the current run printed before its output was streamed,
+    /// such as the screen a holder showed when first reached, so the run's
+    /// tail has them; where the output stands is unchanged.
+    pub fn seed(&mut self, lines: &[TapLine]) {
+        for line in lines {
+            self.keep(line.clone());
+        }
+    }
+
+    /// Adds `line` to the ring, dropping the oldest lines past
+    /// [`TAP_RING_BYTES`].
+    fn keep(&mut self, line: TapLine) {
         self.ring_bytes += line.text().len();
-        self.ring.push_back(line.clone());
+        self.ring.push_back(line);
         while self.ring_bytes > TAP_RING_BYTES {
             let Some(dropped) = self.ring.pop_front() else {
                 break;
             };
             self.ring_bytes -= dropped.text().len();
         }
-        Some(line)
     }
 }
 
@@ -281,6 +296,23 @@ mod tests {
         assert_eq!(lines[0].at(), OutputCursor::new(4096));
         assert_eq!(tap.cursor(), OutputCursor::new(4106));
         assert_eq!(tap.tail(5), ["Listening"]);
+    }
+
+    /// Lines seeded from a first screen join the run's tail without moving
+    /// where the output stands.
+    #[test]
+    fn seeded_lines_join_the_tail() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.begin_run_at(OutputCursor::new(40));
+        let screen = TapLine::builder()
+            .at(OutputCursor::new(40))
+            .text("boom".to_string())
+            .build();
+
+        tap.seed(&[screen]);
+
+        assert_eq!(tap.tail(30), ["boom"]);
+        assert_eq!(tap.cursor(), OutputCursor::new(40));
     }
 
     #[test]

@@ -280,10 +280,11 @@ impl Supervisor {
         self.test_lines(pane, &lines);
     }
 
-    /// Tests the screen a freshly spawned run on `pane` showed when its
-    /// holder was first reached. A holder streams only what its child writes
-    /// after that, so the lines printed before arrive as this screen; each
-    /// is taken to begin at the run's start.
+    /// Keeps and tests the screen a freshly spawned run on `pane` showed when
+    /// its holder was first reached. A holder streams only what its child
+    /// writes after that, so the lines printed before arrive as this screen;
+    /// each is taken to begin at the run's start, and a run that ends at once
+    /// still has them as its tail.
     pub(super) fn observe_first_screen(&mut self, pane: PaneId) {
         let Some(text) = self
             .panes
@@ -302,6 +303,7 @@ impl Supervisor {
             .filter(|line| !line.is_empty())
             .map(|line| TapLine::builder().at(at).text(line.to_string()).build())
             .collect();
+        self.tap(pane).seed(&lines);
         self.test_lines(pane, &lines);
     }
 

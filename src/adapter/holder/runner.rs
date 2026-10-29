@@ -204,7 +204,7 @@ impl HolderRunner {
         let log = self.dirs.process_log(project, name);
         let end = log_end(&log).ok()?;
         let from = OutputCursor::new(end.offset().saturating_sub(LOG_TAIL_BYTES));
-        read_log_range(&log, from, end).ok()
+        read_log_range(&log, from, end, LOG_TAIL_BYTES).ok()
     }
 
     /// The record of a live holder supervising the child with `child_pid`,

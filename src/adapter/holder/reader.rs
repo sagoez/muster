@@ -21,7 +21,7 @@ pub(super) const HOLDER_LOST: &str = "the holder stopped serving without reporti
 const SERVING_PROBE: Duration = Duration::from_millis(500);
 /// Most bytes of a resync's catch-up read from the log and sent at once, so
 /// a long gap is replayed in pieces rather than held whole.
-const CATCH_UP_CHUNK_BYTES: u64 = 64 * 1024;
+pub(super) const CATCH_UP_CHUNK_BYTES: u64 = 64 * 1024;
 
 /// Everything the reader thread of a holder connection owns.
 pub(super) struct Reader {
@@ -50,15 +50,17 @@ impl Reader {
 
     /// Forwards from the log the output a resync dropped: everything between
     /// what was forwarded and `log_end`, where the holder's frames resume,
-    /// in pieces of at most [`CATCH_UP_CHUNK_BYTES`]. Output the log no
-    /// longer holds is skipped, and the tap sees the gap.
+    /// in pieces of at most [`CATCH_UP_CHUNK_BYTES`]. Each piece starts at
+    /// the oldest byte the log still holds when rotation discarded more, so
+    /// however far it rotated the rest is still replayed, and the piece
+    /// placed past what was forwarded shows the tap the gap, as `logs -f`
+    /// reports the bytes it skipped.
     fn catch_up(&mut self, log_end: OutputCursor) {
         let Some(log) = self.log.clone() else {
             return;
         };
         while self.delivered < log_end {
-            let to = log_end.min(self.delivered.advanced(CATCH_UP_CHUNK_BYTES));
-            match read_log_range(&log, self.delivered, to) {
+            match read_log_range(&log, self.delivered, log_end, CATCH_UP_CHUNK_BYTES) {
                 Ok((at, bytes)) if !bytes.is_empty() => self.forward(at, bytes),
                 Ok(_) | Err(_) => return,
             }

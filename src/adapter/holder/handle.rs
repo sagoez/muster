@@ -161,7 +161,7 @@ impl HolderHandle {
                 self.log_end.offset().saturating_sub(BACKLOG_MAX_BYTES),
             ));
         if from < self.log_end {
-            self.backlog = read_log_range(&log, from, self.log_end)
+            self.backlog = read_log_range(&log, from, self.log_end, BACKLOG_MAX_BYTES)
                 .ok()
                 .filter(|(_, bytes)| !bytes.is_empty());
         }
@@ -292,7 +292,9 @@ mod tests {
         adapter::{
             channel_sink::ChannelSink,
             holder::{
-                log_fixture::Fixture, protocol::HolderMessage, reader::HOLDER_LOST,
+                log_fixture::Fixture,
+                protocol::HolderMessage,
+                reader::{CATCH_UP_CHUNK_BYTES, HOLDER_LOST},
                 shared_writer::WRITE_TIMED_OUT,
             },
             test_scratch::short_scratch,
@@ -396,6 +398,89 @@ mod tests {
             (dropped, b"MARKER-READY\n".to_vec()),
             (resumed, b"last\n".to_vec()),
         ]);
+    }
+
+    /// A resync after the log rotated more than one catch-up piece past the
+    /// output forwarded replays what the log still holds, from its oldest
+    /// byte, placed past the gap so the tap sees it, through to where the
+    /// frames resume, so a readiness marker written after the rotated span
+    /// still arrives.
+    #[test]
+    fn a_resync_past_a_long_rotation_replays_what_the_log_still_holds() {
+        let filler_line = [vec![b'x'; 1023], b"\n".to_vec()].concat();
+        let cap = 2 * CATCH_UP_CHUNK_BYTES;
+        let mut log = Fixture::with_cap(cap);
+        log.write(b"first\n");
+        let filler_lines = usize::try_from(4 * cap).unwrap() / filler_line.len();
+        for _ in 0..filler_lines {
+            log.write(&filler_line);
+        }
+        let marker = log.write(b"MARKER-READY\n");
+        let resumed = log.write(b"last\n");
+        let (service, mut holder) = greeted_pair();
+        let (sender, outputs) = unbounded();
+        let _handle = HolderHandle::supervise(
+            service,
+            Path::new(UNSERVED_SOCKET),
+            Some(log.path()),
+            Box::new(ChannelSink::new(sender)),
+            WAIT,
+        )
+        .unwrap();
+
+        HolderMessage::Output {
+            at: OutputCursor::new(0),
+            bytes: b"first\n".to_vec(),
+        }
+        .write_to(&mut holder)
+        .unwrap();
+        HolderMessage::Snapshot {
+            repaint: SCREEN.to_vec(),
+            size: PtySize::try_new(ROWS, COLS).unwrap(),
+            pid: Pid::try_new(CHILD_PID).unwrap(),
+            attached: 0,
+            run_start: OutputCursor::new(0),
+            log_end: resumed,
+        }
+        .write_to(&mut holder)
+        .unwrap();
+        HolderMessage::Output {
+            at: resumed,
+            bytes: b"last\n".to_vec(),
+        }
+        .write_to(&mut holder)
+        .unwrap();
+
+        let placed: Vec<(OutputCursor, Vec<u8>)> =
+            iter::from_fn(|| outputs.recv_timeout(QUIET).ok())
+                .filter_map(|output| match output {
+                    ProcessOutput::Placed { at, bytes } => Some((at, bytes)),
+                    _ => None,
+                })
+                .collect();
+        let (first, replayed) = placed.split_first().unwrap();
+        assert_eq!(first, &(OutputCursor::new(0), b"first\n".to_vec()));
+        let gap_end = replayed[0].0;
+        assert!(
+            gap_end.bytes_since(OutputCursor::new(b"first\n".len() as u64)) > CATCH_UP_CHUNK_BYTES,
+            "the log rotated more than one piece past what was forwarded: {gap_end}"
+        );
+        let mut expected = gap_end;
+        for (at, bytes) in replayed {
+            assert_eq!(*at, expected, "the replay is contiguous from the gap");
+            expected = at.advanced(bytes.len() as u64);
+        }
+        assert_eq!(expected, resumed.advanced(b"last\n".len() as u64));
+        let marked = replayed.iter().any(|(at, bytes)| {
+            *at <= marker
+                && bytes
+                    .windows(b"MARKER-READY".len())
+                    .any(|w| w == b"MARKER-READY")
+        });
+        assert!(
+            marked,
+            "the readiness marker after the rotated span arrives"
+        );
     }
 
     /// A frame the reader cannot decode is reported as unreadable output,

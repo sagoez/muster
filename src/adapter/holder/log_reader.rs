@@ -107,8 +107,10 @@ pub(super) fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
     Ok(Span::open(log)?.end())
 }
 
-/// The raw bytes of the log at `log` from `from` up to `to`, and where they
-/// start: at the oldest kept byte when rotation discarded what `from` names.
+/// The raw bytes of the log at `log` from `from` up to `to`, at most `max`
+/// of them, and where they start: at the oldest kept byte when rotation
+/// discarded what `from` names, so the bound counts from there and a reader
+/// sees the gap in where the bytes start.
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be read.
@@ -116,10 +118,14 @@ pub(super) fn read_log_range(
     log: &Path,
     from: OutputCursor,
     to: OutputCursor,
+    max: u64,
 ) -> Result<(OutputCursor, Vec<u8>), HolderError> {
     let span = Span::open(log)?;
     let start = from.max(span.oldest());
-    let length = to.min(span.end()).bytes_since(start);
+    let length = to
+        .min(span.end())
+        .min(start.advanced(max))
+        .bytes_since(start);
     let mut bytes = Vec::new();
     SpanReader::new(&span, start)
         .take(length)

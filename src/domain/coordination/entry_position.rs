@@ -1,8 +1,8 @@
 use nutype::nutype;
 
-/// Where a note or key-value entry stands in the order its project's entries
-/// were first written. A page resumes after one, so deleting the entry a
-/// page ended on never breaks the listing. Opaque to whoever pages.
+/// Where a note, todo or key-value entry stands in the order its project's
+/// entries were first written. A page resumes after one, so deleting the
+/// entry a page ended on never breaks the listing. Opaque to whoever pages.
 #[nutype(
     validate(greater_or_equal = 0),
     derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Display, FromStr)

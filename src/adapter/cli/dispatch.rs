@@ -269,11 +269,21 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Init { yes, json }) => init(invocation, yes, json),
         Some(Command::Run(args)) => run_command(invocation, &args),
         Some(Command::Projects { command, json }) => projects(invocation, command, json),
-        Some(Command::Note { command, json }) => {
-            with_root(invocation, json, NOTE_TITLE, |store, root| {
-                note(command, store, root, &Author::human())
-            })
-        },
+        Some(Command::Note {
+            command,
+            limit,
+            cursor,
+            json,
+        }) => with_root(invocation, json, NOTE_TITLE, |store, root| {
+            note(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                root,
+                &Author::human(),
+            )
+        }),
         Some(Command::Todo {
             command,
             limit,
@@ -292,9 +302,17 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Kv {
             command,
             limit,
+            cursor,
             json,
         }) => with_root(invocation, json, KV_TITLE, |store, root| {
-            kv(command, limit, store, root, &Author::human())
+            kv(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                root,
+                &Author::human(),
+            )
         }),
         Some(Command::Lock { command, json }) => {
             with_root(invocation, json, LOCK_TITLE, |store, root| {

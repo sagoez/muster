@@ -242,13 +242,18 @@ fn claim_columns(todo: &Todo) -> (Option<&str>, Option<i64>) {
     })
 }
 
-/// Writes a todo with the author, time and claim it carries.
+/// Writes a todo with the author, time and claim it carries; a rewrite keeps
+/// the todo's place in creation order, so a re-import never reorders todos.
 fn put_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), ConfigError> {
     let (owner, claimed_until) = claim_columns(todo);
     conn.execute(
-        "INSERT OR REPLACE INTO todos \
+        "INSERT INTO todos \
          (project_id, id, title, status, deps, author, updated_at, owner, claimed_until) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         ON CONFLICT (project_id, id) DO UPDATE SET \
+         title = excluded.title, status = excluded.status, deps = excluded.deps, \
+         author = excluded.author, updated_at = excluded.updated_at, owner = excluded.owner, \
+         claimed_until = excluded.claimed_until",
         params![
             project_id,
             todo.id().as_ref(),
@@ -473,6 +478,24 @@ impl CoordinationStore for SqliteStore {
                 &format!("SELECT {TODO_COLUMNS} FROM todos WHERE project_id = ?1 ORDER BY rowid"),
                 params![project_id],
                 todo_from_row,
+            )
+        })
+    }
+
+    fn positioned_todos(
+        &self,
+        project: &ProjectRoot,
+    ) -> Result<Vec<(EntryPosition, Todo)>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            collect(
+                conn,
+                &format!(
+                    "SELECT rowid AS position, {TODO_COLUMNS} FROM todos WHERE project_id = ?1 \
+                     ORDER BY rowid"
+                ),
+                params![project_id],
+                |row| Ok((position(row)?, todo_from_row(row)?)),
             )
         })
     }
@@ -1608,6 +1631,29 @@ mod tests {
         assert_eq!(store.scratchpads(&root).unwrap(), vec![note]);
         assert_eq!(store.todos(&root).unwrap(), vec![todo, held]);
         assert_eq!(store.values(&root).unwrap(), vec![entry]);
+    }
+
+    /// Re-importing a snapshot into the same project keeps every todo where
+    /// it stood, so a todo added after the export stays last and
+    /// `todo_claim` without an id still takes the oldest.
+    #[test]
+    fn a_re_import_keeps_todo_order() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        add(&store, &root, "y", &[]);
+        add(&store, &root, "z", &[]);
+        let exported = store.todos(&root).unwrap();
+        add(&store, &root, "w", &[]);
+
+        CoordinationStore::import(&store, &root, &[], &exported, &[]).unwrap();
+
+        let titles: Vec<String> = store
+            .todos(&root)
+            .unwrap()
+            .iter()
+            .map(|todo| todo.title().to_string())
+            .collect();
+        assert_eq!(titles, ["y", "z", "w"]);
     }
 
     /// A second connection to the file sees committed writes, as the CLI,

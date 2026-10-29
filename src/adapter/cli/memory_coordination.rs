@@ -20,6 +20,25 @@ pub(super) struct MemoryCoordination {
     entries: RefCell<Vec<KeyValue>>,
 }
 
+/// The page of `limit` of `items` after `after`, each item standing at its
+/// place in the list counted from one, as `map` lists it.
+fn paged<T, U>(
+    items: &[T],
+    after: Option<EntryPosition>,
+    limit: usize,
+    map: impl Fn(&T) -> U,
+) -> EntryPage<U> {
+    let rows = items
+        .iter()
+        .zip(1_i64..)
+        .filter_map(|(item, at)| Some((EntryPosition::try_new(at).ok()?, item)))
+        .filter(|(position, _)| after.is_none_or(|after| *position > after))
+        .map(|(position, item)| (position, map(item)))
+        .take(limit.saturating_add(1))
+        .collect();
+    EntryPage::of(rows, limit)
+}
+
 impl CoordinationStore for MemoryCoordination {
     fn scratchpads(&self, _project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError> {
         Ok(self.notes.borrow().clone())
@@ -28,10 +47,16 @@ impl CoordinationStore for MemoryCoordination {
     fn scratchpad_page(
         &self,
         _project: &ProjectRoot,
-        _after: Option<EntryPosition>,
-        _limit: usize,
+        after: Option<EntryPosition>,
+        limit: usize,
     ) -> Result<EntryPage<NoteHeader>, ConfigError> {
-        unreachable!("note commands never page")
+        Ok(paged(&self.notes.borrow(), after, limit, |note| {
+            NoteHeader::builder()
+                .key(note.key().clone())
+                .author(note.author().clone())
+                .updated_at(*note.updated_at())
+                .build()
+        }))
     }
 
     fn scratchpad_keys(&self, _project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
@@ -87,6 +112,13 @@ impl CoordinationStore for MemoryCoordination {
     }
 
     fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
+        unreachable!("note and kv commands never touch todos")
+    }
+
+    fn positioned_todos(
+        &self,
+        _project: &ProjectRoot,
+    ) -> Result<Vec<(EntryPosition, Todo)>, ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }
 
@@ -167,10 +199,10 @@ impl CoordinationStore for MemoryCoordination {
     fn value_page(
         &self,
         _project: &ProjectRoot,
-        _after: Option<EntryPosition>,
-        _limit: usize,
+        after: Option<EntryPosition>,
+        limit: usize,
     ) -> Result<EntryPage<KeyValue>, ConfigError> {
-        unreachable!("kv commands never page")
+        Ok(paged(&self.entries.borrow(), after, limit, Clone::clone))
     }
 
     fn value_keys(&self, _project: &ProjectRoot) -> Result<Vec<KvKey>, ConfigError> {

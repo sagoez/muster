@@ -194,6 +194,13 @@ pub enum Command {
     Note {
         #[command(subcommand)]
         command: Option<NoteCommand>,
+        /// Notes one page of the listing shows, by key; `note get` shows a
+        /// body.
+        #[arg(long, default_value_t)]
+        limit: PageSize,
+        /// List from after this cursor, the one an earlier page printed.
+        #[arg(long)]
+        cursor: Option<String>,
         /// Print the result as JSON.
         #[arg(long, global = true)]
         json: bool,
@@ -205,7 +212,7 @@ pub enum Command {
         /// Todos one page of the listing shows.
         #[arg(long, default_value_t)]
         limit: PageSize,
-        /// List from after this todo id, the cursor an earlier page ended at.
+        /// List from after this cursor, the one an earlier page printed.
         #[arg(long)]
         cursor: Option<String>,
         /// Print the result as JSON.
@@ -220,6 +227,9 @@ pub enum Command {
         /// `kv get` shows a value whole.
         #[arg(long, default_value_t)]
         limit: PageSize,
+        /// List from after this cursor, the one an earlier page printed.
+        #[arg(long)]
+        cursor: Option<String>,
         /// Print the result as JSON.
         #[arg(long, global = true)]
         json: bool,

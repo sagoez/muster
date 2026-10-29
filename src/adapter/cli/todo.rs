@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use super::{
-    answer::Answer, error::CliError, report::attribution, row::Row, row_kind::RowKind,
-    todo_command::TodoCommand,
+    answer::Answer, error::CliError, page_cursor::parse_cursor, report::attribution, row::Row,
+    row_kind::RowKind, todo_command::TodoCommand,
 };
 use crate::{
     adapter::{
@@ -79,13 +79,14 @@ fn parse_id(id: &str) -> Result<TodoId, CliError> {
     })
 }
 
-/// Lists one page of `limit` todos for `project`, after the todo `cursor`
-/// names, as `id  status  title`, one per line, with who holds it and for how
-/// long at `now` (Unix seconds), and how to read on when more follow.
+/// Lists one page of `limit` todos for `project`, after the position
+/// `cursor` names, as `id  status  title`, one per line, with who holds it
+/// and for how long at `now` (Unix seconds), and how to read on when more
+/// follow.
 ///
 /// # Errors
-/// Returns [`CliError::UnknownTodo`] for a cursor naming no todo, or a store
-/// read failure.
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
 fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
@@ -93,16 +94,19 @@ fn list(
     cursor: Option<&str>,
     now: EpochSeconds,
 ) -> Result<Answer, CliError> {
-    let after = cursor.map(parse_id).transpose()?;
-    let todos = store.todos(project)?;
-    let start = TodoPage::resume(&todos, after.as_ref())
-        .ok_or_else(|| CliError::UnknownTodo(cursor.unwrap_or_default().to_string()))?;
-    let listed = &todos[start..];
-    let page = TodoPage::of(listed.iter().map(|todo| TodoView::at(todo, now)), limit);
+    let after = cursor.map(parse_cursor).transpose()?;
+    let todos = store.positioned_todos(project)?;
+    let listed = &todos[TodoPage::resume(&todos, after)..];
+    let page = TodoPage::of(
+        listed
+            .iter()
+            .map(|(position, todo)| (*position, TodoView::at(todo, now))),
+        limit,
+    );
     let mut rows: Vec<Row> = listed
         .iter()
         .take(page.todos().len())
-        .map(|todo| {
+        .map(|(_, todo)| {
             Row::unlabeled(
                 RowKind::Plain,
                 format!(
@@ -120,10 +124,7 @@ fn list(
         rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
     }
     if let Some(next) = page.cursor() {
-        rows.push(Row::unlabeled(
-            RowKind::Hint,
-            format!("{MORE_NOTE}{}`", next.as_ref()),
-        ));
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
     }
     Answer::of(rows, &page)
 }
@@ -469,8 +470,9 @@ mod tests {
         ));
     }
 
-    /// A listing pages by cursor like `todo_list`, saying how to read on, and
-    /// a cursor naming no todo is refused.
+    /// A listing pages by cursor like `todo_list`, saying how to read on; a
+    /// todo deleted where a page ended never breaks the next page, and text
+    /// no page printed is refused.
     #[test]
     fn list_pages_by_cursor() {
         let (store, root, _scratch) = fixture();
@@ -483,22 +485,26 @@ mod tests {
         let first = list(&store, &root, two, None, now()).unwrap();
         assert_eq!(first.json()["todos"].as_array().unwrap().len(), 2);
         assert_eq!(first.json()["more"], true);
-        assert_eq!(first.json()["cursor"], ids[1].as_str());
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
         assert!(
-            first.rows()[2].detail().contains(&ids[1]),
+            first.rows()[2]
+                .detail()
+                .contains(&format!("--cursor {cursor}`")),
             "{:?}",
             first.rows()
         );
+        let id = TodoId::try_new(ids[1].as_str()).unwrap();
+        assert!(store.delete_todo(&root, &id).unwrap());
 
-        let rest = list(&store, &root, two, Some(&ids[1]), now()).unwrap();
+        let rest = list(&store, &root, two, Some(&cursor), now()).unwrap();
         assert_eq!(rest.json()["todos"][0]["id"], ids[2].as_str());
         assert_eq!(rest.json()["more"], false);
         assert!(rest.json().get("cursor").is_none());
         assert_eq!(rest.rows().len(), 1);
 
         assert!(matches!(
-            list(&store, &root, two, Some("no-such-todo"), now()),
-            Err(CliError::UnknownTodo(_))
+            list(&store, &root, two, Some(&ids[0]), now()),
+            Err(CliError::InvalidCursor(_))
         ));
     }
 

@@ -1,11 +1,14 @@
 use serde_json::json;
 
 use super::{
-    answer::Answer, error::CliError, note_command::NoteCommand, report::attribution, row::Row,
-    row_kind::RowKind,
+    answer::Answer, error::CliError, note_command::NoteCommand, page_cursor::parse_cursor,
+    report::attribution, row::Row, row_kind::RowKind,
 };
 use crate::{
-    adapter::{client::NoteEntry, wire::WireForm},
+    adapter::{
+        client::{NoteEntry, PageSize},
+        wire::WireForm,
+    },
     domain::{
         coordination::{
             Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
@@ -24,6 +27,12 @@ const NOTE_KEY: &str = "note key";
 const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>`";
 /// The JSON key of the listed notes.
 const NOTES: &str = "notes";
+/// The JSON key of whether notes follow the listed page.
+const MORE: &str = "more";
+/// The JSON key of where the next page starts.
+const CURSOR: &str = "cursor";
+/// Line printed under a page that more notes follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster note --cursor ";
 /// The JSON key of the key a write saved.
 const SAVED: &str = "saved";
 /// The JSON key of the key a delete named.
@@ -32,19 +41,22 @@ const KEY: &str = "key";
 const DELETED: &str = "deleted";
 
 /// Runs a `muster note` action against `store` for `project`, returning what
-/// to print. Absent a subcommand, lists the project's notes.
+/// to print. Absent a subcommand, lists one page of `limit` note keys after
+/// the position `cursor` names.
 ///
 /// # Errors
-/// Returns [`CliError`] when a key is invalid, a requested note is absent, or the
-/// store cannot be read or written.
+/// Returns [`CliError`] when a key or cursor is invalid, a requested note is
+/// absent, or the store cannot be read or written.
 pub fn note(
     command: Option<NoteCommand>,
+    limit: PageSize,
+    cursor: Option<&str>,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project),
+        None => list(store, project, limit, cursor),
         Some(NoteCommand::Get { key }) => get(store, project, &key),
         Some(NoteCommand::Set { key, body }) => set(store, project, author, &key, &body),
         Some(NoteCommand::Rm { key }) => remove(store, project, &key),
@@ -67,28 +79,41 @@ fn parse_key(key: &str) -> Result<ScratchpadKey, CliError> {
     })
 }
 
-/// Lists the keys of every note stored for `project`, one per line, without
-/// their bodies.
+/// Lists one page of `limit` note keys for `project` after the position
+/// `cursor` names, one per line, without their bodies, and how to read on
+/// when more follow; its JSON is `note_read`'s listing.
 ///
 /// # Errors
-/// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Answer, CliError> {
-    let notes = store.scratchpads(project)?;
-    let entries: Vec<NoteEntry> = notes.iter().map(NoteEntry::from).collect();
-    let rows = if notes.is_empty() {
-        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
-    } else {
-        notes
-            .iter()
-            .map(|note| {
-                Row::unlabeled(
-                    RowKind::Plain,
-                    format!("{}{}", note.key().as_ref(), attribution(note.author())),
-                )
-            })
-            .collect()
-    };
-    Answer::of(rows, &json!({ NOTES: entries }))
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
+fn list(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    limit: PageSize,
+    cursor: Option<&str>,
+) -> Result<Answer, CliError> {
+    let after = cursor.map(parse_cursor).transpose()?;
+    let page = store.scratchpad_page(project, after, limit.into_inner())?;
+    let entries: Vec<NoteEntry> = page.entries().iter().map(NoteEntry::from).collect();
+    let mut rows: Vec<Row> = page
+        .entries()
+        .iter()
+        .map(|note| {
+            Row::unlabeled(
+                RowKind::Plain,
+                format!("{}{}", note.key().as_ref(), attribution(note.author())),
+            )
+        })
+        .collect();
+    if rows.is_empty() && after.is_none() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    let mut answer = json!({ NOTES: entries, MORE: page.next().is_some() });
+    if let Some(next) = page.next() {
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
+        answer[CURSOR] = json!(next.to_string());
+    }
+    Answer::of(rows, &answer)
 }
 
 /// Prints the body of the note under `key`, one row per line so the framed
@@ -192,7 +217,7 @@ mod tests {
         )
         .unwrap();
 
-        let listed = list(&store, &project()).unwrap();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
         assert_eq!(listed.rows().len(), 1);
         assert_eq!(listed.rows()[0].detail(), "plan");
         assert_eq!(listed.json()["notes"][0]["key"], "plan");
@@ -222,10 +247,37 @@ mod tests {
     #[test]
     fn list_reports_empty() {
         let store = MemoryCoordination::default();
-        let listed = list(&store, &project()).unwrap();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
         assert_eq!(listed.rows()[0].detail(), EMPTY_NOTE);
         assert_eq!(listed.rows()[0].kind(), RowKind::Hint);
         assert_eq!(listed.json()["notes"], json!([]));
+        assert_eq!(listed.json()["more"], false);
+    }
+
+    /// A listing pages by `limit` and `cursor` as `note_read` does, printing
+    /// the cursor to read on with; text no page printed is refused.
+    #[test]
+    fn list_pages_by_cursor() {
+        let store = MemoryCoordination::default();
+        for key in ["one", "two", "three"] {
+            set(&store, &project(), &Author::human(), key, "b").unwrap();
+        }
+        let two = PageSize::try_new(2).unwrap();
+
+        let first = list(&store, &project(), two, None).unwrap();
+        assert_eq!(first.json()["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(first.json()["more"], true);
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
+        assert_eq!(first.rows()[2].detail(), &format!("{MORE_NOTE}{cursor}`"));
+
+        let rest = list(&store, &project(), two, Some(&cursor)).unwrap();
+        assert_eq!(rest.json()["notes"][0]["key"], "three");
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert!(matches!(
+            list(&store, &project(), two, Some("three")),
+            Err(CliError::InvalidCursor(_))
+        ));
     }
 
     /// A note an agent wrote is attributed in the list; the human's is not.
@@ -242,7 +294,7 @@ mod tests {
             )
             .unwrap();
 
-        let listed = list(&store, &project()).unwrap();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
         let details: Vec<&str> = listed
             .rows()
             .iter()

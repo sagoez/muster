@@ -62,6 +62,7 @@ mod memory_coordination;
 mod note;
 mod note_command;
 mod output;
+mod page_cursor;
 mod parsed;
 mod presenter;
 mod presenter_theme;

@@ -103,6 +103,9 @@ pub enum CliError {
     /// No todo exists with the requested id.
     #[error("no todo '{0}'")]
     UnknownTodo(String),
+    /// A `--cursor` is not one an earlier page of the listing printed.
+    #[error("'{0}' is not a cursor; pass the one an earlier page printed")]
+    InvalidCursor(String),
     /// Another agent holds what the command would change under a live lease.
     #[error(
         "{what} is held by {owner} for {}; pass --force to change it anyway",
@@ -377,6 +380,7 @@ impl CliError {
             | Self::TooLong { .. }
             | Self::TooMany { .. }
             | Self::InvalidTodoId(_)
+            | Self::InvalidCursor(_)
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
             | Self::InvalidName { .. }
@@ -426,6 +430,7 @@ impl CliError {
             | Self::TooLong { .. }
             | Self::TooMany { .. }
             | Self::InvalidTodoId(_)
+            | Self::InvalidCursor(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)

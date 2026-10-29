@@ -67,10 +67,7 @@ const BODY_FIELD: &str = "body";
 const VALUE_FIELD: &str = "value";
 const TITLE_FIELD: &str = "title";
 const CURSOR_FIELD: &str = "cursor";
-/// The form a `todo_list` cursor is written in.
-const CURSOR_FORM: &str =
-    "the cursor of an earlier todo_list page, naming a todo that still exists";
-/// The form a `note_read` or `kv_read` cursor is written in.
+/// The form a `todo_list`, `note_read` or `kv_read` cursor is written in.
 const KEY_CURSOR_FORM: &str = "the cursor an earlier page returned";
 /// The form a bounded list is written in, followed by its maximum.
 const COUNT_FORM: &str = "at most ";
@@ -301,7 +298,7 @@ impl MusterMcp {
     )]
     pub(super) async fn todo_list(&self, Parameters(arg): Parameters<TodoListArg>) -> ToolResult {
         let status = arg.status().as_deref().map(todo_status).transpose()?;
-        let after = arg.cursor().as_deref().map(todo_id).transpose()?;
+        let after = arg.cursor().as_deref().map(entry_cursor).transpose()?;
         let me = self.identity.author().clone();
         let owner = arg.owner().clone().map(|owner| {
             if owner.trim() == OWNER_ME {
@@ -312,33 +309,23 @@ impl MusterMcp {
         });
         let only_claimable = arg.claimable().unwrap_or(false);
         let limit = page_size(arg.limit())?;
-        let todos = self
+        let positioned = self
             .blocking(move |deps| {
                 let project = deps.project(arg.project().as_deref())?;
-                Ok(deps.coordination().todos(project.root())?)
+                Ok(deps.coordination().positioned_todos(project.root())?)
             })
             .await?;
-        let start = TodoPage::resume(&todos, after.as_ref()).ok_or_else(|| {
-            invalid(
-                CURSOR_FIELD,
-                CURSOR_FORM,
-                after.as_ref().map_or("", AsRef::as_ref),
-            )
-        })?;
+        let start = TodoPage::resume(&positioned, after);
         let now = epoch_now();
-        let listed: Vec<_> = if only_claimable {
-            let earlier: HashSet<&TodoId> = todos[..start].iter().map(Todo::id).collect();
-            claimable(&todos, now)
-                .filter(|todo| !earlier.contains(todo.id()))
-                .collect()
-        } else {
-            todos[start..].iter().collect()
-        };
-        let matching = listed
-            .into_iter()
-            .map(|todo| TodoView::at(todo, now))
-            .filter(|view| status.is_none_or(|status| *view.status() == status))
-            .filter(|view| {
+        let todos: Vec<Todo> = positioned.iter().map(|(_, todo)| todo.clone()).collect();
+        let ready: Option<HashSet<&TodoId>> =
+            only_claimable.then(|| claimable(&todos, now).map(Todo::id).collect());
+        let matching = positioned[start..]
+            .iter()
+            .filter(|(_, todo)| ready.as_ref().is_none_or(|ready| ready.contains(todo.id())))
+            .map(|(position, todo)| (*position, TodoView::at(todo, now)))
+            .filter(|(_, view)| status.is_none_or(|status| *view.status() == status))
+            .filter(|(_, view)| {
                 owner.as_deref().is_none_or(|owner| {
                     view.owner()
                         .as_ref()
@@ -1532,6 +1519,23 @@ mod tests {
                 cursor = page[CURSOR].as_str().map(str::to_string);
             }
             assert_eq!(titles, ["one", "two", "three"]);
+
+            let first = content(server.todo_list(Parameters(list(None, Some(1)))).await);
+            let id = first[TODOS][0][ID].as_str().unwrap().to_string();
+            content(
+                server
+                    .todo_delete(Parameters(TodoIdArg::builder().id(id).build()))
+                    .await,
+            );
+            let cursor = first[CURSOR].as_str().map(str::to_string);
+            let rest = content(server.todo_list(Parameters(list(cursor, None))).await);
+            let rest: Vec<&str> = rest[TODOS]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|todo| todo["title"].as_str().unwrap())
+                .collect();
+            assert_eq!(rest, ["two", "three"]);
 
             for limit in [0, MAX_LIST_LIMIT + 1] {
                 let refused = refusal(server.todo_list(Parameters(list(None, Some(limit)))).await);

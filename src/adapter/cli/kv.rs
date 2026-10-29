@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use super::{
-    answer::Answer, error::CliError, kv_command::KvCommand, report::attribution, row::Row,
-    row_kind::RowKind,
+    answer::Answer, error::CliError, kv_command::KvCommand, page_cursor::parse_cursor,
+    report::attribution, row::Row, row_kind::RowKind,
 };
 use crate::{
     adapter::{
@@ -28,10 +28,12 @@ const FIELD_GAP: &str = "  ";
 const ENTRIES: &str = "entries";
 /// The JSON key of whether entries follow the listed page.
 const MORE: &str = "more";
+/// The JSON key of where the next page starts.
+const CURSOR: &str = "cursor";
 /// What follows a listed value that was cut short.
 const CUT_MARK: &str = "...";
-/// Line printed under a listing that more entries follow.
-const MORE_NOTE: &str = "more follow; pass a larger --limit to list them";
+/// Line printed under a page that more entries follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster kv --cursor ";
 /// The JSON key of the key a write saved.
 const SAVED: &str = "saved";
 /// The JSON key of the key a delete named.
@@ -40,20 +42,22 @@ const KEY: &str = "key";
 const DELETED: &str = "deleted";
 
 /// Runs a `muster kv` action against `store` for `project`, returning what to
-/// print. Absent a subcommand, lists the project's first `limit` entries.
+/// print. Absent a subcommand, lists one page of `limit` entries after the
+/// position `cursor` names.
 ///
 /// # Errors
-/// Returns [`CliError`] when a key is invalid, a requested value is absent, or the
-/// store cannot be read or written.
+/// Returns [`CliError`] when a key or cursor is invalid, a requested value is
+/// absent, or the store cannot be read or written.
 pub fn kv(
     command: Option<KvCommand>,
     limit: PageSize,
+    cursor: Option<&str>,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, limit),
+        None => list(store, project, limit, cursor),
         Some(KvCommand::Get { key }) => get(store, project, &key),
         Some(KvCommand::Set { key, value }) => set(store, project, author, &key, &value),
         Some(KvCommand::Rm { key }) => remove(store, project, &key),
@@ -76,23 +80,23 @@ fn parse_key(key: &str) -> Result<KvKey, CliError> {
     })
 }
 
-/// Lists the first `limit` entries for `project` as `key  value`, one per
-/// line, each value cut as `kv_read` cuts it, saying when more follow.
+/// Lists one page of `limit` entries for `project` after the position
+/// `cursor` names, as `key  value`, one per line, each value cut as
+/// `kv_read` cuts it, and how to read on when more follow; its JSON is
+/// `kv_read`'s listing.
 ///
 /// # Errors
-/// Returns [`CliError`] when the store cannot be read.
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
 fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     limit: PageSize,
+    cursor: Option<&str>,
 ) -> Result<Answer, CliError> {
-    let entries = store.values(project)?;
-    let page: Vec<ListedValue> = entries
-        .iter()
-        .take(limit.into_inner())
-        .map(ListedValue::from)
-        .collect();
-    let more = entries.len() > page.len();
+    let after = cursor.map(parse_cursor).transpose()?;
+    let listed = store.value_page(project, after, limit.into_inner())?;
+    let page: Vec<ListedValue> = listed.entries().iter().map(ListedValue::from).collect();
     let mut rows: Vec<Row> = page
         .iter()
         .map(|listed| {
@@ -109,13 +113,15 @@ fn list(
             )
         })
         .collect();
-    if entries.is_empty() {
+    if page.is_empty() && after.is_none() {
         rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
     }
-    if more {
-        rows.push(Row::unlabeled(RowKind::Hint, MORE_NOTE));
+    let mut answer = json!({ ENTRIES: page, MORE: listed.next().is_some() });
+    if let Some(next) = listed.next() {
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
+        answer[CURSOR] = json!(next.to_string());
     }
-    Answer::of(rows, &json!({ ENTRIES: page, MORE: more }))
+    Answer::of(rows, &answer)
 }
 
 /// Prints the value under `key`, one row per line so the framed layout stays
@@ -213,7 +219,7 @@ mod tests {
         set(&store, &project(), &Author::human(), "port", "3000").unwrap();
         set(&store, &project(), &Author::human(), "port", "4000").unwrap();
 
-        let listed = list(&store, &project(), PageSize::default()).unwrap();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
         assert_eq!(
             listed.rows().len(),
             1,
@@ -227,8 +233,9 @@ mod tests {
         assert_eq!(value.json()["key"], "port");
     }
 
-    /// A listing cuts a long value and marks it, pages by `limit` and says
-    /// when more follow; `get` still returns the value whole.
+    /// A listing cuts a long value and marks it, pages by `limit` and
+    /// `cursor` as `kv_read` does, printing the cursor to read on with; text
+    /// no page printed is refused, and `get` still returns the value whole.
     #[test]
     fn list_cuts_values_and_pages() {
         let store = MemoryCoordination::default();
@@ -236,14 +243,25 @@ mod tests {
         set(&store, &project(), &Author::human(), "blob", &long).unwrap();
         set(&store, &project(), &Author::human(), "port", "4000").unwrap();
 
-        let first = list(&store, &project(), PageSize::try_new(1).unwrap()).unwrap();
+        let one = PageSize::try_new(1).unwrap();
+        let first = list(&store, &project(), one, None).unwrap();
         assert_eq!(first.json()["entries"].as_array().unwrap().len(), 1);
         assert_eq!(first.json()["entries"][0]["truncated"], true);
         assert_eq!(first.json()["more"], true);
         assert!(first.rows()[0].detail().contains(CUT_MARK));
-        assert_eq!(first.rows()[1].detail(), MORE_NOTE);
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
+        assert_eq!(first.rows()[1].detail(), &format!("{MORE_NOTE}{cursor}`"));
 
-        let all = list(&store, &project(), PageSize::default()).unwrap();
+        let rest = list(&store, &project(), one, Some(&cursor)).unwrap();
+        assert_eq!(rest.json()["entries"][0]["key"], "port");
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert!(matches!(
+            list(&store, &project(), one, Some("port")),
+            Err(CliError::InvalidCursor(_))
+        ));
+
+        let all = list(&store, &project(), PageSize::default(), None).unwrap();
         assert_eq!(all.json()["more"], false);
         assert_eq!(
             get(&store, &project(), "blob").unwrap().json()["value"],
@@ -306,7 +324,7 @@ mod tests {
     fn list_reports_empty() {
         let store = MemoryCoordination::default();
         assert_eq!(
-            list(&store, &project(), PageSize::default())
+            list(&store, &project(), PageSize::default(), None)
                 .unwrap()
                 .rows()[0]
                 .detail(),

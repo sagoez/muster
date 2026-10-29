@@ -3,7 +3,7 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    coordination::{Author, Scratchpad},
+    coordination::{Author, NoteHeader, Scratchpad},
     value::EpochSeconds,
 };
 
@@ -20,6 +20,16 @@ pub struct NoteEntry {
     /// When it was last written, as RFC 3339 UTC.
     #[serde(with = "crate::adapter::wire::form")]
     updated_at: EpochSeconds,
+}
+
+impl From<&NoteHeader> for NoteEntry {
+    fn from(note: &NoteHeader) -> Self {
+        Self {
+            key: note.key().as_ref().to_string(),
+            author: note.author().clone(),
+            updated_at: *note.updated_at(),
+        }
+    }
 }
 
 impl From<&Scratchpad> for NoteEntry {

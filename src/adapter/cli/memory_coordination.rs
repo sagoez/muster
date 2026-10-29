@@ -3,9 +3,10 @@ use std::cell::RefCell;
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
-        LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
-        TodoChange, TodoDeps, TodoId, TodoLease, TodoUpdate,
+        Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
+        LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
+        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
+        TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -22,6 +23,24 @@ pub(super) struct MemoryCoordination {
 impl CoordinationStore for MemoryCoordination {
     fn scratchpads(&self, _project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError> {
         Ok(self.notes.borrow().clone())
+    }
+
+    fn scratchpad_page(
+        &self,
+        _project: &ProjectRoot,
+        _after: Option<EntryPosition>,
+        _limit: usize,
+    ) -> Result<EntryPage<NoteHeader>, ConfigError> {
+        unreachable!("note commands never page")
+    }
+
+    fn scratchpad_keys(&self, _project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
+        Ok(self
+            .notes
+            .borrow()
+            .iter()
+            .map(|note| note.key().clone())
+            .collect())
     }
 
     fn scratchpad(
@@ -143,6 +162,24 @@ impl CoordinationStore for MemoryCoordination {
 
     fn values(&self, _project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError> {
         Ok(self.entries.borrow().clone())
+    }
+
+    fn value_page(
+        &self,
+        _project: &ProjectRoot,
+        _after: Option<EntryPosition>,
+        _limit: usize,
+    ) -> Result<EntryPage<KeyValue>, ConfigError> {
+        unreachable!("kv commands never page")
+    }
+
+    fn value_keys(&self, _project: &ProjectRoot) -> Result<Vec<KvKey>, ConfigError> {
+        Ok(self
+            .entries
+            .borrow()
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect())
     }
 
     fn value(&self, _project: &ProjectRoot, key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {

@@ -11,10 +11,10 @@ use crate::{
     domain::{
         config::ConfigError,
         coordination::{
-            Author, Claim, ClaimState, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder,
-            LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad,
-            ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease,
-            TodoStatus, TodoTitle, TodoUpdate,
+            Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
+            LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle,
+            NoteBody, NoteHeader, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange,
+            TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
         },
         port::CoordinationStore,
         value::{EpochSeconds, ProjectRoot},
@@ -23,6 +23,18 @@ use crate::{
 
 /// Selects the scratchpad columns [`scratchpad_from_row`] reads by name.
 const SELECT_SCRATCHPAD: &str = "SELECT key, body, author, updated_at FROM scratchpads";
+/// One page of a project's note headers by write order after a position:
+/// `:project`, `:after` and `:limit` bind it.
+const SCRATCHPAD_PAGE: &str = "\
+SELECT rowid AS position, key, author, updated_at FROM scratchpads \
+WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
+/// One page of a project's key-values by write order after a position:
+/// `:project`, `:after` and `:limit` bind it.
+const KV_PAGE: &str = "\
+SELECT rowid AS position, key, value, author, updated_at FROM kv \
+WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
+/// The position a page starts after when none is given: before every row.
+const PAGE_START: i64 = 0;
 /// The columns [`todo_from_row`] reads, in order.
 const TODO_COLUMNS: &str = "id, title, status, deps, author, updated_at, owner, claimed_until";
 /// Selects the key-value columns [`key_value_from_row`] reads by name.
@@ -121,6 +133,63 @@ fn key_value_from_row(row: &Row) -> Result<KeyValue, ConfigError> {
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
+}
+
+/// The stored write-order position of a [`SCRATCHPAD_PAGE`] or [`KV_PAGE`]
+/// row.
+fn position(row: &Row) -> Result<EntryPosition, ConfigError> {
+    let position: i64 = row.get("position").map_err(db_error)?;
+    EntryPosition::try_new(position).map_err(|error| corrupt("entry position", error))
+}
+
+/// Reads a [`SCRATCHPAD_PAGE`] row.
+fn note_header_from_row(row: &Row) -> Result<(EntryPosition, NoteHeader), ConfigError> {
+    let key: String = row.get("key").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
+    Ok((
+        position(row)?,
+        NoteHeader::builder()
+            .key(ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error))?)
+            .author(author_from(&author)?)
+            .updated_at(updated_at(row)?)
+            .build(),
+    ))
+}
+
+/// One page of `sql` ([`SCRATCHPAD_PAGE`] or [`KV_PAGE`]) for project
+/// `project_id` after `after`, read one past `limit`, mapped with `map`.
+fn page<T>(
+    conn: &Connection,
+    sql: &str,
+    project_id: i64,
+    after: Option<EntryPosition>,
+    limit: usize,
+    map: impl Fn(&Row) -> Result<(EntryPosition, T), ConfigError>,
+) -> Result<EntryPage<T>, ConfigError> {
+    let rows = collect(
+        conn,
+        sql,
+        named_params! {
+            ":project": project_id,
+            ":after": after.map_or(PAGE_START, EntryPosition::into_inner),
+            ":limit": i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX),
+        },
+        map,
+    )?;
+    Ok(EntryPage::of(rows, limit))
+}
+
+/// The key column of every row `sql` selects for project `project_id`, each
+/// checked by `parse`.
+fn keys<K>(
+    conn: &Connection,
+    sql: &str,
+    project_id: i64,
+    parse: impl Fn(String) -> Result<K, ConfigError>,
+) -> Result<Vec<K>, ConfigError> {
+    collect(conn, sql, params![project_id], |row| {
+        parse(row.get("key").map_err(db_error)?)
+    })
 }
 
 /// Every row `sql` selects with `values`, mapped with `map`.
@@ -313,6 +382,37 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
+    fn scratchpad_page(
+        &self,
+        project: &ProjectRoot,
+        after: Option<EntryPosition>,
+        limit: usize,
+    ) -> Result<EntryPage<NoteHeader>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            page(
+                conn,
+                SCRATCHPAD_PAGE,
+                project_id,
+                after,
+                limit,
+                note_header_from_row,
+            )
+        })
+    }
+
+    fn scratchpad_keys(&self, project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            keys(
+                conn,
+                "SELECT key FROM scratchpads WHERE project_id = ?1 ORDER BY rowid",
+                project_id,
+                |key| ScratchpadKey::try_new(key).map_err(|error| corrupt("scratchpad key", error)),
+            )
+        })
+    }
+
     fn scratchpad(
         &self,
         project: &ProjectRoot,
@@ -473,6 +573,32 @@ impl CoordinationStore for SqliteStore {
                 &format!("{SELECT_KV} WHERE project_id = ?1 ORDER BY rowid"),
                 params![project_id],
                 key_value_from_row,
+            )
+        })
+    }
+
+    fn value_page(
+        &self,
+        project: &ProjectRoot,
+        after: Option<EntryPosition>,
+        limit: usize,
+    ) -> Result<EntryPage<KeyValue>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            page(conn, KV_PAGE, project_id, after, limit, |row| {
+                Ok((position(row)?, key_value_from_row(row)?))
+            })
+        })
+    }
+
+    fn value_keys(&self, project: &ProjectRoot) -> Result<Vec<KvKey>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            keys(
+                conn,
+                "SELECT key FROM kv WHERE project_id = ?1 ORDER BY rowid",
+                project_id,
+                |key| KvKey::try_new(key).map_err(|error| corrupt("kv key", error)),
             )
         })
     }

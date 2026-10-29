@@ -1,9 +1,10 @@
 use crate::domain::{
     config::ConfigError,
     coordination::{
-        Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
-        LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
-        TodoChange, TodoDeps, TodoId, TodoLease, TodoUpdate,
+        Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
+        LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
+        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
+        TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -20,6 +21,26 @@ pub trait CoordinationStore {
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn scratchpads(&self, project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError>;
+
+    /// At most `limit` of `project`'s notes without bodies, in the order each
+    /// was first written, after the position `after` (from the start without
+    /// one). An entry deleted at `after` does not break the listing.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn scratchpad_page(
+        &self,
+        project: &ProjectRoot,
+        after: Option<EntryPosition>,
+        limit: usize,
+    ) -> Result<EntryPage<NoteHeader>, ConfigError>;
+
+    /// The key of every scratchpad under `project`, in the order each was
+    /// first written.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn scratchpad_keys(&self, project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError>;
 
     /// The scratchpad named `key` under `project`, if present.
     ///
@@ -117,6 +138,26 @@ pub trait CoordinationStore {
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn values(&self, project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError>;
+
+    /// At most `limit` of `project`'s key-value entries, in the order each
+    /// was first written, after the position `after` (from the start without
+    /// one). An entry deleted at `after` does not break the listing.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn value_page(
+        &self,
+        project: &ProjectRoot,
+        after: Option<EntryPosition>,
+        limit: usize,
+    ) -> Result<EntryPage<KeyValue>, ConfigError>;
+
+    /// The key of every key-value entry under `project`, in the order each
+    /// was first written.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn value_keys(&self, project: &ProjectRoot) -> Result<Vec<KvKey>, ConfigError>;
 
     /// The key-value entry named `key` under `project`, if present.
     ///

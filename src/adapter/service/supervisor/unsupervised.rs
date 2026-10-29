@@ -6,7 +6,7 @@ use super::{
 use crate::{
     adapter::{
         pty::{signal_group, unix_signal},
-        service::NoticeLevel,
+        service::{NoticeLevel, Refusal},
     },
     domain::{
         process::{ExitIntent, ProcessState},
@@ -83,6 +83,19 @@ impl Supervisor {
             .and_then(|target| target.unsupervised)
             .filter(UnsupervisedChild::is_running)
             .map(|child| child.pid())
+    }
+
+    /// Why `pane` is left alone by a project-wide start while its child still
+    /// runs unsupervised, naming the pid; `None` once nothing runs there.
+    pub(super) fn unsupervised_refusal(&self, pane: PaneId) -> Option<Refusal> {
+        let pid = self.running_unsupervised_pid(pane)?;
+        let name = self.workspace.process(pane)?.name().clone();
+        Some(
+            Refusal::builder()
+                .name(name)
+                .reason(format!("{UNSUPERVISED_START_REFUSED} {pid}"))
+                .build(),
+        )
     }
 
     /// Refuses a launch of `pane` while its child may still run unsupervised,

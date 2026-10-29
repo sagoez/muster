@@ -88,8 +88,7 @@ impl Supervisor {
             }
             // Bringing a process up, like starting it, begins a new streak.
             self.crash_streaks.remove(&pane);
-            self.set_launch_environment(pane, environment);
-            self.spawn(pane);
+            self.spawn_with(pane, Some(environment));
         }
         let acted: Vec<ProcessName> = self
             .workspace
@@ -101,7 +100,14 @@ impl Supervisor {
             })
             .map(|process| process.name().clone())
             .collect();
-        self.finish_batch(acted, Vec::new())
+        let left_unsupervised: Vec<Refusal> = self
+            .workspace
+            .processes()
+            .iter()
+            .filter(|process| *process.autostart())
+            .filter_map(|process| self.unsupervised_refusal(*process.id()))
+            .collect();
+        self.finish_batch(acted, left_unsupervised)
     }
 
     /// Ends a project-wide request that acted on `acted`: every error it
@@ -171,8 +177,7 @@ impl Supervisor {
     /// with `environment`, the environment of the command that asked.
     pub fn restart(&mut self, name: &ProcessName, environment: &LaunchEnvironment) {
         if let Some(pane) = self.resolve(name) {
-            self.set_launch_environment(pane, environment);
-            self.restart_pane(pane);
+            self.restart_pane(pane, Some(environment));
         }
     }
 
@@ -213,15 +218,18 @@ impl Supervisor {
         // A start the user asks for begins a new streak, so its failure is told.
         self.failing_spawns.remove(&pane);
         self.crash_streaks.remove(&pane);
-        self.set_launch_environment(pane, environment);
-        self.spawn(pane);
+        self.spawn_with(pane, Some(environment));
     }
 
     /// Restarts `pane` regardless of its restart policy: a live process is
     /// stopped gracefully and respawned on its exit, a stopped one is spawned
-    /// at once.
-    pub(crate) fn restart_pane(&mut self, pane: PaneId) {
+    /// at once. The respawn runs with `environment` when given, which is only
+    /// taken once the restart goes ahead.
+    pub(crate) fn restart_pane(&mut self, pane: PaneId, environment: Option<&LaunchEnvironment>) {
         if self.record_intent(pane, PendingIntent::Restart) {
+            if let Some(environment) = environment {
+                self.set_launch_environment(pane, environment);
+            }
             return;
         }
         self.failing_spawns.remove(&pane);
@@ -233,6 +241,9 @@ impl Supervisor {
                 .is_some_and(|target| !target.exit_intent.accepts_restart_request())
             {
                 return;
+            }
+            if let Some(environment) = environment {
+                self.set_launch_environment(pane, environment);
             }
             self.request_graceful_transition(pane, ExitIntent::request_restart, true);
             return;
@@ -246,7 +257,7 @@ impl Supervisor {
             .process(pane)
             .is_some_and(|process| *process.state() == ProcessState::Restarting);
         let before = self.generations.get(&pane).copied();
-        self.spawn(pane);
+        self.spawn_with(pane, environment);
         if counted_by_spawn || self.generations.get(&pane).copied() == before {
             return;
         }
@@ -575,6 +586,13 @@ impl Supervisor {
     /// Spawns `pane`'s process and connects its PTY to the service event
     /// stream.
     pub(super) fn spawn(&mut self, pane: PaneId) {
+        self.spawn_with(pane, None);
+    }
+
+    /// As [`Self::spawn`], taking `environment` as the one `pane` launches
+    /// with, now and on its policy restarts, once the launch goes ahead; a
+    /// refused launch leaves the environment of the last one in place.
+    fn spawn_with(&mut self, pane: PaneId, environment: Option<&LaunchEnvironment>) {
         if self.is_starting(pane) || self.refuse_unsupervised_launch(pane) {
             return;
         }
@@ -582,6 +600,9 @@ impl Supervisor {
             self.notify(NoticeLevel::Error, None, SPAWN_UNKNOWN_PROCESS);
             return;
         };
+        if let Some(environment) = environment {
+            self.set_launch_environment(pane, environment);
+        }
         let restarting = prior_state == ProcessState::Restarting;
         let Some(request) = self.spawn_request(pane, restarting) else {
             return;
@@ -878,7 +899,7 @@ impl Supervisor {
         match intent {
             Some(PendingIntent::Stop) => self.stop_pane(pane),
             Some(PendingIntent::Kill) => self.force_kill_pane(pane),
-            Some(PendingIntent::Restart) => self.restart_pane(pane),
+            Some(PendingIntent::Restart) => self.restart_pane(pane, None),
             None => {},
         }
     }
@@ -1294,14 +1315,19 @@ impl Supervisor {
         self.workspace.process(pane).map(|process| *process.stop())
     }
 
-    /// The panes marked to start with the project and not already running.
-    fn autostart_panes(&self) -> Vec<PaneId> {
+    /// The panes marked to start with the project that run nothing: not live,
+    /// not being launched or adopted, and not left running unsupervised.
+    pub(super) fn autostart_panes(&self) -> Vec<PaneId> {
         self.workspace
             .processes()
             .iter()
             .filter(|process| *process.autostart())
             .map(|process| *process.id())
-            .filter(|pane| !self.is_live(*pane))
+            .filter(|pane| {
+                !self.is_live(*pane)
+                    && !self.is_starting(*pane)
+                    && self.running_unsupervised_pid(*pane).is_none()
+            })
             .collect()
     }
 }
@@ -2566,6 +2592,26 @@ mod tests {
                 .parser()
                 .screen_text()
                 .contains("first then")
+        );
+    }
+
+    /// A second `up` while the first one's launch is in flight starts nothing
+    /// and leaves that launch's environment, which its policy restarts reuse.
+    #[test]
+    fn an_up_during_a_launch_keeps_the_launch_environment() {
+        let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Always);
+        harness.supervisor.up(&client_env("FROM", "first"));
+        assert_eq!(state(&harness), ProcessState::Starting);
+
+        let again = harness.supervisor.up(&client_env("FROM", "second"));
+        let (pane, generation, result) = spawned(&harness);
+        harness.supervisor.handle_spawned(pane, generation, result);
+
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(state(&harness), ProcessState::Running);
+        assert_eq!(
+            harness.supervisor.launch_environments.get(&pane),
+            Some(&client_env("FROM", "first").to_os())
         );
     }
 

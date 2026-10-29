@@ -143,18 +143,16 @@ impl Supervisor {
         reply: Sender<ServiceResponse>,
     ) -> Result<(), ServiceErrorBody> {
         let mut prepared: HashMap<PaneId, (PreparedWait, SpawnGeneration)> = HashMap::new();
-        for name in self.process_names() {
-            let pane = self.pane_named(&name);
-            let candidate = pane.is_some_and(|pane| {
-                self.workspace
-                    .process(pane)
-                    .is_some_and(|process| *process.autostart())
-                    && !self.is_live(pane)
-            });
-            if let (true, Some(pane)) = (candidate, pane) {
-                let wait = self.prepare_wait(&name, spec)?;
-                prepared.insert(pane, (wait, self.current_generation(pane)));
-            }
+        for pane in self.autostart_panes() {
+            let Some(name) = self
+                .workspace
+                .process(pane)
+                .map(|process| process.name().clone())
+            else {
+                continue;
+            };
+            let wait = self.prepare_wait(&name, spec)?;
+            prepared.insert(pane, (wait, self.current_generation(pane)));
         }
         let batch = self.up(environment);
         let acted: Vec<(PreparedWait, SpawnGeneration)> = batch

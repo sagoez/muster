@@ -19,6 +19,12 @@ pub enum FailureKind {
     UnknownProcess,
     /// The name typed matches more than one process.
     Ambiguous,
+    /// No todo has the id typed.
+    UnknownTodo,
+    /// No note has the key typed.
+    UnknownNote,
+    /// No key-value entry has the key typed.
+    UnknownKey,
     /// The process has nothing running to reach.
     NotRunning,
     /// The service is shutting down.
@@ -48,6 +54,9 @@ impl FailureKind {
             | Self::InvalidConfig
             | Self::UnknownProcess
             | Self::Ambiguous
+            | Self::UnknownTodo
+            | Self::UnknownNote
+            | Self::UnknownKey
             | Self::NotRunning
             | Self::ProcessFailed
             | Self::InvalidInput

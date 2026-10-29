@@ -4,18 +4,13 @@ use std::path::{Path, PathBuf};
 
 use super::error::CliError;
 use crate::{
-    adapter::path::{absolutize, expand_home, project_root},
+    adapter::path::{absolutize, expand_home, names_a_folder, project_root},
     domain::{
         port::ProjectStore,
         project::Project,
         value::{ProjectName, ProjectRoot},
     },
 };
-
-/// Marks a `--project` value as a folder when it starts with one of these.
-const FOLDER_PREFIXES: [char; 2] = ['.', '~'];
-/// Marks a `--project` value as a folder when it contains it anywhere.
-const PATH_SEPARATOR: char = '/';
 
 /// The project a command acts on: a registered one, or a folder that is not
 /// a project yet, which only the commands that register one accept.
@@ -93,11 +88,6 @@ pub fn resolve_project(
 /// The root a process muster started carries in its environment, when set.
 pub fn env_project(value: Option<PathBuf>) -> Option<PathBuf> {
     value.filter(|path| !path.as_os_str().is_empty())
-}
-
-/// Whether a `--project` value names a folder rather than a project.
-fn names_a_folder(value: &str) -> bool {
-    value.contains(PATH_SEPARATOR) || value.starts_with(FOLDER_PREFIXES)
 }
 
 /// The registered project called `value`.

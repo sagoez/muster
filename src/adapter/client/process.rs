@@ -24,6 +24,7 @@ use super::{
     process_outcome::ProcessOutcome,
     process_view::ProcessView,
     project_identity_view::ProjectIdentityView,
+    service_access::ServiceAccess,
     service_client::ServiceClient,
     settle_watch::SettleWatch,
     settling::{Settling, UNBOUNDED},
@@ -84,6 +85,20 @@ pub fn up(
     project: &Project,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, ClientError> {
+    up_within(client, project, UNBOUNDED, watch)
+}
+
+/// Like [`up`], but waits at most `bound` for the processes to settle and
+/// otherwise reports them as still starting.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses.
+pub fn up_within(
+    client: &ServiceClient,
+    project: &Project,
+    bound: Duration,
+    watch: &mut dyn SettleWatch,
+) -> Result<ActionReport, ClientError> {
     let before = status(client, project)?;
     ready_to_send(watch)?;
     let sent = SystemTime::now();
@@ -100,6 +115,7 @@ pub fn up(
         .before(&before)
         .names(batch.acted())
         .sent(sent)
+        .bound(bound)
         .build();
     let report = report(client, project, settling, watch)?;
     with_refusals(report, &batch, client, project)
@@ -337,12 +353,13 @@ pub fn settle_removed(
     report(client, project, settling, watch)
 }
 
-/// Whether a service that already runs has `project` loaded and lists
-/// `name` as possibly running. It never starts the service, and an answer it
-/// cannot get reads as not running, since this only tells a caller whether
-/// an edit it already made waits for a restart.
-pub fn runs_now(project: &ProjectRoot, name: &ProcessName) -> bool {
-    ServiceClient::loaded_status(project)
+/// Whether a service that already runs, reached through `service`, has
+/// `project` loaded and lists `name` as possibly running. It never starts
+/// the service, and an answer it cannot get reads as not running, since this
+/// only tells a caller whether an edit it already made waits for a restart.
+pub fn runs_now(service: &dyn ServiceAccess, project: &ProjectRoot, name: &ProcessName) -> bool {
+    service
+        .loaded_status(project)
         .ok()
         .flatten()
         .is_some_and(|status| {

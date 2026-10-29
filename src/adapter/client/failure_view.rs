@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use typed_builder::TypedBuilder;
 
 use super::failure_kind::FailureKind;
-use crate::domain::value::ProcessName;
 
 /// A failure as JSON reports it, so a script or an agent can act on it
 /// without parsing the message.
@@ -16,9 +15,11 @@ pub struct FailureView {
     /// Why, for a person or an agent to read.
     #[getset(get = "pub")]
     message: String,
-    /// The process names the caller could have meant.
+    /// The names the caller could have meant: processes, projects, todo ids
+    /// or keys.
+    #[builder(setter(transform = |names: Vec<impl ToString>| names.iter().map(ToString::to_string).collect()))]
     #[getset(get = "pub")]
-    candidates: Vec<ProcessName>,
+    candidates: Vec<String>,
 }
 
 impl FailureView {

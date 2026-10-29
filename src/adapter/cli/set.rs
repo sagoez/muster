@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     adapter::client::{
-        DefinitionView, ProjectIdentityView,
+        DefinitionView, ProjectIdentityView, UserService,
         process::{resolve_among, runs_now},
     },
     domain::{
@@ -131,7 +131,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         })?;
     let name = resolve_among(stack.names(), &project, &args.name)?;
     let spec = stack_editor(&store).change(root, &name, &change)?;
-    let running = runs_now(root, spec.name());
+    let running = runs_now(&UserService, root, spec.name());
     Ok(SetView::builder()
         .project(ProjectIdentityView::from(&project))
         .process(DefinitionView::from(&spec))

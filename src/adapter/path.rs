@@ -9,6 +9,16 @@ use crate::domain::{config::ConfigError, value::ProjectRoot};
 
 /// Leading path component expanded to the user's home directory.
 const HOME_PREFIX: &str = "~";
+/// Marks a project value as a folder when it starts with one of these.
+const FOLDER_PREFIXES: [char; 2] = ['.', '~'];
+/// Marks a project value as a folder when it contains it anywhere.
+const PATH_SEPARATOR: char = '/';
+
+/// Whether a project value someone typed names a folder (it contains `/` or
+/// starts with `.` or `~`) rather than a registered project's name.
+pub fn names_a_folder(value: &str) -> bool {
+    value.contains(PATH_SEPARATOR) || value.starts_with(FOLDER_PREFIXES)
+}
 
 /// Expands a leading `~` to the user's home directory; any other path is left
 /// unchanged.

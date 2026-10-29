@@ -221,6 +221,9 @@ impl CliError {
             Self::Config(error) => FailureKind::from(error),
             Self::Client(error) => error.kind(),
             Self::NothingRunning(_) => FailureKind::NotRunning,
+            Self::UnknownNote(_) => FailureKind::UnknownNote,
+            Self::UnknownTodo(_) => FailureKind::UnknownTodo,
+            Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -233,14 +236,11 @@ impl CliError {
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
             | Self::InvalidNoteKey(_)
-            | Self::UnknownNote(_)
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
-            | Self::UnknownTodo(_)
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
-            | Self::UnknownValue(_)
             | Self::InvalidName(_)
             | Self::EmptyCommand
             | Self::InvalidCommand

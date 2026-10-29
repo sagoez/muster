@@ -47,6 +47,9 @@ impl From<FailureKind> for CliExit {
             | FailureKind::InvalidConfig
             | FailureKind::UnknownProcess
             | FailureKind::Ambiguous
+            | FailureKind::UnknownTodo
+            | FailureKind::UnknownNote
+            | FailureKind::UnknownKey
             | FailureKind::InvalidInput => Self::InvalidInput,
             FailureKind::NotRunning | FailureKind::ProcessFailed | FailureKind::Io => {
                 Self::ActionFailed

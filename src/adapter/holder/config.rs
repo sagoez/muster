@@ -13,9 +13,9 @@ use typed_builder::TypedBuilder;
 use super::{error::HolderError, id::HolderId};
 use crate::domain::pty::SpawnRequest;
 
-/// Mode of a handed-over file: owner read and write only, since the request
-/// can carry the child's environment.
-const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Mode of a handed-over file or holder record: owner read and write only,
+/// since either can carry the child's environment.
+pub(super) const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Extension of the spec file handed to a holder beside its socket.
 const SPEC_EXTENSION: &str = "json";
 /// Extension of the file a holder that fails reports its error in, beside its

@@ -1,16 +1,17 @@
 use std::{
     ffi::OsString,
     fs, io,
+    os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use atomic_write_file::AtomicWriteFile;
+use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use getset::{CopyGetters, Getters};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::{error::HolderError, id::HolderId};
+use super::{config::PRIVATE_FILE_MODE, error::HolderError, id::HolderId};
 use crate::{
     adapter::private_dir::create_private_dir_all,
     domain::{
@@ -77,14 +78,17 @@ pub struct HolderRecord {
 }
 
 impl HolderRecord {
-    /// Writes this record atomically into `dir`, creating the directory
-    /// owner-only.
+    /// Writes this record atomically into `dir` as an owner-only file, since
+    /// it carries the child's environment, creating the directory owner-only.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when encoding or the write fails.
     pub fn save(&self, dir: &Path) -> Result<(), HolderError> {
         create_private_dir_all(dir)?;
-        let mut file = AtomicWriteFile::open(self.path_in(dir))?;
+        let mut file = AtomicWriteFile::options()
+            .mode(PRIVATE_FILE_MODE)
+            .preserve_mode(false)
+            .open(self.path_in(dir))?;
         serde_json::to_writer(&mut file, self)?;
         file.commit()?;
         Ok(())
@@ -158,6 +162,8 @@ mod tests {
     const PERMISSION_BITS: u32 = 0o777;
     /// The mode of a directory only its owner can enter.
     const OWNER_DIR: u32 = 0o700;
+    /// A file mode other users can read.
+    const SHARED_FILE: u32 = 0o644;
     /// Grace of the recorded stop policy.
     const STOP_GRACE: Duration = Duration::from_secs(7);
 
@@ -214,6 +220,25 @@ mod tests {
             let mode = fs::metadata(created).unwrap().permissions().mode() & PERMISSION_BITS;
             assert_eq!(mode, OWNER_DIR, "{}", created.display());
         }
+    }
+
+    /// A saved record is its owner's alone, even over one another user could
+    /// read.
+    #[test]
+    fn a_saved_record_is_private() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path().join("records");
+        let saved = record();
+        saved.save(&dir).unwrap();
+        let path = saved.path_in(&dir);
+        let mode_of =
+            |path: &Path| fs::metadata(path).unwrap().permissions().mode() & PERMISSION_BITS;
+        assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(SHARED_FILE)).unwrap();
+        saved.save(&dir).unwrap();
+
+        assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
     }
 
     #[test]

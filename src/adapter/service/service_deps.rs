@@ -33,12 +33,17 @@ pub struct ServiceDeps {
     pub(super) settings: Box<dyn SettingsReader>,
     /// Reads the agent edits each project's stack took, raised as events.
     pub(super) edits: Box<dyn StackEditLog>,
-    /// Keeps how each process last ended on its own, read as a project loads
-    /// and written off the loop as runs end.
-    pub(super) runs: Arc<dyn RunHistory>,
-    /// Keeps the newest agent edit of each project raised as an event, read
-    /// as a project loads and written off the loop.
-    pub(super) raised: Arc<dyn RaisedEdits>,
+    /// Reads how each process last ended on its own, as a project loads.
+    pub(super) runs: Box<dyn RunHistory>,
+    /// Reads the newest agent edit of each project raised as an event, as a
+    /// project loads.
+    pub(super) raised: Box<dyn RaisedEdits>,
+    /// Writes how runs end, off the loop, on a database connection of its
+    /// own, so its wait for another writer never holds the loop's.
+    pub(super) run_writes: Box<dyn RunHistory>,
+    /// Writes which agent edits were raised, on the same connection as
+    /// `run_writes`.
+    pub(super) raised_writes: Box<dyn RaisedEdits>,
     /// Finds the ports running process trees listen on; absent where ports
     /// are not reported.
     pub(super) listening: Option<Box<dyn ListeningPorts + Send>>,

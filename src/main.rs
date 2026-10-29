@@ -139,6 +139,8 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
 /// spawned with no terminal. Every process runs under a holder launched from
 /// this binary, with its logs under the state directory, and starts at the
 /// open-files limit the service started with, read before `sysinfo` raises it.
+/// What the service records as runs end goes through a database connection
+/// of its own, so its wait for another writer never holds the loop's.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when the state directory, database or service
@@ -153,6 +155,7 @@ fn run_service() -> Result<(), MusterError> {
         return Ok(());
     };
     let store = SqliteStore::open_default()?;
+    let recorder_store = SqliteStore::open_default()?;
     let binary = env::current_exe()?;
     let launcher = ExecHolderLauncher::builder()
         .binary(binary.clone())
@@ -168,8 +171,10 @@ fn run_service() -> Result<(), MusterError> {
         .metrics(Some(Box::new(SysinfoMetrics::default())))
         .stacks(Box::new(store.clone()))
         .settings(Box::new(store.clone()))
-        .runs(Arc::new(store.clone()))
-        .raised(Arc::new(store.clone()))
+        .runs(Box::new(store.clone()))
+        .raised(Box::new(store.clone()))
+        .run_writes(Box::new(recorder_store.clone()))
+        .raised_writes(Box::new(recorder_store))
         .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
         .build();

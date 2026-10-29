@@ -112,10 +112,10 @@ pub struct ServiceRuntime {
     /// Reads the agent edits each project's stack took.
     edits: Box<dyn StackEditLog>,
     /// Reads how each process last ended on its own as a project loads.
-    runs: Arc<dyn RunHistory>,
+    runs: Box<dyn RunHistory>,
     /// Reads the newest agent edit an earlier service raised, as a project
     /// loads.
-    raised: Arc<dyn RaisedEdits>,
+    raised: Box<dyn RaisedEdits>,
     /// Stores run ends and raised edits off the loop; every supervisor shares
     /// it.
     store_recorder: StoreRecorder,
@@ -208,6 +208,8 @@ impl ServiceRuntime {
             edits,
             runs,
             raised,
+            run_writes,
+            raised_writes,
             listening,
         } = deps;
         let notices = Notices::shared(Some(protocol::log_path(state_dir)));
@@ -219,11 +221,7 @@ impl ServiceRuntime {
             stacks,
             settings_store,
             edits,
-            store_recorder: StoreRecorder::spawn(
-                Arc::clone(&runs),
-                Arc::clone(&raised),
-                Arc::clone(&notices),
-            ),
+            store_recorder: StoreRecorder::spawn(run_writes, raised_writes, Arc::clone(&notices)),
             runs,
             raised,
             settings,

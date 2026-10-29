@@ -28,11 +28,12 @@ use muster::{
     domain::{
         config::{Environment, ProcessSpec, SettingChange},
         coordination::Author,
-        port::{SettingsStore, StackStore},
+        port::{RunHistory, SettingsStore, StackStore},
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
     },
 };
+use rusqlite::Connection;
 use rustix::process::{
     Pid as RawPid, Resource, Rlimit, Signal, getrlimit, kill_process, kill_process_group, setrlimit,
 };
@@ -86,6 +87,11 @@ const OPEN_FILES_ROW: &str = "Max open files";
 /// The open-files soft limit a service is started with, below the hard limit
 /// `sysinfo` would raise it to.
 const SERVICE_OPEN_FILES: u64 = 1000;
+/// How long a test holds the database's write lock: past the 5 s the store
+/// waits for another writer.
+const LOCK_HELD: Duration = Duration::from_secs(6);
+/// Longest a `ps` may take while another writer holds the database.
+const QUICK_ANSWER: Duration = Duration::from_secs(1);
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -800,6 +806,44 @@ fn a_stack_write_whose_notice_was_missed_reaches_the_next_request() {
     );
     wait_until("api to be stopped and gone", || {
         scratch.named(&project, "api").is_none() && scratch.holders().is_empty()
+    });
+    scratch.stop_service(service);
+}
+
+/// A database another writer holds past the store's own busy wait neither
+/// stalls the service nor loses the crash it records meanwhile: `ps` stays
+/// quick throughout, and the crash is stored once the lock is let go.
+#[test]
+fn a_held_database_lock_neither_stalls_the_service_nor_loses_a_crash() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project();
+    let service = scratch.start_service();
+    let child = scratch.up_running(&project).pid().unwrap().into_inner();
+    let writer = Connection::open(scratch.state_root().join(APP_DIR).join(DATABASE_FILE)).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    kill_hard(child);
+    wait_until("the crash", || {
+        !scratch.api(&project).state().may_be_running()
+    });
+    let held = Instant::now();
+    while held.elapsed() < LOCK_HELD {
+        let asked = Instant::now();
+        scratch.status(&project);
+        assert!(
+            asked.elapsed() < QUICK_ANSWER,
+            "ps took {:?}",
+            asked.elapsed()
+        );
+        thread::sleep(SETTLE);
+    }
+    writer.execute_batch("COMMIT").unwrap();
+
+    wait_until("the crash to be stored", || {
+        scratch
+            .store()
+            .ended_runs(&project)
+            .is_ok_and(|runs| !runs.is_empty())
     });
     scratch.stop_service(service);
 }

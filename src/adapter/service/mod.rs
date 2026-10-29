@@ -13,6 +13,8 @@ mod event_seq;
 mod event_waiter;
 mod exit_reason;
 #[cfg(test)]
+mod failing_history;
+#[cfg(test)]
 mod fake_metrics;
 #[cfg(test)]
 mod fake_pool;

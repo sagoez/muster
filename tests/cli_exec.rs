@@ -503,6 +503,7 @@ fn in_process_service(
             Box::new(exec)
         };
         let store = SqliteStore::open(&database).expect("the scratch database opens");
+        let recorder_store = SqliteStore::open(&database).expect("the scratch database opens");
         let deps = ServiceDeps::builder()
             .version(version)
             .binary(PathBuf::from(IN_PROCESS_BINARY))
@@ -515,8 +516,10 @@ fn in_process_service(
             .metrics(None)
             .stacks(Box::new(store.clone()))
             .settings(Box::new(store.clone()))
-            .runs(Arc::new(store.clone()))
-            .raised(Arc::new(store.clone()))
+            .runs(Box::new(store.clone()))
+            .raised(Box::new(store.clone()))
+            .run_writes(Box::new(recorder_store.clone()))
+            .raised_writes(Box::new(recorder_store))
             .edits(Box::new(store))
             .listening(None)
             .build();

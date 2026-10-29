@@ -1,4 +1,8 @@
-use std::time::Duration;
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use crate::domain::{
     process::StopSignal,
@@ -13,12 +17,78 @@ pub trait OutputSink: Send + Sync + 'static {
     fn send(&self, output: ProcessOutput);
 }
 
+/// The input half of a process's terminal, writable from a thread other than
+/// the one controlling the process.
+pub trait ProcessInput: Send {
+    /// Writes raw input bytes to the process's PTY, blocking while it is full.
+    ///
+    /// # Errors
+    /// Returns a `PtyError` if the write fails.
+    fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError>;
+}
+
 /// Handle to a spawned process: write input, resize, or terminate it.
 pub trait ProcessHandle: Send {
     /// The OS process ID of the spawned child, when the platform exposes it.
     /// Defaults to unknown so simple test doubles need not invent one.
     fn process_id(&self) -> Option<u32> {
         None
+    }
+
+    /// A writer onto the process's input for another thread, so a child that
+    /// stops reading blocks that thread rather than the controller. Defaults to
+    /// none so simple test doubles need not provide one.
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        None
+    }
+
+    /// Whether something behind this handle already answers the child's
+    /// terminal queries, so the supervisor must not answer them a second time.
+    /// Defaults to no: a bare PTY leaves answering to its reader.
+    fn answers_terminal_queries(&self) -> bool {
+        false
+    }
+
+    /// The socket of the holder running this process, which serves its
+    /// authoritative screen. Defaults to none: a bare PTY has no holder.
+    fn holder_socket(&self) -> Option<&Path> {
+        None
+    }
+
+    /// The screen the process already had when this handle connected, to paint
+    /// before any output that follows. Taken once; later calls return none.
+    /// Defaults to none: a fresh PTY starts blank.
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// The PTY size of that screen, which a viewer of it must take rather than
+    /// impose its own on a running process. Defaults to none: a fresh PTY has
+    /// the size it was spawned with.
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    /// The writable clients attached to the process's terminal when this
+    /// handle connected. Defaults to none attached.
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    /// When the process started, when that predates this handle. Defaults to
+    /// none: it started as the handle was made.
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    /// Tells whatever holds the finished process that its exit was handled, so
+    /// it can let go of it. Until then a holder keeps the exit for a later
+    /// supervisor. Defaults to nothing to release.
+    ///
+    /// # Errors
+    /// Returns a `PtyError` if the acknowledgement cannot be delivered.
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
+        Ok(())
     }
 
     /// Writes raw input bytes to the process's PTY.
@@ -73,4 +143,11 @@ pub trait ProcessRunner {
         request: SpawnRequest,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError>;
+
+    /// This runner, shareable with a worker thread, when a spawn may block
+    /// long enough that the caller must not wait for it on its own loop.
+    /// Defaults to none: spawns are quick and run inline.
+    fn detached(&self) -> Option<Arc<dyn ProcessRunner + Send + Sync>> {
+        None
+    }
 }

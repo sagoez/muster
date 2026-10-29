@@ -15,7 +15,7 @@ check:
 build:
     cargo build
 
-# Run the TUI. Pass args after `--`, e.g. `just run -- --config muster.yml`.
+# Run the CLI. Pass args after `--`, e.g. `just run -- ps` or `just run -- up`.
 run *ARGS:
     cargo run -- {{ARGS}}
 

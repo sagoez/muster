@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
-/// Which sidebar section a process belongs to.
+/// Which config section a process belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
-#[strum(serialize_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum ProcessKind {
     /// A CLI coding agent (Claude Code, Codex, ...).
     Agent,
@@ -15,7 +15,7 @@ pub enum ProcessKind {
 }
 
 impl ProcessKind {
-    /// Returns this kind's stable sidebar section position.
+    /// Returns this kind's stable config section position.
     pub(crate) const fn section_index(self) -> usize {
         match self {
             Self::Agent => 0,

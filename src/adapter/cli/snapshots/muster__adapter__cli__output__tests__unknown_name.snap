@@ -1,0 +1,6 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 867
+expression: error.to_string()
+---
+no process 'dev' in /home/me/shop/muster.yml; valid names: 'dev server', 'café', "it's"

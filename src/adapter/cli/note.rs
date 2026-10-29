@@ -61,8 +61,8 @@ fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliEr
         .collect())
 }
 
-/// Prints the body of the note under `key`, one row per line so the boxed layout
-/// stays intact and piped output reproduces the body verbatim.
+/// Prints the body of the note under `key`, one row per line so the framed
+/// layout stays intact and piped output reproduces the body verbatim.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, [`CliError::UnknownNote`]

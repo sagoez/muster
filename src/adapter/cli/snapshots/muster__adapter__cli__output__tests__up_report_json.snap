@@ -1,0 +1,77 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 773
+expression: json(&report).unwrap()
+---
+{
+  "project": "/home/me/shop/muster.yml",
+  "action": "up",
+  "processes": [
+    {
+      "name": "dev server",
+      "outcome": "started",
+      "reason": null,
+      "status": {
+        "name": "dev server",
+        "kind": "command",
+        "state": "running",
+        "activity": "idle",
+        "pid": 4123,
+        "uptime": 3723,
+        "restarts": 0,
+        "cpu_percent": 2.25,
+        "memory_bytes": 134217728,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5
+      }
+    },
+    {
+      "name": "café",
+      "outcome": "crashed",
+      "reason": null,
+      "status": {
+        "name": "café",
+        "kind": "terminal",
+        "state": "crashed",
+        "activity": "idle",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": {
+          "status": 127,
+          "signal": null
+        },
+        "stop_grace": null
+      }
+    },
+    {
+      "name": "claude",
+      "outcome": "refused",
+      "reason": "left stopped: its agent session cannot be resumed",
+      "status": null
+    }
+  ],
+  "notices": [
+    {
+      "at": "2027-01-15T08:00:00Z",
+      "project": "/home/me/shop/muster.yml",
+      "process": "café",
+      "level": "error",
+      "message": "crashed: exited with status 127"
+    }
+  ],
+  "other_notices": [
+    {
+      "at": "2027-01-15T08:00:00Z",
+      "project": "/home/me/shop/muster.yml",
+      "process": "cron",
+      "level": "error",
+      "message": "crashed: ended by signal: Killed"
+    }
+  ],
+  "wait_ended": "settled"
+}

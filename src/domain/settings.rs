@@ -2,33 +2,33 @@ use getset::{Getters, WithSetters};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
+use crate::domain::{
+    color_scheme::ColorScheme,
+    pty::PtySize,
+    value::{ByteSize, DetachKey},
+};
+
 /// User settings that apply across every workspace, stored per machine rather
 /// than in any single project's config.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters, WithSetters, TypedBuilder)]
 #[set_with]
 pub struct Settings {
-    /// Whether to raise OS desktop notifications. In-app status-bar notices are
-    /// always shown regardless.
+    /// Whether to raise OS desktop notifications.
     #[getset(get = "pub", set_with = "pub")]
     desktop_notifications: bool,
-    /// How to open a project in an external editor.
+    /// Terminal size a process starts with, before any client resizes it.
     #[getset(get = "pub", set_with = "pub")]
-    editor: EditorSettings,
-}
-
-/// How the `e` action opens a project. The editor is launched as a detached
-/// window, so a terminal editor needs a terminal launcher to open its own window;
-/// a GUI editor opens directly.
-#[derive(Clone, Debug, Serialize, Deserialize, Getters, WithSetters, TypedBuilder)]
-#[set_with]
-pub struct EditorSettings {
-    /// Command that opens the editor. Empty falls back to `$VISUAL`, then
-    /// `$EDITOR`. The project path is appended.
+    default_size: PtySize,
+    /// The key that detaches `muster attach` from a process.
     #[getset(get = "pub", set_with = "pub")]
-    command: String,
-    /// Terminal launcher wrapping a terminal editor (`nvim`, `vim`, ...) so it
-    /// opens its own window; muster runs `<terminal> <command> <path>`. Empty runs
-    /// the editor directly, which is right for a GUI editor (`code`, `zed`).
+    detach_key: DetachKey,
+    /// Size at which a process's output log rotates.
     #[getset(get = "pub", set_with = "pub")]
-    terminal: String,
+    log_max_size: ByteSize,
+    /// Lines of scrollback each process's terminal keeps.
+    #[getset(get = "pub", set_with = "pub")]
+    scrollback: usize,
+    /// The default colors a process's terminal reports when asked.
+    #[getset(get = "pub", set_with = "pub")]
+    color_scheme: ColorScheme,
 }

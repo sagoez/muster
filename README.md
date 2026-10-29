@@ -1,173 +1,253 @@
 # muster
 
-A terminal workspace for running CLI agents and dev processes side by side.
+The supervisor and control plane behind your terminal.
 
-muster runs your agents, dev servers, log tails, and build watchers as panes in a
-single terminal and manages their lifecycle: start, stop, restart, and
-auto-restart on failure.
+muster owns what runs in a project: its dev servers, watchers, shells and CLI
+agents. A per-user background service starts them, restarts them, keeps their
+logs and screens, and answers a CLI and an MCP server. Your terminal stays your
+choice: muster draws no panes, and `muster attach` shows any process in the
+terminal you are already in.
 
-**Status: Beta**
-
-It's been my daily driver for running local work for a while. This is the
-cleaned-up cut I opened up, done with help of the AI.
-
-## Demo
+**Status: Beta.** Linux and macOS.
 
 ![muster demo](docs/muster-demo.gif)
 
-## Features
-
-- Runs each process under its own PTY and renders it live. A process that exits
-  keeps its last screen.
-- Full lifecycle control: start/stop, restart, force-kill, pause/resume
-  (SIGSTOP/SIGCONT), command-level graceful shutdown, and auto-restart on
-  failure.
-- A projects tree in the sidebar for switching between workspaces.
-- Live config reload: edits are reconciled into the running workspace, adding new
-  processes and dropping removed ones while leaving running ones untouched.
-- First-class agent sessions can be launched from presets, named automatically,
-  closed into history, resumed, and restored with their workspace. Terminals and
-  commands can be added persistently without leaving the app.
-- A failed process raises an alert visible from any pane.
-
-## Getting started
+## Install
 
 Requires a recent Rust toolchain.
 
 ```sh
 cargo install muster-workspace
-muster init                  # scaffolds a starter muster.yml here and registers it
-muster                       # starts the TUI on a local or registered workspace
-muster hooks setup           # enables native session discovery for agent CLIs
+muster init           # write a muster.yml here and register the folder
+muster up             # start its autostart processes
+muster hooks setup    # let agent CLIs report their session ids, for resume
 ```
 
-From a source checkout:
+There is no daemon to start. The first `muster` command that needs the service
+starts it in the background.
 
-```sh
-cargo run                     # starts the TUI on ./muster.yml
-cargo run -- --config my.yml  # use a different config
-```
+## muster.yml
 
-Without `--config`, muster uses `$MUSTER_PROJECT` when launched from one of its
-panes, then `./muster.yml` when present, then the first project in the global
-registry. This means a registered workspace can be launched from any directory.
-Registry config paths are stored as absolute paths. Legacy relative entries are
-not supported during beta because resolving them from another directory is
-unsafe. Convert or remove them directly in the global `projects.yml` registry.
-
-Press `?` in the app for the full keymap:
-
-- `j`/`k` or arrows to move, `Enter`/`l` to open, `h` to go back
-- `s` start/stop, `r` restart, `p` pause, `x` force-kill, `t` toggle autostart
-- `a` add a process, `n` new project, `o` switch projects
-- `d` closes an agent session into history or removes the selected saved project
-- `u` reopens the most recently closed agent session
-- `C-a` detaches from a focused pane; the same commands work as `C-a` chords while
-  attached
-- `q` to quit
-
-## Configuration
-
-A workspace is a YAML file with three sections: `agents`, `terminals`, and
-`commands`. The grouping controls how processes appear in the sidebar. Commands
-can additionally opt into graceful shutdown.
+A project is a `muster.yml` with three sections, `agents`, `terminals` and
+`commands`. Every section is present; use `[]` for an empty one.
 
 ```yaml
 agents:
   - name: claude
     command: claude
-    description: coding agent
     autostart: false
 
 terminals:
   - name: shell
     command: null          # null runs your login shell
-    description: your login shell
+    autostart: true
 
 commands:
-  - name: clock
-    command: while true; do date +%T; sleep 1; done
-    restart: on_failure
+  - name: web
+    command: npm run dev
+    description: the dev server
+    autostart: true
+    restart: on-failure
     stop:
-      signal: terminate
-      grace_period: 5s
-    autostart: false
+      signal: interrupt
+      grace_period: 10s
 ```
 
-Entries under `agents` are pinned workspace processes. They persist in
-`muster.yml` and use the normal start, stop, restart, and autostart controls.
+Each process takes:
 
-Press `a`, choose `agent`, then select Claude, Codex, Gemini, Amp, OpenCode,
-Copilot, Kimi, or Custom to launch a first-class agent session. `Enter` launches
-a known preset immediately with a generated human name; `e` opens the advanced
-form for a custom name, command, and resume command. Sessions never modify
-`muster.yml`. Closing one with `d` or `C-a d` moves it into history, and `u`
-resumes the latest closed conversation. Open resumable sessions return when the
-workspace is opened again. If a provider ID was not captured, the session
-returns as a stopped row so `d` can close it without starting a new conversation.
+- `name`: unique within the project, and how every command addresses it.
+- `autostart`: required. `true` starts the process with `muster up`; `false`
+  leaves it for `muster start`.
+- `command`: the shell command. `null` on a terminal runs your login shell.
+- `working_dir`: where it runs, relative to the project folder. Defaults to the
+  project folder.
+- `description`: an optional one-line note.
+- `restart`: `never` (the default), `on-failure` or `always`. Restarts back off.
+- `stop`: commands only. `signal` is `terminate` (SIGTERM) or `interrupt`
+  (SIGINT), and `grace_period` is how long muster waits before SIGKILL. The
+  default is `terminate` with `5s`.
 
-Run `muster hooks setup` once to install the provider lifecycle integrations
-that capture native conversation IDs. Setup is explicit and idempotent, and
-OpenCode's plugin is installed under its XDG configuration root. Provider
-conversation switches update the durable resume target. OpenCode captures only
-the active top-level conversation, ignoring child and background session
-metadata. Caller-assigned IDs are not treated as resumable until the provider
-confirms them. Muster also exposes a versioned
-[agent event protocol](docs/agent-protocol.md) so new agents can integrate
-without screen scraping or a Rust dependency.
+muster reconciles edits to `muster.yml` live: new entries appear, removed ones
+retire, and a running process whose entry is unchanged keeps running.
 
-Agent activity detection follows the selected tool. Codex, Gemini, and Amp use
-terminal-title changes; the other presets use visible output. Terminal progress,
-bells, and notification sequences still provide explicit working or waiting
-signals for every preset.
+Machine-wide settings live in `settings.yml` in muster's config directory
+(`~/.config/muster` on Linux, `~/Library/Application Support/muster` on
+macOS), written with explicit defaults on first run:
 
-The left dot always shows process lifecycle. A working agent also gets a cyan
-animated marker at the right edge, while any process that explicitly requests
-attention gets a yellow `!`. Ordinary command and terminal output adds no second
-marker.
+- `desktop_notifications`: whether failures raise a desktop notification.
+- `default_size`: the terminal size a process starts with, 1 to 1000 rows by
+  2 to 2000 columns. An attached terminal outside that range is clamped to it.
+- `detach_key`: the key that ends `muster attach`.
+- `log_max_size`: the size at which a process's log rotates.
+- `scrollback`: the lines of history each process's terminal keeps.
+- `color_scheme`: `dark` or `light`, the default colors a process's terminal
+  reports when an agent asks for them, so it themes for your terminal.
 
-- `autostart`: `null` uses the default (agents and terminals start with the
-  workspace, commands wait for `s`), or set `true`/`false` explicitly. Toggle it
-  live with `t`.
-- `restart`: `never`, `on_failure`, `always`, or `null` to never restart.
-- `working_dir`: launch directory; inherits the workspace directory when `null`.
-- `stop`: optional and valid only on commands. Commands default to `terminate`
-  (SIGTERM) with a `5s` grace period. Set both `signal` (`terminate` or
-  `interrupt`) and a human-readable `grace_period` such as `5s` or `1m` to
-  override that policy.
+## Commands
 
-For commands, `s` and `r` send the effective graceful signal to the whole process
-group, wait for its grace period, then use SIGKILL if it is still alive. `x`
-always force-kills the selected process immediately. Agents, terminals, project
-switches, and quitting always use immediate kill.
+Process commands act on the project of `--config`, then `$MUSTER_PROJECT` (set
+inside every process muster runs), then `./muster.yml`, then the first
+registered project. Bare `muster` is `muster ps`.
 
-## The CLI
+| Command | What it does |
+|---|---|
+| `muster ps [--all]` | List processes with state, pid, uptime, restarts and usage |
+| `muster up` | Start every `autostart: true` process |
+| `muster down [--agents [--yes]]` | Stop commands and terminals, and agents with `--agents` |
+| `muster start [name]` | Start a process |
+| `muster stop [name]` | Stop a process through its stop policy |
+| `muster restart [name]` | Restart a process |
+| `muster pause [name]` / `resume [name]` | Suspend and resume a process (SIGSTOP and SIGCONT) |
+| `muster kill [name]` | Kill a process at once |
+| `muster logs [name] [-f] [--screen]` | Print a process's log, follow it, or print its current screen |
+| `muster attach [name] [--read-only]` | Show a process in this terminal and type into it |
+| `muster run [--name] [--kind] -- <command>` | Add a command to the project, start it and attach |
+| `muster agent new <tool> [--command] [--resume]` / `close <name>` / `reopen` | Open, close and reopen agent sessions |
+| `muster notices` | Show failed starts, forced stops and crashes the service recorded |
+| `muster service status` / `stop` | Show or stop the service; processes keep running |
+| `muster init` | Write a `muster.yml`, asking for its processes, and register the folder |
+| `muster check` | Validate a `muster.yml` |
+| `muster projects [add\|remove]` | List and manage registered projects |
+| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state |
+| `muster coordination export\|import` | Move that shared state as YAML |
+| `muster mcp [--print-config]` | Serve the project to an agent over MCP |
+| `muster hooks setup` | Install the agent session hooks |
+| `muster doctor` | Diagnose config, projects, sessions, hooks and completions |
+| `muster completions <shell>` | Print the shell line that enables completions |
 
-Beyond the TUI, muster ships workspace commands:
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | A process did not end up as asked, or the action failed |
+| 2 | The command line could not be parsed, or a question was cancelled with Esc or Ctrl-C |
+| 3 | The service is unavailable or runs a newer version |
+| 4 | An unknown project or process name, or an invalid config |
+| 130 | Interrupted with Ctrl-C while it waited at a terminal |
+
+### At a terminal
+
+The terminal is interactive when stdin, stdout and stderr are all
+terminals, `--json` is not given, `NO_COLOR` is unset or empty and `TERM` is
+not `dumb`. There, the commands that act and `muster doctor` frame what they
+do, with a spinner naming the processes still starting or stopping:
+
+```text
+┌  muster up · shop
+│
+├  /home/me/shop/muster.yml
+│
+●  web     running (pid 4123)
+│
+✗  worker  crashed: exited with status 1
+│
+└  1 ok · 1 failure
+```
+
+Ctrl-C closes the frame and exits with 130: before the request is sent it
+cancels the command with nothing changed, and under the spinner the service
+still finishes what it was asked. Data a command prints, such as a note, a
+listing or the completions line, is never framed.
+
+A command that needs a process name and was given none offers the project's
+processes to choose from: `start`, `stop`, `restart`, `pause`, `resume`,
+`kill` and `logs`, and `attach` offers the running ones. While an agent
+runs, `muster down --agents` asks before it stops the agents; `--yes`
+answers for it, and answering no stops nothing and exits with 0. `muster
+init` asks for each process's name, kind, command, autostart and restart
+policy, then writes them to `muster.yml`.
+
+Anywhere else muster prints one plain line per fact and asks nothing. A
+question it might have to ask fails with exit code 4 and names the argument
+that answers it, before it reaches the service: a missing name, and
+`down --agents` without `--yes` whether or not an agent runs. `muster init`
+writes a starter `muster.yml` with one terminal.
+
+### JSON
+
+`ps`, `up`, `down`, `start`, `stop`, `restart`, `pause`, `resume`, `kill`,
+`logs`, `attach`, `run`, `agent new`, `agent close`, `agent reopen`,
+`notices`, `service status` and `service stop` take `--json` and print
+results and failures as JSON on stdout. Keys are snake_case, enum values are
+kebab-case (`on-failure`, `in-progress`), durations are whole seconds and
+times are RFC 3339 in UTC. `muster logs -f --json` prints one object per
+line.
+
+## Attach
+
+`muster attach <name>` takes over the current terminal like `tmux attach`: it
+paints the process's screen at once, follows resizes and passes your keys
+through. Without a name it offers the project's processes first. A one-line
+hint, kept in the window title while attached, names the detach key: `ctrl-\`
+by default (`detach_key` in `settings.yml`). Several clients may attach to one
+process; `--read-only` watches without typing or resizing.
+
+## Logs
+
+Each process writes its raw output to a log under the state directory
+(`~/.local/state/muster/logs` on Linux,
+`~/Library/Application Support/muster/logs` on macOS), across restarts and
+after it exits. A log rotates at `log_max_size`, keeping one older file. The
+state directory, its logs and the coordination database are readable by their
+owner only.
+`muster logs` reads it; `muster logs --screen` prints what the terminal shows
+now.
+
+## Processes outlive the service
+
+Every process runs under its own small holder process that owns its terminal.
+Stopping, upgrading or crashing the service leaves every process running: the
+next service finds the holders, reconnects and rebuilds each screen before it
+answers, keeping each process's uptime, restart count, size and attached
+clients, and carrying out any restart that was pending. A process whose holder
+dies while it keeps running is shown as `unsupervised` and never started a
+second time. A newer muster binary replaces an older running service in place.
+
+## Agents
+
+`muster agent new claude` opens an agent session in the project; `muster agent
+close <name>` moves it into history and `muster agent reopen` resumes the latest
+closed conversation. Agents listed under `agents:` in `muster.yml` resume their
+own conversation when they start. Run `muster hooks setup` once so Claude,
+Codex, Gemini, Amp, OpenCode, Copilot and Kimi report their session ids, and
+again after upgrading muster: `muster doctor` reports hooks an older muster
+installed, and a capture from one asks for the same.
+
+Any other agent runs as `custom` with its own command:
 
 ```sh
-muster init                  # scaffold a starter muster.yml and register the folder
-muster check                 # validate the config; exits non-zero for CI and hooks
-muster projects              # list registered projects; add/remove subcommands
-muster completions zsh       # print the shell hook enabling tab completion
-muster doctor                # diagnose config, projects, sessions, hooks,
-                             # clipboard, and completions
+muster agent new custom --name scout --command mycodex \
+  --resume 'mycodex resume {session_id}'
 ```
 
-On a terminal the commands render as styled reports in the TUI's visual
-language; piped or under NO_COLOR they emit plain line-per-fact output for
-scripts.
+`--resume` is optional. In it, `{session_id}` stands for the agent's
+conversation id and must be a whole unquoted word; without it muster appends
+the id to the template. muster refuses a template whose placeholder is quoted
+or embedded in another word. Such an agent reports its id through the
+[agent protocol](docs/agent-protocol.md).
 
-### muster run
+## MCP
 
-`muster run` registers a command into a project and runs it in place, without
-opening the config:
+`muster mcp --print-config` prints the snippet that adds muster to an agent's
+MCP servers. The server exposes the project to the agent:
 
-```sh
-muster run -- npm run dev
-muster run --name api --kind terminal -- cargo watch -x run
+- processes: `process_list`, `process_output`, `process_start`, `process_stop`,
+  `process_restart`, `process_send`, `session_list`;
+- shared notes: `scratchpad_list`, `scratchpad_get`, `scratchpad_set`,
+  `scratchpad_delete`;
+- shared todos: `todo_list`, `todo_get`, `todo_add`, `todo_set_status`,
+  `todo_delete`;
+- shared key-value state: `kv_list`, `kv_get`, `kv_set`, `kv_delete`.
+
+## Using it with herdr
+
+muster works in any terminal. In [herdr](https://herdr.dev), a custom command
+can open a process in a pane of its own:
+
+```toml
+[[keys.command]]
+key = "prefix+w"
+type = "pane"
+command = "muster attach web"
 ```
-
-The target is `--project` if given, otherwise `$MUSTER_PROJECT` (exported into
-every pane), otherwise `--config`. Shell quoting is preserved and `--project` has
-tab completion.

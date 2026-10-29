@@ -1,10 +1,10 @@
 use crate::domain::agent_session::{AgentProcessId, AgentProcessStartToken};
 
 /// Offset basis for a deterministic process-start-text fingerprint.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(not(target_os = "linux"))]
 const START_TOKEN_HASH_OFFSET: u64 = 14_695_981_039_346_656_037;
 /// Multiplier for a deterministic process-start-text fingerprint.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(not(target_os = "linux"))]
 const START_TOKEN_HASH_PRIME: u64 = 1_099_511_628_211;
 
 /// Queries the operating system for a process's non-reusable creation marker.
@@ -16,9 +16,32 @@ impl LocalProcessIdentity {
         Self::platform_start_token(process_id)
     }
 
+    /// Whether `process_id` is still the process that started with `expected`:
+    /// it exists and its start token matches, which an unreadable token never
+    /// disproves.
+    pub fn is_same_process(
+        process_id: AgentProcessId,
+        expected: Option<AgentProcessStartToken>,
+    ) -> bool {
+        Self::is_alive(process_id) && Self::same_start(expected, Self::start_token(process_id))
+    }
+
+    /// Whether a process whose start token reads `current` may be the one
+    /// started with `recorded`: they differ only when both are known and
+    /// unequal.
+    pub fn same_start(
+        recorded: Option<AgentProcessStartToken>,
+        current: Option<AgentProcessStartToken>,
+    ) -> bool {
+        match (recorded, current) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => true,
+        }
+    }
+
     /// Whether `process_id` currently exists. Returns `true` when liveness cannot be
-    /// determined - an unsupported target or a metadata lookup failure - so a caller
-    /// that guards on liveness does not fail open on uncertainty.
+    /// determined, such as a failed lookup, so a caller that guards on liveness
+    /// does not fail open on uncertainty.
     pub fn is_alive(process_id: AgentProcessId) -> bool {
         Self::platform_is_alive(process_id)
     }
@@ -28,39 +51,12 @@ impl LocalProcessIdentity {
         std::path::Path::new(&format!("/proc/{}", process_id.into_inner())).exists()
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(not(target_os = "linux"))]
     fn platform_is_alive(process_id: AgentProcessId) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &process_id.into_inner().to_string()])
             .status()
             .map_or(true, |status| status.success())
-    }
-
-    #[cfg(windows)]
-    fn platform_is_alive(process_id: AgentProcessId) -> bool {
-        use windows_sys::Win32::{
-            Foundation::CloseHandle,
-            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        };
-
-        // SAFETY: the PID is an ordinary integer; a non-null handle is closed.
-        unsafe {
-            let handle = OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                process_id.into_inner(),
-            );
-            if handle.is_null() {
-                return false;
-            }
-            let _ = CloseHandle(handle);
-            true
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn platform_is_alive(_process_id: AgentProcessId) -> bool {
-        true
     }
 
     #[cfg(target_os = "linux")]
@@ -79,39 +75,7 @@ impl LocalProcessIdentity {
             .and_then(|token| AgentProcessStartToken::try_new(token).ok())
     }
 
-    #[cfg(windows)]
-    fn platform_start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
-        use windows_sys::Win32::{
-            Foundation::{CloseHandle, FILETIME},
-            System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-        };
-
-        // SAFETY: the PID is an ordinary integer, the output FILETIMEs are valid
-        // initialized stack storage, and the opened handle is closed on every path.
-        unsafe {
-            let handle = OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                process_id.into_inner(),
-            );
-            if handle.is_null() {
-                return None;
-            }
-            let mut created = std::mem::zeroed::<FILETIME>();
-            let mut exited = std::mem::zeroed::<FILETIME>();
-            let mut kernel = std::mem::zeroed::<FILETIME>();
-            let mut user = std::mem::zeroed::<FILETIME>();
-            let result = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
-            let _ = CloseHandle(handle);
-            (result != 0)
-                .then(|| {
-                    u64::from(created.dwLowDateTime) | (u64::from(created.dwHighDateTime) << 32)
-                })
-                .and_then(|token| AgentProcessStartToken::try_new(token).ok())
-        }
-    }
-
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(not(target_os = "linux"))]
     fn platform_start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
         use std::process::Command;
 
@@ -127,10 +91,5 @@ impl LocalProcessIdentity {
                 (hash ^ u64::from(byte)).wrapping_mul(START_TOKEN_HASH_PRIME)
             });
         AgentProcessStartToken::try_new(token).ok()
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn platform_start_token(_process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
-        None
     }
 }

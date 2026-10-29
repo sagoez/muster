@@ -26,164 +26,13 @@ pub struct Reconciliation {
     removed: Vec<PaneId>,
 }
 
-/// Identifies a configured process occurrence by its fully resolved settings.
-#[derive(Clone)]
-pub struct ProcessSpecMatcher {
-    kind: ProcessKind,
-    name: ProcessName,
-    command: Option<CommandLine>,
-    working_dir: Option<std::path::PathBuf>,
-    description: Option<Description>,
-    restart: RestartPolicy,
-    stop: Option<StopPolicy>,
-    autostart: bool,
-}
-
-impl ProcessSpecMatcher {
-    /// Builds the resolved identity of `spec` in a config section.
-    pub fn of_spec(kind: ProcessKind, spec: &ProcessSpec) -> Self {
-        Self {
-            kind,
-            name: spec.name().clone(),
-            command: spec.command().clone(),
-            working_dir: spec.working_dir().clone(),
-            description: spec.description().clone(),
-            restart: spec.restart_policy(),
-            stop: spec.effective_stop_policy(kind),
-            autostart: spec.should_autostart(kind),
-        }
-    }
-
-    /// Builds the resolved identity represented by one live process.
-    pub fn of(process: &Process) -> Self {
-        Self {
-            kind: *process.kind(),
-            name: process.name().clone(),
-            command: process.command().clone(),
-            working_dir: process.working_dir().clone(),
-            description: process.description().clone(),
-            restart: *process.restart(),
-            stop: process.effective_stop_policy(),
-            autostart: *process.autostart(),
-        }
-    }
-
-    /// Returns whether `spec` resolves to this process occurrence's identity.
-    pub fn matches(&self, spec: &ProcessSpec) -> bool {
-        spec.name() == &self.name
-            && spec.command() == &self.command
-            && spec.working_dir() == &self.working_dir
-            && spec.description() == &self.description
-            && spec.restart_policy() == self.restart
-            && spec.effective_stop_policy(self.kind) == self.stop
-            && spec.should_autostart(self.kind) == self.autostart
-    }
-
-    /// Returns whether `process` has this fully resolved identity.
-    pub fn matches_process(&self, process: &Process) -> bool {
-        *process.kind() == self.kind
-            && process.name() == &self.name
-            && process.command() == &self.command
-            && process.working_dir() == &self.working_dir
-            && process.description() == &self.description
-            && *process.restart() == self.restart
-            && process.effective_stop_policy() == self.stop
-            && *process.autostart() == self.autostart
-    }
-
-    /// Edits autostart on the requested occurrence and reports whether it existed.
-    pub fn with_autostart(
-        &self,
-        config: WorkspaceConfig,
-        occurrence: usize,
-        autostart: Option<bool>,
-    ) -> (WorkspaceConfig, bool) {
-        let mut seen = 0;
-        let mut edited = false;
-        let mut apply = |specs: &[ProcessSpec]| {
-            specs
-                .iter()
-                .map(|spec| {
-                    if self.matches(spec) {
-                        let hit = seen == occurrence;
-                        seen += 1;
-                        if hit {
-                            edited = true;
-                            return spec.clone().with_autostart(autostart);
-                        }
-                    }
-                    spec.clone()
-                })
-                .collect()
-        };
-        let config = match self.kind {
-            ProcessKind::Agent => {
-                let specs = apply(config.agents());
-                config.with_agents(specs)
-            },
-            ProcessKind::Terminal => {
-                let specs = apply(config.terminals());
-                config.with_terminals(specs)
-            },
-            ProcessKind::Command => {
-                let specs = apply(config.commands());
-                config.with_commands(specs)
-            },
-        };
-        (config, edited)
-    }
-
-    /// Removes the `occurrence`-th spec matching this identity from the config,
-    /// returning the new config and whether a spec was actually removed.
-    pub fn without(&self, config: WorkspaceConfig, occurrence: usize) -> (WorkspaceConfig, bool) {
-        let mut seen = 0;
-        let mut removed = false;
-        let mut retain = |specs: &[ProcessSpec]| -> Vec<ProcessSpec> {
-            specs
-                .iter()
-                .filter(|spec| {
-                    if self.matches(spec) {
-                        let hit = seen == occurrence;
-                        seen += 1;
-                        if hit {
-                            removed = true;
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .cloned()
-                .collect()
-        };
-        let config = match self.kind {
-            ProcessKind::Agent => {
-                let specs = retain(config.agents());
-                config.with_agents(specs)
-            },
-            ProcessKind::Terminal => {
-                let specs = retain(config.terminals());
-                config.with_terminals(specs)
-            },
-            ProcessKind::Command => {
-                let specs = retain(config.commands());
-                config.with_commands(specs)
-            },
-        };
-        (config, removed)
-    }
-}
-
 impl Reconciliation {
     /// Reconciles `workspace` with `config`, consulting `is_live` before
-    /// removing a process whose configuration entry disappeared. `force_retire`
-    /// names panes the caller is deleting: each retires even when its identity
-    /// still has a surviving config occurrence, so a later identical duplicate is
-    /// kept as the tracked row instead of the specific pane that was removed.
+    /// removing a process whose configuration entry disappeared.
     pub fn apply(
         workspace: &Workspace,
         config: &WorkspaceConfig,
         is_live: impl Fn(PaneId) -> bool,
-        force_retire: impl Fn(PaneId) -> bool,
     ) -> Self {
         let sections = [
             (ProcessKind::Agent, config.agents()),
@@ -212,16 +61,11 @@ impl Reconciliation {
             }
             let identity = ProcessSpecIdentity::of_process(process);
             let pane = *process.id();
-            // A pane the caller is deleting must retire even when its identity still
-            // has a surviving config occurrence: leaving its count for a later
-            // identical duplicate keeps that duplicate running as the tracked row,
-            // and this stopped pane retires rather than lingering as a tracked stop.
-            let matched = !force_retire(pane)
-                && config_counts
-                    .get_mut(&identity)
-                    .filter(|count| **count > 0)
-                    .map(|count| *count -= 1)
-                    .is_some();
+            let matched = config_counts
+                .get_mut(&identity)
+                .filter(|count| **count > 0)
+                .map(|count| *count -= 1)
+                .is_some();
             if matched {
                 tracked.push(pane);
                 kept.push(process.clone());
@@ -247,18 +91,8 @@ impl Reconciliation {
         }
 
         kept.sort_by_key(|process| process.kind().section_index());
-        let selected = workspace
-            .selected_process()
-            .map(|process| *process.id())
-            .and_then(|pane| kept.iter().position(|process| *process.id() == pane))
-            .unwrap_or(0);
         Self::builder()
-            .workspace(
-                Workspace::builder()
-                    .processes(kept)
-                    .selected_index(selected)
-                    .build(),
-            )
+            .workspace(Workspace::builder().processes(kept).build())
             .tracked(tracked)
             .retiring(retiring)
             .removed(removed)
@@ -271,7 +105,7 @@ impl Reconciliation {
     }
 }
 
-/// Full resolved identity of one configured process occurrence.
+/// Full resolved identity of one configured process.
 #[derive(Hash, PartialEq, Eq)]
 struct ProcessSpecIdentity {
     kind: ProcessKind,
@@ -295,7 +129,7 @@ impl ProcessSpecIdentity {
             description: spec.description().clone(),
             restart: spec.restart_policy(),
             stop: spec.effective_stop_policy(kind),
-            autostart: spec.should_autostart(kind),
+            autostart: *spec.autostart(),
         }
     }
 

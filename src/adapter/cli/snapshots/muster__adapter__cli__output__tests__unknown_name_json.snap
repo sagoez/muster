@@ -1,0 +1,16 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 868
+expression: failure_json(&error)
+---
+{
+  "error": {
+    "candidates": [
+      "dev server",
+      "café",
+      "it's"
+    ],
+    "kind": "unknown-process",
+    "message": "no process 'dev' in /home/me/shop/muster.yml; valid names: 'dev server', 'café', \"it's\""
+  }
+}

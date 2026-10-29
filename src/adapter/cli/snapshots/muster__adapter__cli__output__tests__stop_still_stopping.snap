@@ -1,0 +1,7 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 835
+expression: plain(&action_rows(&report))
+---
+/home/me/shop/muster.yml
+✗ dev server: still stopping when the wait ended; `muster ps` shows how it ends (pid 4123)

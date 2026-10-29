@@ -1,106 +1,59 @@
-# VHS tape for the README demo. Render with:
+# VHS tape for the README demo. Build first, then render from the repo root:
+#   cargo build
 #   mise exec vhs@0.11.0 ttyd@latest -- vhs docs/demo.tape
-# Runs ~/.cargo/bin/muster against an isolated copy of the repo's muster.yml in
-# /tmp, with XDG dirs isolated too, so the real project registry, session store,
-# and workspace config all stay untouched (the delete demo mutates only the copy).
+# Runs target/debug/muster with every XDG directory under /tmp/muster-vhs, so
+# the real registry, settings, sessions and running service stay untouched.
 
 Output docs/muster-demo.gif
 
 Set Shell bash
-Set FontSize 17
+Set FontSize 16
 Set Width 1200
-Set Height 720
+Set Height 680
 Set Padding 16
-Set TypingSpeed 55ms
+Set TypingSpeed 50ms
 Set Theme "GruvboxDark"
 
 Hide
-Type "export PATH=$HOME/Projects/muster/target/release:$HOME/.cargo/bin:$PATH XDG_CONFIG_HOME=/tmp/muster-vhs/xdg-config XDG_STATE_HOME=/tmp/muster-vhs/xdg-state"
+Type `export PATH="$PWD/target/debug:$PATH" TERM=xterm-256color`
 Enter
-Type "rm -rf /tmp/muster-vhs /tmp/muster-blog /tmp/muster-demo"
+Type "unset NO_COLOR; export XDG_CONFIG_HOME=/tmp/muster-vhs/config XDG_STATE_HOME=/tmp/muster-vhs/state XDG_DATA_HOME=/tmp/muster-vhs/data"
 Enter
-Type "mkdir -p /tmp/muster-blog /tmp/muster-demo"
+Type "rm -rf /tmp/muster-vhs && mkdir -p /tmp/muster-vhs/config/muster /tmp/muster-vhs/shop && cd /tmp/muster-vhs/shop"
 Enter
-Type "cp $HOME/Projects/muster/muster.yml /tmp/muster-demo/muster.yml"
+Type `printf 'desktop_notifications: false\ndefault_size:\n  rows: 24\n  cols: 80\ndetach_key: "ctrl-\\\\"\nlog_max_size: 10MiB\nscrollback: 1000\ncolor_scheme: dark\n' > ../config/muster/settings.yml`
 Enter
-Type "cd /tmp/muster-blog; clear"
+Type `printf 'agents: []\nterminals: []\ncommands:\n  - name: web\n    command: while true; do echo "$(date +%%T) GET /api/cart 200 $((RANDOM %% 40 + 5))ms"; sleep 0.7; done\n    autostart: true\n  - name: worker\n    command: trap "sleep 1.5; exit 0" TERM; n=0; while true; do n=$((n + 1)); echo "$(date +%%T) job $n done"; sleep 1; done\n    autostart: true\n' > muster.yml`
+Enter
+Type "muster projects add . > /dev/null && clear"
 Enter
 Show
 
-# CLI: scaffold, validate, and check a new project.
-Type "muster init"
-Enter
-Sleep 1.5s
-Type "muster check"
-Enter
-Sleep 1.2s
-Type "muster doctor"
+Type "muster up"
 Enter
 Sleep 3s
 
-Hide
-Type "cd /tmp/muster-demo; clear"
+Type "muster ps"
 Enter
-Show
+Sleep 3s
 
-# Launch the workspace TUI: agents, terminals, and commands side by side.
-Type "muster"
+Type "muster attach"
 Enter
 Sleep 2s
-
-# Attach the login-shell terminal and run a couple of commands.
 Down
-Sleep 500ms
-Type "s"
-Sleep 800ms
-Enter
-Sleep 900ms
-Type "echo hello from muster"
-Enter
-Sleep 900ms
-Type "ls"
-Enter
-Sleep 1.2s
-
-# Leader detaches back to the sidebar; start the clock command.
-Ctrl+a
-Sleep 300ms
-Type "h"
-Sleep 500ms
-Down
-Sleep 400ms
-Type "s"
-Sleep 2.5s
-
-# Launch a live Claude agent session and attach to it.
+Sleep 0.6s
 Up
-Sleep 300ms
-Up
-Sleep 400ms
-Type "s"
-Sleep 900ms
+Sleep 0.8s
 Enter
-Sleep 8s
+Sleep 4s
+Ctrl+\
+Sleep 2s
 
-# Detach, then open the keybinding overlay.
-Ctrl+a
-Sleep 300ms
-Type "h"
-Sleep 800ms
-Type "?"
-Sleep 2.5s
-Escape
-Sleep 500ms
-
-# Delete the running clock command from muster.yml: pick it, confirm, gone.
-Down
-Sleep 300ms
-Down
-Sleep 400ms
-Type "d"
-Sleep 1.8s
+Type "muster down"
 Enter
-Sleep 1.8s
+Sleep 4.5s
 
-Type "q"
-Sleep 800ms
+Hide
+Type "muster service stop > /dev/null; cd / && rm -rf /tmp/muster-vhs"
+Enter
+Sleep 1s

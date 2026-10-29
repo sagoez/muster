@@ -1,0 +1,107 @@
+//! The client side of the holder protocol shared by the service's supervisor
+//! connection, one-shot readers and `muster attach`.
+
+use std::{os::unix::net::UnixStream, path::Path, time::Duration};
+
+use getset::{CopyGetters, Getters};
+use typed_builder::TypedBuilder;
+
+use super::{
+    error::HolderError,
+    protocol::{ClientMessage, ClientRole, HolderMessage},
+};
+use crate::{
+    adapter::terminal::TerminalEmulator,
+    domain::{
+        color_scheme::ColorScheme,
+        pty::{PtyError, PtySize},
+    },
+};
+
+/// Longest a one-shot reader waits for the holder's screen.
+const SCREEN_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Scrollback of the emulator that rebuilds a screen; only the visible screen
+/// is read from it.
+const SCREEN_SCROLLBACK: usize = 0;
+/// Color scheme of the emulator that rebuilds a screen. It has no child, so it
+/// answers no color query and either scheme reads the same text.
+const SCREEN_COLOR_SCHEME: ColorScheme = ColorScheme::Dark;
+
+/// The screen a holder sends a client that says hello.
+#[derive(Debug, Getters, CopyGetters, TypedBuilder)]
+pub struct Greeting {
+    /// Bytes that rebuild the screen in a fresh terminal.
+    #[getset(get = "pub")]
+    repaint: Vec<u8>,
+    /// The size the screen was rendered at.
+    #[getset(get_copy = "pub")]
+    size: PtySize,
+    /// The child's process id.
+    #[getset(get_copy = "pub")]
+    pid: u32,
+    /// The writable attach clients connected.
+    #[getset(get_copy = "pub")]
+    attached: u32,
+}
+
+impl Greeting {
+    /// The bytes that rebuild the screen, taken out of the greeting.
+    pub fn into_repaint(self) -> Vec<u8> {
+        self.repaint
+    }
+}
+
+/// Introduces `stream` to the holder at `socket` as `role` and reads the
+/// screen it answers with, waiting at most `timeout`. The read timeout stays
+/// set; a caller that keeps reading clears it.
+///
+/// # Errors
+/// Returns [`HolderError::NoSnapshot`] when the holder answers with anything
+/// but its screen or closes first, or the I/O error from the exchange.
+pub fn greet(
+    stream: &mut UnixStream,
+    socket: &Path,
+    role: ClientRole,
+    timeout: Duration,
+) -> Result<Greeting, HolderError> {
+    stream.set_read_timeout(Some(timeout))?;
+    ClientMessage::Hello { role }.write_to(stream)?;
+    match HolderMessage::read_from(stream) {
+        Ok(HolderMessage::Snapshot {
+            repaint,
+            size,
+            pid,
+            attached,
+        }) => Ok(Greeting::builder()
+            .repaint(repaint)
+            .size(size)
+            .pid(pid)
+            .attached(attached)
+            .build()),
+        Ok(_) | Err(HolderError::Io(_)) => Err(HolderError::NoSnapshot(socket.to_path_buf())),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the visible screen of the holder serving `socket`, as a read-only
+/// client that leaves the child and every other client untouched.
+///
+/// # Errors
+/// Returns a [`PtyError`] when the holder cannot be reached or sends no screen.
+pub fn screen_text(socket: &Path) -> Result<String, PtyError> {
+    let mut stream = UnixStream::connect(socket)?;
+    let greeting = greet(
+        &mut stream,
+        socket,
+        ClientRole::Attach { read_only: true },
+        SCREEN_READ_TIMEOUT,
+    )?;
+    let mut screen = TerminalEmulator::new(
+        greeting.size().rows(),
+        greeting.size().cols(),
+        SCREEN_SCROLLBACK,
+        SCREEN_COLOR_SCHEME,
+    );
+    screen.process(greeting.repaint());
+    Ok(screen.screen_text())
+}

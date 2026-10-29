@@ -1,0 +1,658 @@
+---
+source: src/adapter/cli/args.rs
+expression: "helps.join(\"\\n\\n\")"
+---
+$ muster --help
+Run a project's agents and dev processes in the background, and control them from any shell
+
+Usage: muster [OPTIONS] [COMMAND]
+
+Commands:
+  ps            List this project's processes: state, pid, uptime, restarts and usage
+  up            Start this project's processes set to `autostart: true`
+  down          Stop this project's commands and terminals
+  start         Start a process
+  stop          Stop a process through its stop policy
+  restart       Restart a process
+  pause         Suspend a process, leaving it alive
+  resume        Resume a paused process
+  kill          Kill a process at once, skipping its graceful stop
+  logs          Print a process's output log, kept across its runs and after it exits
+  attach        Show a running process in this terminal and type into it
+  agent         Open, close or reopen agent sessions
+  notices       Show what the muster service reported about this project: failed starts, forced stops, crashes
+  service       Show or stop the muster service. Processes keep running either way
+  init          Create a muster.yml here and register this folder as a project
+  check         Validate the workspace config and exit non-zero on problems
+  run           Register a command in a project, start it and attach to it
+  projects      List registered projects, or add and remove them
+  note          Read or write shared scratchpad notes for the current project
+  todo          List or manage the current project's shared todos
+  kv            Read or write the current project's shared key-value state
+  coordination  Export or restore this project's coordination state as portable YAML
+  mcp           Serve this project to agents as an MCP server over stdio: its processes, agent sessions and shared coordination state (spawned as a child process by a connecting agent)
+  hooks         Install provider integrations used to preserve native agent sessions
+  doctor        Diagnose config, projects, sessions, hooks, and completions
+  completions   Print the shell hook that enables completions
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+  -V, --version          Print version
+
+Exit codes:
+    0  success
+    1  a process did not end up as asked, or the action failed
+    2  the command line could not be parsed, or a question was cancelled
+    3  the muster service is unavailable or runs a newer version
+    4  an unknown project or process name, or an invalid config
+  130  interrupted with Ctrl-C while it waited at a terminal
+
+With --json, results and failures print as JSON on stdout. Object keys are
+snake_case, enum values are kebab-case, durations are whole seconds, and times
+are RFC 3339 in UTC.
+
+
+$ muster ps --help
+List this project's processes: state, pid, uptime, restarts and usage
+
+Usage: muster ps [OPTIONS]
+
+Options:
+      --all              List every project the muster service has loaded
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster up --help
+Start this project's processes set to `autostart: true`
+
+Usage: muster up [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster down --help
+Stop this project's commands and terminals
+
+Usage: muster down [OPTIONS]
+
+Options:
+      --agents           Stop the project's agents too, after asking at a terminal
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -y, --yes              Stop the agents without asking; required with --agents where nobody can be asked
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster start --help
+Start a process
+
+Usage: muster start [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster stop --help
+Stop a process through its stop policy
+
+Usage: muster stop [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster restart --help
+Restart a process
+
+Usage: muster restart [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster pause --help
+Suspend a process, leaving it alive
+
+Usage: muster pause [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster resume --help
+Resume a paused process
+
+Usage: muster resume [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster kill --help
+Kill a process at once, skipping its graceful stop
+
+Usage: muster kill [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster logs --help
+Print a process's output log, kept across its runs and after it exits
+
+Usage: muster logs [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -f, --follow           Keep printing what the process writes, across restarts, until interrupted
+      --screen           Print the process's current terminal screen instead of its log
+      --json             Print the result as JSON; with --follow, one JSON object per log line
+  -h, --help             Print help
+
+
+$ muster attach --help
+Show a running process in this terminal and type into it
+
+Usage: muster attach [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --read-only        Watch without typing into the process or resizing it
+      --json             Print a refusal or failure as JSON; an attach prints nothing else
+  -h, --help             Print help (see more with '--help')
+
+
+$ muster agent --help
+Open, close or reopen agent sessions
+
+Usage: muster agent [OPTIONS] <COMMAND>
+
+Commands:
+  new     Open and start a new agent session
+  close   Close an agent session, stopping its process
+  reopen  Reopen the most recently closed agent session
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster agent new --help
+Open and start a new agent session
+
+Usage: muster agent new [OPTIONS] <TOOL>
+
+Arguments:
+  <TOOL>  The agent to run; `custom` runs the agent --command names [possible values: claude, codex, gemini, amp, opencode, copilot, kimi, custom]
+
+Options:
+  -c, --config <CONFIG>    The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --name <NAME>        Its name; generated from the agent when absent
+      --command <COMMAND>  The command that starts the agent. Required for `custom`; for a preset it replaces the default command
+      --resume <TEMPLATE>  The command that resumes a closed conversation. Put `{session_id}` where the agent's conversation id belongs, as a whole unquoted word; without it the id is appended
+      --json               Print the result as JSON
+  -h, --help               Print help
+
+
+$ muster agent close --help
+Close an agent session, stopping its process
+
+Usage: muster agent close [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The session, as `muster ps` lists it; quote a name with spaces
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster agent reopen --help
+Reopen the most recently closed agent session
+
+Usage: muster agent reopen [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster notices --help
+Show what the muster service reported about this project: failed starts, forced stops, crashes
+
+Usage: muster notices [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster service --help
+Show or stop the muster service. Processes keep running either way
+
+Usage: muster service [OPTIONS] <COMMAND>
+
+Commands:
+  status  Show whether the service runs, its version and what it has loaded, without starting it
+  stop    Stop the service. Every process keeps running under its holder, and the next muster command starts the service again
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster service status --help
+Show whether the service runs, its version and what it has loaded, without starting it
+
+Usage: muster service status [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster service stop --help
+Stop the service. Every process keeps running under its holder, and the next muster command starts the service again
+
+Usage: muster service stop [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --json             Print the result as JSON
+  -h, --help             Print help
+
+
+$ muster init --help
+Create a muster.yml here and register this folder as a project
+
+Usage: muster init [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help (see more with '--help')
+
+
+$ muster check --help
+Validate the workspace config and exit non-zero on problems
+
+Usage: muster check [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster run --help
+Register a command in a project, start it and attach to it
+
+Usage: muster run [OPTIONS] <COMMAND>...
+
+Arguments:
+  <COMMAND>...  The command to register and run, e.g. `-- npm run dev`
+
+Options:
+  -c, --config <CONFIG>    The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -p, --project <PROJECT>  Project to add the command to (a registered project name). Defaults to the current project when run inside a process muster started
+  -n, --name <NAME>        Name for the process. Defaults to the command's first word
+      --json               Print the report as JSON
+  -k, --kind <KIND>        How the process is grouped and managed [default: command] [possible values: agent, terminal, command]
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster projects --help
+List registered projects, or add and remove them
+
+Usage: muster projects [OPTIONS] [COMMAND]
+
+Commands:
+  add     Register an existing folder containing a muster.yml
+  remove  Unregister a project by name; files on disk are untouched
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster projects add --help
+Register an existing folder containing a muster.yml
+
+Usage: muster projects add [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Folder to register (defaults to the current directory)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster projects remove --help
+Unregister a project by name; files on disk are untouched
+
+Usage: muster projects remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Registered project name
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster note --help
+Read or write shared scratchpad notes for the current project
+
+Usage: muster note [OPTIONS] [COMMAND]
+
+Commands:
+  get   Print a note's body by key
+  set   Create or replace a note
+  rm    Delete a note by key
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster note get --help
+Print a note's body by key
+
+Usage: muster note get [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Note key
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster note set --help
+Create or replace a note
+
+Usage: muster note set [OPTIONS] <KEY> <BODY>
+
+Arguments:
+  <KEY>   Note key
+  <BODY>  Markdown body
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster note rm --help
+Delete a note by key
+
+Usage: muster note rm [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Note key
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster todo --help
+List or manage the current project's shared todos
+
+Usage: muster todo [OPTIONS] [COMMAND]
+
+Commands:
+  add     Add a new pending todo
+  status  Set a todo's status: pending, in-progress, or done
+  rm      Delete a todo by id
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster todo add --help
+Add a new pending todo
+
+Usage: muster todo add [OPTIONS] <TITLE>
+
+Arguments:
+  <TITLE>  What the task is
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --dep <DEPS>       Id of a todo this one depends on (repeatable)
+  -h, --help             Print help
+
+
+$ muster todo status --help
+Set a todo's status: pending, in-progress, or done
+
+Usage: muster todo status [OPTIONS] <ID> <STATUS>
+
+Arguments:
+  <ID>      Todo id
+  <STATUS>  New status
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster todo rm --help
+Delete a todo by id
+
+Usage: muster todo rm [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Todo id
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster kv --help
+Read or write the current project's shared key-value state
+
+Usage: muster kv [OPTIONS] [COMMAND]
+
+Commands:
+  get   Print a value by key
+  set   Create or replace a value
+  rm    Delete an entry by key
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster kv get --help
+Print a value by key
+
+Usage: muster kv get [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Entry key
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster kv set --help
+Create or replace a value
+
+Usage: muster kv set [OPTIONS] <KEY> <VALUE>
+
+Arguments:
+  <KEY>    Entry key
+  <VALUE>  Value to store
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster kv rm --help
+Delete an entry by key
+
+Usage: muster kv rm [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Entry key
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster coordination --help
+Export or restore this project's coordination state as portable YAML
+
+Usage: muster coordination [OPTIONS] <COMMAND>
+
+Commands:
+  export  Write this project's scratchpads, todos, and key-values to a YAML file
+  import  Restore entries from a YAML file, preserving ids, authors, and timestamps. Entries merge; those absent from the file are left alone
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster coordination export --help
+Write this project's scratchpads, todos, and key-values to a YAML file
+
+Usage: muster coordination export [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  File to write
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster coordination import --help
+Restore entries from a YAML file, preserving ids, authors, and timestamps. Entries merge; those absent from the file are left alone
+
+Usage: muster coordination import [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  File to read
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster mcp --help
+Serve this project to agents as an MCP server over stdio: its processes, agent sessions and shared coordination state (spawned as a child process by a connecting agent)
+
+Usage: muster mcp [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+      --print-config     Print the JSON config snippet to add muster to an agent's MCP servers, then exit instead of serving
+      --as <NAME>        Identity this server stamps on coordination writes (the connecting agent's name), so entries are attributable. Defaults to a generic agent label
+  -h, --help             Print help
+
+
+$ muster hooks --help
+Install provider integrations used to preserve native agent sessions
+
+Usage: muster hooks [OPTIONS] <COMMAND>
+
+Commands:
+  setup  Install idempotent session-ID hooks/plugins for supported agents
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster hooks setup --help
+Install idempotent session-ID hooks/plugins for supported agents
+
+Usage: muster hooks setup [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster doctor --help
+Diagnose config, projects, sessions, hooks, and completions
+
+Usage: muster doctor [OPTIONS]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help
+
+
+$ muster completions --help
+Print the shell hook that enables completions
+
+Usage: muster completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>  Shell to print the hook for [possible values: bash, zsh, fish, elvish, powershell]
+
+Options:
+  -c, --config <CONFIG>  The project's muster.yml. Process commands default to $MUSTER_PROJECT, then ./muster.yml, then the first registered project
+  -h, --help             Print help

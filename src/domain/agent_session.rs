@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use getset::Getters;
 use nutype::nutype;
@@ -160,7 +160,7 @@ pub struct AgentProcessStartToken(u64);
 
 /// Whether a persisted session should be restored with its workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentSessionState {
     /// A fresh launch was reserved but has not attached to a PTY successfully.
     Pending,
@@ -244,7 +244,9 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    /// Returns a copy with the provider identity captured by a hook or plugin.
+    /// Returns a copy with the provider identity captured by a hook or plugin,
+    /// for a test to arrange a captured session.
+    #[cfg(test)]
     pub fn with_native_id(mut self, native_id: NativeSessionId) -> Self {
         self.native_id = Some(native_id);
         self
@@ -265,7 +267,9 @@ impl AgentSession {
         self
     }
 
-    /// Returns a copy bound to the current managed provider process.
+    /// Returns a copy bound to the current managed provider process, for a test
+    /// to arrange a live owner.
+    #[cfg(test)]
     pub fn with_owner_process_id(mut self, process_id: AgentProcessId) -> Self {
         self.owner_process_id = Some(process_id);
         self
@@ -305,39 +309,10 @@ impl AgentSession {
 
     /// Returns a copy detached from its configured agent, becoming a history
     /// record again. Used to recover a configured session left without a matching
-    /// `muster.yml` agent so it reappears in history and the pin picker.
+    /// `muster.yml` agent so it reappears in history.
     pub fn unconfigure(mut self) -> Self {
         self.configured_key = None;
         self
-    }
-
-    /// Returns a copy carrying `source`'s live runtime state - captured identity,
-    /// reporter binding, live owner, launch token, and lifecycle - while keeping
-    /// this record's configured identity. Used when a conversation is transferred
-    /// into a configured agent, so the transfer cannot drop an owner that is still
-    /// live (which would let autostart run a second provider for the conversation)
-    /// or a native id captured after a stale snapshot was taken.
-    pub fn with_runtime_state_of(mut self, source: &AgentSession) -> Self {
-        self.native_id = source.native_id.clone();
-        self.native_reporter_process_id = source.native_reporter_process_id;
-        self.native_reporter_start_token = source.native_reporter_start_token;
-        self.owner_process_id = source.owner_process_id;
-        self.owner_process_start_token = source.owner_process_start_token;
-        self.launch_token = source.launch_token.clone();
-        self.state = source.state;
-        self
-    }
-
-    /// The directory the conversation ran in: its working dir when set (joined to
-    /// its workspace folder if relative), else that workspace folder. `None` only
-    /// when the owning config path has no parent directory.
-    pub fn effective_working_dir(&self) -> Option<PathBuf> {
-        let workspace = self.project.parent();
-        match &self.working_dir {
-            Some(dir) if dir.is_absolute() => Some(dir.clone()),
-            Some(dir) => workspace.map(|folder| folder.join(dir)),
-            None => workspace.map(Path::to_path_buf),
-        }
     }
 
     /// Returns a copy with the provider and launch command refreshed, keeping the
@@ -521,20 +496,7 @@ impl AgentSession {
 
     /// Quotes one opaque argument for the command shell that launches agents.
     pub(crate) fn quote_for_command_shell(value: &str) -> Option<String> {
-        #[cfg(windows)]
-        {
-            // cmd.exe expands percent variables even inside double quotes. Its
-            // ordinary metacharacters are inert there, so double percent signs
-            // preserve an opaque provider identity as one command argument.
-            Some(format!(
-                "\"{}\"",
-                value.replace('%', "%%").replace('"', "^\"")
-            ))
-        }
-        #[cfg(not(windows))]
-        {
-            shlex::try_quote(value).ok().map(Into::into)
-        }
+        shlex::try_quote(value).ok().map(Into::into)
     }
 
     /// Whether the placeholder is an unquoted shell word delimited by command
@@ -598,77 +560,6 @@ impl AgentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Transferring a conversation into a configured agent keeps the configured
-    /// identity but takes the source's live runtime state, so a still-live owner
-    /// is preserved rather than dropped (which would let autostart run a second
-    /// provider for the same conversation).
-    #[test]
-    fn with_runtime_state_of_keeps_identity_but_adopts_live_state() {
-        let source = AgentSession::builder()
-            .id(AgentSessionId::generate().unwrap())
-            .name(ProcessName::try_new("Grace").unwrap())
-            .tool(AgentTool::Claude)
-            .project(PathBuf::from("/work/backend/muster.yml"))
-            .launch_command(CommandLine::try_new("claude").unwrap())
-            .native_id(Some(NativeSessionId::try_new("conv-42").unwrap()))
-            .owner_process_id(Some(AgentProcessId::try_new(4242).unwrap()))
-            .state(AgentSessionState::Open)
-            .build();
-        let configured = AgentSession::builder()
-            .id(source.id().clone())
-            .name(ProcessName::try_new("backend").unwrap())
-            .tool(AgentTool::Custom)
-            .project(PathBuf::from("/here/muster.yml"))
-            .launch_command(CommandLine::try_new("wrapper").unwrap())
-            .working_dir(Some(PathBuf::from("/work/backend")))
-            .configured_key(Some(
-                ConfiguredAgentKey::of(&ProcessName::try_new("backend").unwrap()).unwrap(),
-            ))
-            .state(AgentSessionState::Closed)
-            .build();
-
-        let merged = configured.with_runtime_state_of(&source);
-
-        assert_eq!(merged.owner_process_id(), source.owner_process_id());
-        assert_eq!(merged.native_id(), source.native_id());
-        assert_eq!(*merged.state(), AgentSessionState::Open);
-        assert_eq!(merged.name().as_ref(), "backend");
-        assert_eq!(*merged.tool(), AgentTool::Custom);
-        assert!(merged.configured_key().is_some());
-        assert_eq!(merged.working_dir(), &Some(PathBuf::from("/work/backend")));
-    }
-
-    /// A conversation's effective directory is its working dir resolved against its
-    /// workspace when relative, taken verbatim when absolute, and the workspace
-    /// folder when unset.
-    #[test]
-    fn effective_working_dir_resolves_the_conversation_directory() {
-        let at = |working_dir: Option<&str>| {
-            AgentSession::builder()
-                .id(AgentSessionId::generate().unwrap())
-                .name(ProcessName::try_new("x").unwrap())
-                .tool(AgentTool::Claude)
-                .project(PathBuf::from("/work/svc/muster.yml"))
-                .launch_command(CommandLine::try_new("claude").unwrap())
-                .working_dir(working_dir.map(PathBuf::from))
-                .state(AgentSessionState::Closed)
-                .build()
-        };
-
-        assert_eq!(
-            at(None).effective_working_dir(),
-            Some(PathBuf::from("/work/svc"))
-        );
-        assert_eq!(
-            at(Some("api")).effective_working_dir(),
-            Some(PathBuf::from("/work/svc/api"))
-        );
-        assert_eq!(
-            at(Some("/elsewhere/api")).effective_working_dir(),
-            Some(PathBuf::from("/elsewhere/api"))
-        );
-    }
 
     /// A command edit that keeps the provider retains the custom resume template,
     /// but one that changes the provider drops it along with the captured id, so a
@@ -899,16 +790,6 @@ mod tests {
         assert_eq!(
             session.resume().unwrap().as_ref(),
             "agent --resume '$(touch /tmp/muster-owned)'"
-        );
-    }
-
-    /// Windows must use cmd.exe quoting rather than POSIX single quotes.
-    #[cfg(windows)]
-    #[test]
-    fn quotes_resume_ids_for_the_windows_command_shell() {
-        assert_eq!(
-            AgentSession::quote_for_command_shell("thread & command"),
-            Some("\"thread & command\"".to_string())
         );
     }
 

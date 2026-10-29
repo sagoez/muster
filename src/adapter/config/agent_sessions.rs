@@ -1,19 +1,16 @@
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt};
 use std::{
     fs,
     io::{ErrorKind, Write},
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt},
     path::{Path, PathBuf},
 };
 
-use atomic_write_file::AtomicWriteFile;
-#[cfg(unix)]
-use atomic_write_file::unix::OpenOptionsExt as _;
+use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use serde::{Deserialize, Serialize};
 
 use super::yaml::state_dir_path;
 use crate::{
-    adapter::process_identity::LocalProcessIdentity,
+    adapter::{private_dir::prepare_state_dir, process_identity::LocalProcessIdentity},
     constants::MUSTER_AGENT_SESSION_STATE_FILE_ENV,
     domain::{
         agent_session::{
@@ -33,13 +30,10 @@ const SESSION_FILE_VERSION: u8 = 1;
 /// Maximum symlink chain followed for the durable session-state file.
 const MAX_SESSION_STATE_SYMLINKS: usize = 40;
 /// New session-state files are readable and writable only by their owner.
-#[cfg(unix)]
 const PRIVATE_SESSION_FILE_MODE: u32 = 0o600;
-/// Permission bits retained when inspecting an existing Unix file.
-#[cfg(unix)]
+/// Permission bits retained when inspecting an existing file.
 const FILE_PERMISSION_MASK: u32 = 0o777;
 /// Existing modes are preserved only when they grant no group or other access.
-#[cfg(unix)]
 const OWNER_PERMISSION_MASK: u32 = 0o700;
 
 /// Versioned on-disk agent-session history.
@@ -59,7 +53,7 @@ impl SessionFile {
     }
 }
 
-/// YAML-backed session history shared by the TUI and provider hooks.
+/// YAML-backed session history shared by the service and provider hooks.
 #[derive(Default)]
 pub struct YamlAgentSessionStore;
 
@@ -154,7 +148,8 @@ impl YamlAgentSessionStore {
     }
 
     /// Serializes and atomically replaces the session file without ever
-    /// exposing its contents to group or other users on Unix.
+    /// exposing its contents to group or other users on Unix, readying its
+    /// directory as the private state directory.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if serialization, directory creation, file
@@ -163,23 +158,19 @@ impl YamlAgentSessionStore {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            prepare_state_dir(parent).map_err(|source| ConfigError::Write {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
         let raw = serde_yaml_ng::to_string(value)?;
         let mut options = AtomicWriteFile::options();
-        #[cfg(unix)]
-        {
-            options.preserve_mode(false);
-            options.mode(PRIVATE_SESSION_FILE_MODE);
-        }
+        options.preserve_mode(false);
+        options.mode(PRIVATE_SESSION_FILE_MODE);
         let mut file = options.open(path).map_err(|source| ConfigError::Write {
             path: path.to_path_buf(),
             source,
         })?;
-        #[cfg(unix)]
         file.set_permissions(fs::Permissions::from_mode(Self::secure_file_mode(path)?))
             .map_err(|source| ConfigError::Write {
                 path: path.to_path_buf(),
@@ -197,12 +188,11 @@ impl YamlAgentSessionStore {
     }
 
     /// Returns an existing owner-only mode unchanged and narrows any broader
-    /// Unix mode to the private default.
+    /// mode to the private default.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when metadata fails for a reason other than a
     /// missing destination.
-    #[cfg(unix)]
     fn secure_file_mode(path: &Path) -> Result<u32, ConfigError> {
         match fs::metadata(path) {
             Ok(metadata) => {
@@ -221,15 +211,14 @@ impl YamlAgentSessionStore {
         }
     }
 
-    /// Acquires the stable cross-platform sibling lock shared by TUI and hook
-    /// writers.
+    /// Acquires the stable sibling lock shared by the service and hook writers.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the lock file cannot be created or locked.
     fn lock(path: &Path) -> Result<fs::File, ConfigError> {
         let lock_path = Self::lock_path(path);
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            prepare_state_dir(parent).map_err(|source| ConfigError::Write {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -419,80 +408,6 @@ impl AgentSessionStore for YamlAgentSessionStore {
         Ok(resolved)
     }
 
-    fn pin_configured(&self, session: &AgentSession) -> Result<Vec<AgentSession>, ConfigError> {
-        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
-        let mut displaced = Vec::new();
-        Self::update(&path, |sessions| {
-            // Under the lock, the source must still be unconfigured, or already this
-            // exact target (an idempotent retry). A source a concurrent instance
-            // already pinned to a different agent must not be transferred again:
-            // doing so would clobber that agent's session and orphan its seed.
-            if let Some(current) = sessions
-                .iter()
-                .find(|candidate| candidate.id() == session.id())
-                && current.configured_key().is_some()
-                && !Self::same_configured_agent(current, session)
-            {
-                return Err(ConfigError::AgentSessionAlreadyPinned(session.id().clone()));
-            }
-            // Overlay the live runtime state of the record being transferred, read
-            // fresh under the lock, so the transfer cannot erase a still-live owner
-            // (letting autostart run a competing provider) or lose an identity a
-            // concurrent reopen captured after the caller's snapshot was taken.
-            let record = sessions
-                .iter()
-                .find(|candidate| candidate.id() == session.id())
-                .map_or_else(
-                    || session.clone(),
-                    |current| session.clone().with_runtime_state_of(current),
-                );
-            // Displaced records (the source and any prior record for this target)
-            // are returned so a failed follow-up can restore the full pre-pin state.
-            let (removed, kept): (Vec<_>, Vec<_>) = sessions.drain(..).partition(|candidate| {
-                candidate.id() == session.id() || Self::same_configured_agent(candidate, session)
-            });
-            *sessions = kept;
-            sessions.push(record);
-            displaced = removed;
-            Ok(())
-        })?;
-        Ok(displaced)
-    }
-
-    fn restore_sessions(
-        &self,
-        expected: &AgentSession,
-        records: &[AgentSession],
-    ) -> Result<(), ConfigError> {
-        let path = Self::path().ok_or(ConfigError::NoConfigDir)?;
-        Self::update(&path, |sessions| {
-            for record in records {
-                let position = sessions
-                    .iter()
-                    .position(|candidate| candidate.id() == record.id());
-                let restored = match position {
-                    Some(index) => {
-                        let current = &sessions[index];
-                        // Leave the pin's transferred record alone if a concurrent
-                        // operation re-targeted it, rather than clobbering that change.
-                        if record.id() == expected.id()
-                            && current.configured_key() != expected.configured_key()
-                        {
-                            continue;
-                        }
-                        // Restore the displaced identity but keep any runtime state a
-                        // live provider wrote onto the current record during the write.
-                        record.clone().with_runtime_state_of(current)
-                    },
-                    None => record.clone(),
-                };
-                sessions.retain(|candidate| candidate.id() != record.id());
-                sessions.push(restored);
-            }
-            Ok(())
-        })
-    }
-
     fn retire_orphaned_configured(
         &self,
         project: &Path,
@@ -594,6 +509,37 @@ mod tests {
             .build()
     }
 
+    /// Mode bits a permission check compares.
+    const PERMISSION_BITS: u32 = 0o777;
+    /// The mode of a directory only its owner can enter.
+    const OWNER_DIR: u32 = 0o700;
+    /// A directory mode other users can enter.
+    const SHARED_DIR: u32 = 0o755;
+
+    /// Saving sessions readies their state directory as the service does:
+    /// created owner-only, or narrowed to its owner when found open.
+    #[test]
+    fn a_save_makes_the_state_directory_private() {
+        for existing in [false, true] {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let state_dir = scratch.path().join("muster");
+            if existing {
+                fs::create_dir(&state_dir).unwrap();
+                fs::set_permissions(&state_dir, fs::Permissions::from_mode(SHARED_DIR)).unwrap();
+            }
+            let path = state_dir.join(AGENT_SESSIONS_FILE);
+
+            YamlAgentSessionStore::update(&path, |sessions| {
+                YamlAgentSessionStore::replace(sessions, session());
+                Ok(())
+            })
+            .unwrap();
+
+            let mode = fs::metadata(&state_dir).unwrap().permissions().mode() & PERMISSION_BITS;
+            assert_eq!(mode, OWNER_DIR, "existing: {existing}");
+        }
+    }
+
     /// State mutations preserve the record and make close history durable.
     #[test]
     fn updates_session_state_and_native_identity() {
@@ -629,7 +575,6 @@ mod tests {
 
     /// Atomic session-state writes retain a dotfile-managed symlink and update
     /// its target rather than replacing the alias.
-    #[cfg(unix)]
     #[test]
     fn writes_session_state_through_a_symlink() {
         use std::os::unix::fs::symlink;
@@ -1030,7 +975,6 @@ mod tests {
 
     /// Session-state writes start owner-only, preserve an existing restrictive
     /// mode, and narrow any legacy mode that exposed data to other users.
-    #[cfg(unix)]
     #[test]
     fn writes_session_state_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;

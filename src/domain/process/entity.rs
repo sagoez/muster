@@ -18,7 +18,7 @@ use crate::domain::{
 pub struct Process {
     /// Stable identity for this process and its pane.
     id: PaneId,
-    /// Display name shown in the sidebar.
+    /// Name the CLI and MCP address the process by.
     name: ProcessName,
     /// Section the process belongs to.
     kind: ProcessKind,
@@ -37,7 +37,7 @@ pub struct Process {
     /// Working directory to launch in; inherits the workspace cwd when absent.
     #[builder(default)]
     working_dir: Option<PathBuf>,
-    /// Optional secondary line under the name in the sidebar.
+    /// Optional one-line description.
     #[builder(default)]
     description: Option<Description>,
     /// Current lifecycle state.

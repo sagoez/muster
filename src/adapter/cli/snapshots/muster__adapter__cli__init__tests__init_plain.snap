@@ -1,0 +1,7 @@
+---
+source: src/adapter/cli/init.rs
+expression: "plain(&Report::new(\"muster init\", rows))"
+---
+created muster.yml
+registered project 'shop'
+run `muster up` here to start it

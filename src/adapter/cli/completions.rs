@@ -2,7 +2,7 @@ use strum::Display;
 
 /// Shells supported by the dynamic completion engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Display)]
-#[strum(serialize_all = "lowercase")]
+#[strum(serialize_all = "kebab-case")]
 pub enum CompletionShell {
     Bash,
     Zsh,

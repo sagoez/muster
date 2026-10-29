@@ -1,13 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::{
     error::CliError,
     report::{Row, RowKind},
 };
 use crate::{
-    adapter::{config::starter_workspace, path::absolutize},
+    adapter::path::absolutize,
     constants::WORKSPACE_FILE_NAME,
-    domain::{port::ProjectRegistry, project::Project, value::ProjectName},
+    domain::{
+        config::WorkspaceConfig, port::ProjectRegistry, project::Project, value::ProjectName,
+    },
 };
 
 /// Note printed when the workspace file already exists.
@@ -15,15 +20,33 @@ const EXISTS_NOTE: &str = "already exists, left unchanged";
 /// Note printed when the folder is already a registered project.
 const REGISTERED_NOTE: &str = "already registered";
 /// Closing hint after a successful init.
-const RUN_HINT: &str = "run `muster` here to start";
+const RUN_HINT: &str = "run `muster up` here to start it";
 
-/// Scaffolds a starter workspace in `directory` and registers it as a project.
-/// Returns the report rows to print, in order.
+/// Whether `directory` can become a project and has no workspace file yet,
+/// so `muster init` there writes one.
+///
+/// # Errors
+/// Returns [`CliError`] when the folder name is not a usable project name or
+/// its config path cannot be registered.
+pub fn needs_workspace(directory: &Path) -> Result<bool, CliError> {
+    project_name(directory)?;
+    let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
+    ensure_representable(&config_path)?;
+    Ok(fs::symlink_metadata(&config_path).is_err())
+}
+
+/// Writes `workspace` as the workspace file of `directory`, unless one is
+/// already there, and registers the folder as a project. Returns the report
+/// rows to print, in order.
 ///
 /// # Errors
 /// Returns [`CliError`] when the folder name is not a usable project name or
 /// the registry cannot be read or written.
-pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
+pub fn init(
+    directory: &Path,
+    registry: &dyn ProjectRegistry,
+    workspace: &WorkspaceConfig,
+) -> Result<Vec<Row>, CliError> {
     // Validate everything the registry will persist first: a folder that
     // cannot become a project (a filesystem root, a non-UTF-8 path) must
     // fail before anything is written.
@@ -36,7 +59,7 @@ pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>
     // dangling symlink, which the exclusive open also refuses - is left
     // untouched, intentionally asymmetric with `projects add` and `doctor`,
     // which require a reachable regular file.
-    if registry.create_workspace(&config_path, &starter_workspace())? {
+    if registry.create_workspace(&config_path, workspace)? {
         rows.push(Row::unlabeled(
             RowKind::Ok,
             format!("created {WORKSPACE_FILE_NAME}"),
@@ -137,11 +160,23 @@ mod tests {
     use std::{cell::RefCell, fs, path::PathBuf};
 
     use super::*;
-    use crate::domain::{
-        config::{ConfigError, WorkspaceConfig},
-        project::Project,
-        value::ProjectName,
+    use crate::{
+        adapter::{
+            cli::report::{Report, plain},
+            config::starter_workspace,
+        },
+        domain::{
+            config::{ConfigError, WorkspaceConfig},
+            project::Project,
+            value::ProjectName,
+        },
     };
+
+    /// `init` of `dir` with the starter workspace, as `muster init` without a
+    /// terminal runs it.
+    fn init_starter(dir: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
+        init(dir, registry, &starter_workspace())
+    }
 
     /// A registry recording saves of projects and workspaces.
     #[derive(Default)]
@@ -190,8 +225,9 @@ mod tests {
     fn scaffolds_and_registers_a_fresh_folder() {
         let dir = temp_dir("fresh");
         let registry = RecordingRegistry::default();
+        assert!(needs_workspace(&dir).unwrap());
 
-        let rows = init(&dir, &registry).unwrap();
+        let rows = init_starter(&dir, &registry).unwrap();
 
         assert!(
             registry.saved_workspace.borrow().is_some(),
@@ -206,14 +242,30 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The plain fallback of `muster init` in a fresh folder, as a pipe or a
+    /// dumb terminal shows it.
+    #[test]
+    fn init_falls_back_to_plain_lines() {
+        let base = temp_dir("plain");
+        let dir = base.join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let registry = RecordingRegistry::default();
+
+        let rows = init_starter(&dir, &registry).unwrap();
+
+        insta::assert_snapshot!("init_plain", plain(&Report::new("muster init", rows)));
+        fs::remove_dir_all(base).unwrap();
+    }
+
     /// An existing config is never overwritten, but registration still runs.
     #[test]
     fn refuses_to_overwrite_but_still_registers() {
         let dir = temp_dir("existing");
         fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
         let registry = RecordingRegistry::default();
+        assert!(!needs_workspace(&dir).unwrap(), "nothing to ask for");
 
-        let rows = init(&dir, &registry).unwrap();
+        let rows = init_starter(&dir, &registry).unwrap();
 
         assert!(registry.saved_workspace.borrow().is_none(), "no overwrite");
         assert!(
@@ -226,7 +278,6 @@ mod tests {
 
     /// A symlinked folder keeps its alias name, matching the alias the
     /// registry stores, so two aliases of one target stay distinguishable.
-    #[cfg(unix)]
     #[test]
     fn project_name_keeps_the_symlink_alias() {
         use std::os::unix::fs::symlink;
@@ -245,7 +296,6 @@ mod tests {
     /// workspace exists. The directory is never created: APFS rejects
     /// non-UTF-8 names entirely, and init's validation must fire before any
     /// filesystem access anyway.
-    #[cfg(unix)]
     #[test]
     fn init_rejects_a_non_utf8_folder_before_writing() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -255,7 +305,7 @@ mod tests {
         let dir = PathBuf::from(OsString::from_vec(raw));
         let registry = RecordingRegistry::default();
 
-        let result = init(&dir, &registry);
+        let result = init_starter(&dir, &registry);
 
         assert!(
             matches!(
@@ -279,9 +329,16 @@ mod tests {
     fn init_at_a_root_creates_nothing() {
         let registry = RecordingRegistry::default();
 
-        let result = init(Path::new("/"), &registry);
+        let result = init_starter(Path::new("/"), &registry);
 
         assert!(matches!(result, Err(CliError::InvalidProjectFolder(_))));
+        assert!(
+            matches!(
+                needs_workspace(Path::new("/")),
+                Err(CliError::InvalidProjectFolder(_))
+            ),
+            "refused before any question is asked"
+        );
         assert!(
             registry.saved_workspace.borrow().is_none(),
             "no workspace file was created"
@@ -308,7 +365,7 @@ mod tests {
             ..RecordingRegistry::default()
         };
 
-        let rows = init(&dir, &registry).unwrap();
+        let rows = init_starter(&dir, &registry).unwrap();
 
         // The list is written back unchanged: still exactly the seeded entry.
         let saved = registry.saved_projects.borrow();

@@ -1,5 +1,8 @@
 /// Human-facing application name, reused for window titles and labels.
 pub const APP_NAME: &str = "muster";
+/// This build's version, which a client and the service compare so a newer
+/// binary replaces an older service.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Conventional workspace filename looked for in a project folder.
 pub const WORKSPACE_FILE_NAME: &str = "muster.yml";

@@ -5,14 +5,22 @@ use std::{
 };
 
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
+use getset::Getters;
+use typed_builder::TypedBuilder;
 
-use super::error::CliError;
+use super::{
+    action_report::ActionReport,
+    error::CliError,
+    process::{ready_to_send, start_registered, status},
+    service_client::ServiceClient,
+    settle_watch::SettleWatch,
+};
 use crate::{
     adapter::{
         config::YamlProjectRegistry,
         path::{absolutize, registered_config_path},
     },
-    constants::MUSTER_PROJECT_ENV,
+    constants::{MUSTER_PROJECT_ENV, WORKSPACE_FILE_NAME},
     domain::{
         config::{ConfigError, ProcessSpec, WorkspaceConfig},
         port::ProjectRegistry,
@@ -22,34 +30,46 @@ use crate::{
     },
 };
 
-/// Shell used to run a captured command, matching how the PTY runner launches
-/// processes so "runs now" behaves the same as "runs later under muster".
-#[cfg(unix)]
-const SHELL_PROGRAM: &str = "/bin/sh";
-/// Flag passing the command string to [`SHELL_PROGRAM`].
-#[cfg(unix)]
-const SHELL_FLAG: &str = "-c";
+/// Whether `muster up` starts a process `muster run` registers. Off: running
+/// a command once does not enlist it in every later start of the stack.
+const RUN_AUTOSTART: bool = false;
 
-/// `muster run`: register a command as a process in a project, then run it.
+/// `muster run`: register a command as a process in a project, start it
+/// under the muster service and attach to it.
 ///
-/// The command is added to the project's workspace file (so it persists and is
-/// managed on the next launch) and then executed in place, exactly as if it had
-/// been typed without the `muster run` prefix.
+/// The command is added to the project's workspace file, so it persists and
+/// can be started again by name, then started like `muster start`.
 #[derive(clap::Args)]
 pub struct RunArgs {
     /// Project to add the command to (a registered project name). Defaults to
-    /// the current project when run inside a muster pane.
+    /// the current project when run inside a process muster started.
     #[arg(short, long, add = ArgValueCandidates::new(project_candidates))]
     project: Option<String>,
-    /// Sidebar name for the process. Defaults to the command's first word.
+    /// Name for the process. Defaults to the command's first word.
     #[arg(short, long)]
     name: Option<String>,
+    /// Print the report as JSON.
+    #[arg(long)]
+    json: bool,
     /// How the process is grouped and managed.
     #[arg(short, long, value_enum, default_value_t = ProcessKindArg::Command)]
     kind: ProcessKindArg,
     /// The command to register and run, e.g. `-- npm run dev`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
     command: Vec<String>,
+}
+
+/// A `muster run` checked and ready: the project to add to, and the process
+/// to add.
+#[derive(Debug, Clone, Getters, TypedBuilder)]
+#[getset(get = "pub")]
+pub struct RunPlan {
+    /// The project's config path.
+    project: PathBuf,
+    /// The process to add.
+    spec: ProcessSpec,
+    /// The section to add it to.
+    kind: ProcessKind,
 }
 
 /// The process kind, as a CLI-facing value enum.
@@ -70,49 +90,125 @@ impl From<ProcessKindArg> for ProcessKind {
     }
 }
 
-/// Registers the command in the resolved project, then runs it in place. On
-/// success this replaces the current process, so it does not return; any error
-/// short-circuits before the command runs.
-///
-/// # Errors
-/// Returns [`CliError`] if the project cannot be resolved, the workspace file
-/// cannot be updated, or the command fails to start.
-pub fn run(args: RunArgs, config: PathBuf, registry: &dyn ProjectRegistry) -> Result<(), CliError> {
-    // Running the command replaces this process in place, which only works on
-    // Unix. Refuse up front so a failed run never leaves a persisted-but-unrun
-    // entry in the config on other platforms.
-    if cfg!(not(unix)) {
-        return Err(CliError::Unsupported);
+impl RunArgs {
+    /// Whether the report prints as JSON.
+    pub fn json(&self) -> bool {
+        self.json
     }
-    let config_path = resolve(
-        registry,
-        args.project.as_deref(),
-        current_project_from_env(),
-        config,
-    )?;
-    let command = command_string(&args.command)?;
-    let command_line = CommandLine::try_new(command).map_err(|_| CliError::EmptyCommand)?;
-    let name = process_name(args.name.as_deref(), &args.command)?;
-    // The command runs in the caller's directory now; record it so a later start
-    // from the sidebar runs there too instead of muster's launch directory.
-    let spec = ProcessSpec::builder()
-        .name(name)
-        .command(Some(command_line.clone()))
-        .working_dir(std::env::current_dir().ok())
-        .build();
-    register(registry, &config_path, spec, args.kind.into())?;
-    // Run the stored form verbatim, so the immediate run matches what muster
-    // will run later.
-    Err(exec(command_line.as_ref()))
 }
 
-/// Resolves an absolute workspace path for a bare TUI launch, preferring
-/// explicit and contextual paths before local and globally registered ones.
+impl RunPlan {
+    /// Checks `args` and finds the project to add the command to: the
+    /// registered project `--project` names, or the project every process
+    /// command finds from `explicit_config`. Nothing is written yet.
+    ///
+    /// # Errors
+    /// Returns [`CliError`] when the command or name is not usable, or the
+    /// project cannot be found.
+    pub fn prepare(
+        args: &RunArgs,
+        explicit_config: Option<&Path>,
+        registry: &dyn ProjectRegistry,
+    ) -> Result<Self, CliError> {
+        let command = command_string(&args.command)?;
+        let command_line = CommandLine::try_new(command).map_err(|_| CliError::EmptyCommand)?;
+        let name = process_name(args.name.as_deref(), &args.command)?;
+        let project = run_project(
+            registry,
+            args.project.as_deref(),
+            explicit_config,
+            current_project_from_env().as_deref(),
+            Path::new(WORKSPACE_FILE_NAME),
+        )?;
+        if !project.exists() {
+            return Err(CliError::NoProjectConfig(project));
+        }
+        if registry
+            .workspace(&project)
+            .is_ok_and(|config| config.uses_name(&name))
+        {
+            return Err(CliError::RunNameTaken { name, project });
+        }
+        // The service starts processes in their recorded working directory,
+        // so record the caller's: the command then runs where it was typed.
+        let spec = ProcessSpec::builder()
+            .name(name)
+            .command(Some(command_line))
+            .working_dir(std::env::current_dir().ok())
+            .autostart(RUN_AUTOSTART)
+            .build();
+        Ok(Self::builder()
+            .project(project)
+            .spec(spec)
+            .kind(args.kind.into())
+            .build())
+    }
+
+    /// Registers the command in its project, then starts it through `client`
+    /// and reports it once it settled, telling `watch` meanwhile. A name an
+    /// open agent session holds,
+    /// which the config does not list, is refused first, and so is one a
+    /// concurrent writer added to the config meanwhile.
+    ///
+    /// # Errors
+    /// Returns [`CliError::RunNameTaken`] when a process already has the
+    /// name, or another [`CliError`] when the workspace file cannot be
+    /// updated or the service cannot start the command.
+    pub fn carry_out(
+        self,
+        registry: &dyn ProjectRegistry,
+        client: &ServiceClient,
+        watch: &mut dyn SettleWatch,
+    ) -> Result<ActionReport, CliError> {
+        let name = self.spec.name().clone();
+        let key = name.key();
+        let taken = || CliError::RunNameTaken {
+            name: name.clone(),
+            project: self.project.clone(),
+        };
+        if status(client, &self.project)?
+            .processes()
+            .iter()
+            .any(|process| process.name().key() == key)
+        {
+            return Err(taken());
+        }
+        ready_to_send(watch)?;
+        register_unique(registry, &self.project, self.spec.clone(), self.kind)?;
+        start_registered(client, &self.project, name, watch)
+    }
+}
+
+/// Registers `spec` as [`register`] does, refusing with
+/// [`CliError::RunNameTaken`] when the locked write found its name taken by
+/// a concurrent writer; a duplicate of another name already in the file is
+/// the config's own error.
+fn register_unique(
+    registry: &dyn ProjectRegistry,
+    config_path: &Path,
+    spec: ProcessSpec,
+    kind: ProcessKind,
+) -> Result<(), CliError> {
+    let name = spec.name().clone();
+    match register(registry, config_path, spec, kind) {
+        Err(CliError::Config(ConfigError::DuplicateProcessName {
+            name: duplicate, ..
+        })) if duplicate.key() == name.key() => Err(CliError::RunNameTaken {
+            name,
+            project: config_path.to_path_buf(),
+        }),
+        registered => registered,
+    }
+}
+
+/// Resolves the absolute path of the project a process command acts on:
+/// the explicit `--config`, then the current project exported into
+/// processes, then `./muster.yml`, then the first registered project.
 ///
 /// # Errors
 /// Returns [`ConfigError`] when the registry cannot be read or its fallback
 /// project has an ambiguous legacy relative path.
-pub fn resolve_tui_config(
+pub fn resolve_project_config(
     explicit: Option<&Path>,
     current_project: Option<&Path>,
     local_config: &Path,
@@ -155,18 +251,28 @@ fn command_string(command: &[String]) -> Result<String, CliError> {
     }
 }
 
-/// Resolves the target workspace path: an explicit project name looked up in the
-/// registry, else the current-project environment variable, else the top-level
-/// `--config` path (so `muster --config X run ...` targets X).
-fn resolve(
+/// Resolves the project `muster run` adds to: the registered project
+/// `named` when one is named, otherwise the chain every process command
+/// uses from `explicit`, `current_project` and `local_config`.
+///
+/// # Errors
+/// Returns [`CliError`] when the named project is unknown or ambiguous, or
+/// the registry cannot be read.
+fn run_project(
     registry: &dyn ProjectRegistry,
-    project: Option<&str>,
-    env: Option<PathBuf>,
-    config: PathBuf,
+    named: Option<&str>,
+    explicit: Option<&Path>,
+    current_project: Option<&Path>,
+    local_config: &Path,
 ) -> Result<PathBuf, CliError> {
-    match project {
+    match named {
         Some(name) => resolve_named(registry, name),
-        None => Ok(absolutize(&env.unwrap_or(config))),
+        None => Ok(resolve_project_config(
+            explicit,
+            current_project,
+            local_config,
+            registry,
+        )?),
     }
 }
 
@@ -267,26 +373,6 @@ fn register(
     Ok(())
 }
 
-/// Replaces the current process with the command via the shell. Returns the
-/// error only if the command could not be started (on success it never returns).
-#[cfg(unix)]
-fn exec(command: &str) -> CliError {
-    use std::os::unix::process::CommandExt;
-
-    let error = std::process::Command::new(SHELL_PROGRAM)
-        .arg(SHELL_FLAG)
-        .arg(command)
-        .exec();
-    CliError::Exec(error)
-}
-
-/// Unreachable on non-Unix: [`run`] refuses before persisting, so the platform's
-/// missing in-place exec never reaches a shell.
-#[cfg(not(unix))]
-fn exec(_command: &str) -> CliError {
-    CliError::Unsupported
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -358,7 +444,7 @@ mod tests {
             project("api", "~/api/muster.yml"),
         ]);
         assert_eq!(
-            resolve(&registry, Some("api"), None, PathBuf::from("muster.yml")).unwrap(),
+            run_project(&registry, Some("api"), None, None, Path::new("muster.yml")).unwrap(),
             absolutize(Path::new("~/api/muster.yml"))
         );
     }
@@ -371,7 +457,7 @@ mod tests {
         ]);
         assert!(
             matches!(
-                resolve(&registry, Some("web"), None, PathBuf::from("muster.yml")),
+                run_project(&registry, Some("web"), None, None, Path::new("muster.yml")),
                 Err(CliError::AmbiguousProject { count: 2, .. })
             ),
             "run -p must refuse to pick one of two same-named projects"
@@ -382,40 +468,63 @@ mod tests {
     fn an_unknown_project_name_errors() {
         let registry = registry_with(vec![project("web", "~/web/muster.yml")]);
         assert!(matches!(
-            resolve(&registry, Some("nope"), None, PathBuf::from("muster.yml")),
+            run_project(&registry, Some("nope"), None, None, Path::new("muster.yml")),
             Err(CliError::UnknownProject(_))
         ));
     }
 
+    /// Without `--project`, `muster run` finds its project with the same
+    /// chain as every process command: `--config`, then the environment,
+    /// then the local file, then the first registered project.
     #[test]
-    fn without_a_name_it_falls_back_to_environment_then_config() {
-        let registry = registry_with(vec![]);
+    fn without_a_name_it_uses_the_shared_chain() {
+        let first = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("first.yml");
+        let registry = registry_with(vec![
+            Project::builder()
+                .name(ProjectName::try_new("first").unwrap())
+                .config(first.clone())
+                .build(),
+        ]);
+        let missing = Path::new("missing-local.yml");
+
         assert_eq!(
-            resolve(
+            run_project(
                 &registry,
                 None,
-                Some(PathBuf::from("/env/muster.yml")),
-                PathBuf::from("/cfg/muster.yml"),
+                Some(Path::new("/cfg/muster.yml")),
+                Some(Path::new("/env/muster.yml")),
+                missing,
             )
             .unwrap(),
-            PathBuf::from("/env/muster.yml"),
-            "the environment path wins over --config"
+            PathBuf::from("/cfg/muster.yml"),
+            "--config wins over the environment, as for every other command"
         );
         assert_eq!(
-            resolve(&registry, None, None, PathBuf::from("/cfg/muster.yml")).unwrap(),
-            PathBuf::from("/cfg/muster.yml"),
-            "with no name or environment, the --config path is the target"
+            run_project(
+                &registry,
+                None,
+                None,
+                Some(Path::new("/env/muster.yml")),
+                missing
+            )
+            .unwrap(),
+            PathBuf::from("/env/muster.yml")
+        );
+        assert_eq!(
+            run_project(&registry, None, None, None, missing).unwrap(),
+            first,
+            "with nothing else, the first registered project"
         );
     }
 
     /// Verifies explicit and pane-context paths outrank filesystem discovery.
     #[test]
-    fn tui_config_prefers_explicit_then_current_project() {
+    fn project_config_prefers_explicit_then_current_project() {
         let registry = registry_with(vec![project("registered", "registered.yml")]);
         let local = Path::new("missing-local.yml");
 
         assert_eq!(
-            resolve_tui_config(
+            resolve_project_config(
                 Some(Path::new("explicit.yml")),
                 Some(Path::new("current.yml")),
                 local,
@@ -425,16 +534,15 @@ mod tests {
             absolutize(Path::new("explicit.yml"))
         );
         assert_eq!(
-            resolve_tui_config(None, Some(Path::new("current.yml")), local, &registry).unwrap(),
+            resolve_project_config(None, Some(Path::new("current.yml")), local, &registry).unwrap(),
             absolutize(Path::new("current.yml"))
         );
     }
 
-    #[cfg(unix)]
     /// Verifies workspace resolution makes a symlink path absolute without
     /// replacing the selected alias with its target.
     #[test]
-    fn tui_config_preserves_an_explicit_symlink_path() {
+    fn project_config_preserves_an_explicit_symlink_path() {
         use std::{fs, os::unix::fs::symlink};
 
         let dir = std::env::temp_dir().join(format!("muster-cli-link-{}", std::process::id()));
@@ -446,17 +554,16 @@ mod tests {
         let registry = registry_with(Vec::new());
 
         let resolved =
-            resolve_tui_config(Some(&link), None, Path::new("unused.yml"), &registry).unwrap();
+            resolve_project_config(Some(&link), None, Path::new("unused.yml"), &registry).unwrap();
 
         assert_eq!(resolved, link);
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     /// Verifies a dangling local config alias is selected and left for the
     /// loader to report instead of falling through to a registered workspace.
     #[test]
-    fn tui_config_prefers_a_dangling_local_symlink() {
+    fn project_config_prefers_a_dangling_local_symlink() {
         use std::os::unix::fs::symlink;
 
         let dir = std::env::temp_dir().join(format!("muster-cli-dangling-{}", std::process::id()));
@@ -465,7 +572,7 @@ mod tests {
         symlink(dir.join("missing.yml"), &local).unwrap();
         let registry = registry_with(vec![project("registered", "/other/muster.yml")]);
 
-        let resolved = resolve_tui_config(None, None, &local, &registry).unwrap();
+        let resolved = resolve_project_config(None, None, &local, &registry).unwrap();
 
         assert_eq!(resolved, local);
         fs::remove_dir_all(dir).unwrap();
@@ -474,19 +581,19 @@ mod tests {
     /// Verifies an existing local workspace preserves the original bare-launch
     /// behavior even when global projects are registered.
     #[test]
-    fn tui_config_prefers_an_existing_local_workspace() {
+    fn project_config_prefers_an_existing_local_workspace() {
         let registry = registry_with(vec![project("registered", "registered.yml")]);
         let local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("muster.yml");
 
         assert_eq!(
-            resolve_tui_config(None, None, &local, &registry).unwrap(),
+            resolve_project_config(None, None, &local, &registry).unwrap(),
             local
         );
     }
 
     /// Verifies a bare launch outside a workspace uses the first global project.
     #[test]
-    fn tui_config_falls_back_to_the_global_registry() {
+    fn project_config_falls_back_to_the_global_registry() {
         let first = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("first.yml");
         let registry = registry_with(vec![
             Project::builder()
@@ -496,7 +603,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            resolve_tui_config(None, None, Path::new("missing-local.yml"), &registry).unwrap(),
+            resolve_project_config(None, None, Path::new("missing-local.yml"), &registry).unwrap(),
             first
         );
     }
@@ -504,11 +611,11 @@ mod tests {
     /// Verifies an ambiguous legacy registry entry fails closed rather than
     /// resolving against the directory of a later launch.
     #[test]
-    fn tui_config_rejects_a_legacy_relative_registry_path() {
+    fn project_config_rejects_a_legacy_relative_registry_path() {
         let registry = registry_with(vec![project("legacy", "muster.yml")]);
 
-        let error =
-            resolve_tui_config(None, None, Path::new("missing-local.yml"), &registry).unwrap_err();
+        let error = resolve_project_config(None, None, Path::new("missing-local.yml"), &registry)
+            .unwrap_err();
 
         match error {
             ConfigError::RelativeProjectConfig { name, path } => {
@@ -522,12 +629,12 @@ mod tests {
     /// Verifies an empty registry retains the conventional path so its existing
     /// load error remains actionable.
     #[test]
-    fn tui_config_keeps_the_local_path_when_the_registry_is_empty() {
+    fn project_config_keeps_the_local_path_when_the_registry_is_empty() {
         let registry = registry_with(vec![]);
         let local = Path::new("missing-local.yml");
 
         assert_eq!(
-            resolve_tui_config(None, None, local, &registry).unwrap(),
+            resolve_project_config(None, None, local, &registry).unwrap(),
             absolutize(local)
         );
     }
@@ -538,6 +645,7 @@ mod tests {
         let spec = ProcessSpec::builder()
             .name(ProcessName::try_new("web").unwrap())
             .command(Some(CommandLine::try_new("npm run dev").unwrap()))
+            .autostart(false)
             .build();
 
         register(
@@ -614,5 +722,79 @@ mod tests {
             "npm",
             "a single quoted expression uses its first word, not the whole string"
         );
+    }
+
+    /// A registry whose locked write refuses, as a concurrent writer's
+    /// duplicate of `duplicate` would make it.
+    struct RefusingRegistry {
+        duplicate: &'static str,
+    }
+
+    impl ProjectRegistry for RefusingRegistry {
+        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
+            Ok(Vec::new())
+        }
+
+        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
+            Ok(empty_workspace())
+        }
+
+        fn workspace_exists(&self, _config_path: &Path) -> bool {
+            true
+        }
+
+        fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn save_workspace(
+            &self,
+            _config_path: &Path,
+            _config: &WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Ok(())
+        }
+
+        fn update_workspace(
+            &self,
+            _config_path: &Path,
+            _update: &mut dyn FnMut(WorkspaceConfig) -> WorkspaceConfig,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::DuplicateProcessName {
+                name: ProcessName::try_new(self.duplicate).unwrap(),
+                first_kind: ProcessKind::Command,
+                first_entry: 1,
+                second_kind: ProcessKind::Command,
+                second_entry: 2,
+            })
+        }
+    }
+
+    /// The locked write refusing the name being added reports it as taken;
+    /// a duplicate of another name is the config's own error.
+    #[test]
+    fn only_the_name_being_added_is_reported_as_taken() {
+        let project = Path::new("/p/muster.yml");
+        let spec = || {
+            ProcessSpec::builder()
+                .name(ProcessName::try_new("api").unwrap())
+                .command(Some(CommandLine::try_new("sleep 600").unwrap()))
+                .working_dir(None)
+                .autostart(RUN_AUTOSTART)
+                .build()
+        };
+
+        let same = RefusingRegistry { duplicate: "api" };
+        assert!(matches!(
+            register_unique(&same, project, spec(), ProcessKind::Command),
+            Err(CliError::RunNameTaken { .. })
+        ));
+        let other = RefusingRegistry {
+            duplicate: "worker",
+        };
+        assert!(matches!(
+            register_unique(&other, project, spec(), ProcessKind::Command),
+            Err(CliError::Config(ConfigError::DuplicateProcessName { .. }))
+        ));
     }
 }

@@ -6,11 +6,13 @@
 
 ## Project Overview
 
-**muster** - a terminal UI, built with [ratatui](https://ratatui.rs) + crossterm,
-for an agentic terminal workspace. It runs multiple CLI agents and dev processes
-side by side, manages a process/stack (start/stop/restart, auto-restart,
-file-watch triggers, port waits), detects agent work/idle state, and exposes
-shared coordination primitives (todos, scratchpads, locks, timers, key-value).
+**muster** - the supervisor and control plane behind your terminal. A headless
+per-user service runs each project's dev processes and CLI agents under their
+own holder processes, keeps their logs and screens, restarts them by policy,
+detects agent work and idle state, and holds shared coordination state (notes,
+todos, key-value). Users and agents drive it through the CLI and an MCP server;
+`muster attach` shows a process in the user's own terminal. muster draws no
+panes.
 
 > Architecture and the config schema are agreed in discussion before
 > implementation. This file governs *how* we write the code, not *what* it does.
@@ -28,20 +30,27 @@ on-disk files.
 ## Architecture: Ports and Adapters (hexagonal)
 
 The code is organized as a hexagon. The domain is pure and knows nothing about
-ratatui, crossterm, tokio, PTYs, or YAML. Everything concrete is an adapter that
+sockets, tokio, PTYs, terminals or YAML. Everything concrete is an adapter that
 plugs into a port.
 
 - **`domain`** - the core. Entities, value objects, and **ports** (traits the
-  core needs the outside world to fulfil, e.g. `ProcessRunner`, `ConfigSource`,
-  `Clock`). No I/O, no framework types, no `async`. Fully unit-testable in
-  isolation.
-- **`application`** - use-cases that orchestrate the domain through ports (e.g.
-  `WorkspaceService`). Depends on `domain` only.
-- **`adapter`** - infrastructure. Split into:
-  - **driving adapter** `adapter/tui` - crossterm input + ratatui render + the
-    runtime loop; it drives the application.
-  - **driven adapters** `adapter/pty` (portable-pty implements `ProcessRunner`),
-    `adapter/config` (serde_yaml implements `ConfigSource`), etc.
+  core needs the outside world to fulfil, e.g. `ProcessRunner`,
+  `ProjectRegistry`, `Notifier`). No I/O, no framework types, no `async`. Fully
+  unit-testable in isolation.
+- **`application`** - use-cases that orchestrate the domain through ports
+  (`Workspace`, `Reconciliation`, `ProcessLifecycle`, `SessionRestorer`).
+  Depends on `domain` only.
+- **`adapter`** - infrastructure:
+  - **driving adapters** `adapter/cli` (clap commands, `attach`, the service
+    client) and `adapter/mcp` (the rmcp server); they drive the service.
+  - **`adapter/service`** - the per-user service: one runtime loop owning a
+    supervisor per loaded project, the socket protocol, notices and the config
+    watcher.
+  - **`adapter/holder`** - the detached process that owns one child's PTY,
+    emulator and log, and outlives the service.
+  - **driven adapters** `adapter/pty` (portable-pty implements
+    `ProcessRunner`), `adapter/config` (YAML and SQLite stores), `adapter/terminal`
+    (the VT emulator and signal readers), notifier, metrics, hooks.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs.
 
@@ -53,18 +62,26 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 
 ```
 src/
-  main.rs              # composition root
+  main.rs              # composition root: CLI dispatch, service and holder entry points
   error.rs             # MusterError (transparent aggregate of domain/adapter errors)
   constants.rs         # crate-wide named constants (app identity, ...)
   domain/
-    process/           # Process, ProcessKind, ProcessState (entities + value objects)
-    port/              # ProcessRunner, ConfigSource, Clock, ... (traits)
-  application/
-    workspace.rs       # use-case services
+    process/           # Process, ProcessKind, ProcessState, policies
+    config/            # WorkspaceConfig, ProcessSpec
+    coordination/      # shared notes, todos and key-value entries
+    pty/               # SpawnRequest, PtySize, process output and exit outcomes
+    port/              # ProcessRunner, ProjectRegistry, Notifier, ... (traits)
+    value/             # validated newtypes (ProcessName, Cols, Rows, ...)
+  application/         # Workspace, Reconciliation, ProcessLifecycle, SessionRestorer
   adapter/
-    tui/               # driving: input + render + runtime loop
+    cli/               # driving: commands, attach, the service client
+    mcp/               # driving: the MCP server over stdio
+    bridge/            # the MCP-to-service requests the service protocol lacks
+    service/           # the per-user service and its supervisors
+    holder/            # one detached process per child, owning its PTY
+    terminal/          # VT emulator, signal reader, keyboard tracker
     pty/               # driven: ProcessRunner via portable-pty
-    config/            # driven: ConfigSource via serde_yaml
+    config/            # driven: YAML config, registry, settings, sessions, SQLite
 ```
 
 ## Dependencies and libraries
@@ -84,16 +101,24 @@ Chosen libraries (extend deliberately, same rules apply):
 
 | Concern | Crate |
 |---|---|
-| TUI render | `ratatui` |
-| Terminal I/O | `crossterm` |
-| Event loop | std threads + `std::sync::mpsc` |
+| Raw mode, size and polling on a given terminal fd | `rustix` |
+| Unix signals | `signal-hook` |
+| Event loops | std threads + `crossbeam-channel` |
 | PTY | `portable-pty` |
 | VT parse + embed | `alacritty_terminal` |
 | Validated newtypes | `nutype` |
-| Restart backoff | `backon` |
-| Arg parsing | `clap` |
+| Byte sizes | `bytesize` |
+| Arg parsing and completions | `clap` + `clap_complete` |
+| CLI styling | `anstream` + `anstyle` |
+| Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter |
+| MCP server | `rmcp` on `tokio` |
 | File watching | `notify` |
-| Config (de)serialize | `serde` + `serde_yaml_ng` |
+| Desktop notifications | `notify-rust` |
+| Process usage | `sysinfo` |
+| Coordination store | `rusqlite` |
+| Config (de)serialize | `serde` + `serde_yaml_ng`, `toml_edit` for provider hooks |
+| Durations | `humantime` + `humantime-serde` |
+| Atomic file writes | `atomic-write-file` |
 | Errors | `thiserror` |
 | Builders / getters | `typed-builder` + `getset` |
 | Enum ergonomics | `strum` |
@@ -143,13 +168,18 @@ Chosen libraries (extend deliberately, same rules apply):
 
 ### Enums over dangling strings
 Prefer enums over raw string literals for any fixed set of domain values compared
-or matched (process state, process kind, pane focus, key actions, ...). Give them
+or matched (process state, process kind, process action, error kind, ...). Give them
 `Display`/`FromStr` via `strum` or a manual impl. Never stringly-typed.
 
 ### Enum derivations
 Use `strum` derives and iterator traits for enum display, parsing, and variant
 enumeration whenever they express the behavior. Do not hand-maintain option
 arrays or `match` implementations for those mechanical conversions.
+
+**Enum case is always kebab-case.** Whichever of `strum` or `serde` an enum
+uses, its case attribute is kebab-case: `#[strum(serialize_all =
+"kebab-case")]`, `#[serde(rename_all = "kebab-case")]`. Never `lowercase`,
+`snake_case` or any other casing.
 
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare
@@ -167,16 +197,17 @@ use nutype::nutype;
 pub struct ProcessName(String);
 ```
 
-Add TUI value objects (`PaneId`, `Cols`, `Rows`) the same way rather than passing
-bare `u16`/`usize`.
+Terminal value objects (`PaneId`, `Cols`, `Rows`) follow the same rule rather
+than passing bare `u16`/`usize`.
 
 ### Structs
 - **Always derive `TypedBuilder` + `Getters`** on data structs, at minimum,
-  including render state, widget state, and event structs. The exceptions are
-  RAII resource guards and stateful runtime controllers whose construction wires
-  side-effecting resources (e.g. the terminal guard, the event-loop `App`): these
-  use a hand-written constructor, and a small private helper struct local to such
-  a controller may use a plain struct literal.
+  including protocol messages, status views, and event structs. The exceptions
+  are RAII resource guards and stateful runtime controllers whose construction
+  wires side-effecting resources (e.g. `RawModeGuard`, `ServiceRuntime`,
+  `HolderServer`, `Supervisor`): these use a hand-written constructor, and a
+  small private helper struct local to such a controller may use a plain struct
+  literal.
 - **Config structs additionally derive `WithSetters`, `Serialize`,
   `Deserialize`** with `#[set_with]` and `#[getset(get = "pub", set_with =
   "pub")]`.
@@ -208,8 +239,8 @@ custom `Debug` that prints `[REDACTED]` (never `#[derive(Debug)]`).
 - The top-level `MusterError` in `crate::error` is a lean aggregate: just
   `#[error(transparent)]` + `#[from]`. Let each error's own `Display` speak.
 - Fallible operations return `Result`, never panic via `.expect()`/`.unwrap()`.
-  The only tolerated panics are in tests and a top-level panic hook that restores
-  the terminal before reporting.
+  The only tolerated panics are in tests and a top-level panic hook that gives
+  an attached terminal back before reporting.
 
 ### Prefer methods, but free functions are fine when they fit
 Default to methods on a struct. But leave a free function free when it reads
@@ -237,39 +268,46 @@ pub use kind::*;
 pub use state::*;
 ```
 
-## TUI Conventions
+## Service and holder
 
-### Rendering
-- Rendering is pure: `render(frame, area, state)` reads immutable state and
-  draws. Never mutate domain state inside a render.
-- Prefer `StatefulWidget` for scroll/selection; keep widget state minimal, derive
-  the rest from domain state.
-- Redraw on change, not a busy spin.
+### Single-owner event loops
+- The service and each holder run one synchronous loop that owns all of their
+  state: `ServiceRuntime` owns every project's `Supervisor`, `HolderServer` owns
+  its child's emulator, keyboard tracker and log. Every other thread (socket
+  acceptor, client readers, PTY reader, timers, the config watcher) only sends
+  events to that loop over a `crossbeam-channel`; none of them touches the state.
+- Nothing blocking runs on a loop. A socket read, a holder round trip or a
+  bounded wait goes to a helper thread whose result comes back as an event.
+- The only async runtime is the one `rmcp` needs inside `muster mcp`.
+
+### Processes outlive the service
+- Every child runs under its own holder, launched detached from the muster
+  binary. A service stop, crash or upgrade never touches a running child: the
+  next service adopts the live holders and rebuilds each screen from them.
+- On exit the service waits out launches still in flight, leaves every holder
+  running, removes its socket and releases its lock before it answers the
+  client that stopped it. A holder serves until a supervisor has collected its
+  child's exit.
 
 ### PTY handling
 - Spawn children under a PTY via `portable-pty`. Parse output through
-  `alacritty_terminal` into a screen/scrollback model, wrapped by the pane's
-  `TerminalEmulator`; ratatui renders that model.
-- PTY read/write runs off the render path; communicate over channels, never
-  shared locks on the render path. The runtime loop owns the parsers; reader
-  tasks only shuttle bytes and lifecycle events as messages.
-
-### Event loop
-- A single synchronous loop owns the state. Terminal input, PTY output, and ticks
-  arrive as messages on one `std::sync::mpsc` channel: a dedicated thread blocks
-  on crossterm input, each process's reader thread forwards output, and the loop
-  drains the channel and redraws. No async runtime.
-- Terminal raw-mode/alt-screen setup is a RAII guard that restores on drop and on
-  panic. Never leave the terminal in raw mode on exit.
+  `alacritty_terminal`, wrapped by `TerminalEmulator`, into a screen and
+  scrollback model the holder repaints onto any client that attaches.
+- PTY read/write runs off the loop; reader threads only shuttle bytes and
+  lifecycle events as messages, never shared locks on the loop's state.
+- `muster attach` puts the user's terminal in raw mode through a RAII guard that
+  restores on drop and on panic. Never leave the terminal in raw mode on exit.
 
 ### Testing
-- **Tests live inline**, in `#[cfg(test)] mod tests { ... }` in the same file. Do
-  not use the `tests/` directory for unit tests.
-- **Snapshot ratatui output with `insta`**: render into a `TestBackend` buffer
-  and snapshot it. Review with `cargo insta review`; never blindly accept.
+- **Tests live inline**, in `#[cfg(test)] mod tests { ... }` in the same file.
+  The `tests/` directory holds only integration tests that run the built binary.
+- **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
+  `cargo insta review`; never blindly accept.
 - **Use getters** to read private fields in tests rather than making fields `pub`.
 - Pure domain logic (state machines, config parsing) has direct unit tests with
   no terminal involved.
+- Tests that spawn a service or holder use isolated state directories and stop
+  every process they start.
 
 ## Commands
 
@@ -279,7 +317,7 @@ Use the `justfile`:
 just build        # cargo build
 just check        # cargo check
 just test         # cargo test
-just run          # run the TUI (just run -- --config muster.yml)
+just run          # run the CLI (just run -- ps, just run -- up)
 just fmt          # format (nightly rustfmt, honors rustfmt.toml)
 just fmt-check    # verify formatting
 just lint         # cargo clippy --all-targets -- -D warnings
@@ -289,6 +327,20 @@ just ci           # fmt-check + lint + test
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`
 locates the installed nightly toolchain and overrides `RUSTFMT`; it does not
 change any global tool config.
+
+## Review gate
+
+Every new feature passes this gate before it is called done:
+
+1. **Four adversarial reviewers**, run in parallel as independent subagents.
+   Each gets the full diff and one lens: correctness and edge cases;
+   concurrency, process lifecycle and failure paths; security and untrusted
+   input (MCP, IPC, hooks, config); architecture and the rules in this file.
+   Each reviewer tries to break the change, and every finding is verified
+   against the code before it is acted on. Each finding that survives owes a
+   regression test that fails without its fix.
+2. **`/code-review`** on the same diff after the adversarial findings are fixed.
+3. Repeat both until a full round surfaces nothing new, then run `just ci`.
 
 ## Git
 

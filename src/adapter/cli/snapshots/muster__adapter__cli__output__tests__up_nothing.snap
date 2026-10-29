@@ -1,0 +1,8 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 612
+expression: plain(&action_rows(&report))
+---
+/home/me/shop/muster.yml
+nothing to start: every process set to autostart is running
+`muster start <name>` starts a process that does not autostart

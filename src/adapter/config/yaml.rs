@@ -27,10 +27,16 @@ pub(crate) fn config_dir_path(filename: &str) -> Option<PathBuf> {
 /// Path to `filename` inside muster's platform state directory, falling back to
 /// local data on platforms without a distinct state location.
 pub(crate) fn state_dir_path(filename: &str) -> Option<PathBuf> {
+    state_dir().map(|dir| dir.join(filename))
+}
+
+/// Muster's platform state directory, falling back to local data on platforms
+/// without a distinct state location.
+pub fn state_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", APP_DIR).map(|dirs| {
         dirs.state_dir()
             .unwrap_or_else(|| dirs.data_local_dir())
-            .join(filename)
+            .to_path_buf()
     })
 }
 
@@ -248,7 +254,6 @@ mod tests {
     }
 
     /// A dangling symlink at the destination is refused, not followed.
-    #[cfg(unix)]
     #[test]
     fn create_config_new_refuses_a_dangling_symlink_destination() {
         use std::os::unix::fs::symlink;
@@ -271,7 +276,6 @@ mod tests {
 
     /// Writing through a dangling symlink creates the link's target instead
     /// of replacing the link with a regular file.
-    #[cfg(unix)]
     #[test]
     fn write_config_preserves_a_dangling_symlink_destination() {
         use std::os::unix::fs::symlink;
@@ -300,7 +304,6 @@ mod tests {
     }
 
     /// A restricted destination keeps its permission bits across a rewrite.
-    #[cfg(unix)]
     #[test]
     fn write_config_preserves_restrictive_permissions() {
         use std::os::unix::fs::PermissionsExt;

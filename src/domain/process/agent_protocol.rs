@@ -1,11 +1,6 @@
-use getset::Getters;
-use serde::{Deserialize, Serialize};
-use typed_builder::TypedBuilder;
+use strum::{Display, EnumString};
 
-use super::{
-    AgentTool,
-    agent_tool::{is_env_assignment, strip_launcher_suffix},
-};
+use super::{AgentTool, agent_tool::is_env_assignment};
 use crate::domain::{
     agent_session::{AgentSession, AgentSessionId, NativeSessionId},
     value::CommandLine,
@@ -146,19 +141,10 @@ impl AgentTool {
         .ok()
     }
 
-    /// Whether `executable` (a bare command name) names this provider, using the
-    /// host shell's case sensitivity.
+    /// Whether `executable` (a bare command name) names this provider.
     fn executable_is_this_provider(&self, executable: &str) -> bool {
-        self.default_command().is_some_and(|default_command| {
-            #[cfg(windows)]
-            {
-                executable.eq_ignore_ascii_case(default_command)
-            }
-            #[cfg(not(windows))]
-            {
-                executable == default_command
-            }
-        })
+        self.default_command()
+            .is_some_and(|default_command| executable == default_command)
     }
 }
 
@@ -166,8 +152,8 @@ impl AgentTool {
 /// `NAME=VALUE` environment assignment. Quote-aware, so a quoted assignment value
 /// or executable path is not split at its internal whitespace. Returns the byte
 /// offset immediately after that token (where provider arguments are inserted) and
-/// the executable's bare name (path segments and Windows launcher suffixes
-/// removed). `None` if the command has no executable token.
+/// the executable's bare name (path segments removed). `None` if the command has
+/// no executable token.
 fn provider_executable(command: &str) -> Option<(usize, String)> {
     let mut cursor = 0;
     loop {
@@ -261,7 +247,6 @@ fn is_shell_operator(character: char) -> bool {
 /// keep their whitespace and operators inside the token, matching the `shlex`
 /// tokenization `from_command` uses, so an escaped space such as `two\ words` is
 /// not split.
-#[cfg(not(windows))]
 fn token_end(command: &str, start: usize) -> usize {
     let mut in_single = false;
     let mut in_double = false;
@@ -285,90 +270,39 @@ fn token_end(command: &str, start: usize) -> usize {
     command.len()
 }
 
-/// The byte offset where the token starting at `start` ends on Windows, where a
-/// backslash is a literal path separator rather than an escape; only quoted spans
-/// keep their internal whitespace and shell operators (see [`is_shell_operator`])
-/// inside the token.
-#[cfg(windows)]
-fn token_end(command: &str, start: usize) -> usize {
-    let mut in_single = false;
-    let mut in_double = false;
-    for (offset, character) in command[start..].char_indices() {
-        if !in_single && !in_double && (character.is_whitespace() || is_shell_operator(character)) {
-            return start + offset;
-        }
-        match character {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            _ => {},
-        }
-    }
-    command.len()
-}
-
 /// The bare executable name of a shell token: quotes removed, then the last path
-/// segment with any Windows launcher suffix stripped (case-insensitively on
-/// Windows via [`strip_launcher_suffix`]).
+/// segment.
 fn executable_name(token: &str) -> String {
     let unquoted: String = token
         .chars()
         .filter(|&character| character != '"' && character != '\'')
         .collect();
-    let base = unquoted.rsplit(['/', '\\']).next().unwrap_or(&unquoted);
-    strip_launcher_suffix(base).to_string()
+    unquoted.rsplit('/').next().unwrap_or(&unquoted).to_string()
 }
 
-/// Event names accepted by the public JSON wire protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Event names accepted by the public JSON wire protocol, spelled on the wire
+/// as their kebab-case form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[strum(serialize_all = "kebab-case")]
 pub enum AgentProtocolEventKind {
     /// A provider created or resumed a native conversation.
     SessionStarted,
 }
 
-/// Canonical versioned event an agent can send to `muster hook capture`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct AgentProtocolEvent {
-    /// Protocol schema version, currently [`AGENT_PROTOCOL_VERSION`].
-    version: u8,
-    /// Lifecycle event represented by this payload.
-    event: AgentProtocolEventKind,
-    /// Provider-owned identity used by its native resume command.
-    session_id: NativeSessionId,
-}
-
-impl AgentProtocolEvent {
-    /// Creates the canonical event for a provider conversation becoming active.
-    pub fn session_started(session_id: NativeSessionId) -> Self {
-        Self::builder()
-            .version(AGENT_PROTOCOL_VERSION)
-            .event(AgentProtocolEventKind::SessionStarted)
-            .session_id(session_id)
-            .build()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
 
-    /// The canonical constructor fixes the public wire version and event name.
+    /// The event name on the wire is the public contract.
     #[test]
-    fn session_started_serializes_the_versioned_wire_contract() {
-        let event = AgentProtocolEvent::session_started(
-            NativeSessionId::try_new("provider-session").unwrap(),
-        );
-
+    fn session_started_is_spelled_as_the_wire_contract() {
         assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            json!({
-                "version": AGENT_PROTOCOL_VERSION,
-                "event": "session_started",
-                "session_id": "provider-session"
-            })
+            AgentProtocolEventKind::SessionStarted.to_string(),
+            "session-started"
+        );
+        assert_eq!(
+            "session-started".parse::<AgentProtocolEventKind>(),
+            Ok(AgentProtocolEventKind::SessionStarted)
         );
     }
 
@@ -487,22 +421,6 @@ mod tests {
         );
     }
 
-    /// A Windows-style executable path resolves the executable to insert after,
-    /// even when the host compiling this test is Unix; backslashes stay literal.
-    #[test]
-    fn provider_arguments_prepend_after_a_windows_executable_path() {
-        let command = CommandLine::try_new(r"C:\Tools\codex.exe --profile work").unwrap();
-        let native_id = NativeSessionId::try_new("thread-id").unwrap();
-
-        assert_eq!(
-            AgentTool::Codex
-                .resume_command(&command, &native_id)
-                .unwrap()
-                .as_ref(),
-            r"C:\Tools\codex.exe resume thread-id --profile work"
-        );
-    }
-
     /// A command that invokes the provider directly resolves to a resume command
     /// regardless of shape - a value option, an unrecognized option, a prompt, or a
     /// composition - because inserting after the executable is always safe, so
@@ -616,7 +534,6 @@ mod tests {
     /// A POSIX backslash-escaped space keeps its assignment value one token, so the
     /// provider executable is found after it rather than mistaking the second word
     /// for the executable and refusing injection.
-    #[cfg(not(windows))]
     #[test]
     fn provider_arguments_survive_an_escaped_assignment_value() {
         let command = CommandLine::try_new(r"MODEL=two\ words claude").unwrap();

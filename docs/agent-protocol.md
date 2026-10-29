@@ -8,8 +8,8 @@ provider identity and commands.
 
 ## Session identity
 
-Muster exports `MUSTER_AGENT_SESSION_ID` to every first-class agent process. This
-is Muster's stable pane/session identity, not the provider conversation ID. On a
+Muster exports `MUSTER_AGENT_SESSION_ID` to every first-class agent process.
+This is Muster's stable session identity, not the provider conversation ID. On a
 new or resumed native conversation, send this JSON to `muster hook capture` on
 standard input. External integrations identify themselves as `custom`:
 
@@ -23,7 +23,7 @@ The command reads:
 ```json
 {
   "version": 1,
-  "event": "session_started",
+  "event": "session-started",
   "session_id": "provider-owned-session-id"
 }
 ```
@@ -48,8 +48,11 @@ During the beta, compatibility adapters also accept provider-native hook
 payloads containing `session_id` or `sessionId`. `muster hooks setup` installs
 those adapters explicitly for the built-in providers.
 
-Only `session_started` is defined in version 1. Unknown versions and unknown
-versioned event names fail closed. Additive fields may be ignored by readers.
+Only `session-started` is defined in version 1. Unknown versions and unknown
+versioned event names fail closed. An event spelled with underscores
+(`session_started`) comes from a hook an older Muster installed; the capture
+fails asking for `muster hooks setup`. Additive fields may be ignored by
+readers.
 
 ## Activity and attention
 
@@ -75,15 +78,16 @@ before confirmation, Muster retries the original new-session command with the
 same assigned ID instead of issuing a resume for a conversation that may not
 exist.
 
-Custom providers can supply a resume command in the advanced launcher. Use
-an unquoted, whitespace-delimited `{session_id}` shell word where the provider ID
-belongs; when omitted, Muster appends the shell-quoted ID. Quoted or embedded
-placeholders are rejected in the launcher before the session is persisted
-because their surrounding shell context is ambiguous. Placeholder-free
-templates must also end outside quotes and without a dangling escape.
-When a launch command is a shell composition such as a pipeline or sequence,
-an explicit resume command is required so provider arguments are never attached
-to a different command in the composition.
+A session may carry a resume command template, given with
+`muster agent new custom --command <cmd> --resume <template>`. It uses an
+unquoted, whitespace-delimited `{session_id}` shell word where the provider ID
+belongs; without one, Muster appends the shell-quoted ID. Quoted or embedded
+placeholders are rejected because their surrounding shell context is
+ambiguous, and a placeholder-free template must end outside quotes and without
+a dangling escape.
+When a launch command is a shell composition such as a pipeline or sequence, a
+built-in provider resumes only through such a template, so provider arguments
+are never attached to a different command in the composition.
 
 ## Integrating another agent
 
@@ -91,5 +95,5 @@ to a different command in the composition.
 2. On new-session and resume lifecycle events, pipe the canonical JSON event to
    `muster hook capture --provider custom`.
 3. Emit standard terminal progress or attention sequences where possible.
-4. Use the Custom launcher and a resume template for providers not bundled with
-   Muster.
+4. Open it with `muster agent new custom --command <cmd>`, adding `--resume`
+   with a template, or declare it under `agents:` in `muster.yml`.

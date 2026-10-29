@@ -1,6 +1,0 @@
----
-source: src/adapter/tui/widget/status_bar.rs
-assertion_line: 300
-expression: terminal.backend()
----
-"s start/stop   r restart   x kill   a add   ? help          "

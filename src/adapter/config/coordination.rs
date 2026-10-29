@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{OpenOptions, Permissions},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
     sync::{Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
@@ -8,19 +9,24 @@ use std::{
 use rusqlite::{Connection, Row, params};
 
 use super::yaml::state_dir_path;
-use crate::domain::{
-    config::ConfigError,
-    coordination::{
-        Author, KeyValue, KvKey, Scratchpad, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle,
+use crate::{
+    adapter::private_dir::prepare_state_dir,
+    domain::{
+        config::ConfigError,
+        coordination::{
+            Author, KeyValue, KvKey, Scratchpad, ScratchpadKey, Todo, TodoId, TodoStatus, TodoTitle,
+        },
+        port::CoordinationStore,
     },
-    port::CoordinationStore,
 };
 
 /// Coordination database filename under muster's platform state directory.
 const COORDINATION_DB_FILE: &str = "coordination.db";
+/// Mode of the coordination database: its owner's alone.
+const PRIVATE_DB_MODE: u32 = 0o600;
 
 /// Schema and connection pragmas, applied on every open. WAL lets the CLI, the
-/// MCP subprocess, and the TUI read concurrently with a single writer; the busy
+/// MCP subprocess, and the service read concurrently with a single writer; the busy
 /// timeout bounds the wait for that writer instead of failing fast. Tables are
 /// keyed by `(project, key/id)`, so a write touches one row, not the whole store.
 const SCHEMA: &str = "\
@@ -99,7 +105,9 @@ impl SqliteCoordinationStore {
     }
 
     /// Opens (creating if needed) the coordination database at `path` and applies
-    /// the schema and connection pragmas.
+    /// the schema and connection pragmas. What agents share stays private: the
+    /// state directory is readied as the service readies it, and the database
+    /// file is its owner's alone.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the parent directory or database cannot be
@@ -108,11 +116,22 @@ impl SqliteCoordinationStore {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            prepare_state_dir(parent).map_err(|source| ConfigError::Write {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
+        let write_error = |source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        };
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(PRIVATE_DB_MODE)
+            .open(path)
+            .and_then(|file| file.set_permissions(Permissions::from_mode(PRIVATE_DB_MODE)))
+            .map_err(write_error)?;
         let conn = Connection::open(path).map_err(db_error)?;
         conn.execute_batch(SCHEMA).map_err(db_error)?;
         Ok(Self {
@@ -498,9 +517,23 @@ impl CoordinationStore for SqliteCoordinationStore {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use super::*;
+
+    /// Mode bits a permission check compares.
+    const PERMISSION_BITS: u32 = 0o777;
+    /// The mode of a file only its owner can read.
+    const OWNER_FILE: u32 = 0o600;
+    /// The mode of a directory only its owner can enter.
+    const OWNER_DIR: u32 = 0o700;
+    /// A directory mode other users can enter.
+    const SHARED_DIR: u32 = 0o755;
+
+    /// The permission bits of `path`.
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & PERMISSION_BITS
+    }
 
     /// A store over a fresh temp-file database, plus the directory to clean up.
     fn store() -> (SqliteCoordinationStore, PathBuf) {
@@ -730,8 +763,29 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The coordination database holds what agents share, so it and the state
+    /// directory it lives in are its owner's alone, whether the directory is
+    /// created fresh or found open to other users.
+    #[test]
+    fn the_database_and_its_state_directory_are_private() {
+        for existing in [false, true] {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let state_dir = scratch.path().join("muster");
+            if existing {
+                fs::create_dir(&state_dir).unwrap();
+                fs::set_permissions(&state_dir, Permissions::from_mode(SHARED_DIR)).unwrap();
+            }
+            let path = state_dir.join(COORDINATION_DB_FILE);
+
+            SqliteCoordinationStore::open(&path).unwrap();
+
+            assert_eq!(mode_of(&state_dir), OWNER_DIR, "existing: {existing}");
+            assert_eq!(mode_of(&path), OWNER_FILE, "existing: {existing}");
+        }
+    }
+
     /// A second connection to the same database file sees another's committed
-    /// writes - the cross-process sharing the CLI, MCP, and TUI rely on.
+    /// writes - the cross-process sharing the CLI, MCP, and service rely on.
     #[test]
     fn a_second_connection_sees_committed_writes() {
         let dir =

@@ -1,0 +1,11 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 673
+expression: "render_status(&[shop()], false)"
+---
+NAME        KIND      STATE     PID   UPTIME  RESTARTS  CPU   MEM        ATTACHED  LAST EXIT
+claude      agent     running   4100  1h 2m   0         2.2%  128.0 MiB  -         -
+dev server  command   running   4123  1h 2m   2         2.2%  128.0 MiB  1         -
+café        terminal  crashed   -     -       0         -     -          -         status 127
+worker      command   starting  -     -       0         -     -          -         -
+cron        command   crashed   -     -       0         -     -          -         signal SIGKILL

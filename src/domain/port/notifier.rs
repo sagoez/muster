@@ -3,10 +3,9 @@ use crate::domain::{
     value::PaneId,
 };
 
-/// Delivers a [`Notification`] to the user outside the TUI, for example as an OS
-/// desktop notification. The in-app status line is handled by the TUI itself, so
-/// this port covers only the out-of-band channel. Called only from the runtime
-/// loop, so it carries no thread-safety bound.
+/// Delivers a [`Notification`] to the user out of band, for example as an OS
+/// desktop notification; notices are kept by the service itself. Called only
+/// from the runtime loop, so it carries no thread-safety bound.
 pub trait Notifier {
     /// Shows `notification` to the user. Best effort: a delivery failure is
     /// swallowed, so a missing notification daemon never disrupts the workspace.

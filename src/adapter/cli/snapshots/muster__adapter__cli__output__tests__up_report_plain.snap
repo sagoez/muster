@@ -1,0 +1,11 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 749
+expression: plain(&action_rows(&report))
+---
+/home/me/shop/muster.yml
+● dev server: running (pid 4123)
+✗ café: crashed: exited with status 127
+✗ claude: left stopped: its agent session cannot be resumed
+other notices, about processes this command did not touch:
+! cron: crashed: ended by signal: Killed

@@ -237,7 +237,6 @@ mod tests {
 
     /// A project registered through a symlink alias still gets the current
     /// marker when the working directory is its resolved target.
-    #[cfg(unix)]
     #[test]
     fn list_marks_a_symlinked_current_project() {
         use std::os::unix::fs::symlink;

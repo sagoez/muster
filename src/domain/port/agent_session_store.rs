@@ -9,7 +9,7 @@ use crate::domain::{
     process::AgentTool,
 };
 
-/// Persists agent-session identity and history across TUI lifetimes.
+/// Persists agent-session identity and history across service lifetimes.
 pub trait AgentSessionStore {
     /// Loads sessions in history order, oldest first.
     ///
@@ -41,49 +41,10 @@ pub trait AgentSessionStore {
     /// Returns a [`ConfigError`] when the state file cannot be read or written.
     fn link_configured(&self, candidate: &AgentSession) -> Result<AgentSessionId, ConfigError>;
 
-    /// Adopts a conversation as a configured agent's durable session in one
-    /// transaction. `session` carries the source conversation's id and native
-    /// identity, now stamped with the configured project and key. Any record with
-    /// the same id (the source history record it was built from) and any prior
-    /// record for the same project and configured key are removed before it is
-    /// inserted as the newest entry, so the pinned identity has exactly one
-    /// launchable owner and reconciliation cannot resume a stale record instead.
-    /// The removed records are returned so a caller can restore the complete
-    /// pre-pin state if a following step (the config write) fails.
-    ///
-    /// The source is validated under the lock to still be unconfigured, or already
-    /// this exact target; a source a concurrent pin already claimed for a different
-    /// agent is rejected rather than clobbered.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::AgentSessionAlreadyPinned`] when the source was
-    /// concurrently pinned elsewhere, or a [`ConfigError`] when the state file
-    /// cannot be read or written.
-    fn pin_configured(&self, session: &AgentSession) -> Result<Vec<AgentSession>, ConfigError>;
-
-    /// Undoes a [`AgentSessionStore::pin_configured`] whose follow-up failed,
-    /// restoring each displaced record so nothing it removed is lost. `expected` is
-    /// the record the pin transferred: the displaced record with its id is restored
-    /// only while the current record still belongs to that pin, so a concurrent
-    /// re-target is not clobbered. Each restored record keeps its original identity
-    /// but adopts the runtime state (captured id, owner, lifecycle) read from the
-    /// current same-id record under the lock, so a capture made during the failed
-    /// write is not discarded.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the state file cannot be read or written.
-    fn restore_sessions(
-        &self,
-        expected: &AgentSession,
-        records: &[AgentSession],
-    ) -> Result<(), ConfigError>;
-
     /// Un-configures durable sessions under `project` whose configured key is not in
-    /// `live_keys` - configured records left without a matching `muster.yml` agent,
-    /// for example a pin whose config write never completed before a crash. Clearing
-    /// the key returns them to history so they are restored and offered for pinning
-    /// again instead of being stranded, hidden from both pickers. Returns the number
-    /// of records changed.
+    /// `live_keys`: configured records left without a matching `muster.yml` agent.
+    /// Clearing the key returns them to history instead of leaving them stranded.
+    /// Returns the number of records changed.
     ///
     /// The caller must build `live_keys` from a config read taken while holding the
     /// workspace lock (`ProjectRegistry::with_workspace_locked`), so a config re-add

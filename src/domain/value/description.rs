@@ -1,7 +1,6 @@
 use nutype::nutype;
 
-/// Optional secondary line shown under a process name in the sidebar: trimmed
-/// and non-empty. Wrap in `Option` for the absent case.
+/// Optional one-line description of a process: trimmed and non-empty. Wrap in `Option` for the absent case.
 #[nutype(
     sanitize(trim),
     validate(not_empty),

@@ -68,7 +68,7 @@ fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliEr
         .collect())
 }
 
-/// Prints the value under `key`, one row per line so the boxed layout stays
+/// Prints the value under `key`, one row per line so the framed layout stays
 /// intact and piped output reproduces the value verbatim.
 ///
 /// # Errors

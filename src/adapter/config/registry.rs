@@ -150,8 +150,9 @@ impl ProjectRegistry for YamlProjectRegistry {
         let config = load_workspace(&dest)?;
         let updated = update(config);
         // Validate before writing so an update that would introduce a duplicate
-        // agent name (or other cross-field violation) is rejected here rather
-        // than persisted as a config that then refuses to load.
+        // process name (or other cross-field violation) is rejected here, with
+        // the file untouched, rather than persisted as a config that then
+        // refuses to load.
         updated.validate()?;
         write_config(&dest, &updated)
     }
@@ -187,10 +188,7 @@ impl ProjectRegistry for YamlProjectRegistry {
 /// # Errors
 /// Returns a `ConfigError` if the lock file cannot be opened or locked, so a
 /// caller never proceeds believing it holds a lock it does not.
-#[cfg(unix)]
 fn lock_workspace(dest: &Path) -> Result<fs::File, ConfigError> {
-    use std::os::unix::io::AsRawFd;
-
     let lock_path = lock_path_of(dest);
     if let Some(parent) = lock_path.parent()
         && !parent.as_os_str().is_empty()
@@ -208,21 +206,11 @@ fn lock_workspace(dest: &Path) -> Result<fs::File, ConfigError> {
             path: lock_path.clone(),
             source,
         })?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == -1 {
-        return Err(ConfigError::Write {
-            path: lock_path,
-            source: std::io::Error::last_os_error(),
-        });
-    }
+    file.lock().map_err(|source| ConfigError::Write {
+        path: lock_path,
+        source,
+    })?;
     Ok(file)
-}
-
-/// No advisory lock off Unix. Known limitation: concurrent registry mutations
-/// (two `muster init` / `projects add` invocations) can still race there;
-/// closing it would need a dedicated file-locking crate for Windows.
-#[cfg(not(unix))]
-fn lock_workspace(_dest: &Path) -> Result<(), ConfigError> {
-    Ok(())
 }
 
 /// The sibling `<name>.lock` path for a config file.
@@ -309,7 +297,6 @@ mod tests {
         assert!(matches!(error, ConfigError::RelativeProjectConfig { .. }));
     }
 
-    #[cfg(unix)]
     /// Verifies registry persistence retains an existing symlink alias instead
     /// of replacing it with the canonical target path.
     #[test]
@@ -342,12 +329,14 @@ mod tests {
             .terminals(vec![
                 ProcessSpec::builder()
                     .name(ProcessName::try_new("Shell").unwrap())
+                    .autostart(true)
                     .build(),
             ])
             .commands(vec![
                 ProcessSpec::builder()
                     .name(ProcessName::try_new("Server").unwrap())
                     .command(Some(CommandLine::try_new("serve").unwrap()))
+                    .autostart(false)
                     .stop(Some(
                         StopPolicy::builder()
                             .signal(StopSignal::Terminate)
@@ -404,7 +393,6 @@ mod tests {
         assert!(existed, "the config is written into the current directory");
     }
 
-    #[cfg(unix)]
     #[test]
     fn save_workspace_rewrites_a_symlink_target_in_place() {
         use std::os::unix::fs::symlink;
@@ -421,6 +409,7 @@ mod tests {
             .terminals(vec![
                 ProcessSpec::builder()
                     .name(ProcessName::try_new("Shell").unwrap())
+                    .autostart(true)
                     .build(),
             ])
             .commands(vec![])
@@ -447,7 +436,6 @@ mod tests {
     /// A coordinated read must not require write access to the config's directory:
     /// an adopted read-only workspace has no writable place for a `.lock` sibling,
     /// so `with_workspace_locked` falls back to an unlocked read instead of failing.
-    #[cfg(unix)]
     #[test]
     fn with_workspace_locked_reads_a_read_only_workspace() {
         use std::os::unix::fs::PermissionsExt;

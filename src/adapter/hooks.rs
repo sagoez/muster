@@ -18,7 +18,7 @@ use crate::{
     domain::{
         agent_session::{AgentProcessId, AgentSessionId, LaunchToken, NativeSessionId},
         port::AgentSessionStore,
-        process::{AGENT_PROTOCOL_VERSION, AgentTool},
+        process::{AGENT_PROTOCOL_VERSION, AgentProtocolEventKind, AgentTool},
     },
 };
 
@@ -57,16 +57,14 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 const SESSION_START_EVENT: &str = "SessionStart";
 /// Lifecycle event used by Copilot's camel-case hook format.
 const COPILOT_SESSION_START_EVENT: &str = "sessionStart";
-/// Copilot hook key holding the PowerShell command.
-#[cfg(windows)]
-const COPILOT_POWERSHELL_KEY: &str = "powershell";
 /// Copilot hook key holding the POSIX shell command.
-#[cfg(not(windows))]
 const COPILOT_BASH_KEY: &str = "bash";
 /// Kimi lifecycle matcher covering new, resumed, and reset sessions.
 const KIMI_SESSION_MATCHER: &str = "startup|resume|clear";
-/// Canonical lifecycle event accepted by the versioned wire protocol.
-const PROTOCOL_SESSION_STARTED: &str = "session_started";
+/// Separator between the words of a protocol event name on the wire.
+const EVENT_WORD_SEPARATOR: &str = "-";
+/// Separator older muster installs wrote between event-name words.
+const LEGACY_EVENT_WORD_SEPARATOR: &str = "_";
 /// Hidden CLI subcommand containing provider lifecycle commands.
 const HOOK_SUBCOMMAND: &str = "hook";
 /// Hidden CLI action that records a provider lifecycle event.
@@ -108,6 +106,11 @@ pub enum HookError {
     /// A canonical event name is not part of the supported protocol version.
     #[error("unsupported agent protocol event {0}")]
     UnsupportedProtocolEvent(String),
+    /// A known event name spelled the way an older muster install sends it.
+    #[error(
+        "agent protocol event {0} comes from a hook an older muster installed; run `muster hooks setup`"
+    )]
+    StaleHookInstall(String),
     /// A versioned event omitted its required event name.
     #[error("the agent protocol event name is missing")]
     MissingProtocolEvent,
@@ -166,7 +169,7 @@ pub enum HookError {
 
 /// Installation state of one provider integration file.
 #[derive(Clone, Copy, Debug, Display, PartialEq, Eq)]
-#[strum(serialize_all = "lowercase")]
+#[strum(serialize_all = "kebab-case")]
 pub enum HookState {
     /// No muster entry exists in the provider's config.
     Missing,
@@ -196,7 +199,7 @@ enum ExpectedHook {
     /// Command string in the grouped `SessionStart` JSON schema, with the timeout
     /// the provider's schema requires (`None` when the provider needs none).
     GroupedCommand(String, Option<u64>),
-    /// Command string under Copilot's platform command key.
+    /// Command string under Copilot's `bash` command key.
     CopilotCommand(String),
     /// Command string in a Kimi `[[hooks]]` table.
     KimiCommand(String),
@@ -377,9 +380,6 @@ impl ProviderHooks {
     /// # Errors
     /// Returns a [`HookError`] when the command or plugin cannot be built.
     fn expected_hook(executable: &str, provider: AgentTool) -> Result<ExpectedHook, HookError> {
-        #[cfg(windows)]
-        let command = Self::powershell_hook_command(executable, provider);
-        #[cfg(not(windows))]
         let command = Self::posix_hook_command(executable, provider)?;
         Ok(match provider {
             AgentTool::Claude | AgentTool::Codex | AgentTool::Gemini => {
@@ -474,12 +474,8 @@ impl ProviderHooks {
     }
 
     /// Whether Copilot's `sessionStart` schema holds exactly `command` under
-    /// the platform's command key.
+    /// its `bash` command key.
     fn copilot_has_exact(content: &str, command: &str) -> bool {
-        #[cfg(windows)]
-        let command_key = COPILOT_POWERSHELL_KEY;
-        #[cfg(not(windows))]
-        let command_key = COPILOT_BASH_KEY;
         let Ok(root) = serde_json::from_str::<Value>(content) else {
             return false;
         };
@@ -487,9 +483,9 @@ impl ProviderHooks {
             .and_then(|hooks| hooks.get(COPILOT_SESSION_START_EVENT))
             .and_then(Value::as_array)
             .is_some_and(|members| {
-                members
-                    .iter()
-                    .any(|member| member.get(command_key).and_then(Value::as_str) == Some(command))
+                members.iter().any(|member| {
+                    member.get(COPILOT_BASH_KEY).and_then(Value::as_str) == Some(command)
+                })
             })
     }
 
@@ -569,22 +565,10 @@ impl ProviderHooks {
         codex_home: &Path,
     ) -> Result<Vec<PathBuf>, HookError> {
         let executable = executable.to_str().ok_or(HookError::InvalidExecutable)?;
-        #[cfg(windows)]
-        let kimi_command = Self::powershell_hook_command(executable, AgentTool::Kimi);
-        #[cfg(not(windows))]
         let kimi_command = Self::posix_hook_command(executable, AgentTool::Kimi)?;
-        #[cfg(windows)]
-        let copilot_command = Self::powershell_hook_command(executable, AgentTool::Copilot);
-        #[cfg(not(windows))]
         let copilot_command = Self::posix_hook_command(executable, AgentTool::Copilot)?;
         let pairs = Self::provider_paths(home, config, xdg_config, codex_home);
         let mut paths: Vec<PathBuf> = pairs.iter().map(|(_, path)| path.clone()).collect();
-        #[cfg(windows)]
-        for (provider, path) in pairs[..3].iter().map(|(p, path)| (*p, path)) {
-            let command = Self::powershell_hook_command(executable, provider);
-            Self::install_grouped_json(path, provider, &command)?;
-        }
-        #[cfg(not(windows))]
         for (provider, path) in pairs[..3].iter().map(|(p, path)| (*p, path)) {
             let command = Self::posix_hook_command(executable, provider)?;
             Self::install_grouped_json(path, provider, &command)?;
@@ -655,17 +639,6 @@ impl ProviderHooks {
             "{executable} {} {CAPTURE_PROCESS_ID_ARGUMENT} \"$PPID\" {CAPTURE_PARENT_PROCESS_ID_ARGUMENT} \"$(ps -o ppid= -p \"$PPID\" | tr -d '[:space:]')\"",
             Self::capture_arguments(provider).join(" "),
         ))
-    }
-
-    /// Builds a PowerShell invocation, including the call operator required for
-    /// a quoted executable path.
-    #[cfg(any(windows, test))]
-    fn powershell_hook_command(executable: &str, provider: AgentTool) -> String {
-        let executable = executable.replace('\'', "''");
-        format!(
-            "$provider = (Get-CimInstance -ClassName Win32_Process -Filter \"ProcessId=$PID\").ParentProcessId; $parent = (Get-CimInstance -ClassName Win32_Process -Filter \"ProcessId=$provider\").ParentProcessId; & '{executable}' {} {CAPTURE_PROCESS_ID_ARGUMENT} $provider {CAPTURE_PARENT_PROCESS_ID_ARGUMENT} $parent",
-            Self::capture_arguments(provider).join(" "),
-        )
     }
 
     /// Reconciles Muster's provider-specific entry in a grouped `SessionStart`
@@ -777,16 +750,12 @@ impl ProviderHooks {
     /// # Errors
     /// Returns a [`HookError`] if the owned hook file cannot be written.
     fn install_copilot(path: &Path, command: &str) -> Result<(), HookError> {
-        #[cfg(windows)]
-        let command_key = COPILOT_POWERSHELL_KEY;
-        #[cfg(not(windows))]
-        let command_key = COPILOT_BASH_KEY;
         let hook = json!({
             "version": 1,
             "hooks": {
                 COPILOT_SESSION_START_EVENT: [{
                     "type": "command",
-                    command_key: command
+                    COPILOT_BASH_KEY: command
                 }]
             }
         });
@@ -883,6 +852,7 @@ impl ProviderHooks {
             serde_json::to_string(MUSTER_AGENT_SESSION_ENV).map_err(HookError::PluginEncoding)?;
         let arguments = serde_json::to_string(&Self::capture_arguments(AgentTool::Amp))
             .map_err(HookError::PluginEncoding)?;
+        let event = AgentProtocolEventKind::SessionStarted;
         Ok(format!(
             r#"import {{ spawn }} from "node:child_process"
 import type {{ PluginAPI }} from "@ampcode/plugin"
@@ -895,7 +865,7 @@ const capture = (sessionId: string) => {{
   const child = spawn(executable, [...{arguments}, "{CAPTURE_PROCESS_ID_ARGUMENT}", process.pid.toString(), "{CAPTURE_PARENT_PROCESS_ID_ARGUMENT}", process.ppid.toString()], {{ stdio: ["pipe", "ignore", "ignore"] }})
   child.on("error", () => {{}})
   child.stdin.on("error", () => {{}})
-  child.stdin.end(JSON.stringify({{ version: {AGENT_PROTOCOL_VERSION}, event: "session_started", session_id: sessionId }}))
+  child.stdin.end(JSON.stringify({{ version: {AGENT_PROTOCOL_VERSION}, event: "{event}", session_id: sessionId }}))
 }}
 
 export default function musterSession(amp: PluginAPI) {{
@@ -915,6 +885,7 @@ export default function musterSession(amp: PluginAPI) {{
             serde_json::to_string(MUSTER_AGENT_SESSION_ENV).map_err(HookError::PluginEncoding)?;
         let arguments = serde_json::to_string(&Self::capture_arguments(AgentTool::Opencode))
             .map_err(HookError::PluginEncoding)?;
+        let event = AgentProtocolEventKind::SessionStarted;
         Ok(format!(
             r#"import {{ spawn }} from "node:child_process"
 
@@ -943,7 +914,7 @@ const flush = () => {{
   child.on("error", () => complete(false))
   child.on("exit", (code) => complete(code === 0))
   child.stdin.on("error", () => complete(false))
-  child.stdin.end(JSON.stringify({{ version: {AGENT_PROTOCOL_VERSION}, event: "session_started", session_id: sessionId }}))
+  child.stdin.end(JSON.stringify({{ version: {AGENT_PROTOCOL_VERSION}, event: "{event}", session_id: sessionId }}))
 }}
 
 const capture = (sessionId) => {{
@@ -1004,8 +975,17 @@ export const MusterSession = async ({{ client }}) => {{
                 .get("event")
                 .and_then(Value::as_str)
                 .ok_or(HookError::MissingProtocolEvent)?;
-            if event != PROTOCOL_SESSION_STARTED {
-                return Err(HookError::UnsupportedProtocolEvent(event.to_string()));
+            match event.parse::<AgentProtocolEventKind>() {
+                Ok(AgentProtocolEventKind::SessionStarted) => {},
+                Err(_)
+                    if event
+                        .replace(LEGACY_EVENT_WORD_SEPARATOR, EVENT_WORD_SEPARATOR)
+                        .parse::<AgentProtocolEventKind>()
+                        .is_ok() =>
+                {
+                    return Err(HookError::StaleHookInstall(event.to_string()));
+                },
+                Err(_) => return Err(HookError::UnsupportedProtocolEvent(event.to_string())),
             }
         }
         let native = payload
@@ -1499,7 +1479,7 @@ mod tests {
     fn decodes_protocol_and_compatibility_payloads() {
         let protocol = json!({
             "version": AGENT_PROTOCOL_VERSION,
-            "event": "session_started",
+            "event": "session-started",
             "session_id": "native-one"
         });
         let native = json!({ "sessionId": "native-two" });
@@ -1530,19 +1510,55 @@ mod tests {
         ));
     }
 
-    /// Quoted Windows paths use PowerShell's call operator and escape embedded
-    /// single quotes.
+    /// A plugin from an older install still spells the event the old way; its
+    /// capture is refused with the fix rather than as an unknown event.
     #[test]
-    fn powershell_commands_invoke_quoted_executables() {
-        let command = ProviderHooks::powershell_hook_command(
-            r"C:\Program Files\Muster's\muster.exe",
-            AgentTool::Copilot,
-        );
+    fn an_old_spelling_of_a_known_event_asks_for_hooks_setup() {
+        let event = json!({
+            "version": AGENT_PROTOCOL_VERSION,
+            "event": "session_started",
+            "session_id": "native-one"
+        });
 
-        assert_eq!(
-            command,
-            r#"$provider = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$PID").ParentProcessId; $parent = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$provider").ParentProcessId; & 'C:\Program Files\Muster''s\muster.exe' hook capture --provider copilot --process-id $provider --parent-process-id $parent"#
+        let error = ProviderHooks::native_id(&event).unwrap_err();
+
+        assert!(
+            matches!(error, HookError::StaleHookInstall(ref name) if name == "session_started"),
+            "{error:?}"
         );
+        assert!(error.to_string().contains("muster hooks setup"), "{error}");
+    }
+
+    /// An Amp or OpenCode plugin written by an older install, which sends the
+    /// old event spelling, reads as stale so `muster doctor` asks for setup.
+    #[test]
+    fn a_plugin_with_the_old_event_spelling_is_stale() {
+        let root = std::env::temp_dir().join(format!("muster-old-plugin-{}", uuid::Uuid::new_v4()));
+        let home = root.join("home");
+        let config = root.join("config");
+        let xdg = root.join("xdg");
+        let codex = home.join(CODEX_CONFIG_DIR);
+        fs::create_dir_all(&home).unwrap();
+        let exe = Path::new("/opt/muster/muster");
+        ProviderHooks::setup_in_with_codex(exe, &home, &config, &xdg, &codex).unwrap();
+        let current = AgentProtocolEventKind::SessionStarted.to_string();
+        let old = current.replace('-', "_");
+        for plugin in [config.join(AMP_PLUGIN), xdg.join(OPENCODE_PLUGIN)] {
+            let content = fs::read_to_string(&plugin).unwrap();
+            assert!(content.contains(&current), "{}", plugin.display());
+            fs::write(&plugin, content.replace(&current, &old)).unwrap();
+        }
+
+        let statuses = ProviderHooks::status_in(exe, &home, &config, &xdg, &codex).unwrap();
+
+        for provider in [AgentTool::Amp, AgentTool::Opencode] {
+            let status = statuses
+                .iter()
+                .find(|status| status.provider() == provider)
+                .unwrap();
+            assert_eq!(status.state(), HookState::Stale, "{provider}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Owned Node integrations absorb asynchronous spawn and pipe errors when
@@ -1956,7 +1972,6 @@ mod tests {
 
     /// Atomic replacement retains restrictive permissions from an existing
     /// provider settings file.
-    #[cfg(unix)]
     #[test]
     fn atomic_writes_preserve_existing_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -1979,7 +1994,6 @@ mod tests {
 
     /// Rewriting a symlinked provider config updates its target without
     /// replacing the dotfile-managed alias.
-    #[cfg(unix)]
     #[test]
     fn atomic_writes_preserve_provider_config_symlinks() {
         use std::os::unix::fs::symlink;
@@ -2005,7 +2019,6 @@ mod tests {
 
     /// First-time setup follows a relative dangling symlink and creates its
     /// target without replacing the dotfile-managed alias.
-    #[cfg(unix)]
     #[test]
     fn atomic_writes_preserve_dangling_provider_config_symlinks() {
         use std::os::unix::fs::symlink;

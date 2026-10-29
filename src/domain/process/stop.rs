@@ -10,8 +10,8 @@ const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Graceful signal sent before a command is force-killed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum StopSignal {
     /// Requests the conventional service shutdown path (SIGTERM on Unix).
     Terminate,

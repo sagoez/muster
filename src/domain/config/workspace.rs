@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use getset::{Getters, WithSetters};
 use serde::{Deserialize, Serialize};
@@ -7,11 +7,11 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::{ConfigError, ProcessSpec},
     process::{Process, ProcessKind},
-    value::PaneId,
+    value::{PaneId, ProcessName},
 };
 
-/// The full workspace definition: processes grouped by section, matching the
-/// sidebar's AGENTS / TERMINALS / COMMANDS layout. Every section must be present
+/// The full workspace definition: processes grouped into the agents,
+/// terminals and commands sections. Every section must be present
 /// in the file; use an empty list for a section with no processes.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters, WithSetters, TypedBuilder)]
 #[set_with]
@@ -31,8 +31,8 @@ impl WorkspaceConfig {
     /// Returns [`ConfigError::InvalidStopPolicy`] when an agent or terminal
     /// configures the command-only graceful shutdown policy,
     /// [`ConfigError::AgentCommandMissing`] when an agent omits its command, or
-    /// [`ConfigError::DuplicateAgentName`] when two agents share a name (which
-    /// would collide their durable sessions).
+    /// [`ConfigError::DuplicateProcessName`] when two processes of any kinds
+    /// share a name.
     pub fn validate(&self) -> Result<(), ConfigError> {
         for (kind, specs) in [
             (ProcessKind::Agent, &self.agents),
@@ -45,33 +45,56 @@ impl WorkspaceConfig {
                 });
             }
         }
-        let mut seen = HashSet::new();
-        for spec in &self.agents {
-            if spec.command().is_none() {
-                return Err(ConfigError::AgentCommandMissing {
-                    name: spec.name().clone(),
-                });
-            }
-            if !seen.insert(spec.name()) {
-                return Err(ConfigError::DuplicateAgentName {
-                    name: spec.name().clone(),
-                });
+        if let Some(spec) = self.agents.iter().find(|spec| spec.command().is_none()) {
+            return Err(ConfigError::AgentCommandMissing {
+                name: spec.name().clone(),
+            });
+        }
+        let mut seen: HashMap<String, (ProcessKind, usize)> = HashMap::new();
+        for (kind, specs) in self.sections() {
+            for (index, spec) in specs.iter().enumerate() {
+                let entry = index + 1;
+                if let Some((first_kind, first_entry)) =
+                    seen.insert(spec.name().key(), (kind, entry))
+                {
+                    return Err(ConfigError::DuplicateProcessName {
+                        name: spec.name().clone(),
+                        first_kind,
+                        first_entry,
+                        second_kind: kind,
+                        second_entry: entry,
+                    });
+                }
             }
         }
         Ok(())
     }
 
-    /// Flattens every section into ordered `Process` entities, assigning each a
-    /// stable `PaneId` and tagging it with its section's kind.
-    pub fn to_processes(&self) -> Vec<Process> {
-        let sections = [
+    /// Whether a process of any section uses `name`, however its accents are
+    /// encoded.
+    pub fn uses_name(&self, name: &ProcessName) -> bool {
+        let key = name.key();
+        self.sections()
+            .into_iter()
+            .flat_map(|(_, specs)| specs)
+            .any(|spec| spec.name().key() == key)
+    }
+
+    /// Every section with its kind, in section order.
+    fn sections(&self) -> [(ProcessKind, &Vec<ProcessSpec>); 3] {
+        [
             (ProcessKind::Agent, &self.agents),
             (ProcessKind::Terminal, &self.terminals),
             (ProcessKind::Command, &self.commands),
-        ];
+        ]
+    }
+
+    /// Flattens every section into ordered `Process` entities, assigning each a
+    /// stable `PaneId` and tagging it with its section's kind.
+    pub fn to_processes(&self) -> Vec<Process> {
         let mut processes = Vec::new();
         let mut next_id = 0;
-        for (kind, specs) in sections {
+        for (kind, specs) in self.sections() {
             for spec in specs {
                 processes.push(spec.to_process(PaneId::new(next_id), kind));
                 next_id += 1;
@@ -86,7 +109,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::process::{ProcessState, RestartPolicy, StopSignal};
+    use crate::domain::{
+        process::{ProcessState, RestartPolicy, StopSignal},
+        value::CommandLine,
+    };
 
     /// Grace period configured by the sample command.
     const SAMPLE_STOP_GRACE: Duration = Duration::from_secs(5);
@@ -95,13 +121,16 @@ agents:
   - name: Claude Code
     command: claude
     description: Primary coding agent
+    autostart: true
 terminals:
   - name: Blank terminal
     command: bash
+    autostart: true
 commands:
   - name: npm:dev
     command: npm run dev
-    restart: on_failure
+    autostart: false
+    restart: on-failure
     stop:
       signal: interrupt
       grace_period: 5s
@@ -129,6 +158,7 @@ commands:
 agents:
   - name: "  "
     command: claude
+    autostart: true
 terminals: []
 commands: []
 "#;
@@ -152,6 +182,7 @@ commands: []
             r#"
 agents:
   - name: Claude
+    autostart: true
     stop:
       signal: terminate
       grace_period: 5s
@@ -179,8 +210,10 @@ commands: []
 agents:
   - name: claude
     command: claude
+    autostart: true
   - name: claude
     command: claude --model opus
+    autostart: true
 terminals: []
 commands: []
 "#,
@@ -189,7 +222,64 @@ commands: []
 
         assert!(matches!(
             invalid.validate(),
-            Err(ConfigError::DuplicateAgentName { name }) if name.as_ref() == "claude"
+            Err(ConfigError::DuplicateProcessName { name, .. }) if name.as_ref() == "claude"
+        ));
+    }
+
+    /// Every process command names a process, so a name is unique across
+    /// every section, and the error names both entries.
+    #[test]
+    fn rejects_a_name_shared_across_sections() {
+        let invalid: WorkspaceConfig = serde_yaml_ng::from_str(
+            r#"
+agents: []
+terminals:
+  - name: shell
+    command: bash
+    autostart: true
+commands:
+  - name: api
+    command: sleep 600
+    autostart: true
+  - name: shell
+    command: sleep 600
+    autostart: false
+"#,
+        )
+        .unwrap();
+
+        let error = invalid.validate().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "the name 'shell' is used by two processes, terminal #1 and command #2; process names must be unique within a project"
+        );
+    }
+
+    /// Names that differ only in how an accent is encoded read the same, so
+    /// they count as one name.
+    #[test]
+    fn rejects_names_equal_in_normal_form_c() {
+        let config = WorkspaceConfig::builder()
+            .agents(vec![])
+            .terminals(vec![])
+            .commands(
+                ["caf\u{e9}", "cafe\u{301}"]
+                    .into_iter()
+                    .map(|name| {
+                        ProcessSpec::builder()
+                            .name(ProcessName::try_new(name).unwrap())
+                            .command(Some(CommandLine::try_new("true").unwrap()))
+                            .autostart(false)
+                            .build()
+                    })
+                    .collect(),
+            )
+            .build();
+
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::DuplicateProcessName { .. })
         ));
     }
 
@@ -201,6 +291,7 @@ commands: []
             r#"
 agents:
   - name: claude
+    autostart: true
 terminals: []
 commands: []
 "#,
@@ -224,27 +315,8 @@ commands: []
 agents:
   - name: claude
     command: claude --system-prompt foo | tee agent.log
+    autostart: true
 terminals: []
-commands: []
-"#,
-        )
-        .unwrap();
-
-        assert!(config.validate().is_ok());
-    }
-
-    /// The same name may repeat across sections; only agent names are the
-    /// durable-session key, so a terminal and an agent can share a name.
-    #[test]
-    fn allows_a_name_shared_across_sections() {
-        let config: WorkspaceConfig = serde_yaml_ng::from_str(
-            r#"
-agents:
-  - name: shell
-    command: claude
-terminals:
-  - name: shell
-    command: bash
 commands: []
 "#,
         )

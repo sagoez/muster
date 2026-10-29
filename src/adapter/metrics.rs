@@ -29,7 +29,7 @@ impl ProcessMetrics for SysinfoMetrics {
         }
         // Refresh only CPU and memory (the parent PID is always collected), so a
         // host with many processes is not enumerated for disk, exe, and command
-        // data on the single TUI event loop. `without_tasks` is essential, not
+        // data on the service's event loop. `without_tasks` is essential, not
         // just cheaper: `nothing()` leaves task collection on, and on Linux each
         // thread would appear as a child in `processes()`, so summing the subtree
         // would add the process-wide RSS once per thread and inflate the total.

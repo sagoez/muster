@@ -1,20 +1,14 @@
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
-    path::{Path, PathBuf},
+    path::Path,
+    thread,
     time::Duration,
 };
 
+use crossbeam_channel::bounded;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::adapter::config::state_dir_path;
-
-/// Subdirectory of the state dir holding per-project workspace sockets.
-const SOCKET_DIR: &str = "ipc";
-/// Suffix of a workspace IPC socket file.
-const SOCKET_SUFFIX: &str = ".sock";
 /// Longest a peer may take to send its request line, or to read the response,
 /// before the connection is abandoned. Bounds a client that connects and then
 /// stalls, so it cannot hold a server thread forever.
@@ -22,23 +16,6 @@ const PEER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest request accepted, in bytes. Caps server-side allocation so one peer
 /// cannot force unbounded memory with an endless line.
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
-
-/// The unix-socket path a running workspace for `project` listens on, and that an
-/// MCP client connects to. The absolutized project path is hashed so the socket
-/// name stays within the platform's socket-path length limit and is stable for a
-/// given project across processes.
-///
-/// A unix socket path is capped by `sun_path` (104 bytes on macOS, 108 on Linux),
-/// which is why the project is hashed to 16 characters rather than embedded. If
-/// the state directory itself is long enough to breach that cap, `bind` fails and
-/// live workspace tools stay unavailable; coordination is unaffected.
-#[must_use]
-pub fn socket_path(project: &Path) -> Option<PathBuf> {
-    let mut hasher = DefaultHasher::new();
-    project.hash(&mut hasher);
-    let name = format!("{:016x}{SOCKET_SUFFIX}", hasher.finish());
-    state_dir_path(SOCKET_DIR).map(|dir| dir.join(name))
-}
 
 /// Binds a listener at `path`, creating its parent directory.
 ///
@@ -73,6 +50,24 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
+/// Connects to the socket at `path`, giving up after `timeout` so a listener
+/// whose backlog is full cannot stall the caller. The attempt runs on a
+/// helper thread, which a stalled connect leaves to finish on its own.
+///
+/// # Errors
+/// Returns the connect error, or one of kind [`io::ErrorKind::TimedOut`] when
+/// the connection was not made in time.
+pub fn connect_within(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
+    let (sender, receiver) = bounded(1);
+    let path = path.to_path_buf();
+    thread::spawn(move || {
+        let _ = sender.send(UnixStream::connect(path));
+    });
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
+}
+
 /// Removes a workspace socket file, ignoring an already-absent path. Called on
 /// clean shutdown so sockets do not accumulate in the state directory.
 pub fn unlink(path: &Path) {
@@ -90,14 +85,53 @@ where
     Req: Serialize,
     Resp: DeserializeOwned,
 {
+    exchange(UnixStream::connect(path)?, request)
+}
+
+/// As [`request`], giving up once the response has not arrived within
+/// `reply_timeout`, so a wedged server cannot hang its client.
+///
+/// # Errors
+/// Returns an [`io::Error`] as [`request`] does, or one of kind
+/// [`io::ErrorKind::WouldBlock`] or [`io::ErrorKind::TimedOut`] when the
+/// response is late.
+pub fn request_within<Req, Resp>(
+    path: &Path,
+    request: &Req,
+    reply_timeout: Duration,
+) -> io::Result<Resp>
+where
+    Req: Serialize,
+    Resp: DeserializeOwned,
+{
     let stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(reply_timeout))?;
+    stream.set_write_timeout(Some(reply_timeout))?;
+    exchange(stream, request)
+}
+
+/// Writes `request` on `stream` as one line and reads one response line.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the exchange fails or the response does not
+/// parse.
+fn exchange<Req, Resp>(stream: UnixStream, request: &Req) -> io::Result<Resp>
+where
+    Req: Serialize,
+    Resp: DeserializeOwned,
+{
     let encoded = serde_json::to_string(request).map_err(io::Error::other)?;
     (&stream).write_all(encoded.as_bytes())?;
     (&stream).write_all(b"\n")?;
     (&stream).flush()?;
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    if reader.read_line(&mut line)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the peer closed the connection without answering",
+        ));
+    }
     serde_json::from_str(line.trim_end()).map_err(io::Error::other)
 }
 
@@ -140,7 +174,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{path::PathBuf, thread};
 
     use serde::Deserialize;
 
@@ -162,16 +196,6 @@ mod tests {
     fn short_socket_path() -> PathBuf {
         let unique = uuid::Uuid::new_v4().simple().to_string();
         Path::new("/tmp").join(format!("mstr-{}.sock", &unique[..8]))
-    }
-
-    /// A socket path is stable for a project and differs between projects.
-    #[test]
-    fn socket_paths_are_stable_and_project_scoped() {
-        let one = socket_path(Path::new("/repo/a/muster.yml"));
-        let two = socket_path(Path::new("/repo/a/muster.yml"));
-        let other = socket_path(Path::new("/repo/b/muster.yml"));
-        assert_eq!(one, two, "same project resolves to the same socket");
-        assert_ne!(one, other, "different projects get different sockets");
     }
 
     /// A request round-trips through the listener to a handler and back.

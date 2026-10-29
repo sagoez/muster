@@ -1,15 +1,25 @@
+mod byte_size;
 mod cols;
 mod command_line;
 mod description;
+mod detach_key;
 mod pane_id;
+mod positive_duration;
 mod process_name;
+mod process_ref;
 mod project_name;
 mod rows;
+mod unresolved_process;
 
+pub use byte_size::*;
 pub use cols::*;
 pub use command_line::*;
 pub use description::*;
+pub use detach_key::*;
 pub use pane_id::*;
+pub use positive_duration::*;
 pub use process_name::*;
+pub use process_ref::*;
 pub use project_name::*;
 pub use rows::*;
+pub use unresolved_process::*;

@@ -1,42 +1,34 @@
-#[cfg(unix)]
-use std::io;
 use std::{
+    ffi::CStr,
     fmt::Display,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded};
-use portable_pty::{CommandBuilder, PtySize as PortablePtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system};
+use signal_hook::low_level;
 
 use crate::{
     constants::MUSTER_PROJECT_ENV,
     domain::{
         agent_session::AgentSessionId,
-        port::{OutputSink, ProcessHandle, ProcessRunner},
+        port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         process::StopSignal,
-        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
+        pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
         value::CommandLine,
     },
 };
 
 /// Size of a single PTY read buffer, in bytes.
 const READ_BUFFER_BYTES: usize = 4096;
-/// POSIX shell used to interpret each non-agent command line.
-#[cfg(unix)]
-const SHELL_PROGRAM: &str = "/bin/sh";
-/// Windows command shell used to interpret each non-agent command line.
-#[cfg(windows)]
-const SHELL_PROGRAM: &str = "cmd.exe";
+/// POSIX shell that interprets each command line muster runs.
+pub const SHELL_PROGRAM: &str = "/bin/sh";
 /// POSIX flag that runs the following argument as a shell command.
-#[cfg(unix)]
-const SHELL_COMMAND_FLAG: &str = "-c";
-/// Windows flag that runs the following argument as a shell command.
-#[cfg(windows)]
-const SHELL_COMMAND_FLAG: &str = "/C";
+pub const SHELL_COMMAND_FLAG: &str = "-c";
 /// Hidden CLI namespace that binds session ownership before starting an agent.
 const HOOK_SUBCOMMAND: &str = "hook";
 /// Hidden CLI action that starts a provider after recording its owner process.
@@ -62,10 +54,8 @@ const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 /// Poll interval used while a direct child has exited but its process group is
 /// still completing descendant cleanup.
 const PROCESS_GROUP_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Reported when suspend/resume is requested on a platform without job-control
-/// signals.
-#[cfg(not(unix))]
-const SUSPEND_UNSUPPORTED: &str = "suspend and resume are only supported on Unix";
+/// Reported when a writer panicked mid-write, leaving the PTY input unusable.
+const INPUT_POISONED: &str = "pty input writer is poisoned";
 
 /// Spawns processes under a native PTY using `portable-pty`.
 #[derive(Clone, Copy, Default)]
@@ -94,10 +84,8 @@ impl ProcessRunner for PortablePtyRunner {
             },
             None => CommandBuilder::new_default_prog(),
         };
+        ensure_working_dir(&request)?;
         if let Some(dir) = request.working_dir() {
-            if !dir.is_dir() {
-                return Err(PtyError::InvalidWorkingDir(dir.clone()));
-            }
             command.cwd(dir);
         } else if let Ok(cwd) = std::env::current_dir() {
             command.cwd(cwd);
@@ -148,8 +136,8 @@ impl ProcessRunner for PortablePtyRunner {
         });
         thread::spawn(move || {
             let outcome = match child.wait() {
-                Ok(status) if status.success() => ExitOutcome::Succeeded,
-                _ => ExitOutcome::Failed,
+                Ok(status) => exit_outcome(&status),
+                Err(_) => ExitOutcome::FAILED_UNKNOWN,
             };
             // A descendant can retain the PTY after the direct shell exits. A
             // graceful stop supplies its full cleanup window; ordinary exits use
@@ -170,7 +158,7 @@ impl ProcessRunner for PortablePtyRunner {
 
         Ok(Box::new(PtyProcessHandle {
             master: pair.master,
-            writer,
+            input: PtyInput(Arc::new(Mutex::new(writer))),
             killer,
             grace_tx,
             pid,
@@ -207,6 +195,18 @@ impl PortablePtyRunner {
             command.as_ref(),
         ]);
         launcher
+    }
+}
+
+/// Refuses a request whose configured working directory is missing or not a
+/// directory, before anything is spawned.
+///
+/// # Errors
+/// Returns [`PtyError::InvalidWorkingDir`] naming the bad directory.
+pub fn ensure_working_dir(request: &SpawnRequest) -> Result<(), PtyError> {
+    match request.working_dir() {
+        Some(dir) if !dir.is_dir() => Err(PtyError::InvalidWorkingDir(dir.clone())),
+        _ => Ok(()),
     }
 }
 
@@ -253,30 +253,42 @@ where
     }
 }
 
-/// Reports whether any Unix process still belongs to the spawned process
-/// group. Other platforms rely solely on PTY reader completion.
+/// Reports whether any process still belongs to the spawned process group.
 fn process_group_is_alive(pid: Option<u32>) -> bool {
-    #[cfg(unix)]
-    {
-        let Some(pid) = pid else {
-            return false;
-        };
-        if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
-            return true;
-        }
-        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let Some(pid) = pid else {
+        return false;
+    };
+    if unsafe { libc::kill(-(pid as libc::pid_t), 0) } == 0 {
+        return true;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The PTY's input writer, shared so another thread can write while the
+/// handle's owner keeps controlling the process.
+#[derive(Clone)]
+struct PtyInput(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl ProcessInput for PtyInput {
+    /// Writes and flushes `bytes` to the PTY.
+    ///
+    /// # Errors
+    /// Returns a `PtyError` if the write fails or a writer panicked mid-write.
+    fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
+        let mut writer = self
+            .0
+            .lock()
+            .map_err(|_| PtyError::System(INPUT_POISONED.to_string()))?;
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(())
     }
 }
 
 /// Live handle to a PTY-backed process.
 struct PtyProcessHandle {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    input: PtyInput,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     grace_tx: Sender<Duration>,
     pid: Option<u32>,
@@ -287,10 +299,12 @@ impl ProcessHandle for PtyProcessHandle {
         self.pid
     }
 
+    fn input(&self) -> Option<Box<dyn ProcessInput>> {
+        Some(Box::new(self.input.clone()))
+    }
+
     fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
-        Ok(())
+        self.input.write_input(bytes)
     }
 
     fn resize(&mut self, size: PtySize) -> Result<(), PtyError> {
@@ -300,42 +314,20 @@ impl ProcessHandle for PtyProcessHandle {
     }
 
     fn pause(&mut self) -> Result<(), PtyError> {
-        #[cfg(unix)]
-        {
-            signal_group(self.pid, libc::SIGSTOP)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(PtyError::Unsupported(SUSPEND_UNSUPPORTED.to_string()))
-        }
+        signal_group(self.pid, libc::SIGSTOP)
     }
 
     fn resume(&mut self) -> Result<(), PtyError> {
-        #[cfg(unix)]
-        {
-            signal_group(self.pid, libc::SIGCONT)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(PtyError::Unsupported(SUSPEND_UNSUPPORTED.to_string()))
-        }
+        signal_group(self.pid, libc::SIGCONT)
     }
 
     fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError> {
         // Publish the grace before signalling: if the signal makes the direct shell
         // exit immediately, its waiter still observes the intended deadline.
         let _ = self.grace_tx.try_send(grace);
-        #[cfg(unix)]
-        {
-            // A paused command cannot handle a shutdown signal until it resumes.
-            let _ = signal_group(self.pid, libc::SIGCONT);
-            signal_group(self.pid, unix_signal(signal))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = signal;
-            self.killer.kill().map_err(system_error)
-        }
+        // A paused command cannot handle a shutdown signal until it resumes.
+        let _ = signal_group(self.pid, libc::SIGCONT);
+        signal_group(self.pid, unix_signal(signal))
     }
 
     fn kill(&mut self) -> Result<(), PtyError> {
@@ -343,12 +335,59 @@ impl ProcessHandle for PtyProcessHandle {
     }
 }
 
+/// Highest signal number tried when recovering a signal from its description.
+const MAX_SIGNAL: libc::c_int = 64;
+/// How portable-pty describes a signal `strsignal` has no text for.
+const UNDESCRIBED_SIGNAL_PREFIX: &str = "Signal ";
+/// Name of a signal with no POSIX name, before its number.
+const UNNAMED_SIGNAL_PREFIX: &str = "signal-";
+
 /// Maps the domain shutdown signal to its Unix signal number.
-#[cfg(unix)]
-fn unix_signal(signal: StopSignal) -> libc::c_int {
+pub(crate) fn unix_signal(signal: StopSignal) -> libc::c_int {
     match signal {
         StopSignal::Terminate => libc::SIGTERM,
         StopSignal::Interrupt => libc::SIGINT,
+    }
+}
+
+/// How a child that ended with `status` exited: success, or the status or
+/// signal that ended it.
+fn exit_outcome(status: &ExitStatus) -> ExitOutcome {
+    match status.signal() {
+        Some(described) => match signal_name(described) {
+            Some(name) => ExitOutcome::Failed(ExitCause::Signal(name)),
+            None => ExitOutcome::FAILED_UNKNOWN,
+        },
+        None if status.success() => ExitOutcome::Succeeded,
+        None => ExitOutcome::Failed(ExitCause::Status(status.exit_code())),
+    }
+}
+
+/// The name of the signal portable-pty described as `described`, or `None`
+/// when no signal reads that way. portable-pty keeps only `strsignal`'s text,
+/// which depends on the locale, so the number is recovered by describing each
+/// signal the same way in this process and the name derived from the number.
+fn signal_name(described: &str) -> Option<SignalName> {
+    let number = described
+        .strip_prefix(UNDESCRIBED_SIGNAL_PREFIX)
+        .and_then(|number| number.parse::<libc::c_int>().ok())
+        .or_else(|| {
+            (1..=MAX_SIGNAL).find(|&number| strsignal_text(number).as_deref() == Some(described))
+        })?;
+    let token = match low_level::signal_name(number) {
+        Some(posix) => posix.to_string(),
+        None => format!("{UNNAMED_SIGNAL_PREFIX}{number}"),
+    };
+    SignalName::try_new(token).ok()
+}
+
+/// How `strsignal` describes the signal `number` in this process's locale.
+fn strsignal_text(number: libc::c_int) -> Option<String> {
+    // SAFETY: `strsignal` returns null or a NUL-terminated string that stays
+    // valid until the next call on this thread; it is copied out at once.
+    unsafe {
+        let text = libc::strsignal(number);
+        (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
     }
 }
 
@@ -368,13 +407,12 @@ fn system_error<E: Display>(error: E) -> PtyError {
 }
 
 /// Sends `signal` to a process's whole group (negative pid), so it reaches
-/// backgrounded descendants and not just the direct child. Unix only.
+/// backgrounded descendants and not just the direct child.
 ///
 /// # Errors
 /// Returns `Unsupported` when there is no pid to target, or the OS error when
 /// `kill` reports failure (e.g. the process has already exited, or `EPERM`).
-#[cfg(unix)]
-fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), PtyError> {
+pub(crate) fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), PtyError> {
     let pid = pid.ok_or_else(|| PtyError::Unsupported("no pid to signal".to_string()))?;
     if unsafe { libc::kill(-(pid as libc::pid_t), signal) } == -1 {
         return Err(PtyError::Io(std::io::Error::last_os_error()));
@@ -382,9 +420,9 @@ fn signal_group(pid: Option<u32>, signal: libc::c_int) -> Result<(), PtyError> {
     Ok(())
 }
 
-/// Terminates a spawned process: a whole-group SIGKILL on Unix, with the
-/// portable child killer as the fallback and the non-Unix path. Returns success
-/// when either mechanism delivers the request.
+/// Terminates a spawned process: a whole-group SIGKILL, with the portable child
+/// killer as the fallback. Returns success when either mechanism delivers the
+/// request.
 ///
 /// # Errors
 /// Returns a `PtyError` when neither termination mechanism succeeds.
@@ -392,19 +430,11 @@ fn terminate_group(
     pid: Option<u32>,
     killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
 ) -> Result<(), PtyError> {
-    #[cfg(unix)]
-    {
-        let group_result = signal_group(pid, libc::SIGKILL);
-        let child_result = killer.kill().map_err(system_error);
-        match (group_result, child_result) {
-            (Ok(()), _) | (_, Ok(())) => Ok(()),
-            (Err(error), Err(_)) => Err(error),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        killer.kill().map_err(system_error)
+    let group_result = signal_group(pid, libc::SIGKILL);
+    let child_result = killer.kill().map_err(system_error);
+    match (group_result, child_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(error), Err(_)) => Err(error),
     }
 }
 
@@ -419,9 +449,12 @@ mod tests {
     use super::*;
     use crate::domain::{
         agent_session::AgentSessionId,
-        value::{Cols, CommandLine, Rows},
+        process::ProcessKind,
+        value::{Cols, CommandLine, ProcessName, Rows},
     };
 
+    /// Name given to every test process.
+    const TEST_PROCESS: &str = "test";
     /// Maximum time to wait for a test process's events.
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Grace used by termination tests, long enough for delayed descendant
@@ -446,6 +479,8 @@ mod tests {
 
     fn request(command: &str) -> SpawnRequest {
         SpawnRequest::builder()
+            .process(ProcessName::try_new(TEST_PROCESS).unwrap())
+            .kind(ProcessKind::Command)
             .command(Some(CommandLine::try_new(command).unwrap()))
             .size(
                 PtySize::builder()
@@ -510,6 +545,9 @@ mod tests {
             match output {
                 ProcessOutput::Chunk(chunk) => bytes.extend_from_slice(&chunk),
                 ProcessOutput::Exited(exit) => outcome = Some(exit),
+                other @ (ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -538,13 +576,15 @@ mod tests {
             .iter()
             .flat_map(|event| match event {
                 ProcessOutput::Chunk(chunk) => chunk.clone(),
-                ProcessOutput::Exited(_) => Vec::new(),
+                ProcessOutput::Exited(_)
+                | ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_) => Vec::new(),
             })
             .collect();
         assert!(String::from_utf8_lossy(&output).contains("hello"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn graceful_termination_drains_shutdown_output() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -562,6 +602,9 @@ mod tests {
             match rx.recv_timeout(OUTPUT_TIMEOUT).unwrap() {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
+                other @ (ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
             }
         }
         handle
@@ -571,6 +614,9 @@ mod tests {
             match output {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
                 ProcessOutput::Exited(_) => break,
+                other @ (ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -583,7 +629,6 @@ mod tests {
     /// those that do not (dash, the usual `/bin/sh` on CI) report 0. Either way a
     /// setup that only switches shells at the top level behaves inside a pane as in
     /// a bare terminal.
-    #[cfg(unix)]
     #[test]
     fn a_pane_shell_starts_at_the_base_nesting_level() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -608,7 +653,6 @@ mod tests {
         assert!(level <= 1, "pane shell nested at level {level}: {output:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn graceful_termination_preserves_descendant_cleanup_after_shell_exit() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -624,6 +668,9 @@ mod tests {
             match rx.recv_timeout(OUTPUT_TIMEOUT).unwrap() {
                 ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
                 ProcessOutput::Exited(_) => panic!("command exited before termination"),
+                other @ (ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
             }
         }
         #[cfg(target_os = "macos")]
@@ -639,6 +686,9 @@ mod tests {
                     exited = true;
                     break;
                 },
+                other @ (ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_)) => panic!("unexpected output: {other:?}"),
             }
         }
 
@@ -680,7 +730,10 @@ mod tests {
             .iter()
             .map(|event| match event {
                 ProcessOutput::Chunk(chunk) => chunk.len(),
-                ProcessOutput::Exited(_) => 0,
+                ProcessOutput::Exited(_)
+                | ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_) => 0,
             })
             .sum();
         assert_eq!(
@@ -703,13 +756,53 @@ mod tests {
             }
         }
 
-        assert_eq!(outcome, Some(ExitOutcome::Failed));
+        assert_eq!(outcome, Some(ExitOutcome::Failed(ExitCause::Status(3))));
+    }
+
+    /// A child ended by a signal reports the signal, not a status.
+    #[test]
+    fn reports_the_signal_that_ended_a_child() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _handle = PortablePtyRunner
+            .spawn(request("kill -KILL $$"), Box::new(ChannelSink(tx)))
+            .unwrap();
+
+        let mut outcome = None;
+        while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
+            if let ProcessOutput::Exited(exit) = output {
+                outcome = Some(exit);
+            }
+        }
+
+        assert_eq!(
+            outcome,
+            Some(ExitOutcome::Failed(ExitCause::Signal(
+                SignalName::try_new("sigkill").unwrap()
+            )))
+        );
+    }
+
+    /// A signal is named from its number, whichever way the OS words it.
+    #[test]
+    fn a_signal_is_named_from_its_number() {
+        assert_eq!(
+            signal_name(&strsignal_text(libc::SIGTERM).unwrap()),
+            Some(SignalName::try_new("sigterm").unwrap())
+        );
+        assert_eq!(
+            signal_name("Signal 63"),
+            Some(SignalName::try_new("signal-63").unwrap()),
+            "a signal with no POSIX name is named by its number"
+        );
+        assert_eq!(signal_name("no such signal"), None);
     }
 
     #[test]
     fn invalid_working_directory_is_rejected() {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let request = SpawnRequest::builder()
+            .process(ProcessName::try_new(TEST_PROCESS).unwrap())
+            .kind(ProcessKind::Command)
             .command(Some(CommandLine::try_new("true").unwrap()))
             .working_dir(Some(PathBuf::from("/no/such/muster/dir")))
             .size(

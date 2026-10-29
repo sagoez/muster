@@ -1,7 +1,9 @@
+use std::io;
+
 use thiserror::Error;
 
 use crate::{
-    adapter::hooks::HookError,
+    adapter::{holder::HolderError, hooks::HookError, service::ServiceError},
     domain::{config::ConfigError, pty::PtyError},
 };
 
@@ -13,7 +15,7 @@ use crate::{
 pub enum MusterError {
     /// An I/O failure while driving the terminal or a child process.
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     /// A workspace configuration failure.
     #[error(transparent)]
     Config(#[from] ConfigError),
@@ -23,6 +25,12 @@ pub enum MusterError {
     /// A provider lifecycle integration failure.
     #[error(transparent)]
     Hook(#[from] HookError),
+    /// A process holder failure.
+    #[error(transparent)]
+    Holder(#[from] HolderError),
+    /// A service failure.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
 }
 
 /// Crate-wide result alias.

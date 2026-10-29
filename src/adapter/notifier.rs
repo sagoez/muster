@@ -2,7 +2,7 @@ use std::{collections::HashMap, thread};
 
 use crossbeam_channel::{Sender, bounded};
 use notify_rust::Notification as OsNotification;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 use notify_rust::NotificationHandle as OsNotificationHandle;
 
 use crate::{
@@ -22,13 +22,13 @@ const QUEUE_CAPACITY: usize = 64;
 /// later Kitty update or close operations.
 const MAX_ACTIVE_NOTIFICATIONS: usize = 64;
 /// XDG markup entity for a literal ampersand in a plain-text body.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 const XDG_AMPERSAND: &str = "&amp;";
 /// XDG markup entity for a literal less-than sign in a plain-text body.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 const XDG_LESS_THAN: &str = "&lt;";
 /// XDG markup entity for a literal greater-than sign in a plain-text body.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 const XDG_GREATER_THAN: &str = "&gt;";
 
 /// A Kitty identifier scoped to the managed pane and terminal lifetime that
@@ -190,7 +190,7 @@ impl<B: NotificationBackend> DeliveryWorker<B> {
 /// Concrete `notify-rust` backend used by the desktop worker.
 struct OsBackend;
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 impl NotificationBackend for OsBackend {
     type Handle = OsNotificationHandle;
 
@@ -208,10 +208,10 @@ impl NotificationBackend for OsBackend {
     }
 }
 
-// notify-rust's default macOS backend and Windows backend do not expose the
-// update/close handle API. They still receive ordered shows; retaining unit
-// handles prevents duplicate shows from being treated as unidentified.
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+// notify-rust's default macOS backend does not expose the update/close handle
+// API. It still receives ordered shows; retaining unit handles prevents
+// duplicate shows from being treated as unidentified.
+#[cfg(target_os = "macos")]
 impl NotificationBackend for OsBackend {
     type Handle = ();
 
@@ -250,7 +250,7 @@ fn configure_os_notification(output: &mut OsNotification, notification: &Notific
 
 /// Converts a protocol-defined plain-text body into safe XDG notification
 /// markup so servers display markup characters literally.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 fn notification_body(body: &str) -> String {
     let mut escaped = String::with_capacity(body.len());
     for character in body.chars() {
@@ -266,7 +266,7 @@ fn notification_body(body: &str) -> String {
 
 /// Keeps protocol-defined plain text unchanged on backends whose body is not
 /// interpreted as XDG markup.
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(target_os = "macos")]
 fn notification_body(body: &str) -> String {
     body.to_string()
 }
@@ -433,7 +433,7 @@ mod tests {
         assert!(worker.active.contains_key(&(pane, old_scope, identifier)));
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn xdg_delivery_escapes_plain_text_markup_characters() {
         assert_eq!(

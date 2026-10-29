@@ -18,7 +18,7 @@ pub enum ExitDecision {
     Settle(ProcessState),
 }
 
-/// Pure process lifecycle policy used by the TUI runtime.
+/// Pure process lifecycle policy used by the supervisor.
 pub struct ProcessLifecycle;
 
 impl ProcessLifecycle {
@@ -27,7 +27,7 @@ impl ProcessLifecycle {
         intent: ExitIntent,
         retired_by_config: bool,
         should_restart: bool,
-        outcome: ExitOutcome,
+        outcome: &ExitOutcome,
     ) -> ExitDecision {
         if retired_by_config {
             return ExitDecision::Retire;
@@ -42,9 +42,9 @@ impl ProcessLifecycle {
 }
 
 /// Maps an OS process outcome to the state rendered for an inactive pane.
-fn exit_state(outcome: ExitOutcome) -> ProcessState {
+fn exit_state(outcome: &ExitOutcome) -> ProcessState {
     match outcome {
         ExitOutcome::Succeeded => ProcessState::Exited,
-        ExitOutcome::Failed => ProcessState::Crashed,
+        ExitOutcome::Failed(_) => ProcessState::Crashed,
     }
 }

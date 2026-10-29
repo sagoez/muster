@@ -10,33 +10,23 @@ use typed_builder::TypedBuilder;
 use super::{
     check::{CheckOutcome, VALID_SUFFIX, check, error_chain},
     completions::{CompletionShell, registration_line},
-    report::{Report, Row, RowKind, summary_line},
+    report::{Report, Row, RowKind},
 };
 use crate::{
     adapter::{
-        clipboard,
         hooks::{HookState, HookStatus},
         path::absolutize,
     },
     domain::port::{AgentSessionStore, ProjectRegistry},
 };
 
-/// Title of the doctor report box.
+/// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
-/// Summary word for passing probes.
-const SUMMARY_OK: &str = "ok";
-/// Summary words for advisory probes.
-const SUMMARY_HINT: &str = "hint";
-const SUMMARY_HINTS: &str = "hints";
-/// Summary words for failing probes.
-const SUMMARY_FAILURE: &str = "failure";
-const SUMMARY_FAILURES: &str = "failures";
 /// Probe labels.
 const CONFIG_LABEL: &str = "config";
 const REGISTRY_LABEL: &str = "projects";
 const SESSIONS_LABEL: &str = "sessions";
 const HOOKS_LABEL: &str = "agent hooks";
-const CLIPBOARD_LABEL: &str = "clipboard";
 const COMPLETIONS_LABEL: &str = "completions";
 /// Prefix of a commented-out rc line, ignored by every probed shell.
 const COMMENT_PREFIX: &str = "#";
@@ -54,15 +44,8 @@ const FISH_COMPLETIONS: &str = "fish/completions/muster.fish";
 const ELVISH_RC: &str = ".elvish/rc.elv";
 /// Elvish rc under the XDG config root, the modern location.
 const ELVISH_XDG_RC: &str = "elvish/rc.elv";
-/// PowerShell profile for sourcing completions on Unix.
-#[cfg(not(windows))]
+/// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
-/// PowerShell 7 profile relative to the user's home directory on Windows.
-#[cfg(windows)]
-const POWERSHELL_RC: &str = "Documents/PowerShell/Microsoft.PowerShell_profile.ps1";
-/// Windows PowerShell 5 profile relative to the user's home directory.
-#[cfg(windows)]
-const WINDOWS_POWERSHELL_RC: &str = "Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
 
 /// Severity of a probe result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,26 +168,10 @@ pub fn hooks_probe_error(error: &dyn Error) -> Probe {
     probe(HOOKS_LABEL, ProbeOutcome::Fail, error_chain(error))
 }
 
-/// Reports which clipboard path a copy would take. Informational only.
-pub fn clipboard_probe() -> Probe {
-    let tool = clipboard::preferred_tool();
-    let detail = match (clipboard::prefers_osc52(), &tool) {
-        (true, _) => "remote session; OSC 52 via the terminal".to_string(),
-        (false, Some(tool_name)) => format!("native tool: {tool_name}"),
-        (false, None) => "no native tool; OSC 52 via the terminal".to_string(),
-    };
-    let outcome = if tool.is_some() || clipboard::prefers_osc52() {
-        ProbeOutcome::Ok
-    } else {
-        ProbeOutcome::Warn
-    };
-    probe(CLIPBOARD_LABEL, outcome, detail)
-}
-
 /// Best-effort check that the shell's rc file registers completions; warns
 /// with the exact line to add when it does not.
 pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Path) -> Probe {
-    let Some(shell) = detect_shell(shell_path) else {
+    let Some(shell) = shell_path.and_then(shell_from_path) else {
         return probe(
             COMPLETIONS_LABEL,
             ProbeOutcome::Warn,
@@ -238,21 +205,6 @@ fn registers_completions(content: &str, shell: CompletionShell) -> bool {
     })
 }
 
-/// The shell whose completions the probe should check: `$SHELL` when it
-/// names a known shell, else PowerShell on Windows, where `$SHELL` is
-/// normally unset even though a profile may register completions.
-fn detect_shell(shell_env: Option<&str>) -> Option<CompletionShell> {
-    let named = shell_env.and_then(shell_from_path);
-    if named.is_some() {
-        return named;
-    }
-    if cfg!(windows) {
-        Some(CompletionShell::Powershell)
-    } else {
-        None
-    }
-}
-
 /// The completion shell inferred from a `$SHELL` path.
 fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
     let name = Path::new(shell_path).file_name()?.to_str()?;
@@ -275,38 +227,18 @@ fn rc_paths(shell: CompletionShell, home: &Path, xdg_config: &Path) -> Vec<PathB
         CompletionShell::Zsh => vec![home.join(ZSH_RC)],
         CompletionShell::Fish => vec![xdg_config.join(FISH_RC), xdg_config.join(FISH_COMPLETIONS)],
         CompletionShell::Elvish => vec![home.join(ELVISH_RC), xdg_config.join(ELVISH_XDG_RC)],
-        #[cfg(not(windows))]
         CompletionShell::Powershell => vec![xdg_config.join(POWERSHELL_RC)],
-        // Best effort: $PROFILE can point elsewhere (e.g. OneDrive-redirected
-        // Documents), which a spawned-shell query would be needed to resolve.
-        #[cfg(windows)]
-        CompletionShell::Powershell => {
-            vec![home.join(POWERSHELL_RC), home.join(WINDOWS_POWERSHELL_RC)]
-        },
     }
 }
 
 /// The report over all probes: one labeled row each, closed by a summary
-/// counting outcomes (shown in the boxed layout only).
+/// counting outcomes (shown in the interactive layout only), and failed when
+/// a probe failed.
 pub fn doctor_report(probes: &[Probe]) -> Report {
     let rows = probes.iter().map(probe_row).collect();
-    let ok = outcome_count(probes, ProbeOutcome::Ok);
-    let hints = outcome_count(probes, ProbeOutcome::Warn);
-    let failures = outcome_count(probes, ProbeOutcome::Fail);
-    let mut parts = vec![format!("{ok} {SUMMARY_OK}")];
-    if hints > 0 {
-        parts.push(format!(
-            "{hints} {}",
-            plural(hints, SUMMARY_HINT, SUMMARY_HINTS)
-        ));
-    }
-    if failures > 0 {
-        parts.push(format!(
-            "{failures} {}",
-            plural(failures, SUMMARY_FAILURE, SUMMARY_FAILURES)
-        ));
-    }
-    Report::new(DOCTOR_TITLE, rows).with_summary(summary_line(&parts))
+    Report::new(DOCTOR_TITLE, rows)
+        .with_tally()
+        .with_failure(any_failed(probes))
 }
 
 /// One probe as a report row: outcome glyph, bold label, detail.
@@ -317,19 +249,6 @@ fn probe_row(probe: &Probe) -> Row {
         ProbeOutcome::Fail => RowKind::Fail,
     };
     Row::labeled(kind, probe.label().clone(), probe.detail().clone())
-}
-
-/// How many probes ended with `outcome`.
-fn outcome_count(probes: &[Probe], outcome: ProbeOutcome) -> usize {
-    probes
-        .iter()
-        .filter(|probe| probe.outcome() == outcome)
-        .count()
-}
-
-/// The singular or plural word for a count.
-fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { singular } else { many }
 }
 
 /// Whether any probe failed (warnings do not fail the run).
@@ -420,7 +339,6 @@ mod tests {
     }
 
     /// A project whose config path is a dangling symlink is flagged as missing.
-    #[cfg(unix)]
     #[test]
     fn registry_probe_flags_dangling_symlink_project() {
         use std::os::unix::fs::symlink;
@@ -458,18 +376,26 @@ mod tests {
         assert!(probe.detail().contains("Codex"));
     }
 
+    /// A stale install, as one an older muster wrote, fails the probe and
+    /// names the fix.
+    #[test]
+    fn hooks_probe_asks_for_setup_on_a_stale_install() {
+        let statuses = vec![hook_status(AgentTool::Amp, HookState::Stale)];
+        let probe = hooks_probe(&statuses);
+        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
+        assert!(probe.detail().contains("stale"), "{}", probe.detail());
+        assert!(
+            probe.detail().contains("muster hooks setup"),
+            "{}",
+            probe.detail()
+        );
+    }
+
     /// All-installed hooks pass.
     #[test]
     fn hooks_probe_passes_when_everything_is_installed() {
         let statuses = vec![hook_status(AgentTool::Claude, HookState::Installed)];
         assert_eq!(hooks_probe(&statuses).outcome(), ProbeOutcome::Ok);
-    }
-
-    /// The clipboard probe never fails; it informs.
-    #[test]
-    fn clipboard_probe_is_informational() {
-        let probe = clipboard_probe();
-        assert_ne!(probe.outcome(), ProbeOutcome::Fail);
     }
 
     /// The completions probe warns with the exact line when unregistered.
@@ -555,14 +481,11 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A named shell always wins; without one, only Windows assumes a shell.
+    /// A `$SHELL` path maps to a completion shell only when muster knows it.
     #[test]
-    fn detect_shell_prefers_the_environment_then_the_platform() {
-        assert_eq!(detect_shell(Some("/bin/zsh")), Some(CompletionShell::Zsh));
-        #[cfg(windows)]
-        assert_eq!(detect_shell(None), Some(CompletionShell::Powershell));
-        #[cfg(not(windows))]
-        assert_eq!(detect_shell(None), None);
+    fn shell_from_path_names_known_shells_only() {
+        assert_eq!(shell_from_path("/bin/zsh"), Some(CompletionShell::Zsh));
+        assert_eq!(shell_from_path("/bin/tcsh"), None);
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.

@@ -268,6 +268,7 @@ mod tests {
                 pid: fake_launcher_pid(),
                 attached: 0,
                 run_start: OutputCursor::new(0),
+                log_end: OutputCursor::new(0),
             }
             .write_to(&mut stream);
         })

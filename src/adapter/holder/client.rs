@@ -46,6 +46,10 @@ pub struct Greeting {
     /// Where the child's run began in its output stream.
     #[getset(get_copy = "pub")]
     run_start: OutputCursor,
+    /// Where the log ended as the screen was taken; streamed output starts
+    /// there.
+    #[getset(get_copy = "pub")]
+    log_end: OutputCursor,
 }
 
 impl Greeting {
@@ -77,12 +81,14 @@ pub fn greet(
             pid,
             attached,
             run_start,
+            log_end,
         }) => Ok(Greeting::builder()
             .repaint(repaint)
             .size(size)
             .pid(pid)
             .attached(attached)
             .run_start(run_start)
+            .log_end(log_end)
             .build()),
         Ok(_) | Err(HolderError::Io(_)) => Err(HolderError::NoSnapshot(socket.to_path_buf())),
         Err(error) => Err(error),

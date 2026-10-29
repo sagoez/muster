@@ -114,6 +114,29 @@ pub fn live_start(log: &Path, live: &File) -> io::Result<OutputCursor> {
     Ok(OutputCursor::new(resolved.offset()))
 }
 
+/// The raw bytes of the log at `log` from `from` up to `to`, and where they
+/// start: at the oldest kept byte when rotation discarded what `from` names.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the files cannot be read.
+pub(super) fn read_log_range(
+    log: &Path,
+    from: OutputCursor,
+    to: OutputCursor,
+) -> Result<(OutputCursor, Vec<u8>), HolderError> {
+    let span = Span::open(log)?;
+    let start = from.max(span.oldest);
+    let length = to.min(span.end).bytes_since(start);
+    let mut bytes = Vec::new();
+    SpanReader {
+        span: &span,
+        at: start,
+    }
+    .take(length)
+    .read_to_end(&mut bytes)?;
+    Ok((start, bytes))
+}
+
 /// Reads the next line from `reader`, stripped, keeping at most
 /// [`RAW_LINE_KEEP_BYTES`] of it and cutting what strips past
 /// [`LINE_MAX_CHARS`]. A final line with no line feed is returned too.

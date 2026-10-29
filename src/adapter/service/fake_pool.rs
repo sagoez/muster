@@ -18,7 +18,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::{Pid, ProcessName, ProjectRoot},
+        value::{OutputCursor, Pid, ProcessName, ProjectRoot},
     },
 };
 
@@ -92,6 +92,7 @@ impl HolderAdopter for FakePool {
     fn adopt(
         &self,
         _record: &HolderRecord,
+        _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.wait_at_gate();

@@ -218,7 +218,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     assert_eq!(runner.live_records(), vec![record.clone()]);
     let (sender, outputs) = unbounded();
     let mut adopted = runner
-        .adopt(&record, Box::new(ChannelSink(sender)))
+        .adopt(&record, None, Box::new(ChannelSink(sender)))
         .unwrap();
     assert_eq!(adopted.process_id(), Some(record.child_pid()));
     receive_until(&outputs, "output after adoption", |output| {

@@ -16,7 +16,7 @@ use crate::{
         port::{OutputSink, ProcessHandle},
         process::{ExitIntent, ProcessState, RestartPolicy},
         pty::{ExitOutcome, PtyError},
-        value::{PaneId, Pid},
+        value::{OutputCursor, PaneId, Pid},
     },
 };
 
@@ -89,7 +89,8 @@ pub trait HolderAdopter {
     fn locate(&self, child_pid: Pid) -> Option<HolderRecord>;
 
     /// Becomes the supervisor of the holder `record` describes, forwarding its
-    /// screen, output and exit to `sink`.
+    /// screen, output and exit to `sink`, with the output it logged after
+    /// `since`, or since its run began, as the handle's backlog.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the holder cannot be reached or sends no
@@ -97,6 +98,7 @@ pub trait HolderAdopter {
     fn adopt(
         &self,
         record: &HolderRecord,
+        since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError>;
 
@@ -116,9 +118,10 @@ impl HolderAdopter for HolderRunner {
     fn adopt(
         &self,
         record: &HolderRecord,
+        since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        HolderRunner::adopt(self, record, sink)
+        HolderRunner::adopt(self, record, since, sink)
     }
 }
 
@@ -293,9 +296,10 @@ impl Supervisor {
             }
             return;
         };
+        let since = carried.is_some().then(|| self.output_position(pane).0);
         let adoption = match adopter.detached() {
             Some(detached) => Adoption::Detached(detached, sink),
-            None => Adoption::Inline(adopter.adopt(record, Box::new(sink))),
+            None => Adoption::Inline(adopter.adopt(record, since, Box::new(sink))),
         };
         let prior_state = self
             .workspace
@@ -313,7 +317,7 @@ impl Supervisor {
             Adoption::Detached(adopter, sink) => {
                 let record = record.clone();
                 thread::spawn(move || {
-                    let result = adopter.adopt(&record, Box::new(sink));
+                    let result = adopter.adopt(&record, since, Box::new(sink));
                     let _ = events.send(ServiceEvent::Adopted {
                         project,
                         pane,
@@ -449,7 +453,7 @@ impl Supervisor {
                 return;
             },
         };
-        self.install_pane(pane, handle);
+        let backlog = self.install_pane(pane, handle);
         if carried.is_none() {
             self.restarts.take_history(pane, record.history());
             self.adopt_run(pane);
@@ -466,7 +470,7 @@ impl Supervisor {
                 self.rearm_force_stop(pane);
             }
         }
-        self.replay(pane, generation, launch.into_early());
+        self.replay(pane, generation, backlog, launch.into_early());
         let suspend = suspend.filter(|_| self.runs_launch(pane, generation));
         self.apply_pending(pane, membership, suspend, intent);
     }

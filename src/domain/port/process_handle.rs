@@ -56,6 +56,13 @@ pub trait ProcessHandle: Send {
         None
     }
 
+    /// The logged output the process wrote before this handle connected, and
+    /// where it starts, so every byte is seen before the output that follows.
+    /// Taken once. Defaults to none: a bare PTY streams every byte.
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
     /// Tells whatever holds the finished process that its exit was handled, so
     /// it can let go of it. Until then a holder keeps the exit for a later
     /// supervisor. Defaults to nothing to release.

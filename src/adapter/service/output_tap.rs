@@ -58,11 +58,18 @@ impl OutputTap {
     }
 
     /// Starts a new run at `start`, the offset its log says it began at,
-    /// which every later positioned chunk counts from.
+    /// which every later positioned chunk counts from. The current run placed
+    /// again, as a reconnect does, keeps what was seen of it, and the cursor
+    /// never moves back.
     pub fn begin_run_at(&mut self, start: OutputCursor) {
+        if self.run_start == Some(start) {
+            return;
+        }
         self.flush_partial();
-        self.next = start;
-        self.partial_at = start;
+        if start > self.next {
+            self.next = start;
+            self.partial_at = start;
+        }
         self.run_start = Some(start);
     }
 
@@ -171,15 +178,6 @@ impl OutputTap {
         Some(line)
     }
 
-    /// Keeps `lines` the current run printed before its output was streamed,
-    /// such as the screen a holder showed when first reached, so the run's
-    /// tail has them; where the output stands is unchanged.
-    pub fn seed(&mut self, lines: &[TapLine]) {
-        for line in lines {
-            self.keep(line.clone());
-        }
-    }
-
     /// Adds `line` to the ring, dropping the oldest lines past
     /// [`TAP_RING_BYTES`].
     fn keep(&mut self, line: TapLine) {
@@ -285,21 +283,21 @@ mod tests {
         assert_eq!(tap.tail(5), ["Listening"]);
     }
 
-    /// Lines seeded from a first screen join the run's tail without moving
-    /// where the output stands.
+    /// Placing the current run again keeps what was seen of it, and no run
+    /// moves the cursor back.
     #[test]
-    fn seeded_lines_join_the_tail() {
+    fn placing_a_run_never_moves_the_cursor_back() {
         let mut tap = OutputTap::new(OutputCursor::new(0));
         tap.begin_run_at(OutputCursor::new(40));
-        let screen = TapLine::builder()
-            .at(OutputCursor::new(40))
-            .text("boom".to_string())
-            .build();
+        tap.feed(Some(OutputCursor::new(40)), b"one\ntwo");
 
-        tap.seed(&[screen]);
+        tap.begin_run_at(OutputCursor::new(40));
+        assert_eq!(tap.cursor(), OutputCursor::new(47));
+        assert_eq!(tap.tail(5), ["one", "two"]);
 
-        assert_eq!(tap.tail(30), ["boom"]);
-        assert_eq!(tap.cursor(), OutputCursor::new(40));
+        tap.begin_run_at(OutputCursor::new(10));
+        assert_eq!(tap.cursor(), OutputCursor::new(47));
+        assert_eq!(tap.run_start(), Some(OutputCursor::new(10)));
     }
 
     #[test]

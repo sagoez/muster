@@ -16,6 +16,7 @@ use super::{
     client_role::ClientRole,
     error::HolderError,
     holder_control::HolderControl,
+    log_reader::read_log_range,
     reader::{Reader, spawn_reader},
     runner::abandon,
     shared_writer::SharedWriter,
@@ -30,6 +31,9 @@ use crate::domain::{
 /// Longest one write to the holder may wait for it to read, so a holder that
 /// stops reading fails the request instead of stalling the service.
 pub(super) const HOLDER_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Most bytes of logged output a handle reads back as it connects: what a
+/// service's output tap keeps, so older output would only be dropped again.
+const BACKLOG_MAX_BYTES: u64 = 256 * 1024;
 
 /// The service's supervisor connection to one holder, driving its child.
 ///
@@ -64,6 +68,10 @@ pub struct HolderHandle {
     started_at: Option<SystemTime>,
     /// Where the child's run began in its output stream.
     run_start: OutputCursor,
+    /// Where the log ended as the holder greeted; streamed output starts here.
+    log_end: OutputCursor,
+    /// Output logged before `log_end`, and where it starts, until taken.
+    backlog: Option<(OutputCursor, Vec<u8>)>,
     /// Set when this handle is dropped, so the reader reports no exit.
     detached: Arc<AtomicBool>,
     /// Set once the holder reported the exit, which it then holds until
@@ -114,6 +122,8 @@ impl HolderHandle {
             attached: greeting.attached(),
             started_at: None,
             run_start: greeting.run_start(),
+            log_end: greeting.log_end(),
+            backlog: None,
             initial_screen: Some(greeting.into_repaint()),
             detached,
             exit_held,
@@ -124,6 +134,25 @@ impl HolderHandle {
     /// says, so an adopted process keeps its uptime.
     pub(super) fn with_started_at(mut self, started_at: SystemTime) -> Self {
         self.started_at = Some(started_at);
+        self
+    }
+
+    /// Reads what the child wrote to `log` before this handle connected, from
+    /// `since` or the run's start and at most the last [`BACKLOG_MAX_BYTES`],
+    /// for [`ProcessHandle::take_backlog`]. A log that cannot be read leaves
+    /// none, and the output from here on is still streamed.
+    pub(super) fn with_backlog(mut self, log: &Path, since: Option<OutputCursor>) -> Self {
+        let from = since
+            .unwrap_or(self.run_start)
+            .max(self.run_start)
+            .max(OutputCursor::new(
+                self.log_end.offset().saturating_sub(BACKLOG_MAX_BYTES),
+            ));
+        if from < self.log_end {
+            self.backlog = read_log_range(log, from, self.log_end)
+                .ok()
+                .filter(|(_, bytes)| !bytes.is_empty());
+        }
         self
     }
 
@@ -179,6 +208,10 @@ impl ProcessHandle for HolderHandle {
 
     fn run_start(&self) -> Option<OutputCursor> {
         Some(self.run_start)
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        self.backlog.take()
     }
 
     /// Collects the exit the holder is keeping, letting it finish. Nothing is
@@ -282,6 +315,7 @@ mod tests {
             pid: Pid::try_new(CHILD_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
+            log_end: OutputCursor::new(0),
         }
         .write_to(&mut holder)
         .unwrap();

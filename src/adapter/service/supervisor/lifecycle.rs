@@ -25,7 +25,7 @@ use crate::{
         port::ProcessHandle,
         process::{ExitIntent, ProcessState, StopPolicy},
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
-        value::{PaneId, ProcessName},
+        value::{OutputCursor, PaneId, ProcessName},
     },
 };
 
@@ -638,7 +638,7 @@ impl Supervisor {
                 }
                 self.restarts.spawned(pane);
                 self.release_held_exit(pane);
-                self.install_pane(pane, handle);
+                let backlog = self.install_pane(pane, handle);
                 let pid = self
                     .panes
                     .get(&pane)
@@ -650,8 +650,7 @@ impl Supervisor {
                     pid.map(|pid| format!("pid {pid}")).unwrap_or_default(),
                 );
                 self.arm_probes(pane);
-                self.observe_first_screen(pane);
-                self.replay(pane, generation, early);
+                self.replay(pane, generation, backlog, early);
                 self.runs_launch(pane, generation)
             },
             Err(error) => {
@@ -687,32 +686,47 @@ impl Supervisor {
 
     /// Supervises `handle` as `pane`'s live process, keeping the screen the
     /// process already had as its last screen. The screen is a repaint, not
-    /// output, so no wait or readiness check sees it.
-    pub(super) fn install_pane(&mut self, pane: PaneId, mut handle: Box<dyn ProcessHandle>) {
+    /// output, so no wait or readiness check sees it. Returns the output the
+    /// process logged before the handle connected, for [`Self::replay`].
+    pub(super) fn install_pane(
+        &mut self,
+        pane: PaneId,
+        mut handle: Box<dyn ProcessHandle>,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
         let screen = handle.take_initial_screen();
+        let backlog = handle.take_backlog();
         let size = handle
             .screen_size()
             .unwrap_or(*self.settings.default_size());
         let run_start = handle.run_start();
-        if self.install_terminal(pane, Some(handle)) {
-            self.workspace.set_state(pane, ProcessState::Running);
-            if let Some(start) = run_start {
-                self.place_run(pane, start);
-            }
-            if let Some(screen) = screen {
-                self.keep_screen(pane, &screen, size);
-            }
+        if !self.install_terminal(pane, Some(handle)) {
+            return None;
         }
+        self.workspace.set_state(pane, ProcessState::Running);
+        if let Some(start) = run_start {
+            self.place_run(pane, start);
+        }
+        if let Some(screen) = screen {
+            self.keep_screen(pane, &screen, size);
+        }
+        backlog
     }
 
-    /// Applies the output a starting process sent before it was installed,
-    /// in order.
+    /// Feeds the `backlog` an installed process logged before its handle
+    /// connected to its tap, then applies the output it sent before it was
+    /// installed, in order, so readiness and waits see every byte once.
     pub(super) fn replay(
         &mut self,
         pane: PaneId,
         generation: SpawnGeneration,
+        backlog: Option<(OutputCursor, Vec<u8>)>,
         early: Vec<ProcessOutput>,
     ) {
+        if let Some((at, bytes)) = backlog
+            && self.panes.contains_key(&pane)
+        {
+            self.tap_output(pane, Some(at), &bytes);
+        }
         for output in early {
             self.handle_output(pane, generation, output);
         }
@@ -2357,8 +2371,8 @@ mod tests {
     }
 
     /// A launch on a worker leaves the process `Starting` until its result is
-    /// settled; output that arrived first is replayed after the screen the
-    /// connection began with, in order.
+    /// settled; output that arrived first is replayed after what was logged
+    /// before the connection, in order.
     #[test]
     fn a_worker_launch_installs_its_screen_then_the_output_that_came_first() {
         let mut harness = on_worker(Box::new(WorkerRunner::default()), RestartPolicy::Never);
@@ -2375,7 +2389,7 @@ mod tests {
         harness.supervisor.handle_spawned(pane, generation, result);
 
         assert_eq!(state(&harness), ProcessState::Running);
-        assert_eq!(harness.run_tail(pane), ["first", "then"]);
+        assert_eq!(harness.run_tail(pane), ["first then"]);
     }
 
     /// A second `up` while the first one's launch is in flight starts nothing

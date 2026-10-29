@@ -6,7 +6,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::Pid,
+        value::{OutputCursor, Pid},
     },
 };
 
@@ -46,9 +46,10 @@ impl HolderAdopter for SharedHolders {
     fn adopt(
         &self,
         record: &HolderRecord,
+        since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        self.0.adopt(record, sink)
+        self.0.adopt(record, since, sink)
     }
 
     /// An adoption waits for the holder's screen, so it runs off the loop.

@@ -2,6 +2,8 @@
 
 mod ack_count_handle;
 mod ack_count_runner;
+mod backlog_handle;
+mod backlog_runner;
 mod connected_handle;
 mod exited_holder;
 mod failing_runner;
@@ -39,6 +41,7 @@ mod worker_runner;
 
 pub(crate) use ack_count_handle::*;
 pub(crate) use ack_count_runner::*;
+pub(crate) use backlog_runner::*;
 pub(crate) use exited_holder::*;
 pub(crate) use failing_runner::*;
 pub(crate) use failing_worker_adopter::*;

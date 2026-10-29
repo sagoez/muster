@@ -53,13 +53,15 @@ impl Fixture {
         self.scratch.path().join("state")
     }
 
-    /// Where this fixture's holders keep their sockets, records and logs.
+    /// Where this fixture's holders keep their sockets, records and logs. The
+    /// logs sit beside the holders' folder, as a service's do, since a
+    /// service starting removes a `logs` folder inside it as legacy.
     pub(super) fn dirs(&self) -> HolderDirs {
         let root = self.scratch.path().join("h");
         HolderDirs::builder()
             .sockets(root.join("sock"))
             .records(root.join("records"))
-            .logs(root.join("logs"))
+            .logs(self.scratch.path().join("logs"))
             .build()
     }
 

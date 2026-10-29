@@ -496,6 +496,7 @@ impl HolderServer {
             pid: self.child_pid,
             attached: self.writable_attached(),
             run_start: self.run_start,
+            log_end: self.log.end(),
         }
     }
 

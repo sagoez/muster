@@ -1101,9 +1101,12 @@ mod tests {
             config::SettingChange,
             coordination::Author,
             port::ProcessRunner,
-            process::{LogPattern, PatternKind, PatternText, ProcessState},
+            process::{
+                LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
+                ReadyProbe,
+            },
             pty::{ProcessOutput, PtySize},
-            value::{CommandLine, PaneId},
+            value::{CommandLine, PaneId, PositiveDuration},
         },
     };
 
@@ -1879,6 +1882,91 @@ mod tests {
             Some(run_start),
             "an adopted run keeps its log offset"
         );
+        adopting.stop();
+    }
+
+    /// A readiness marker printed while no service ran, inside the readiness
+    /// window, makes the adopted run ready, and a log wait from a cursor taken
+    /// before the restart still matches it, at a cursor that never went back.
+    #[test]
+    fn output_printed_while_the_service_was_down_reaches_readiness_and_waits() {
+        let fixture = Fixture::new();
+        let folder = fixture.folder("shop");
+        let go = folder.as_ref().join("go");
+        let marked = sleeper("api", false)
+            .with_command(
+                CommandLine::try_new(format!(
+                    "echo booting; while [ ! -e '{}' ]; do sleep 0.05; done; echo READY now; \
+                     sleep 600",
+                    go.display()
+                ))
+                .unwrap(),
+            )
+            .with_ready(Some(
+                ReadyCheck::builder()
+                    .probe(ReadyProbe::from_stored("log", "READY").unwrap())
+                    .timeout(PositiveDuration::try_new(WAIT * 4).unwrap())
+                    .build(),
+            ));
+        let project = fixture.project_in("shop", vec![marked]);
+        let api = ProcessName::try_new("api").unwrap();
+        let service = fixture.start(Arc::new(fixture.runner()));
+        let control = ServiceRequest::Control {
+            project: project.clone(),
+            name: api.clone(),
+            action: ProcessAction::Start,
+            environment: no_env(),
+            wait: Some(
+                WaitSpec::builder()
+                    .until(Some(WaitCondition::Log(
+                        LogPattern::builder()
+                            .text(PatternText::try_new("booting").unwrap())
+                            .kind(PatternKind::Substring)
+                            .build(),
+                    )))
+                    .timeout(WAIT)
+                    .build(),
+            ),
+        };
+        let ServiceResponse::Waited(booted) = service.send(control) else {
+            panic!("a start with a wait answers how the wait ended");
+        };
+        assert_eq!(booted.status(), WaitStatus::Matched);
+        let before = *booted.cursor();
+        assert_eq!(
+            *process(&service.status(&project), "api").ready(),
+            Readiness::Waiting
+        );
+        service.stop();
+
+        fs::write(&go, "").unwrap();
+        let log = fixture.dirs().process_log(&project, &api);
+        wait_until("the marker in the log", || {
+            fs::read_to_string(&log).is_ok_and(|text| text.contains("READY now"))
+        });
+        let adopting = fixture.start(Arc::new(fixture.runner()));
+        wait_until("the adopted run to be ready", || {
+            *process(&adopting.status(&project), "api").ready() == Readiness::Ready
+        });
+        let ServiceResponse::Waited(marker) = adopting.send(ServiceRequest::Wait {
+            project: project.clone(),
+            name: api.clone(),
+            wait: WaitSpec::builder()
+                .until(Some(WaitCondition::Log(
+                    LogPattern::builder()
+                        .text(PatternText::try_new("READY now").unwrap())
+                        .kind(PatternKind::Substring)
+                        .build(),
+                )))
+                .since(Some(before))
+                .timeout(WAIT)
+                .build(),
+        }) else {
+            panic!("a wait answers how it ended");
+        };
+        assert_eq!(marker.status(), WaitStatus::Matched, "{marker:?}");
+        assert!(*marker.matched().as_ref().unwrap().at() >= before);
+        assert!(*marker.cursor() > before, "the cursor never goes back");
         adopting.stop();
     }
 

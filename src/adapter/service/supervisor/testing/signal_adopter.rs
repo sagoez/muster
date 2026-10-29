@@ -6,7 +6,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle},
         pty::PtyError,
-        value::Pid,
+        value::{OutputCursor, Pid},
     },
 };
 
@@ -22,6 +22,7 @@ impl HolderAdopter for SignalAdopter {
     fn adopt(
         &self,
         _record: &HolderRecord,
+        _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         Ok(Box::new(StopSignalHandle {

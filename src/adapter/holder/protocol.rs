@@ -26,8 +26,8 @@ const ATTACHED_BYTES: usize = 4;
 /// Bytes an encoded output offset occupies, ahead of the output it places.
 const OFFSET_BYTES: usize = 8;
 /// Bytes of a snapshot payload before its repaint: the pid, the size, the
-/// attach-client count, then the run's start offset.
-const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES + OFFSET_BYTES;
+/// attach-client count, the run's start offset, then the log's end offset.
+const SNAPSHOT_HEADER_BYTES: usize = PID_BYTES + SIZE_BYTES + ATTACHED_BYTES + 2 * OFFSET_BYTES;
 
 /// A message from the holder to a client.
 ///
@@ -51,6 +51,10 @@ pub enum HolderMessage {
         /// Where the child's run began in the process's output stream, so a
         /// client that connects late still knows the run's first offset.
         run_start: OutputCursor,
+        /// Where the log ends as the snapshot is taken: every output frame
+        /// that follows starts at or past it, and the bytes before it are
+        /// read from the log.
+        log_end: OutputCursor,
     },
     /// Bytes the child wrote, with the output offset of the first, so a
     /// client that missed frames sees the gap.
@@ -102,12 +106,14 @@ impl TryFrom<HolderMessage> for Frame {
                 pid,
                 attached,
                 run_start,
+                log_end,
             } => {
                 let mut payload = Vec::with_capacity(SNAPSHOT_HEADER_BYTES + repaint.len());
                 payload.extend_from_slice(&pid.into_inner().to_be_bytes());
                 payload.extend_from_slice(&encode_size(size));
                 payload.extend_from_slice(&attached.to_be_bytes());
                 payload.extend_from_slice(&run_start.offset().to_be_bytes());
+                payload.extend_from_slice(&log_end.offset().to_be_bytes());
                 payload.extend(repaint);
                 (FrameTag::Snapshot, payload)
             },
@@ -143,7 +149,8 @@ impl TryFrom<Frame> for HolderMessage {
                 let repaint = payload.split_off(SNAPSHOT_HEADER_BYTES);
                 let (pid, rest) = payload.split_at(PID_BYTES);
                 let (size, rest) = rest.split_at(SIZE_BYTES);
-                let (attached, run_start) = rest.split_at(ATTACHED_BYTES);
+                let (attached, rest) = rest.split_at(ATTACHED_BYTES);
+                let (run_start, log_end) = rest.split_at(OFFSET_BYTES);
                 let pid = decode_u32(pid)
                     .and_then(|pid| Pid::try_new(pid).ok())
                     .ok_or(HolderError::MalformedPayload(tag))?;
@@ -151,12 +158,14 @@ impl TryFrom<Frame> for HolderMessage {
                 let attached = decode_u32(attached).ok_or(HolderError::MalformedPayload(tag))?;
                 let run_start =
                     decode_offset(run_start).ok_or(HolderError::MalformedPayload(tag))?;
+                let log_end = decode_offset(log_end).ok_or(HolderError::MalformedPayload(tag))?;
                 Ok(Self::Snapshot {
                     repaint,
                     size,
                     pid,
                     attached,
                     run_start,
+                    log_end,
                 })
             },
             FrameTag::Output => {
@@ -265,6 +274,7 @@ mod tests {
                 pid: Pid::try_new(4242).unwrap(),
                 attached: 2,
                 run_start: OutputCursor::new(u64::MAX - 7),
+                log_end: OutputCursor::new(u64::MAX - 5),
             },
             HolderMessage::Output {
                 at: OutputCursor::new(u64::MAX - 3),

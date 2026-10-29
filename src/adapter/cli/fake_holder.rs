@@ -58,6 +58,7 @@ impl FakeHolder {
                 pid: Pid::try_new(FAKE_PID).unwrap(),
                 attached: 0,
                 run_start: OutputCursor::new(0),
+                log_end: OutputCursor::new(0),
             }
             .write_to(&mut stream)
             .unwrap();

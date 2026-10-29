@@ -27,7 +27,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::{Pid, PositiveDuration, ProjectRoot},
+        value::{OutputCursor, Pid, PositiveDuration, ProjectRoot},
     },
 };
 
@@ -130,7 +130,8 @@ impl HolderRunner {
     }
 
     /// Becomes the supervisor of the running holder `record` describes,
-    /// forwarding its screen and then its output and exit to `sink`.
+    /// forwarding its screen and then its output and exit to `sink`, with the
+    /// output it logged after `since`, or since its run began, as backlog.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the holder cannot be reached or sends no
@@ -138,6 +139,7 @@ impl HolderRunner {
     pub fn adopt(
         &self,
         record: &HolderRecord,
+        since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         let stream = UnixStream::connect(record.socket())?;
@@ -147,7 +149,8 @@ impl HolderRunner {
             sink,
             HOLDER_READY_TIMEOUT.into_inner(),
         )?
-        .with_started_at(record.child_started_at());
+        .with_started_at(record.child_started_at())
+        .with_backlog(record.log(), since);
         Ok(Box::new(handle))
     }
 
@@ -252,7 +255,7 @@ impl ProcessRunner for HolderRunner {
         let id = HolderId::generate().map_err(|error| PtyError::System(error.to_string()))?;
         let socket = self.dirs.socket_path(&id);
         let config = HolderConfig::builder()
-            .log(log)
+            .log(log.clone())
             .id(id)
             .request(request)
             .socket(socket.clone())
@@ -270,7 +273,7 @@ impl ProcessRunner for HolderRunner {
             Ok(handle) => Ok(handle),
         };
         let _ = fs::remove_file(&error_file);
-        Ok(Box::new(supervised?))
+        Ok(Box::new(supervised?.with_backlog(&log, None)))
     }
 }
 
@@ -864,7 +867,7 @@ mod tests {
         let runner = fixture.runner();
         assert_eq!(runner.live_records(), vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
-        let mut adopted = runner.adopt(&record, sink).unwrap();
+        let mut adopted = runner.adopt(&record, None, sink).unwrap();
         watch.until("the held exit", |watch| watch.exit.is_some());
         assert_eq!(watch.exit, Some(ExitOutcome::Succeeded));
         adopted.acknowledge_exit().unwrap();
@@ -892,6 +895,40 @@ mod tests {
         });
     }
 
+    /// An adopting handle reads back what the child logged before it
+    /// connected, from the run's start or from a given cursor, so no byte
+    /// falls between the earlier connection and the new stream.
+    #[test]
+    fn an_adoption_reads_back_what_was_logged_before_it_connected() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let (sink, mut watch) = Watch::new();
+        let handle = runner
+            .spawn(fixture.request("echo first; echo second; sleep 600"), sink)
+            .unwrap();
+        let start = handle.run_start().unwrap();
+        drop(handle);
+        let record = runner.live_records().remove(0);
+        wait_until("both lines in the log", || {
+            fixture.log(&record).contains("second")
+        });
+        watch.drain();
+
+        let (sink, _watch) = Watch::new();
+        let mut whole = runner.adopt(&record, None, sink).unwrap();
+        let (at, bytes) = whole.take_backlog().unwrap();
+        assert_eq!(at, start);
+        assert_eq!(bytes, b"first\r\nsecond\r\n");
+        assert_eq!(whole.take_backlog(), None, "taken once");
+        drop(whole);
+
+        let later = start.advanced("first\r\n".len() as u64);
+        let (sink, _watch) = Watch::new();
+        let mut rest = runner.adopt(&record, Some(later), sink).unwrap();
+        assert_eq!(rest.take_backlog(), Some((later, b"second\r\n".to_vec())));
+        rest.kill().unwrap();
+    }
+
     #[test]
     fn dropping_the_runner_leaves_the_process_running_and_adopt_resumes_output() {
         let fixture = Fixture::new();
@@ -915,7 +952,7 @@ mod tests {
         assert_eq!(records[0].child_pid(), pid);
 
         let (sink, mut watch) = Watch::new();
-        let mut adopted = runner.adopt(&records[0], sink).unwrap();
+        let mut adopted = runner.adopt(&records[0], None, sink).unwrap();
         watch.connected(&mut adopted);
         assert_eq!(adopted.process_id(), Some(pid));
         watch.until("a tick after the adoption snapshot", |watch| {
@@ -957,7 +994,7 @@ mod tests {
         let records = runner.live_records();
         assert_eq!(records, vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
-        let mut adopted = runner.adopt(&record, sink).unwrap();
+        let mut adopted = runner.adopt(&record, None, sink).unwrap();
         watch.connected(&mut adopted);
         adopted.write_input(b"\n").unwrap();
         wait_until("the child to finish its output", || {

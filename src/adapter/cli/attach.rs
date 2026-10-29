@@ -622,6 +622,7 @@ mod tests {
             pid: Pid::try_new(FAKE_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
+            log_end: OutputCursor::new(0),
         });
         pty.wait_for(b"\x1b[H\x1b[2Jsecond");
         pty.type_keys(DETACH_BYTE);
@@ -723,6 +724,7 @@ mod tests {
             pid: Pid::try_new(FAKE_PID).unwrap(),
             attached: 0,
             run_start: OutputCursor::new(0),
+            log_end: OutputCursor::new(0),
         });
         pty.wait_for(b"new-screen");
         pty.type_keys(DETACH_BYTE);

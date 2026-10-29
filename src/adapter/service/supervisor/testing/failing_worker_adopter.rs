@@ -6,7 +6,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle},
         pty::PtyError,
-        value::Pid,
+        value::{OutputCursor, Pid},
     },
 };
 
@@ -27,6 +27,7 @@ impl HolderAdopter for FailingWorkerAdopter {
     fn adopt(
         &self,
         _record: &HolderRecord,
+        _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         Err(PtyError::System(REFUSAL.to_string()))

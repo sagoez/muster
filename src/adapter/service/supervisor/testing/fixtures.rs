@@ -38,6 +38,12 @@ const FAKE_LAUNCHER_PID: u32 = 4242;
 /// The screen a [`ConnectedHandle`](super::connected_handle::ConnectedHandle)
 /// connects to.
 pub(crate) const FIRST_SCREEN: &[u8] = b"first ";
+/// What a [`BacklogHandle`](super::backlog_handle::BacklogHandle)'s process
+/// logged before it connected: a marker on its first line.
+pub(crate) const BACKLOG: &[u8] = b"READY on 3000\nbooting\n";
+/// The log offset a [`BacklogHandle`](super::backlog_handle::BacklogHandle)'s
+/// run began at.
+pub(crate) const BACKLOG_RUN_START: u64 = 4096;
 /// Longest a test waits for a worker's launch result.
 const WORKER_WAIT: Duration = Duration::from_secs(5);
 /// Why a refusing adopter fails.

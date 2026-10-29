@@ -7,11 +7,11 @@ use super::fixtures::FIRST_SCREEN;
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     pty::{PtyError, PtySize, ScreenSource},
-    value::Pid,
+    value::{OutputCursor, Pid},
 };
 
 /// A handle that connected to a screen already showing [`FIRST_SCREEN`],
-/// counting the kills it is sent.
+/// which its log holds too, counting the kills it is sent.
 pub(crate) struct ConnectedHandle(pub(super) Arc<AtomicUsize>);
 
 impl ProcessHandle for ConnectedHandle {
@@ -33,6 +33,10 @@ impl ProcessHandle for ConnectedHandle {
 
     fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
         Some(FIRST_SCREEN.to_vec())
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        Some((OutputCursor::new(0), FIRST_SCREEN.to_vec()))
     }
 
     fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {

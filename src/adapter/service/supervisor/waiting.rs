@@ -295,29 +295,6 @@ impl Supervisor {
         self.test_lines(pane, &lines);
     }
 
-    /// Keeps and tests the screen a freshly spawned run on `pane` showed when
-    /// its holder was first reached. A holder streams only what its child
-    /// writes after that, so the lines printed before arrive as this screen;
-    /// each is taken to begin at the run's start, and a run that ends at once
-    /// still has them as its tail.
-    pub(super) fn observe_first_screen(&mut self, pane: PaneId) {
-        let Some(text) = self.panes.get(&pane).map(|target| target.screen().clone()) else {
-            return;
-        };
-        let at = self
-            .output_position(pane)
-            .1
-            .unwrap_or_else(|| OutputCursor::new(0));
-        let lines: Vec<TapLine> = text
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.is_empty())
-            .map(|line| TapLine::builder().at(at).text(line.to_string()).build())
-            .collect();
-        self.tap(pane).seed(&lines);
-        self.test_lines(pane, &lines);
-    }
-
     /// Tests `lines` of `pane`'s current run against its readiness pattern
     /// and the log waits that count that run.
     fn test_lines(&mut self, pane: PaneId, lines: &[TapLine]) {
@@ -375,10 +352,10 @@ impl Supervisor {
     }
 
     /// Takes over the run of a holder adopted from an earlier service. Its
-    /// readiness check waits out what is left of its timeout; once that
-    /// passed, a log check counts as passed, since the earlier service saw the
-    /// lines and they are not seen again, while a port or HTTP check is
-    /// probed afresh.
+    /// readiness check waits out what is left of its timeout, against the
+    /// output read back from its log too; once that passed, a log check counts
+    /// as passed, since the earlier service saw the lines and they may predate
+    /// what is read back, while a port or HTTP check is probed afresh.
     pub(super) fn adopt_run(&mut self, pane: PaneId) {
         self.tap(pane).begin_run();
         self.readiness.remove(&pane);
@@ -1068,6 +1045,43 @@ mod tests {
         assert_eq!(waiting.status(), WaitStatus::Waiting);
         assert_eq!(*waiting.cursor(), OutputCursor::new(8));
         assert!(harness.supervisor.next_wait_deadline().is_none());
+    }
+
+    /// A marker the process printed on its first line, before its handle
+    /// connected, reaches readiness and waits from the log, at its real
+    /// offset.
+    #[test]
+    fn output_logged_before_the_handle_connected_reaches_readiness_and_waits() {
+        let check = ready(ReadyProbe::from_stored("log", "READY").unwrap());
+        let mut harness = Harness::over(Box::new(BacklogRunner), &[api(
+            RestartPolicy::Never,
+            Some(check),
+        )]);
+        harness.up();
+        harness.supervisor.settle_waits(Instant::now());
+
+        let snapshot = harness.supervisor.snapshot();
+        let status = &snapshot.processes()[0];
+        assert_eq!(*status.ready(), Readiness::Ready);
+        let start = OutputCursor::new(BACKLOG_RUN_START);
+        assert_eq!(*status.run_start(), Some(start));
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("booting")), Some(start)),
+            None,
+        );
+        let matched = answered(&answers).unwrap();
+        assert_eq!(matched.status(), WaitStatus::Matched);
+        assert_eq!(
+            *matched.matched().as_ref().unwrap().at(),
+            start.advanced("READY on 3000\n".len() as u64)
+        );
+        assert_eq!(
+            *matched.cursor(),
+            start.advanced(BACKLOG.len() as u64),
+            "the cursor stands past the backlog"
+        );
     }
 
     #[test]

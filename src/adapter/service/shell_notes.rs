@@ -36,16 +36,8 @@ impl ShellNotes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::value::{Pid, ProcessName, ProjectName, StartToken};
-
-    /// The shell running as `pid`.
-    fn shell(pid: u32) -> ShellId {
-        ShellId::builder()
-            .pid(Pid::try_new(pid).unwrap())
-            .start(StartToken::try_new(1).unwrap())
-            .build()
-    }
+    use super::{super::runtime_testing::test_shell, *};
+    use crate::domain::value::{ProcessName, ProjectName};
 
     /// A note that `index` started in the project `shop`.
     fn started(index: usize) -> ShellNote {
@@ -59,17 +51,17 @@ mod tests {
     fn queued_notes_are_capped_and_go_with_their_shell() {
         let mut notes = ShellNotes::default();
         for index in 0..MAX_QUEUED_NOTES + 2 {
-            notes.queue(shell(101), started(index));
+            notes.queue(test_shell(101, 1), started(index));
         }
-        notes.queue(shell(102), started(0));
+        notes.queue(test_shell(102, 1), started(0));
 
-        let taken = notes.take(&shell(101));
+        let taken = notes.take(&test_shell(101, 1));
         assert_eq!(taken.len(), MAX_QUEUED_NOTES);
         assert_eq!(taken[0], started(2), "the two oldest were dropped");
         assert_eq!(taken[MAX_QUEUED_NOTES - 1], started(MAX_QUEUED_NOTES + 1));
-        assert!(notes.take(&shell(101)).is_empty(), "taken once");
+        assert!(notes.take(&test_shell(101, 1)).is_empty(), "taken once");
 
-        notes.forget(&shell(102));
-        assert!(notes.take(&shell(102)).is_empty());
+        notes.forget(&test_shell(102, 1));
+        assert!(notes.take(&test_shell(102, 1)).is_empty());
     }
 }

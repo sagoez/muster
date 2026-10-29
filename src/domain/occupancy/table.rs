@@ -134,29 +134,15 @@ impl Occupancy {
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
-    use crate::domain::{
-        occupancy::testing::stamp,
-        value::{Pid, StartToken},
+    use super::{
+        super::testing::{stamp, test_root, test_shell},
+        *,
     };
 
     /// The hook load most tests report from.
     const LOAD: u64 = 1;
     /// The folder every report is made from; the table never reads it.
     const FOLDER: &str = "/home/me";
-
-    /// The shell running as `pid`, started at `start`.
-    fn shell(pid: u32, start: u64) -> ShellId {
-        ShellId::builder()
-            .pid(Pid::try_new(pid).unwrap())
-            .start(StartToken::try_new(start).unwrap())
-            .build()
-    }
-
-    /// The project folder `/home/me/<name>`.
-    fn root(name: &str) -> ProjectRoot {
-        ProjectRoot::try_new(PathBuf::from("/home/me").join(name)).unwrap()
-    }
 
     /// `shell`'s report at prompt `seq` of hook load `load` that it is in
     /// the project `project` names.
@@ -165,7 +151,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(load, seq))
             .folder(PathBuf::from(FOLDER))
-            .project(project.map(root))
+            .project(project.map(test_root))
             .build()
     }
 
@@ -178,31 +164,31 @@ mod tests {
     fn the_first_shell_in_a_project_enters_it_and_the_last_out_leaves_it() {
         let mut table = Occupancy::new();
 
-        assert_eq!(table.report(&at(shell(100, 1), 1, Some("shop"))), [
-            OccupancyChange::Entered(root("shop"))
+        assert_eq!(table.report(&at(test_shell(100, 1), 1, Some("shop"))), [
+            OccupancyChange::Entered(test_root("shop"))
         ]);
-        assert_eq!(table.occupants(&root("shop")), 1);
-        assert_eq!(table.report(&at(shell(100, 1), 2, None)), [
-            OccupancyChange::Left(root("shop"))
+        assert_eq!(table.occupants(&test_root("shop")), 1);
+        assert_eq!(table.report(&at(test_shell(100, 1), 2, None)), [
+            OccupancyChange::Left(test_root("shop"))
         ]);
-        assert_eq!(table.occupants(&root("shop")), 0);
-        assert!(table.knows(&shell(100, 1)), "a shell outside every project");
+        assert_eq!(table.occupants(&test_root("shop")), 0);
+        assert!(table.knows(&test_shell(100, 1)), "a shell outside every project");
         assert_eq!(table.len(), 1);
     }
 
     #[test]
     fn a_move_between_projects_is_left_then_entered() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
 
-        let changes = table.report(&at(shell(100, 1), 2, Some("blog")));
+        let changes = table.report(&at(test_shell(100, 1), 2, Some("blog")));
 
         assert_eq!(changes, [
-            OccupancyChange::Left(root("shop")),
-            OccupancyChange::Entered(root("blog"))
+            OccupancyChange::Left(test_root("shop")),
+            OccupancyChange::Entered(test_root("blog"))
         ]);
         assert!(
-            table.report(&at(shell(100, 1), 3, Some("blog"))).is_empty(),
+            table.report(&at(test_shell(100, 1), 3, Some("blog"))).is_empty(),
             "a prompt in the same project changes nothing"
         );
     }
@@ -212,16 +198,16 @@ mod tests {
     #[test]
     fn a_report_not_newer_than_the_last_changes_nothing() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 5, Some("blog")));
+        table.report(&at(test_shell(100, 1), 5, Some("blog")));
 
-        assert!(table.report(&at(shell(100, 1), 4, Some("shop"))).is_empty());
+        assert!(table.report(&at(test_shell(100, 1), 4, Some("shop"))).is_empty());
         assert!(
-            table.report(&at(shell(100, 1), 5, None)).is_empty(),
+            table.report(&at(test_shell(100, 1), 5, None)).is_empty(),
             "the same seq again"
         );
 
-        assert_eq!(table.occupants(&root("blog")), 1);
-        assert_eq!(table.occupants(&root("shop")), 0);
+        assert_eq!(table.occupants(&test_root("blog")), 1);
+        assert_eq!(table.occupants(&test_root("shop")), 0);
     }
 
     /// A shell that `exec`s itself loads the hook again and counts its
@@ -230,30 +216,30 @@ mod tests {
     #[test]
     fn a_report_of_a_new_hook_load_is_newer_whatever_its_seq() {
         let mut table = Occupancy::new();
-        table.report(&loaded(shell(100, 1), 7, 50, Some("blog")));
+        table.report(&loaded(test_shell(100, 1), 7, 50, Some("blog")));
 
-        assert_eq!(table.report(&loaded(shell(100, 1), 8, 1, Some("shop"))), [
-            OccupancyChange::Left(root("blog")),
-            OccupancyChange::Entered(root("shop"))
+        assert_eq!(table.report(&loaded(test_shell(100, 1), 8, 1, Some("shop"))), [
+            OccupancyChange::Left(test_root("blog")),
+            OccupancyChange::Entered(test_root("shop"))
         ]);
         assert!(
-            table.report(&loaded(shell(100, 1), 8, 1, None)).is_empty(),
+            table.report(&loaded(test_shell(100, 1), 8, 1, None)).is_empty(),
             "the same prompt of the new load again"
         );
-        assert_eq!(table.report(&loaded(shell(100, 1), 8, 2, None)), [
-            OccupancyChange::Left(root("shop"))
+        assert_eq!(table.report(&loaded(test_shell(100, 1), 8, 2, None)), [
+            OccupancyChange::Left(test_root("shop"))
         ]);
     }
 
     #[test]
     fn a_second_shell_in_a_project_changes_nothing_until_both_go() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
 
-        assert!(table.report(&at(shell(200, 1), 1, Some("shop"))).is_empty());
-        assert_eq!(table.occupants(&root("shop")), 2);
-        assert!(table.report(&at(shell(100, 1), 2, None)).is_empty());
-        assert_eq!(table.remove(&shell(200, 1)), [OccupancyChange::Left(root(
+        assert!(table.report(&at(test_shell(200, 1), 1, Some("shop"))).is_empty());
+        assert_eq!(table.occupants(&test_root("shop")), 2);
+        assert!(table.report(&at(test_shell(100, 1), 2, None)).is_empty());
+        assert_eq!(table.remove(&test_shell(200, 1)), [OccupancyChange::Left(test_root(
             "shop"
         ))]);
     }
@@ -262,20 +248,20 @@ mod tests {
     fn restore_never_yields_a_change() {
         let mut table = Occupancy::new();
 
-        table.restore(&at(shell(100, 1), 7, Some("shop")));
+        table.restore(&at(test_shell(100, 1), 7, Some("shop")));
 
-        assert_eq!(table.occupants(&root("shop")), 1);
+        assert_eq!(table.occupants(&test_root("shop")), 1);
         assert!(
-            table.report(&at(shell(100, 1), 7, Some("blog"))).is_empty(),
+            table.report(&at(test_shell(100, 1), 7, Some("blog"))).is_empty(),
             "a report not newer than the record"
         );
         assert!(
-            table.report(&at(shell(200, 1), 1, Some("shop"))).is_empty(),
+            table.report(&at(test_shell(200, 1), 1, Some("shop"))).is_empty(),
             "the restored shell already occupies shop"
         );
-        table.restore(&at(shell(100, 1), 6, None));
+        table.restore(&at(test_shell(100, 1), 6, None));
         assert_eq!(
-            table.occupants(&root("shop")),
+            table.occupants(&test_root("shop")),
             2,
             "an older record is ignored"
         );
@@ -284,14 +270,14 @@ mod tests {
     #[test]
     fn removing_the_last_shell_leaves_its_project() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 1, Some("shop")));
-        table.report(&at(shell(200, 1), 1, None));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(200, 1), 1, None));
 
-        assert_eq!(table.remove(&shell(100, 1)), [OccupancyChange::Left(root(
+        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(test_root(
             "shop"
         ))]);
-        assert!(table.remove(&shell(200, 1)).is_empty());
-        assert!(table.remove(&shell(300, 1)).is_empty(), "an unknown shell");
+        assert!(table.remove(&test_shell(200, 1)).is_empty());
+        assert!(table.remove(&test_shell(300, 1)).is_empty(), "an unknown shell");
         assert!(table.is_empty());
     }
 
@@ -301,18 +287,18 @@ mod tests {
     fn a_shell_counts_where_its_newest_report_puts_it() {
         let mut table = Occupancy::new();
 
-        table.report(&at(shell(100, 1), 1, Some("shop")));
-        table.report(&at(shell(100, 1), 2, Some("blog")));
-        table.report(&at(shell(100, 1), 1, Some("shop")));
-        assert_eq!(table.occupants(&root("shop")), 0);
-        assert_eq!(table.occupants(&root("blog")), 1);
-        table.report(&at(shell(100, 1), 3, None));
-        assert_eq!(table.occupants(&root("blog")), 0);
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(100, 1), 2, Some("blog")));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
+        assert_eq!(table.occupants(&test_root("shop")), 0);
+        assert_eq!(table.occupants(&test_root("blog")), 1);
+        table.report(&at(test_shell(100, 1), 3, None));
+        assert_eq!(table.occupants(&test_root("blog")), 0);
 
-        table.restore(&at(shell(200, 1), 4, Some("shop")));
-        assert_eq!(table.occupants(&root("shop")), 1);
-        table.remove(&shell(200, 1));
-        assert_eq!(table.occupants(&root("shop")), 0);
+        table.restore(&at(test_shell(200, 1), 4, Some("shop")));
+        assert_eq!(table.occupants(&test_root("shop")), 1);
+        table.remove(&test_shell(200, 1));
+        assert_eq!(table.occupants(&test_root("shop")), 0);
     }
 
     /// A shell holding the outer project a nested one was registered in
@@ -321,23 +307,23 @@ mod tests {
     #[test]
     fn a_held_project_counts_the_shell_until_it_lets_go() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
 
         let nested = ShellRecord::builder()
-            .shell(shell(100, 1))
+            .shell(test_shell(100, 1))
             .stamp(stamp(LOAD, 2))
             .folder(PathBuf::from(FOLDER))
-            .project(Some(root("shop/admin")))
-            .held(vec![root("shop")])
+            .project(Some(test_root("shop/admin")))
+            .held(vec![test_root("shop")])
             .build();
-        assert_eq!(table.report(&nested), [OccupancyChange::Entered(root(
+        assert_eq!(table.report(&nested), [OccupancyChange::Entered(test_root(
             "shop/admin"
         ))]);
-        assert_eq!(table.occupants(&root("shop")), 1, "shop is held");
+        assert_eq!(table.occupants(&test_root("shop")), 1, "shop is held");
 
-        assert_eq!(table.report(&at(shell(100, 1), 3, None)), [
-            OccupancyChange::Left(root("shop")),
-            OccupancyChange::Left(root("shop/admin"))
+        assert_eq!(table.report(&at(test_shell(100, 1), 3, None)), [
+            OccupancyChange::Left(test_root("shop")),
+            OccupancyChange::Left(test_root("shop/admin"))
         ]);
     }
 
@@ -346,29 +332,29 @@ mod tests {
     #[test]
     fn a_restored_shell_removed_leaves_its_project_unless_another_stays() {
         let mut table = Occupancy::new();
-        table.restore(&at(shell(100, 1), 1, Some("shop")));
-        table.restore(&at(shell(200, 1), 1, Some("blog")));
-        table.restore(&at(shell(300, 1), 1, Some("blog")));
+        table.restore(&at(test_shell(100, 1), 1, Some("shop")));
+        table.restore(&at(test_shell(200, 1), 1, Some("blog")));
+        table.restore(&at(test_shell(300, 1), 1, Some("blog")));
 
-        assert_eq!(table.remove(&shell(100, 1)), [OccupancyChange::Left(root(
+        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(test_root(
             "shop"
         ))]);
         assert!(
-            table.remove(&shell(200, 1)).is_empty(),
+            table.remove(&test_shell(200, 1)).is_empty(),
             "blog still has one"
         );
-        assert_eq!(table.occupants(&root("blog")), 1);
+        assert_eq!(table.occupants(&test_root("blog")), 1);
     }
 
     #[test]
     fn the_same_pid_with_another_start_is_another_shell() {
         let mut table = Occupancy::new();
-        table.report(&at(shell(100, 1), 9, Some("shop")));
+        table.report(&at(test_shell(100, 1), 9, Some("shop")));
 
-        assert!(table.report(&at(shell(100, 2), 1, Some("shop"))).is_empty());
+        assert!(table.report(&at(test_shell(100, 2), 1, Some("shop"))).is_empty());
 
-        assert_eq!(table.occupants(&root("shop")), 2);
-        assert_eq!(table.shells(), [shell(100, 1), shell(100, 2)]);
-        assert!(!table.knows(&shell(100, 3)));
+        assert_eq!(table.occupants(&test_root("shop")), 2);
+        assert_eq!(table.shells(), [test_shell(100, 1), test_shell(100, 2)]);
+        assert!(!table.knows(&test_shell(100, 3)));
     }
 }

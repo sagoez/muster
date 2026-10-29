@@ -13,7 +13,7 @@ use std::{
 
 use muster::{
     adapter::{
-        service::SHELL_SWEEP_INTERVAL,
+        service::{SHELL_SWEEP_INTERVAL, protocol::SERVICE_SUBCOMMAND},
         shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
     },
     domain::{occupancy::ReportSeq, value::ProjectRoot},
@@ -50,8 +50,6 @@ const PROMPTS: u64 = 5;
 const UNSEEN_PROMPTS: u64 = 1;
 /// The stack file `import` reads.
 const STACK_FILE: &str = "muster.yml";
-/// The subcommand the service runs as.
-const SERVICE_SUBCOMMAND: &str = "__service";
 /// What a job-control message carries in bash, zsh or fish.
 const JOB_NOISE: [&str; 4] = ["[1]", "Done", "Job", "has ended"];
 /// The program that holds a port in another project.

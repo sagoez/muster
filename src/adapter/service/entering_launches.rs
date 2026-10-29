@@ -41,23 +41,10 @@ impl EnteringLaunches {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::domain::value::{Pid, StartToken};
-
-    /// The shell running as `pid`.
-    fn shell(pid: u32) -> ShellId {
-        ShellId::builder()
-            .pid(Pid::try_new(pid).unwrap())
-            .start(StartToken::try_new(1).unwrap())
-            .build()
-    }
-
-    /// The project folder `/home/me/<name>`.
-    fn root(name: &str) -> ProjectRoot {
-        ProjectRoot::try_new(PathBuf::from("/home/me").join(name)).unwrap()
-    }
+    use super::{
+        super::runtime_testing::{test_root, test_shell},
+        *,
+    };
 
     /// The process named `raw`.
     fn name(raw: &str) -> ProcessName {
@@ -67,31 +54,35 @@ mod tests {
     #[test]
     fn a_launch_settles_once_to_the_shell_that_entered() {
         let mut launches = EnteringLaunches::default();
-        launches.begin(&root("shop"), &[name("api"), name("web")], shell(101));
+        launches.begin(
+            &test_root("shop"),
+            &[name("api"), name("web")],
+            test_shell(101, 1),
+        );
 
         assert_eq!(
-            launches.settle(&root("shop"), &name("api")),
-            Some(shell(101))
+            launches.settle(&test_root("shop"), &name("api")),
+            Some(test_shell(101, 1))
         );
-        assert_eq!(launches.settle(&root("shop"), &name("api")), None);
-        assert_eq!(launches.settle(&root("blog"), &name("web")), None);
+        assert_eq!(launches.settle(&test_root("shop"), &name("api")), None);
+        assert_eq!(launches.settle(&test_root("blog"), &name("web")), None);
 
-        launches.forget_shell(&shell(101));
-        assert_eq!(launches.settle(&root("shop"), &name("web")), None);
+        launches.forget_shell(&test_shell(101, 1));
+        assert_eq!(launches.settle(&test_root("shop"), &name("web")), None);
     }
 
     #[test]
     fn a_client_acting_on_the_project_takes_its_launches_over() {
         let mut launches = EnteringLaunches::default();
-        launches.begin(&root("shop"), &[name("api")], shell(101));
-        launches.begin(&root("blog"), &[name("api")], shell(101));
+        launches.begin(&test_root("shop"), &[name("api")], test_shell(101, 1));
+        launches.begin(&test_root("blog"), &[name("api")], test_shell(101, 1));
 
-        launches.forget_project(&root("shop"));
+        launches.forget_project(&test_root("shop"));
 
-        assert_eq!(launches.settle(&root("shop"), &name("api")), None);
+        assert_eq!(launches.settle(&test_root("shop"), &name("api")), None);
         assert_eq!(
-            launches.settle(&root("blog"), &name("api")),
-            Some(shell(101))
+            launches.settle(&test_root("blog"), &name("api")),
+            Some(test_shell(101, 1))
         );
     }
 }

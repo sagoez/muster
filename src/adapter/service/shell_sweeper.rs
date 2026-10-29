@@ -52,37 +52,31 @@ impl ShellSweeper {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::fake_shells::FakeShells, *};
-    use crate::domain::value::{Pid, StartToken};
+    use super::{
+        super::{fake_shells::FakeShells, runtime_testing::test_shell},
+        *,
+    };
 
     /// Longest a test waits for a sweep.
     const SWEEP_WAIT: Duration = Duration::from_secs(5);
 
-    /// The shell running as `pid`.
-    fn shell(pid: u32) -> ShellId {
-        ShellId::builder()
-            .pid(Pid::try_new(pid).unwrap())
-            .start(StartToken::try_new(1).unwrap())
-            .build()
-    }
-
     #[test]
     fn only_ended_shells_are_forgotten_and_posted() {
         let shells = FakeShells::default();
-        shells.open(shell(101));
+        shells.open(test_shell(101, 1));
         let (sender, events) = bounded(4);
         let sweeper = ShellSweeper::spawn(Arc::new(shells.clone()), sender);
 
-        sweeper.sweep(vec![shell(101), shell(102)]);
+        sweeper.sweep(vec![test_shell(101, 1), test_shell(102, 1)]);
 
         let ServiceEvent::ShellsGone { shells: gone } = events.recv_timeout(SWEEP_WAIT).unwrap()
         else {
             panic!("expected the ended shells");
         };
-        assert_eq!(gone, [shell(102)]);
-        assert_eq!(shells.forgotten(), [shell(102)]);
+        assert_eq!(gone, [test_shell(102, 1)]);
+        assert_eq!(shells.forgotten(), [test_shell(102, 1)]);
 
-        sweeper.sweep(vec![shell(101)]);
+        sweeper.sweep(vec![test_shell(101, 1)]);
         assert!(
             events.recv_timeout(SWEEP_WAIT / 5).is_err(),
             "nothing ended, nothing posted"

@@ -112,7 +112,7 @@ mod tests {
             port::{OutputSink, ProcessHandle, ProcessRunner},
             process::RestartPolicy,
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{Cols, OutputCursor, Rows},
+            value::OutputCursor,
         },
     };
 
@@ -241,10 +241,7 @@ mod tests {
             }
             let _ = HolderMessage::Snapshot {
                 repaint: HOLDER_SCREEN.as_bytes().to_vec(),
-                size: PtySize::builder()
-                    .rows(Rows::new(HOLDER_SIDE))
-                    .cols(Cols::new(HOLDER_SIDE))
-                    .build(),
+                size: PtySize::try_new(HOLDER_SIDE, HOLDER_SIDE).unwrap(),
                 pid: FAKE_LAUNCHER_PID,
                 attached: 0,
                 run_start: OutputCursor::new(0),

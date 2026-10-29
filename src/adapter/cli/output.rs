@@ -8,7 +8,6 @@ use std::{
 };
 
 use bytesize::ByteSize;
-use semver::Version;
 use serde::Serialize;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
@@ -544,14 +543,11 @@ pub fn service_rows(status: &ServiceStatus) -> Report {
                 .version(Some(version.clone()))
                 .binary(status.binary().clone())
                 .build();
-            let hint = Version::parse(status.client_version())
-                .ok()
-                .map(|ours| running.compared_with(&ours))
-                .and_then(|ordering| match ordering {
-                    Ordering::Greater => Some(SERVICE_REPLACED_HINT),
-                    Ordering::Less => Some(SERVICE_NEWER_HINT),
-                    Ordering::Equal => None,
-                });
+            let hint = match running.compared_with(status.client_version()) {
+                Ordering::Greater => Some(SERVICE_REPLACED_HINT),
+                Ordering::Less => Some(SERVICE_NEWER_HINT),
+                Ordering::Equal => None,
+            };
             if let Some(hint) = hint {
                 rows.push(Row::unlabeled(
                     RowKind::Hint,
@@ -1164,9 +1160,9 @@ mod tests {
         let status = |version: &str| {
             ServiceStatus::builder()
                 .running(true)
-                .version(Some(version.to_string()))
+                .version(Some(version.parse().unwrap()))
                 .binary(Some(PathBuf::from("/usr/bin/muster")))
-                .client_version("0.9.1".to_string())
+                .client_version("0.9.1".parse().unwrap())
                 .socket(PathBuf::from("/s/service.sock"))
                 .log(PathBuf::from("/s/service.log"))
                 .projects(vec![])

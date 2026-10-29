@@ -356,7 +356,7 @@ mod tests {
             color_scheme::ColorScheme,
             process::{StopPolicy, StopSignal},
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, OutputCursor, Rows, StopGrace},
+            value::{ByteSize, CommandLine, OutputCursor, StopGrace},
         },
     };
 
@@ -418,10 +418,7 @@ mod tests {
 
     /// A terminal size of `rows` by `cols`.
     fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::builder()
-            .rows(Rows::new(rows))
-            .cols(Cols::new(cols))
-            .build()
+        PtySize::try_new(rows, cols).unwrap()
     }
 
     /// A scratch directory under a short root, removed even on a panic.

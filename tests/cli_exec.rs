@@ -35,7 +35,7 @@ use muster::{
         service::{
             BatchOutcome, LaunchEnvironment, Notice, NoticeLevel, ProcessAction, ProcessStatus,
             ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest,
-            ServiceResponse, ServiceRuntime, Singleton,
+            ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
         store::SqliteStore,
@@ -45,7 +45,7 @@ use muster::{
         process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
-        value::{Cols, ProcessName, ProjectName, ProjectRoot, Rows},
+        value::{ProcessName, ProjectName, ProjectRoot},
     },
 };
 use rustix::{
@@ -466,7 +466,7 @@ fn in_process_service(
     let state_dir = scratch.state_dir();
     let database = scratch.database();
     let started = state_dir.clone();
-    let version = version.to_string();
+    let version: ServiceVersion = version.parse().expect("a test version is semantic");
     let service = thread::spawn(move || {
         let singleton = Singleton::acquire(&state_dir)?.expect("no other service runs");
         let exec = ExecHolderLauncher::builder()
@@ -1597,7 +1597,7 @@ fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'s
                 .push(request_name(&request));
             let response = match request {
                 ServiceRequest::Hello { .. } => ServiceResponse::Hello {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: ServiceVersion::current(),
                     binary: PathBuf::from(IN_PROCESS_BINARY),
                 },
                 ServiceRequest::Ps { .. } => {
@@ -1636,7 +1636,7 @@ fn scripted_service(scratch: &Scratch, project: PathBuf) {
             };
             let response = match request {
                 ServiceRequest::Hello { .. } => ServiceResponse::Hello {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: ServiceVersion::current(),
                     binary: PathBuf::from(IN_PROCESS_BINARY),
                 },
                 ServiceRequest::Ps { .. } => {
@@ -2999,10 +2999,7 @@ fn an_attach_survives_a_service_restart_and_a_killed_attach_is_uncounted() {
     let project = scratch.project("shop", &single());
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
-    let attached_size = PtySize::builder()
-        .rows(Rows::new(ATTACH_ROWS))
-        .cols(Cols::new(ATTACH_COLS))
-        .build();
+    let attached_size = PtySize::try_new(ATTACH_ROWS, ATTACH_COLS).unwrap();
 
     let pty = Pty::open_sized(ATTACH_ROWS, ATTACH_COLS);
     let mut attach = pty.spawn(&mut scratch, &project, &["attach", "api"]);

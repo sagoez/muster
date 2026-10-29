@@ -417,7 +417,7 @@ mod tests {
     use crate::domain::{
         color_scheme::ColorScheme,
         process::StopPolicy,
-        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
+        value::{ByteSize, CommandLine, ProcessName, StopGrace},
     };
 
     /// Name given to every test process.
@@ -457,12 +457,7 @@ mod tests {
             .process(ProcessName::try_new(TEST_PROCESS).unwrap())
             .command(CommandLine::try_new(command).unwrap())
             .working_dir(working_dir)
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
+            .size(PtySize::try_new(24, 80).unwrap())
             .scrollback(TEST_SCROLLBACK)
             .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
             .color_scheme(ColorScheme::Dark)
@@ -521,12 +516,7 @@ mod tests {
                 .into(),
             )
             .environment([("OWN".into(), "own".into()), ("BOTH".into(), "own".into())].into())
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
+            .size(PtySize::try_new(24, 80).unwrap())
             .scrollback(TEST_SCROLLBACK)
             .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
             .color_scheme(ColorScheme::Dark)

@@ -11,12 +11,11 @@ use muster::{
         port_occupants::OsPortOccupants,
         private_dir::{prepare_state_dir, state_dir},
         service::{
-            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton, protocol,
-            redirect_stderr,
+            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
+            protocol, redirect_stderr,
         },
         store::SqliteStore,
     },
-    constants::APP_VERSION,
     domain::{
         config::ConfigError,
         port::{Notifier, PortOccupants},
@@ -108,7 +107,7 @@ fn run_service() -> Result<(), MusterError> {
         .build();
     let runner = HolderRunner::new(Box::new(launcher), HolderDirs::under(&state_dir));
     let deps = ServiceDeps::builder()
-        .version(APP_VERSION.to_string())
+        .version(ServiceVersion::current())
         .binary(binary)
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))

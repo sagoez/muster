@@ -5,7 +5,8 @@ use strum::IntoStaticStr;
 
 use super::{
     batch_outcome::BatchOutcome, located::Located, notice::Notice, project_status::ProjectStatus,
-    service_error_body::ServiceErrorBody, stack_event::EventPage, wait_outcome::WaitOutcome,
+    service_error_body::ServiceErrorBody, service_version::ServiceVersion, stack_event::EventPage,
+    wait_outcome::WaitOutcome,
 };
 
 /// The service's answer to one [`ServiceRequest`](super::ServiceRequest), as
@@ -17,7 +18,7 @@ pub enum ServiceResponse {
     /// The service's own build.
     Hello {
         /// The service's muster version.
-        version: String,
+        version: ServiceVersion,
         /// The muster binary the service runs.
         binary: PathBuf,
     },

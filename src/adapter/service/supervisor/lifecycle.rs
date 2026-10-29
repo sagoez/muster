@@ -1380,7 +1380,7 @@ mod tests {
             port::{OutputSink, ProcessRunner},
             process::{Process, RestartPolicy, StopSignal},
             pty::{ExitCause, PtySize},
-            value::{Cols, EnvName, EnvValue, Rows},
+            value::{EnvName, EnvValue},
         },
     };
 
@@ -1617,10 +1617,7 @@ mod tests {
             ],
         );
         harness.up();
-        let bigger = PtySize::builder()
-            .rows(Rows::new(40))
-            .cols(Cols::new(120))
-            .build();
+        let bigger = PtySize::try_new(40, 120).unwrap();
 
         harness
             .supervisor

@@ -603,8 +603,8 @@ mod tests {
                 chunks: Vec::new(),
                 exit: None,
                 screen: TerminalEmulator::new(
-                    Rows::new(ROWS),
-                    Cols::new(COLS),
+                    Rows::try_new(ROWS).unwrap(),
+                    Cols::try_new(COLS).unwrap(),
                     TEST_SCROLLBACK,
                     ColorScheme::Dark,
                 ),
@@ -852,10 +852,7 @@ mod tests {
         wait_until("the holder to report the exit", || {
             reported.load(Ordering::SeqCst)
         });
-        let probe = PtySize::builder()
-            .rows(Rows::new(ROWS + 1))
-            .cols(Cols::new(COLS))
-            .build();
+        let probe = PtySize::try_new(ROWS + 1, COLS).unwrap();
         handle
             .resize(probe)
             .expect("the holder keeps serving its supervisor after the exit");
@@ -984,8 +981,8 @@ mod tests {
         assert!(lines == expected, "the log has a gap or a duplicate");
 
         let mut replayed = TerminalEmulator::new(
-            Rows::new(ROWS),
-            Cols::new(COLS),
+            Rows::try_new(ROWS).unwrap(),
+            Cols::try_new(COLS).unwrap(),
             TEST_SCROLLBACK,
             ColorScheme::Dark,
         );

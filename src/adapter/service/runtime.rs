@@ -31,6 +31,7 @@ use super::{
     service_error_kind::ServiceErrorKind,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
+    service_version::ServiceVersion,
     shared_holders::SharedHolders,
     singleton::Singleton,
     stack_event::{EventKind, EventSeq},
@@ -122,7 +123,7 @@ struct EventWaiter {
 /// changed.
 pub struct ServiceRuntime {
     /// The running binary's version.
-    version: String,
+    version: ServiceVersion,
     /// The running binary's path.
     binary: PathBuf,
     /// The holders every process runs under.
@@ -1069,7 +1070,7 @@ mod tests {
             port::{Notifier, OutputSink, PortOccupants, ProcessHandle, ProcessRunner},
             process::{LogPattern, PatternKind, PatternText, ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, SpawnRequest},
-            value::{Cols, CommandLine, PaneId, Rows},
+            value::{CommandLine, PaneId},
         },
     };
 
@@ -1262,7 +1263,7 @@ mod tests {
 
         fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
             let mut settings = self.settings.lock().unwrap();
-            *settings = settings.clone().with_change(change)?;
+            *settings = settings.clone().with_change(change);
             Ok(settings.clone())
         }
     }
@@ -1557,7 +1558,7 @@ mod tests {
                     return Ok(());
                 };
                 let deps = ServiceDeps::builder()
-                    .version(VERSION.to_string())
+                    .version(VERSION.parse().unwrap())
                     .binary(PathBuf::from(TEST_BINARY))
                     .holders(pool)
                     .ports(Box::new(TestPorts))
@@ -2344,10 +2345,10 @@ mod tests {
 
         assert_eq!(
             service.send(ServiceRequest::Hello {
-                version: "9.9.9".to_string()
+                version: "9.9.9".parse().unwrap()
             }),
             ServiceResponse::Hello {
-                version: VERSION.to_string(),
+                version: VERSION.parse().unwrap(),
                 binary: PathBuf::from(TEST_BINARY),
             }
         );
@@ -2666,10 +2667,7 @@ mod tests {
         let service = fixture.start(Arc::new(fixture.runner()));
         service.up(&project);
         service.wait_for(&project, "api", ProcessState::Running);
-        let bigger = PtySize::builder()
-            .rows(Rows::new(40))
-            .cols(Cols::new(120))
-            .build();
+        let bigger = PtySize::try_new(40, 120).unwrap();
 
         fixture
             .store

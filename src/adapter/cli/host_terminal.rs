@@ -8,7 +8,7 @@ use rustix::termios::tcgetwinsize;
 use super::error::CliError;
 use crate::domain::{
     pty::PtySize,
-    value::{Cols, Rows},
+    value::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS},
 };
 
 /// The terminal `muster attach` takes over: where keys are read from and the
@@ -63,13 +63,14 @@ impl HostTerminal {
     /// most a holder takes, or none when it reports no rows or columns.
     pub fn size(&self) -> Option<PtySize> {
         let size = tcgetwinsize(&self.output).ok()?;
-        (size.ws_row > 0 && size.ws_col > 0).then(|| {
-            PtySize::builder()
-                .rows(Rows::new(size.ws_row))
-                .cols(Cols::new(size.ws_col))
-                .build()
-                .clamped()
-        })
+        if size.ws_row == 0 || size.ws_col == 0 {
+            return None;
+        }
+        PtySize::try_new(
+            size.ws_row.clamp(MIN_ROWS, MAX_ROWS),
+            size.ws_col.clamp(MIN_COLS, MAX_COLS),
+        )
+        .ok()
     }
 }
 
@@ -77,10 +78,7 @@ impl HostTerminal {
 mod tests {
     use crate::{
         adapter::cli::test_pty::TestPty,
-        domain::{
-            pty::PtySize,
-            value::{Cols, Rows},
-        },
+        domain::{pty::PtySize, value::MIN_COLS},
     };
 
     /// A one-column terminal is reported at the narrowest size a holder
@@ -90,12 +88,7 @@ mod tests {
         let pty = TestPty::open(24, 1);
         assert_eq!(
             pty.terminal().size(),
-            Some(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(PtySize::MIN_COLS))
-                    .build()
-            )
+            Some(PtySize::try_new(24, MIN_COLS).unwrap())
         );
     }
 }

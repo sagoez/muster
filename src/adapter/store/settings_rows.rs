@@ -12,7 +12,7 @@ use crate::domain::{
     port::SettingsStore,
     pty::PtySize,
     settings::Settings,
-    value::{ByteSize, Cols, DetachKey, LogMaxSize, Rows, ScrollbackLines},
+    value::{ByteSize, DetachKey, LogMaxSize, ScrollbackLines},
 };
 
 /// Selects the settings row in the order [`settings_from_row`] reads it.
@@ -33,11 +33,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
     let default_restart: String = row.get(8).map_err(db_error)?;
     let default_stop_signal: String = row.get(9).map_err(db_error)?;
     let default_stop_grace_ms: i64 = row.get(10).map_err(db_error)?;
-    let default_size = PtySize::builder()
-        .rows(Rows::new(rows))
-        .cols(Cols::new(cols))
-        .build()
-        .checked()
+    let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
         .map_err(|error| corrupt("log size", error))
@@ -124,7 +120,7 @@ impl SettingsStore for SqliteStore {
 
     fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
         self.write(|conn| {
-            let settings = load_settings(conn)?.with_change(change)?;
+            let settings = load_settings(conn)?.with_change(change);
             store_settings(conn, &settings)?;
             load_settings(conn)
         })
@@ -185,7 +181,7 @@ mod tests {
 
         let mut expected = store.load().unwrap();
         for change in &changes {
-            expected = expected.with_change(change).unwrap();
+            expected = expected.with_change(change);
             assert_eq!(store.apply(change).unwrap(), expected, "{}", change.key());
         }
 
@@ -194,18 +190,19 @@ mod tests {
         assert_eq!(reopened.load().unwrap(), expected);
     }
 
-    /// A refused change writes nothing.
+    /// A default size edited outside the PTY bounds by hand is refused as
+    /// it is read, so no settings can hold one.
     #[test]
-    fn a_refused_change_leaves_the_settings() {
-        let (store, _scratch) = fresh_store();
-        let before = store.load().unwrap();
+    fn a_hand_edited_size_outside_the_bounds_is_refused() {
+        let (store, scratch) = fresh_store();
+        Connection::open(database(&scratch))
+            .unwrap()
+            .execute("UPDATE settings SET default_rows = 0", [])
+            .unwrap();
 
-        let error = store
-            .apply(&parsed(SettingKey::DefaultSize, "0x80"))
-            .unwrap_err();
+        let error = store.load().unwrap_err();
 
         assert!(matches!(error, ConfigError::InvalidDefaultSize { .. }));
-        assert_eq!(store.load().unwrap(), before);
     }
 
     /// A hand-edited row the domain refuses fails to load rather than

@@ -3,7 +3,9 @@ use crate::domain::{
     config::{ConfigError, SettingKey},
     process::{RestartPolicy, StopSignal},
     pty::PtySize,
-    value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace, parse_as, parse_choice},
+    value::{
+        DetachKey, LogMaxSize, ScrollbackLines, StopGrace, ValueParseError, parse_as, parse_choice,
+    },
 };
 
 /// The form a boolean setting is written in.
@@ -43,14 +45,15 @@ impl SettingChange {
     ///
     /// # Errors
     /// Returns [`ConfigError::InvalidSetting`] naming the key and the form it
-    /// accepts.
+    /// accepts, or [`ConfigError::InvalidDefaultSize`] for a size outside the
+    /// PTY bounds.
     pub fn parse(key: SettingKey, raw: &str) -> Result<Self, ConfigError> {
         let raw = raw.trim();
         let change = match key {
             SettingKey::DesktopNotifications => {
                 parse_as(raw, BOOLEAN_FORM).map(Self::DesktopNotifications)
             },
-            SettingKey::DefaultSize => raw.parse().map(Self::DefaultSize),
+            SettingKey::DefaultSize => return Self::default_size(raw),
             SettingKey::DetachKey => parse_as(raw, DETACH_KEY_FORM).map(Self::DetachKey),
             SettingKey::LogMaxSize => raw.parse().map(Self::LogMaxSize),
             SettingKey::Scrollback => parse_as(raw, LINE_COUNT_FORM).map(Self::Scrollback),
@@ -60,10 +63,20 @@ impl SettingChange {
             SettingKey::DefaultStopSignal => parse_choice(raw).map(Self::DefaultStopSignal),
             SettingKey::DefaultStopGrace => raw.parse().map(Self::DefaultStopGrace),
         };
-        change.map_err(|error| ConfigError::InvalidSetting {
-            key,
-            reason: error.to_string(),
-        })
+        change.map_err(|error| invalid(key, &error))
+    }
+
+    /// Parses `raw` as a default size within the PTY bounds.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidSetting`] for text that is not a size, or
+    /// [`ConfigError::InvalidDefaultSize`] for one outside the PTY bounds.
+    fn default_size(raw: &str) -> Result<Self, ConfigError> {
+        let (rows, cols) =
+            PtySize::dimensions(raw).map_err(|error| invalid(SettingKey::DefaultSize, &error))?;
+        PtySize::try_new(rows, cols)
+            .map(Self::DefaultSize)
+            .map_err(|source| ConfigError::InvalidDefaultSize { source })
     }
 
     /// The setting this change sets.
@@ -83,12 +96,19 @@ impl SettingChange {
     }
 }
 
+/// The refusal of `error`'s text as the value of `key`.
+fn invalid(key: SettingKey, error: &ValueParseError) -> ConfigError {
+    ConfigError::InvalidSetting {
+        key,
+        reason: error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::value::{Cols, Rows};
 
     fn parse(key: SettingKey, raw: &str) -> SettingChange {
         SettingChange::parse(key, raw).unwrap()
@@ -122,12 +142,7 @@ mod tests {
     fn default_size_reads_rows_by_columns() {
         assert_eq!(
             parse(SettingKey::DefaultSize, "30x120"),
-            SettingChange::DefaultSize(
-                PtySize::builder()
-                    .rows(Rows::new(30))
-                    .cols(Cols::new(120))
-                    .build()
-            )
+            SettingChange::DefaultSize(PtySize::try_new(30, 120).unwrap())
         );
         assert!(refusal(SettingKey::DefaultSize, "big").contains("ROWSxCOLS"));
     }

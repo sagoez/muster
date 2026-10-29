@@ -94,7 +94,7 @@ mod tests {
     fn seeded() -> Settings {
         Settings::builder()
             .desktop_notifications(true)
-            .default_size("24x80".parse::<PtySize>().unwrap())
+            .default_size(PtySize::try_new(24, 80).unwrap())
             .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
             .log_max_size("10MiB".parse::<LogMaxSize>().unwrap())
             .scrollback(ScrollbackLines::try_new(1000).unwrap())

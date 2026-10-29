@@ -33,8 +33,8 @@ use crate::{
         pty::{PtyError, PtySize, SpawnRequest},
         settings::Settings,
         value::{
-            ByteSize, Cols, CommandLine, DetachKey, LogMaxSize, PaneId, ProcessName, ProjectName,
-            ProjectRoot, Rows, ScrollbackLines, StopGrace,
+            ByteSize, CommandLine, DetachKey, LogMaxSize, PaneId, ProcessName, ProjectName,
+            ProjectRoot, ScrollbackLines, StopGrace,
         },
     },
 };
@@ -95,12 +95,7 @@ pub(crate) fn stack(processes: &[ProcessSpec]) -> Stack {
 pub(crate) fn test_settings() -> Settings {
     Settings::builder()
         .desktop_notifications(false)
-        .default_size(
-            PtySize::builder()
-                .rows(Rows::new(TEST_TERMINAL_SIDE))
-                .cols(Cols::new(TEST_TERMINAL_SIDE))
-                .build(),
-        )
+        .default_size(PtySize::try_new(TEST_TERMINAL_SIDE, TEST_TERMINAL_SIDE).unwrap())
         .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
         .log_max_size(
             LogMaxSize::try_new(ByteSize::try_new(RawByteSize::mib(TEST_LOG_CAP_MIB)).unwrap())

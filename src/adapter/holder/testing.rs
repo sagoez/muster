@@ -8,7 +8,7 @@ use crate::domain::{
     color_scheme::ColorScheme,
     process::{StopPolicy, StopSignal},
     pty::{PtySize, SpawnRequest},
-    value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
+    value::{ByteSize, CommandLine, ProcessName, StopGrace},
 };
 
 /// PTY rows of every test child.
@@ -24,10 +24,7 @@ pub(crate) const TEST_STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// The terminal size every test child starts with.
 pub(crate) fn test_size() -> PtySize {
-    PtySize::builder()
-        .rows(Rows::new(TEST_ROWS))
-        .cols(Cols::new(TEST_COLS))
-        .build()
+    PtySize::try_new(TEST_ROWS, TEST_COLS).unwrap()
 }
 
 /// The stop policy every test child is launched with.

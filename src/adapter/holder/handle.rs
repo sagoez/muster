@@ -394,7 +394,6 @@ mod tests {
     use crossbeam_channel::{RecvTimeoutError, Sender, unbounded};
 
     use super::*;
-    use crate::domain::value::{Cols, Rows};
 
     /// Bound on every wait in these tests; reaching it fails the test.
     const WAIT: Duration = Duration::from_secs(10);
@@ -438,10 +437,7 @@ mod tests {
         let (service, mut holder) = UnixStream::pair().unwrap();
         HolderMessage::Snapshot {
             repaint: SCREEN.to_vec(),
-            size: PtySize::builder()
-                .rows(Rows::new(ROWS))
-                .cols(Cols::new(COLS))
-                .build(),
+            size: PtySize::try_new(ROWS, COLS).unwrap(),
             pid: CHILD_PID,
             attached: 0,
             run_start: OutputCursor::new(0),

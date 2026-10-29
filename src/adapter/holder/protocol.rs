@@ -15,7 +15,7 @@ use super::{
 use crate::domain::{
     process::StopSignal,
     pty::{ExitOutcome, PtySize},
-    value::{Cols, OutputCursor, Rows},
+    value::OutputCursor,
 };
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
@@ -343,12 +343,11 @@ fn decode_offset(bytes: &[u8]) -> Option<OutputCursor> {
 /// length or a size outside the PTY bounds, which no holder renders.
 fn decode_size(bytes: &[u8]) -> Option<PtySize> {
     let [rows_high, rows_low, cols_high, cols_low] = <[u8; SIZE_BYTES]>::try_from(bytes).ok()?;
-    PtySize::builder()
-        .rows(Rows::new(u16::from_be_bytes([rows_high, rows_low])))
-        .cols(Cols::new(u16::from_be_bytes([cols_high, cols_low])))
-        .build()
-        .checked()
-        .ok()
+    PtySize::try_new(
+        u16::from_be_bytes([rows_high, rows_low]),
+        u16::from_be_bytes([cols_high, cols_low]),
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -359,10 +358,7 @@ mod tests {
     use crate::domain::pty::{ExitCause, SignalName};
 
     fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::builder()
-            .rows(Rows::new(rows))
-            .cols(Cols::new(cols))
-            .build()
+        PtySize::try_new(rows, cols).unwrap()
     }
 
     /// Every message survives the wire in both directions.

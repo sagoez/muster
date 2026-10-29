@@ -3,7 +3,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     color_scheme::ColorScheme,
-    config::{ConfigError, ProcessDefaults, SettingChange, SettingKey},
+    config::{ProcessDefaults, SettingChange, SettingKey},
     process::{RestartPolicy, StopPolicy, StopSignal},
     pty::PtySize,
     value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
@@ -47,17 +47,10 @@ pub struct Settings {
 
 impl Settings {
     /// These settings with `change` applied.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError::InvalidDefaultSize`] for a size outside the PTY
-    /// bounds.
-    pub fn with_change(self, change: &SettingChange) -> Result<Self, ConfigError> {
-        Ok(match change {
+    pub fn with_change(self, change: &SettingChange) -> Self {
+        match change {
             SettingChange::DesktopNotifications(value) => self.with_desktop_notifications(*value),
-            SettingChange::DefaultSize(size) => self.with_default_size(
-                size.checked()
-                    .map_err(|source| ConfigError::InvalidDefaultSize { source })?,
-            ),
+            SettingChange::DefaultSize(size) => self.with_default_size(*size),
             SettingChange::DetachKey(key) => self.with_detach_key(key.clone()),
             SettingChange::LogMaxSize(size) => self.with_log_max_size(*size),
             SettingChange::Scrollback(lines) => self.with_scrollback(*lines),
@@ -66,7 +59,7 @@ impl Settings {
             SettingChange::DefaultRestart(policy) => self.with_default_restart(*policy),
             SettingChange::DefaultStopSignal(signal) => self.with_default_stop_signal(*signal),
             SettingChange::DefaultStopGrace(grace) => self.with_default_stop_grace(*grace),
-        })
+        }
     }
 
     /// The value of `key` as `muster config get` prints it, in the form
@@ -108,13 +101,10 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::domain::value::{Cols, Rows};
+    use crate::domain::config::ConfigError;
 
     fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::builder()
-            .rows(Rows::new(rows))
-            .cols(Cols::new(cols))
-            .build()
+        PtySize::try_new(rows, cols).unwrap()
     }
 
     fn settings() -> Settings {
@@ -134,9 +124,7 @@ mod tests {
 
     #[test]
     fn a_change_sets_only_its_setting() {
-        let changed = settings()
-            .with_change(&SettingChange::DefaultRestart(RestartPolicy::Always))
-            .unwrap();
+        let changed = settings().with_change(&SettingChange::DefaultRestart(RestartPolicy::Always));
 
         assert_eq!(
             changed,
@@ -144,19 +132,22 @@ mod tests {
         );
     }
 
+    /// A default size outside the PTY bounds is refused as it is read, so no
+    /// setting can hold one.
     #[test]
     fn refuses_a_default_size_outside_the_pty_bounds() {
-        for refused in [size(0, 80), size(24, 1), size(24, PtySize::MAX_COLS + 1)] {
-            assert!(matches!(
-                settings().with_change(&SettingChange::DefaultSize(refused)),
-                Err(ConfigError::InvalidDefaultSize { .. })
-            ));
+        for refused in ["0x80", "24x1", "24x2001"] {
+            assert!(
+                matches!(
+                    SettingChange::parse(SettingKey::DefaultSize, refused),
+                    Err(ConfigError::InvalidDefaultSize { .. })
+                ),
+                "{refused}"
+            );
         }
+        let change = SettingChange::parse(SettingKey::DefaultSize, "30x120").unwrap();
         assert_eq!(
-            *settings()
-                .with_change(&SettingChange::DefaultSize(size(30, 120)))
-                .unwrap()
-                .default_size(),
+            *settings().with_change(&change).default_size(),
             size(30, 120)
         );
     }
@@ -169,11 +160,7 @@ mod tests {
             let change = SettingChange::parse(key, &settings().value_text(key)).unwrap();
 
             assert_eq!(change.key(), key);
-            assert_eq!(
-                settings().with_change(&change).unwrap(),
-                settings(),
-                "{key}"
-            );
+            assert_eq!(settings().with_change(&change), settings(), "{key}");
         }
         assert_eq!(settings().value_text(SettingKey::DefaultSize), "24x80");
         assert_eq!(settings().value_text(SettingKey::DefaultStopGrace), "5s");

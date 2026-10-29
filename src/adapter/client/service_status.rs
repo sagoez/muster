@@ -4,6 +4,8 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
+use crate::adapter::service::ServiceVersion;
+
 /// What `muster service status` reports, without starting the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct ServiceStatus {
@@ -12,14 +14,14 @@ pub struct ServiceStatus {
     running: bool,
     /// The running service's muster version.
     #[getset(get = "pub")]
-    version: Option<String>,
+    version: Option<ServiceVersion>,
     /// The muster binary the running service runs.
     #[getset(get = "pub")]
     binary: Option<PathBuf>,
     /// This binary's muster version, which replaces a service of another one
     /// at the next command.
     #[getset(get = "pub")]
-    client_version: String,
+    client_version: ServiceVersion,
     /// The socket the service listens on.
     #[getset(get = "pub")]
     socket: PathBuf,

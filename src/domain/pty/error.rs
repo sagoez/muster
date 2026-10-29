@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use super::PtySize;
+use crate::domain::value::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS};
 
 /// Errors from spawning or interacting with a process under a PTY.
 #[derive(Debug, Error)]
@@ -23,10 +23,10 @@ pub enum PtyError {
     /// A terminal size outside the PTY bounds.
     #[error(
         "terminal size {rows}x{cols} is outside {min_rows}x{min_cols} to {max_rows}x{max_cols} (rows x columns)",
-        min_rows = PtySize::MIN_ROWS,
-        min_cols = PtySize::MIN_COLS,
-        max_rows = PtySize::MAX_ROWS,
-        max_cols = PtySize::MAX_COLS
+        min_rows = MIN_ROWS,
+        min_cols = MIN_COLS,
+        max_rows = MAX_ROWS,
+        max_cols = MAX_COLS
     )]
     SizeOutOfBounds {
         /// The refused rows.

@@ -244,7 +244,6 @@ impl HolderServer {
             .clone()
             .and_then(|root| ProjectRoot::try_new(root).ok())
             .ok_or(HolderError::MissingProject)?;
-        request.size().checked()?;
         let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
         let handle =
@@ -683,14 +682,13 @@ impl HolderServer {
         Ok(())
     }
 
-    /// Resizes the PTY when `size`, pulled within the PTY bounds, differs
-    /// from the current one, then the emulator, so a refused resize leaves
-    /// both at the size the child has. Returns whether the size changed.
+    /// Resizes the PTY when `size` differs from the current one, then the
+    /// emulator, so a refused resize leaves both at the size the child has.
+    /// Returns whether the size changed.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the PTY refuses the resize.
     fn apply_size(&mut self, size: PtySize) -> Result<bool, PtyError> {
-        let size = size.clamped();
         if size == self.size {
             return Ok(false);
         }
@@ -930,8 +928,8 @@ mod tests {
     use crate::{
         adapter::{
             holder::{
-                ClientMessage, ClientRole, HolderControl, HolderId, HolderMessage, HolderRecord,
-                RejectReason,
+                ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
+                HolderRecord, RejectReason,
                 testing::{test_request, test_stop},
             },
             terminal::TerminalEmulator,
@@ -939,7 +937,7 @@ mod tests {
         domain::{
             color_scheme::ColorScheme,
             pty::{ExitOutcome, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, OutputCursor, ProcessName, Rows},
+            value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
         },
     };
 
@@ -987,10 +985,7 @@ mod tests {
     const RESIZE_REFUSED: &str = "resize refused";
 
     fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::builder()
-            .rows(Rows::new(rows))
-            .cols(Cols::new(cols))
-            .build()
+        PtySize::try_new(rows, cols).unwrap()
     }
 
     /// A request to run `command` as `dev server` of the project at `dir`,
@@ -1348,12 +1343,18 @@ mod tests {
 
     /// A one-column resize, as from a one-column terminal, is refused, so a
     /// wide character the child then prints never reaches a screen too narrow
-    /// for it and the child keeps running.
+    /// for it and the child keeps running. No `PtySize` can be one column, so
+    /// the frame is written raw.
     #[test]
     fn a_one_column_resize_then_a_wide_character_keeps_the_child_alive() {
         let harness = Harness::start(r"read x; printf '\347\225\214 done'; read y");
         let (mut narrow, _) = harness.connect(ClientRole::Attach { read_only: false });
-        narrow.send(ClientMessage::Resize(size(ROWS, 1)));
+        let [rows_high, rows_low] = ROWS.to_be_bytes();
+        let one_column = Frame::builder()
+            .tag(FrameTag::Resize)
+            .payload(vec![rows_high, rows_low, 0, 1])
+            .build();
+        write_frame(&mut narrow.stream, &one_column).unwrap();
         narrow.expect_closed();
         assert_eq!(harness.current_size(), size(ROWS, COLS));
 
@@ -1812,7 +1813,7 @@ mod tests {
         let scratch = scratch();
         let (mut server, killed) = fake_server(&scratch);
         server.emulator =
-            TerminalEmulator::new(Rows::new(ROWS), Cols::new(1), 0, ColorScheme::Dark);
+            TerminalEmulator::one_column(Rows::try_new(ROWS).unwrap(), 0, ColorScheme::Dark);
         let (supervisor, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(WAIT)).unwrap();
         server.on_connected(ClientId(0), supervisor);
@@ -1844,7 +1845,7 @@ mod tests {
         let scratch = scratch();
         let (mut server, _, written) = recording_server(&scratch);
         server.emulator =
-            TerminalEmulator::new(Rows::new(ROWS), Cols::new(1), 0, ColorScheme::Dark);
+            TerminalEmulator::one_column(Rows::try_new(ROWS).unwrap(), 0, ColorScheme::Dark);
 
         server
             .on_output("\x1b[>1u\x1b[?uwide \u{754c}".as_bytes().to_vec())

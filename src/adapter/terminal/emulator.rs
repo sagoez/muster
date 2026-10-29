@@ -272,12 +272,29 @@ impl TerminalEmulator {
     /// Builds an emulator for a `rows` by `cols` screen retaining `scrollback`
     /// lines of history, answering color queries from `color_scheme`.
     pub fn new(rows: Rows, cols: Cols, scrollback: usize, color_scheme: ColorScheme) -> Self {
+        let size = TermSize::new(cols.into_inner() as usize, rows.into_inner() as usize);
+        Self::sized(size, scrollback, color_scheme)
+    }
+
+    /// Builds an emulator for a one-column screen, which no PTY takes, so a
+    /// test can drive the backend into a panic with a wide character.
+    #[cfg(test)]
+    pub(crate) fn one_column(rows: Rows, scrollback: usize, color_scheme: ColorScheme) -> Self {
+        Self::sized(
+            TermSize::new(1, rows.into_inner() as usize),
+            scrollback,
+            color_scheme,
+        )
+    }
+
+    /// Builds an emulator for a `size` screen retaining `scrollback` lines of
+    /// history, answering color queries from `color_scheme`.
+    fn sized(size: TermSize, scrollback: usize, color_scheme: ColorScheme) -> Self {
         let sink = Arc::new(Mutex::new(EmulatorSink::default()));
         let proxy = EventProxy {
             sink: sink.clone(),
             color_scheme,
         };
-        let size = TermSize::new(cols.into_inner() as usize, rows.into_inner() as usize);
         let term = Term::new(history_config(scrollback), &size, proxy);
         Self {
             term,
@@ -303,13 +320,8 @@ impl TerminalEmulator {
             return false;
         }
         let pending = self.take_pty_writes();
-        let (rows, cols) = self.size();
-        *self = Self::new(
-            Rows::new(rows),
-            Cols::new(cols),
-            self.history,
-            self.color_scheme,
-        );
+        let size = TermSize::new(self.term.columns(), self.term.screen_lines());
+        *self = Self::sized(size, self.history, self.color_scheme);
         lock_sink(&self.sink).pty_writes = pending;
         true
     }
@@ -908,11 +920,11 @@ mod tests {
     use crate::domain::value::{Cols, Rows};
 
     fn rows(count: u16) -> Rows {
-        Rows::new(count)
+        Rows::try_new(count).unwrap()
     }
 
     fn cols(count: u16) -> Cols {
-        Cols::new(count)
+        Cols::try_new(count).unwrap()
     }
 
     /// Repainting a screen onto a fresh emulator reproduces its cells, cursor, and

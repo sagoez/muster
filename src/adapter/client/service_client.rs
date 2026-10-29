@@ -10,8 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use semver::Version;
-
 use super::{
     client_error::ClientError, probe::Probe, running_service::RunningService,
     service_log::ServiceLog, service_start::ServiceStart, service_status::ServiceStatus,
@@ -22,7 +20,7 @@ use crate::{
         holder::{detached, reap},
         private_dir::{prepare_state_dir, state_dir},
         service::{
-            ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
+            ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
     },
@@ -69,7 +67,7 @@ impl ServiceClient {
     /// being replaced.
     pub fn connect() -> Result<Self, ClientError> {
         let client = Self::local()?;
-        let ours = ours();
+        let ours = ServiceVersion::current();
         let running = client.reach()?;
         match running.compared_with(&ours) {
             Ordering::Equal => return Ok(client),
@@ -82,7 +80,11 @@ impl ServiceClient {
         }
         Err(ClientError::VersionMismatch {
             ours: APP_VERSION.to_string(),
-            theirs: replacement.version().clone().unwrap_or_default(),
+            theirs: replacement
+                .version()
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
         })
     }
 
@@ -120,7 +122,7 @@ impl ServiceClient {
                     .as_ref()
                     .and_then(|running| running.binary().clone()),
             )
-            .client_version(APP_VERSION.to_string())
+            .client_version(ServiceVersion::current())
             .socket(client.socket.clone())
             .log(client.log().path().clone())
             .projects(projects)
@@ -297,7 +299,7 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when something accepts but does not answer.
     fn probe(&self) -> Result<Probe, ClientError> {
         let hello = ServiceRequest::Hello {
-            version: APP_VERSION.to_string(),
+            version: ServiceVersion::current(),
         };
         match protocol::send_within(&self.socket, &hello, SERVICE_EXIT_TIMEOUT) {
             Ok(ServiceResponse::Hello { version, binary }) => Ok(Probe::Running(
@@ -481,7 +483,11 @@ impl ServiceClient {
             Err(error) if not_listening(&error) || gone(&error) => Ok(()),
             Err(source) => Err(self.unavailable(
                 UnavailableReason::DidNotMakeWay {
-                    theirs: running.version().clone().unwrap_or_default(),
+                    theirs: running
+                        .version()
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
                     ours: APP_VERSION,
                     source,
                 },
@@ -512,16 +518,15 @@ impl ServiceClient {
     }
 }
 
-/// This binary's version.
-fn ours() -> Version {
-    Version::parse(APP_VERSION).unwrap_or_else(|_| Version::new(0, 0, 0))
-}
-
 /// The refusal to use the newer service `running`.
 fn newer(running: RunningService) -> ClientError {
     ClientError::ServiceNewer {
         ours: APP_VERSION.to_string(),
-        theirs: running.version().clone().unwrap_or_default(),
+        theirs: running
+            .version()
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
         binary: running.binary().clone(),
     }
 }

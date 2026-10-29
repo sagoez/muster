@@ -2,14 +2,16 @@ use std::{path::PathBuf, sync::Arc};
 
 use typed_builder::TypedBuilder;
 
-use super::{holder_pool::HolderPool, project_ports::ProjectPorts};
+use super::{
+    holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
+};
 use crate::domain::port::{ListeningPorts, ProcessMetrics, SettingsStore, StackStore};
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
 #[derive(TypedBuilder)]
 pub struct ServiceDeps {
     /// The running binary's version, answered to a client's hello.
-    pub(super) version: String,
+    pub(super) version: ServiceVersion,
     /// The running binary's path, answered to a client's hello so an older
     /// client can say which muster it found.
     pub(super) binary: PathBuf,

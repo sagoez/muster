@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     launch_environment::LaunchEnvironment,
     process_action::ProcessAction,
+    service_version::ServiceVersion,
     stack_event::{EventKind, EventSeq},
     wait_condition::WaitSpec,
 };
@@ -22,7 +23,7 @@ pub enum ServiceRequest {
     /// replace the service.
     Hello {
         /// The client's muster version.
-        version: String,
+        version: ServiceVersion,
     },
     /// Starts the project's `autostart` processes that are not running.
     Up {

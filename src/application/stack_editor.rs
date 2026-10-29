@@ -111,10 +111,7 @@ mod tests {
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
-        value::{
-            Cols, CommandLine, DetachKey, ProjectName, Rows, ScrollbackLines, StackRevision,
-            StopGrace,
-        },
+        value::{CommandLine, DetachKey, ProjectName, ScrollbackLines, StackRevision, StopGrace},
     };
 
     /// One step the fakes record, so a test can check what happened in order.
@@ -231,7 +228,7 @@ mod tests {
 
         fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
             self.write()?;
-            let changed = self.settings.borrow().clone().with_change(change)?;
+            let changed = self.settings.borrow().clone().with_change(change);
             *self.settings.borrow_mut() = changed.clone();
             Ok(changed)
         }
@@ -270,12 +267,7 @@ mod tests {
     fn settings() -> Settings {
         Settings::builder()
             .desktop_notifications(true)
-            .default_size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
+            .default_size(PtySize::try_new(24, 80).unwrap())
             .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
             .log_max_size("10MiB".parse().unwrap())
             .scrollback(ScrollbackLines::try_new(1000).unwrap())
@@ -398,23 +390,5 @@ mod tests {
                 .is_err()
         );
         assert!(fakes.steps().is_empty());
-    }
-
-    /// A value the domain refuses is refused before any notification.
-    #[test]
-    fn an_invalid_setting_notifies_nothing() {
-        let fakes = Fakes::new(false);
-        let tiny = PtySize::builder()
-            .rows(Rows::new(0))
-            .cols(Cols::new(0))
-            .build();
-
-        let error = fakes
-            .editor()
-            .configure(&SettingChange::DefaultSize(tiny))
-            .unwrap_err();
-
-        assert!(matches!(error, ConfigError::InvalidDefaultSize { .. }));
-        assert!(!fakes.steps().contains(&Step::SettingsChanged));
     }
 }

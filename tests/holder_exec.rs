@@ -22,7 +22,7 @@ use muster::{
         port::{OutputSink, ProcessRunner},
         process::{StopPolicy, StopSignal},
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
+        value::{ByteSize, CommandLine, ProcessName, StopGrace},
     },
 };
 use tempfile::TempDir;
@@ -147,12 +147,7 @@ impl Scratch {
             .project(Some(self.root.path().to_path_buf()))
             .launch_environment([(LAUNCH_ENTRY.0.into(), LAUNCH_ENTRY.1.into())].into())
             .environment([(OWN_ENTRY.0.into(), OWN_ENTRY.1.into())].into())
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
+            .size(PtySize::try_new(24, 80).unwrap())
             .scrollback(SCROLLBACK_LINES)
             .log_max_size(ByteSize::try_new(RawByteSize::mib(LOG_CAP_MIB)).unwrap())
             .color_scheme(ColorScheme::Dark)

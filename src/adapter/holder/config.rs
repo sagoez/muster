@@ -124,7 +124,7 @@ mod tests {
         color_scheme::ColorScheme,
         process::{StopPolicy, StopSignal},
         pty::PtySize,
-        value::{ByteSize, Cols, CommandLine, ProcessName, Rows, StopGrace},
+        value::{ByteSize, CommandLine, ProcessName, StopGrace},
     };
 
     /// A log cap with no exact human-readable form.
@@ -150,12 +150,7 @@ mod tests {
             .command(CommandLine::try_new("echo hi").unwrap())
             .launch_environment([("FROM".into(), "cli".into())].into())
             .environment([("KEY".into(), "value".into())].into())
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
+            .size(PtySize::try_new(24, 80).unwrap())
             .scrollback(SCROLLBACK)
             .log_max_size(ByteSize::try_new(RawByteSize::b(ODD_CAP_BYTES)).unwrap())
             .color_scheme(ColorScheme::Light)

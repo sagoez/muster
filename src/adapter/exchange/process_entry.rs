@@ -9,7 +9,7 @@ use typed_builder::TypedBuilder;
 
 use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
-    config::{DeclaredPorts, Environment, ProcessSpec, stays_under_root},
+    config::{DeclaredPorts, Environment, ProcessSpec, RepeatedPort, stays_under_root},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
@@ -129,9 +129,7 @@ fn declared_ports(raw: Vec<u16>) -> Result<DeclaredPorts, EntryError> {
     for port in raw {
         let port = LocalPort::try_new(port).map_err(|_| EntryError::InvalidPort { port })?;
         if !seen.insert(port) {
-            return Err(EntryError::DuplicatePort {
-                port: port.into_inner(),
-            });
+            return Err(RepeatedPort::builder().port(port).build().into());
         }
     }
     Ok(DeclaredPorts::of(seen)?)

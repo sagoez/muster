@@ -294,13 +294,16 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        super::{add::add, add_args::AddArgs, args::Args, command::Command, fake_ports::FakePorts},
+        super::{
+            add::add, add_args::AddArgs, args::Args, cli_exit::CliExit, command::Command,
+            fake_ports::FakePorts,
+        },
         *,
     };
     use crate::{
         adapter::{cli::report::plain, store::test_support::fresh_store},
         domain::{
-            config::{Environment, ProcessSpec},
+            config::{DECLARED_PORTS_MAX, Environment, ProcessSpec},
             port::StackReader,
             process::{RestartPolicy, StopPolicy, StopSignal},
             value::{
@@ -357,7 +360,7 @@ mod tests {
             .clone()
     }
 
-    /// `add --port` stores each port once, and `set --port` replaces the
+    /// `add --port` stores the ports ascending, and `set --port` replaces the
     /// whole set, each through the editor into the database.
     #[test]
     fn add_and_set_take_ports() {
@@ -372,8 +375,6 @@ mod tests {
                 "5173",
                 "--port",
                 "3000",
-                "--port",
-                "5173",
                 "--",
                 "npm run dev",
             ]),
@@ -391,6 +392,55 @@ mod tests {
 
         let plain_add = add(&invocation, add_args(&["api", "--", "bin/api"])).unwrap();
         assert!(plain_add.process().ports().is_empty());
+    }
+
+    /// A port given twice is refused as an import refuses it, and more ports
+    /// than a process may declare name the limit, each invalid input on
+    /// `add` and `set`, and nothing is written.
+    #[test]
+    fn a_repeated_port_or_one_past_the_limit_is_refused() {
+        let (fakes, dir, _scratch) = shop();
+        let invocation = Invocation::new(Some(dir.to_str().unwrap().to_string()), &fakes);
+        add(
+            &invocation,
+            add_args(&["web", "--port", "8080", "--", "npm run dev"]),
+        )
+        .unwrap();
+        let repeated = ["--port", "3000", "--port", "5173", "--port", "3000"];
+        let past_the_limit: Vec<String> = (1..=DECLARED_PORTS_MAX + 1)
+            .flat_map(|port| ["--port".to_string(), port.to_string()])
+            .collect();
+        let past_the_limit: Vec<&str> = past_the_limit.iter().map(String::as_str).collect();
+        let limit = format!("the {DECLARED_PORTS_MAX} a process may declare");
+
+        for (flags, says) in [
+            (&repeated[..], "port 3000 is listed twice"),
+            (&past_the_limit[..], limit.as_str()),
+        ] {
+            let added = add(
+                &invocation,
+                add_args(&[&["api"], flags, &["--", "bin/api"]].concat()),
+            )
+            .map(|_| ())
+            .expect_err("add is refused");
+            let changed = set(&invocation, set_args(&[&["web"], flags].concat()))
+                .map(|_| ())
+                .expect_err("set is refused");
+            for refused in [added, changed] {
+                assert_eq!(
+                    CliExit::from(refused.kind()),
+                    CliExit::InvalidInput,
+                    "{refused}"
+                );
+                assert!(refused.to_string().contains(says), "{refused}");
+            }
+        }
+        assert_eq!(stored_ports(&fakes, &dir), ports(&[8080]));
+        let root = ProjectRoot::try_new(dir.clone()).unwrap();
+        assert_eq!(
+            fakes.store().stack(&root).unwrap().unwrap().names().len(),
+            1
+        );
     }
 
     /// `--no-ports` clears the set, and cannot be given with `--port`.

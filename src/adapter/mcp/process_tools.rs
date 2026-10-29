@@ -319,7 +319,8 @@ impl MusterMcp {
             a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
             {\"port\": 3000, \"timeout\": 30} or {\"http\": \
             \"http://localhost:3000/health\", \"timeout\": 30}, and ports, the TCP ports it \
-            listens on, such as [3000, 5173]: a start is refused, naming who holds it, while \
+            listens on, such as [3000, 5173], each once and at most <declared-ports-max> of \
+            them: a start is refused, naming who holds it, while \
             one of them or the readiness port is taken. Durations are numbers of \
             seconds in both directions, as results report them, in whole milliseconds: \
             text such as \"30s\" and a fraction such as 0.0004 are refused. Fields left out \
@@ -368,7 +369,8 @@ impl MusterMcp {
             array of names to remove), autostart, restart, stop_signal, stop_grace (a number \
             of seconds, at most <max-stop-grace-s>) and ready (as process_add takes it, its \
             timeout in seconds; null removes the readiness check) and ports (the TCP ports it \
-            listens on, replacing the ones declared; [] clears them). The change is shown \
+            listens on, each once and at most <declared-ports-max>, replacing the ones \
+            declared; [] clears them). The change is shown \
             to the human as a notice naming the fields changed. A running process keeps its \
             current run: restart it to apply the change; a ports change applies to its next \
             start without one. Returns {project, process: the \
@@ -655,7 +657,7 @@ mod tests {
             },
         },
         domain::{
-            config::{McpStackEdits, SettingChange},
+            config::{DECLARED_PORTS_MAX, McpStackEdits, SettingChange},
             coordination::Author,
             port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
             value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
@@ -1339,44 +1341,33 @@ mod tests {
         );
     }
 
-    /// A zero, a value past 65535, a fraction, a negative number or a port
-    /// given twice is the caller's mistake, `invalid-input` naming ports, on
-    /// add and on set, and nothing is written.
-    #[test]
-    fn a_bad_port_is_invalid_input_naming_ports() {
-        let fixture = fixture();
-        register(&fixture);
+    /// Asserts that `ports` is refused `invalid-input` saying `says`, on
+    /// `process_add` of a new `api` and on `process_set` of `web`, and that
+    /// neither wrote anything.
+    fn assert_ports_refused(fixture: &Fixture, ports: &Value, says: &str) {
         runtime().block_on(async {
-            for bad in [
-                serde_json::json!([0]),
-                serde_json::json!([65536]),
-                serde_json::json!([3000.5]),
-                serde_json::json!([-1]),
-                serde_json::json!([3000, 3000]),
-            ] {
-                let added = fixture
-                    .server()
-                    .process_add(Parameters(
-                        serde_json::from_value(serde_json::json!({
-                            "name": "api",
-                            "command": "npm start",
-                            "ports": bad,
-                        }))
-                        .unwrap(),
-                    ))
-                    .await;
-                let set = fixture
-                    .server()
-                    .process_set(set(serde_json::json!({ "name": "web", "ports": bad })))
-                    .await;
-                for refused in [added, set] {
-                    let answer = answered(refused).expect("a result, not a protocol error");
-                    assert_eq!(answer.is_error, Some(true), "{bad}");
-                    let error = &answer.structured_content.clone().expect("structured")["error"];
-                    assert_eq!(error["kind"], "invalid-input", "{bad}: {error}");
-                    let text = result_text(&answer);
-                    assert!(text.contains("invalid ports"), "{bad}: {text}");
-                }
+            let added = fixture
+                .server()
+                .process_add(Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "api",
+                        "command": "npm start",
+                        "ports": ports,
+                    }))
+                    .unwrap(),
+                ))
+                .await;
+            let set = fixture
+                .server()
+                .process_set(set(serde_json::json!({ "name": "web", "ports": ports })))
+                .await;
+            for refused in [added, set] {
+                let answer = answered(refused).expect("a result, not a protocol error");
+                assert_eq!(answer.is_error, Some(true), "{ports}");
+                let error = &answer.structured_content.clone().expect("structured")["error"];
+                assert_eq!(error["kind"], "invalid-input", "{ports}: {error}");
+                let text = result_text(&answer);
+                assert!(text.contains(says), "{ports}: {text}");
             }
         });
         let stack = fixture
@@ -1385,7 +1376,43 @@ mod tests {
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names().len(), 1);
-        assert!(stored_ports(&fixture).is_empty());
+        assert!(stored_ports(fixture).is_empty());
+    }
+
+    /// A zero, a value past 65535, a fraction or a negative number is the
+    /// caller's mistake, `invalid-input` naming ports, on add and on set,
+    /// and nothing is written.
+    #[test]
+    fn a_bad_port_is_invalid_input_naming_ports() {
+        let fixture = fixture();
+        register(&fixture);
+        for bad in [
+            serde_json::json!([0]),
+            serde_json::json!([65536]),
+            serde_json::json!([3000.5]),
+            serde_json::json!([-1]),
+        ] {
+            assert_ports_refused(&fixture, &bad, "invalid ports");
+        }
+    }
+
+    /// A port given twice is refused as an import refuses it, and more ports
+    /// than a process may declare name the limit, on add and on set.
+    #[test]
+    fn a_repeated_port_or_one_past_the_limit_is_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        assert_ports_refused(
+            &fixture,
+            &serde_json::json!([3000, 5173, 3000]),
+            "port 3000 is listed twice",
+        );
+        let past_the_limit: Vec<usize> = (1..=DECLARED_PORTS_MAX + 1).collect();
+        assert_ports_refused(
+            &fixture,
+            &serde_json::json!(past_the_limit),
+            &format!("the {DECLARED_PORTS_MAX} a process may declare"),
+        );
     }
 
     /// A timeout past the call bound is refused naming the field, never cut

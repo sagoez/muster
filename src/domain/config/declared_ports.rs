@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, btree_set::Iter};
 
 use getset::Getters;
 
-use super::too_many_ports::TooManyPorts;
+use super::{error::ConfigError, repeated_port::RepeatedPort, too_many_ports::TooManyPorts};
 use crate::domain::value::LocalPort;
 
 /// Most ports one process may declare, since every launch checks each of
@@ -31,6 +31,21 @@ impl DeclaredPorts {
             return Err(TooManyPorts::builder().found(ports.len()).build());
         }
         Ok(Self { ports })
+    }
+
+    /// The set holding `ports` as a person or agent listed them.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::RepeatedPort`] for the first port listed twice,
+    /// and [`ConfigError::TooManyPorts`] past [`DECLARED_PORTS_MAX`].
+    pub fn listed(ports: impl IntoIterator<Item = LocalPort>) -> Result<Self, ConfigError> {
+        let mut seen = BTreeSet::new();
+        for port in ports {
+            if !seen.insert(port) {
+                return Err(RepeatedPort::builder().port(port).build().into());
+            }
+        }
+        Ok(Self::of(seen)?)
     }
 
     /// The ports in ascending order.
@@ -103,5 +118,30 @@ mod tests {
         );
         assert!(DeclaredPorts::default().is_empty());
         assert!(!declared.is_empty());
+    }
+
+    /// A listed port given twice is refused naming it, as an import refuses
+    /// it, and a list past the maximum names the limit.
+    #[test]
+    fn a_list_refuses_a_repeated_port_and_one_past_the_limit() {
+        let mut repeated = ports(2);
+        repeated.extend(ports(2));
+        let refused = DeclaredPorts::listed(repeated).unwrap_err();
+        assert!(
+            matches!(&refused, ConfigError::RepeatedPort(_)),
+            "{refused:?}"
+        );
+        assert_eq!(refused.to_string(), "port 1 is listed twice");
+
+        let refused = DeclaredPorts::listed(ports(DECLARED_PORTS_MAX + 1)).unwrap_err();
+        assert!(
+            matches!(&refused, ConfigError::TooManyPorts(_)),
+            "{refused:?}"
+        );
+
+        assert_eq!(
+            DeclaredPorts::listed(ports(DECLARED_PORTS_MAX)).unwrap(),
+            DeclaredPorts::of(ports(DECLARED_PORTS_MAX)).unwrap()
+        );
     }
 }

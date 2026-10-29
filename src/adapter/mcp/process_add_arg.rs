@@ -68,8 +68,9 @@ pub struct ProcessAddArg {
     /// "http://localhost:3000/health", "timeout": 30}.
     #[builder(default)]
     ready: Option<ReadyArg>,
-    /// The TCP ports it listens on, such as [3000, 5173]. A start is refused,
-    /// naming who holds it, while one of them is taken.
+    /// The TCP ports it listens on, such as [3000, 5173], each once and
+    /// at most <declared-ports-max>. A start is refused, naming who holds
+    /// it, while one of them is taken.
     #[builder(default)]
     #[schemars(with = "Option<Vec<u16>>")]
     ports: Option<Vec<Number>>,

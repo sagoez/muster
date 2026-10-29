@@ -106,6 +106,7 @@ impl From<&ConfigError> for FailureKind {
             | ConfigError::TooLarge { .. }
             | ConfigError::OverCap { .. }
             | ConfigError::TooManyPorts(_)
+            | ConfigError::RepeatedPort(_)
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
@@ -172,5 +173,14 @@ mod tests {
                 .contains(&format!("the {DECLARED_PORTS_MAX} a process may declare")),
             "{refused}"
         );
+    }
+
+    /// A port listed twice is the caller's input to fix.
+    #[test]
+    fn a_repeated_port_is_invalid_input() {
+        let port = LocalPort::try_new(3000).unwrap();
+        let refused = DeclaredPorts::listed([port, port]).unwrap_err();
+
+        assert_eq!(FailureKind::from(&refused), FailureKind::InvalidInput);
     }
 }

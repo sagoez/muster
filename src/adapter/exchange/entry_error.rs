@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::domain::{config::TooManyPorts, value::NameProblem};
+use crate::domain::{
+    config::{RepeatedPort, TooManyPorts},
+    value::NameProblem,
+};
 
 /// Why one process entry of a stack file is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -88,11 +91,8 @@ pub enum EntryError {
         port: u16,
     },
     /// `ports` lists one port more than once.
-    #[error("port {port} is listed twice")]
-    DuplicatePort {
-        /// The port listed again.
-        port: u16,
-    },
+    #[error(transparent)]
+    RepeatedPort(#[from] RepeatedPort),
     /// `ports` lists more ports than a process may declare.
     #[error(transparent)]
     TooManyPorts(#[from] TooManyPorts),

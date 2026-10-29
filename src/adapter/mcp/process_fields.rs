@@ -1,12 +1,7 @@
 //! Reads the fields an agent passes to the stack-editing tools into domain
 //! values, naming the field and the accepted form on a refusal.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Display,
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
 use serde_json::Number;
 use strum::IntoEnumIterator;
@@ -15,7 +10,7 @@ use super::{condition_arg::PORT_FORM, seconds_arg::SecondsArg, tool_error::ToolE
 use crate::{
     adapter::client::WorkingDirPlace,
     domain::{
-        config::{ConfigError, DeclaredPorts, Environment},
+        config::{DeclaredPorts, Environment},
         value::{
             COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
             DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, ProcessName,
@@ -59,8 +54,6 @@ const ENV_NAME_FORM: &str = "a non-empty name without '=' that does not start wi
 const ENV_VALUE_FORM: &str = "text without NUL bytes";
 /// The `ports` field.
 pub(super) const PORTS_FIELD: &str = "ports";
-/// The form a list of declared ports is written in.
-const DISTINCT_PORTS_FORM: &str = "each port once";
 
 /// The refusal of `found` as the field `field`, which accepts `expected`.
 pub(super) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolError {
@@ -166,26 +159,19 @@ pub(super) fn environment(
 ///
 /// # Errors
 /// Returns the refusal naming [`PORTS_FIELD`] of a value that is not a port
-/// from 1 to 65535, or of a port given twice, and
-/// [`ConfigError::TooManyPorts`] past
-/// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
+/// from 1 to 65535, and the refusals of [`DeclaredPorts::listed`].
 pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
-    let mut declared = BTreeSet::new();
-    for number in raw {
-        let port = number
-            .as_u64()
-            .and_then(|port| u16::try_from(port).ok())
-            .and_then(|port| LocalPort::try_new(port).ok())
-            .ok_or_else(|| invalid(PORTS_FIELD, PORT_FORM, &number.to_string()))?;
-        if !declared.insert(port) {
-            return Err(invalid(
-                PORTS_FIELD,
-                DISTINCT_PORTS_FORM,
-                &number.to_string(),
-            ));
-        }
-    }
-    Ok(DeclaredPorts::of(declared).map_err(ConfigError::from)?)
+    let ports = raw
+        .iter()
+        .map(|number| {
+            number
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .and_then(|port| LocalPort::try_new(port).ok())
+                .ok_or_else(|| invalid(PORTS_FIELD, PORT_FORM, &number.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeclaredPorts::listed(ports)?)
 }
 
 /// `raw` read as one of `T`'s kebab-case names in `field`.

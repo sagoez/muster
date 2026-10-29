@@ -99,8 +99,8 @@ pub struct ProcessSetArg {
     /// A readiness check as process_add takes; null removes it.
     #[builder(default)]
     ready: Option<Option<ReadyArg>>,
-    /// The TCP ports it listens on, replacing the ones declared; [] clears
-    /// them.
+    /// The TCP ports it listens on, replacing the ones declared, each once
+    /// and at most <declared-ports-max>; [] clears them.
     #[builder(default)]
     #[schemars(with = "Option<Vec<u16>>")]
     ports: Option<Vec<Number>>,

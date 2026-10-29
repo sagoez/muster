@@ -111,16 +111,17 @@ impl ProcessFlags {
         ))
     }
 
-    /// The `--port` ports, each once, when any was given.
+    /// The `--port` ports, when any was given.
     ///
     /// # Errors
-    /// Returns [`ConfigError::TooManyPorts`] past
+    /// Returns [`ConfigError::RepeatedPort`] for a port given twice, and
+    /// [`ConfigError::TooManyPorts`] past
     /// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
     pub fn ports(&self) -> Result<Option<DeclaredPorts>, ConfigError> {
         if self.port.is_empty() {
             return Ok(None);
         }
-        Ok(Some(DeclaredPorts::of(self.port.iter().copied())?))
+        DeclaredPorts::listed(self.port.iter().copied()).map(Some)
     }
 
     /// Whether no flag was given.

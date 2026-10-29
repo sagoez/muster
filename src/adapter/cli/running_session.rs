@@ -6,6 +6,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use getset::{Getters, MutGetters};
+
 use super::{
     announce::Announce,
     attach::AttachSession,
@@ -24,9 +26,11 @@ use crate::adapter::service::Located;
 
 /// A session running on a thread, with a way to send it events a signal
 /// would.
+#[derive(Getters, MutGetters)]
 pub(super) struct Running {
     /// The session's thread.
-    pub(super) session: JoinHandle<Result<AttachEnd, CliError>>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    session: JoinHandle<Result<AttachEnd, CliError>>,
     /// Where signal events go.
     signals: SignalSlot,
 }
@@ -47,11 +51,11 @@ impl Running {
         late: Vec<EndingSignal>,
     ) -> Self {
         let signals: SignalSlot = Arc::new(Mutex::new(None));
-        let source = ScriptedSignals {
-            slot: Arc::clone(&signals),
-            preset,
-            late,
-        };
+        let source = ScriptedSignals::builder()
+            .slot(Arc::clone(&signals))
+            .preset(preset)
+            .late(late)
+            .build();
         let output = terminal.output().try_clone().unwrap();
         let announce: Announce = Box::new(move |line: &str| writeln!(File::from(output), "{line}"));
         let session = AttachSession::new(name(), terminal, Box::new(source), announce);

@@ -1,10 +1,13 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use super::{WireForm, optional_form};
 use crate::domain::pty::{ExitOutcome, SpawnHistory};
 
 /// What a process's earlier runs leave to the next, as a holder keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SpawnHistoryWire {
     /// Times the process was restarted.

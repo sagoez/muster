@@ -1,12 +1,13 @@
 use getset::Getters;
 use serde::Serialize;
+use typed_builder::TypedBuilder;
 
 use super::{PageSize, TodoView};
 use crate::domain::coordination::{Todo, TodoId};
 
 /// One page of a todo listing: the todos, whether more follow, and the id to
 /// resume after when they do.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct TodoPage {
     /// The todos on this page.

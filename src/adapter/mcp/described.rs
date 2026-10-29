@@ -138,7 +138,7 @@ mod tests {
     fn no_description_keeps_a_placeholder() {
         let fixture = fixture();
 
-        for tool in fixture.server.tool_router.list_all() {
+        for tool in fixture.server().tool_router.list_all() {
             let description = tool.description.clone().unwrap_or_default();
             assert!(
                 !keeps_a_placeholder(&description),
@@ -164,7 +164,7 @@ mod tests {
     fn an_argument_description_states_its_bound() {
         let fixture = fixture();
         let wait = fixture
-            .server
+            .server()
             .tool_router
             .list_all()
             .into_iter()

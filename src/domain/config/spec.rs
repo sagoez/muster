@@ -132,18 +132,22 @@ mod tests {
         value::{EnvName, EnvValue, StopGrace},
     };
 
+    /// The variable name `raw`.
     fn name(raw: &str) -> EnvName {
         EnvName::try_new(raw).unwrap()
     }
 
+    /// The variable value `raw`.
     fn value(raw: &str) -> EnvValue {
         EnvValue::try_new(raw).unwrap()
     }
 
+    /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
         StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
+    /// A definition with every field set.
     fn spec() -> ProcessSpec {
         ProcessSpec::builder()
             .name(ProcessName::try_new("web").unwrap())
@@ -166,6 +170,7 @@ mod tests {
             .build()
     }
 
+    /// The project every test definition belongs to.
     fn root() -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()
     }

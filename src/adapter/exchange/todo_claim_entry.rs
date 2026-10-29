@@ -1,4 +1,6 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use crate::{
     adapter::wire::{WireForm, form},
@@ -9,7 +11,8 @@ use crate::{
 };
 
 /// An agent's hold on a todo, as a coordination snapshot keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(deny_unknown_fields)]
 pub struct TodoClaimEntry {
     /// The agent working the todo.

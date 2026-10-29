@@ -116,10 +116,12 @@ impl DetachScanner {
 mod tests {
     use super::*;
 
+    /// A scanner for the detach key `key`.
     fn scanner(key: &str) -> DetachScanner {
         DetachScanner::new(&DetachKey::try_new(key).unwrap())
     }
 
+    /// The scan result passing `forward` on, detached or not.
     fn scanned(forward: &[u8], detached: bool) -> ScanResult {
         ScanResult::builder()
             .forward(forward.to_vec())

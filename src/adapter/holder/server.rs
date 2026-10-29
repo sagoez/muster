@@ -913,7 +913,7 @@ mod tests {
         supervisor.send(ClientMessage::Input(b"\n".to_vec()));
         supervisor.output_until("2000\r\n");
 
-        let frames = &supervisor.frames;
+        let frames = &supervisor.frames();
         assert_eq!(frames[0].0, OutputCursor::new(0));
         for pair in frames.windows(2) {
             assert_eq!(
@@ -923,7 +923,7 @@ mod tests {
             );
         }
         let (last_at, last_len) = *frames.last().unwrap();
-        let log_len = fs::metadata(harness.config.log()).unwrap().len();
+        let log_len = fs::metadata(harness.config().log()).unwrap().len();
         assert_eq!(
             last_at.advanced(last_len as u64),
             OutputCursor::new(log_len)
@@ -1005,7 +1005,7 @@ mod tests {
             .tag(FrameTag::Resize)
             .payload(vec![rows_high, rows_low, 0, 1])
             .build();
-        write_frame(&mut narrow.stream, &one_column).unwrap();
+        write_frame(&mut narrow.stream(), &one_column).unwrap();
         narrow.expect_closed();
         assert_eq!(harness.current_size(), size(ROWS, COLS));
 
@@ -1062,12 +1062,13 @@ mod tests {
             );
         }
 
-        let snapshots = writer.snapshots;
+        let snapshots = *writer.snapshots();
         writer.send(ClientMessage::Resize(size(30, 100)));
         writer.send(ClientMessage::Input(b"mark\n".to_vec()));
         writer.output_until("mark");
         assert_eq!(
-            writer.snapshots, snapshots,
+            *writer.snapshots(),
+            snapshots,
             "an unchanged size sends no resync"
         );
         harness.finish();
@@ -1193,7 +1194,7 @@ mod tests {
 
         slow.send(ClientMessage::Input(b"\n".to_vec()));
         let seen = slow.screen_until("END");
-        assert!(slow.snapshots > 1, "the stalled client was resynced");
+        assert!(*slow.snapshots() > 1, "the stalled client was resynced");
         let (mut fresh, _) = harness.connect(ClientRole::Attach { read_only: true });
         assert_eq!(fresh.screen_until("END"), seen);
         harness.finish();
@@ -1231,7 +1232,7 @@ mod tests {
             done
         });
         supervisor.send(ClientMessage::CollectExit);
-        let watcher_snapshots = watcher.snapshots;
+        let watcher_snapshots = *watcher.snapshots();
         watcher.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
 
         assert!(matches!(
@@ -1242,7 +1243,11 @@ mod tests {
             panic!("the exit follows a snapshot, got {last:?}");
         };
         assert!(repaint_text(&repaint, size).contains("FINAL-SCREEN"));
-        assert_eq!(watcher.snapshots, watcher_snapshots, "no snapshot at exit");
+        assert_eq!(
+            *watcher.snapshots(),
+            watcher_snapshots,
+            "no snapshot at exit"
+        );
         harness.finish_collected();
     }
 
@@ -1258,7 +1263,7 @@ mod tests {
         watcher.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
         assert!(
             watcher
-                .screen
+                .screen()
                 .as_ref()
                 .unwrap()
                 .screen_text()
@@ -1276,9 +1281,15 @@ mod tests {
         let (_watcher, _) = harness.connect(ClientRole::Attach { read_only: true });
 
         wait_until("the holder to give up", || harness.server_finished());
-        harness.server.take().unwrap().join().unwrap().unwrap();
+        harness
+            .server_mut()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
         assert!(harness.record().is_none(), "the record is removed");
-        assert!(!harness.config.socket().exists(), "the socket is removed");
+        assert!(!harness.config().socket().exists(), "the socket is removed");
         wait_until("the child to be killed", || {
             !SignalTarget::Process(child).is_alive()
         });
@@ -1347,7 +1358,7 @@ mod tests {
     #[test]
     fn the_socket_is_private_to_its_owner() {
         let harness = Harness::start("read x");
-        let socket = harness.config.socket();
+        let socket = harness.config().socket();
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & PERMISSION_BITS;
         assert_eq!(mode(socket), EXPECTED_SOCKET_MODE);
         assert_eq!(mode(socket.parent().unwrap()), EXPECTED_DIR_MODE);
@@ -1422,10 +1433,10 @@ mod tests {
         .unwrap();
         let killed = Arc::new(AtomicBool::new(false));
         let written = Arc::new(Mutex::new(Vec::new()));
-        let child = FakeChild {
-            killed: Arc::clone(&killed),
-            written: Arc::clone(&written),
-        };
+        let child = FakeChild::builder()
+            .killed(Arc::clone(&killed))
+            .written(Arc::clone(&written))
+            .build();
         let server = HolderServer::new(
             Box::new(child),
             log,

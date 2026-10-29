@@ -172,6 +172,7 @@ mod tests {
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
 
+    /// Holder dirs under `root`.
     fn dirs(root: &Path) -> HolderDirs {
         HolderDirs::builder()
             .sockets(root.join("sock"))

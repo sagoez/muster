@@ -134,6 +134,7 @@ mod tests {
     /// `café` with `e` and a combining acute accent.
     const CAFE_DECOMPOSED: &str = "cafe\u{301}";
 
+    /// A definition of `name` running `command`.
     fn spec(name: &str, command: &str) -> ProcessSpec {
         ProcessSpec::builder()
             .name(ProcessName::try_new(name).unwrap())
@@ -150,6 +151,7 @@ mod tests {
             .build()
     }
 
+    /// A stack of `processes`.
     fn stack(processes: Vec<ProcessSpec>) -> Stack {
         let root = ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap();
         Stack::builder()
@@ -163,12 +165,14 @@ mod tests {
             .build()
     }
 
+    /// The process names `raw`.
     fn names(raw: &[&str]) -> Vec<ProcessName> {
         raw.iter()
             .map(|name| ProcessName::try_new(*name).unwrap())
             .collect()
     }
 
+    /// The stack an import is planned against.
     fn current() -> Stack {
         stack(vec![spec("web", "npm run dev"), spec("api", "cargo run")])
     }

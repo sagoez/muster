@@ -8,6 +8,7 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
+use getset::{Getters, MutGetters};
 
 use super::{
     holder_pool::HolderPool, runtime_testing::WAIT, stalled_handle::StalledHandle,
@@ -26,16 +27,24 @@ use crate::{
 /// adopt. Every spawn is counted and answers through a holder at `socket`
 /// that never replies. While `gate` is held, a launch or an adoption
 /// waits, as one for a holder that never becomes ready does.
+#[derive(Getters, MutGetters)]
 pub(super) struct FakePool {
-    pub(super) records: Vec<HolderRecord>,
-    pub(super) spawns: Arc<AtomicUsize>,
-    pub(super) kills: Arc<AtomicUsize>,
-    pub(super) socket: Option<PathBuf>,
-    pub(super) gate: Option<Receiver<()>>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    records: Vec<HolderRecord>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    spawns: Arc<AtomicUsize>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    kills: Arc<AtomicUsize>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    socket: Option<PathBuf>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    gate: Option<Receiver<()>>,
     /// Times the legacy logs were removed.
-    pub(super) legacy_removals: Arc<AtomicUsize>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    legacy_removals: Arc<AtomicUsize>,
     /// The failure the next legacy log removal reports.
-    pub(super) legacy_result: Mutex<Option<io::Error>>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    legacy_result: Mutex<Option<io::Error>>,
 }
 
 impl FakePool {
@@ -77,10 +86,12 @@ impl ProcessRunner for FakePool {
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
         self.wait_at_gate();
-        Ok(Box::new(StalledHandle {
-            socket: self.socket.clone(),
-            kills: Arc::clone(&self.kills),
-        }))
+        Ok(Box::new(
+            StalledHandle::builder()
+                .socket(self.socket.clone())
+                .kills(Arc::clone(&self.kills))
+                .build(),
+        ))
     }
 }
 

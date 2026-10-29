@@ -130,13 +130,14 @@ pub(crate) fn spawned(
     SpawnGeneration,
     Result<Box<dyn ProcessHandle>, PtyError>,
 ) {
-    match harness.events().recv_timeout(WORKER_WAIT) {
-        Ok(ServiceEvent::Spawned {
-            pane,
-            generation,
-            result,
-            ..
-        }) => (pane, generation, result),
-        _ => panic!("the worker posts the launch result"),
-    }
+    let Ok(ServiceEvent::Spawned {
+        pane,
+        generation,
+        result,
+        ..
+    }) = harness.events().recv_timeout(WORKER_WAIT)
+    else {
+        panic!("the worker posts the launch result");
+    };
+    (pane, generation, result)
 }

@@ -359,8 +359,8 @@ mod tests {
             config::SettingChange,
             coordination::Author,
             port::{
-                CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsStore,
-                StackEditLog, StackReader, StackStore,
+                CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsReader,
+                SettingsStore, StackEditLog, StackReader, StackStore,
             },
             value::{ProjectRoot, StackRevision},
         },
@@ -381,10 +381,12 @@ mod tests {
     /// Openers racing on one fresh database.
     const RACING_OPENERS: usize = 8;
 
+    /// The permission bits of the file at `path`.
     fn mode_of(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & PERMISSION_BITS
     }
 
+    /// The schema version of the database at `path`.
     fn user_version(path: &Path) -> u32 {
         Connection::open(path)
             .unwrap()

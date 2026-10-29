@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 use bytesize::ByteSize as RawByteSize;
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use crate::{
     adapter::wire::{WireForm, form},
@@ -17,7 +19,8 @@ use crate::{
 const ZERO_LOG_CAP: &str = "the log cap must be at least one byte";
 
 /// A spawn request as a holder's spec file carries it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SpawnRequestWire {
     /// Name of the process being spawned.

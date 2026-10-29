@@ -154,10 +154,12 @@ mod tests {
     /// The epoch of every test log.
     const EPOCH: u32 = 7;
 
+    /// The project root at `path`.
     fn root(path: &str) -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from(path)).unwrap()
     }
 
+    /// An event of `kind` for the project at `project`.
     fn draft(project: &str, kind: EventKind) -> EventDraft {
         EventDraft::builder()
             .project(Some(root(project)))
@@ -167,6 +169,7 @@ mod tests {
             .build()
     }
 
+    /// The event cursor `seq` of the log started at `epoch`.
     fn cursor(epoch: u32, seq: u64) -> EventSeq {
         EventSeq::builder().epoch(epoch).seq(seq).build()
     }

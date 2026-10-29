@@ -122,6 +122,7 @@ fn list(names: &[ProcessName]) -> String {
 mod tests {
     use super::*;
 
+    /// The process names `raw`.
     fn names(raw: &[&str]) -> Vec<ProcessName> {
         raw.iter()
             .map(|name| ProcessName::try_new(*name).unwrap())

@@ -11,7 +11,7 @@ use crate::domain::{
         SettingChange, Stack,
     },
     coordination::Author,
-    port::{SettingsStore, StackReader, StackStore, StateChangeNotifier},
+    port::{SettingsReader, SettingsStore, StackReader, StackStore, StateChangeNotifier},
     settings::Settings,
     value::{ProcessName, ProjectRoot, StackRevision},
 };
@@ -136,11 +136,13 @@ impl StackStore for EditorFakes {
     }
 }
 
-impl SettingsStore for EditorFakes {
+impl SettingsReader for EditorFakes {
     fn load(&self) -> Result<Settings, ConfigError> {
         Ok(self.settings.borrow().clone())
     }
+}
 
+impl SettingsStore for EditorFakes {
     fn apply(&self, change: &SettingChange, _author: &Author) -> Result<Settings, ConfigError> {
         self.write()?;
         let changed = self.settings.borrow().clone().with_change(change);

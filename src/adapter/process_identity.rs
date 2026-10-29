@@ -78,6 +78,7 @@ impl LocalProcessIdentity {
         Self::platform_has_exited(process_id)
     }
 
+    /// Whether `process_id` is a zombie or dead, read from its `/proc` stat.
     #[cfg(target_os = "linux")]
     fn platform_has_exited(process_id: Pid) -> bool {
         stat_fields(process_id)
@@ -85,11 +86,13 @@ impl LocalProcessIdentity {
             .is_some_and(|state| EXITED_STATES.contains(&state.as_str()))
     }
 
+    /// Never known elsewhere: a process is taken to run until it is gone.
     #[cfg(not(target_os = "linux"))]
     fn platform_has_exited(_process_id: Pid) -> bool {
         false
     }
 
+    /// The start time `/proc` records for `process_id`, in clock ticks.
     #[cfg(target_os = "linux")]
     fn platform_start_token(process_id: Pid) -> Option<StartToken> {
         stat_fields(process_id)?
@@ -100,6 +103,7 @@ impl LocalProcessIdentity {
             .and_then(|token| StartToken::try_new(token).ok())
     }
 
+    /// The start time `ps` reports for `process_id`.
     #[cfg(not(target_os = "linux"))]
     fn platform_start_token(process_id: Pid) -> Option<StartToken> {
         let output = Command::new(PS_PROGRAM)

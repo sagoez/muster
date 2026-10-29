@@ -1,12 +1,15 @@
 use std::net::IpAddr;
 
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use super::WireForm;
 use crate::domain::{port::ListeningSocket, value::Pid};
 
 /// A socket a process tree listens on, as the service and MCP show it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ListeningSocketWire {
     /// The port it listens on.

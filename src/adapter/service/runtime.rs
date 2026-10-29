@@ -52,7 +52,7 @@ use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        port::{ProcessHandle, RaisedEdits, RunHistory, SettingsStore, StackEditLog, StackReader},
+        port::{ProcessHandle, RaisedEdits, RunHistory, SettingsReader, StackEditLog, StackReader},
         project::Project,
         pty::PtyError,
         settings::Settings,
@@ -108,7 +108,7 @@ pub struct ServiceRuntime {
     /// Reads each project's stack.
     stacks: Box<dyn StackReader>,
     /// Reads the user's settings.
-    settings_store: Box<dyn SettingsStore>,
+    settings_store: Box<dyn SettingsReader>,
     /// Reads the agent edits each project's stack took.
     edits: Box<dyn StackEditLog>,
     /// Reads how each process last ended on its own as a project loads.
@@ -1174,7 +1174,7 @@ mod tests {
         domain::{
             config::SettingChange,
             coordination::Author,
-            port::ProcessRunner,
+            port::{ProcessRunner, SettingsStore},
             process::{
                 LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
                 ReadyProbe,
@@ -1236,7 +1236,7 @@ mod tests {
         service.up(&project);
         let running = service.wait_for(&project, "api", ProcessState::Running);
         let pid = process(&running, "api").pid().unwrap();
-        let socket = service.socket.clone();
+        let socket = service.socket().clone();
 
         service.stop();
 
@@ -1416,13 +1416,13 @@ mod tests {
     fn a_stalled_holder_screen_read_never_stalls_the_loop() {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("api", true)]));
-        let stalled = fixture.scratch.path().join("stalled.sock");
+        let stalled = fixture.scratch().path().join("stalled.sock");
         let _never_accepts = UnixListener::bind(&stalled).unwrap();
         let pool = FakePool::new(Vec::new(), Some(stalled));
         let service = fixture.start(Arc::new(pool));
         service.up(&project);
 
-        let socket = service.socket.clone();
+        let socket = service.socket().clone();
         service.wait_for(&project, "api", ProcessState::Running);
         let screen_project = project.clone();
         let reading = thread::spawn(move || {
@@ -1490,8 +1490,8 @@ mod tests {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("api", false)]));
         let pool = FakePool::new(Vec::new(), None);
-        *pool.legacy_result.lock().unwrap() = Some(io::Error::other("read-only file system"));
-        let removals = Arc::clone(&pool.legacy_removals);
+        *pool.legacy_result().lock().unwrap() = Some(io::Error::other("read-only file system"));
+        let removals = Arc::clone(pool.legacy_removals());
 
         let service = fixture.start(Arc::new(pool));
 
@@ -1523,11 +1523,11 @@ mod tests {
             .process(ProcessName::try_new(name).unwrap())
             .command(CommandLine::try_new(SLEEPER).unwrap())
             .stop(test_stop())
-            .socket(fixture.scratch.path().join("gone.sock"))
+            .socket(fixture.scratch().path().join("gone.sock"))
             .holder_pid(Pid::try_new(process::id()).unwrap())
             .child_pid(child_pid)
             .child_start_token(None)
-            .log(fixture.scratch.path().join("api.log"))
+            .log(fixture.scratch().path().join("api.log"))
             .child_started_at(SystemTime::now())
             .build()
     }
@@ -1541,7 +1541,7 @@ mod tests {
         let project = fixture.project(commands(&[("api", true)]));
         let orphan = Orphan::spawn();
         let pool = FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None);
-        let spawns = Arc::clone(&pool.spawns);
+        let spawns = Arc::clone(pool.spawns());
         let service = fixture.start(Arc::new(pool));
         let name = ProcessName::try_new("api").unwrap();
 
@@ -1609,7 +1609,7 @@ mod tests {
             let project = fixture.project(commands(&[("api", true)]));
             let (open, gate) = bounded(0);
             let pool = FakePool::new(Vec::new(), None).gated(gate);
-            let kills = Arc::clone(&pool.kills);
+            let kills = Arc::clone(pool.kills());
             let service = fixture.start(Arc::new(pool));
             service.up(&project);
             service.wait_for(&project, "api", ProcessState::Starting);
@@ -1641,7 +1641,7 @@ mod tests {
         let (open, gate) = bounded(0);
         let pool =
             FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None).gated(gate);
-        let spawns = Arc::clone(&pool.spawns);
+        let spawns = Arc::clone(pool.spawns());
         let service = fixture.start(Arc::new(pool));
         service.wait_for(&project, "api", ProcessState::Starting);
 
@@ -1700,7 +1700,7 @@ mod tests {
         let project = fixture.project(commands(&[("api", true)]));
         let (open, gate) = bounded(0);
         let pool = FakePool::new(Vec::new(), None).gated(gate);
-        let spawns = Arc::clone(&pool.spawns);
+        let spawns = Arc::clone(pool.spawns());
         let service = fixture.start(Arc::new(pool));
         service.up(&project);
         service.wait_for(&project, "api", ProcessState::Starting);
@@ -1791,7 +1791,7 @@ mod tests {
         let service = fixture.start(Arc::new(fixture.runner()));
 
         let response: ServiceResponse = ipc::request(
-            &service.socket,
+            service.socket(),
             &serde_json::json!({ "ps": { "project": "project" } }),
         )
         .unwrap();
@@ -2109,7 +2109,7 @@ mod tests {
 
         let changed = sleeper("api", true).with_command(CommandLine::try_new("sleep 601").unwrap());
         fixture
-            .store
+            .store()
             .put(&project, vec![changed, sleeper("docs", false)]);
         assert_eq!(
             service.send(ServiceRequest::StackChanged {
@@ -2196,7 +2196,7 @@ mod tests {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("api", false)]));
         fixture
-            .store
+            .store()
             .record_edit(&project, "api", "agent claude added 'api'");
         let service = fixture.start(Arc::new(fixture.runner()));
 
@@ -2207,7 +2207,7 @@ mod tests {
         )]);
 
         fixture
-            .store
+            .store()
             .record_edit(&project, "api", "agent claude changed autostart of 'api'");
         for _ in 0..2 {
             assert_eq!(
@@ -2226,7 +2226,7 @@ mod tests {
         assert!(changed.events()[0].at() >= loaded.events()[0].at());
 
         fixture
-            .store
+            .store()
             .record_edit(&project, "api", "agent claude removed 'api'");
         let missed = edit_events(&service, &project, Some(*changed.cursor()));
         assert_eq!(told(&missed), [(
@@ -2241,7 +2241,7 @@ mod tests {
         service.stop();
 
         fixture
-            .store
+            .store()
             .record_edit(&project, "api", "agent claude added 'web'");
         let successor = fixture.start(Arc::new(fixture.runner()));
         assert_eq!(
@@ -2265,7 +2265,7 @@ mod tests {
         let loaded = edit_events(&service, &project, None);
 
         fixture
-            .store
+            .store()
             .apply(
                 &SettingChange::DefaultSize(PtySize::try_new(40, 120).unwrap()),
                 &Author::agent("claude"),
@@ -2337,7 +2337,7 @@ mod tests {
         service.up(&project);
         service.wait_for(&project, "gone", ProcessState::Running);
         service.stop();
-        fixture.store.put(&project, commands(&[("api", true)]));
+        fixture.store().put(&project, commands(&[("api", true)]));
 
         let successor = fixture.start(Arc::new(fixture.runner()));
 
@@ -2366,7 +2366,7 @@ mod tests {
         service.up(&project);
         service.wait_for(&project, "api", ProcessState::Running);
         service.stop();
-        fixture.store.forget(&project);
+        fixture.store().forget(&project);
 
         let successor = fixture.start(Arc::new(fixture.runner()));
 
@@ -2390,7 +2390,7 @@ mod tests {
         let bigger = PtySize::try_new(40, 120).unwrap();
 
         fixture
-            .store
+            .store()
             .apply(&SettingChange::DefaultSize(bigger), &Author::human())
             .unwrap();
         assert_eq!(

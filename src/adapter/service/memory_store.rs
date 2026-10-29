@@ -11,7 +11,10 @@ use crate::domain::{
         Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
-    port::{RaisedEdits, RunHistory, SettingsStore, StackEditLog, StackReader, StackStore},
+    port::{
+        RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog, StackReader,
+        StackStore,
+    },
     process::EndedRun,
     project::Project,
     settings::Settings,
@@ -35,6 +38,7 @@ pub(super) struct MemoryStore {
 }
 
 impl MemoryStore {
+    /// An empty store with the default settings.
     pub(super) fn new() -> Self {
         Self {
             stacks: Arc::default(),
@@ -228,11 +232,13 @@ impl RaisedEdits for MemoryStore {
     }
 }
 
-impl SettingsStore for MemoryStore {
+impl SettingsReader for MemoryStore {
     fn load(&self) -> Result<Settings, ConfigError> {
         Ok(self.settings.lock().unwrap().clone())
     }
+}
 
+impl SettingsStore for MemoryStore {
     fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
         let mut settings = self.settings.lock().unwrap();
         *settings = settings.clone().with_change(change);

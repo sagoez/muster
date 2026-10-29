@@ -80,6 +80,7 @@ mod tests {
     use super::*;
     use crate::domain::process::PatternText;
 
+    /// The log pattern `text`, read as `kind`.
     fn pattern(text: &str, kind: PatternKind) -> LogPattern {
         LogPattern::builder()
             .text(PatternText::try_new(text).unwrap())

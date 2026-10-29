@@ -195,6 +195,7 @@ mod tests {
             .build()
     }
 
+    /// A change to `status` alone, forced or not.
     fn change(status: Option<TodoStatus>, force: bool) -> TodoChange {
         TodoChange::builder()
             .title(None)

@@ -211,10 +211,12 @@ mod tests {
         },
     };
 
+    /// A limit of `count` lines.
     fn lines(count: usize) -> LineLimit {
         LineLimit::try_new(count).unwrap()
     }
 
+    /// A filter keeping lines that match `text`, read as `kind`.
     fn grep(text: &str, kind: PatternKind) -> LineFilter {
         LineFilter::Grep(
             LineMatcher::compile(
@@ -227,6 +229,7 @@ mod tests {
         )
     }
 
+    /// One numbered line for each of `range`.
     fn numbered(range: Range<usize>) -> String {
         range.map(|line| format!("line {line}\n")).collect()
     }
@@ -292,7 +295,7 @@ mod tests {
         let first = fixture.write(b"aaaa\nbbbb\n");
         let second = fixture.write(b"cccc\ndddd\n");
         fixture.write(b"eeee\n");
-        assert!(fs::metadata(rotated_path(&fixture.path)).is_ok());
+        assert!(fs::metadata(rotated_path(fixture.path())).is_ok());
 
         let from_second = fixture.read(&LogQuery::builder().since(Some(second)).build());
         assert_eq!(from_second.lines(), &["cccc", "dddd", "eeee"]);
@@ -312,12 +315,12 @@ mod tests {
     #[test]
     fn the_raw_stream_is_both_generations_unchanged() {
         let mut fixture = Fixture::with_cap(12);
-        assert!(read_log_bytes(&fixture.path).unwrap().is_empty());
+        assert!(read_log_bytes(fixture.path()).unwrap().is_empty());
         fixture.write(b"\x1b[31maaaa\n");
         fixture.write(b"live \xff\n");
 
         assert_eq!(
-            read_log_bytes(&fixture.path).unwrap(),
+            read_log_bytes(fixture.path()).unwrap(),
             b"\x1b[31maaaa\nlive \xff\n"
         );
     }
@@ -339,7 +342,7 @@ mod tests {
         let mut fixture = Fixture::new();
         fixture.write(b"one\n");
         let error = read_log(
-            &fixture.path,
+            fixture.path(),
             &LogQuery::builder()
                 .since(Some(OutputCursor::new(99)))
                 .build(),

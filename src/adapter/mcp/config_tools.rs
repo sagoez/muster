@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::mcp::test_support::{add, content, edits, fixture, refusal, runtime},
-        domain::{config::McpStackEdits, port::SettingsStore},
+        domain::{config::McpStackEdits, port::SettingsReader},
     };
 
     /// `config_get` reads every setting or one; an unknown key lists the
@@ -90,7 +90,7 @@ mod tests {
         runtime().block_on(async {
             let all = content(
                 fixture
-                    .server
+                    .server()
                     .config_get(Parameters(ConfigGetArg::builder().build()))
                     .await,
             );
@@ -99,7 +99,7 @@ mod tests {
 
             let one = content(
                 fixture
-                    .server
+                    .server()
                     .config_get(Parameters(
                         ConfigGetArg::builder()
                             .key(Some("default-restart".to_string()))
@@ -114,7 +114,7 @@ mod tests {
 
             let unknown = refusal(
                 fixture
-                    .server
+                    .server()
                     .config_get(Parameters(
                         ConfigGetArg::builder()
                             .key(Some("restart".to_string()))
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn config_set_stores_and_announces_a_setting() {
         let fixture = fixture();
-        let server = &fixture.server;
+        let server = &fixture.server();
         runtime().block_on(async {
             let stored = content(
                 server
@@ -178,7 +178,7 @@ mod tests {
                     .await,
             );
         });
-        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 2);
+        assert_eq!(*fixture.notifier().settings().lock().unwrap(), 2);
         assert_eq!(
             edits(&fixture).last().map(String::as_str),
             Some("agent test set default-autostart to false")
@@ -194,7 +194,7 @@ mod tests {
             for key in SettingKey::iter().filter(|key| !key.agent_may_set()) {
                 let refused = refusal(
                     fixture
-                        .server
+                        .server()
                         .config_set(Parameters(
                             ConfigSetArg::builder()
                                 .key(key.to_string())
@@ -207,9 +207,9 @@ mod tests {
                 assert!(refused.contains("cannot be changed over MCP"), "{refused}");
             }
         });
-        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 0);
+        assert_eq!(*fixture.notifier().settings().lock().unwrap(), 0);
         assert_eq!(
-            *fixture.store.load().unwrap().mcp_stack_edits(),
+            *fixture.store().load().unwrap().mcp_stack_edits(),
             McpStackEdits::Allow
         );
     }

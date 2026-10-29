@@ -36,6 +36,7 @@ impl ProjectRoot {
 mod tests {
     use super::*;
 
+    /// The project root at `path`.
     fn root(path: &str) -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from(path)).unwrap()
     }

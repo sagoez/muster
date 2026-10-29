@@ -631,7 +631,7 @@ mod tests {
         domain::{
             config::{McpStackEdits, SettingChange},
             coordination::Author,
-            port::{ProjectStore, SettingsStore, StackReader},
+            port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
             value::ProcessName,
         },
     };
@@ -657,12 +657,18 @@ mod tests {
     #[test]
     fn process_add_registers_the_folder() {
         let fixture = fixture();
-        assert!(fixture.store.project_at(&fixture.root).unwrap().is_none());
+        assert!(
+            fixture
+                .store()
+                .project_at(fixture.root())
+                .unwrap()
+                .is_none()
+        );
 
         let added = runtime().block_on(async {
             content(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(
                         ProcessAddArg::builder()
                             .name("web".to_string())
@@ -684,10 +690,16 @@ mod tests {
         assert_eq!(definition["restart"], "on-failure");
         assert_eq!(definition["autostart"], false, "the seeded default");
 
-        assert!(fixture.store.project_at(&fixture.root).unwrap().is_some());
+        assert!(
+            fixture
+                .store()
+                .project_at(fixture.root())
+                .unwrap()
+                .is_some()
+        );
         let stack = fixture
-            .store
-            .stack(&fixture.root)
+            .store()
+            .stack(fixture.root())
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
@@ -701,8 +713,8 @@ mod tests {
             Some("5173".to_string()),
             "the value is stored, only never shown"
         );
-        assert_eq!(*fixture.notifier.stacks.lock().unwrap(), vec![
-            fixture.root.clone()
+        assert_eq!(*fixture.notifier().stacks().lock().unwrap(), vec![
+            fixture.root().clone()
         ]);
         assert_eq!(edits(&fixture), vec![format!(
             "agent {AGENT} added 'web', running `npm run dev` in frontend"
@@ -718,27 +730,27 @@ mod tests {
         let fixture = fixture();
         register(&fixture);
         fixture
-            .store
+            .store()
             .apply(
                 &SettingChange::McpStackEdits(McpStackEdits::ReadOnly),
                 &Author::human(),
             )
             .unwrap();
-        let settings = fixture.store.load().unwrap();
+        let settings = fixture.store().load().unwrap();
 
         runtime().block_on(async {
             let refusals = [
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(add("worker", "bin/worker")))
                     .await,
                 fixture
-                    .server
+                    .server()
                     .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
                     .await,
-                fixture.server.process_remove(named("web")).await,
+                fixture.server().process_remove(named("web")).await,
                 fixture
-                    .server
+                    .server()
                     .process_send(Parameters(
                         SendInputArg::builder()
                             .name("web".to_string())
@@ -747,7 +759,7 @@ mod tests {
                     ))
                     .await,
                 fixture
-                    .server
+                    .server()
                     .config_set(Parameters(
                         ConfigSetArg::builder()
                             .key("default-restart".to_string())
@@ -777,18 +789,18 @@ mod tests {
         });
 
         let stack = fixture
-            .store
-            .stack(&fixture.root)
+            .store()
+            .stack(fixture.root())
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
         assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
-        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
+        assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), 1);
         assert_eq!(edits(&fixture).len(), 1);
-        assert_eq!(fixture.store.load().unwrap(), settings);
+        assert_eq!(fixture.store().load().unwrap(), settings);
 
         fixture
-            .store
+            .store()
             .apply(
                 &SettingChange::McpStackEdits(McpStackEdits::Allow),
                 &Author::human(),
@@ -797,7 +809,7 @@ mod tests {
         runtime().block_on(async {
             content(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(add("worker", "bin/worker")))
                     .await,
             );
@@ -812,7 +824,7 @@ mod tests {
         let fixture = fixture();
         register(&fixture);
         let outside = fixture
-            .root
+            .root()
             .as_ref()
             .parent()
             .unwrap()
@@ -822,7 +834,7 @@ mod tests {
         runtime().block_on(async {
             let added = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(
                         ProcessAddArg::builder()
                             .name("worker".to_string())
@@ -835,7 +847,7 @@ mod tests {
             assert!(added.contains("outside the project root"), "{added}");
             let changed = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_set(set(
                         serde_json::json!({ "name": "web", "working_dir": ".." }),
                     ))
@@ -845,8 +857,8 @@ mod tests {
         });
 
         let stack = fixture
-            .store
-            .stack(&fixture.root)
+            .store()
+            .stack(fixture.root())
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names().len(), 1);
@@ -863,7 +875,7 @@ mod tests {
         runtime().block_on(async {
             let taken = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(add("web", "true")))
                     .await,
             );
@@ -871,7 +883,7 @@ mod tests {
 
             let invalid = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(
                         ProcessAddArg::builder()
                             .name("worker".to_string())
@@ -888,12 +900,12 @@ mod tests {
         });
 
         let stack = fixture
-            .store
-            .stack(&fixture.root)
+            .store()
+            .stack(fixture.root())
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names().len(), 1);
-        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
+        assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), 1);
     }
 
     /// A readiness check out of form is refused naming the ready field, and
@@ -905,7 +917,7 @@ mod tests {
         let refused = runtime().block_on(async {
             refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(
                         serde_json::from_value(serde_json::json!({
                             "name": "api",
@@ -919,7 +931,13 @@ mod tests {
         });
 
         assert!(refused.contains("invalid ready"), "{refused}");
-        assert!(fixture.store.project_at(&fixture.root).unwrap().is_none());
+        assert!(
+            fixture
+                .store()
+                .project_at(fixture.root())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// `process_set` changes only the fields it is given and reports the
@@ -933,7 +951,7 @@ mod tests {
         let changed = runtime().block_on(async {
             content(
                 fixture
-                    .server
+                    .server()
                     .process_set(set(serde_json::json!({
                         "name": "web",
                         "command": "npm start",
@@ -949,7 +967,7 @@ mod tests {
         assert!(!changed.to_string().contains("3000"), "{changed}");
         assert_eq!(changed[PROJECT]["name"], "shop");
         assert_eq!(changed[RUNNING], false);
-        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 2);
+        assert_eq!(fixture.notifier().stacks().lock().unwrap().len(), 2);
         let edits = edits(&fixture);
         assert_eq!(
             edits.last().map(String::as_str),
@@ -974,14 +992,14 @@ mod tests {
         runtime().block_on(async {
             let nothing = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_set(set(serde_json::json!({ "name": "web" })))
                     .await,
             );
             assert!(nothing.contains("changed nothing"), "{nothing}");
             let unknown = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_set(set(serde_json::json!({ "name": "wbe", "autostart": true })))
                     .await,
             );
@@ -997,13 +1015,13 @@ mod tests {
         register(&fixture);
 
         runtime().block_on(async {
-            let unknown = refusal(fixture.server.process_remove(named("wbe")).await);
+            let unknown = refusal(fixture.server().process_remove(named("wbe")).await);
             assert!(unknown.contains("'web'"), "{unknown}");
         });
 
         let stack = fixture
-            .store
-            .stack(&fixture.root)
+            .store()
+            .stack(fixture.root())
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names().len(), 1);
@@ -1017,10 +1035,10 @@ mod tests {
         register(&fixture);
 
         runtime().block_on(async {
-            refusal(fixture.server.process_screen(named("   ")).await);
+            refusal(fixture.server().process_screen(named("   ")).await);
             let cursor = refusal(
                 fixture
-                    .server
+                    .server()
                     .wait(
                         serde_json::from_value(
                             serde_json::json!({ "name": "web", "since": "18234" }),
@@ -1035,7 +1053,7 @@ mod tests {
             );
             let until = refusal(
                 fixture
-                    .server
+                    .server()
                     .wait(
                         serde_json::from_value(serde_json::json!({
                             "name": "web",
@@ -1048,7 +1066,7 @@ mod tests {
             assert!(until.contains("invalid until"), "{until}");
             let wait = refusal(
                 fixture
-                    .server
+                    .server()
                     .control(
                         serde_json::from_value(
                             serde_json::json!({ "name": "web", "wait": { "port": 0 } }),
@@ -1098,7 +1116,7 @@ mod tests {
         register(&fixture);
 
         let error = runtime()
-            .block_on(async { fixture.server.process_screen(named("web")).await })
+            .block_on(async { fixture.server().process_screen(named("web")).await })
             .unwrap_err()
             .answer()
             .unwrap_err();
@@ -1117,7 +1135,7 @@ mod tests {
         runtime().block_on(async {
             let control = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(add("web\u{1b}]0;owned\u{7}", "true")))
                     .await,
             );
@@ -1129,7 +1147,7 @@ mod tests {
             assert!(control.contains("\\u{1b}"), "{control}");
             let empty = refusal(
                 fixture
-                    .server
+                    .server()
                     .process_add(Parameters(add("   ", "true")))
                     .await,
             );
@@ -1145,7 +1163,7 @@ mod tests {
         runtime().block_on(async {
             let refused = refusal(
                 fixture
-                    .server
+                    .server()
                     .wait(
                         ProcessWaitArg::builder()
                             .name("web".to_string())

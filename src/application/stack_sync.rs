@@ -114,6 +114,7 @@ mod tests {
     /// `café` with `e` and a combining acute accent.
     const CAFE_DECOMPOSED: &str = "cafe\u{301}";
 
+    /// A definition of `name` running `command`.
     fn spec(name: &str, command: &str) -> ProcessSpec {
         ProcessSpec::builder()
             .name(ProcessName::try_new(name).unwrap())
@@ -130,6 +131,7 @@ mod tests {
             .build()
     }
 
+    /// Process `name` on pane `id`, running `command` and in `state`.
     fn process(id: u64, name: &str, command: &str, state: ProcessState) -> Process {
         let mut process = spec(name, command).to_process(PaneId::new(id));
         process.set_state(state);
@@ -156,6 +158,7 @@ mod tests {
         }
     }
 
+    /// The names of `workspace`'s processes, in order.
     fn names(workspace: &Workspace) -> Vec<String> {
         workspace
             .processes()

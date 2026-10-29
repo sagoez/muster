@@ -173,6 +173,7 @@ mod tests {
         assert_eq!(attribution(&Author::agent("claude")), "  (by claude)");
     }
 
+    /// A report with a row of every kind.
     fn sample() -> Report {
         Report::new("muster doctor", vec![
             Row::labeled(RowKind::Ok, "config", "muster.yml is valid"),

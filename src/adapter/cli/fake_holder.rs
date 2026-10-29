@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 
+use getset::{Getters, MutGetters};
 use tempfile::TempDir;
 
 use super::{
@@ -22,9 +23,11 @@ use crate::{
 
 /// A scripted holder: it answers the hello with a repaint, then records
 /// what the client sends and writes what a test tells it to.
+#[derive(Getters, MutGetters)]
 pub(super) struct FakeHolder {
     /// Its socket.
-    pub(super) socket: PathBuf,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    socket: PathBuf,
     /// The client connection, once the client said hello.
     peer: Arc<Mutex<Option<UnixStream>>>,
     /// What the client sent, in order.

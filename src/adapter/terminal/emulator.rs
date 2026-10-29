@@ -213,7 +213,15 @@ impl TerminalEmulator {
                     match observation {
                         Observation::SetTabStop => self.tabs.set(column),
                         Observation::ClearTabStop => self.tabs.clear(column),
-                        _ => self.tabs.clear_all(),
+                        Observation::ClearAllTabStops
+                        | Observation::Nothing
+                        | Observation::EnterAlternate
+                        | Observation::LeaveAlternate
+                        | Observation::ScrollRegion { .. }
+                        | Observation::FullReset
+                        | Observation::ShiftOut
+                        | Observation::ShiftIn
+                        | Observation::Dropped => self.tabs.clear_all(),
                     }
                 },
             }
@@ -775,10 +783,12 @@ mod tests {
         domain::value::{Cols, Rows},
     };
 
+    /// `count` rows.
     fn rows(count: u16) -> Rows {
         Rows::try_new(count).unwrap()
     }
 
+    /// `count` columns.
     fn cols(count: u16) -> Cols {
         Cols::try_new(count).unwrap()
     }
@@ -828,6 +838,7 @@ mod tests {
         }
     }
 
+    /// Fails unless `rebuilt` shows every cell and the cursor as `live` does.
     fn assert_screens_match(live: &TerminalEmulator, rebuilt: &TerminalEmulator) {
         assert_eq!(rebuilt.screen_text(), live.screen_text());
         assert_eq!(rebuilt.cursor(), live.cursor());
@@ -1056,6 +1067,7 @@ mod tests {
     /// The emulator moves between threads.
     #[test]
     fn emulator_is_send() {
+        /// Compiles only for a `T` that can move to another thread.
         fn assert_send<T: Send>() {}
         assert_send::<TerminalEmulator>();
     }

@@ -3,6 +3,7 @@
 
 use std::{fs, path::Path, sync::Arc};
 
+use getset::{Getters, MutGetters};
 use rmcp::{
     ErrorData,
     handler::server::wrapper::Parameters,
@@ -30,17 +31,22 @@ pub const AGENT: &str = "test";
 
 /// A server started in a folder no project claims yet, with the store and
 /// notifier it writes through.
+#[derive(Getters, MutGetters)]
 pub struct Fixture {
     /// Holds the scratch directory for the fixture's life.
     pub _dir: TempDir,
     /// The folder the server was started in.
-    pub root: ProjectRoot,
+    #[getset(get = "pub", get_mut = "pub")]
+    root: ProjectRoot,
     /// The database.
-    pub store: SqliteStore,
+    #[getset(get = "pub", get_mut = "pub")]
+    store: SqliteStore,
     /// What the server told about its edits.
-    pub notifier: Arc<RecordingNotifier>,
+    #[getset(get = "pub", get_mut = "pub")]
+    notifier: Arc<RecordingNotifier>,
     /// The server.
-    pub server: MusterMcp,
+    #[getset(get = "pub", get_mut = "pub")]
+    server: MusterMcp,
 }
 
 /// A [`Fixture`] whose folder, holding a `frontend` folder, is not yet a

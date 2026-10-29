@@ -11,7 +11,7 @@ use super::{
 use crate::domain::{
     config::{ConfigError, SettingChange, StackEdit},
     coordination::Author,
-    port::SettingsStore,
+    port::{SettingsReader, SettingsStore},
     pty::PtySize,
     settings::Settings,
     value::{ByteSize, DetachKey, LogMaxSize, ScrollbackLines},
@@ -122,11 +122,13 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
     Ok(())
 }
 
-impl SettingsStore for SqliteStore {
+impl SettingsReader for SqliteStore {
     fn load(&self) -> Result<Settings, ConfigError> {
         self.read(load_settings)
     }
+}
 
+impl SettingsStore for SqliteStore {
     fn apply(&self, change: &SettingChange, author: &Author) -> Result<Settings, ConfigError> {
         self.write(|conn| {
             let settings = load_settings(conn)?.with_change(change);

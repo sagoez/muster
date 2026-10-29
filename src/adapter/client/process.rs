@@ -68,7 +68,15 @@ pub fn ps(
     match client.send(&request)? {
         ServiceResponse::Status(statuses) => Ok(statuses),
         ServiceResponse::Error(body) => Err(refusal(body, None, None)),
-        other => Err(ClientError::UnexpectedAnswer((&other).into())),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)) => Err(ClientError::UnexpectedAnswer((&other).into())),
     }
 }
 
@@ -363,7 +371,16 @@ pub fn events(
     };
     match client.send_waiting(&request, wait)? {
         ServiceResponse::Events(page) => Ok(page),
-        other => Err(unexpected(other, project, None)),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
     }
 }
 
@@ -378,7 +395,16 @@ fn waited(
 ) -> Result<WaitOutcome, ClientError> {
     match response {
         ServiceResponse::Waited(outcome) => Ok(outcome),
-        other => Err(unexpected(other, project, Some(name))),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, Some(name))),
     }
 }
 
@@ -488,7 +514,16 @@ fn service_notices(client: &ServiceClient, project: &Project) -> Result<Vec<Noti
         project: project.root().clone(),
     })? {
         ServiceResponse::Notices(notices) => Ok(notices),
-        other => Err(unexpected(other, project, None)),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
     }
 }
 
@@ -516,7 +551,16 @@ pub fn logs<E: From<ClientError>>(
             ServiceResponse::Screen(screen) => {
                 Ok(read.log(None).bytes(screen.into_bytes()).build())
             },
-            other => Err(unexpected(other, project, Some(&name)).into()),
+            other @ (ServiceResponse::Hello { .. }
+            | ServiceResponse::Ok
+            | ServiceResponse::Batch(_)
+            | ServiceResponse::Log(_)
+            | ServiceResponse::Status(_)
+            | ServiceResponse::Located(_)
+            | ServiceResponse::Notices(_)
+            | ServiceResponse::Waited(_)
+            | ServiceResponse::Events(_)
+            | ServiceResponse::Error(_)) => Err(unexpected(other, project, Some(&name)).into()),
         };
     }
     let log = log_path(client, project, &name)?;
@@ -538,7 +582,20 @@ pub fn log_read_error(path: &Path, error: HolderError) -> ClientError {
     match error {
         HolderError::CursorAhead { cursor, end } => ClientError::CursorAhead { cursor, end },
         HolderError::Io(source) => log_error(path, source),
-        other => log_error(path, io::Error::other(other.to_string())),
+        other @ (HolderError::Pty(_)
+        | HolderError::Json(_)
+        | HolderError::UnexpectedFrame(_)
+        | HolderError::MalformedPayload(_)
+        | HolderError::MissingProject
+        | HolderError::MissingChildPid
+        | HolderError::UnrecordablePid(_)
+        | HolderError::MissingChildInput
+        | HolderError::InsecureSocketDir(_)
+        | HolderError::NotReady(_)
+        | HolderError::NoSnapshot(_)
+        | HolderError::FailedToStart { .. }) => {
+            log_error(path, io::Error::other(other.to_string()))
+        },
     }
 }
 
@@ -579,7 +636,16 @@ pub fn log_path(
         name: name.clone(),
     })? {
         ServiceResponse::Log(log) => Ok(log),
-        other => Err(unexpected(other, project, Some(name))),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, Some(name))),
     }
 }
 
@@ -596,7 +662,16 @@ pub fn status(client: &ServiceClient, project: &Project) -> Result<ProjectStatus
             .into_iter()
             .next()
             .ok_or(ClientError::UnexpectedAnswer(EMPTY_STATUS)),
-        other => Err(unexpected(other, project, None)),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
     }
 }
 
@@ -801,7 +876,16 @@ fn with_refusals(
 fn batch(response: ServiceResponse, project: &Project) -> Result<BatchOutcome, ClientError> {
     match response {
         ServiceResponse::Batch(batch) => Ok(batch),
-        other => Err(unexpected(other, project, None)),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
     }
 }
 
@@ -825,7 +909,16 @@ pub fn expect_ok(
 ) -> Result<(), ClientError> {
     match response {
         ServiceResponse::Ok => Ok(()),
-        other => Err(unexpected(other, project, name)),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, name)),
     }
 }
 
@@ -838,7 +931,16 @@ pub fn unexpected(
 ) -> ClientError {
     match response {
         ServiceResponse::Error(body) => refusal(body, Some(project), name),
-        other => ClientError::UnexpectedAnswer((&other).into()),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)) => ClientError::UnexpectedAnswer((&other).into()),
     }
 }
 

@@ -1,5 +1,6 @@
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
+use typed_builder::TypedBuilder;
 
 use crate::domain::coordination::KeyValue;
 
@@ -9,7 +10,7 @@ pub const LISTED_VALUE_CHARS: usize = 200;
 
 /// A key-value entry as a listing shows it: its value cut to
 /// [`LISTED_VALUE_CHARS`], marked `truncated` when cut.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct ListedValue {
     /// The entry, its value cut.
     #[serde(flatten, with = "crate::adapter::wire::form")]

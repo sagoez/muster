@@ -1,4 +1,6 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use super::{WireForm, form};
 use crate::domain::{
@@ -7,7 +9,8 @@ use crate::domain::{
 };
 
 /// How a process stops, as a holder keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(deny_unknown_fields)]
 pub struct StopPolicyWire {
     /// The graceful signal.

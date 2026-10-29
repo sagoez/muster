@@ -137,13 +137,15 @@ impl ProcessRunner for PortablePtyRunner {
             sink.send(ProcessOutput::Exited(outcome));
         });
 
-        Ok(Box::new(PtyProcessHandle {
-            master: pair.master,
-            input: PtyInput(Arc::new(Mutex::new(writer))),
-            killer,
-            grace_tx,
-            pid,
-        }))
+        Ok(Box::new(
+            PtyProcessHandle::builder()
+                .master(pair.master)
+                .input(PtyInput::new(Arc::new(Mutex::new(writer))))
+                .killer(killer)
+                .grace_tx(grace_tx)
+                .pid(pid)
+                .build(),
+        ))
     }
 }
 

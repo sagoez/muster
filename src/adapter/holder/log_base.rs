@@ -100,6 +100,7 @@ mod tests {
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
 
+    /// The generation of a file with `inode` holding `len` bytes.
     fn generation(inode: u64, len: u64) -> Option<Generation> {
         Some(Generation::builder().inode(inode).len(len).build())
     }

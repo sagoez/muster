@@ -58,12 +58,13 @@ plugs into a port.
     injects fakes and never reaches the user's real database or socket.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
-    the database through read-only ports (`StackReader`, `SettingsStore`,
+    the database through read-only ports (`StackReader`, `SettingsReader`,
     `StackEditLog`); writers tell it what changed. What it writes, through
     `RunHistory` and `RaisedEdits` from a thread of its own, is how each
     process last ended and which agent edits it raised.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
-    emulator and log, and outlives the service.
+    emulator and log, and outlives the service. It spawns its child through
+    the `ProcessRunner` the composition root hands it.
   - **driven adapters** `adapter/pty` (portable-pty implements
     `ProcessRunner`), `adapter/store` (one `SqliteStore` implements every store
     port), `adapter/exchange` (the export file), `adapter/detect` (stack
@@ -71,8 +72,10 @@ plugs into a port.
     keyboard tracker), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs. It hands the CLI
-  its ports through `CliPorts`, and builds the MCP server's deps and runtime
-  itself when the CLI asks to serve one.
+  its ports through `CliPorts`, builds the MCP server's deps when the CLI asks
+  to serve one and hands them to `adapter/mcp`'s `run_stdio`, which builds the
+  async runtime, and hands a holder `PortablePtyRunner`. No adapter builds
+  another adapter's concrete type.
 
 **Dependency rule (strict):** dependencies point inward. `domain` depends on
 nothing internal. `application` depends on `domain`. `adapter` depends on
@@ -259,9 +262,15 @@ than passing bare `u16`/`usize`.
   field keeps its domain type with `#[serde(with = "...::wire::form")]`
   (`optional_form`, `form_list`). Only validated newtypes derive serde.
 - Fields are private; expose access through `Getters`, never `pub` fields.
-  The one exception is a deps struct (`SupervisorDeps`, `ServiceDeps`):
-  its boxed ports are moved out once by the controller it builds, which
-  destructures it, so its fields are `pub(super)` and it has no getters.
+  This holds for clap `Args` structs and test fixtures too. The exceptions:
+  - A deps struct (`SupervisorDeps`, `ServiceDeps`): its boxed ports are
+    moved out once by the controller it builds, which destructures it, so its
+    fields are `pub(super)` and it has no getters.
+  - A controller whose impl is split across sibling files of its own module
+    (`Supervisor`, `MusterMcp`) may give its fields `pub(super)`.
+  - A private helper struct owned by one controller and built by it with a
+    struct literal (`RecordGuard`, `SharedWriter`) may give its fields
+    `pub(super)`.
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]
@@ -284,7 +293,8 @@ pub struct ProcessSpec {
   call may block, a page's default and largest size (`DEFAULT_LIST_LIMIT`,
   `MAX_LIST_LIMIT`) and a log read's size bound what one call costs, not what
   the user configures, so they are constants beside the code that enforces
-  them. A tool description names them through `adapter/mcp/described.rs`
+  them. A tool description, an argument's description in its input schema
+  and the server instructions name them through `adapter/mcp/described.rs`
   placeholders, never by repeating the number.
 
 ### Secret config fields
@@ -365,6 +375,11 @@ pub use state::*;
 ### Testing
 - **Tests live inline**, in `#[cfg(test)] mod tests { ... }` in the same file.
   The `tests/` directory holds only integration tests that run the built binary.
+- **Test-only types live in `#[cfg(test)]` fixture files** of their module,
+  one type per file as elsewhere (`holder/testing.rs`, `holder/watch.rs`,
+  `service/supervisor/testing/`), never inline in a `mod tests`. A fake is
+  shared, not copied: one `ChannelSink`, one `ThreadLauncher` with its
+  `Holders`, one `FakeService`. Every fixture fn gets a doc comment.
 - **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
   `cargo insta review`; never blindly accept.
 - **Use getters** to read private fields in tests rather than making fields `pub`.

@@ -1,4 +1,6 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use super::WireForm;
 use crate::domain::{
@@ -7,7 +9,8 @@ use crate::domain::{
 };
 
 /// A PTY size, as a holder's spawn request carries it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PtySizeWire {
     /// Rows, within the PTY bounds.

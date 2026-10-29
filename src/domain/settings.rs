@@ -108,10 +108,12 @@ mod tests {
     use super::*;
     use crate::domain::config::ConfigError;
 
+    /// A PTY of `rows` by `cols`.
     fn size(rows: u16, cols: u16) -> PtySize {
         PtySize::try_new(rows, cols).unwrap()
     }
 
+    /// Settings with every value explicit.
     fn settings() -> Settings {
         Settings::builder()
             .desktop_notifications(true)

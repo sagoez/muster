@@ -5,20 +5,19 @@ use nutype::nutype;
 
 use super::{ByteSize, ValueParseError};
 
-/// The smallest size at which a process's log may rotate.
-pub const MIN_LOG_MAX_SIZE: RawByteSize = RawByteSize::kib(16);
-/// The largest size at which a process's log may rotate.
-pub const MAX_LOG_MAX_SIZE: RawByteSize = RawByteSize::gib(1);
+/// The fewest bytes at which a process's log may rotate.
+const MIN_LOG_MAX_BYTES: u64 = RawByteSize::kib(16).as_u64();
+/// The most bytes at which a process's log may rotate.
+const MAX_LOG_MAX_BYTES: u64 = RawByteSize::gib(1).as_u64();
 /// The form a log size is written in.
 const LOG_SIZE_FORM: &str = "a size from 16KiB to 1GiB such as 10MiB";
 
-/// Whether `size` lies between [`MIN_LOG_MAX_SIZE`] and [`MAX_LOG_MAX_SIZE`].
+/// Whether `size` lies between [`MIN_LOG_MAX_BYTES`] and [`MAX_LOG_MAX_BYTES`].
 fn is_log_size(size: &ByteSize) -> bool {
-    (MIN_LOG_MAX_SIZE.as_u64()..=MAX_LOG_MAX_SIZE.as_u64()).contains(&size.bytes())
+    (MIN_LOG_MAX_BYTES..=MAX_LOG_MAX_BYTES).contains(&size.bytes())
 }
 
-/// The size at which a process's log rotates, between [`MIN_LOG_MAX_SIZE`]
-/// and [`MAX_LOG_MAX_SIZE`].
+/// The size at which a process's log rotates, from 16 KiB to 1 GiB.
 #[nutype(
     validate(predicate = is_log_size),
     derive(Debug, Clone, Copy, PartialEq, Eq, Display)

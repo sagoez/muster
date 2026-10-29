@@ -92,7 +92,18 @@ impl From<HolderError> for PtyError {
         match error {
             HolderError::Io(error) => Self::Io(error),
             HolderError::Pty(error) => error,
-            other => Self::System(other.to_string()),
+            other @ (HolderError::Json(_)
+            | HolderError::UnexpectedFrame(_)
+            | HolderError::MalformedPayload(_)
+            | HolderError::MissingProject
+            | HolderError::MissingChildPid
+            | HolderError::UnrecordablePid(_)
+            | HolderError::MissingChildInput
+            | HolderError::InsecureSocketDir(_)
+            | HolderError::NotReady(_)
+            | HolderError::NoSnapshot(_)
+            | HolderError::FailedToStart { .. }
+            | HolderError::CursorAhead { .. }) => Self::System(other.to_string()),
         }
     }
 }

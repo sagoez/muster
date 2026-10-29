@@ -6,7 +6,7 @@ use super::{
     holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
 };
 use crate::domain::port::{
-    ListeningPorts, ProcessMetrics, RaisedEdits, RunHistory, SettingsStore, StackEditLog,
+    ListeningPorts, ProcessMetrics, RaisedEdits, RunHistory, SettingsReader, StackEditLog,
     StackReader,
 };
 
@@ -28,7 +28,7 @@ pub struct ServiceDeps {
     /// Reads each project's stack as it is loaded and as it changes.
     pub(super) stacks: Box<dyn StackReader>,
     /// Reads the user's settings at start and as they change.
-    pub(super) settings: Box<dyn SettingsStore>,
+    pub(super) settings: Box<dyn SettingsReader>,
     /// Reads the agent edits each project's stack took, raised as events.
     pub(super) edits: Box<dyn StackEditLog>,
     /// Keeps how each process last ended on its own, read as a project loads

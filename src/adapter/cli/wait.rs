@@ -130,6 +130,7 @@ mod tests {
         domain::value::ProcessName,
     };
 
+    /// A wait that ended `status` with its output at `cursor`.
     fn outcome(status: WaitStatus, cursor: u64) -> WaitOutcome {
         WaitOutcome::builder()
             .process(ProcessName::try_new("api").unwrap())

@@ -1,5 +1,7 @@
 use std::sync::{Arc, PoisonError, mpsc::SyncSender};
 
+use typed_builder::TypedBuilder;
+
 use super::{
     attach_event::AttachEvent, ending_signal::EndingSignal, error::CliError,
     session_alarm::SessionAlarm, signal_slot::SignalSlot, signal_source::SignalSource,
@@ -10,13 +12,14 @@ use super::{
 /// reports `late` as it is stopped, as signals arriving during teardown
 /// would, the way the real listener does: recorded in the alarm, posted
 /// only when there is room.
+#[derive(TypedBuilder)]
 pub(super) struct ScriptedSignals {
     /// The session's event sender and alarm, while it listens.
-    pub(super) slot: SignalSlot,
+    slot: SignalSlot,
     /// Events posted the moment the session listens.
-    pub(super) preset: Vec<AttachEvent>,
+    preset: Vec<AttachEvent>,
     /// Ending signals arriving while the session stops listening.
-    pub(super) late: Vec<EndingSignal>,
+    late: Vec<EndingSignal>,
 }
 
 impl SignalSource for ScriptedSignals {

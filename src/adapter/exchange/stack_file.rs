@@ -188,10 +188,12 @@ processes:
         ProjectRoot::try_new(PathBuf::from(ROOT)).unwrap()
     }
 
+    /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
         StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
+    /// A stack exercising every field the file carries.
     fn example() -> Vec<ProcessSpec> {
         vec![
             ProcessSpec::builder()
@@ -249,6 +251,7 @@ processes:
         ))
     }
 
+    /// Why the file `raw` is refused.
     fn refusal(raw: &str) -> String {
         read_stack_file(raw).unwrap_err().to_string()
     }

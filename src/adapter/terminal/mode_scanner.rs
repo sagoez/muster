@@ -63,6 +63,7 @@ impl ModeScanner {
 mod tests {
     use super::{ModeScanner, Observation};
 
+    /// What `scanner` observed on each byte of `bytes`, nothing left out.
     fn scan(scanner: &mut ModeScanner, bytes: &[u8]) -> Vec<Observation> {
         bytes
             .iter()

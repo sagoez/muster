@@ -196,6 +196,7 @@ impl OutputTap {
 mod tests {
     use super::*;
 
+    /// The text of each of `lines`.
     fn texts(lines: &[TapLine]) -> Vec<&str> {
         lines.iter().map(|line| line.text().as_str()).collect()
     }

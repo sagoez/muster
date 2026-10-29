@@ -1,14 +1,18 @@
 use std::sync::Mutex;
 
+use getset::{Getters, MutGetters};
+
 use crate::domain::{port::StateChangeNotifier, value::ProjectRoot};
 
 /// A [`StateChangeNotifier`] that records what it was told.
-#[derive(Default)]
+#[derive(Default, Getters, MutGetters)]
 pub struct RecordingNotifier {
     /// Each project whose stack changed, in order.
-    pub stacks: Mutex<Vec<ProjectRoot>>,
+    #[getset(get = "pub", get_mut = "pub")]
+    stacks: Mutex<Vec<ProjectRoot>>,
     /// How many times the settings changed.
-    pub settings: Mutex<usize>,
+    #[getset(get = "pub", get_mut = "pub")]
+    settings: Mutex<usize>,
 }
 
 impl StateChangeNotifier for RecordingNotifier {

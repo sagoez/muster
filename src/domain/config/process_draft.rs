@@ -71,10 +71,12 @@ mod tests {
 
     use super::*;
 
+    /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
         StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
     }
 
+    /// Defaults that differ from every value a draft sets.
     fn defaults() -> ProcessDefaults {
         ProcessDefaults::builder()
             .autostart(false)
@@ -88,10 +90,12 @@ mod tests {
             .build()
     }
 
+    /// The name every test draft takes.
     fn name() -> ProcessName {
         ProcessName::try_new("web").unwrap()
     }
 
+    /// The command every test draft runs.
     fn command() -> CommandLine {
         CommandLine::try_new("npm run dev").unwrap()
     }

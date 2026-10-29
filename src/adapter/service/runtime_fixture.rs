@@ -3,6 +3,7 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
+use getset::{Getters, MutGetters};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -32,10 +33,14 @@ use crate::{
 /// A scratch state directory, holder dirs, projects and their store, plus
 /// every holder thread started there; dropping it kills every child still
 /// recorded and lets its holder finish.
+#[derive(Getters, MutGetters)]
 pub(super) struct Fixture {
-    pub(super) scratch: TempDir,
-    pub(super) holders: Holders,
-    pub(super) store: MemoryStore,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    scratch: TempDir,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    holders: Holders,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    store: MemoryStore,
 }
 
 impl Fixture {
@@ -144,10 +149,10 @@ impl Fixture {
         wait_until("the service to accept", || {
             UnixStream::connect(&socket).is_ok()
         });
-        Running {
-            socket,
-            thread: Some(thread),
-        }
+        Running::builder()
+            .socket(socket)
+            .thread(Some(thread))
+            .build()
     }
 }
 

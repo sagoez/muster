@@ -8,6 +8,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use getset::{Getters, MutGetters};
+use typed_builder::TypedBuilder;
+
 use crate::{
     adapter::holder::{ServedScreen, abandon},
     domain::{
@@ -20,9 +23,12 @@ use crate::{
 
 /// A handle whose holder, when it has one, serves at `socket` but never
 /// answers, counting the kills it is sent.
+#[derive(Getters, MutGetters, TypedBuilder)]
 pub(super) struct StalledHandle {
-    pub(super) socket: Option<PathBuf>,
-    pub(super) kills: Arc<AtomicUsize>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    socket: Option<PathBuf>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    kills: Arc<AtomicUsize>,
 }
 
 impl ProcessHandle for StalledHandle {

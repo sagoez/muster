@@ -114,10 +114,12 @@ mod tests {
 
     use super::*;
 
+    /// The change `raw` makes to `key`, which must parse.
     fn parse(key: SettingKey, raw: &str) -> SettingChange {
         SettingChange::parse(key, raw).unwrap()
     }
 
+    /// Why `raw` is refused for `key`.
     fn refusal(key: SettingKey, raw: &str) -> String {
         let error = SettingChange::parse(key, raw).unwrap_err();
         assert!(

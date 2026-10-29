@@ -31,7 +31,7 @@ impl Readiness {
     pub fn on_passed(self) -> Self {
         match self {
             Self::Waiting => Self::Ready,
-            other => other,
+            Self::None | Self::Ready | Self::TimedOut => self,
         }
     }
 
@@ -40,7 +40,7 @@ impl Readiness {
     pub fn on_deadline(self) -> Self {
         match self {
             Self::Waiting => Self::TimedOut,
-            other => other,
+            Self::None | Self::Ready | Self::TimedOut => self,
         }
     }
 
@@ -66,6 +66,7 @@ mod tests {
         value::{LocalPort, PositiveDuration},
     };
 
+    /// A port readiness check.
     fn check() -> ReadyCheck {
         ReadyCheck::builder()
             .probe(ReadyProbe::Port(LocalPort::try_new(3000).unwrap()))

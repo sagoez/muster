@@ -99,7 +99,10 @@ impl Scope {
                 ResolveError::Unregistrable { dir, why } if !given => {
                     ToolError::ProjectRequired { dir, why }
                 },
-                other => other.into(),
+                other @ (ResolveError::Unregistrable { .. }
+                | ResolveError::UnknownProject { .. }
+                | ResolveError::NotAProject { .. }
+                | ResolveError::Config(_)) => other.into(),
             })
     }
 }

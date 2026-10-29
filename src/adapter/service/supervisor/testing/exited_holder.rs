@@ -29,6 +29,8 @@ pub(crate) struct ExitedHolder {
 }
 
 impl ExitedHolder {
+    /// A holder serving in a fresh scratch directory until its exit is
+    /// collected.
     pub(crate) fn serve() -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         let socket = scratch.path().join("h.sock");

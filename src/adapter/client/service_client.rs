@@ -109,7 +109,18 @@ impl ServiceClient {
                     .iter()
                     .map(|status| status.project().root().as_ref().clone())
                     .collect(),
-                other => return Err(ClientError::UnexpectedAnswer((&other).into())),
+                other @ (ServiceResponse::Hello { .. }
+                | ServiceResponse::Ok
+                | ServiceResponse::Batch(_)
+                | ServiceResponse::Log(_)
+                | ServiceResponse::Located(_)
+                | ServiceResponse::Screen(_)
+                | ServiceResponse::Notices(_)
+                | ServiceResponse::Waited(_)
+                | ServiceResponse::Events(_)
+                | ServiceResponse::Error(_)) => {
+                    return Err(ClientError::UnexpectedAnswer((&other).into()));
+                },
             },
             None => Vec::new(),
         };
@@ -147,7 +158,16 @@ impl ServiceClient {
             ServiceResponse::Status(statuses) => Ok(statuses
                 .into_iter()
                 .find(|status| status.project().root() == project)),
-            other => Err(ClientError::UnexpectedAnswer((&other).into())),
+            other @ (ServiceResponse::Hello { .. }
+            | ServiceResponse::Ok
+            | ServiceResponse::Batch(_)
+            | ServiceResponse::Log(_)
+            | ServiceResponse::Located(_)
+            | ServiceResponse::Screen(_)
+            | ServiceResponse::Notices(_)
+            | ServiceResponse::Waited(_)
+            | ServiceResponse::Events(_)
+            | ServiceResponse::Error(_)) => Err(ClientError::UnexpectedAnswer((&other).into())),
         }
     }
 
@@ -166,7 +186,16 @@ impl ServiceClient {
             project: project.clone(),
         })? {
             ServiceResponse::Notices(notices) => Ok(Some(notices)),
-            other => Err(ClientError::UnexpectedAnswer((&other).into())),
+            other @ (ServiceResponse::Hello { .. }
+            | ServiceResponse::Ok
+            | ServiceResponse::Batch(_)
+            | ServiceResponse::Log(_)
+            | ServiceResponse::Status(_)
+            | ServiceResponse::Located(_)
+            | ServiceResponse::Screen(_)
+            | ServiceResponse::Waited(_)
+            | ServiceResponse::Events(_)
+            | ServiceResponse::Error(_)) => Err(ClientError::UnexpectedAnswer((&other).into())),
         }
     }
 

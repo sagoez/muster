@@ -121,6 +121,7 @@ struct Scratch {
 }
 
 impl Scratch {
+    /// Holder dirs in a fresh scratch directory short enough to bind in.
     fn new() -> Self {
         let root = Builder::new()
             .prefix(SCRATCH_PREFIX)
@@ -134,6 +135,7 @@ impl Scratch {
         Self { dirs, root }
     }
 
+    /// A runner launching real holders from the built binary into these dirs.
     fn runner(&self) -> HolderRunner {
         let launcher = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
@@ -142,6 +144,7 @@ impl Scratch {
         HolderRunner::new(Box::new(launcher), self.dirs.clone())
     }
 
+    /// A request to run the ticker as a process of the scratch project.
     fn request(&self) -> SpawnRequest {
         SpawnRequest::builder()
             .process(ProcessName::try_new("ticker").unwrap())

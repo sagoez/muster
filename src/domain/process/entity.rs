@@ -87,6 +87,7 @@ mod tests {
         value::{EnvName, EnvValue, StopGrace},
     };
 
+    /// A definition running `command`.
     fn spec(command: &str) -> ProcessSpec {
         ProcessSpec::builder()
             .name(ProcessName::try_new("web").unwrap())

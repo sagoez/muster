@@ -273,6 +273,7 @@ mod tests {
         todo
     }
 
+    /// The moment leases are read at.
     fn now() -> EpochSeconds {
         epoch_now()
     }

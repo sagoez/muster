@@ -68,7 +68,10 @@ pub fn export(
                 name: name.clone(),
                 source: error,
             },
-            other => CliError::Output(io::Error::other(other)),
+            other @ (ExchangeError::Malformed { .. }
+            | ExchangeError::UnsupportedVersion { .. }
+            | ExchangeError::Entry { .. }
+            | ExchangeError::Render { .. }) => CliError::Output(io::Error::other(other)),
         })?;
     let path = match StackPath::of(invocation, project.root().as_ref(), file)? {
         StackPath::Stdio => return Ok(Exported::Text(text)),

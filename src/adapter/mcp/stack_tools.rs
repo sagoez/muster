@@ -210,7 +210,7 @@ mod tests {
         runtime().block_on(async {
             let cursor = refusal(
                 fixture
-                    .server
+                    .server()
                     .events(
                         StackEventsArg::builder()
                             .since(Some("9921".to_string()))
@@ -224,7 +224,7 @@ mod tests {
             );
             let kind = refusal(
                 fixture
-                    .server
+                    .server()
                     .events(
                         StackEventsArg::builder()
                             .kinds(Some(vec!["exploded".to_string()]))
@@ -243,7 +243,7 @@ mod tests {
         runtime().block_on(async {
             let text = refusal(
                 fixture
-                    .server
+                    .server()
                     .stack_status(Parameters(ProjectArg::default()))
                     .await,
             );
@@ -261,7 +261,7 @@ mod tests {
         runtime().block_on(async {
             let error = answered(
                 fixture
-                    .server
+                    .server()
                     .stack_status(Parameters(ProjectArg::default()))
                     .await,
             )

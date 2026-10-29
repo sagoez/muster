@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime};
 use crossbeam_channel::Sender;
 use portable_pty::{ChildKiller, MasterPty};
 use rustix::process::Signal;
+use typed_builder::TypedBuilder;
 
 use super::{
     pty_input::PtyInput,
@@ -18,12 +19,13 @@ use crate::domain::{
 };
 
 /// Live handle to a PTY-backed process.
+#[derive(TypedBuilder)]
 pub(super) struct PtyProcessHandle {
-    pub(super) master: Box<dyn MasterPty + Send>,
-    pub(super) input: PtyInput,
-    pub(super) killer: Box<dyn ChildKiller + Send + Sync>,
-    pub(super) grace_tx: Sender<Duration>,
-    pub(super) pid: Option<Pid>,
+    master: Box<dyn MasterPty + Send>,
+    input: PtyInput,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    grace_tx: Sender<Duration>,
+    pid: Option<Pid>,
 }
 
 impl ProcessHandle for PtyProcessHandle {

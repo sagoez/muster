@@ -177,6 +177,7 @@ mod tests {
     /// Grace of the recorded stop policy.
     const STOP_GRACE: Duration = Duration::from_secs(7);
 
+    /// A record with every field set.
     fn record() -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())

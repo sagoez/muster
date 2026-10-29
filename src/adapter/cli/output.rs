@@ -359,7 +359,7 @@ pub fn action_rows(report: &ActionReport) -> Report {
 /// The title a command acting on the project `project` opens with: the
 /// command and the project's name, such as `muster up · shop`.
 pub fn action_title(action: Action, project: &ProjectName) -> String {
-    project_title(command_word(action), project)
+    project_title(action.into(), project)
 }
 
 /// The title `muster attach` opens with, such as `muster attach · shop`.
@@ -387,22 +387,6 @@ pub fn service_title() -> String {
 /// `muster <command> · <project>`.
 pub fn project_title(command: &str, project: &ProjectName) -> String {
     format!("{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{project}")
-}
-
-/// The command a person types for `action`.
-fn command_word(action: Action) -> &'static str {
-    match action {
-        Action::Up => "up",
-        Action::Down => "down",
-        Action::Start => "start",
-        Action::Stop => "stop",
-        Action::Restart => "restart",
-        Action::Pause => "pause",
-        Action::Resume => "resume",
-        Action::Kill => "kill",
-        Action::Run => "run",
-        Action::Remove => "rm",
-    }
 }
 
 /// What to say when the action of `report` touched no process.

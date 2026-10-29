@@ -1,5 +1,7 @@
 use std::{io, os::unix::net::UnixStream, path::Path};
 
+use getset::{Getters, MutGetters};
+
 use super::{
     client_message::ClientMessage,
     client_role::ClientRole,
@@ -14,15 +16,23 @@ use crate::{
 
 /// One client connection with a bounded read timeout, mirroring the screen
 /// it is shown.
+#[derive(Getters, MutGetters)]
 pub(super) struct TestClient {
-    pub(super) stream: UnixStream,
-    pub(super) output: Vec<u8>,
-    pub(super) frames: Vec<(OutputCursor, usize)>,
-    pub(super) screen: Option<TerminalEmulator>,
-    pub(super) snapshots: usize,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    stream: UnixStream,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    output: Vec<u8>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    frames: Vec<(OutputCursor, usize)>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    screen: Option<TerminalEmulator>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    snapshots: usize,
 }
 
 impl TestClient {
+    /// Connects to the holder at `socket` as `role`, once it serves, and
+    /// returns the client with the snapshot it was greeted with.
     pub(super) fn connect(socket: &Path, role: ClientRole) -> (Self, HolderMessage) {
         let mut stream = None;
         wait_until("the holder socket", || {
@@ -43,10 +53,13 @@ impl TestClient {
         (client, snapshot)
     }
 
+    /// Sends `message` to the holder.
     pub(super) fn send(&mut self, message: ClientMessage) {
         message.write_to(&mut self.stream).unwrap();
     }
 
+    /// Receives the next message, keeping the output, frames, screen and
+    /// snapshot count it carries.
     pub(super) fn recv(&mut self) -> HolderMessage {
         let message = HolderMessage::read_from(&mut self.stream).unwrap();
         match &message {
@@ -97,6 +110,7 @@ impl TestClient {
         }
     }
 
+    /// Receives until a message `wanted` accepts, and returns it.
     pub(super) fn recv_until(
         &mut self,
         mut wanted: impl FnMut(&HolderMessage) -> bool,
@@ -109,6 +123,7 @@ impl TestClient {
         }
     }
 
+    /// Receives until the output holds `needle`, and returns the output.
     pub(super) fn output_until(&mut self, needle: &str) -> String {
         while !String::from_utf8_lossy(&self.output).contains(needle) {
             self.recv();

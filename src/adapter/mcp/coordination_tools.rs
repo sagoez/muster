@@ -340,7 +340,10 @@ impl MusterMcp {
                         Some(id) => Err(unknown_todo(store, project.root(), id)),
                         None => Ok(Claim::NothingClaimable),
                     },
-                    claim => Ok(claim),
+                    claim @ (Claim::Claimed(_)
+                    | Claim::HeldBy { .. }
+                    | Claim::Unavailable(_)
+                    | Claim::NothingClaimable) => Ok(claim),
                 }
             })
             .await?;
@@ -708,7 +711,7 @@ mod tests {
     fn a_note_round_trips_and_the_index_omits_bodies() {
         let fixture = fixture();
         register(&fixture);
-        let server = &fixture.server;
+        let server = &fixture.server();
 
         runtime().block_on(async {
             let saved = content(
@@ -758,7 +761,7 @@ mod tests {
         runtime().block_on(async {
             content(
                 fixture
-                    .server
+                    .server()
                     .kv_write(Parameters(
                         KvWriteArg::builder()
                             .key("port".to_string())
@@ -768,7 +771,7 @@ mod tests {
                     .await,
             );
             let result = fixture
-                .server
+                .server()
                 .kv_read(Parameters(
                     ReadArg::builder().key(Some("prot".to_string())).build(),
                 ))
@@ -791,7 +794,7 @@ mod tests {
         runtime().block_on(async {
             let text = refusal(
                 fixture
-                    .server
+                    .server()
                     .note_write(Parameters(
                         NoteWriteArg::builder()
                             .key("plan".to_string())
@@ -810,7 +813,7 @@ mod tests {
     fn todo_list_filters_claimable_and_status() {
         let fixture = fixture();
         register(&fixture);
-        let server = &fixture.server;
+        let server = &fixture.server();
 
         runtime().block_on(async {
             let first = content(
@@ -877,7 +880,7 @@ mod tests {
         runtime().block_on(async {
             let nothing = refusal(
                 fixture
-                    .server
+                    .server()
                     .todo_update(Parameters(
                         TodoUpdateArg::builder().id("x".to_string()).build(),
                     ))
@@ -886,7 +889,7 @@ mod tests {
             assert!(nothing.contains("todo_update changed nothing"), "{nothing}");
             let name = refusal(
                 fixture
-                    .server
+                    .server()
                     .lock_release(Parameters(
                         LockNameArg::builder().name("DB Reset".to_string()).build(),
                     ))
@@ -927,7 +930,7 @@ mod tests {
         runtime().block_on(async {
             let added = content(
                 fixture
-                    .server
+                    .server()
                     .todo_add(Parameters(
                         TodoAddArg::builder().title("schema".to_string()).build(),
                     ))
@@ -937,7 +940,7 @@ mod tests {
 
             let claimed = content(
                 fixture
-                    .server
+                    .server()
                     .todo_claim(Parameters(TodoClaimArg::builder().build()))
                     .await,
             );
@@ -973,7 +976,7 @@ mod tests {
 
             let released = content(
                 fixture
-                    .server
+                    .server()
                     .todo_update(Parameters(
                         TodoUpdateArg::builder()
                             .id(id.clone())
@@ -1015,7 +1018,7 @@ mod tests {
         runtime().block_on(async {
             let taken = content(
                 fixture
-                    .server
+                    .server()
                     .acquire(acquire("migrations", Some("adding users")))
                     .await,
             );
@@ -1030,7 +1033,7 @@ mod tests {
             assert_eq!(not_theirs[RELEASED], false);
             assert_eq!(not_theirs[OWNER], AGENT);
 
-            let freed = content(fixture.server.lock_release(release("migrations")).await);
+            let freed = content(fixture.server().lock_release(release("migrations")).await);
             assert_eq!(freed[RELEASED], true);
             let retaken = content(other.acquire(acquire("migrations", None)).await);
             assert_eq!(retaken[ACQUIRED], true);
@@ -1060,20 +1063,20 @@ mod tests {
 
         runtime().block_on(async {
             assert_eq!(content(earlier.acquire(acquire()).await)[ACQUIRED], true);
-            let twin = content(fixture.server.acquire(acquire()).await);
+            let twin = content(fixture.server().acquire(acquire()).await);
             assert_eq!(twin[ACQUIRED], false);
             assert_eq!(twin[OWNER], AGENT);
-            let not_shared = content(fixture.server.lock_release(release()).await);
+            let not_shared = content(fixture.server().lock_release(release()).await);
             assert_eq!(not_shared[RELEASED], false);
 
             release_session_locks(&earlier.deps, &earlier.identity);
             assert_eq!(
-                content(fixture.server.acquire(acquire()).await)[ACQUIRED],
+                content(fixture.server().acquire(acquire()).await)[ACQUIRED],
                 true
             );
             release_session_locks(&earlier.deps, &earlier.identity);
         });
-        assert_eq!(fixture.store.locks(&fixture.root).unwrap().len(), 1);
+        assert_eq!(fixture.store().locks(fixture.root()).unwrap().len(), 1);
     }
 
     /// A note body, value or title past its maximum is refused naming the
@@ -1082,7 +1085,7 @@ mod tests {
     fn oversized_writes_are_refused() {
         let fixture = fixture();
         register(&fixture);
-        let server = &fixture.server;
+        let server = &fixture.server();
         runtime().block_on(async {
             let body = refusal(
                 server
@@ -1117,9 +1120,15 @@ mod tests {
             );
             assert!(title.contains("invalid title"), "{title}");
         });
-        assert!(fixture.store.scratchpads(&fixture.root).unwrap().is_empty());
-        assert!(fixture.store.values(&fixture.root).unwrap().is_empty());
-        assert!(fixture.store.todos(&fixture.root).unwrap().is_empty());
+        assert!(
+            fixture
+                .store()
+                .scratchpads(fixture.root())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(fixture.store().values(fixture.root()).unwrap().is_empty());
+        assert!(fixture.store().todos(fixture.root()).unwrap().is_empty());
     }
 
     /// `todo_list` pages through every todo by cursor, saying when more
@@ -1128,7 +1137,7 @@ mod tests {
     fn todo_list_pages_by_cursor() {
         let fixture = fixture();
         register(&fixture);
-        let server = &fixture.server;
+        let server = &fixture.server();
         let list = |cursor: Option<String>, limit: Option<usize>| {
             TodoListArg::builder().cursor(cursor).limit(limit).build()
         };
@@ -1180,7 +1189,7 @@ mod tests {
         runtime().block_on(async {
             content(
                 fixture
-                    .server
+                    .server()
                     .kv_write(Parameters(
                         KvWriteArg::builder()
                             .key("blob".to_string())
@@ -1189,7 +1198,12 @@ mod tests {
                     ))
                     .await,
             );
-            let listed = content(fixture.server.kv_read(Parameters(ReadArg::default())).await);
+            let listed = content(
+                fixture
+                    .server()
+                    .kv_read(Parameters(ReadArg::default()))
+                    .await,
+            );
             let entry = &listed[ENTRIES][0];
             assert_eq!(
                 entry["value"].as_str().unwrap().chars().count(),
@@ -1199,7 +1213,7 @@ mod tests {
             assert_eq!(listed[MORE], false);
             let whole = content(
                 fixture
-                    .server
+                    .server()
                     .kv_read(Parameters(
                         ReadArg::builder().key(Some("blob".to_string())).build(),
                     ))

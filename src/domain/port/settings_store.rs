@@ -1,18 +1,12 @@
+use super::SettingsReader;
 use crate::domain::{
     config::{ConfigError, SettingChange},
     coordination::Author,
     settings::Settings,
 };
 
-/// Driven port: the machine-wide [`Settings`].
-pub trait SettingsStore {
-    /// The current settings.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the store cannot be read or holds an
-    /// invalid value.
-    fn load(&self) -> Result<Settings, ConfigError>;
-
+/// Driven port: the machine-wide [`Settings`], read and changed.
+pub trait SettingsStore: SettingsReader {
     /// Applies `change` for `author` and returns the settings it produced.
     /// An agent's change is kept in every project's edit log in the same
     /// write, since every project's new processes take it.

@@ -6,6 +6,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use typed_builder::TypedBuilder;
+
 use super::{
     recording_input::RecordingInput,
     server_testing::{FAKE_PID, RESIZE_REFUSED},
@@ -19,9 +21,10 @@ use crate::domain::{
 
 /// A live child whose PTY refuses every resize and that records a kill
 /// and its input.
+#[derive(TypedBuilder)]
 pub(super) struct FakeChild {
-    pub(super) killed: Arc<AtomicBool>,
-    pub(super) written: Arc<Mutex<Vec<u8>>>,
+    killed: Arc<AtomicBool>,
+    written: Arc<Mutex<Vec<u8>>>,
 }
 
 impl ProcessHandle for FakeChild {

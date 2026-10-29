@@ -2,7 +2,8 @@ use nutype::nutype;
 
 /// A todo's human-readable title: trimmed and non-empty, so a blank line can
 /// never masquerade as a task. A title being written is capped by
-/// [`NewTodoTitle`]; a stored one is read back whatever its length.
+/// [`NewTodoTitle`](crate::domain::coordination::NewTodoTitle); a stored one is
+/// read back whatever its length.
 #[nutype(
     sanitize(trim),
     validate(not_empty),

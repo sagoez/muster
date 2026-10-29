@@ -87,7 +87,16 @@ pub fn attach_named(
         name: name.clone(),
     })? {
         ServiceResponse::Located(located) => located,
-        other => return Err(unexpected(other, project, Some(&name)).into()),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => return Err(unexpected(other, project, Some(&name)).into()),
     };
     AttachSession::new(name, terminal, Box::new(HostSignals::default()), announce)
         .run(target, read_only, detach)
@@ -459,7 +468,7 @@ mod tests {
         pty.type_keys(b"\x03a\r");
         pty.wait_for(b"03 61");
         assert!(
-            !running.session.is_finished(),
+            !running.session().is_finished(),
             "Ctrl-C does not end the session"
         );
         pty.type_keys(b"b\r");
@@ -512,7 +521,7 @@ mod tests {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         assert_eq!(holder.next(), ClientMessage::Hello {
             role: ClientRole::Attach { read_only: false }
@@ -537,7 +546,7 @@ mod tests {
             let holder = FakeHolder::start(&repaint("screen"));
             let pty = TestPty::open(ROWS, COLS);
             let cooked = pty.settings();
-            let running = Running::start(&pty, holder.socket.clone(), false);
+            let running = Running::start(&pty, holder.socket().clone(), false);
 
             pty.wait_for(b"screen");
             running.signal(AttachEvent::Ended(signal));
@@ -562,7 +571,7 @@ mod tests {
             );
             let running = Running::on(
                 terminal,
-                holder.socket.clone(),
+                holder.socket().clone(),
                 false,
                 Vec::new(),
                 Vec::new(),
@@ -592,7 +601,7 @@ mod tests {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         holder.close();
@@ -612,7 +621,7 @@ mod tests {
     fn a_resync_clears_the_screen_and_repaints() {
         let holder = FakeHolder::start(&repaint("first"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"first");
         holder.send(live_output(b"live"));
@@ -645,7 +654,7 @@ mod tests {
     fn a_detach_after_a_line_drawing_charset_leaves_ascii() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         holder.send(live_output(b"\x1b(0lqk"));
@@ -667,7 +676,7 @@ mod tests {
     fn a_window_change_resizes_the_process() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
         holder.next();
         assert_eq!(holder.next(), ClientMessage::Resize(size(ROWS, COLS)));
 
@@ -687,7 +696,7 @@ mod tests {
         let burst = (0..10).map(|_| AttachEvent::Resized).collect();
         let running = Running::on(
             pty.terminal(),
-            holder.socket.clone(),
+            holder.socket().clone(),
             false,
             burst,
             Vec::new(),
@@ -710,7 +719,7 @@ mod tests {
     fn a_mismatched_size_resizes_before_the_first_screen() {
         let holder = FakeHolder::sized(&repaint("old-screen"), size(30, 100));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         holder.next();
         assert_eq!(holder.next(), ClientMessage::Resize(size(ROWS, COLS)));
@@ -744,7 +753,7 @@ mod tests {
         for refuses in [true, false] {
             let holder = FakeHolder::sized(&repaint("old-screen"), size(30, 100));
             let pty = TestPty::open(ROWS, COLS);
-            let running = Running::start(&pty, holder.socket.clone(), false);
+            let running = Running::start(&pty, holder.socket().clone(), false);
 
             holder.next();
             assert_eq!(holder.next(), ClientMessage::Resize(size(ROWS, COLS)));
@@ -767,7 +776,7 @@ mod tests {
     fn a_read_only_mismatched_screen_is_drawn_unwrapped() {
         let holder = FakeHolder::sized(&repaint("old-screen"), size(30, 100));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), true);
+        let running = Running::start(&pty, holder.socket().clone(), true);
 
         pty.wait_for(&[WRAP_OFF, b"old-screen", WRAP_ON].concat());
         pty.type_keys(DETACH_BYTE);
@@ -782,7 +791,7 @@ mod tests {
     fn a_read_only_session_sends_only_its_hello() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), true);
+        let running = Running::start(&pty, holder.socket().clone(), true);
 
         assert_eq!(holder.next(), ClientMessage::Hello {
             role: ClientRole::Attach { read_only: true }
@@ -803,7 +812,7 @@ mod tests {
     fn a_lone_escape_reaches_the_process() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
         holder.next();
         holder.next();
 
@@ -820,7 +829,7 @@ mod tests {
     fn an_escape_is_not_held_back_by_streaming_output() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
         holder.next();
         holder.next();
         let (streaming, streamer) = stream_output(&holder);
@@ -844,7 +853,7 @@ mod tests {
     fn dropped_input_is_told_after_the_session() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         holder.send(HolderMessage::Rejected(RejectReason::InputBacklogged));
@@ -880,7 +889,7 @@ mod tests {
     fn a_resize_is_not_held_back_by_streaming_output() {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
         holder.next();
         holder.next();
         let (streaming, streamer) = stream_output(&holder);
@@ -910,7 +919,7 @@ mod tests {
         let output = pty.terminal().output().try_clone().unwrap();
         let running = Running::on(
             HostTerminal::new(OwnedFd::from(input), output),
-            holder.socket.clone(),
+            holder.socket().clone(),
             false,
             Vec::new(),
             Vec::new(),
@@ -935,7 +944,7 @@ mod tests {
         let pty = TestPty::open(ROWS, COLS);
         let running = Running::on(
             pty.terminal(),
-            holder.socket.clone(),
+            holder.socket().clone(),
             false,
             Vec::new(),
             vec![EndingSignal::Terminate],
@@ -960,7 +969,7 @@ mod tests {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         running.alarm().record_ending(EndingSignal::Hangup);
@@ -977,7 +986,7 @@ mod tests {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         let alarm = running.alarm();
@@ -1005,7 +1014,7 @@ mod tests {
         let holder = FakeHolder::start(&repaint("screen"));
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
-        let running = Running::start(&pty, holder.socket.clone(), false);
+        let running = Running::start(&pty, holder.socket().clone(), false);
 
         pty.wait_for(b"screen");
         running.signal(AttachEvent::HelperFailed);

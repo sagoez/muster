@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use getset::{Getters, MutGetters};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -26,21 +27,29 @@ use crate::{
 };
 
 /// A running holder on a thread, with its scratch directory.
+#[derive(Getters, MutGetters)]
 pub(super) struct Harness {
-    pub(super) config: HolderConfig,
-    pub(super) server: Option<JoinHandle<Result<(), HolderError>>>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    config: HolderConfig,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    server: Option<JoinHandle<Result<(), HolderError>>>,
     pub(super) _scratch: TempDir,
 }
 
 impl Harness {
+    /// A holder running `command` in a fresh scratch directory.
     pub(super) fn start(command: &str) -> Self {
         Self::start_with(command, SUPERVISOR_DEADLINE, ColorScheme::Dark)
     }
 
+    /// As [`Self::start`], killing its child unless a supervisor reaches it by
+    /// `supervisor_deadline`.
     pub(super) fn start_with_deadline(command: &str, supervisor_deadline: Duration) -> Self {
         Self::start_with(command, supervisor_deadline, ColorScheme::Dark)
     }
 
+    /// A holder running `command` under `color_scheme`, with
+    /// `supervisor_deadline`, once its record is written.
     pub(super) fn start_with(
         command: &str,
         supervisor_deadline: Duration,
@@ -67,18 +76,22 @@ impl Harness {
         harness
     }
 
+    /// The holder's record, while it is written.
     pub(super) fn record(&self) -> Option<HolderRecord> {
         HolderRecord::load_all(self.config.record_dir()).pop()
     }
 
+    /// The child's log so far, empty while it cannot be read.
     pub(super) fn log(&self) -> String {
         String::from_utf8_lossy(&fs::read(self.config.log()).unwrap_or_default()).into_owned()
     }
 
+    /// A client connected as `role`, with the snapshot it was greeted with.
     pub(super) fn connect(&self, role: ClientRole) -> (TestClient, HolderMessage) {
         TestClient::connect(self.config.socket(), role)
     }
 
+    /// Whether the holder's thread has returned.
     pub(super) fn server_finished(&self) -> bool {
         self.server.as_ref().is_none_or(JoinHandle::is_finished)
     }

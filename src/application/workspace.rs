@@ -71,6 +71,7 @@ mod tests {
         value::{CommandLine, ProcessName, StopGrace},
     };
 
+    /// A process on pane `id` restarting by `restart`.
     fn process(id: u64, restart: RestartPolicy) -> Process {
         Process::builder()
             .id(PaneId::new(id))
@@ -88,6 +89,7 @@ mod tests {
             .build()
     }
 
+    /// A workspace of processes under each restart policy.
     fn workspace() -> Workspace {
         Workspace::builder()
             .processes(vec![

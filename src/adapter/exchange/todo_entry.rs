@@ -1,4 +1,6 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use crate::{
     adapter::wire::{WireForm, form, optional_form},
@@ -9,7 +11,8 @@ use crate::{
 };
 
 /// A todo as a coordination snapshot keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(deny_unknown_fields)]
 pub struct TodoEntry {
     /// Its stable identity.

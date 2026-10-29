@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use strum::{Display, EnumIter, EnumMessage};
+use strum::{Display, EnumIter, EnumMessage, IntoStaticStr};
 
 use crate::{
     adapter::service::{ProcessAction, ProcessStatus},
@@ -20,9 +20,12 @@ const STOP_SETTLE_MARGIN: Duration = Duration::from_secs(5);
 /// was starting.
 const SUSPEND_SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// What a command asked the service to do, as its report names it. Each
-/// variant's message is the word for it while it is under way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumIter, EnumMessage, Serialize)]
+/// What a command asked the service to do, as its report names it: its text is
+/// the command word that asks for it, and its message the word for it while
+/// it is under way.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Display, EnumIter, EnumMessage, IntoStaticStr, Serialize,
+)]
 #[strum(serialize_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
@@ -54,7 +57,7 @@ pub enum Action {
     #[strum(message = "starting")]
     Run,
     /// Remove processes from the project, stopping those that run.
-    #[strum(message = "stopping")]
+    #[strum(message = "stopping", to_string = "rm")]
     Remove,
 }
 
@@ -181,9 +184,22 @@ mod tests {
         assert_eq!(Action::Restart.get_message(), Some("restarting"));
     }
 
+    /// An action reads as the command word a person types for it.
+    #[test]
+    fn an_action_reads_as_its_command_word() {
+        assert_eq!(<&str>::from(Action::Up), "up");
+        assert_eq!(<&str>::from(Action::Restart), "restart");
+        assert_eq!(<&str>::from(Action::Remove), "rm");
+    }
+
+    /// An action travels in kebab case, while it reads as its command word.
     #[test]
     fn actions_are_named_in_kebab_case() {
-        assert_eq!(Action::Remove.to_string(), "remove");
+        assert_eq!(Action::Remove.to_string(), "rm");
+        assert_eq!(
+            serde_json::to_string(&Action::Remove).unwrap(),
+            "\"remove\""
+        );
         assert_eq!(serde_json::to_string(&Action::Run).unwrap(), "\"run\"");
     }
 }

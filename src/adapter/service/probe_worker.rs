@@ -145,6 +145,7 @@ mod tests {
     /// Longest a test waits for a probe to pass.
     const PASS_WAIT: Duration = Duration::from_secs(5);
 
+    /// The project every probe belongs to.
     fn root() -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/shop")).unwrap()
     }
@@ -166,13 +167,12 @@ mod tests {
             until,
         );
 
-        match events.recv_timeout(PASS_WAIT).unwrap() {
-            ServiceEvent::ProbePassed { pane, probe, .. } => {
-                assert_eq!(pane, PaneId::new(1));
-                assert_eq!(probe, ProbeTarget::Port(port));
-            },
-            _ => panic!("expected a pass"),
-        }
+        let ServiceEvent::ProbePassed { pane, probe, .. } = events.recv_timeout(PASS_WAIT).unwrap()
+        else {
+            panic!("expected a pass");
+        };
+        assert_eq!(pane, PaneId::new(1));
+        assert_eq!(probe, ProbeTarget::Port(port));
         assert!(events.recv_timeout(PROBE_INTERVAL * 4).is_err());
     }
 

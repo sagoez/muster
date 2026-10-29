@@ -1372,15 +1372,12 @@ mod tests {
             ExitOutcome::Failed(ExitCause::Status(2)),
         );
 
-        match answers.try_recv() {
-            Ok(ServiceResponse::Batch(batch)) => {
-                let statuses: Vec<WaitStatus> =
-                    batch.waits().iter().map(WaitOutcome::status).collect();
-                assert_eq!(statuses, [WaitStatus::Matched, WaitStatus::Crashed]);
-                assert_eq!(batch.acted().len(), 2);
-            },
-            _ => panic!("the batch answers once both waits ended"),
-        }
+        let Ok(ServiceResponse::Batch(batch)) = answers.try_recv() else {
+            panic!("the batch answers once both waits ended");
+        };
+        let statuses: Vec<WaitStatus> = batch.waits().iter().map(WaitOutcome::status).collect();
+        assert_eq!(statuses, [WaitStatus::Matched, WaitStatus::Crashed]);
+        assert_eq!(batch.acted().len(), 2);
     }
 
     #[test]

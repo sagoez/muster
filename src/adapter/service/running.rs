@@ -4,6 +4,9 @@ use std::{
     time::Instant,
 };
 
+use getset::{Getters, MutGetters};
+use typed_builder::TypedBuilder;
+
 use super::{
     notice::Notice,
     process_action::ProcessAction,
@@ -20,9 +23,12 @@ use crate::domain::{
 };
 
 /// A service running on a thread of the test.
+#[derive(Getters, MutGetters, TypedBuilder)]
 pub(super) struct Running {
-    pub(super) socket: PathBuf,
-    pub(super) thread: Option<JoinHandle<Result<(), ServiceError>>>,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    socket: PathBuf,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    thread: Option<JoinHandle<Result<(), ServiceError>>>,
 }
 
 impl Running {

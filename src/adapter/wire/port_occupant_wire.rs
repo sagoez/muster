@@ -1,11 +1,14 @@
+use getset::Getters;
 use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
 
 use super::WireForm;
 use crate::domain::{port::PortOccupant, value::Pid};
 
 /// A process listening on a port, as the service names a blocked start's
 /// holder.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PortOccupantWire {
     /// Its process id.

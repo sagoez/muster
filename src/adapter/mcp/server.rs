@@ -309,11 +309,11 @@ mod tests {
     #[test]
     fn every_tool_is_served() {
         let fixture = fixture();
-        let info = fixture.server.get_info();
+        let info = fixture.server().get_info();
         assert_eq!(info.server_info.name, MCP_SERVER_NAME);
         assert!(info.capabilities.tools.is_some());
         let mut names: Vec<String> = fixture
-            .server
+            .server()
             .tool_router
             .list_all()
             .into_iter()
@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn the_first_write_introduces_the_agent() {
         let fixture = fixture();
-        let first = fixture.server.introduced(object());
+        let first = fixture.server().introduced(object());
         assert_eq!(first[YOU], "test");
-        assert!(fixture.server.introduced(object()).get(YOU).is_none());
+        assert!(fixture.server().introduced(object()).get(YOU).is_none());
     }
 }

@@ -36,10 +36,9 @@ use crate::{
         terminal::{KittyKeyboardTracker, TerminalEmulator},
     },
     domain::{
-        agent_session::AgentProcessId,
-        color_scheme::ColorScheme,
         port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
-        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize},
+        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
+        value::{Pid, ProjectRoot},
     },
 };
 
@@ -241,21 +240,15 @@ impl HolderServer {
         let project = request
             .project()
             .clone()
+            .and_then(|root| ProjectRoot::try_new(root).ok())
             .ok_or(HolderError::MissingProject)?;
         request.size().checked()?;
-        let log = RotatingLog::open(config.log().clone(), config.log_cap())?;
+        let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
         let handle =
             PortablePtyRunner.spawn(request.clone(), Box::new(HolderSink(sender.clone())))?;
         let child_started_at = SystemTime::now();
-        let server = Self::new(
-            handle,
-            log,
-            (sender.clone(), events),
-            request.size(),
-            config.scrollback(),
-            config.color_scheme(),
-        )?;
+        let server = Self::new(handle, log, (sender.clone(), events), request)?;
         let listener = bind_private(config.socket())?;
         let guard = SocketGuard {
             path: config.socket().clone(),
@@ -265,13 +258,20 @@ impl HolderServer {
             .id(config.id().clone())
             .project(project)
             .process(request.process().clone())
-            .kind(request.kind())
-            .agent_session_id(request.agent_session_id().clone())
+            .command(request.command().clone())
+            .stop(request.stop())
+            .launch_environment(
+                request
+                    .launch_environment()
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            )
             .socket(config.socket().clone())
             .holder_pid(process::id())
             .child_pid(server.child_pid)
             .child_start_token(
-                AgentProcessId::try_new(server.child_pid)
+                Pid::try_new(server.child_pid)
                     .ok()
                     .and_then(LocalProcessIdentity::start_token),
             )
@@ -307,8 +307,9 @@ impl HolderServer {
         Ok(())
     }
 
-    /// Wraps a spawned child, starting the thread that writes its input.
-    /// Kills the child when it cannot be served.
+    /// Wraps a spawned child, starting the thread that writes its input, with
+    /// a terminal sized and kept as `request` asks. Kills the child when it
+    /// cannot be served.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the child reports no pid or input writer.
@@ -316,10 +317,9 @@ impl HolderServer {
         handle: Box<dyn ProcessHandle>,
         log: RotatingLog,
         (timers, events): (Sender<HolderEvent>, Receiver<HolderEvent>),
-        size: PtySize,
-        scrollback: usize,
-        color_scheme: ColorScheme,
+        request: &SpawnRequest,
     ) -> Result<Self, HolderError> {
+        let size = request.size();
         let child = ChildGuard {
             handle,
             exited: false,
@@ -336,7 +336,12 @@ impl HolderServer {
             child,
             child_pid,
             input,
-            emulator: TerminalEmulator::new(size.rows(), size.cols(), scrollback, color_scheme),
+            emulator: TerminalEmulator::new(
+                size.rows(),
+                size.cols(),
+                request.scrollback(),
+                request.color_scheme(),
+            ),
             keyboard: KittyKeyboardTracker::default(),
             log,
             clients: HashMap::new(),
@@ -428,15 +433,14 @@ impl HolderServer {
     /// terminal queries they raise, logs it and broadcasts it. Output the
     /// emulator panics on leaves it blank instead of ending the holder, and
     /// with it the child: every client is resynced to that screen and warned.
+    /// That chunk still reaches the keyboard tracker and its query replies are
+    /// still sent, so the child neither loses a protocol change nor waits on
+    /// an answer.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the output cannot be encoded.
     fn on_output(&mut self, bytes: Vec<u8>) -> Result<(), HolderError> {
-        if self.emulator.process_or_reset(&bytes) {
-            let _ = self.log.append(&bytes);
-            self.resync_all()?;
-            return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
-        }
+        let reset = self.emulator.process_or_reset(&bytes);
         let mut replies = self.emulator.take_pty_writes();
         replies.extend(self.keyboard.observe(&bytes));
         if !replies.is_empty() {
@@ -446,6 +450,10 @@ impl HolderServer {
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
         let _ = self.log.append(&bytes);
+        if reset {
+            self.resync_all()?;
+            return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
+        }
         self.broadcast(HolderMessage::Output(bytes))
     }
 
@@ -903,6 +911,7 @@ mod tests {
         io,
         os::unix::{fs::PermissionsExt, net::UnixStream},
         path::{Path, PathBuf},
+        sync::Mutex,
         thread::{self, JoinHandle},
         time::{Duration, Instant, SystemTime},
     };
@@ -916,11 +925,12 @@ mod tests {
             holder::{
                 ClientMessage, ClientRole, HolderControl, HolderId, HolderMessage, HolderRecord,
                 RejectReason,
+                testing::{test_request, test_stop},
             },
             terminal::TerminalEmulator,
         },
         domain::{
-            process::ProcessKind,
+            color_scheme::ColorScheme,
             pty::{ExitOutcome, PtySize, SpawnRequest},
             value::{ByteSize, Cols, CommandLine, ProcessName, Rows},
         },
@@ -976,6 +986,22 @@ mod tests {
             .build()
     }
 
+    /// A request to run `command` as `dev server` of the project at `dir`,
+    /// whose terminal answers color queries from `color_scheme`.
+    fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> SpawnRequest {
+        let request = test_request("dev server", command, Some(dir.to_path_buf()), None);
+        SpawnRequest::builder()
+            .process(request.process().clone())
+            .command(request.command().clone())
+            .project(request.project().clone())
+            .size(size(ROWS, COLS))
+            .scrollback(SCROLLBACK)
+            .log_max_size(request.log_max_size())
+            .color_scheme(color_scheme)
+            .stop(request.stop())
+            .build()
+    }
+
     /// Polls `condition` until it holds, failing the test at [`WAIT`].
     fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
         let started = Instant::now();
@@ -1016,22 +1042,12 @@ mod tests {
         ) -> Self {
             let scratch = scratch();
             let dir = scratch.path();
-            let request = SpawnRequest::builder()
-                .process(ProcessName::try_new("dev server").unwrap())
-                .kind(ProcessKind::Command)
-                .command(Some(CommandLine::try_new(command).unwrap()))
-                .project(Some(dir.join("muster.yml")))
-                .size(size(ROWS, COLS))
-                .build();
             let config = HolderConfig::builder()
                 .id(HolderId::generate().unwrap())
-                .request(request)
+                .request(request(dir, command, color_scheme))
                 .socket(dir.join(SOCKET_DIR).join(SOCKET_FILE))
                 .record_dir(dir.join("records"))
                 .log(dir.join("logs").join("dev.log"))
-                .log_cap(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
-                .scrollback(SCROLLBACK)
-                .color_scheme(color_scheme)
                 .supervisor_deadline(supervisor_deadline)
                 .build();
             let server_config = config.clone();
@@ -1567,23 +1583,18 @@ mod tests {
     /// A config whose socket lives in a directory nothing has created yet, so
     /// whether it exists afterwards shows whether the holder ever bound.
     fn unbound_config(dir: &Path, working_dir: PathBuf, log: PathBuf) -> HolderConfig {
-        let request = SpawnRequest::builder()
-            .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .working_dir(Some(working_dir))
-            .project(Some(dir.join("muster.yml")))
-            .size(size(ROWS, COLS))
-            .build();
+        let request = test_request(
+            "dev server",
+            "true",
+            Some(dir.to_path_buf()),
+            Some(working_dir),
+        );
         HolderConfig::builder()
             .id(HolderId::generate().unwrap())
             .request(request)
             .socket(dir.join(SOCKET_DIR).join(SOCKET_FILE))
             .record_dir(dir.join("records"))
             .log(log)
-            .log_cap(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
-            .scrollback(SCROLLBACK)
-            .color_scheme(ColorScheme::Dark)
             .supervisor_deadline(SUPERVISOR_DEADLINE)
             .build()
     }
@@ -1646,10 +1657,10 @@ mod tests {
         let dir = scratch.path().join("records");
         let record = HolderRecord::builder()
             .id(HolderId::generate().unwrap())
-            .project(scratch.path().join("muster.yml"))
+            .project(ProjectRoot::try_new(scratch.path().to_path_buf()).unwrap())
             .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .agent_session_id(None)
+            .command(CommandLine::try_new("true").unwrap())
+            .stop(test_stop())
             .socket(scratch.path().join(SOCKET_FILE))
             .holder_pid(process::id())
             .child_pid(FAKE_PID)
@@ -1680,18 +1691,21 @@ mod tests {
         );
     }
 
-    /// Discards whatever is written to it.
-    struct DiscardInput;
+    /// Records whatever is written to it.
+    struct RecordingInput(Arc<Mutex<Vec<u8>>>);
 
-    impl ProcessInput for DiscardInput {
-        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
+    impl ProcessInput for RecordingInput {
+        fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         }
     }
 
-    /// A live child whose PTY refuses every resize and that records a kill.
+    /// A live child whose PTY refuses every resize and that records a kill
+    /// and its input.
     struct FakeChild {
         killed: Arc<AtomicBool>,
+        written: Arc<Mutex<Vec<u8>>>,
     }
 
     impl ProcessHandle for FakeChild {
@@ -1700,7 +1714,7 @@ mod tests {
         }
 
         fn input(&self) -> Option<Box<dyn ProcessInput>> {
-            Some(Box::new(DiscardInput))
+            Some(Box::new(RecordingInput(Arc::clone(&self.written))))
         }
 
         fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
@@ -1727,25 +1741,31 @@ mod tests {
 
     /// A server around a [`FakeChild`], with the flag its kill sets.
     fn fake_server(scratch: &TempDir) -> (HolderServer, Arc<AtomicBool>) {
+        let (server, killed, _) = recording_server(scratch);
+        (server, killed)
+    }
+
+    /// As [`fake_server`], with what the child's input received too.
+    fn recording_server(scratch: &TempDir) -> (HolderServer, Arc<AtomicBool>, Arc<Mutex<Vec<u8>>>) {
         let log = RotatingLog::open(
             scratch.path().join("dev.log"),
             ByteSize::try_new(RawByteSize::mib(1)).unwrap(),
         )
         .unwrap();
         let killed = Arc::new(AtomicBool::new(false));
+        let written = Arc::new(Mutex::new(Vec::new()));
         let child = FakeChild {
             killed: Arc::clone(&killed),
+            written: Arc::clone(&written),
         };
         let server = HolderServer::new(
             Box::new(child),
             log,
             bounded(1),
-            size(ROWS, COLS),
-            SCROLLBACK,
-            ColorScheme::Dark,
+            &request(scratch.path(), "true", ColorScheme::Dark),
         )
         .unwrap();
-        (server, killed)
+        (server, killed, written)
     }
 
     /// Output the emulator panics on rebuilds the screen instead of taking
@@ -1778,6 +1798,29 @@ mod tests {
             HolderMessage::read_from(&mut peer).unwrap(),
             HolderMessage::Warning(_)
         ) {}
+    }
+
+    /// The chunk the emulator panics on still reaches the keyboard tracker,
+    /// and the query it carries is still answered.
+    #[test]
+    fn the_chunk_an_emulator_panics_on_still_drives_the_keyboard_protocol() {
+        let scratch = scratch();
+        let (mut server, _, written) = recording_server(&scratch);
+        server.emulator =
+            TerminalEmulator::new(Rows::new(ROWS), Cols::new(1), 0, ColorScheme::Dark);
+
+        server
+            .on_output("\x1b[>1u\x1b[?uwide \u{754c}".as_bytes().to_vec())
+            .unwrap();
+
+        assert_ne!(
+            server.keyboard.protocol(),
+            KittyKeyboardTracker::default().protocol(),
+            "the pushed keyboard level is tracked"
+        );
+        wait_until("the keyboard query to be answered", || {
+            String::from_utf8_lossy(&written.lock().unwrap()).contains("\x1b[?1u")
+        });
     }
 
     #[test]

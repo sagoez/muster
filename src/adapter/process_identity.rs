@@ -1,4 +1,4 @@
-use crate::domain::agent_session::{AgentProcessId, AgentProcessStartToken};
+use crate::domain::value::{Pid, StartToken};
 
 /// Offset basis for a deterministic process-start-text fingerprint.
 #[cfg(not(target_os = "linux"))]
@@ -12,27 +12,21 @@ pub struct LocalProcessIdentity;
 
 impl LocalProcessIdentity {
     /// Returns the creation marker for `process_id` when this platform exposes one.
-    pub fn start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
+    pub fn start_token(process_id: Pid) -> Option<StartToken> {
         Self::platform_start_token(process_id)
     }
 
     /// Whether `process_id` is still the process that started with `expected`:
     /// it exists and its start token matches, which an unreadable token never
     /// disproves.
-    pub fn is_same_process(
-        process_id: AgentProcessId,
-        expected: Option<AgentProcessStartToken>,
-    ) -> bool {
+    pub fn is_same_process(process_id: Pid, expected: Option<StartToken>) -> bool {
         Self::is_alive(process_id) && Self::same_start(expected, Self::start_token(process_id))
     }
 
     /// Whether a process whose start token reads `current` may be the one
     /// started with `recorded`: they differ only when both are known and
     /// unequal.
-    pub fn same_start(
-        recorded: Option<AgentProcessStartToken>,
-        current: Option<AgentProcessStartToken>,
-    ) -> bool {
+    pub fn same_start(recorded: Option<StartToken>, current: Option<StartToken>) -> bool {
         match (recorded, current) {
             (Some(recorded), Some(current)) => recorded == current,
             _ => true,
@@ -42,17 +36,17 @@ impl LocalProcessIdentity {
     /// Whether `process_id` currently exists. Returns `true` when liveness cannot be
     /// determined, such as a failed lookup, so a caller that guards on liveness
     /// does not fail open on uncertainty.
-    pub fn is_alive(process_id: AgentProcessId) -> bool {
+    pub fn is_alive(process_id: Pid) -> bool {
         Self::platform_is_alive(process_id)
     }
 
     #[cfg(target_os = "linux")]
-    fn platform_is_alive(process_id: AgentProcessId) -> bool {
+    fn platform_is_alive(process_id: Pid) -> bool {
         std::path::Path::new(&format!("/proc/{}", process_id.into_inner())).exists()
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn platform_is_alive(process_id: AgentProcessId) -> bool {
+    fn platform_is_alive(process_id: Pid) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &process_id.into_inner().to_string()])
             .status()
@@ -60,7 +54,7 @@ impl LocalProcessIdentity {
     }
 
     #[cfg(target_os = "linux")]
-    fn platform_start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
+    fn platform_start_token(process_id: Pid) -> Option<StartToken> {
         let stat =
             std::fs::read_to_string(format!("/proc/{}/stat", process_id.into_inner())).ok()?;
         let fields = stat
@@ -72,11 +66,11 @@ impl LocalProcessIdentity {
             .get(19)?
             .parse::<u64>()
             .ok()
-            .and_then(|token| AgentProcessStartToken::try_new(token).ok())
+            .and_then(|token| StartToken::try_new(token).ok())
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn platform_start_token(process_id: AgentProcessId) -> Option<AgentProcessStartToken> {
+    fn platform_start_token(process_id: Pid) -> Option<StartToken> {
         use std::process::Command;
 
         let output = Command::new("ps")
@@ -90,6 +84,6 @@ impl LocalProcessIdentity {
             .fold(START_TOKEN_HASH_OFFSET, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(START_TOKEN_HASH_PRIME)
             });
-        AgentProcessStartToken::try_new(token).ok()
+        StartToken::try_new(token).ok()
     }
 }

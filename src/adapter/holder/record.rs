@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -13,17 +14,17 @@ use super::{error::HolderError, id::HolderId};
 use crate::{
     adapter::private_dir::create_private_dir_all,
     domain::{
-        agent_session::{AgentProcessStartToken, AgentSessionId},
-        process::ProcessKind,
+        process::StopPolicy,
         pty::SpawnHistory,
-        value::ProcessName,
+        value::{CommandLine, ProcessName, ProjectRoot, StartToken},
     },
 };
 
 /// File extension of a persisted holder record.
 const RECORD_EXTENSION: &str = "json";
 
-/// What a running holder persists so a later service can find and adopt it.
+/// What a running holder persists so a later service can find and adopt it,
+/// and stop it even once its process is no longer in the project.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder,
 )]
@@ -32,18 +33,23 @@ pub struct HolderRecord {
     /// The holder's identity, also its record's file stem.
     #[getset(get = "pub")]
     id: HolderId,
-    /// Config path of the project the process belongs to.
+    /// The folder of the project the process belongs to.
     #[getset(get = "pub")]
-    project: PathBuf,
+    project: ProjectRoot,
     /// The process's name within its project.
     #[getset(get = "pub")]
     process: ProcessName,
-    /// Section the process belongs to.
-    #[getset(get_copy = "pub")]
-    kind: ProcessKind,
-    /// Durable agent session the process runs, when it is one.
+    /// The command the child runs.
     #[getset(get = "pub")]
-    agent_session_id: Option<AgentSessionId>,
+    command: CommandLine,
+    /// How the process stops.
+    #[getset(get_copy = "pub")]
+    stop: StopPolicy,
+    /// The environment of the command that launched the child, which its
+    /// restarts are launched with too.
+    #[getset(get = "pub")]
+    #[builder(default)]
+    launch_environment: Vec<(OsString, OsString)>,
     /// Socket the holder serves.
     #[getset(get = "pub")]
     socket: PathBuf,
@@ -56,7 +62,7 @@ pub struct HolderRecord {
     /// The child's start token when the platform reports one, so a later
     /// process reusing `child_pid` is never taken for the child.
     #[getset(get_copy = "pub")]
-    child_start_token: Option<AgentProcessStartToken>,
+    child_start_token: Option<StartToken>,
     /// The child's output log.
     #[getset(get = "pub")]
     log: PathBuf,
@@ -141,28 +147,37 @@ fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
 
     use tempfile::TempDir;
 
     use super::*;
+    use crate::domain::{process::StopSignal, value::PositiveDuration};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
     /// The mode of a directory only its owner can enter.
     const OWNER_DIR: u32 = 0o700;
+    /// Grace of the recorded stop policy.
+    const STOP_GRACE: Duration = Duration::from_secs(7);
 
     fn record() -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
-            .project(PathBuf::from("/repo/muster.yml"))
+            .project(ProjectRoot::try_new(PathBuf::from("/repo")).unwrap())
             .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .agent_session_id(Some(AgentSessionId::try_new("session").unwrap()))
+            .command(CommandLine::try_new("npm run dev").unwrap())
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Interrupt)
+                    .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+                    .build(),
+            )
+            .launch_environment(vec![("PATH".into(), "/usr/bin".into())])
             .socket(PathBuf::from("/tmp/h.sock"))
             .holder_pid(10)
             .child_pid(11)
-            .child_start_token(Some(AgentProcessStartToken::try_new(12).unwrap()))
+            .child_start_token(Some(StartToken::try_new(12).unwrap()))
             .log(PathBuf::from("/state/logs/dev.log"))
             .child_started_at(SystemTime::UNIX_EPOCH)
             .build()

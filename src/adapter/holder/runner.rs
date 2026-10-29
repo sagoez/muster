@@ -3,7 +3,7 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use super::{
@@ -19,11 +19,9 @@ use super::{
 use crate::{
     adapter::{ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir},
     domain::{
-        agent_session::AgentProcessId,
-        color_scheme::ColorScheme,
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::{ByteSize, PositiveDuration},
+        value::{Pid, PositiveDuration, ProjectRoot},
     },
 };
 
@@ -53,12 +51,6 @@ pub struct HolderRunner {
     launcher: Box<dyn HolderLauncher>,
     /// Where holders keep their sockets, records and logs.
     dirs: HolderDirs,
-    /// Size at which each child's log rotates.
-    log_cap: ByteSize,
-    /// Scrollback lines each holder's terminal keeps.
-    scrollback: usize,
-    /// The default colors each holder's terminal reports.
-    color_scheme: ColorScheme,
     /// Longest a launched holder may take to serve its supervisor.
     ready_timeout: PositiveDuration,
 }
@@ -69,24 +61,23 @@ impl HolderRunner {
         &self.dirs
     }
 
-    /// Creates a runner launching holders through `launcher` into `dirs`, each
-    /// rotating its child's log at `log_cap`, keeping `scrollback` lines and
-    /// answering color queries from `color_scheme`.
-    pub fn new(
-        launcher: Box<dyn HolderLauncher>,
-        dirs: HolderDirs,
-        log_cap: ByteSize,
-        scrollback: usize,
-        color_scheme: ColorScheme,
-    ) -> Self {
+    /// Creates a runner launching holders through `launcher` into `dirs`. Each
+    /// request carries its own launch settings: size, scrollback, log cap and
+    /// colors.
+    pub fn new(launcher: Box<dyn HolderLauncher>, dirs: HolderDirs) -> Self {
         Self {
             launcher,
             dirs,
-            log_cap,
-            scrollback,
-            color_scheme,
             ready_timeout: HOLDER_READY_TIMEOUT,
         }
+    }
+
+    /// How long a launched holder waits for its first supervisor: past the
+    /// ready timeout, so a holder the runner still waits for never gives up.
+    fn supervisor_deadline(&self) -> Duration {
+        self.ready_timeout
+            .into_inner()
+            .saturating_mul(SUPERVISOR_DEADLINE_FACTOR)
     }
 
     /// The record files that cannot be read, which no service can adopt.
@@ -188,11 +179,15 @@ impl HolderRunner {
             .and_then(|index| candidates.into_iter().nth(index))
     }
 
-    /// Deletes the holder socket files nothing accepts on any more: what a
-    /// holder that died without unlinking its socket left behind. A socket
-    /// whose probe times out may belong to a busy holder and is kept. Run
-    /// beside [`Self::sweep_handover_files`] at service start. A file that
-    /// cannot be removed is returned with why.
+    /// Deletes the holder sockets no running holder serves: what a holder that
+    /// died without unlinking its socket left behind. A socket is kept while a
+    /// record names it and that record's holder process is alive, and while
+    /// it is younger than a holder's first-supervisor deadline, since a holder
+    /// binds its socket just before it writes its record and one never
+    /// supervised is gone by then. How a connection to a dead socket fails
+    /// differs by platform, so it is never the test. Run beside
+    /// [`Self::sweep_handover_files`] at service start. A file that cannot be
+    /// removed is returned with why.
     ///
     /// # Errors
     /// Returns the I/O error from listing the directory; an absent directory
@@ -203,14 +198,19 @@ impl HolderRunner {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
+        let served: Vec<PathBuf> = HolderRecord::load_all(self.dirs.records())
+            .into_iter()
+            .filter(holder_runs)
+            .map(|record| record.socket().clone())
+            .collect();
+        let settled = SystemTime::now()
+            .checked_sub(self.supervisor_deadline())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
         Ok(entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| self.dirs.is_socket(path))
-            .filter(|path| {
-                ipc::connect_within(path, LIVENESS_PROBE_TIMEOUT)
-                    .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionRefused)
-            })
+            .filter(|path| self.dirs.is_socket(path) && !served.contains(path))
+            .filter(|path| modified_before(path, settled))
             .filter_map(|path| fs::remove_file(&path).err().map(|error| (path, error)))
             .collect())
     }
@@ -234,10 +234,14 @@ impl ProcessRunner for HolderRunner {
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         ensure_working_dir(&request)?;
-        let Some(project) = request.project() else {
+        let Some(project) = request
+            .project()
+            .clone()
+            .and_then(|root| ProjectRoot::try_new(root).ok())
+        else {
             return Err(HolderError::MissingProject.into());
         };
-        let log = self.dirs.process_log(project, request.process());
+        let log = self.dirs.process_log(&project, request.process());
         self.dirs.prepare_sockets()?;
         let id = HolderId::generate().map_err(|error| PtyError::System(error.to_string()))?;
         let socket = self.dirs.socket_path(&id);
@@ -247,14 +251,7 @@ impl ProcessRunner for HolderRunner {
             .request(request)
             .socket(socket.clone())
             .record_dir(self.dirs.records().clone())
-            .log_cap(self.log_cap)
-            .scrollback(self.scrollback)
-            .color_scheme(self.color_scheme)
-            .supervisor_deadline(
-                self.ready_timeout
-                    .into_inner()
-                    .saturating_mul(SUPERVISOR_DEADLINE_FACTOR),
-            )
+            .supervisor_deadline(self.supervisor_deadline())
             .build();
         let error_file = config.error_path();
         self.launcher.launch(config)?;
@@ -345,16 +342,29 @@ fn kill_and_collect(
 /// [`HolderRunner::live_records`]. A probe that times out finds a listener
 /// too busy to accept, which is a running holder, never a stale one.
 fn is_live(record: &HolderRecord) -> bool {
-    AgentProcessId::try_new(record.holder_pid()).is_ok_and(LocalProcessIdentity::is_alive)
+    holder_runs(record)
         && ipc::connect_within(record.socket(), LIVENESS_PROBE_TIMEOUT)
             .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
+}
+
+/// Whether the holder process `record` names is alive.
+fn holder_runs(record: &HolderRecord) -> bool {
+    Pid::try_new(record.holder_pid()).is_ok_and(LocalProcessIdentity::is_alive)
 }
 
 /// Whether the child `record` names still runs as the same process, as one
 /// that ignores the hangup does after its holder died.
 fn child_runs(record: &HolderRecord) -> bool {
-    AgentProcessId::try_new(record.child_pid())
+    Pid::try_new(record.child_pid())
         .is_ok_and(|child| LocalProcessIdentity::is_same_process(child, record.child_start_token()))
+}
+
+/// Whether the file at `path` was last modified before `instant`. One whose
+/// time cannot be read counts as recent, so it is kept.
+fn modified_before(path: &Path, instant: SystemTime) -> bool {
+    fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified < instant)
 }
 
 /// Connects to a launching holder's socket, retrying while it is not bound
@@ -420,10 +430,8 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
         thread::JoinHandle,
-        time::SystemTime,
     };
 
-    use bytesize::ByteSize as RawByteSize;
     use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
     use tempfile::TempDir;
 
@@ -434,14 +442,15 @@ mod tests {
                 HolderServer,
                 client::{greet, screen_text},
                 error_path_beside, run_holder,
+                testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
             },
-            terminal::{SCROLLBACK_LINES, TerminalEmulator},
+            terminal::TerminalEmulator,
         },
         domain::{
-            agent_session::AgentProcessStartToken,
-            process::{ProcessKind, StopSignal},
+            color_scheme::ColorScheme,
+            process::StopSignal,
             pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize},
-            value::{Cols, CommandLine, ProcessName, Rows},
+            value::{Cols, CommandLine, ProcessName, Rows, StartToken},
         },
     };
 
@@ -457,11 +466,9 @@ mod tests {
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "mr-";
     /// PTY rows of every test child.
-    const ROWS: u16 = 24;
+    const ROWS: u16 = TEST_ROWS;
     /// PTY cols of every test child.
-    const COLS: u16 = 80;
-    /// Log cap far above anything a test writes, so the log never rotates.
-    const LOG_CAP_MIB: u64 = 64;
+    const COLS: u16 = TEST_COLS;
     /// Numbered lines the heavy-output child prints.
     const HEAVY_LINES: usize = 20_000;
     /// Line the heavy-output child must have reached before the runner drops.
@@ -598,7 +605,7 @@ mod tests {
                 screen: TerminalEmulator::new(
                     Rows::new(ROWS),
                     Cols::new(COLS),
-                    SCROLLBACK_LINES,
+                    TEST_SCROLLBACK,
                     ColorScheme::Dark,
                 ),
             };
@@ -715,13 +722,12 @@ mod tests {
         }
 
         fn runner_over(&self, dirs: HolderDirs, launcher: Box<dyn HolderLauncher>) -> HolderRunner {
-            HolderRunner::new(
-                launcher,
-                dirs,
-                ByteSize::try_new(RawByteSize::mib(LOG_CAP_MIB)).unwrap(),
-                SCROLLBACK_LINES,
-                ColorScheme::Dark,
-            )
+            HolderRunner::new(launcher, dirs)
+        }
+
+        /// The project every test child belongs to: the scratch directory.
+        fn root(&self) -> ProjectRoot {
+            ProjectRoot::try_new(self.scratch.path().to_path_buf()).unwrap()
         }
 
         /// A launcher running holders from spec files, sabotaged as given.
@@ -738,34 +744,24 @@ mod tests {
             let id = HolderId::generate().unwrap();
             let request = self.request(command);
             HolderConfig::builder()
-                .log(
-                    self.dirs
-                        .process_log(request.project().as_deref().unwrap(), request.process()),
-                )
+                .log(self.dirs.process_log(&self.root(), request.process()))
                 .socket(self.dirs.socket_path(&id))
                 .id(id)
                 .request(request)
                 .record_dir(self.dirs.records().clone())
-                .log_cap(ByteSize::try_new(RawByteSize::mib(LOG_CAP_MIB)).unwrap())
-                .scrollback(SCROLLBACK_LINES)
-                .color_scheme(ColorScheme::Dark)
                 .supervisor_deadline(supervisor_deadline)
                 .build()
         }
 
+        /// A request to run `command` as `dev server` of this fixture's
+        /// project.
         fn request(&self, command: &str) -> SpawnRequest {
-            SpawnRequest::builder()
-                .process(ProcessName::try_new("dev server").unwrap())
-                .kind(ProcessKind::Command)
-                .command(Some(CommandLine::try_new(command).unwrap()))
-                .project(Some(self.scratch.path().join("muster.yml")))
-                .size(
-                    PtySize::builder()
-                        .rows(Rows::new(ROWS))
-                        .cols(Cols::new(COLS))
-                        .build(),
-                )
-                .build()
+            test_request(
+                "dev server",
+                command,
+                Some(self.scratch.path().to_path_buf()),
+                None,
+            )
         }
 
         fn record_files(&self) -> Vec<HolderRecord> {
@@ -988,7 +984,7 @@ mod tests {
         let mut replayed = TerminalEmulator::new(
             Rows::new(ROWS),
             Cols::new(COLS),
-            SCROLLBACK_LINES,
+            TEST_SCROLLBACK,
             ColorScheme::Dark,
         );
         replayed.process(&log);
@@ -1006,18 +1002,13 @@ mod tests {
     fn a_request_the_holder_would_refuse_fails_before_anything_launches() {
         let fixture = Fixture::new();
         let runner = fixture.runner();
-        let missing_dir = SpawnRequest::builder()
-            .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .working_dir(Some(fixture.scratch.path().join("absent")))
-            .project(Some(fixture.scratch.path().join("muster.yml")))
-            .size(fixture.request("true").size())
-            .build();
-        let no_project = SpawnRequest::builder()
-            .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .size(fixture.request("true").size())
-            .build();
+        let missing_dir = test_request(
+            "dev server",
+            "true",
+            Some(fixture.scratch.path().to_path_buf()),
+            Some(fixture.scratch.path().join("absent")),
+        );
+        let no_project = test_request("dev server", "true", None, None);
 
         let (sink, _watch) = Watch::new();
         assert!(matches!(
@@ -1038,20 +1029,20 @@ mod tests {
     fn save_reused_pid_record(
         fixture: &Fixture,
         child_pid: u32,
-        child_start_token: Option<AgentProcessStartToken>,
+        child_start_token: Option<StartToken>,
     ) -> HolderRecord {
         let id = HolderId::generate().unwrap();
         let record = HolderRecord::builder()
             .socket(fixture.dirs.socket_path(&id))
             .log(fixture.dirs.process_log(
-                &fixture.scratch.path().join("muster.yml"),
+                &fixture.root(),
                 &ProcessName::try_new("dev server").unwrap(),
             ))
             .id(id)
-            .project(fixture.scratch.path().join("muster.yml"))
+            .project(fixture.root())
             .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .agent_session_id(None)
+            .command(CommandLine::try_new("true").unwrap())
+            .stop(test_stop())
             .holder_pid(process::id())
             .child_pid(child_pid)
             .child_start_token(child_start_token)
@@ -1062,16 +1053,15 @@ mod tests {
     }
 
     /// The test process's own start token.
-    fn own_start_token() -> Option<AgentProcessStartToken> {
-        AgentProcessId::try_new(process::id())
+    fn own_start_token() -> Option<StartToken> {
+        Pid::try_new(process::id())
             .ok()
             .and_then(LocalProcessIdentity::start_token)
     }
 
     /// A start token the test process does not have.
-    fn foreign_start_token() -> Option<AgentProcessStartToken> {
-        own_start_token()
-            .and_then(|token| AgentProcessStartToken::try_new(token.into_inner() + 1).ok())
+    fn foreign_start_token() -> Option<StartToken> {
+        own_start_token().and_then(|token| StartToken::try_new(token.into_inner() + 1).ok())
     }
 
     #[test]
@@ -1160,20 +1150,65 @@ mod tests {
         fs::remove_dir_all(fixture.dirs.records()).unwrap();
     }
 
-    /// A socket nothing accepts on is swept; one a holder serves is kept.
+    /// A settled socket no live holder's record names is swept, even one
+    /// something still accepts on, and whatever a connection to it would
+    /// say; one a live holder's record names is kept, and so is one too young
+    /// to have its record yet.
     #[test]
-    fn the_sweep_removes_orphan_sockets_and_keeps_served_ones() {
+    fn the_sweep_removes_orphan_sockets_by_record_and_age() {
         let fixture = Fixture::new();
         fixture.dirs.prepare_sockets().unwrap();
+        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
         let orphan = fixture.dirs.socket_path(&HolderId::generate().unwrap());
         drop(UnixListener::bind(&orphan).unwrap());
-        let served = fixture.dirs.socket_path(&HolderId::generate().unwrap());
-        let _serving = UnixListener::bind(&served).unwrap();
+        let accepting = fixture.dirs.socket_path(&HolderId::generate().unwrap());
+        let _accepting = UnixListener::bind(&accepting).unwrap();
+        let served = save_reused_pid_record(&fixture, process::id(), own_start_token());
+        let _serving = UnixListener::bind(served.socket()).unwrap();
+        let dead_holder = save_dead_holder_record(&fixture);
+        drop(UnixListener::bind(dead_holder.socket()).unwrap());
+        thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
+        let young = fixture.dirs.socket_path(&HolderId::generate().unwrap());
+        drop(UnixListener::bind(&young).unwrap());
 
-        assert!(fixture.runner().sweep_orphan_sockets().unwrap().is_empty());
+        assert!(runner.sweep_orphan_sockets().unwrap().is_empty());
 
-        assert!(!orphan.exists(), "the orphan socket is removed");
-        assert!(served.exists(), "the served socket is kept");
+        assert!(!orphan.exists(), "an unnamed socket is removed");
+        assert!(!accepting.exists(), "accepting is no proof of a holder");
+        assert!(
+            !dead_holder.socket().exists(),
+            "a dead holder's socket goes"
+        );
+        assert!(served.socket().exists(), "a live holder's socket is kept");
+        assert!(
+            young.exists(),
+            "a socket younger than a holder's start stays"
+        );
+        forget_records(&fixture);
+    }
+
+    /// Saves a record whose holder process has exited.
+    fn save_dead_holder_record(fixture: &Fixture) -> HolderRecord {
+        let mut exited = process::Command::new("true").spawn().unwrap();
+        let dead_pid = exited.id();
+        exited.wait().unwrap();
+        let id = HolderId::generate().unwrap();
+        let name = ProcessName::try_new("dev server").unwrap();
+        let record = HolderRecord::builder()
+            .socket(fixture.dirs.socket_path(&id))
+            .log(fixture.dirs.process_log(&fixture.root(), &name))
+            .id(id)
+            .project(fixture.root())
+            .process(name)
+            .command(CommandLine::try_new("true").unwrap())
+            .stop(test_stop())
+            .holder_pid(dead_pid)
+            .child_pid(dead_pid)
+            .child_start_token(None)
+            .child_started_at(SystemTime::now())
+            .build();
+        record.save(fixture.dirs.records()).unwrap();
+        record
     }
 
     #[test]
@@ -1215,7 +1250,7 @@ mod tests {
             reported_pid()
         });
         if let Some(pid) = pid {
-            let child = AgentProcessId::try_new(pid).unwrap();
+            let child = Pid::try_new(pid).unwrap();
             wait_until("the abandoned child to die", || {
                 !LocalProcessIdentity::is_alive(child)
             });
@@ -1244,7 +1279,7 @@ mod tests {
         });
         assert!(fixture.record_files().is_empty());
         wait_until("the child to die", || {
-            !LocalProcessIdentity::is_alive(AgentProcessId::try_new(record.child_pid()).unwrap())
+            !LocalProcessIdentity::is_alive(Pid::try_new(record.child_pid()).unwrap())
         });
     }
 
@@ -1280,14 +1315,12 @@ mod tests {
         fs::create_dir(&workdir).unwrap();
         let runner =
             fixture.runner_with(fixture.spec_launcher(Some(Sabotage::RemoveDir(workdir.clone()))));
-        let request = SpawnRequest::builder()
-            .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .working_dir(Some(workdir))
-            .project(Some(fixture.scratch.path().join("muster.yml")))
-            .size(fixture.request("true").size())
-            .build();
+        let request = test_request(
+            "dev server",
+            "true",
+            Some(fixture.scratch.path().to_path_buf()),
+            Some(workdir),
+        );
 
         let error = expect_failed_start(&fixture, &runner, request);
         assert!(

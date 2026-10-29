@@ -1,12 +1,12 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::PathBuf};
 
 use super::supervisor::HolderAdopter;
 use crate::{
     adapter::holder::{HolderRecord, HolderRunner},
-    domain::{port::ProcessRunner, value::ProcessName},
+    domain::{
+        port::ProcessRunner,
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
 /// Every holder the service can reach: it launches new ones, adopts and
@@ -29,7 +29,7 @@ pub trait HolderPool: ProcessRunner + HolderAdopter + Send + Sync {
     fn sweep_handover_files(&self) -> io::Result<Vec<(PathBuf, io::Error)>>;
 
     /// The log every run of the process `name` of `project` writes to.
-    fn process_log(&self, project: &Path, name: &ProcessName) -> PathBuf;
+    fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf;
 
     /// Removes the per-holder logs an earlier muster left behind.
     ///
@@ -53,7 +53,7 @@ impl HolderPool for HolderRunner {
         Ok(failures)
     }
 
-    fn process_log(&self, project: &Path, name: &ProcessName) -> PathBuf {
+    fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {
         self.dirs().process_log(project, name)
     }
 

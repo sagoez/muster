@@ -1,18 +1,20 @@
 use std::{sync::Arc, thread};
 
 use super::{
-    carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink, entity::Supervisor,
-    launch_purpose::LaunchPurpose, lifecycle::discard, pending_launch::PendingLaunch,
+    carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
+    config_membership::ConfigMembership, entity::Supervisor, launch_purpose::LaunchPurpose,
+    lifecycle::discard, pending_intent::PendingIntent, pending_launch::PendingLaunch,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
 use crate::{
     adapter::{
-        holder::{HolderRecord, HolderRunner},
-        service::{NoticeLevel, ProjectKey, ServiceEvent},
+        holder::{HolderRecord, HolderRunner, abandon},
+        service::{NoticeLevel, ServiceEvent},
     },
     domain::{
+        config::{Environment, ProcessSpec},
         port::{OutputSink, ProcessHandle},
-        process::{ExitIntent, ProcessState},
+        process::{ExitIntent, ProcessState, RestartPolicy},
         pty::{ExitOutcome, PtyError, SpawnHistory},
         value::PaneId,
     },
@@ -27,14 +29,11 @@ enum Adoption {
     Detached(Arc<dyn HolderAdopter + Send + Sync>, ChannelOutputSink),
 }
 
-/// Shown when a holder record belongs to a process the config no longer has.
-const ADOPT_UNKNOWN_NOTICE: &str =
-    "a running process is no longer in muster.yml; it was left running unsupervised";
-/// Shown when a holder record names this project's process but was recorded for
-/// another project or another kind of process.
-const ADOPT_MISMATCH_NOTICE: &str =
-    "a running process does not match its muster.yml entry; it was left running unsupervised";
-/// Shown when a holder record names a process that is already supervised.
+/// Shown when a running holder's process is no longer in the project, so it
+/// is adopted only to be stopped through the stop policy its record carries.
+pub(super) const ADOPT_REMOVED_NOTICE: &str = "stopped: removed from the project";
+/// Shown when a holder record names a process that is already supervised and
+/// whose child still runs.
 const ADOPT_DUPLICATE_NOTICE: &str =
     "a second running copy of this process was found; it was left running unsupervised";
 /// Shown when a holder record cannot be adopted for want of an adopter; an
@@ -56,7 +55,7 @@ const CHILD_PID_LABEL: &str = "child pid";
 const HOLDER_PID_LABEL: &str = "holder pid";
 
 /// `notice` naming the child and holder pids of `record`, so the user can find
-/// the process left running.
+/// the process.
 fn with_pids(notice: &str, record: &HolderRecord) -> String {
     format!(
         "{notice} ({CHILD_PID_LABEL} {}, {HOLDER_PID_LABEL} {})",
@@ -68,6 +67,26 @@ fn with_pids(notice: &str, record: &HolderRecord) -> String {
 /// The outcome suffix of a failed adoption whose child is `running` or not.
 fn outcome(running: bool) -> &'static str {
     if running { LEFT_RUNNING } else { SINCE_EXITED }
+}
+
+/// Tells the holder `record` names, whose child is gone, to hand over the
+/// exit it holds and finish, off the loop. A holder no service adopts would
+/// otherwise wait for its exit to be collected forever.
+fn collect_exit(record: &HolderRecord) {
+    let socket = record.socket().clone();
+    thread::spawn(move || abandon(&socket));
+}
+
+/// Whether the child `record` names still runs as that same process; when it
+/// does not, its holder's exit is collected.
+fn child_runs_or_collect(record: &HolderRecord) -> bool {
+    let running =
+        UnsupervisedChild::observe_expected(record.child_pid(), record.child_start_token())
+            .is_some();
+    if !running {
+        collect_exit(record);
+    }
+    running
 }
 
 /// Takes over a holder a previous service left running, so its process is
@@ -114,9 +133,12 @@ impl HolderAdopter for HolderRunner {
 
 impl Supervisor {
     /// Supervises the running holder `record` describes as its named process,
-    /// without restarting it. The record must name this project and a process
-    /// of the same kind that is not already supervised; otherwise the process
-    /// is left running and a notice says so.
+    /// without restarting it, and with the environment it was launched with
+    /// for its policy restarts. A process no longer in the project is adopted
+    /// only to be stopped through the stop policy its record carries, with a
+    /// notice, and its row goes once it exits. A second copy of a supervised
+    /// process is left running and said so; one whose child is gone has its
+    /// exit collected so its holder finishes.
     pub fn adopt(&mut self, record: HolderRecord) {
         self.begin_adoption(&record, None);
     }
@@ -132,28 +154,27 @@ impl Supervisor {
         record: &HolderRecord,
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     ) {
-        let queued = self.pending_session_reopens.get(&pane).cloned();
-        if let Some(retired) = self.settle_adoption(pane, generation, record, result) {
-            self.exit_effect(retired, queued);
-        }
+        self.settle_adoption(pane, generation, record, result);
     }
 
     /// Reconnects to the holder of `pane`'s process after its output stream
     /// broke: drops the handle, then adopts the holder again, which resyncs the
     /// screen from a fresh snapshot. Everything about the pane that outlives a
-    /// connection carries over: its state, exit intent, config membership and
+    /// connection carries over: its state, exit intent, stack membership and
     /// start time, and a stop in flight gets a fresh force-stop deadline. When
     /// the holder cannot be adopted and the child still runs, the process is
     /// left unsupervised, as an unadoptable holder is at startup; a child that
     /// is gone settles as a failed exit under the pane's policy. A failed
     /// reconnect always raises a notice. The adoption runs off the loop when
-    /// the adopter allows it, and settles in [`Self::handle_adopted`]. Returns
-    /// whether the row retired when the reconnect settled an exit here, or
-    /// `None` when it did not.
-    pub(super) fn reconnect(&mut self, pane: PaneId) -> Option<bool> {
+    /// the adopter allows it, and settles in [`Self::handle_adopted`].
+    pub(super) fn reconnect(&mut self, pane: PaneId) {
         let state = self.workspace.process(pane).map(|process| *process.state());
-        let target = self.panes.get_mut(&pane)?;
-        let handle = target.handle.take()?;
+        let Some(target) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        let Some(handle) = target.handle.take() else {
+            return;
+        };
         let carried = CarriedPane {
             intent: target.exit_intent,
             membership: target.config_membership,
@@ -169,27 +190,30 @@ impl Supervisor {
             Some(record) => self.begin_adoption(&record, Some((pane, carried))),
             None => {
                 self.bump_generation(pane);
-                self.reconnect_failed(pane, carried, None, None)
+                self.reconnect_failed(pane, carried, None, None);
             },
         }
     }
 
     /// Settles a reconnect that could not supervise the holder again: the
     /// child is left unsupervised while it runs, with a stop in flight carried
-    /// over, and a gone child settles as a failed exit. `record` is the
-    /// holder's record when one was found and `error` why adopting it failed.
-    /// Returns whether the row retired.
+    /// over, and a gone child settles as a failed exit, its holder's exit
+    /// collected. `record` is the holder's record when one was found and
+    /// `error` why adopting it failed.
     fn reconnect_failed(
         &mut self,
         pane: PaneId,
         carried: CarriedPane,
         record: Option<&HolderRecord>,
         error: Option<PtyError>,
-    ) -> Option<bool> {
+    ) {
         let start_token = record.and_then(HolderRecord::child_start_token);
         let running = carried
             .pid
             .is_some_and(|pid| self.leave_unsupervised(pane, pid, start_token));
+        if let (Some(record), false) = (record, running) {
+            collect_exit(record);
+        }
         match (record, error) {
             (Some(record), Some(error)) => {
                 let notice = format!("{ADOPT_FAILED_NOTICE}{}: {error}", outcome(running));
@@ -210,13 +234,13 @@ impl Supervisor {
         }
         if running {
             self.continue_stop_unsupervised(pane, carried.intent);
-            return None;
+            return;
         }
         if let Some(target) = self.panes.get_mut(&pane) {
             target.exit_intent = carried.intent;
             target.config_membership = carried.membership;
         }
-        self.apply_exit(pane, ExitOutcome::FAILED_UNKNOWN)
+        self.apply_exit(pane, ExitOutcome::FAILED_UNKNOWN);
     }
 
     /// Carries a stop that was in flight when the connection broke over to the
@@ -242,7 +266,7 @@ impl Supervisor {
                 pane,
                 spawn_generation,
                 shutdown_generation,
-                *policy.grace_period(),
+                policy.grace_period().into_inner(),
             );
         }
     }
@@ -250,29 +274,41 @@ impl Supervisor {
     /// Starts adopting the holder `record` describes, as [`Self::adopt`] does,
     /// or reconnecting `reconnecting`'s pane to it with what that pane
     /// carries. The pane is `Starting` until the adoption settles; it runs on
-    /// a worker when the adopter allows it, and inline otherwise. Returns
-    /// whether the row retired when a failed reconnect settled an exit here.
+    /// a worker when the adopter allows it, and inline otherwise.
     fn begin_adoption(
         &mut self,
         record: &HolderRecord,
         reconnecting: Option<(PaneId, CarriedPane)>,
-    ) -> Option<bool> {
+    ) {
+        let removed = reconnecting.is_none() && self.pane_named(record.process()).is_none();
         let Some(pane) = self.adoptable_pane(record) else {
-            let (pane, carried) = reconnecting?;
-            self.bump_generation(pane);
-            return self.reconnect_failed(pane, carried, Some(record), None);
+            if let Some((pane, carried)) = reconnecting {
+                self.bump_generation(pane);
+                self.reconnect_failed(pane, carried, Some(record), None);
+            }
+            return;
         };
+        if reconnecting.is_none() {
+            self.launch_environments
+                .insert(pane, record.launch_environment().iter().cloned().collect());
+        }
         let carried = reconnecting.map(|(_, carried)| carried);
         let generation = self.bump_generation(pane);
-        let project = self.project.clone();
+        let project = self.root().clone();
         let events = self.events.clone();
         let sink = ChannelOutputSink::new(project.clone(), pane, generation, events.clone());
         let Some(adopter) = self.adopter.as_ref() else {
             let running =
                 self.leave_unsupervised(pane, record.child_pid(), record.child_start_token());
+            if !running {
+                collect_exit(record);
+            }
             let notice = format!("{ADOPT_UNAVAILABLE_NOTICE}{}", outcome(running));
             self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
-            return None;
+            if removed {
+                self.stop_removed(pane);
+            }
+            return;
         };
         let adoption = match adopter.detached() {
             Some(detached) => Adoption::Detached(detached, sink),
@@ -287,6 +323,9 @@ impl Supervisor {
             PendingLaunch::new(generation, prior_state, LaunchPurpose::Adopt { carried }),
         );
         self.workspace.set_state(pane, ProcessState::Starting);
+        if removed {
+            self.stop_removed(pane);
+        }
         match adoption {
             Adoption::Detached(adopter, sink) => {
                 let record = record.clone();
@@ -300,76 +339,99 @@ impl Supervisor {
                         result,
                     });
                 });
-                None
             },
             Adoption::Inline(result) => self.settle_adoption(pane, generation, record, result),
         }
     }
 
-    /// The pane of the process `record` runs, when the record names this
-    /// project and a process of the same kind that holds nothing yet; a
-    /// notice says why otherwise, and the process is left running.
-    fn adoptable_pane(&self, record: &HolderRecord) -> Option<PaneId> {
-        let Some(process) = self
-            .workspace
-            .processes()
-            .iter()
-            .find(|process| process.name() == record.process())
-        else {
-            self.notify_process(
-                NoticeLevel::Warning,
-                Some(record.process().clone()),
-                with_pids(ADOPT_UNKNOWN_NOTICE, record),
-            );
-            return None;
-        };
-        let pane = *process.id();
-        if ProjectKey::new(record.project().clone()) != self.project
-            || *process.kind() != record.kind()
-        {
-            self.notify(
-                NoticeLevel::Warning,
-                Some(pane),
-                with_pids(ADOPT_MISMATCH_NOTICE, record),
-            );
-            return None;
+    /// Stops `pane`, the adopted process of a holder whose process is no longer
+    /// in the project, with a notice: its row retires once the process exits,
+    /// or at once when nothing runs. A pane still starting takes the stop once
+    /// its adoption settles.
+    fn stop_removed(&mut self, pane: PaneId) {
+        self.notify(NoticeLevel::Warning, Some(pane), ADOPT_REMOVED_NOTICE);
+        self.set_membership(pane, ConfigMembership::RetireOnExit);
+        if self.record_intent(pane, PendingIntent::Stop) {
+            return;
         }
         if self.holds_process(pane) {
-            self.notify(
-                NoticeLevel::Warning,
-                Some(pane),
-                with_pids(ADOPT_DUPLICATE_NOTICE, record),
-            );
+            self.stop_pane(pane);
+        } else {
+            self.retire_pane(pane);
+        }
+    }
+
+    /// The pane of the process `record` runs, when it holds nothing yet. A
+    /// process no longer in the project gets a pane of its own, built from the
+    /// record, to be stopped from. A process already supervised is a second
+    /// copy: it is left running and said so while its child runs, and its
+    /// holder's exit is collected otherwise.
+    fn adoptable_pane(&mut self, record: &HolderRecord) -> Option<PaneId> {
+        let Some(pane) = self.pane_named(record.process()) else {
+            return Some(self.add_removed_pane(record));
+        };
+        if self.holds_process(pane) {
+            if child_runs_or_collect(record) {
+                self.notify(
+                    NoticeLevel::Warning,
+                    Some(pane),
+                    with_pids(ADOPT_DUPLICATE_NOTICE, record),
+                );
+            }
             return None;
         }
         Some(pane)
     }
 
+    /// Adds a pane for the process `record` runs that is no longer in the
+    /// project: its name, command and stop policy come from the record, and it
+    /// never restarts or autostarts. Returns the pane, after every other.
+    fn add_removed_pane(&mut self, record: &HolderRecord) -> PaneId {
+        let pane = PaneId::new(
+            self.workspace
+                .processes()
+                .iter()
+                .map(|process| process.id().into_inner() + 1)
+                .chain(self.generations.keys().map(|pane| pane.into_inner() + 1))
+                .max()
+                .unwrap_or_default(),
+        );
+        let spec = ProcessSpec::builder()
+            .name(record.process().clone())
+            .command(record.command().clone())
+            .environment(Environment::empty())
+            .autostart(false)
+            .restart(RestartPolicy::Never)
+            .stop(record.stop())
+            .build();
+        self.workspace.push(spec.to_process(pane));
+        pane
+    }
+
     /// Settles the adoption of `pane` at `generation` with `result`: the
     /// holder is supervised with the output it sent meanwhile, a reconnect
     /// gets back what it carried, and a failure leaves a running child
-    /// unsupervised. Then what was asked while it was starting applies: the
-    /// membership a reconcile gave it, a pause or resume when the adoption
-    /// installed a live process, and a stop, kill or restart, which a child
-    /// left unsupervised receives through the unsupervised path. A superseded
-    /// result is never installed: it is detached when a shutdown superseded
-    /// it and stopped otherwise, and a superseded failure
-    /// whose child still runs is said so. Returns whether the row retired when
-    /// a failed reconnect settled an exit.
+    /// unsupervised and has a gone child's exit collected. Then what was asked
+    /// while it was starting applies: the membership a stack change gave it, a
+    /// pause or resume when the adoption installed a live process, and a stop,
+    /// kill or restart, which a child left unsupervised receives through the
+    /// unsupervised path. A superseded result is never installed: it is
+    /// detached when a shutdown superseded it and stopped otherwise, and a
+    /// superseded failure whose child still runs is said so.
     fn settle_adoption(
         &mut self,
         pane: PaneId,
         generation: SpawnGeneration,
         record: &HolderRecord,
         result: Result<Box<dyn ProcessHandle>, PtyError>,
-    ) -> Option<bool> {
+    ) {
         let Some(launch) = self.take_launch(pane, generation) else {
             let release = self.stale_release(pane, generation);
             match result {
                 Ok(handle) => release.release(handle),
                 Err(error) => self.report_superseded_failure(record, &error),
             }
-            return None;
+            return;
         };
         let PendingLaunch {
             prior_state,
@@ -384,7 +446,7 @@ impl Supervisor {
             if let Ok(handle) = result {
                 discard(handle);
             }
-            return None;
+            return;
         };
         let carried = carried.map(|carried| CarriedPane {
             membership: membership.unwrap_or(carried.membership),
@@ -395,18 +457,21 @@ impl Supervisor {
             Err(error) => {
                 self.workspace.set_state(pane, prior_state);
                 if let Some(carried) = carried {
-                    let retired = self.reconnect_failed(pane, carried, Some(record), Some(error));
-                    if retired != Some(true) {
+                    self.reconnect_failed(pane, carried, Some(record), Some(error));
+                    if self.workspace.process(pane).is_some() {
                         self.apply_pending(pane, membership, None, intent);
                     }
-                    return retired;
+                    return;
                 }
                 let running =
                     self.leave_unsupervised(pane, record.child_pid(), record.child_start_token());
+                if !running {
+                    collect_exit(record);
+                }
                 let notice = format!("{ADOPT_FAILED_NOTICE}{}: {error}", outcome(running));
                 self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
                 self.apply_pending(pane, membership, None, intent);
-                return None;
+                return;
             },
         };
         self.install_pane(pane, handle);
@@ -429,7 +494,6 @@ impl Supervisor {
         self.replay(pane, generation, early);
         let suspend = suspend.filter(|_| self.runs_launch(pane, generation));
         self.apply_pending(pane, membership, suspend, intent);
-        None
     }
 
     /// Takes over the restart count and last exit a holder record carries
@@ -444,12 +508,10 @@ impl Supervisor {
     }
 
     /// Reports an adoption that failed after a later action superseded it,
-    /// when its child still runs, so a child is never dropped silently.
+    /// when its child still runs, so a child is never dropped silently; a
+    /// gone child's exit is collected instead.
     fn report_superseded_failure(&self, record: &HolderRecord, error: &PtyError) {
-        let running =
-            UnsupervisedChild::observe_expected(record.child_pid(), record.child_start_token())
-                .is_some();
-        if running {
+        if child_runs_or_collect(record) {
             self.notify_process(
                 NoticeLevel::Error,
                 Some(record.process().clone()),
@@ -466,45 +528,39 @@ impl Supervisor {
 mod tests {
     use std::{
         cell::Cell,
-        path::PathBuf,
+        ffi::OsString,
+        os::unix::net::UnixListener,
+        path::{Path, PathBuf},
+        process,
         rc::Rc,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant, SystemTime},
     };
+
+    use crossbeam_channel::bounded;
 
     use super::*;
     use crate::{
         adapter::{
-            holder::HolderId,
+            holder::{ClientMessage, HolderControl, HolderId, HolderMessage},
             service::{
-                ServiceEvent,
+                LaunchEnvironment, ServiceEvent,
                 supervisor::{
-                    ConfigMembership, OutputEffect, SpawnGeneration, lifecycle::FORCE_STOP_NOTICE,
-                    testing::*, unsupervised::UNSUPERVISED_ROW_REMOVED,
-                    unsupervised_child::UnsupervisedChild,
+                    ConfigMembership, SpawnGeneration, lifecycle::FORCE_STOP_NOTICE, testing::*,
+                    unsupervised::UNSUPERVISED_ROW_REMOVED, unsupervised_child::UnsupervisedChild,
                 },
             },
         },
         domain::{
-            agent_session::AgentProcessStartToken,
-            config::{ProcessSpec, WorkspaceConfig},
             port::ProcessRunner,
-            process::{
-                AgentTool, Process, ProcessKind, ProcessState, RestartPolicy, StopPolicy,
-                StopSignal,
-            },
+            process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{CommandLine, ProcessName},
+            value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken},
         },
     };
 
     const PANE: u64 = 0;
-    /// The configured command of the unsupervised-row tests.
-    const SLEEP_COMMAND: &str = "serve";
-    /// The command a config change replaces [`SLEEP_COMMAND`] with.
+    /// The command a stack change replaces the test command with.
     const OTHER_COMMAND: &str = "serve --again";
     /// A start token no running process has.
     const FOREIGN_TOKEN: u64 = 1;
@@ -512,6 +568,36 @@ mod tests {
     const EARLIER: Duration = Duration::from_secs(3600);
     /// Longest a test waits for a scheduled respawn to arrive.
     const RESPAWN_WAIT: Duration = Duration::from_secs(5);
+    /// A socket path nothing serves.
+    const UNSERVED_SOCKET: &str = "/nonexistent/holder.sock";
+    /// Why a refusing adopter fails.
+    const REFUSAL: &str = "holder unreachable";
+    /// Grace the graceful stop policy gives before the kill.
+    const STOP_GRACE: Duration = Duration::from_millis(300);
+    /// Longest a test waits for an unsupervised stop to settle.
+    const SETTLE_WAIT: Duration = Duration::from_secs(10);
+    /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
+    const SHORT_TEMP_ROOT: &str = "/tmp";
+    /// Prefix of every test scratch directory.
+    const SCRATCH_PREFIX: &str = "ma-";
+
+    /// The test process's name.
+    fn p() -> ProcessName {
+        name("p")
+    }
+
+    /// No environment of the client's own.
+    fn no_env() -> LaunchEnvironment {
+        LaunchEnvironment::default()
+    }
+
+    /// The graceful stop policy of the adoption tests.
+    fn graceful() -> StopPolicy {
+        StopPolicy::builder()
+            .signal(StopSignal::Interrupt)
+            .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+            .build()
+    }
 
     /// An adopter whose every holder answers with a pid-reporting handle.
     struct FakeAdopter;
@@ -530,47 +616,39 @@ mod tests {
         }
     }
 
-    /// A harness over one terminal named `p` that can adopt holders.
-    fn adopting(runner: Box<dyn ProcessRunner>) -> Harness {
-        let process = Process::builder()
-            .id(PaneId::new(PANE))
-            .name(ProcessName::try_new("p").unwrap())
-            .kind(ProcessKind::Terminal)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .restart(RestartPolicy::Always)
-            .build();
+    /// `harness` able to adopt through `adopter`.
+    fn with_adopter(harness: Harness, adopter: Box<dyn HolderAdopter>) -> Harness {
         let Harness {
             supervisor,
             events,
             notices,
-        } = Harness::new(runner, vec![process]);
+        } = harness;
         Harness {
-            supervisor: supervisor.with_adopter(Box::new(FakeAdopter)),
+            supervisor: supervisor.with_adopter(adopter),
             events,
             notices,
         }
     }
 
-    /// The record a holder running `process` of kind `kind` in `project` would
-    /// leave.
-    fn record_in(project: &str, process: &str, kind: ProcessKind) -> HolderRecord {
-        record_with_pid(project, process, kind, FAKE_LAUNCHER_PID)
+    /// A harness over `p`, restarting always, that can adopt holders.
+    fn adopting(runner: Box<dyn ProcessRunner>) -> Harness {
+        with_adopter(
+            Harness::over(runner, &[spec("p", "true", RestartPolicy::Always)]),
+            Box::new(FakeAdopter),
+        )
     }
 
-    /// As [`record_in`], for a child running as `child_pid`.
-    fn record_with_pid(
-        project: &str,
-        process: &str,
-        kind: ProcessKind,
-        child_pid: u32,
-    ) -> HolderRecord {
+    /// The record a holder running `process` of this project as `child_pid`
+    /// would leave, serving at `socket`.
+    fn record_at(process: &str, child_pid: u32, socket: &Path) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
-            .project(PathBuf::from(project))
-            .process(ProcessName::try_new(process).unwrap())
-            .kind(kind)
-            .agent_session_id(None)
-            .socket(PathBuf::from("/tmp/holder.sock"))
+            .project(ProjectRoot::try_new(PathBuf::from(TEST_PROJECT)).unwrap())
+            .process(name(process))
+            .command(CommandLine::try_new("sleep 600").unwrap())
+            .stop(graceful())
+            .launch_environment(vec![(OsString::from("FROM"), OsString::from("cli"))])
+            .socket(socket.to_path_buf())
             .holder_pid(1)
             .child_pid(child_pid)
             .child_start_token(None)
@@ -579,15 +657,22 @@ mod tests {
             .build()
     }
 
-    /// The record of this project's command `p` running as `child_pid`.
-    fn command_record(child_pid: u32) -> HolderRecord {
-        record_with_pid(TEST_PROJECT, "p", ProcessKind::Command, child_pid)
+    /// As [`record_at`], at a socket nothing serves.
+    fn record_with_pid(process: &str, child_pid: u32) -> HolderRecord {
+        record_at(process, child_pid, Path::new(UNSERVED_SOCKET))
     }
 
-    /// The record a holder running the terminal `process` of this project
-    /// would leave.
+    /// The record of `process` running as the fake launcher pid.
     fn record(process: &str) -> HolderRecord {
-        record_in(TEST_PROJECT, process, ProcessKind::Terminal)
+        record_with_pid(process, FAKE_LAUNCHER_PID)
+    }
+
+    /// A pid that belonged to a process that has exited.
+    fn gone_pid() -> u32 {
+        let mut exited = process::Command::new("true").spawn().unwrap();
+        let pid = exited.id();
+        exited.wait().unwrap();
+        pid
     }
 
     #[test]
@@ -599,7 +684,7 @@ mod tests {
         let pane = PaneId::new(PANE);
 
         harness.supervisor.adopt(record("p"));
-        harness.supervisor.up();
+        harness.up();
 
         let status = harness.supervisor.snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Running);
@@ -616,15 +701,7 @@ mod tests {
             ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN),
         );
 
-        assert_eq!(
-            *harness
-                .supervisor
-                .workspace()
-                .process(pane)
-                .unwrap()
-                .state(),
-            ProcessState::Restarting
-        );
+        assert_eq!(state(&harness), ProcessState::Restarting);
         let Ok(ServiceEvent::Respawn {
             pane: respawned,
             generation,
@@ -634,42 +711,197 @@ mod tests {
             panic!("the restart policy schedules a respawn");
         };
         harness.supervisor.handle_respawn(respawned, generation);
-        assert_eq!(spawns.requests.borrow().len(), 1);
+        let requests = spawns.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .launch_environment()
+                .get(&OsString::from("FROM")),
+            Some(&OsString::from("cli")),
+            "the policy restart keeps the environment the holder was launched with"
+        );
     }
 
-    /// A holder recorded for another project, or for a process of another kind
-    /// under the same name, is refused and left running.
+    /// A holder whose process is no longer in the project is adopted to be
+    /// stopped through the stop policy its record carries, with a notice, and
+    /// its row goes once it exits.
     #[test]
-    fn a_record_for_another_project_or_kind_is_refused() {
-        let mut harness = adopting(Box::new(FakeRunner));
+    fn a_removed_process_found_running_is_stopped_with_a_notice_and_discarded() {
+        let signals = Arc::new(StopSignals::default());
+        struct SignalAdopter(Arc<StopSignals>);
+        impl HolderAdopter for SignalAdopter {
+            fn locate(&self, _child_pid: u32) -> Option<HolderRecord> {
+                None
+            }
 
-        let elsewhere = record_in("/elsewhere/muster.yml", "p", ProcessKind::Terminal);
-        let other_kind = record_in(TEST_PROJECT, "p", ProcessKind::Command);
-        harness.supervisor.adopt(elsewhere.clone());
-        harness.supervisor.adopt(other_kind.clone());
+            fn adopt(
+                &self,
+                _record: &HolderRecord,
+                _sink: Box<dyn OutputSink>,
+            ) -> Result<Box<dyn ProcessHandle>, PtyError> {
+                Ok(Box::new(StopSignalHandle {
+                    signals: Arc::clone(&self.0),
+                }))
+            }
+        }
+        let mut harness = with_adopter(
+            Harness::over(Box::new(FakeRunner), &[spec(
+                "p",
+                "true",
+                RestartPolicy::Never,
+            )]),
+            Box::new(SignalAdopter(Arc::clone(&signals))),
+        );
 
-        assert!(harness.supervisor.panes().is_empty());
-        assert_eq!(harness.notice_messages(), vec![
-            with_pids(ADOPT_MISMATCH_NOTICE, &elsewhere),
-            with_pids(ADOPT_MISMATCH_NOTICE, &other_kind),
-        ]);
-        assert!(harness.notice_messages()[0].contains(&FAKE_LAUNCHER_PID.to_string()));
+        harness.supervisor.adopt(record("gone"));
+
+        let gone = harness
+            .supervisor
+            .workspace()
+            .processes()
+            .iter()
+            .find(|process| process.name() == &name("gone"))
+            .map(|process| *process.id())
+            .expect("the removed process has a row while it stops");
+        assert_eq!(
+            *signals.termination.lock().unwrap(),
+            Some((StopSignal::Interrupt, STOP_GRACE)),
+            "stopped through the recorded stop policy"
+        );
+        assert_eq!(
+            harness
+                .notices
+                .lock()
+                .unwrap()
+                .recent(harness.supervisor.root())[0]
+                .process(),
+            &Some(name("gone"))
+        );
+        assert!(
+            harness
+                .notice_messages()
+                .contains(&ADOPT_REMOVED_NOTICE.to_string())
+        );
+        let generation = harness.supervisor.generations()[&gone];
+        harness.supervisor.handle_output(
+            gone,
+            generation,
+            ProcessOutput::Exited(ExitOutcome::Succeeded),
+        );
+        assert!(harness.supervisor.workspace().process(gone).is_none());
+        assert_eq!(harness.supervisor.process_names(), vec![p()]);
     }
 
-    /// A holder for a process the config no longer has is left running and
-    /// reported, never killed.
+    /// A fake holder at a socket in a scratch directory that takes one
+    /// supervisor, tells it the child exited, and reports whether the exit
+    /// was collected.
+    struct ExitedHolder {
+        _scratch: tempfile::TempDir,
+        socket: PathBuf,
+        collected: crossbeam_channel::Receiver<()>,
+    }
+
+    impl ExitedHolder {
+        fn serve() -> Self {
+            let scratch = tempfile::Builder::new()
+                .prefix(SCRATCH_PREFIX)
+                .tempdir_in(SHORT_TEMP_ROOT)
+                .unwrap();
+            let socket = scratch.path().join("h.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (sender, collected) = bounded(1);
+            thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut exit_sent = false;
+                while let Ok(message) = ClientMessage::read_from(&mut stream) {
+                    match message {
+                        ClientMessage::Control(HolderControl::Kill)
+                        | ClientMessage::Hello { .. }
+                            if !exit_sent =>
+                        {
+                            exit_sent = true;
+                            let _ =
+                                HolderMessage::Exited(ExitOutcome::Succeeded).write_to(&mut stream);
+                        },
+                        ClientMessage::CollectExit => {
+                            let _ = sender.send(());
+                            return;
+                        },
+                        _ => {},
+                    }
+                }
+            });
+            Self {
+                _scratch: scratch,
+                socket,
+                collected,
+            }
+        }
+
+        /// Whether a supervisor collected the exit within [`SETTLE_WAIT`].
+        fn was_collected(&self) -> bool {
+            self.collected.recv_timeout(SETTLE_WAIT).is_ok()
+        }
+    }
+
+    /// A record naming an already supervised process whose child is gone is
+    /// not adoptable, so its holder's exit is collected rather than left held
+    /// forever, and nothing says a child was left running.
     #[test]
-    fn adopting_an_unknown_process_leaves_it_running_and_says_so() {
+    fn an_unadoptable_duplicate_whose_child_is_gone_has_its_exit_collected() {
+        let holder = ExitedHolder::serve();
         let mut harness = adopting(Box::new(FakeRunner));
+        harness.up();
 
-        let gone = record("gone");
-        harness.supervisor.adopt(gone.clone());
+        harness
+            .supervisor
+            .adopt(record_at("p", gone_pid(), &holder.socket));
 
-        assert!(harness.supervisor.panes().is_empty());
-        assert_eq!(harness.notice_messages(), vec![with_pids(
-            ADOPT_UNKNOWN_NOTICE,
-            &gone
-        )]);
+        assert!(holder.was_collected());
+        assert!(
+            harness.notice_messages().is_empty(),
+            "no left-running notice: {:?}",
+            harness.notice_messages()
+        );
+    }
+
+    /// An adoption that fails on a child that is gone collects its holder's
+    /// exit and says the child exited, never that it was left running.
+    #[test]
+    fn a_failed_adoption_of_a_gone_child_collects_its_exit() {
+        let holder = ExitedHolder::serve();
+        let mut harness = with_adopter(
+            Harness::over(Box::new(FakeRunner), &[spec(
+                "p",
+                "true",
+                RestartPolicy::Never,
+            )]),
+            Box::new(ReconnectingAdopter {
+                record: None,
+                refuses: true,
+                adoptions: Rc::new(Cell::new(0)),
+            }),
+        );
+
+        harness
+            .supervisor
+            .adopt(record_at("p", gone_pid(), &holder.socket));
+
+        assert!(holder.was_collected());
+        let messages = harness.notice_messages();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains(SINCE_EXITED))
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains(LEFT_RUNNING))
+        );
+        assert_eq!(state(&harness), ProcessState::Pending);
     }
 
     /// An adopter that finds `record` for its child's pid, and adopts it unless
@@ -699,13 +931,6 @@ mod tests {
             Ok(Box::new(FixedPidHandle(record.child_pid())))
         }
     }
-
-    /// Why a refusing adopter fails.
-    const REFUSAL: &str = "holder unreachable";
-    /// Grace the graceful stop policy gives before the kill.
-    const STOP_GRACE: Duration = Duration::from_millis(300);
-    /// Longest a test waits for an unsupervised stop to settle.
-    const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
     /// A handle that reports a fixed pid and accepts every request.
     struct FixedPidHandle(u32);
@@ -753,59 +978,34 @@ mod tests {
         }
     }
 
-    /// The graceful stop policy of the unsupervised tests.
-    fn graceful() -> StopPolicy {
-        StopPolicy::builder()
-            .signal(StopSignal::Interrupt)
-            .grace_period(STOP_GRACE)
-            .build()
+    /// The test process `p`, restarting always and stopped gracefully,
+    /// running `command`.
+    fn graceful_spec(command: &str) -> ProcessSpec {
+        spec("p", command, RestartPolicy::Always).with_stop(graceful())
     }
 
-    /// A harness over `p` of `kind` with `stop` policy and restart `Always`,
-    /// whose processes report `pid` and whose holder `adopter` can reconnect
-    /// to, plus its spawn count. Nothing is started.
-    fn reconnectable_over(
-        kind: ProcessKind,
-        stop: Option<StopPolicy>,
-        pid: u32,
-        adopter: ReconnectingAdopter,
-    ) -> (Harness, Arc<AtomicUsize>) {
-        let process = Process::builder()
-            .id(PaneId::new(PANE))
-            .name(ProcessName::try_new("p").unwrap())
-            .kind(kind)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .restart(RestartPolicy::Always)
-            .stop(stop)
-            .build();
+    /// A harness over `p` (graceful stop, restart `Always`) whose processes
+    /// report `pid` and whose holder `adopter` can reconnect to, plus its
+    /// spawn count. Nothing is started.
+    fn reconnectable_over(pid: u32, adopter: ReconnectingAdopter) -> (Harness, Arc<AtomicUsize>) {
         let spawns = Arc::new(AtomicUsize::new(0));
-        let Harness {
-            supervisor,
-            events,
-            notices,
-        } = Harness::new(
-            Box::new(FixedPidRunner {
-                pid,
-                spawns: spawns.clone(),
-            }),
-            vec![process],
+        let harness = with_adopter(
+            Harness::over(
+                Box::new(FixedPidRunner {
+                    pid,
+                    spawns: spawns.clone(),
+                }),
+                &[graceful_spec("true")],
+            ),
+            Box::new(adopter),
         );
-        let harness = Harness {
-            supervisor: supervisor.with_adopter(Box::new(adopter)),
-            events,
-            notices,
-        };
         (harness, spawns)
     }
 
     /// As [`reconnectable_over`], started, with a pid no test relies on.
-    fn reconnectable(
-        kind: ProcessKind,
-        stop: Option<StopPolicy>,
-        adopter: ReconnectingAdopter,
-    ) -> Harness {
-        let (mut harness, _) = reconnectable_over(kind, stop, FAKE_LAUNCHER_PID, adopter);
-        harness.supervisor.up();
+    fn reconnectable(adopter: ReconnectingAdopter) -> Harness {
+        let (mut harness, _) = reconnectable_over(FAKE_LAUNCHER_PID, adopter);
+        harness.up();
         harness
     }
 
@@ -840,56 +1040,17 @@ mod tests {
         }
     }
 
-    /// A supervisor of the configured command `p` (graceful stop) whose
-    /// registry reads that config, with `p` left running unsupervised as
+    /// A supervisor of `p` (graceful stop) left running unsupervised as
     /// `orphan` by an adoption that failed at startup, plus its spawn count.
-    fn configured_unsupervised(orphan: &Orphan) -> (Harness, Arc<AtomicUsize>, WorkspaceConfig) {
-        let config = command_config(SLEEP_COMMAND);
-        let spawns = Arc::new(AtomicUsize::new(0));
-        let Harness {
-            supervisor,
-            events,
-            notices,
-        } = Harness::with_registry(
-            Box::new(FixedPidRunner {
-                pid: orphan.pid(),
-                spawns: spawns.clone(),
-            }),
-            config.to_processes(),
-            Box::new(FakeRegistry {
-                projects: Vec::new(),
-                workspace: config.clone(),
-                recorder: Recorder::default(),
-            }),
-        );
-        let mut harness = Harness {
-            supervisor: supervisor.with_adopter(Box::new(ReconnectingAdopter {
-                record: None,
-                refuses: true,
-                adoptions: Rc::new(Cell::new(0)),
-            })),
-            events,
-            notices,
-        };
-        harness.supervisor.adopt(command_record(orphan.pid()));
+    fn configured_unsupervised(orphan: &Orphan) -> (Harness, Arc<AtomicUsize>) {
+        let (mut harness, spawns) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
+            record: None,
+            refuses: true,
+            adoptions: Rc::new(Cell::new(0)),
+        });
+        harness.supervisor.adopt(record_with_pid("p", orphan.pid()));
         assert_eq!(state(&harness), ProcessState::Unsupervised);
-        (harness, spawns, config)
-    }
-
-    /// A config of one command `p` running `command` with the graceful stop.
-    fn command_config(command: &str) -> WorkspaceConfig {
-        WorkspaceConfig::builder()
-            .agents(vec![])
-            .terminals(vec![])
-            .commands(vec![
-                ProcessSpec::builder()
-                    .name(ProcessName::try_new("p").unwrap())
-                    .command(Some(CommandLine::try_new(command).unwrap()))
-                    .stop(Some(graceful()))
-                    .autostart(false)
-                    .build(),
-            ])
-            .build()
+        (harness, spawns)
     }
 
     /// The shared assertions on an unsupervised `p` running as `orphan`: it is
@@ -900,7 +1061,6 @@ mod tests {
         spawns: &AtomicUsize,
         orphan: &Orphan,
     ) {
-        let name = ProcessName::try_new("p").unwrap();
         assert_eq!(state(harness), ProcessState::Unsupervised);
         assert!(!harness.supervisor.is_live(PaneId::new(PANE)));
         assert_eq!(
@@ -909,8 +1069,8 @@ mod tests {
         );
         let spawned = spawns.load(Ordering::SeqCst);
 
-        harness.supervisor.start(&name);
-        harness.supervisor.restart(&name);
+        harness.supervisor.start(&p(), &no_env());
+        harness.supervisor.restart(&p(), &no_env());
 
         assert_eq!(spawns.load(Ordering::SeqCst), spawned, "no second copy");
         assert_eq!(state(harness), ProcessState::Unsupervised);
@@ -921,7 +1081,7 @@ mod tests {
                 .any(|message| message.ends_with(&orphan.pid().to_string()))
         );
 
-        harness.supervisor.stop(&name);
+        harness.supervisor.stop(&p());
         assert_eq!(state(harness), ProcessState::Stopping);
         assert!(orphan.alive(), "the graceful signal is ignored");
 
@@ -944,6 +1104,15 @@ mod tests {
             .state()
     }
 
+    /// The state of the process on `pane`, while it has a row.
+    fn state_of(harness: &Harness, pane: PaneId) -> Option<ProcessState> {
+        harness
+            .supervisor
+            .workspace()
+            .process(pane)
+            .map(|process| *process.state())
+    }
+
     /// Reports `p`'s output stream as broken.
     fn break_stream(harness: &mut Harness) {
         let current = generation(harness);
@@ -959,7 +1128,7 @@ mod tests {
     #[test]
     fn an_unreadable_stream_reconnects_and_a_later_stop_observes_the_exit() {
         let adoptions = Rc::new(Cell::new(0));
-        let mut harness = reconnectable(ProcessKind::Terminal, None, ReconnectingAdopter {
+        let mut harness = reconnectable(ReconnectingAdopter {
             record: Some(record("p")),
             refuses: false,
             adoptions: adoptions.clone(),
@@ -983,7 +1152,7 @@ mod tests {
         let screen = harness.supervisor.panes()[&pane].parser().screen_text();
         assert!(screen.contains("fresh") && !screen.contains("stale"));
 
-        harness.supervisor.stop(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.stop(&p());
         let current = generation(&harness);
         harness.supervisor.handle_output(
             pane,
@@ -996,20 +1165,15 @@ mod tests {
 
     /// A graceful stop already delivered when the stream breaks carries over
     /// the reconnect, so the exit the holder reports on the new connection
-    /// settles as a stop rather than a restart and never strands the process
-    /// in `Stopping`.
+    /// settles as a stop rather than a restart.
     #[test]
     fn a_stop_in_flight_survives_a_reconnect() {
-        let stop = StopPolicy::builder()
-            .signal(StopSignal::Interrupt)
-            .grace_period(Duration::from_secs(7))
-            .build();
-        let mut harness = reconnectable(ProcessKind::Command, Some(stop), ReconnectingAdopter {
-            record: Some(record_in(TEST_PROJECT, "p", ProcessKind::Command)),
+        let mut harness = reconnectable(ReconnectingAdopter {
+            record: Some(record("p")),
             refuses: false,
             adoptions: Rc::new(Cell::new(0)),
         });
-        harness.supervisor.stop(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         break_stream(&mut harness);
@@ -1023,7 +1187,7 @@ mod tests {
 
         assert_eq!(state(&harness), ProcessState::Exited);
         assert!(
-            harness.events.try_recv().is_err(),
+            !matches!(harness.events.try_recv(), Ok(ServiceEvent::Respawn { .. })),
             "no restart is scheduled"
         );
     }
@@ -1036,18 +1200,13 @@ mod tests {
     fn a_failed_reconnect_leaves_the_process_unsupervised_until_its_pid_is_gone() {
         for refuses in [false, true] {
             let orphan = Orphan::spawn();
-            let record = command_record(orphan.pid());
-            let (mut harness, spawns) = reconnectable_over(
-                ProcessKind::Command,
-                Some(graceful()),
-                orphan.pid(),
-                ReconnectingAdopter {
-                    record: refuses.then_some(record),
-                    refuses,
-                    adoptions: Rc::new(Cell::new(0)),
-                },
-            );
-            harness.supervisor.up();
+            let record = record_with_pid("p", orphan.pid());
+            let (mut harness, spawns) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
+                record: refuses.then_some(record),
+                refuses,
+                adoptions: Rc::new(Cell::new(0)),
+            });
+            harness.up();
 
             break_stream(&mut harness);
 
@@ -1067,18 +1226,8 @@ mod tests {
     #[test]
     fn a_holder_unadoptable_at_startup_is_unsupervised_until_its_pid_is_gone() {
         let orphan = Orphan::spawn();
-        let (mut harness, spawns) = reconnectable_over(
-            ProcessKind::Command,
-            Some(graceful()),
-            orphan.pid(),
-            ReconnectingAdopter {
-                record: None,
-                refuses: true,
-                adoptions: Rc::new(Cell::new(0)),
-            },
-        );
-        harness.supervisor.adopt(command_record(orphan.pid()));
-        harness.supervisor.up();
+        let (mut harness, spawns) = configured_unsupervised(&orphan);
+        harness.up();
 
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "up starts no second copy");
         assert_unsupervised_until_gone(&mut harness, &spawns, &orphan);
@@ -1088,49 +1237,41 @@ mod tests {
     /// settles as a failed exit: the restart policy applies, here a respawn.
     #[test]
     fn a_failed_reconnect_of_a_gone_child_settles_as_an_exit() {
-        let orphan = Orphan::spawn();
-        let pid = orphan.pid();
-        drop(orphan);
-        let (mut harness, spawns) =
-            reconnectable_over(ProcessKind::Terminal, None, pid, ReconnectingAdopter {
-                record: None,
-                refuses: false,
-                adoptions: Rc::new(Cell::new(0)),
-            });
-        harness.supervisor.up();
+        let pid = gone_pid();
+        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
+            record: None,
+            refuses: false,
+            adoptions: Rc::new(Cell::new(0)),
+        });
+        harness.up();
 
-        let effect = harness.supervisor.handle_output(
-            PaneId::new(PANE),
-            generation(&harness),
-            ProcessOutput::Unreadable("bad frame".to_string()),
-        );
+        break_stream(&mut harness);
 
-        assert!(matches!(effect, OutputEffect::Exited {
-            retired: false,
-            ..
-        }));
         assert_eq!(state(&harness), ProcessState::Restarting);
         assert!(harness.notice_messages().iter().any(|message| {
             message.starts_with(ADOPT_FAILED_NOTICE)
                 && message.contains(SINCE_EXITED)
                 && message.ends_with(&pid.to_string())
         }));
-        let Ok(ServiceEvent::Respawn {
-            pane, generation, ..
-        }) = harness.events.recv_timeout(RESPAWN_WAIT)
-        else {
-            panic!("the restart policy schedules a respawn");
+        let respawn = loop {
+            match harness.events.recv_timeout(RESPAWN_WAIT) {
+                Ok(ServiceEvent::Respawn {
+                    pane, generation, ..
+                }) => break (pane, generation),
+                Ok(_) => {},
+                Err(_) => panic!("the restart policy schedules a respawn"),
+            }
         };
-        harness.supervisor.handle_respawn(pane, generation);
+        harness.supervisor.handle_respawn(respawn.0, respawn.1);
         assert_eq!(spawns.load(Ordering::SeqCst), 2);
     }
 
     /// A reconnect keeps what outlives a connection: a process removed from
-    /// muster.yml still retires on its exit instead of respawning, and its
+    /// the project still retires on its exit instead of respawning, and its
     /// uptime still counts from its real start.
     #[test]
-    fn a_reconnect_keeps_config_membership_and_start_time() {
-        let mut harness = reconnectable(ProcessKind::Terminal, None, ReconnectingAdopter {
+    fn a_reconnect_keeps_stack_membership_and_start_time() {
+        let mut harness = reconnectable(ReconnectingAdopter {
             record: Some(record("p")),
             refuses: false,
             adoptions: Rc::new(Cell::new(0)),
@@ -1164,74 +1305,56 @@ mod tests {
     /// A paused process reconnects paused, so a resume still reaches it.
     #[test]
     fn a_paused_process_reconnects_paused_and_resumes() {
-        let mut harness = reconnectable(ProcessKind::Terminal, None, ReconnectingAdopter {
+        let mut harness = reconnectable(ReconnectingAdopter {
             record: Some(record("p")),
             refuses: false,
             adoptions: Rc::new(Cell::new(0)),
         });
-        let name = ProcessName::try_new("p").unwrap();
-        harness.supervisor.pause(&name);
+        harness.supervisor.pause(&p());
         assert_eq!(state(&harness), ProcessState::Paused);
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Paused);
 
-        harness.supervisor.resume(&name);
+        harness.supervisor.resume(&p());
         assert_eq!(state(&harness), ProcessState::Running);
     }
 
-    /// A changed command replaces the spec, but the old row keeps the
-    /// unsupervised pid until the child is gone, and no launch of the same
-    /// process starts a second copy beside it meanwhile.
+    /// A changed command updates the row in place, which keeps the
+    /// unsupervised pid until the child is gone, and no start puts a second
+    /// copy beside it meanwhile; once it is gone the new command starts.
     #[test]
     fn a_changed_command_keeps_the_unsupervised_pid_until_the_child_is_gone() {
         let orphan = Orphan::spawn();
-        let (mut harness, spawns, _) = configured_unsupervised(&orphan);
-        let old = PaneId::new(PANE);
+        let (mut harness, spawns) = configured_unsupervised(&orphan);
 
         harness
             .supervisor
-            .reconcile_config(&command_config(OTHER_COMMAND));
+            .apply_stack(&stack(&[graceful_spec(OTHER_COMMAND)]));
 
         assert_eq!(
             *harness.supervisor.snapshot().processes()[0].pid(),
             Some(orphan.pid())
         );
-        assert_eq!(
-            harness.supervisor.panes()[&old].config_membership(),
-            ConfigMembership::RetireOnExit
-        );
-        let replacement = harness
-            .supervisor
-            .workspace()
-            .processes()
-            .iter()
-            .map(|process| *process.id())
-            .find(|pane| *pane != old)
-            .expect("the new spec has its own row");
-        harness.supervisor.start_pane(replacement);
-        harness.supervisor.up();
+        harness.supervisor.start(&p(), &no_env());
+        harness.up();
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
 
-        harness.supervisor.stop_pane(old);
-        drive_until(&mut harness, "the old row to retire", |harness| {
-            harness.supervisor.workspace().process(old).is_none()
-        });
-        harness.supervisor.start_pane(replacement);
-        assert_eq!(spawns.load(Ordering::SeqCst), 1, "the replacement starts");
+        harness.supervisor.stop(&p());
+        drive_until_exited(&mut harness);
+        harness.supervisor.start(&p(), &no_env());
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "the new command starts");
     }
 
     /// An unsupervised child that exits on its own no longer blocks a start.
     #[test]
     fn an_orphan_that_exits_on_its_own_no_longer_blocks_a_start() {
         let orphan = Orphan::spawn();
-        let (mut harness, spawns, _) = configured_unsupervised(&orphan);
+        let (mut harness, spawns) = configured_unsupervised(&orphan);
         assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
 
         assert_eq!(*harness.supervisor.snapshot().processes()[0].pid(), None);
-        harness
-            .supervisor
-            .start(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.start(&p(), &no_env());
 
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert_eq!(state(&harness), ProcessState::Running);
@@ -1242,21 +1365,17 @@ mod tests {
     #[test]
     fn a_reused_pid_is_never_signalled() {
         let orphan = Orphan::spawn();
-        let (mut harness, ..) = configured_unsupervised(&orphan);
+        let (mut harness, _) = configured_unsupervised(&orphan);
         if let Some(target) = harness.supervisor.panes.get_mut(&PaneId::new(PANE)) {
             target.unsupervised = Some(
                 UnsupervisedChild::builder()
                     .pid(orphan.pid())
-                    .start_token(Some(
-                        AgentProcessStartToken::try_new(FOREIGN_TOKEN).unwrap(),
-                    ))
+                    .start_token(Some(StartToken::try_new(FOREIGN_TOKEN).unwrap()))
                     .build(),
             );
         }
 
-        harness
-            .supervisor
-            .force_kill(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.force_kill(&p());
 
         assert_eq!(state(&harness), ProcessState::Exited);
         assert_eq!(
@@ -1271,16 +1390,12 @@ mod tests {
     /// still killed rather than left `Stopping`.
     #[test]
     fn a_reconnect_rearms_the_deadline_of_a_stop_in_flight() {
-        let mut harness = reconnectable(
-            ProcessKind::Command,
-            Some(graceful()),
-            ReconnectingAdopter {
-                record: Some(record_in(TEST_PROJECT, "p", ProcessKind::Command)),
-                refuses: false,
-                adoptions: Rc::new(Cell::new(0)),
-            },
-        );
-        harness.supervisor.stop(&ProcessName::try_new("p").unwrap());
+        let mut harness = reconnectable(ReconnectingAdopter {
+            record: Some(record("p")),
+            refuses: false,
+            adoptions: Rc::new(Cell::new(0)),
+        });
+        harness.supervisor.stop(&p());
 
         break_stream(&mut harness);
 
@@ -1299,10 +1414,9 @@ mod tests {
     #[test]
     fn a_child_that_survives_every_kill_leaves_the_stop_retryable() {
         let orphan = Orphan::unreaped();
-        let (mut harness, ..) = configured_unsupervised(&orphan);
-        let name = ProcessName::try_new("p").unwrap();
+        let (mut harness, _) = configured_unsupervised(&orphan);
 
-        harness.supervisor.stop(&name);
+        harness.supervisor.stop(&p());
         drive_until(&mut harness, "the kills to give up", |harness| {
             state(harness) == ProcessState::Unsupervised
         });
@@ -1313,7 +1427,7 @@ mod tests {
                 .iter()
                 .any(|message| message.ends_with(&orphan.pid().to_string()))
         );
-        harness.supervisor.stop(&name);
+        harness.supervisor.stop(&p());
         assert_eq!(
             state(&harness),
             ProcessState::Stopping,
@@ -1322,42 +1436,45 @@ mod tests {
     }
 
     /// `ps` never shows an unsupervised process with no pid: a child found
-    /// gone shows as exited, and one whose row left muster.yml shows no row.
+    /// gone shows as exited.
     #[test]
-    fn a_gone_unsupervised_child_shows_as_exited_or_as_no_row() {
+    fn a_gone_unsupervised_child_shows_as_exited() {
         let orphan = Orphan::spawn();
-        let (harness, ..) = configured_unsupervised(&orphan);
+        let (harness, _) = configured_unsupervised(&orphan);
         assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
 
         let status = harness.supervisor.snapshot();
         assert_eq!(*status.processes()[0].state(), ProcessState::Exited);
         assert_eq!(*status.processes()[0].pid(), None);
-
-        let removed = Orphan::spawn();
-        let (mut harness, ..) = configured_unsupervised(&removed);
-        harness
-            .supervisor
-            .reconcile_config(&command_config(OTHER_COMMAND));
-        assert_eq!(removed.end_with(libc::SIGKILL), Some(libc::SIGKILL));
-
-        let status = harness.supervisor.snapshot();
-        assert_eq!(status.processes().len(), 1, "only the replacement row");
-        assert_eq!(*status.processes()[0].state(), ProcessState::Pending);
     }
 
-    /// Starting a row already removed from muster.yml whose unsupervised
+    /// Removing an unsupervised process from the project stops its child, and
+    /// its row goes once the child is gone.
+    #[test]
+    fn a_removed_unsupervised_row_goes_once_its_child_is_gone() {
+        let orphan = Orphan::spawn();
+        let (mut harness, _) = configured_unsupervised(&orphan);
+
+        harness.supervisor.apply_stack(&stack(&[]));
+        assert_eq!(state(&harness), ProcessState::Stopping);
+
+        drive_until(&mut harness, "the removed row to retire", |harness| {
+            harness.supervisor.workspace().is_empty()
+        });
+        assert!(!orphan.alive());
+    }
+
+    /// Starting a row already removed from the project whose unsupervised
     /// child has since exited says the row was removed, and starts nothing.
     #[test]
     fn starting_a_removed_row_whose_child_is_gone_says_it_was_removed() {
         let orphan = Orphan::spawn();
-        let (mut harness, spawns, _) = configured_unsupervised(&orphan);
+        let (mut harness, spawns) = configured_unsupervised(&orphan);
         let old = PaneId::new(PANE);
-        harness
-            .supervisor
-            .reconcile_config(&command_config(OTHER_COMMAND));
+        harness.supervisor.apply_stack(&stack(&[]));
         assert_eq!(orphan.end_with(libc::SIGKILL), Some(libc::SIGKILL));
 
-        harness.supervisor.start_pane(old);
+        harness.supervisor.start(&p(), &no_env());
 
         assert!(harness.supervisor.workspace().process(old).is_none());
         assert_eq!(spawns.load(Ordering::SeqCst), 0);
@@ -1373,28 +1490,21 @@ mod tests {
     #[test]
     fn an_unadoptable_record_whose_child_pid_was_reused_leaves_nothing_unsupervised() {
         let stranger = Orphan::spawn();
-        let (mut harness, spawns) = reconnectable_over(
-            ProcessKind::Command,
-            Some(graceful()),
-            stranger.pid(),
-            ReconnectingAdopter {
-                record: None,
-                refuses: true,
-                adoptions: Rc::new(Cell::new(0)),
-            },
-        );
+        let (mut harness, spawns) = reconnectable_over(stranger.pid(), ReconnectingAdopter {
+            record: None,
+            refuses: true,
+            adoptions: Rc::new(Cell::new(0)),
+        });
         let record = HolderRecord::builder()
             .id(HolderId::generate().unwrap())
-            .project(PathBuf::from(TEST_PROJECT))
-            .process(ProcessName::try_new("p").unwrap())
-            .kind(ProcessKind::Command)
-            .agent_session_id(None)
-            .socket(PathBuf::from("/tmp/holder.sock"))
+            .project(ProjectRoot::try_new(PathBuf::from(TEST_PROJECT)).unwrap())
+            .process(p())
+            .command(CommandLine::try_new("true").unwrap())
+            .stop(graceful())
+            .socket(PathBuf::from(UNSERVED_SOCKET))
             .holder_pid(1)
             .child_pid(stranger.pid())
-            .child_start_token(Some(
-                AgentProcessStartToken::try_new(FOREIGN_TOKEN).unwrap(),
-            ))
+            .child_start_token(Some(StartToken::try_new(FOREIGN_TOKEN).unwrap()))
             .log(PathBuf::from("/tmp/holder.log"))
             .child_started_at(SystemTime::now())
             .build();
@@ -1408,9 +1518,7 @@ mod tests {
                 .iter()
                 .any(|message| message.contains(SINCE_EXITED))
         );
-        harness
-            .supervisor
-            .start(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.start(&p(), &no_env());
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert!(stranger.alive(), "the stranger is never signalled");
     }
@@ -1469,53 +1577,28 @@ mod tests {
         }
     }
 
-    /// Closing an agent session while its holder is being adopted keeps the
-    /// kill and the retirement for the adoption: when it fails with the child
-    /// still running, the child is killed and the row retires once it is
-    /// gone, so no child is left running without a row.
+    /// A removed process whose adoption fails on a worker while its child runs
+    /// is still stopped: the child is left unsupervised, signalled, killed
+    /// once it ignores the signal, and its row retires once it is gone.
     #[test]
-    fn closing_a_session_while_its_adoption_fails_kills_the_child_and_retires_the_row() {
-        let (mut harness, _sessions, _spawns) = agent_harness(Vec::new());
-        let pane = harness
-            .supervisor
-            .create_agent_session(AgentTool::Codex, None, None, None)
-            .unwrap()
-            .pane();
-        let generation = harness.supervisor.generations()[&pane];
-        harness.supervisor.handle_output(
-            pane,
-            generation,
-            ProcessOutput::Exited(ExitOutcome::Succeeded),
-        );
-        let name = harness
-            .supervisor
-            .workspace()
-            .process(pane)
-            .expect("an exited session keeps its row")
-            .name()
-            .clone();
+    fn a_removed_process_whose_adoption_fails_is_killed_and_its_row_retires() {
         let orphan = Orphan::spawn();
-        let record = record_with_pid(
-            TEST_PROJECT,
-            name.as_ref(),
-            ProcessKind::Agent,
-            orphan.pid(),
+        let mut harness = with_adopter(
+            Harness::over(Box::new(FakeRunner), &[]),
+            Box::new(FailingWorkerAdopter { record: None }),
         );
-        harness.supervisor.adopter = Some(Box::new(FailingWorkerAdopter { record: None }));
-        harness.supervisor.adopt(record);
+        harness
+            .supervisor
+            .adopt(record_with_pid("gone", orphan.pid()));
+        let pane = PaneId::new(PANE);
         assert_eq!(state_of(&harness, pane), Some(ProcessState::Starting));
 
-        harness.supervisor.close_agent_session(&name);
-        assert!(
-            harness.supervisor.workspace().process(pane).is_some(),
-            "the row stays while its adoption is in flight"
-        );
         let (pane, generation, record, result) = adopted(&harness);
         harness
             .supervisor
             .handle_adopted(pane, generation, &record, result);
 
-        drive_until(&mut harness, "the closed row to retire", |harness| {
+        drive_until(&mut harness, "the removed row to retire", |harness| {
             harness.supervisor.workspace().process(pane).is_none()
         });
         assert!(!orphan.alive(), "the child was killed");
@@ -1525,31 +1608,21 @@ mod tests {
     /// the reconnect fails on a child that has exited and settles that exit.
     #[test]
     fn a_restart_kept_through_a_failed_reconnect_is_applied() {
-        let gone = Orphan::spawn();
-        let pid = gone.pid();
-        drop(gone);
-        let (mut harness, spawns) =
-            reconnectable_over(ProcessKind::Terminal, None, pid, ReconnectingAdopter {
-                record: None,
-                refuses: false,
-                adoptions: Rc::new(Cell::new(0)),
-            });
+        let pid = gone_pid();
+        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
+            record: None,
+            refuses: false,
+            adoptions: Rc::new(Cell::new(0)),
+        });
         harness.supervisor.adopter = Some(Box::new(FailingWorkerAdopter {
-            record: Some(record_with_pid(
-                TEST_PROJECT,
-                "p",
-                ProcessKind::Terminal,
-                pid,
-            )),
+            record: Some(record_with_pid("p", pid)),
         }));
-        harness.supervisor.up();
+        harness.up();
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
-        harness
-            .supervisor
-            .restart(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.restart(&p(), &no_env());
         let (pane, generation, record, result) = adopted(&harness);
         harness
             .supervisor
@@ -1564,30 +1637,21 @@ mod tests {
     /// in flight launches a fresh process, that process is not paused.
     #[test]
     fn a_pause_kept_through_a_failed_reconnect_never_reaches_the_relaunched_process() {
-        let gone = Orphan::spawn();
-        let pid = gone.pid();
-        drop(gone);
-        let (mut harness, spawns) =
-            reconnectable_over(ProcessKind::Terminal, None, pid, ReconnectingAdopter {
-                record: None,
-                refuses: false,
-                adoptions: Rc::new(Cell::new(0)),
-            });
+        let pid = gone_pid();
+        let (mut harness, spawns) = reconnectable_over(pid, ReconnectingAdopter {
+            record: None,
+            refuses: false,
+            adoptions: Rc::new(Cell::new(0)),
+        });
         harness.supervisor.adopter = Some(Box::new(FailingWorkerAdopter {
-            record: Some(record_with_pid(
-                TEST_PROJECT,
-                "p",
-                ProcessKind::Terminal,
-                pid,
-            )),
+            record: Some(record_with_pid("p", pid)),
         }));
-        harness.supervisor.up();
-        let process = ProcessName::try_new("p").unwrap();
-        harness.supervisor.restart(&process);
+        harness.up();
+        harness.supervisor.restart(&p(), &no_env());
 
         break_stream(&mut harness);
         assert_eq!(state(&harness), ProcessState::Starting);
-        harness.supervisor.pause(&process);
+        harness.supervisor.pause(&p());
         let (pane, generation, record, result) = adopted(&harness);
         harness
             .supervisor
@@ -1601,15 +1665,6 @@ mod tests {
         assert_eq!(state_of(&harness, pane), Some(ProcessState::Running));
     }
 
-    /// The state of the process on `pane`, while it has a row.
-    fn state_of(harness: &Harness, pane: PaneId) -> Option<ProcessState> {
-        harness
-            .supervisor
-            .workspace()
-            .process(pane)
-            .map(|process| *process.state())
-    }
-
     /// A stop in flight when the stream breaks, whose holder cannot be reached
     /// again while the child still runs, carries on against the child
     /// directly instead of being dropped: the process stays `Stopping` and
@@ -1617,18 +1672,13 @@ mod tests {
     #[test]
     fn a_stop_in_flight_continues_when_the_reconnect_fails_while_the_child_runs() {
         let orphan = Orphan::spawn();
-        let (mut harness, _) = reconnectable_over(
-            ProcessKind::Command,
-            Some(graceful()),
-            orphan.pid(),
-            ReconnectingAdopter {
-                record: None,
-                refuses: false,
-                adoptions: Rc::new(Cell::new(0)),
-            },
-        );
-        harness.supervisor.up();
-        harness.supervisor.stop(&ProcessName::try_new("p").unwrap());
+        let (mut harness, _) = reconnectable_over(orphan.pid(), ReconnectingAdopter {
+            record: None,
+            refuses: false,
+            adoptions: Rc::new(Cell::new(0)),
+        });
+        harness.up();
+        harness.supervisor.stop(&p());
         assert_eq!(state(&harness), ProcessState::Stopping);
 
         break_stream(&mut harness);

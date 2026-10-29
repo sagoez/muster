@@ -16,6 +16,8 @@ mod protocol;
 mod record;
 mod runner;
 mod server;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use config::*;
 pub use dirs::*;

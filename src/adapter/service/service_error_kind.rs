@@ -7,15 +7,10 @@ use serde::{Deserialize, Serialize};
 pub enum ServiceErrorKind {
     /// The project has no process of that name; the valid names come with it.
     UnknownProcess,
-    /// No project config exists at that path.
+    /// No project is registered at that folder.
     UnknownProject,
-    /// The project's config exists but cannot be loaded.
-    InvalidConfig,
     /// The process has no running child to reach.
     NotRunning,
-    /// The project refused the request, such as an agent session it could not
-    /// open.
-    Refused,
     /// The request could not be read, as one from a client of another version
     /// would be.
     InvalidRequest,

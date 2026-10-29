@@ -4,7 +4,7 @@
 //! across the sibling modules, which share its state.
 
 mod adopter;
-mod attention;
+mod apply_stack;
 mod bridge;
 mod carried_pane;
 mod channel_output_sink;
@@ -12,23 +12,16 @@ mod config_membership;
 mod deps;
 mod entity;
 mod holder_screen;
-mod launch_intent;
 mod launch_purpose;
 mod lifecycle;
 mod metrics;
-mod output_effect;
 mod pane;
 mod pending_intent;
 mod pending_launch;
-mod reconcile;
-mod reopen_outcome;
 mod screen_reply;
-mod session_row;
-mod sessions;
 mod shutdown_generation;
 mod spawn_generation;
 mod stale_release;
-mod supervisor_error;
 #[cfg(test)]
 pub(crate) mod testing;
 mod unsupervised;
@@ -40,12 +33,7 @@ pub use config_membership::*;
 pub use deps::*;
 pub use entity::*;
 pub use holder_screen::*;
-pub use launch_intent::*;
-pub use output_effect::*;
-pub use reopen_outcome::*;
 pub use screen_reply::*;
-pub use session_row::*;
 pub use shutdown_generation::*;
 pub use spawn_generation::*;
 pub use stale_release::*;
-pub use supervisor_error::*;

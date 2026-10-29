@@ -19,9 +19,9 @@ use muster::{
     domain::{
         color_scheme::ColorScheme,
         port::{OutputSink, ProcessRunner},
-        process::ProcessKind,
+        process::{StopPolicy, StopSignal},
         pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-        value::{ByteSize, Cols, CommandLine, ProcessName, Rows},
+        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
     },
 };
 use tempfile::TempDir;
@@ -44,6 +44,14 @@ const SCROLLBACK_LINES: usize = 1000;
 const TICKER: &str = "while :; do echo tick; sleep 0.05; done";
 /// What the ticker prints.
 const TICK: &str = "tick";
+/// Grace of the ticker's stop policy.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// A variable of the command that launched the ticker.
+const LAUNCH_ENTRY: (&str, &str) = ("FROM_CLIENT", "client");
+/// A variable of the ticker's own.
+const OWN_ENTRY: (&str, &str) = ("PORT", "5173");
+/// A variable the test process has, which cargo sets, and the ticker must not.
+const INHERITED_VAR: &str = "CARGO_PKG_NAME";
 
 /// Forwards a handle's output into a channel.
 struct ChannelSink(Sender<ProcessOutput>);
@@ -127,25 +135,29 @@ impl Scratch {
         let launcher = ExecHolderLauncher::builder()
             .binary(PathBuf::from(BINARY))
             .build();
-        HolderRunner::new(
-            Box::new(launcher),
-            self.dirs.clone(),
-            ByteSize::try_new(RawByteSize::mib(LOG_CAP_MIB)).unwrap(),
-            SCROLLBACK_LINES,
-            ColorScheme::Dark,
-        )
+        HolderRunner::new(Box::new(launcher), self.dirs.clone())
     }
 
     fn request(&self) -> SpawnRequest {
         SpawnRequest::builder()
             .process(ProcessName::try_new("ticker").unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new(TICKER).unwrap()))
-            .project(Some(self.root.path().join("muster.yml")))
+            .command(CommandLine::try_new(TICKER).unwrap())
+            .project(Some(self.root.path().to_path_buf()))
+            .launch_environment([(LAUNCH_ENTRY.0.into(), LAUNCH_ENTRY.1.into())].into())
+            .environment([(OWN_ENTRY.0.into(), OWN_ENTRY.1.into())].into())
             .size(
                 PtySize::builder()
                     .rows(Rows::new(24))
                     .cols(Cols::new(80))
+                    .build(),
+            )
+            .scrollback(SCROLLBACK_LINES)
+            .log_max_size(ByteSize::try_new(RawByteSize::mib(LOG_CAP_MIB)).unwrap())
+            .color_scheme(ColorScheme::Dark)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
                     .build(),
             )
             .build()
@@ -189,6 +201,21 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     assert_eq!(holders_under(scratch.root.path()), vec![
         record.holder_pid()
     ]);
+    let environ = fs::read(format!("/proc/{}/environ", record.child_pid())).unwrap();
+    let environ: Vec<String> = environ
+        .split(|byte| *byte == 0)
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    for (name, value) in [LAUNCH_ENTRY, OWN_ENTRY] {
+        assert!(environ.contains(&format!("{name}={value}")), "{environ:?}");
+    }
+    assert!(
+        !environ
+            .iter()
+            .any(|entry| entry.starts_with(&format!("{INHERITED_VAR}="))),
+        "the holder's own environment stays out: {environ:?}"
+    );
+    assert_eq!(record.stop().grace_period().into_inner(), STOP_GRACE);
     drop(handle);
     drop(runner);
 

@@ -2,9 +2,7 @@
 //!
 //! This wraps an `alacritty_terminal::Term` and its VT parser behind the small
 //! screen-model surface the holder and service need: feed bytes, read the screen
-//! text, and repaint the screen with its modes onto a fresh terminal. Window
-//! title, bell, and progress are decoded separately from the raw byte stream by
-//! the signal reader, so they are deliberately not surfaced here.
+//! text, and repaint the screen with its modes onto a fresh terminal.
 
 use std::{
     mem,
@@ -40,8 +38,6 @@ use crate::domain::{
     value::{Cols, Rows},
 };
 
-/// Scrollback lines the emulator of a live process keeps, wherever it runs.
-pub const SCROLLBACK_LINES: usize = 1000;
 /// Full terminal reset (RIS), the first byte sequence of a repaint.
 pub const RESET_TERMINAL: &str = "\x1bc";
 /// DECSET that switches to the alternate screen and saves the cursor.
@@ -299,12 +295,14 @@ impl TerminalEmulator {
 
     /// Feeds `bytes` as [`Self::process`] does, but a panic in the backend
     /// leaves a blank screen of the same size in place of one it may have
-    /// left corrupt, rather than taking the caller's thread down. Returns
-    /// whether the screen was reset.
+    /// left corrupt, rather than taking the caller's thread down. Replies to
+    /// queries the chunk answered before the panic survive the reset, for
+    /// [`Self::take_pty_writes`]. Returns whether the screen was reset.
     pub fn process_or_reset(&mut self, bytes: &[u8]) -> bool {
         if panic::catch_unwind(AssertUnwindSafe(|| self.process(bytes))).is_ok() {
             return false;
         }
+        let pending = self.take_pty_writes();
         let (rows, cols) = self.size();
         *self = Self::new(
             Rows::new(rows),
@@ -312,6 +310,7 @@ impl TerminalEmulator {
             self.history,
             self.color_scheme,
         );
+        lock_sink(&self.sink).pty_writes = pending;
         true
     }
 

@@ -5,8 +5,11 @@ use typed_builder::TypedBuilder;
 
 use super::spawn_generation::SpawnGeneration;
 use crate::{
-    adapter::{holder::client, service::ProjectKey},
-    domain::{pty::PtyError, value::PaneId},
+    adapter::holder::client,
+    domain::{
+        pty::PtyError,
+        value::{PaneId, ProjectRoot},
+    },
 };
 
 /// The screen of a holder-run process, still to be read from its holder. The
@@ -16,7 +19,7 @@ use crate::{
 pub struct HolderScreen {
     /// The project the pane belonged to when the read was handed out.
     #[getset(get = "pub")]
-    project: ProjectKey,
+    project: ProjectRoot,
     /// The pane whose screen this is.
     #[getset(get_copy = "pub")]
     pane: PaneId,

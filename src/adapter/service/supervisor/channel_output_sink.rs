@@ -2,14 +2,18 @@ use crossbeam_channel::Sender;
 
 use super::spawn_generation::SpawnGeneration;
 use crate::{
-    adapter::service::{ProjectKey, ServiceEvent},
-    domain::{port::OutputSink, pty::ProcessOutput, value::PaneId},
+    adapter::service::ServiceEvent,
+    domain::{
+        port::OutputSink,
+        pty::ProcessOutput,
+        value::{PaneId, ProjectRoot},
+    },
 };
 
 /// An [`OutputSink`] that forwards a process's output onto the service event
 /// channel, tagged with its project, pane and spawn generation.
 pub struct ChannelOutputSink {
-    project: ProjectKey,
+    project: ProjectRoot,
     pane: PaneId,
     generation: SpawnGeneration,
     sender: Sender<ServiceEvent>,
@@ -19,7 +23,7 @@ impl ChannelOutputSink {
     /// Creates a sink that tags output with `project`, `pane` and its spawn
     /// `generation` and sends it on `sender`.
     pub fn new(
-        project: ProjectKey,
+        project: ProjectRoot,
         pane: PaneId,
         generation: SpawnGeneration,
         sender: Sender<ServiceEvent>,

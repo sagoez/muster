@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     adapter::process_identity::LocalProcessIdentity,
-    domain::agent_session::{AgentProcessId, AgentProcessStartToken},
+    domain::value::{Pid, StartToken},
 };
 
 /// A child left running under a holder the service cannot reach: its pid and
@@ -16,7 +16,7 @@ pub(crate) struct UnsupervisedChild {
     #[getset(get_copy = "pub(crate)")]
     pid: u32,
     /// The child's start token when the platform reports one.
-    start_token: Option<AgentProcessStartToken>,
+    start_token: Option<StartToken>,
     /// Kills sent since the last graceful stop, bounding the wait for a child
     /// that will not die.
     #[builder(default)]
@@ -29,10 +29,7 @@ impl UnsupervisedChild {
     /// child still runs, recorded with its start token. A pid now held by a
     /// process with another start token is a stranger and is never recorded; a
     /// token that cannot be read is no proof of one, so the child is kept.
-    pub(crate) fn observe_expected(
-        pid: u32,
-        expected: Option<AgentProcessStartToken>,
-    ) -> Option<Self> {
+    pub(crate) fn observe_expected(pid: u32, expected: Option<StartToken>) -> Option<Self> {
         if !pid_exists(pid) {
             return None;
         }
@@ -71,8 +68,8 @@ impl UnsupervisedChild {
 }
 
 /// The start token of the process `pid`, when the platform reports one.
-fn start_token_of(pid: u32) -> Option<AgentProcessStartToken> {
-    AgentProcessId::try_new(pid)
+fn start_token_of(pid: u32) -> Option<StartToken> {
+    Pid::try_new(pid)
         .ok()
         .and_then(LocalProcessIdentity::start_token)
 }
@@ -124,7 +121,7 @@ mod tests {
     fn a_reused_pid_is_not_the_same_child() {
         let child = UnsupervisedChild::builder()
             .pid(process::id())
-            .start_token(Some(AgentProcessStartToken::try_new(1).unwrap()))
+            .start_token(Some(StartToken::try_new(1).unwrap()))
             .build();
         assert!(!child.is_running());
     }
@@ -133,8 +130,8 @@ mod tests {
     /// process cannot be read now is still the same child.
     #[test]
     fn an_unreadable_start_token_counts_as_the_same_child() {
-        let token = Some(AgentProcessStartToken::try_new(7).unwrap());
-        let other = Some(AgentProcessStartToken::try_new(8).unwrap());
+        let token = Some(StartToken::try_new(7).unwrap());
+        let other = Some(StartToken::try_new(8).unwrap());
 
         assert!(LocalProcessIdentity::same_start(token, None));
         assert!(LocalProcessIdentity::same_start(None, token));
@@ -146,7 +143,7 @@ mod tests {
     /// never recorded as the orphan.
     #[test]
     fn an_expected_child_whose_pid_was_reused_is_not_observed() {
-        let foreign = Some(AgentProcessStartToken::try_new(1).unwrap());
+        let foreign = Some(StartToken::try_new(1).unwrap());
         assert!(UnsupervisedChild::observe_expected(process::id(), foreign).is_none());
 
         let own = start_token_of(process::id());

@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use typed_builder::TypedBuilder;
 
 use super::{holder_pool::HolderPool, project_ports::ProjectPorts};
-use crate::domain::settings::Settings;
+use crate::domain::port::{SettingsStore, StackStore};
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
 #[derive(TypedBuilder)]
@@ -17,6 +17,8 @@ pub struct ServiceDeps {
     pub(super) holders: Arc<dyn HolderPool>,
     /// Builds each project's driven adapters as it is loaded.
     pub(super) ports: Box<dyn ProjectPorts>,
-    /// The user's settings, read once at start.
-    pub(super) settings: Settings,
+    /// Reads each project's stack as it is loaded and as it changes.
+    pub(super) stacks: Box<dyn StackStore>,
+    /// Reads the user's settings at start and as they change.
+    pub(super) settings: Box<dyn SettingsStore>,
 }

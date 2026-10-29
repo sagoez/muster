@@ -9,9 +9,8 @@ use crate::{
         service::NoticeLevel,
     },
     domain::{
-        agent_session::AgentProcessStartToken,
-        process::{ActivityState, ExitIntent, ProcessState},
-        value::PaneId,
+        process::{ExitIntent, ProcessState},
+        value::{PaneId, StartToken},
     },
 };
 
@@ -25,9 +24,9 @@ const UNSUPERVISED_KILL_LIMIT: u32 = 50;
 const UNSUPERVISED_START_REFUSED: &str =
     "cannot start: the process was left running unsupervised as pid";
 /// Shown when a start finds the process gone and its row, already removed
-/// from muster.yml, retired with it, so there is nothing left to start.
+/// from the project, retired with it, so there is nothing left to start.
 pub(super) const UNSUPERVISED_ROW_REMOVED: &str =
-    "cannot start: the process was removed from muster.yml and has exited";
+    "cannot start: the process was removed from the project and has exited";
 /// Prefix for an unsupervised process the stop could not signal; the pid
 /// follows.
 const UNSUPERVISED_STOP_FAILED: &str =
@@ -48,7 +47,7 @@ impl Supervisor {
         &mut self,
         pane: PaneId,
         pid: u32,
-        start_token: Option<AgentProcessStartToken>,
+        start_token: Option<StartToken>,
     ) -> bool {
         let Some(child) = UnsupervisedChild::observe_expected(pid, start_token) else {
             return false;
@@ -61,7 +60,6 @@ impl Supervisor {
             target.unsupervised = Some(child);
         }
         self.workspace.set_state(pane, ProcessState::Unsupervised);
-        self.workspace.set_activity(pane, ActivityState::Idle);
         true
     }
 
@@ -87,44 +85,32 @@ impl Supervisor {
             .map(|child| child.pid())
     }
 
-    /// Refuses a launch of `pane` while a child of the same process may still
-    /// run unsupervised, on this row or on a row its spec replaced, which
-    /// would put a second copy beside it. A recorded child found gone is
-    /// settled first and no longer blocks. Returns whether the launch was
+    /// Refuses a launch of `pane` while its child may still run unsupervised,
+    /// which would put a second copy beside it. A recorded child found gone
+    /// is settled first and no longer blocks, unless settling it retired a
+    /// row already removed from the project. Returns whether the launch was
     /// refused.
     pub(super) fn refuse_unsupervised_launch(&mut self, pane: PaneId) -> bool {
-        let Some(name) = self
+        if !self.is_unsupervised(pane) {
+            return false;
+        }
+        if let Some(pid) = self.running_unsupervised_pid(pane) {
+            self.notify(
+                NoticeLevel::Error,
+                Some(pane),
+                format!("{UNSUPERVISED_START_REFUSED} {pid}"),
+            );
+            return true;
+        }
+        let name = self
             .workspace
             .process(pane)
-            .map(|process| process.name().clone())
-        else {
-            return false;
-        };
-        let blockers: Vec<PaneId> = self
-            .workspace
-            .processes()
-            .iter()
-            .filter(|process| process.name() == &name)
-            .map(|process| *process.id())
-            .filter(|candidate| self.is_unsupervised(*candidate))
-            .collect();
-        for blocker in blockers {
-            match self.running_unsupervised_pid(blocker) {
-                Some(pid) => {
-                    self.notify(
-                        NoticeLevel::Error,
-                        Some(pane),
-                        format!("{UNSUPERVISED_START_REFUSED} {pid}"),
-                    );
-                    return true;
-                },
-                None => self.settle_unsupervised_exit(blocker),
-            }
-        }
+            .map(|process| process.name().clone());
+        self.settle_unsupervised_exit(pane);
         if self.workspace.process(pane).is_none() {
             self.notify_process(
                 NoticeLevel::Error,
-                Some(name),
+                name,
                 UNSUPERVISED_ROW_REMOVED.to_string(),
             );
             return true;
@@ -133,10 +119,9 @@ impl Supervisor {
     }
 
     /// Stops `pane`'s unsupervised child through its process group: the stop
-    /// policy's signal, or a kill when `force` is set or there is no policy.
-    /// The exit is reported only once the child is gone; until then the
-    /// generation-guarded force-stop timer escalates to a kill and checks
-    /// again.
+    /// policy's signal, or a kill when `force` is set. The exit is reported
+    /// only once the child is gone; until then the generation-guarded
+    /// force-stop timer escalates to a kill and checks again.
     pub(super) fn stop_unsupervised(&mut self, pane: PaneId, force: bool) {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
@@ -149,7 +134,10 @@ impl Supervisor {
         }
         let policy = (!force).then(|| self.stop_policy_of(pane)).flatten();
         let (signal, wait) = match policy {
-            Some(policy) => (unix_signal(*policy.signal()), *policy.grace_period()),
+            Some(policy) => (
+                unix_signal(*policy.signal()),
+                policy.grace_period().into_inner(),
+            ),
             None => (libc::SIGKILL, UNSUPERVISED_EXIT_POLL),
         };
         self.signal_unsupervised(pane, signal, wait);
@@ -228,7 +216,7 @@ impl Supervisor {
     }
 
     /// Records that `pane`'s unsupervised child is gone: a row removed from
-    /// the config retires, any other settles as exited.
+    /// the project retires, any other settles as exited.
     fn settle_unsupervised_exit(&mut self, pane: PaneId) {
         let Some(target) = self.panes.get_mut(&pane) else {
             return;

@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
 use crossbeam_channel::Sender;
 
 use super::{
-    project_key::ProjectKey,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
     supervisor::{HolderScreen, ShutdownGeneration, SpawnGeneration},
@@ -13,16 +10,17 @@ use crate::{
     domain::{
         port::ProcessHandle,
         pty::{ProcessOutput, PtyError},
-        value::PaneId,
+        value::{PaneId, ProjectRoot},
     },
 };
 
-/// A message for the service's event loop from a process, a timer or a watcher.
+/// A message for the service's event loop from a process, a timer, a worker
+/// or a client.
 pub enum ServiceEvent {
     /// Output from a running process.
     Output {
         /// Project the process belongs to.
-        project: ProjectKey,
+        project: ProjectRoot,
         /// Pane that produced the output.
         pane: PaneId,
         /// Spawn generation that produced it; output from a superseded
@@ -34,7 +32,7 @@ pub enum ServiceEvent {
     /// A pane's restart backoff has elapsed; respawn it if still current.
     Respawn {
         /// Project the process belongs to.
-        project: ProjectKey,
+        project: ProjectRoot,
         /// Pane to respawn.
         pane: PaneId,
         /// Generation captured when the restart was scheduled; a mismatch means
@@ -45,7 +43,7 @@ pub enum ServiceEvent {
     /// stop request are still current.
     ForceStop {
         /// Project the process belongs to.
-        project: ProjectKey,
+        project: ProjectRoot,
         /// Pane whose process should be forcibly stopped.
         pane: PaneId,
         /// Spawn generation captured when graceful termination began.
@@ -57,7 +55,7 @@ pub enum ServiceEvent {
     /// the failure, unless a later action superseded the launch.
     Spawned {
         /// Project the process belongs to.
-        project: ProjectKey,
+        project: ProjectRoot,
         /// Pane the process was launched for.
         pane: PaneId,
         /// Spawn generation the launch belongs to.
@@ -69,7 +67,7 @@ pub enum ServiceEvent {
     /// the failure, unless a later action superseded it.
     Adopted {
         /// Project the process belongs to.
-        project: ProjectKey,
+        project: ProjectRoot,
         /// Pane the holder was adopted for.
         pane: PaneId,
         /// Spawn generation the adoption belongs to.
@@ -79,11 +77,6 @@ pub enum ServiceEvent {
         record: Box<HolderRecord>,
         /// The adopted process, or why its holder could not be adopted.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
-    },
-    /// A watched project config changed on disk.
-    ConfigChanged {
-        /// Normalized path of the config that changed.
-        path: PathBuf,
     },
     /// A client's request, to be answered on `reply`.
     Request {

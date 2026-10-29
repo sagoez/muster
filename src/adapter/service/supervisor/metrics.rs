@@ -83,9 +83,8 @@ mod tests {
         adapter::service::supervisor::testing::*,
         domain::{
             port::{ProcessMetrics, ProcessSample},
-            process::{Process, ProcessKind, RestartPolicy},
+            process::{Process, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
-            value::{CommandLine, ProcessName},
         },
     };
 
@@ -129,15 +128,9 @@ mod tests {
         (harness, calls)
     }
 
-    /// One terminal on [`PANE`].
+    /// One process `p` on [`PANE`].
     fn terminal() -> Process {
-        Process::builder()
-            .id(PaneId::new(PANE))
-            .name(ProcessName::try_new("p").unwrap())
-            .kind(ProcessKind::Terminal)
-            .command(Some(CommandLine::try_new("sh").unwrap()))
-            .restart(RestartPolicy::Never)
-            .build()
+        spec("p", "sh", RestartPolicy::Never).to_process(PaneId::new(PANE))
     }
 
     /// Usage is resampled only once the metrics deadline has passed, and then
@@ -145,7 +138,7 @@ mod tests {
     #[test]
     fn metrics_are_sampled_only_after_the_deadline() {
         let (mut harness, calls) = sampled(vec![terminal()]);
-        harness.supervisor.up();
+        harness.up();
         let deadline = harness
             .supervisor
             .next_metrics_deadline()
@@ -189,13 +182,11 @@ mod tests {
     #[test]
     fn a_stopped_process_disarms_the_timer_once_its_usage_is_gone() {
         let (mut harness, _) = sampled(vec![terminal()]);
-        harness.supervisor.up();
+        harness.up();
         let deadline = harness.supervisor.next_metrics_deadline().unwrap();
         harness.supervisor.sample_metrics(deadline);
 
-        harness
-            .supervisor
-            .force_kill(&ProcessName::try_new("p").unwrap());
+        harness.supervisor.force_kill(&name("p"));
         let pane = PaneId::new(PANE);
         let generation = harness.supervisor.generations()[&pane];
         harness.supervisor.handle_output(

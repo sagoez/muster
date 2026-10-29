@@ -7,7 +7,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use super::{error::HolderError, id::HolderId, server::ensure_private_dir};
-use crate::domain::value::ProcessName;
+use crate::domain::value::{ProcessName, ProjectRoot};
 
 /// File extension of a holder socket.
 const SOCKET_EXTENSION: &str = "sock";
@@ -88,16 +88,15 @@ impl HolderDirs {
             && path.extension().is_some_and(|ext| ext == SOCKET_EXTENSION)
     }
 
-    /// The log of the process `name` of the project whose config is at
-    /// `project`: one file per process that every run appends to, so it can
-    /// be read after the process exits. The project's folder is named by a
-    /// stable hash of its resolved config path, so symlink aliases share it.
-    pub fn process_log(&self, project: &Path, name: &ProcessName) -> PathBuf {
-        let resolved = fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    /// The log of the process `name` of the project at `project`: one file
+    /// per process that every run appends to, so it can be read after the
+    /// process exits. The project's folder is named by a stable hash of its
+    /// root, which is already canonical, so every alias of it shares the log.
+    pub fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {
         self.logs
             .join(format!(
                 "{:016x}",
-                fnv1a(resolved.as_os_str().as_encoded_bytes())
+                fnv1a(project.as_ref().as_os_str().as_encoded_bytes())
             ))
             .join(format!("{}.{LOG_EXTENSION}", log_file_stem(name)))
     }
@@ -192,34 +191,28 @@ mod tests {
         ProcessName::try_new(name).unwrap()
     }
 
-    /// One project's process logs share a stable folder that a symlink alias
-    /// of its config also names, and each process has one log of its own.
+    /// The project at `path`.
+    fn root(path: PathBuf) -> ProjectRoot {
+        ProjectRoot::try_new(path).unwrap()
+    }
+
+    /// One project's process logs share a stable folder, and each process has
+    /// one log of its own.
     #[test]
     fn a_process_log_is_named_by_project_and_process() {
         let scratch = TempDir::new().unwrap();
         let dirs = HolderDirs::under(scratch.path());
-        let project = scratch.path().join("shop/muster.yml");
-        fs::create_dir_all(project.parent().unwrap()).unwrap();
-        fs::write(&project, "").unwrap();
-        std::os::unix::fs::symlink(scratch.path().join("shop"), scratch.path().join("alias"))
-            .unwrap();
+        let project = root(scratch.path().join("shop"));
 
         let log = dirs.process_log(&project, &name("dev server"));
 
         assert_eq!(log.file_name().unwrap(), "dev server.log");
         assert!(log.starts_with(scratch.path().join(LOGS_DIR)));
-        assert_eq!(
-            dirs.process_log(
-                &scratch.path().join("alias/muster.yml"),
-                &name("dev server")
-            ),
-            log
-        );
         assert_eq!(log, dirs.process_log(&project, &name("dev server")));
         assert_ne!(log, dirs.process_log(&project, &name("api")));
         assert_ne!(
             log.parent(),
-            dirs.process_log(&scratch.path().join("other.yml"), &name("dev server"))
+            dirs.process_log(&root(scratch.path().join("other")), &name("dev server"))
                 .parent()
         );
     }
@@ -248,7 +241,7 @@ mod tests {
         let legacy = scratch.path().join(HOLDERS_DIR).join(LEGACY_LOGS_DIR);
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("0123abcd.log"), "old").unwrap();
-        let current = dirs.process_log(&scratch.path().join("muster.yml"), &name("api"));
+        let current = dirs.process_log(&root(scratch.path().to_path_buf()), &name("api"));
         fs::create_dir_all(current.parent().unwrap()).unwrap();
         fs::write(&current, "new").unwrap();
 

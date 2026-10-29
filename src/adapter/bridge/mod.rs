@@ -2,8 +2,6 @@
 //! service's other requests do not cover. It lives in the adapter layer, so
 //! the core never sees it.
 
-mod session_summary;
 mod workspace_request;
 
-pub use session_summary::*;
 pub use workspace_request::*;

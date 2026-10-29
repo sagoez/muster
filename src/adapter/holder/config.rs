@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{error::HolderError, id::HolderId};
-use crate::domain::{color_scheme::ColorScheme, pty::SpawnRequest, value::ByteSize};
+use crate::domain::pty::SpawnRequest;
 
 /// Mode of a handed-over file: owner read and write only, since the request
 /// can carry the child's environment.
@@ -22,7 +22,8 @@ const SPEC_EXTENSION: &str = "json";
 /// spec.
 const ERROR_EXTENSION: &str = "err";
 
-/// Everything one holder needs to run its child and serve clients.
+/// Everything one holder needs to run its child and serve clients. The
+/// request carries the launch settings: size, scrollback, log cap and colors.
 #[derive(Debug, Clone, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder)]
 #[serde(rename_all = "kebab-case")]
 pub struct HolderConfig {
@@ -41,16 +42,6 @@ pub struct HolderConfig {
     /// The child's output log.
     #[getset(get = "pub")]
     log: PathBuf,
-    /// Size at which the log rotates.
-    #[getset(get_copy = "pub")]
-    #[serde(with = "byte_count")]
-    log_cap: ByteSize,
-    /// Scrollback lines the holder's emulator keeps.
-    #[getset(get_copy = "pub")]
-    scrollback: usize,
-    /// The default colors the holder's emulator reports when the child asks.
-    #[getset(get_copy = "pub")]
-    color_scheme: ColorScheme,
     /// How long after starting the holder waits for its first supervisor.
     /// One that never arrives means the launcher gave up, so the holder kills
     /// its child and exits rather than leave it running unsupervised.
@@ -121,46 +112,19 @@ pub(super) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), Holder
     Ok(written?)
 }
 
-/// Carries a [`ByteSize`] as its exact byte count, since its own human-readable
-/// form rounds.
-mod byte_count {
-    use bytesize::ByteSize as RawByteSize;
-    use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-    use crate::domain::value::ByteSize;
-
-    /// Writes `size` as a plain byte count.
-    ///
-    /// # Errors
-    /// Returns the serializer's error.
-    pub(super) fn serialize<S: Serializer>(
-        size: &ByteSize,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(size.bytes())
-    }
-
-    /// Reads a plain byte count, refusing zero.
-    ///
-    /// # Errors
-    /// Returns the deserializer's error, or a custom one for zero.
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<ByteSize, D::Error> {
-        ByteSize::try_new(RawByteSize::b(u64::deserialize(deserializer)?)).map_err(D::Error::custom)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use bytesize::ByteSize as RawByteSize;
     use tempfile::TempDir;
 
     use super::*;
     use crate::domain::{
-        process::ProcessKind,
+        color_scheme::ColorScheme,
+        process::{StopPolicy, StopSignal},
         pty::PtySize,
-        value::{Cols, CommandLine, ProcessName, Rows},
+        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
     };
 
     /// A log cap with no exact human-readable form.
@@ -169,16 +133,22 @@ mod tests {
     const PERMISSION_BITS: u32 = 0o777;
     /// A first-supervisor deadline with a fractional part.
     const SUPERVISOR_DEADLINE: Duration = Duration::from_millis(1500);
+    /// Scrollback lines the handed-over request asks for.
+    const SCROLLBACK: usize = 10;
+    /// Grace of the handed-over request's stop policy.
+    const STOP_GRACE: Duration = Duration::from_millis(2500);
 
     #[test]
     fn a_handed_over_config_round_trips_exactly_and_is_removed_after_reading() {
-        use std::os::unix::fs::PermissionsExt;
-
         let scratch = TempDir::new().unwrap();
+        let stop = StopPolicy::builder()
+            .signal(StopSignal::Interrupt)
+            .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+            .build();
         let request = SpawnRequest::builder()
             .process(ProcessName::try_new("dev server").unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new("echo hi").unwrap()))
+            .command(CommandLine::try_new("echo hi").unwrap())
+            .launch_environment([("FROM".into(), "cli".into())].into())
             .environment([("KEY".into(), "value".into())].into())
             .size(
                 PtySize::builder()
@@ -186,6 +156,10 @@ mod tests {
                     .cols(Cols::new(80))
                     .build(),
             )
+            .scrollback(SCROLLBACK)
+            .log_max_size(ByteSize::try_new(RawByteSize::b(ODD_CAP_BYTES)).unwrap())
+            .color_scheme(ColorScheme::Light)
+            .stop(stop)
             .build();
         let config = HolderConfig::builder()
             .id(HolderId::generate().unwrap())
@@ -193,9 +167,6 @@ mod tests {
             .socket(scratch.path().join("h.sock"))
             .record_dir(scratch.path().join("records"))
             .log(scratch.path().join("h.log"))
-            .log_cap(ByteSize::try_new(RawByteSize::b(ODD_CAP_BYTES)).unwrap())
-            .scrollback(10)
-            .color_scheme(ColorScheme::Light)
             .supervisor_deadline(SUPERVISOR_DEADLINE)
             .build();
         let path = config.spec_path();
@@ -207,10 +178,14 @@ mod tests {
 
         assert!(!path.exists());
         assert_eq!(read.supervisor_deadline(), SUPERVISOR_DEADLINE);
-        assert_eq!(read.log_cap().bytes(), ODD_CAP_BYTES);
-        assert_eq!(read.color_scheme(), ColorScheme::Light);
         assert_eq!(read.id(), config.id());
-        assert_eq!(read.request().environment(), config.request().environment());
-        assert_eq!(read.request().size(), config.request().size());
+        let (sent, received) = (config.request(), read.request());
+        assert_eq!(received.log_max_size().bytes(), ODD_CAP_BYTES);
+        assert_eq!(received.scrollback(), SCROLLBACK);
+        assert_eq!(received.color_scheme(), ColorScheme::Light);
+        assert_eq!(received.stop(), stop);
+        assert_eq!(received.environment(), sent.environment());
+        assert_eq!(received.launch_environment(), sent.launch_environment());
+        assert_eq!(received.size(), sent.size());
     }
 }

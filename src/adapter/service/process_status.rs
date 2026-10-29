@@ -5,11 +5,7 @@ use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::process_usage::ProcessUsage;
-use crate::domain::{
-    process::{ActivityState, ProcessKind, ProcessState},
-    pty::ExitOutcome,
-    value::ProcessName,
-};
+use crate::domain::{process::ProcessState, pty::ExitOutcome, value::ProcessName};
 
 /// What `ps` shows for one supervised process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Getters, TypedBuilder)]
@@ -18,12 +14,8 @@ use crate::domain::{
 pub struct ProcessStatus {
     /// The process's name within its project.
     name: ProcessName,
-    /// Section the process belongs to.
-    kind: ProcessKind,
     /// Lifecycle state.
     state: ProcessState,
-    /// Inferred working, idle or attention state.
-    activity: ActivityState,
     /// OS process id while a child is live.
     pid: Option<u32>,
     /// How long the live child has run.
@@ -37,8 +29,7 @@ pub struct ProcessStatus {
     attached: u32,
     /// How its most recent child ended, while it is not running.
     last_exit: Option<ExitOutcome>,
-    /// How long a graceful stop waits before it kills, or none when a stop
-    /// kills at once.
+    /// How long a graceful stop waits before it kills.
     #[serde(with = "humantime_serde")]
-    stop_grace: Option<Duration>,
+    stop_grace: Duration,
 }

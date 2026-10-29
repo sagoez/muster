@@ -1,10 +1,12 @@
 //! The real service round trip: the built `muster` binary run as `__service`
-//! over an isolated state directory, bringing a project up, exiting with its
-//! holder still running, and a second service adopting that holder.
+//! over an isolated state directory whose database holds the project's stack,
+//! bringing the project up, following stack and settings changes, exiting
+//! with its holder still running, and a second service adopting that holder.
 
 #![cfg(target_os = "linux")]
 
 use std::{
+    ffi::OsString,
     fs,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -17,11 +19,18 @@ use muster::{
     adapter::{
         holder::HOLDER_SUBCOMMAND,
         service::{
-            ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest, ServiceResponse,
+            LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
+            ServiceResponse,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
+        store::SqliteStore,
     },
-    domain::{process::ProcessState, value::ProcessName},
+    domain::{
+        config::{Environment, ProcessSpec, SettingChange},
+        port::{SettingsStore, StackStore},
+        process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
+        value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot},
+    },
 };
 use tempfile::TempDir;
 
@@ -35,27 +44,16 @@ const POLL: Duration = Duration::from_millis(10);
 const SHORT_TEMP_ROOT: &str = "/tmp";
 /// Prefix of the scratch directory.
 const SCRATCH_PREFIX: &str = "mv-";
-/// Directory muster keeps its state and config under, inside the XDG roots.
+/// Directory muster keeps its state under, inside the XDG state root.
 const APP_DIR: &str = "muster";
-/// The settings file name inside muster's config directory.
-const SETTINGS_FILE: &str = "settings.yml";
-/// The settings muster ships, which every scratch starts from.
-const SHIPPED_SETTINGS: &str = include_str!("../src/adapter/config/default_settings.yml");
-/// The shipped desktop notification setting, and what scratches use instead.
-const DESKTOP_ON: &str = "desktop_notifications: true";
-const DESKTOP_OFF: &str = "desktop_notifications: false";
-/// The setting the incomplete settings file leaves out.
-const MISSING_SETTING: &str = "scrollback";
-/// A settings file with every setting but [`MISSING_SETTING`].
-const INCOMPLETE_SETTINGS: &str = "desktop_notifications: false\neditor:\n  command: \"\"\n  \
-                                   terminal: \"\"\ndefault_size:\n  rows: 24\n  cols: 80\n\
-                                   detach_key: \"ctrl-\\\\\"\nlog_max_size: 10MiB\n";
+/// The database file inside muster's state directory.
+const DATABASE_FILE: &str = "muster.db";
 /// The project's one process, which runs until it is killed.
-const PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: sleep 600\n    autostart: true\n";
-/// A project whose one process ignores the hangup its holder's death sends.
-const HUP_IGNORING_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: trap '' HUP; sleep 600\n    autostart: true\n";
-/// A project whose one process fails at once and is always restarted.
-const FLAPPING_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: exit 1\n    autostart: true\n    restart: always\n";
+const SLEEPER: &str = "sleep 600";
+/// A process that ignores the hangup its holder's death sends.
+const HUP_IGNORING: &str = "trap '' HUP; sleep 600";
+/// A process that fails at once.
+const FLAPPER: &str = "exit 1";
 /// Restarts the flapper makes before its service is stopped.
 const FLAPS_BEFORE_STOP: u32 = 2;
 /// How long a test lets a refused start settle before checking it did nothing.
@@ -64,6 +62,19 @@ const SETTLE: Duration = Duration::from_millis(500);
 const CRASHED: &str = "crashed";
 /// How long a process runs before its service is replaced.
 const UPTIME_BEFORE_STOP: Duration = Duration::from_millis(1500);
+/// Grace every test process's stop policy gives it.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// A variable the service inherits that no child may see.
+const LEAKED_VAR: &str = "MUSTER_TEST_SERVICE_SECRET";
+/// A variable the service inherits outside the baseline, which no child may
+/// see either.
+const INHERITED_VAR: &str = "SERVICE_ONLY_TOKEN";
+/// A variable of the client that asked for a launch.
+const CLIENT_VAR: &str = "FROM_CLIENT";
+/// Its value.
+const CLIENT_VALUE: &str = "client-value";
+/// The notice of a holder found running whose process left the project.
+const REMOVED_NOTICE: &str = "stopped: removed from the project";
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -98,28 +109,62 @@ fn alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-/// Isolated XDG roots and a project; dropping it kills every service, holder
-/// and child the test left there, even on panic.
+/// The environment of the process `pid`, as `NAME=value` entries.
+fn environ(pid: u32) -> Vec<String> {
+    fs::read(format!("/proc/{pid}/environ"))
+        .unwrap_or_default()
+        .split(|byte| *byte == 0)
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect()
+}
+
+/// A process `name` running `command` under `restart`, starting with the
+/// project.
+fn process(name: &str, command: &str, restart: RestartPolicy) -> ProcessSpec {
+    ProcessSpec::builder()
+        .name(ProcessName::try_new(name).unwrap())
+        .command(CommandLine::try_new(command).unwrap())
+        .environment(Environment::empty())
+        .autostart(true)
+        .restart(restart)
+        .stop(
+            StopPolicy::builder()
+                .signal(StopSignal::Terminate)
+                .grace_period(PositiveDuration::try_new(STOP_GRACE).unwrap())
+                .build(),
+        )
+        .build()
+}
+
+/// The client environment carrying [`CLIENT_VAR`].
+fn client_env() -> LaunchEnvironment {
+    LaunchEnvironment::from_vars([(OsString::from(CLIENT_VAR), OsString::from(CLIENT_VALUE))])
+}
+
+/// Isolated XDG roots, a database and a project; dropping it kills every
+/// service, holder and child the test left there, even on panic.
 struct Scratch {
     root: TempDir,
     children: Vec<u32>,
 }
 
 impl Scratch {
-    /// A fresh scratch directory short enough to bind sockets in, with the
-    /// shipped settings but desktop notifications off.
+    /// A fresh scratch directory short enough to bind sockets in, whose
+    /// database has desktop notifications off.
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix(SCRATCH_PREFIX)
             .tempdir_in(SHORT_TEMP_ROOT)
             .unwrap();
-        let settings = root.path().join("config").join(APP_DIR).join(SETTINGS_FILE);
-        fs::create_dir_all(settings.parent().unwrap()).unwrap();
-        fs::write(&settings, SHIPPED_SETTINGS.replace(DESKTOP_ON, DESKTOP_OFF)).unwrap();
-        Self {
+        let scratch = Self {
             root,
             children: Vec::new(),
-        }
+        };
+        scratch
+            .store()
+            .apply(&SettingChange::DesktopNotifications(false))
+            .unwrap();
+        scratch
     }
 
     /// The XDG state root the services run under.
@@ -127,23 +172,31 @@ impl Scratch {
         self.root.path().join("state")
     }
 
+    /// The database the services read.
+    fn store(&self) -> SqliteStore {
+        SqliteStore::open(&self.state_root().join(APP_DIR).join(DATABASE_FILE)).unwrap()
+    }
+
     /// The socket a service over this scratch listens on.
     fn socket(&self) -> PathBuf {
         protocol::socket_path(&self.state_root().join(APP_DIR))
     }
 
-    /// Writes the project's `muster.yml` and returns its path.
-    fn project(&self) -> PathBuf {
-        self.project_with(PROJECT)
+    /// Registers the project with one process `api` running [`SLEEPER`].
+    fn project(&self) -> ProjectRoot {
+        self.project_with(&[process("api", SLEEPER, RestartPolicy::Never)])
     }
 
-    /// Writes `config` as the project's `muster.yml` and returns its path.
-    fn project_with(&self, config: &str) -> PathBuf {
+    /// Registers the project with `processes` and returns its folder.
+    fn project_with(&self, processes: &[ProcessSpec]) -> ProjectRoot {
         let dir = self.root.path().join("project");
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("muster.yml");
-        fs::write(&path, config).unwrap();
-        path
+        let root = ProjectRoot::try_new(fs::canonicalize(dir).unwrap()).unwrap();
+        let store = self.store();
+        for spec in processes {
+            store.add_process(&root, spec).unwrap();
+        }
+        root
     }
 
     /// The pids of the holders running under this scratch.
@@ -151,17 +204,24 @@ impl Scratch {
         processes_under(HOLDER_SUBCOMMAND, self.root.path())
     }
 
-    /// The one process `ps` reports for `project`.
-    fn api(&self, project: &Path) -> ProcessStatus {
-        self.status(project).processes()[0].clone()
+    /// The status `ps` reports for the process `name` of `project`.
+    fn named(&self, project: &ProjectRoot, name: &str) -> Option<ProcessStatus> {
+        self.status(project)
+            .processes()
+            .iter()
+            .find(|process| process.name().as_ref() == name)
+            .cloned()
     }
 
-    /// Brings `project` up and waits until its one process runs, returning
-    /// its status.
-    fn up_running(&mut self, project: &Path) -> ProcessStatus {
-        self.send(ServiceRequest::Up {
-            project: project.to_path_buf(),
-        });
+    /// The status `ps` reports for `api` of `project`.
+    fn api(&self, project: &ProjectRoot) -> ProcessStatus {
+        self.named(project, "api").unwrap()
+    }
+
+    /// Brings `project` up as a client with [`client_env`], and waits until
+    /// `api` runs, returning its status.
+    fn up_running(&mut self, project: &ProjectRoot) -> ProcessStatus {
+        self.up(project);
         wait_until("the process to run", || {
             *self.api(project).state() == ProcessState::Running
         });
@@ -170,41 +230,52 @@ impl Scratch {
         api
     }
 
-    /// Sends `action` for `api` in `project`.
-    fn control(&self, project: &Path, action: ProcessAction) -> ServiceResponse {
-        self.send(ServiceRequest::Control {
-            project: project.to_path_buf(),
-            name: ProcessName::try_new("api").unwrap(),
-            action,
+    /// Brings `project` up as a client with [`client_env`].
+    fn up(&self, project: &ProjectRoot) -> ServiceResponse {
+        self.send(ServiceRequest::Up {
+            project: project.clone(),
+            environment: client_env(),
         })
     }
 
-    /// The recent notices of `project`'s processes, as text.
-    fn notices(&self, project: &Path) -> Vec<String> {
+    /// Sends `action` for `api` in `project`.
+    fn control(&self, project: &ProjectRoot, action: ProcessAction) -> ServiceResponse {
+        self.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action,
+            environment: client_env(),
+        })
+    }
+
+    /// The recent notices of `project`, as `(process, message)`.
+    fn notices(&self, project: &ProjectRoot) -> Vec<(Option<String>, String)> {
         let ServiceResponse::Notices(notices) = self.send(ServiceRequest::Notices {
-            project: project.to_path_buf(),
+            project: project.clone(),
         }) else {
             panic!("notices answer notices");
         };
         notices
             .iter()
-            .map(|notice| notice.message().clone())
+            .map(|notice| {
+                (
+                    notice.process().as_ref().map(ToString::to_string),
+                    notice.message().clone(),
+                )
+            })
             .collect()
     }
 
-    /// The XDG config root the services read their settings from.
-    fn config_root(&self) -> PathBuf {
-        self.root.path().join("config")
-    }
-
     /// Spawns `muster __service` over this scratch's XDG roots with no
-    /// terminal, as a client starts it.
+    /// terminal, as a client starts it, carrying variables no child may see.
     fn spawn_service(&self) -> Child {
         Command::new(BINARY)
             .arg(SERVICE_SUBCOMMAND)
             .env("XDG_STATE_HOME", self.state_root())
-            .env("XDG_CONFIG_HOME", self.config_root())
+            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
+            .env(LEAKED_VAR, "leaked")
+            .env(INHERITED_VAR, "leaked")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -229,9 +300,9 @@ impl Scratch {
     }
 
     /// The one project status a `ps` of `project` reports.
-    fn status(&self, project: &Path) -> ProjectStatus {
+    fn status(&self, project: &ProjectRoot) -> ProjectStatus {
         let ServiceResponse::Status(mut statuses) = self.send(ServiceRequest::Ps {
-            project: Some(project.to_path_buf()),
+            project: Some(project.clone()),
         }) else {
             panic!("ps answers a status");
         };
@@ -277,13 +348,52 @@ fn kill_hard(pid: u32) {
     }
 }
 
+/// A child runs with the scrubbed baseline and the environment of the client
+/// that started it, never a variable the service itself inherited, and its
+/// policy restarts keep that client environment.
+#[test]
+fn a_child_runs_with_the_client_environment_and_none_of_the_services() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project_with(&[process("api", SLEEPER, RestartPolicy::Always)]);
+    let service = scratch.start_service();
+    let first = scratch.up_running(&project).pid().unwrap();
+
+    let client_entry = format!("{CLIENT_VAR}={CLIENT_VALUE}");
+    let leaked = |pid: u32| {
+        environ(pid)
+            .iter()
+            .any(|entry| entry.starts_with(LEAKED_VAR) || entry.starts_with(INHERITED_VAR))
+    };
+    let env = environ(first);
+    assert!(env.contains(&client_entry), "{env:?}");
+    assert!(!leaked(first), "{env:?}");
+    assert!(
+        env.contains(&format!("MUSTER_PROJECT={}", project.as_ref().display())),
+        "{env:?}"
+    );
+
+    kill_hard(first);
+    wait_until("the policy restart", || {
+        scratch.api(&project).pid().is_some_and(|pid| pid != first)
+    });
+    let second = scratch.api(&project).pid().unwrap();
+    scratch.children.push(second);
+    assert!(
+        environ(second).contains(&client_entry),
+        "kept for the restart"
+    );
+    assert!(!leaked(second));
+    scratch.control(&project, ProcessAction::Stop);
+    scratch.stop_service(service);
+}
+
 /// A child that outlives its SIGKILLed holder, as one that ignores the hangup
 /// does, is left unsupervised: `start` never runs a second copy beside it,
 /// neither under the service that saw the holder die nor under a successor.
 #[test]
 fn a_child_outliving_its_killed_holder_is_unsupervised_and_never_started_twice() {
     let mut scratch = Scratch::new();
-    let project = scratch.project_with(HUP_IGNORING_PROJECT);
+    let project = scratch.project_with(&[process("api", HUP_IGNORING, RestartPolicy::Never)]);
     let service = scratch.start_service();
     let pid = *scratch.up_running(&project).pid();
     let holders = scratch.holders();
@@ -328,7 +438,7 @@ fn a_holder_killed_with_its_child_is_told_as_a_crash() {
         scratch
             .notices(&project)
             .iter()
-            .any(|notice| notice.starts_with(CRASHED))
+            .any(|(_, message)| message.starts_with(CRASHED))
     });
     assert!(!scratch.api(&project).state().may_be_running());
     scratch.stop_service(service);
@@ -339,11 +449,9 @@ fn a_holder_killed_with_its_child_is_told_as_a_crash() {
 #[test]
 fn a_restart_pending_at_service_stop_is_carried_out_by_the_successor() {
     let scratch = Scratch::new();
-    let project = scratch.project_with(FLAPPING_PROJECT);
+    let project = scratch.project_with(&[process("api", FLAPPER, RestartPolicy::Always)]);
     let service = scratch.start_service();
-    scratch.send(ServiceRequest::Up {
-        project: project.clone(),
-    });
+    scratch.up(&project);
     wait_until("the flapper to restart", || {
         *scratch.api(&project).restarts() >= FLAPS_BEFORE_STOP
     });
@@ -400,27 +508,74 @@ fn an_adopted_process_keeps_its_uptime() {
     scratch.stop_service(successor);
 }
 
-/// A service that cannot start, here for a settings file missing a key,
-/// exits with a failure that its log records, naming the file and the key,
-/// although it was started with no terminal.
+/// A stack change reaches the running service: an added process waits
+/// `Pending`, a changed running one keeps its pid, and a removed running one
+/// is stopped and its holder ends.
 #[test]
-fn a_service_that_cannot_start_says_why_in_its_log() {
-    let scratch = Scratch::new();
-    let settings = scratch.config_root().join(APP_DIR).join(SETTINGS_FILE);
-    fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    fs::write(&settings, INCOMPLETE_SETTINGS).unwrap();
-
-    let mut service = scratch.spawn_service();
-    let mut status = None;
-    wait_until("the service to give up", || {
-        status = service.try_wait().unwrap();
-        status.is_some()
+fn a_stack_change_adds_updates_and_stops_live() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project_with(&[
+        process("api", SLEEPER, RestartPolicy::Never),
+        process("web", SLEEPER, RestartPolicy::Never),
+    ]);
+    let service = scratch.start_service();
+    let api = scratch.up_running(&project).pid().unwrap();
+    wait_until("web to run", || {
+        scratch
+            .named(&project, "web")
+            .is_some_and(|web| *web.state() == ProcessState::Running)
     });
+    let store = scratch.store();
 
-    assert!(!status.unwrap().success());
-    let log = fs::read_to_string(protocol::log_path(&scratch.state_root().join(APP_DIR))).unwrap();
-    assert!(log.contains(&settings.display().to_string()), "{log}");
-    assert!(log.contains(MISSING_SETTING), "{log}");
+    store
+        .add_process(&project, &process("docs", SLEEPER, RestartPolicy::Never))
+        .unwrap();
+    store
+        .remove_process(&project, &ProcessName::try_new("web").unwrap())
+        .unwrap();
+    assert_eq!(
+        scratch.send(ServiceRequest::StackChanged {
+            project: project.clone()
+        }),
+        ServiceResponse::Ok
+    );
+
+    assert_eq!(
+        *scratch.named(&project, "docs").unwrap().state(),
+        ProcessState::Pending
+    );
+    assert_eq!(*scratch.api(&project).pid(), Some(api), "api kept running");
+    wait_until("web to be stopped and gone", || {
+        scratch.named(&project, "web").is_none() && scratch.holders().len() == 1
+    });
+    scratch.stop_service(service);
+}
+
+/// A process removed from the project while no service ran is found running
+/// by the next service, which stops it with a notice.
+#[test]
+fn a_process_removed_while_the_service_was_down_is_stopped_at_start() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project();
+    let service = scratch.start_service();
+    let pid = scratch.up_running(&project).pid().unwrap();
+    scratch.stop_service(service);
+
+    scratch
+        .store()
+        .remove_process(&project, &ProcessName::try_new("api").unwrap())
+        .unwrap();
+    let successor = scratch.start_service();
+
+    wait_until("the removed process to be stopped", || {
+        !alive(pid) && scratch.holders().is_empty()
+    });
+    assert!(
+        scratch
+            .notices(&project)
+            .contains(&(Some("api".to_string()), REMOVED_NOTICE.to_string()))
+    );
+    scratch.stop_service(successor);
 }
 
 #[test]
@@ -429,15 +584,13 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     let project = scratch.project();
     let service = scratch.start_service();
 
-    let ServiceResponse::Batch(up) = scratch.send(ServiceRequest::Up {
-        project: project.clone(),
-    }) else {
+    let ServiceResponse::Batch(up) = scratch.up(&project) else {
         panic!("up answers what it started");
     };
     assert_eq!(up.acted().len(), 1, "{up:?}");
-    let mut api = scratch.status(&project).processes()[0].clone();
+    let mut api = scratch.api(&project);
     wait_until("the process to run", || {
-        api = scratch.status(&project).processes()[0].clone();
+        api = scratch.api(&project);
         *api.state() == ProcessState::Running
     });
     let pid = api.pid().unwrap();
@@ -447,10 +600,7 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
 
     assert!(!scratch.socket().exists(), "the socket is removed");
     assert!(alive(pid), "the process outlives the service");
-    assert_eq!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root.path()).len(),
-        1
-    );
+    assert_eq!(scratch.holders().len(), 1);
 
     let successor = scratch.start_service();
     let ServiceResponse::Status(loaded) = scratch.send(ServiceRequest::Ps { project: None }) else {
@@ -462,23 +612,15 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
         "the successor loaded the project to adopt it"
     );
     wait_until("the adoption to settle", || {
-        *scratch.status(&project).processes()[0].state() == ProcessState::Running
+        *scratch.api(&project).state() == ProcessState::Running
     });
-    assert_eq!(*scratch.status(&project).processes()[0].pid(), Some(pid));
+    assert_eq!(*scratch.api(&project).pid(), Some(pid));
 
-    scratch.send(ServiceRequest::Control {
-        project: project.clone(),
-        name: ProcessName::try_new("api").unwrap(),
-        action: ProcessAction::Kill,
-    });
+    scratch.control(&project, ProcessAction::Kill);
     wait_until("the kill to settle", || {
-        !scratch.status(&project).processes()[0]
-            .state()
-            .may_be_running()
+        !scratch.api(&project).state().may_be_running()
     });
     scratch.stop_service(successor);
-    wait_until("the holder to finish", || {
-        processes_under(HOLDER_SUBCOMMAND, scratch.root.path()).is_empty()
-    });
+    wait_until("the holder to finish", || scratch.holders().is_empty());
     assert!(!alive(pid));
 }

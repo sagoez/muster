@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
+    ffi::OsString,
     sync::PoisonError,
     time::{Instant, SystemTime},
 };
@@ -15,22 +16,18 @@ use super::{
 };
 use crate::{
     adapter::service::{
-        Notice, NoticeLevel, ProcessStatus, ProcessUsage, ProjectKey, ProjectStatus, Refusal,
-        ServiceEvent, SharedNotices,
+        Notice, NoticeLevel, ProcessStatus, ProcessUsage, ProjectStatus, Refusal, ServiceEvent,
+        SharedNotices,
     },
-    application::Workspace,
+    application::{StackSync, Workspace},
     domain::{
-        agent_session::AgentSessionId,
-        color_scheme::ColorScheme,
-        config::ConfigError,
-        notification::NotificationScope,
-        port::{
-            AgentSessionStore, ConfigWatcher, Notifier, ProcessHandle, ProcessMetrics,
-            ProcessRunner, ProjectRegistry,
-        },
+        config::Stack,
+        port::{Notifier, ProcessHandle, ProcessMetrics, ProcessRunner},
         process::ProcessState,
-        pty::{ExitOutcome, PtySize},
-        value::{PaneId, ProcessName},
+        project::Project,
+        pty::ExitOutcome,
+        settings::Settings,
+        value::{PaneId, ProcessName, ProjectRoot},
     },
 };
 
@@ -38,13 +35,14 @@ use crate::{
 pub(super) const UNKNOWN_PROCESS_NOTICE: &str = "no process with that name in this project";
 
 /// Supervises one project's processes: spawns them, applies their stop and
-/// restart policies, adopts holders a previous service left running, and
-/// reports failures as notices rather than panicking.
+/// restart policies, adopts holders a previous service left running, follows
+/// the project's stored stack, and reports failures as notices rather than
+/// panicking.
 #[derive(Getters, MutGetters)]
 pub struct Supervisor {
     /// The project this supervisor runs.
     #[getset(get = "pub")]
-    pub(super) project: ProjectKey,
+    pub(super) project: Project,
     /// The project's processes and their lifecycle state.
     #[getset(get = "pub")]
     pub(super) workspace: Workspace,
@@ -52,20 +50,10 @@ pub struct Supervisor {
     pub(super) runner: Box<dyn ProcessRunner>,
     /// Takes over holders a previous service left running.
     pub(super) adopter: Option<Box<dyn HolderAdopter>>,
-    /// Reads and locks the project's config.
-    #[getset(get = "pub(crate)")]
-    pub(super) registry: Box<dyn ProjectRegistry>,
-    /// Durable agent-session history.
-    pub(super) agent_session_store: Option<Box<dyn AgentSessionStore>>,
     /// Where output, restart timers and stop deadlines are delivered.
     pub(super) events: Sender<ServiceEvent>,
     /// Where supervision reports what the user should know.
     pub(super) notices: SharedNotices,
-    /// Reports edits to the project's config, so it is reconciled live.
-    pub(super) config_watcher: Option<Box<dyn ConfigWatcher>>,
-    /// Session reopens waiting for the session's previous pane to finish
-    /// retiring, keyed by that pane.
-    pub(super) pending_session_reopens: HashMap<PaneId, AgentSessionId>,
     /// The terminal and live handle of every pane that has run.
     #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
     pub(super) panes: HashMap<PaneId, Pane>,
@@ -103,65 +91,43 @@ pub struct Supervisor {
     pub(super) metrics_deadline: Instant,
     /// Delivers desktop notifications.
     pub(super) notifier: Option<Box<dyn Notifier>>,
-    /// Whether attention a process raises also reaches the desktop.
-    pub(super) desktop_notifications: bool,
+    /// The settings launches take their terminal, log and colors from, and
+    /// that decide whether a crash reaches the desktop.
+    pub(super) settings: Settings,
     /// Panes whose last holder screen read failed, so a failure streak is
     /// reported once.
     pub(super) failing_screen_reads: HashSet<PaneId>,
-    /// Writable clients attached to each pane's terminal.
+    /// Writable clients attached to each live pane's terminal.
     pub(super) attached: HashMap<PaneId, u32>,
     /// The handle of each pane's exited process whose exit is not yet
     /// acknowledged, held while its restart is pending so a service that
     /// stops meanwhile leaves the exit for its successor to apply again.
     pub(super) held_exits: HashMap<PaneId, Box<dyn ProcessHandle>>,
-    /// Terminal size each new process starts with.
-    pub(super) size: PtySize,
-    /// The default colors each process's terminal reports when asked.
-    pub(super) color_scheme: ColorScheme,
-    /// Monotonic source for terminal-lifetime notification scopes.
-    pub(super) next_notification_scope: NotificationScope,
+    /// The environment of the command that last started each pane, which its
+    /// policy restarts are launched with too.
+    pub(super) launch_environments: HashMap<PaneId, BTreeMap<OsString, OsString>>,
 }
 
 impl Supervisor {
-    /// Loads `project`'s config and creates its supervisor. Nothing starts
+    /// Creates the supervisor of `project` running `stack`. Nothing starts
     /// until [`Self::up`] or a start request.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the project's config cannot be read.
-    pub fn load(project: ProjectKey, deps: SupervisorDeps) -> Result<Self, ConfigError> {
-        let config = deps.registry.workspace(project.as_ref())?;
-        let workspace = Workspace::builder()
-            .processes(config.to_processes())
-            .build();
-        Ok(Self::new(project, workspace, deps))
-    }
-
-    /// Creates a supervisor for `project` over an already loaded `workspace`.
-    pub fn new(project: ProjectKey, workspace: Workspace, deps: SupervisorDeps) -> Self {
+    pub fn new(project: Project, stack: &Stack, deps: SupervisorDeps) -> Self {
         let SupervisorDeps {
             runner,
-            registry,
-            agent_session_store,
             events,
             notices,
-            config_watcher,
             notifier,
-            desktop_notifications,
             process_metrics,
-            size,
-            color_scheme,
+            settings,
         } = deps;
-        let mut supervisor = Self {
+        let empty = Workspace::builder().processes(Vec::new()).build();
+        Self {
             project,
-            workspace,
+            workspace: StackSync::apply(&empty, stack.processes(), |_| false).into_workspace(),
             runner,
             adopter: None,
-            registry,
-            agent_session_store,
             events,
             notices,
-            config_watcher,
-            pending_session_reopens: HashMap::new(),
             panes: HashMap::new(),
             generations: HashMap::new(),
             restart_attempts: HashMap::new(),
@@ -176,16 +142,12 @@ impl Supervisor {
             process_metrics,
             metrics_deadline: Instant::now() + METRICS_SAMPLE_INTERVAL,
             notifier,
-            desktop_notifications,
+            settings,
             failing_screen_reads: HashSet::new(),
             attached: HashMap::new(),
             held_exits: HashMap::new(),
-            size,
-            color_scheme,
-            next_notification_scope: NotificationScope::new(0),
-        };
-        supervisor.rewatch_config();
-        supervisor
+            launch_environments: HashMap::new(),
+        }
     }
 
     /// Lets this supervisor take over holders a previous service left running.
@@ -194,10 +156,15 @@ impl Supervisor {
         self
     }
 
-    /// Swaps in durable agent-session history, for a test to inject a store.
-    #[cfg(test)]
-    pub(crate) fn set_agent_session_store(&mut self, store: Box<dyn AgentSessionStore>) {
-        self.agent_session_store = Some(store);
+    /// The folder of the project this supervisor runs.
+    pub fn root(&self) -> &ProjectRoot {
+        self.project.root()
+    }
+
+    /// Takes `settings` for every later launch and for crash alerts; running
+    /// processes keep the terminal they started with.
+    pub fn apply_settings(&mut self, settings: &Settings) {
+        self.settings = settings.clone();
     }
 
     /// Swaps in desktop notification delivery, for a test to inject a fake.
@@ -218,21 +185,15 @@ impl Supervisor {
         &mut self.workspace
     }
 
-    /// Resizes every pane's terminal and live process to `size`, which new
-    /// processes then start with.
-    pub fn resize(&mut self, size: PtySize) {
-        self.size = size;
-        for pane in self.panes.values_mut() {
-            pane.parser.set_size(size.rows(), size.cols());
-            if let Some(handle) = pane.handle.as_mut() {
-                let _ = handle.resize(size);
-            }
-        }
+    /// Whether this supervisor runs nothing and has nothing in flight, so a
+    /// project no longer registered can be let go.
+    pub fn is_idle(&self) -> bool {
+        self.workspace.is_empty() && self.launches.is_empty()
     }
 
     /// A point-in-time view of every process, for `ps`. An unsupervised child
     /// found gone is shown as it will settle: exited, or no row at all when its
-    /// row was removed from the config, so `ps` never shows an unsupervised
+    /// row was removed from the stack, so `ps` never shows an unsupervised
     /// process with no pid.
     pub fn snapshot(&self) -> ProjectStatus {
         let processes = self
@@ -260,9 +221,7 @@ impl Supervisor {
                 Some(
                     ProcessStatus::builder()
                         .name(process.name().clone())
-                        .kind(*process.kind())
                         .state(state)
-                        .activity(*process.activity())
                         .pid(
                             live.and_then(|target| {
                                 target
@@ -281,11 +240,7 @@ impl Supervisor {
                                 .then(|| self.last_exits.get(&pane).cloned())
                                 .flatten(),
                         )
-                        .stop_grace(
-                            process
-                                .effective_stop_policy()
-                                .map(|policy| *policy.grace_period()),
-                        )
+                        .stop_grace(process.stop().grace_period().into_inner())
                         .build(),
                 )
             })
@@ -368,12 +323,14 @@ impl Supervisor {
             .and_then(|handle| handle.process_id())
     }
 
-    /// The pane of the process named `name`, if the project has one.
+    /// The pane of the process named `name`, matched by name key, if the
+    /// project has one.
     pub(super) fn pane_named(&self, name: &ProcessName) -> Option<PaneId> {
+        let key = name.key();
         self.workspace
             .processes()
             .iter()
-            .find(|process| process.name() == name)
+            .find(|process| process.name().key() == key)
             .map(|process| *process.id())
     }
 
@@ -424,7 +381,7 @@ impl Supervisor {
         }
         let notice = Notice::builder()
             .at(SystemTime::now())
-            .project(Some(self.project.clone()))
+            .project(Some(self.root().clone()))
             .process(process)
             .level(level)
             .message(message)
@@ -438,92 +395,45 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use crossbeam_channel::unbounded;
-
     use super::*;
     use crate::{
-        adapter::service::{Notices, supervisor::testing::*},
+        adapter::service::supervisor::testing::*,
         domain::{
-            config::{ProcessSpec, WorkspaceConfig},
-            process::{Process, ProcessKind, ProcessState, RestartPolicy},
+            process::{ProcessState, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
-            value::{Cols, CommandLine, Rows},
         },
     };
 
     const PANE: u64 = 0;
 
-    /// The name of the test process.
-    fn name() -> ProcessName {
-        ProcessName::try_new("p").unwrap()
-    }
-
-    /// `load` reads the project's config through the registry and starts
-    /// nothing until asked.
+    /// `new` builds the workspace from the stack and starts nothing.
     #[test]
-    fn load_builds_the_workspace_from_the_projects_config() {
-        let config = WorkspaceConfig::builder()
-            .agents(vec![])
-            .terminals(vec![
-                ProcessSpec::builder()
-                    .name(name())
-                    .command(Some(CommandLine::try_new("true").unwrap()))
-                    .autostart(true)
-                    .build(),
-            ])
-            .commands(vec![])
-            .build();
-        let deps = SupervisorDeps::builder()
-            .runner(Box::new(FakeRunner))
-            .registry(Box::new(FakeRegistry {
-                projects: Vec::new(),
-                workspace: config,
-                recorder: Recorder::default(),
-            }))
-            .agent_session_store(None)
-            .events(unbounded().0)
-            .notices(Notices::shared(None))
-            .config_watcher(None)
-            .notifier(None)
-            .desktop_notifications(false)
-            .process_metrics(None)
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
-            .color_scheme(ColorScheme::Dark)
-            .build();
+    fn a_new_supervisor_runs_the_stack_and_starts_nothing() {
+        let harness = Harness::over(Box::new(FakeRunner), &[spec(
+            "p",
+            "true",
+            RestartPolicy::Never,
+        )]);
 
-        let supervisor =
-            Supervisor::load(ProjectKey::new(PathBuf::from(TEST_PROJECT)), deps).unwrap();
+        let status = harness.supervisor.snapshot();
 
-        let status = supervisor.snapshot();
+        assert_eq!(status.project(), harness.supervisor.project());
         assert_eq!(status.processes().len(), 1);
-        assert_eq!(status.processes()[0].name(), &name());
+        assert_eq!(status.processes()[0].name(), &name("p"));
         assert_eq!(*status.processes()[0].state(), ProcessState::Pending);
-    }
-
-    /// One terminal named `p` on [`PANE`] with `restart` policy.
-    fn terminal(restart: RestartPolicy) -> Process {
-        Process::builder()
-            .id(PaneId::new(PANE))
-            .name(name())
-            .kind(ProcessKind::Terminal)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .restart(restart)
-            .build()
+        assert_eq!(*status.processes()[0].stop_grace(), TEST_STOP_GRACE);
     }
 
     /// `ps` reports a restarted process's restarts, its uptime and its attached
     /// clients.
     #[test]
     fn the_snapshot_reports_restarts_uptime_and_attached_clients() {
-        let mut harness = Harness::new(Box::new(FakeRunner), vec![terminal(RestartPolicy::Always)]);
-        harness.supervisor.up();
+        let mut harness = Harness::over(Box::new(FakeRunner), &[spec(
+            "p",
+            "true",
+            RestartPolicy::Always,
+        )]);
+        harness.up();
         let pane = PaneId::new(PANE);
         let generation = harness.supervisor.generations()[&pane];
         harness.supervisor.handle_output(
@@ -533,15 +443,26 @@ mod tests {
         );
         let respawn = harness.supervisor.generations()[&pane];
         harness.supervisor.handle_respawn(pane, respawn);
-        harness.supervisor.set_attached(&name(), 2);
+        harness.supervisor.set_attached(&name("p"), 2);
 
         let status = harness.supervisor.snapshot();
 
         let process = &status.processes()[0];
-        assert_eq!(status.project(), harness.supervisor.project());
         assert_eq!(*process.state(), ProcessState::Running);
         assert_eq!(*process.restarts(), 1);
         assert!(process.uptime().is_some());
         assert_eq!(*process.attached(), 2);
+    }
+
+    /// A name is matched by its key, however its accent was encoded.
+    #[test]
+    fn a_process_is_found_by_its_name_key() {
+        let harness = Harness::over(Box::new(FakeRunner), &[spec(
+            "caf\u{e9}",
+            "true",
+            RestartPolicy::Never,
+        )]);
+
+        assert!(harness.supervisor.has_process(&name("cafe\u{301}")));
     }
 }

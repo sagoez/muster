@@ -3,7 +3,7 @@
 use std::{
     cell::RefCell,
     os::unix::process::{CommandExt, ExitStatusExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command},
     rc::Rc,
     sync::{
@@ -14,34 +14,101 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
 
 use super::{SpawnGeneration, Supervisor, SupervisorDeps};
 use crate::{
-    adapter::service::{Notices, ProjectKey, ServiceEvent, SharedNotices},
+    adapter::service::{LaunchEnvironment, Notices, ServiceEvent, SharedNotices},
     application::Workspace,
     domain::{
-        agent_session::{
-            AgentProcessId, AgentProcessStartToken, AgentSession, AgentSessionId,
-            AgentSessionState, ConfiguredAgentKey, LaunchToken, NativeSessionId,
-        },
         color_scheme::ColorScheme,
-        config::{ConfigError, WorkspaceConfig},
-        notification::{Notification, NotificationId, NotificationScope},
-        port::{
-            AgentSessionStore, Notifier, OutputSink, ProcessHandle, ProcessRunner, ProjectRegistry,
-        },
-        process::{AgentTool, Process, StopSignal},
+        config::{Environment, ProcessSpec, Stack},
+        notification::Notification,
+        port::{Notifier, OutputSink, ProcessHandle, ProcessRunner},
+        process::{Process, RestartPolicy, StopPolicy, StopSignal},
         project::Project,
         pty::{PtyError, PtySize, SpawnRequest},
-        value::{Cols, CommandLine, PaneId, ProcessName, Rows},
+        settings::Settings,
+        value::{
+            ByteSize, Cols, CommandLine, DetachKey, PaneId, PositiveDuration, ProcessName,
+            ProjectName, ProjectRoot, Rows,
+        },
     },
 };
 
-/// Config path every harness supervisor runs.
-pub(crate) const TEST_PROJECT: &str = "/here/muster.yml";
+/// Folder of the project every harness supervisor runs.
+pub(crate) const TEST_PROJECT: &str = "/here";
 /// Terminal rows and columns every harness supervisor starts processes with.
 const TEST_TERMINAL_SIDE: u16 = 24;
+/// Scrollback lines every harness launch asks for.
+const TEST_SCROLLBACK: usize = 100;
+/// Log cap of every harness launch, in MiB.
+const TEST_LOG_CAP_MIB: u64 = 4;
+/// Grace of every harness process's stop policy.
+pub(crate) const TEST_STOP_GRACE: Duration = Duration::from_secs(7);
+
+/// The process name `raw`.
+pub(crate) fn name(raw: &str) -> ProcessName {
+    ProcessName::try_new(raw).unwrap()
+}
+
+/// The project every harness supervisor runs.
+pub(crate) fn test_project() -> Project {
+    let root = ProjectRoot::try_new(PathBuf::from(TEST_PROJECT)).unwrap();
+    let name = ProjectName::candidates(&root).next().unwrap();
+    Project::builder().name(name).root(root).build()
+}
+
+/// The stop policy every harness process has: an interrupt, then a kill
+/// after [`TEST_STOP_GRACE`].
+pub(crate) fn test_stop() -> StopPolicy {
+    StopPolicy::builder()
+        .signal(StopSignal::Interrupt)
+        .grace_period(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+        .build()
+}
+
+/// An autostarting process `raw` running `command` under `restart`.
+pub(crate) fn spec(raw: &str, command: &str, restart: RestartPolicy) -> ProcessSpec {
+    ProcessSpec::builder()
+        .name(name(raw))
+        .command(CommandLine::try_new(command).unwrap())
+        .environment(Environment::empty())
+        .autostart(true)
+        .restart(restart)
+        .stop(test_stop())
+        .build()
+}
+
+/// The harness project's stack of `processes`.
+pub(crate) fn stack(processes: &[ProcessSpec]) -> Stack {
+    Stack::builder()
+        .project(test_project())
+        .processes(processes.to_vec())
+        .build()
+}
+
+/// Every setting explicit, desktop notifications off.
+pub(crate) fn test_settings() -> Settings {
+    Settings::builder()
+        .desktop_notifications(false)
+        .default_size(
+            PtySize::builder()
+                .rows(Rows::new(TEST_TERMINAL_SIDE))
+                .cols(Cols::new(TEST_TERMINAL_SIDE))
+                .build(),
+        )
+        .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
+        .log_max_size(ByteSize::try_new(RawByteSize::mib(TEST_LOG_CAP_MIB)).unwrap())
+        .scrollback(TEST_SCROLLBACK)
+        .color_scheme(ColorScheme::Dark)
+        .default_autostart(false)
+        .default_restart(RestartPolicy::Never)
+        .default_stop_signal(StopSignal::Terminate)
+        .default_stop_grace(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+        .build()
+}
 
 /// A supervisor under test, with the channel its timers and output arrive on
 /// and the notices it raises.
@@ -52,49 +119,37 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
-    /// A supervisor of [`TEST_PROJECT`] over `processes`, spawning through
-    /// `runner`, with no agent-session store and nothing started yet.
-    pub(crate) fn new(runner: Box<dyn ProcessRunner>, processes: Vec<Process>) -> Self {
-        Self::with_registry(runner, processes, empty_registry())
-    }
-
-    /// As [`Self::new`], reading and writing the project's config through
-    /// `registry`.
-    pub(crate) fn with_registry(
-        runner: Box<dyn ProcessRunner>,
-        processes: Vec<Process>,
-        registry: Box<dyn ProjectRegistry>,
-    ) -> Self {
+    /// A supervisor of [`TEST_PROJECT`] running a stack of `processes`,
+    /// spawning through `runner`, with nothing started yet.
+    pub(crate) fn over(runner: Box<dyn ProcessRunner>, processes: &[ProcessSpec]) -> Self {
         let (sender, events) = unbounded();
         let notices = Notices::shared(None);
         let deps = SupervisorDeps::builder()
             .runner(runner)
-            .registry(registry)
-            .agent_session_store(None)
             .events(sender)
             .notices(notices.clone())
-            .config_watcher(None)
             .notifier(None)
-            .desktop_notifications(false)
             .process_metrics(None)
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(TEST_TERMINAL_SIDE))
-                    .cols(Cols::new(TEST_TERMINAL_SIDE))
-                    .build(),
-            )
-            .color_scheme(ColorScheme::Dark)
+            .settings(test_settings())
             .build();
-        let supervisor = Supervisor::new(
-            ProjectKey::new(PathBuf::from(TEST_PROJECT)),
-            Workspace::builder().processes(processes).build(),
-            deps,
-        );
         Self {
-            supervisor,
+            supervisor: Supervisor::new(test_project(), &stack(processes), deps),
             events,
             notices,
         }
+    }
+
+    /// A supervisor of [`TEST_PROJECT`] whose workspace is exactly
+    /// `processes`, panes and states as given, spawning through `runner`.
+    pub(crate) fn new(runner: Box<dyn ProcessRunner>, processes: Vec<Process>) -> Self {
+        let mut harness = Self::over(runner, &[]);
+        *harness.supervisor.workspace_mut() = Workspace::builder().processes(processes).build();
+        harness
+    }
+
+    /// Brings the project up as a client with no environment of its own would.
+    pub(crate) fn up(&mut self) {
+        self.supervisor.up(&LaunchEnvironment::default());
     }
 
     /// The messages of every notice raised so far, oldest first.
@@ -102,7 +157,7 @@ impl Harness {
         self.notices
             .lock()
             .unwrap()
-            .recent(self.supervisor.project())
+            .recent(self.supervisor.root())
             .iter()
             .map(|notice| notice.message().clone())
             .collect()
@@ -221,49 +276,16 @@ impl Drop for Orphan {
     }
 }
 
-/// A notifier that records delivered and closed notifications.
+/// A notifier that records every notification delivered.
 #[derive(Clone, Default)]
 pub(crate) struct RecordingNotifier {
     delivered: Rc<RefCell<Vec<Notification>>>,
-    closed: Rc<RefCell<Vec<(PaneId, NotificationId)>>>,
 }
 
 impl RecordingNotifier {
-    /// Number of notifications delivered.
-    pub(crate) fn count(&self) -> usize {
-        self.delivered.borrow().len()
-    }
-
-    /// The pane each delivered notification came from.
-    pub(crate) fn panes(&self) -> Vec<PaneId> {
-        self.delivered
-            .borrow()
-            .iter()
-            .map(|notification| *notification.pane())
-            .collect()
-    }
-
-    /// Identifiers carried by delivered notifications.
-    pub(crate) fn identifiers(&self) -> Vec<Option<NotificationId>> {
-        self.delivered
-            .borrow()
-            .iter()
-            .map(|notification| notification.identifier().clone())
-            .collect()
-    }
-
-    /// Bodies carried by delivered notifications.
-    pub(crate) fn bodies(&self) -> Vec<Option<String>> {
-        self.delivered
-            .borrow()
-            .iter()
-            .map(|notification| notification.body().clone())
-            .collect()
-    }
-
-    /// Identifiers passed to close requests.
-    pub(crate) fn closed(&self) -> Vec<(PaneId, NotificationId)> {
-        self.closed.borrow().clone()
+    /// Every notification delivered, oldest first.
+    pub(crate) fn delivered(&self) -> Vec<Notification> {
+        self.delivered.borrow().clone()
     }
 }
 
@@ -271,329 +293,6 @@ impl Notifier for RecordingNotifier {
     fn notify(&self, notification: &Notification) {
         self.delivered.borrow_mut().push(notification.clone());
     }
-
-    fn close(&self, pane: PaneId, _scope: NotificationScope, identifier: &NotificationId) {
-        self.closed.borrow_mut().push((pane, identifier.clone()));
-    }
-}
-
-/// A shared record of what a [`FakeRegistry`] was asked to persist.
-#[derive(Clone, Default)]
-pub(crate) struct Recorder {
-    pub(crate) projects: Rc<RefCell<Option<Vec<Project>>>>,
-    pub(crate) workspaces: Rc<RefCell<Vec<(PathBuf, WorkspaceConfig)>>>,
-}
-
-/// Shared in-memory durable state for agent-session lifecycle tests.
-#[derive(Clone, Default)]
-pub(crate) struct SessionRecorder {
-    pub(crate) sessions: Rc<RefCell<Vec<AgentSession>>>,
-}
-
-/// An agent-session store with the same history ordering semantics as the
-/// YAML adapter, without touching platform state.
-pub(crate) struct FakeAgentSessionStore {
-    pub(crate) recorder: SessionRecorder,
-}
-
-impl AgentSessionStore for FakeAgentSessionStore {
-    fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
-        Ok(self.recorder.sessions.borrow().clone())
-    }
-
-    fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
-        Ok(None)
-    }
-
-    fn upsert(&self, session: &AgentSession) -> Result<(), ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        sessions.retain(|candidate| candidate.id() != session.id());
-        sessions.push(session.clone());
-        Ok(())
-    }
-
-    fn link_configured(&self, candidate: &AgentSession) -> Result<AgentSessionId, ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        if let Some(session) = sessions.iter_mut().find(|session| {
-            session.project() == candidate.project()
-                && session.configured_key().is_some()
-                && session.configured_key() == candidate.configured_key()
-        }) {
-            *session = session
-                .clone()
-                .with_configured_command(*candidate.tool(), candidate.launch_command().clone());
-            Ok(session.id().clone())
-        } else {
-            sessions.push(candidate.clone());
-            Ok(candidate.id().clone())
-        }
-    }
-
-    fn retire_orphaned_configured(
-        &self,
-        project: &Path,
-        live_keys: &[ConfiguredAgentKey],
-    ) -> Result<usize, ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        let mut retired = 0;
-        for session in sessions.iter_mut() {
-            let orphaned = session.project() == project
-                && session
-                    .configured_key()
-                    .as_ref()
-                    .is_some_and(|key| !live_keys.contains(key));
-            if orphaned {
-                *session = session
-                    .clone()
-                    .unconfigure()
-                    .with_state(AgentSessionState::Closed);
-                retired += 1;
-            }
-        }
-        Ok(retired)
-    }
-
-    fn set_state(&self, id: &AgentSessionId, state: AgentSessionState) -> Result<(), ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        let index = sessions
-            .iter()
-            .position(|session| session.id() == id)
-            .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
-        let session = sessions.remove(index).with_state(state);
-        sessions.push(session);
-        Ok(())
-    }
-
-    fn set_owner_process_id(
-        &self,
-        id: &AgentSessionId,
-        process_id: AgentProcessId,
-        process_start_token: Option<AgentProcessStartToken>,
-        launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id() == id)
-            .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
-        *session = session
-            .clone()
-            .with_launch_owner(process_id, process_start_token, launch_token);
-        Ok(())
-    }
-
-    fn capture_native_id(
-        &self,
-        id: &AgentSessionId,
-        provider: AgentTool,
-        native_id: NativeSessionId,
-        reporter_process_id: AgentProcessId,
-        reported_launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        let mut sessions = self.recorder.sessions.borrow_mut();
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id() == id)
-            .ok_or_else(|| ConfigError::AgentSessionNotFound(id.clone()))?;
-        if *session.tool() != provider {
-            return Err(ConfigError::AgentSessionProviderMismatch {
-                id: id.clone(),
-                expected: *session.tool(),
-                reported: provider,
-            });
-        }
-        if let Some(current) = session.launch_token()
-            && reported_launch_token.as_ref() != Some(current)
-        {
-            return Ok(());
-        }
-        *session = session
-            .clone()
-            .with_reported_native_id(native_id, reporter_process_id, None);
-        Ok(())
-    }
-}
-
-/// A store that models an unavailable platform state directory.
-pub(crate) struct FailingAgentSessionStore;
-
-impl AgentSessionStore for FailingAgentSessionStore {
-    fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
-        Ok(Vec::new())
-    }
-
-    fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
-        Ok(None)
-    }
-
-    fn upsert(&self, _session: &AgentSession) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn link_configured(&self, _candidate: &AgentSession) -> Result<AgentSessionId, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn set_state(
-        &self,
-        _id: &AgentSessionId,
-        _state: AgentSessionState,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn set_owner_process_id(
-        &self,
-        _id: &AgentSessionId,
-        _process_id: AgentProcessId,
-        _process_start_token: Option<AgentProcessStartToken>,
-        _launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn capture_native_id(
-        &self,
-        _id: &AgentSessionId,
-        _provider: AgentTool,
-        _native_id: NativeSessionId,
-        _reporter_process_id: AgentProcessId,
-        _reported_launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn retire_orphaned_configured(
-        &self,
-        _project: &Path,
-        _live_keys: &[ConfiguredAgentKey],
-    ) -> Result<usize, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-}
-
-/// A store that fails reads while preserving the rest of the port shape.
-pub(crate) struct UnreadableAgentSessionStore;
-
-impl AgentSessionStore for UnreadableAgentSessionStore {
-    fn sessions(&self) -> Result<Vec<AgentSession>, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn link_configured(&self, _candidate: &AgentSession) -> Result<AgentSessionId, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn state_file_path(&self) -> Result<Option<PathBuf>, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn upsert(&self, _session: &AgentSession) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn set_state(
-        &self,
-        _id: &AgentSessionId,
-        _state: AgentSessionState,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn set_owner_process_id(
-        &self,
-        _id: &AgentSessionId,
-        _process_id: AgentProcessId,
-        _process_start_token: Option<AgentProcessStartToken>,
-        _launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn capture_native_id(
-        &self,
-        _id: &AgentSessionId,
-        _provider: AgentTool,
-        _native_id: NativeSessionId,
-        _reporter_process_id: AgentProcessId,
-        _reported_launch_token: Option<LaunchToken>,
-    ) -> Result<(), ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-
-    fn retire_orphaned_configured(
-        &self,
-        _project: &Path,
-        _live_keys: &[ConfiguredAgentKey],
-    ) -> Result<usize, ConfigError> {
-        Err(ConfigError::NoConfigDir)
-    }
-}
-
-/// A registry returning a fixed project list and one workspace config, and
-/// recording everything it is asked to save.
-pub(crate) struct FakeRegistry {
-    pub(crate) projects: Vec<Project>,
-    pub(crate) workspace: WorkspaceConfig,
-    pub(crate) recorder: Recorder,
-}
-
-impl ProjectRegistry for FakeRegistry {
-    fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-        Ok(self
-            .recorder
-            .projects
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| self.projects.clone()))
-    }
-
-    fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-        Ok(self.workspace.clone())
-    }
-
-    fn workspace_exists(&self, config_path: &Path) -> bool {
-        self.recorder
-            .workspaces
-            .borrow()
-            .iter()
-            .any(|(path, _)| path == config_path)
-    }
-
-    fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-        *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
-        Ok(())
-    }
-
-    fn save_workspace(
-        &self,
-        config_path: &Path,
-        config: &WorkspaceConfig,
-    ) -> Result<(), ConfigError> {
-        self.recorder
-            .workspaces
-            .borrow_mut()
-            .push((config_path.to_path_buf(), config.clone()));
-        Ok(())
-    }
-}
-
-/// A workspace config with no processes in any section.
-pub(crate) fn empty_workspace_config() -> WorkspaceConfig {
-    WorkspaceConfig::builder()
-        .agents(vec![])
-        .terminals(vec![])
-        .commands(vec![])
-        .build()
-}
-
-/// A registry with no registered projects.
-pub(crate) fn empty_registry() -> Box<dyn ProjectRegistry> {
-    Box::new(FakeRegistry {
-        projects: Vec::new(),
-        workspace: empty_workspace_config(),
-        recorder: Recorder::default(),
-    })
 }
 
 /// A runner whose spawned processes never emit output and never exit on their
@@ -633,7 +332,7 @@ impl ProcessRunner for RequestRecordingRunner {
     }
 }
 
-/// The pid a [`PidHandle`] reports, asserted by the claim tests.
+/// The pid a [`PidHandle`] reports.
 pub(crate) const FAKE_LAUNCHER_PID: u32 = 4242;
 
 /// A handle that reports a pid, like the real PTY handle does.
@@ -665,7 +364,7 @@ impl ProcessHandle for PidHandle {
     }
 }
 
-/// A successful runner whose handles expose a pid.
+/// A successful runner whose handles report a pid.
 pub(crate) struct PidRunner;
 
 impl ProcessRunner for PidRunner {
@@ -1119,115 +818,6 @@ impl ProcessHandle for AckCountHandle {
     }
 
     fn kill(&mut self) -> Result<(), PtyError> {
-        Ok(())
-    }
-}
-
-/// A started supervisor of [`TEST_PROJECT`] with no processes, durable history
-/// seeded with `initial` and every spawn request recorded.
-pub(crate) fn agent_harness(
-    initial: Vec<AgentSession>,
-) -> (Harness, SessionRecorder, SpawnRecorder) {
-    agent_harness_over(initial, empty_registry())
-}
-
-/// As [`agent_harness`], reading and writing the config through `registry`.
-pub(crate) fn agent_harness_over(
-    initial: Vec<AgentSession>,
-    registry: Box<dyn ProjectRegistry>,
-) -> (Harness, SessionRecorder, SpawnRecorder) {
-    let sessions = SessionRecorder {
-        sessions: Rc::new(RefCell::new(initial)),
-    };
-    let spawns = SpawnRecorder::default();
-    let mut harness = Harness::with_registry(
-        Box::new(RequestRecordingRunner {
-            recorder: spawns.clone(),
-        }),
-        Vec::new(),
-        registry,
-    );
-    harness
-        .supervisor
-        .set_agent_session_store(Box::new(FakeAgentSessionStore {
-            recorder: sessions.clone(),
-        }));
-    harness.supervisor.up();
-    (harness, sessions, spawns)
-}
-
-/// A durable provider session of [`TEST_PROJECT`] named `Ada`, for restore
-/// and history tests.
-pub(crate) fn persisted_agent_session(
-    tool: AgentTool,
-    native_id: &str,
-    state: AgentSessionState,
-) -> AgentSession {
-    AgentSession::builder()
-        .id(AgentSessionId::generate().unwrap())
-        .name(ProcessName::try_new("Ada").unwrap())
-        .tool(tool)
-        .project(PathBuf::from(TEST_PROJECT))
-        .launch_command(CommandLine::try_new(tool.default_command().unwrap()).unwrap())
-        .native_id(Some(NativeSessionId::try_new(native_id).unwrap()))
-        .state(state)
-        .build()
-}
-
-/// A closed, resumable conversation (captured native id, no configured link)
-/// of `project`.
-pub(crate) fn closed_conversation(name: &str, project: &str, native_id: &str) -> AgentSession {
-    AgentSession::builder()
-        .id(AgentSessionId::generate().unwrap())
-        .name(ProcessName::try_new(name).unwrap())
-        .tool(AgentTool::Claude)
-        .project(PathBuf::from(project))
-        .launch_command(CommandLine::try_new("claude").unwrap())
-        .native_id(Some(NativeSessionId::try_new(native_id).unwrap()))
-        .state(AgentSessionState::Closed)
-        .build()
-}
-
-/// A registry whose `workspace` reflects the latest `save_workspace`, so a
-/// sequence of edits accumulates as the filesystem adapter's do.
-pub(crate) struct StatefulRegistry {
-    pub(crate) recorder: Recorder,
-    pub(crate) initial: WorkspaceConfig,
-}
-
-impl ProjectRegistry for StatefulRegistry {
-    fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-        Ok(self.recorder.projects.borrow().clone().unwrap_or_default())
-    }
-
-    fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-        Ok(self
-            .recorder
-            .workspaces
-            .borrow()
-            .last()
-            .map(|(_, config)| config.clone())
-            .unwrap_or_else(|| self.initial.clone()))
-    }
-
-    fn workspace_exists(&self, _config_path: &Path) -> bool {
-        true
-    }
-
-    fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-        *self.recorder.projects.borrow_mut() = Some(projects.to_vec());
-        Ok(())
-    }
-
-    fn save_workspace(
-        &self,
-        config_path: &Path,
-        config: &WorkspaceConfig,
-    ) -> Result<(), ConfigError> {
-        self.recorder
-            .workspaces
-            .borrow_mut()
-            .push((config_path.to_path_buf(), config.clone()));
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 use std::{
+    env,
     ffi::CStr,
     fmt::Display,
     io::{self, Read, Write},
-    path::Path,
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -12,14 +12,13 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounde
 use portable_pty::{CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system};
 use signal_hook::low_level;
 
+use super::environment::baseline_environment;
 use crate::{
     constants::MUSTER_PROJECT_ENV,
     domain::{
-        agent_session::AgentSessionId,
         port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         process::StopSignal,
         pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
-        value::CommandLine,
     },
 };
 
@@ -29,12 +28,6 @@ const READ_BUFFER_BYTES: usize = 4096;
 pub const SHELL_PROGRAM: &str = "/bin/sh";
 /// POSIX flag that runs the following argument as a shell command.
 pub const SHELL_COMMAND_FLAG: &str = "-c";
-/// Hidden CLI namespace that binds session ownership before starting an agent.
-const HOOK_SUBCOMMAND: &str = "hook";
-/// Hidden CLI action that starts a provider after recording its owner process.
-const LAUNCH_SUBCOMMAND: &str = "launch";
-/// CLI option carrying the stable Muster session identity.
-const SESSION_ARGUMENT: &str = "--session";
 /// Environment variable naming the terminal type.
 const TERM_VAR: &str = "TERM";
 /// Terminal type advertised to children when the environment has none.
@@ -71,35 +64,16 @@ impl ProcessRunner for PortablePtyRunner {
             .openpty(to_portable_size(request.size()))
             .map_err(system_error)?;
 
-        let mut command = match request.command() {
-            Some(command_line) => {
-                if let Some(session_id) = request.agent_session_id() {
-                    Self::agent_launcher(session_id, command_line)?
-                } else {
-                    let mut builder = CommandBuilder::new(SHELL_PROGRAM);
-                    builder.arg(SHELL_COMMAND_FLAG);
-                    builder.arg(command_line.as_ref());
-                    builder
-                }
-            },
-            None => CommandBuilder::new_default_prog(),
-        };
+        let mut command = CommandBuilder::new(SHELL_PROGRAM);
+        command.arg(SHELL_COMMAND_FLAG);
+        command.arg(request.command().as_ref());
         ensure_working_dir(&request)?;
         if let Some(dir) = request.working_dir() {
             command.cwd(dir);
-        } else if let Ok(cwd) = std::env::current_dir() {
+        } else if let Ok(cwd) = env::current_dir() {
             command.cwd(cwd);
         }
-        if std::env::var_os(TERM_VAR).is_none() {
-            command.env(TERM_VAR, DEFAULT_TERM);
-        }
-        command.env(SHELL_LEVEL_VAR, BASE_SHELL_LEVEL);
-        if let Some(project) = request.project() {
-            command.env(MUSTER_PROJECT_ENV, project);
-        }
-        for (name, value) in request.environment() {
-            command.env(name, value);
-        }
+        apply_environment(&mut command, &request);
 
         let mut child = pair.slave.spawn_command(command).map_err(system_error)?;
         let mut killer = child.clone_killer();
@@ -166,35 +140,26 @@ impl ProcessRunner for PortablePtyRunner {
     }
 }
 
-impl PortablePtyRunner {
-    /// Builds a direct internal launch command for one durable agent session.
-    ///
-    /// # Errors
-    /// Returns a [`PtyError`] when the running executable cannot be located.
-    fn agent_launcher(
-        session_id: &AgentSessionId,
-        command: &CommandLine,
-    ) -> Result<CommandBuilder, PtyError> {
-        let executable = std::env::current_exe().map_err(system_error)?;
-        Ok(Self::agent_launcher_for(&executable, session_id, command))
+/// Gives `command` exactly the environment `request`'s child runs with: the
+/// scrubbed baseline, then the environment of the command that launched it,
+/// then its own stored variables, then muster's: a terminal type when none
+/// was given, the base shell level and the project root.
+fn apply_environment(command: &mut CommandBuilder, request: &SpawnRequest) {
+    command.env_clear();
+    let layers = [
+        baseline_environment(),
+        request.launch_environment().clone(),
+        request.environment().clone(),
+    ];
+    for (name, value) in layers.into_iter().flatten() {
+        command.env(name, value);
     }
-
-    /// Builds a direct internal launch command using an explicit Muster executable.
-    fn agent_launcher_for(
-        executable: &Path,
-        session_id: &AgentSessionId,
-        command: &CommandLine,
-    ) -> CommandBuilder {
-        let mut launcher = CommandBuilder::new(executable);
-        launcher.args([
-            HOOK_SUBCOMMAND,
-            LAUNCH_SUBCOMMAND,
-            SESSION_ARGUMENT,
-            session_id.as_ref(),
-            "--",
-            command.as_ref(),
-        ]);
-        launcher
+    if command.get_env(TERM_VAR).is_none() {
+        command.env(TERM_VAR, DEFAULT_TERM);
+    }
+    command.env(SHELL_LEVEL_VAR, BASE_SHELL_LEVEL);
+    if let Some(project) = request.project() {
+        command.env(MUSTER_PROJECT_ENV, project);
     }
 }
 
@@ -446,15 +411,19 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use bytesize::ByteSize as RawByteSize;
+
     use super::*;
     use crate::domain::{
-        agent_session::AgentSessionId,
-        process::ProcessKind,
-        value::{Cols, CommandLine, ProcessName, Rows},
+        color_scheme::ColorScheme,
+        process::StopPolicy,
+        value::{ByteSize, Cols, CommandLine, PositiveDuration, ProcessName, Rows},
     };
 
     /// Name given to every test process.
     const TEST_PROCESS: &str = "test";
+    /// Scrollback lines every test request asks for.
+    const TEST_SCROLLBACK: usize = 100;
     /// Maximum time to wait for a test process's events.
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Grace used by termination tests, long enough for delayed descendant
@@ -477,41 +446,100 @@ mod tests {
         }
     }
 
+    /// A request to run `command`, with every launch setting explicit.
     fn request(command: &str) -> SpawnRequest {
+        request_in(command, None)
+    }
+
+    /// As [`request`], launched in `working_dir` when given.
+    fn request_in(command: &str, working_dir: Option<PathBuf>) -> SpawnRequest {
         SpawnRequest::builder()
             .process(ProcessName::try_new(TEST_PROCESS).unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new(command).unwrap()))
+            .command(CommandLine::try_new(command).unwrap())
+            .working_dir(working_dir)
             .size(
                 PtySize::builder()
                     .rows(Rows::new(24))
                     .cols(Cols::new(80))
                     .build(),
             )
+            .scrollback(TEST_SCROLLBACK)
+            .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
+            .color_scheme(ColorScheme::Dark)
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(PositiveDuration::try_new(TEST_STOP_GRACE).unwrap())
+                    .build(),
+            )
             .build()
     }
 
-    /// The agent-launch handoff keeps advanced shell expressions as one opaque
-    /// argument for the internal launcher on every supported platform.
-    #[test]
-    fn agent_launch_handoff_preserves_shell_expressions() {
-        let session = AgentSessionId::try_new("session $(injection)").unwrap();
-        let command = CommandLine::try_new("FOO=bar codex | tee agent.log").unwrap();
-        let launch = PortablePtyRunner::agent_launcher_for(
-            &PathBuf::from("/tmp/muster"),
-            &session,
-            &command,
-        );
+    /// Everything `request` prints before it exits.
+    fn output_of(request: SpawnRequest) -> String {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let _handle = PortablePtyRunner
+            .spawn(request, Box::new(ChannelSink(tx)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
+            match output {
+                ProcessOutput::Chunk(chunk) => bytes.extend(chunk),
+                ProcessOutput::Exited(_) => break,
+                ProcessOutput::Unreadable(_)
+                | ProcessOutput::Warning(_)
+                | ProcessOutput::Attached(_) => {},
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 
-        assert_eq!(launch.get_argv(), &vec![
-            PathBuf::from("/tmp/muster").into_os_string(),
-            HOOK_SUBCOMMAND.into(),
-            LAUNCH_SUBCOMMAND.into(),
-            SESSION_ARGUMENT.into(),
-            "session $(injection)".into(),
-            "--".into(),
-            "FOO=bar codex | tee agent.log".into(),
-        ]);
+    /// The child's environment is the baseline, then the launching command's,
+    /// then its own, then muster's project root: nothing else this process
+    /// inherited reaches it, and each layer overrides the one before.
+    #[test]
+    fn a_child_runs_with_the_layered_environment_and_nothing_else() {
+        let project = PathBuf::from("/srv/shop");
+        let request = SpawnRequest::builder()
+            .process(ProcessName::try_new(TEST_PROCESS).unwrap())
+            .command(
+                CommandLine::try_new(
+                    "printf 'from=%s own=%s both=%s project=%s home=%s cargo=%s' \
+                     \"$FROM_CLI\" \"$OWN\" \"$BOTH\" \"$MUSTER_PROJECT\" \"$HOME\" \
+                     \"${CARGO_PKG_NAME:-unset}\"",
+                )
+                .unwrap(),
+            )
+            .project(Some(project))
+            .launch_environment(
+                [
+                    ("FROM_CLI".into(), "cli".into()),
+                    ("BOTH".into(), "cli".into()),
+                ]
+                .into(),
+            )
+            .environment([("OWN".into(), "own".into()), ("BOTH".into(), "own".into())].into())
+            .size(
+                PtySize::builder()
+                    .rows(Rows::new(24))
+                    .cols(Cols::new(80))
+                    .build(),
+            )
+            .scrollback(TEST_SCROLLBACK)
+            .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
+            .color_scheme(ColorScheme::Dark)
+            .stop(request("true").stop())
+            .build();
+
+        let output = output_of(request);
+
+        let home = env::var("HOME").unwrap_or_default();
+        assert!(
+            output.contains(&format!(
+                "from=cli own=own both=own project=/srv/shop home={home} cargo=unset"
+            )),
+            "{output:?}"
+        );
     }
 
     /// Ensures an early PTY EOF does not bypass a still-live process group.
@@ -800,18 +828,7 @@ mod tests {
     #[test]
     fn invalid_working_directory_is_rejected() {
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let request = SpawnRequest::builder()
-            .process(ProcessName::try_new(TEST_PROCESS).unwrap())
-            .kind(ProcessKind::Command)
-            .command(Some(CommandLine::try_new("true").unwrap()))
-            .working_dir(Some(PathBuf::from("/no/such/muster/dir")))
-            .size(
-                PtySize::builder()
-                    .rows(Rows::new(24))
-                    .cols(Cols::new(80))
-                    .build(),
-            )
-            .build();
+        let request = request_in("true", Some(PathBuf::from("/no/such/muster/dir")));
 
         let result = PortablePtyRunner.spawn(request, Box::new(ChannelSink(tx)));
         assert!(matches!(result, Err(PtyError::InvalidWorkingDir(_))));

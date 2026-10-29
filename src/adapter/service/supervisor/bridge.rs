@@ -1,8 +1,7 @@
 use super::{entity::Supervisor, holder_screen::HolderScreen, screen_reply::ScreenReply};
 use crate::{
-    adapter::{bridge::SessionSummary, service::NoticeLevel},
+    adapter::service::NoticeLevel,
     domain::{
-        config::ConfigError,
         pty::PtyError,
         value::{PaneId, ProcessName},
     },
@@ -21,30 +20,6 @@ impl Supervisor {
         self.pane_named(name).map(|pane| self.pane_screen(pane))
     }
 
-    /// This project's durable agent sessions.
-    ///
-    /// # Errors
-    /// Returns the store's [`ConfigError`] when it cannot be read, so "could
-    /// not read" is never mistaken for "no sessions".
-    pub fn sessions(&self) -> Result<Vec<SessionSummary>, ConfigError> {
-        let Some(store) = self.agent_session_store.as_ref() else {
-            return Ok(Vec::new());
-        };
-        Ok(store
-            .sessions()?
-            .iter()
-            .filter(|session| session.project() == self.project.as_ref())
-            .map(|session| {
-                SessionSummary::builder()
-                    .name(session.name().clone())
-                    .tool(*session.tool())
-                    .state(*session.state())
-                    .resumable(session.native_id().is_some())
-                    .build()
-            })
-            .collect())
-    }
-
     /// The visible screen of the known process on `pane`. A live process
     /// whose handle names a holder is answered by that holder, so the read is
     /// handed to the caller; otherwise the pane's own terminal answers, and a
@@ -61,7 +36,7 @@ impl Supervisor {
         match (socket, self.generations.get(&pane)) {
             (Some(socket), Some(generation)) => ScreenReply::ReadHolder(
                 HolderScreen::builder()
-                    .project(self.project.clone())
+                    .project(self.root().clone())
                     .pane(pane)
                     .generation(*generation)
                     .socket(socket.to_path_buf())
@@ -83,7 +58,7 @@ impl Supervisor {
         read: Result<String, PtyError>,
     ) -> String {
         let pane = screen.pane();
-        let current = screen.project() == &self.project
+        let current = screen.project() == self.root()
             && self.panes.contains_key(&pane)
             && self.generations.get(&pane) == Some(&screen.generation());
         if !current {
@@ -131,14 +106,13 @@ mod tests {
     use crate::{
         adapter::{
             holder::{ClientMessage, HolderMessage},
-            service::supervisor::testing::*,
+            service::{LaunchEnvironment, supervisor::testing::*},
         },
         domain::{
-            agent_session::AgentSessionState,
             port::{OutputSink, ProcessHandle, ProcessRunner},
-            process::{AgentTool, Process, ProcessKind, RestartPolicy},
+            process::RestartPolicy,
             pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{Cols, CommandLine, ProcessName, Rows},
+            value::{Cols, Rows},
         },
     };
 
@@ -162,30 +136,14 @@ mod tests {
 
     /// The process name `raw`.
     fn named(raw: &str) -> ProcessName {
-        ProcessName::try_new(raw).unwrap()
+        name(raw)
     }
 
-    /// One process of `kind` on [`PANE`] named [`NAME`], autostarted.
-    fn process(kind: ProcessKind) -> Process {
-        Process::builder()
-            .id(PaneId::new(PANE))
-            .name(named(NAME))
-            .kind(kind)
-            .command(Some(CommandLine::try_new("sh").unwrap()))
-            .restart(RestartPolicy::Never)
-            .build()
-    }
-
-    /// One terminal on [`PANE`] that does not start on its own.
-    fn manual_terminal() -> Process {
-        Process::builder()
-            .id(PaneId::new(PANE))
-            .name(named(NAME))
-            .kind(ProcessKind::Terminal)
-            .command(Some(CommandLine::try_new("sh").unwrap()))
-            .restart(RestartPolicy::Never)
-            .autostart(false)
-            .build()
+    /// A harness over [`NAME`] spawning through `runner`, autostarting or not.
+    fn over(runner: Box<dyn ProcessRunner>, autostart: bool) -> Harness {
+        Harness::over(runner, &[
+            spec(NAME, "sh", RestartPolicy::Never).with_autostart(autostart)
+        ])
     }
 
     /// Feeds `bytes` to `pane`'s current process as output.
@@ -260,13 +218,13 @@ mod tests {
     /// A started terminal run by a holder at `socket`, whose service-side
     /// screen shows [`SERVICE_SCREEN`].
     fn holder_run(socket: &Path) -> Harness {
-        let mut harness = Harness::new(
+        let mut harness = over(
             Box::new(HolderRunRunner {
                 socket: socket.to_path_buf(),
             }),
-            vec![process(ProcessKind::Terminal)],
+            true,
         );
-        harness.supervisor.up();
+        harness.up();
         feed(&mut harness, SERVICE_SCREEN.as_bytes());
         harness
     }
@@ -300,7 +258,7 @@ mod tests {
             .notices
             .lock()
             .unwrap()
-            .recent(harness.supervisor.project())
+            .recent(harness.supervisor.root())
             .iter()
             .filter(|notice| *notice.level() == NoticeLevel::Warning)
             .count()
@@ -310,11 +268,13 @@ mod tests {
     /// and only an unknown name returns nothing, all without a holder read.
     #[test]
     fn output_is_the_screen_empty_before_a_start_and_none_for_an_unknown_name() {
-        let mut harness = Harness::new(Box::new(FakeRunner), vec![manual_terminal()]);
+        let mut harness = over(Box::new(FakeRunner), false);
         assert_eq!(output_of(&mut harness, NAME), Some(String::new()));
         assert_eq!(output_of(&mut harness, UNKNOWN), None);
 
-        harness.supervisor.start(&named(NAME));
+        harness
+            .supervisor
+            .start(&named(NAME), &LaunchEnvironment::default());
         feed(&mut harness, SERVICE_SCREEN.as_bytes());
 
         let Some(ScreenReply::Ready(screen)) = harness.supervisor.screen(&named(NAME)) else {
@@ -394,7 +354,9 @@ mod tests {
     fn a_stale_holder_read_is_dropped_without_a_warning() {
         let mut harness = holder_run(Path::new(UNSERVED_SOCKET));
         let respawned = handed_out(&mut harness);
-        harness.supervisor.restart(&named(NAME));
+        harness
+            .supervisor
+            .restart(&named(NAME), &LaunchEnvironment::default());
         let pane = PaneId::new(PANE);
         let generation = harness.supervisor.generations()[&pane];
         harness.supervisor.handle_output(
@@ -418,11 +380,11 @@ mod tests {
     #[test]
     fn input_reaches_a_live_process_and_is_refused_for_a_stopped_or_unknown_one() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut harness = Harness::new(
+        let mut harness = over(
             Box::new(RecordingRunner {
                 written: written.clone(),
             }),
-            vec![manual_terminal()],
+            false,
         );
         let send = |harness: &mut Harness, name: &str| {
             harness.supervisor.send_input(&named(name), b"ls\r")
@@ -430,30 +392,10 @@ mod tests {
 
         assert!(!send(&mut harness, NAME), "not running yet");
         assert!(!send(&mut harness, UNKNOWN), "no such process");
-        harness.supervisor.start(&named(NAME));
-        assert!(send(&mut harness, NAME));
-        assert_eq!(*written.lock().unwrap(), b"ls\r");
-    }
-
-    /// Only this project's sessions are listed, and a store that cannot be read
-    /// is an error rather than an empty list.
-    #[test]
-    fn sessions_list_this_projects_history_and_a_store_failure_is_an_error() {
-        let ours =
-            persisted_agent_session(AgentTool::Claude, "native-1", AgentSessionState::Closed);
-        let theirs = closed_conversation("Bea", "/elsewhere/muster.yml", "native-2");
-        let (mut harness, ..) = agent_harness(vec![ours, theirs]);
-
-        let sessions = harness.supervisor.sessions().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name(), &named("Ada"));
-        assert_eq!(*sessions[0].tool(), AgentTool::Claude);
-        assert_eq!(*sessions[0].state(), AgentSessionState::Closed);
-        assert!(*sessions[0].resumable());
-
         harness
             .supervisor
-            .set_agent_session_store(Box::new(UnreadableAgentSessionStore));
-        assert!(harness.supervisor.sessions().is_err());
+            .start(&named(NAME), &LaunchEnvironment::default());
+        assert!(send(&mut harness, NAME));
+        assert_eq!(*written.lock().unwrap(), b"ls\r");
     }
 }

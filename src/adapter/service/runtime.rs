@@ -1,6 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    io,
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, PoisonError},
     thread,
@@ -13,12 +12,12 @@ use super::{
     acceptor::Acceptor,
     event::ServiceEvent,
     holder_pool::HolderPool,
+    launch_environment::LaunchEnvironment,
     located::Located,
     notice::Notice,
     notice_level::NoticeLevel,
     notices::{Notices, SharedNotices},
     process_action::ProcessAction,
-    project_key::ProjectKey,
     project_ports::ProjectPorts,
     project_status::ProjectStatus,
     protocol,
@@ -30,15 +29,17 @@ use super::{
     service_response::ServiceResponse,
     shared_holders::SharedHolders,
     singleton::Singleton,
-    supervisor::{
-        HolderScreen, ReopenOutcome, ScreenReply, StaleRelease, Supervisor, SupervisorDeps,
-    },
+    supervisor::{HolderScreen, ScreenReply, StaleRelease, Supervisor, SupervisorDeps},
 };
 use crate::{
     adapter::{bridge::WorkspaceRequest, holder::HolderRecord},
     domain::{
-        config::ConfigError, port::ProcessHandle, pty::PtyError, settings::Settings,
-        value::ProcessName,
+        config::{ConfigError, Stack},
+        port::{ProcessHandle, SettingsStore, StackStore},
+        project::Project,
+        pty::PtyError,
+        settings::Settings,
+        value::{ProcessName, ProjectName, ProjectRoot},
     },
 };
 
@@ -54,25 +55,20 @@ pub(crate) const EVENT_CAPACITY: usize = 256;
 const LAUNCH_DETACH_WAIT: Duration = Duration::from_secs(10);
 /// Shown when a process name matches nothing in its project.
 const UNKNOWN_PROCESS: &str = "no process with that name in this project";
-/// Prefix of the refusal of a project path that is not absolute.
-const RELATIVE_PROJECT: &str =
-    "a project must be named by the absolute path of its muster.yml, not";
-/// Shown when a project's config does not exist.
-const UNKNOWN_PROJECT: &str = "no muster config at";
 /// Shown when the process has no running child.
 const NOT_RUNNING: &str = "the process is not running";
-/// Why a session listing was refused when the session store cannot be read.
-const SESSIONS_UNREADABLE: &str = "could not read this project's agent sessions";
 /// Shown when a running process has no holder record to reach it by.
 const NO_HOLDER: &str = "the process has no holder to reach it by";
+/// Prefix of the refusal of a request the stored state could not answer.
+const STORE_UNREADABLE: &str = "could not read the stored state";
 /// Prefix of the notice for a holder record that cannot be read.
 const UNREADABLE_RECORD_NOTICE: &str = "could not read the holder record";
 /// What an unreadable record means for its process.
 const UNREADABLE_RECORD_OUTCOME: &str =
     "its process, if it still runs, is left running unsupervised";
 /// Prefix of the notice for a project whose running processes could not be
-/// adopted because its config does not load.
-const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running but its config does not load; they are left running until it does";
+/// adopted because its stack could not be read.
+const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running but its stack cannot be read; they are left running until it can";
 /// Prefix of the notice for handover files that could not be removed.
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
@@ -99,7 +95,9 @@ enum Reply {
 
 /// The one service of a user: owns every loaded project's supervisor on a
 /// single thread, which every other thread only sends events to. Clients
-/// connect on `service.sock`; holders run every process and outlive it.
+/// connect on `service.sock`; holders run every process and outlive it. The
+/// service only reads the stored stacks and settings; writers tell it what
+/// changed.
 pub struct ServiceRuntime {
     /// The running binary's version.
     version: String,
@@ -109,30 +107,39 @@ pub struct ServiceRuntime {
     holders: Arc<dyn HolderPool>,
     /// Builds each project's driven adapters.
     ports: Box<dyn ProjectPorts>,
-    /// The user's settings.
+    /// Reads each project's stack.
+    stacks: Box<dyn StackStore>,
+    /// Reads the user's settings.
+    settings_store: Box<dyn SettingsStore>,
+    /// The settings every supervisor launches with, as last read.
     settings: Settings,
-    /// Where processes, timers, watchers, workers and clients deliver events.
+    /// Where processes, timers, workers and clients deliver events.
     events: Sender<ServiceEvent>,
     /// Notices of every project and of the service.
     notices: SharedNotices,
     /// The supervisor of every loaded project.
-    supervisors: HashMap<ProjectKey, Supervisor>,
+    supervisors: HashMap<ProjectRoot, Supervisor>,
+    /// Loaded projects that are no longer registered, kept only until the
+    /// processes they still ran have stopped.
+    unregistered: HashSet<ProjectRoot>,
 }
 
 impl ServiceRuntime {
-    /// Runs the service until a client asks it to stop or be replaced: binds
-    /// the socket in the singleton's state directory, adopts every running
-    /// holder into its project's supervisor, and serves. On exit every holder
-    /// keeps running, the socket is removed and the lock released before the
-    /// exiting client is answered.
+    /// Runs the service until a client asks it to stop or be replaced: reads
+    /// the settings, binds the socket in the singleton's state directory,
+    /// adopts every running holder into its project's supervisor, and serves.
+    /// On exit every holder keeps running, the socket is removed and the lock
+    /// released before the exiting client is answered.
     ///
     /// # Errors
-    /// Returns a [`ServiceError`] when the socket cannot be bound.
+    /// Returns a [`ServiceError`] when the settings cannot be read or the
+    /// socket cannot be bound.
     pub fn run(singleton: Singleton, deps: ServiceDeps) -> Result<(), ServiceError> {
         let state_dir = singleton.state_dir().clone();
+        let settings = deps.settings.load().map_err(ServiceError::Settings)?;
         let (sender, events) = bounded(EVENT_CAPACITY);
         let mut acceptor = Acceptor::bind(&protocol::socket_path(&state_dir), sender.clone())?;
-        let mut runtime = Self::new(deps, sender, &state_dir);
+        let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         let exit = runtime.serve(&events);
         runtime.shutdown();
@@ -148,33 +155,44 @@ impl ServiceRuntime {
         Ok(())
     }
 
-    /// A runtime over `deps` with no project loaded, mirroring its notices to
-    /// the log in `state_dir`.
-    fn new(deps: ServiceDeps, events: Sender<ServiceEvent>, state_dir: &Path) -> Self {
+    /// A runtime over `deps` launching with `settings`, with no project
+    /// loaded, mirroring its notices to the log in `state_dir`.
+    fn new(
+        deps: ServiceDeps,
+        settings: Settings,
+        events: Sender<ServiceEvent>,
+        state_dir: &Path,
+    ) -> Self {
         let ServiceDeps {
             version,
             binary,
             holders,
             ports,
-            settings,
+            stacks,
+            settings: settings_store,
         } = deps;
         Self {
             version,
             binary,
             holders,
             ports,
+            stacks,
+            settings_store,
             settings,
             events,
             notices: Notices::shared(Some(protocol::log_path(state_dir))),
             supervisors: HashMap::new(),
+            unregistered: HashSet::new(),
         }
     }
 
     /// Takes over what a previous service left: removes the per-holder logs
     /// of an earlier muster and stale handover files, reports every holder
-    /// record that cannot be read, and loads each project
-    /// with running holders so they are adopted. A project whose config does
-    /// not load is reported, and its holders are adopted once it does.
+    /// record that cannot be read, and loads each project with running
+    /// holders so they are adopted. A project no longer registered is loaded
+    /// over an empty stack, so what it still runs is stopped. A project whose
+    /// stack cannot be read is reported, and its holders are adopted once it
+    /// can be.
     fn adopt_running(&mut self) {
         if let Err(error) = self.holders.remove_legacy_logs() {
             self.notify(
@@ -210,14 +228,14 @@ impl ServiceRuntime {
             );
         }
         let records = self.holders.live_records();
-        let projects: BTreeSet<PathBuf> = records
+        let projects: BTreeSet<ProjectRoot> = records
             .iter()
             .map(|record| record.project().clone())
             .collect();
         for project in projects {
             if let Err(refused) = self.load(&project, &records) {
                 self.notify(
-                    Some(ProjectKey::new(project)),
+                    Some(project),
                     NoticeLevel::Error,
                     format!("{UNADOPTABLE_PROJECT_NOTICE}: {}", refused.message()),
                 );
@@ -226,8 +244,8 @@ impl ServiceRuntime {
     }
 
     /// Handles events until a client asks the service to exit, waking for the
-    /// supervisors' activity and metrics deadlines in between. Returns where
-    /// to answer that client.
+    /// supervisors' metrics deadlines in between. Returns where to answer
+    /// that client.
     fn serve(&mut self, events: &Receiver<ServiceEvent>) -> Option<Sender<ServiceResponse>> {
         loop {
             let received = match self.next_deadline() {
@@ -247,27 +265,30 @@ impl ServiceRuntime {
         }
     }
 
-    /// The earliest activity or metrics deadline of any supervisor.
+    /// The earliest metrics deadline of any supervisor.
     fn next_deadline(&self) -> Option<Instant> {
         self.supervisors
             .values()
-            .flat_map(|supervisor| {
-                [
-                    supervisor.next_activity_deadline(),
-                    supervisor.next_metrics_deadline(),
-                ]
-            })
-            .flatten()
+            .filter_map(Supervisor::next_metrics_deadline)
             .min()
     }
 
-    /// Acknowledges the held exits whose restart settled, then expires quiet
-    /// activity and samples usage wherever they are due.
+    /// Acknowledges the held exits whose restart settled, samples usage where
+    /// it is due, and lets go of an unregistered project once it runs nothing.
     fn tick(&mut self, now: Instant) {
         for supervisor in self.supervisors.values_mut() {
             supervisor.release_settled_exits();
-            supervisor.expire_quiet_activity(now);
             supervisor.sample_metrics(now);
+        }
+        let finished: Vec<ProjectRoot> = self
+            .unregistered
+            .iter()
+            .filter(|root| self.supervisors.get(*root).is_none_or(Supervisor::is_idle))
+            .cloned()
+            .collect();
+        for root in finished {
+            self.unregistered.remove(&root);
+            self.supervisors.remove(&root);
         }
     }
 
@@ -322,11 +343,6 @@ impl ServiceRuntime {
                 Some(supervisor) => supervisor.handle_adopted(pane, generation, &record, result),
                 None => release_unrecorded(result),
             },
-            ServiceEvent::ConfigChanged { path } => {
-                for supervisor in self.supervisors.values_mut() {
-                    supervisor.handle_config_changed(&path);
-                }
-            },
             ServiceEvent::Request { request, reply } => return self.request(request, reply),
             ServiceEvent::HolderRead {
                 screen,
@@ -360,7 +376,7 @@ impl ServiceRuntime {
     ///
     /// # Errors
     /// Returns the refusal to send when the project or process is unknown, or
-    /// the request cannot be carried out.
+    /// the stored state cannot be read.
     fn respond(&mut self, request: ServiceRequest) -> Result<Reply, ServiceErrorBody> {
         let response = match request {
             ServiceRequest::Replace | ServiceRequest::Stop => return Ok(Reply::Exit),
@@ -388,26 +404,16 @@ impl ServiceRuntime {
                 }
                 ServiceResponse::Ok
             },
-            ServiceRequest::Workspace {
-                project,
-                request: WorkspaceRequest::ListSessions,
-            } => ServiceResponse::Sessions(self.supervisor(&project)?.sessions().map_err(
-                |error| {
-                    refused(
-                        ServiceErrorKind::Internal,
-                        format!("{SESSIONS_UNREADABLE}: {error}"),
-                    )
-                },
-            )?),
             ServiceRequest::Hello { .. } => ServiceResponse::Hello {
                 version: self.version.clone(),
                 binary: self.binary.clone(),
             },
-            ServiceRequest::Up { project } => {
-                ServiceResponse::Batch(self.supervisor(&project)?.up())
-            },
-            ServiceRequest::Down { project, agents } => {
-                ServiceResponse::Batch(self.supervisor(&project)?.down(agents))
+            ServiceRequest::Up {
+                project,
+                environment,
+            } => ServiceResponse::Batch(self.supervisor(&project)?.up(&environment)),
+            ServiceRequest::Down { project } => {
+                ServiceResponse::Batch(self.supervisor(&project)?.down())
             },
             ServiceRequest::Log { project, name } => {
                 self.process(&project, &name)?;
@@ -421,58 +427,81 @@ impl ServiceRuntime {
                 project,
                 name,
                 action,
+                environment,
             } => {
-                control(self.process(&project, &name)?, &name, action);
+                control(self.process(&project, &name)?, &name, action, &environment);
                 ServiceResponse::Ok
             },
             ServiceRequest::Locate { project, name } => {
                 ServiceResponse::Located(self.locate(&project, &name)?)
             },
-            ServiceRequest::AgentNew {
-                project,
-                tool,
-                name,
-                command,
-                resume,
-            } => self
-                .supervisor(&project)?
-                .new_agent_session(tool, name, command, resume)
-                .map(ServiceResponse::Agent)
-                .map_err(|error| refused(ServiceErrorKind::Refused, error.to_string()))?,
-            ServiceRequest::AgentClose { project, name } => {
-                self.process(&project, &name)?.close_agent_session(&name);
+            ServiceRequest::Notices { project } => ServiceResponse::Notices(
+                self.notices
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recent(&project),
+            ),
+            ServiceRequest::StackChanged { project } => {
+                self.stack_changed(&project)?;
                 ServiceResponse::Ok
             },
-            ServiceRequest::AgentReopen { project } => {
-                match self.supervisor(&project)?.reopen_last_closed() {
-                    Ok((name, ReopenOutcome::Opened(_))) => ServiceResponse::Agent(name),
-                    Ok((name, ReopenOutcome::Queued)) => ServiceResponse::AgentQueued(name),
-                    Err(error) => {
-                        return Err(refused(ServiceErrorKind::Refused, error.to_string()));
-                    },
-                }
-            },
-            ServiceRequest::Notices { project } => {
-                let key = project_key(&project)?;
-                ServiceResponse::Notices(
-                    self.notices
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .recent(&key),
-                )
+            ServiceRequest::SettingsChanged => {
+                self.settings_changed()?;
+                ServiceResponse::Ok
             },
         };
         Ok(Reply::Now(response))
     }
 
-    /// Every loaded project's status, ordered by project.
+    /// Applies `project`'s stored stack to its supervisor when it is loaded;
+    /// one no longer registered applies an empty stack, so what it runs is
+    /// stopped. An unloaded project reads its stack afresh when it loads.
+    ///
+    /// # Errors
+    /// Returns the refusal when the stack cannot be read.
+    fn stack_changed(&mut self, project: &ProjectRoot) -> Result<(), ServiceErrorBody> {
+        if !self.supervisors.contains_key(project) {
+            return Ok(());
+        }
+        let stored = self.stacks.stack(project).map_err(store_refusal)?;
+        let Some(supervisor) = self.supervisors.get_mut(project) else {
+            return Ok(());
+        };
+        let stack = match stored {
+            Some(stack) => {
+                self.unregistered.remove(project);
+                stack
+            },
+            None => {
+                self.unregistered.insert(project.clone());
+                empty_stack(supervisor.project().clone())
+            },
+        };
+        supervisor.apply_stack(&stack);
+        Ok(())
+    }
+
+    /// Reads the stored settings for every later launch, and hands them to
+    /// every supervisor.
+    ///
+    /// # Errors
+    /// Returns the refusal when the settings cannot be read.
+    fn settings_changed(&mut self) -> Result<(), ServiceErrorBody> {
+        self.settings = self.settings_store.load().map_err(store_refusal)?;
+        for supervisor in self.supervisors.values_mut() {
+            supervisor.apply_settings(&self.settings);
+        }
+        Ok(())
+    }
+
+    /// Every loaded project's status, ordered by project folder.
     fn statuses(&self) -> Vec<ProjectStatus> {
         let mut statuses: Vec<_> = self
             .supervisors
             .values()
             .map(Supervisor::snapshot)
             .collect();
-        statuses.sort_by(|left, right| left.project().as_ref().cmp(right.project().as_ref()));
+        statuses.sort_by(|left, right| left.project().root().cmp(right.project().root()));
         statuses
     }
 
@@ -481,7 +510,11 @@ impl ServiceRuntime {
     /// # Errors
     /// Returns the refusal when the process is unknown, not running, or has
     /// no holder record.
-    fn locate(&mut self, project: &Path, name: &ProcessName) -> Result<Located, ServiceErrorBody> {
+    fn locate(
+        &mut self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+    ) -> Result<Located, ServiceErrorBody> {
         let pid = self
             .process(project, name)?
             .live_pid(name)
@@ -526,7 +559,7 @@ impl ServiceRuntime {
     /// process refusal listing the project's process names.
     fn process(
         &mut self,
-        project: &Path,
+        project: &ProjectRoot,
         name: &ProcessName,
     ) -> Result<&mut Supervisor, ServiceErrorBody> {
         let supervisor = self.supervisor(project)?;
@@ -540,53 +573,65 @@ impl ServiceRuntime {
             .build())
     }
 
-    /// The supervisor of `project`, loading it on first use and adopting the
-    /// holders already running its processes.
+    /// The supervisor of `project`, loading it on first use from its stored
+    /// stack and adopting the holders already running its processes.
     ///
     /// # Errors
-    /// Returns the refusal when the project's config is missing or invalid.
-    fn supervisor(&mut self, project: &Path) -> Result<&mut Supervisor, ServiceErrorBody> {
-        let key = project_key(project)?;
-        if !self.supervisors.contains_key(&key) {
+    /// Returns the refusal when `project` is not registered or its stack
+    /// cannot be read.
+    fn supervisor(&mut self, project: &ProjectRoot) -> Result<&mut Supervisor, ServiceErrorBody> {
+        if !self.supervisors.contains_key(project) {
             let records = self.holders.live_records();
             self.load(project, &records)?;
         }
         self.supervisors
-            .get_mut(&key)
-            .ok_or_else(|| refused(ServiceErrorKind::UnknownProject, unknown_project(project)))
+            .get_mut(project)
+            .ok_or_else(|| unknown_project(project))
     }
 
-    /// Loads `project`'s supervisor and adopts each of `records` that runs one
-    /// of its processes.
+    /// Loads `project`'s supervisor over its stored stack and adopts each of
+    /// `records` that runs one of its processes. A project no longer
+    /// registered is loaded over an empty stack only while `records` show it
+    /// still runs something, which is then stopped.
     ///
     /// # Errors
-    /// Returns the refusal when the project's config is missing or invalid.
-    fn load(&mut self, project: &Path, records: &[HolderRecord]) -> Result<(), ServiceErrorBody> {
-        let key = ProjectKey::new(project.to_path_buf());
+    /// Returns the refusal when `project` is not registered and runs nothing,
+    /// or its stack cannot be read.
+    fn load(
+        &mut self,
+        project: &ProjectRoot,
+        records: &[HolderRecord],
+    ) -> Result<(), ServiceErrorBody> {
+        let held: Vec<&HolderRecord> = records
+            .iter()
+            .filter(|record| record.project() == project)
+            .collect();
+        let stack = match self.stacks.stack(project).map_err(store_refusal)? {
+            Some(stack) => stack,
+            None if !held.is_empty() => {
+                let name = ProjectName::candidates(project)
+                    .next()
+                    .ok_or_else(|| unknown_project(project))?;
+                self.unregistered.insert(project.clone());
+                empty_stack(Project::builder().root(project.clone()).name(name).build())
+            },
+            None => return Err(unknown_project(project)),
+        };
         let shared = SharedHolders::new(Arc::clone(&self.holders));
         let deps = SupervisorDeps::builder()
             .runner(Box::new(shared.clone()))
-            .registry(self.ports.registry())
-            .agent_session_store(self.ports.agent_session_store())
             .events(self.events.clone())
             .notices(Arc::clone(&self.notices))
-            .config_watcher(self.ports.config_watcher(self.events.clone()))
             .notifier(self.ports.notifier())
-            .desktop_notifications(*self.settings.desktop_notifications())
             .process_metrics(self.ports.process_metrics())
-            .size(*self.settings.default_size())
-            .color_scheme(*self.settings.color_scheme())
+            .settings(self.settings.clone())
             .build();
-        let mut supervisor = Supervisor::load(key.clone(), deps)
-            .map_err(|error| load_refusal(project, &error))?
-            .with_adopter(Box::new(shared));
-        for record in records
-            .iter()
-            .filter(|record| ProjectKey::new(record.project().clone()) == key)
-        {
+        let mut supervisor =
+            Supervisor::new(stack.project().clone(), &stack, deps).with_adopter(Box::new(shared));
+        for record in held {
             supervisor.adopt(record.clone());
         }
-        self.supervisors.insert(key, supervisor);
+        self.supervisors.insert(project.clone(), supervisor);
         Ok(())
     }
 
@@ -621,7 +666,7 @@ impl ServiceRuntime {
     }
 
     /// Records a notice about `project`, or the service as a whole.
-    fn notify(&self, project: Option<ProjectKey>, level: NoticeLevel, message: String) {
+    fn notify(&self, project: Option<ProjectRoot>, level: NoticeLevel, message: String) {
         let notice = Notice::builder()
             .at(SystemTime::now())
             .project(project)
@@ -645,16 +690,30 @@ fn release_unrecorded(result: Result<Box<dyn ProcessHandle>, PtyError>) {
     }
 }
 
-/// Applies `action` to the process `name` of `supervisor`.
-fn control(supervisor: &mut Supervisor, name: &ProcessName, action: ProcessAction) {
+/// Applies `action` to the process `name` of `supervisor`; a start or restart
+/// runs with `environment`, the environment of the client that asked.
+fn control(
+    supervisor: &mut Supervisor,
+    name: &ProcessName,
+    action: ProcessAction,
+    environment: &LaunchEnvironment,
+) {
     match action {
-        ProcessAction::Start => supervisor.start(name),
+        ProcessAction::Start => supervisor.start(name, environment),
         ProcessAction::Stop => supervisor.stop(name),
-        ProcessAction::Restart => supervisor.restart(name),
+        ProcessAction::Restart => supervisor.restart(name, environment),
         ProcessAction::Pause => supervisor.pause(name),
         ProcessAction::Resume => supervisor.resume(name),
         ProcessAction::Kill => supervisor.force_kill(name),
     }
+}
+
+/// The stack of `project` with no process in it.
+fn empty_stack(project: Project) -> Stack {
+    Stack::builder()
+        .project(project)
+        .processes(Vec::new())
+        .build()
 }
 
 /// A refusal of `kind` saying `message`.
@@ -665,87 +724,66 @@ fn refused(kind: ServiceErrorKind, message: String) -> ServiceErrorBody {
         .build()
 }
 
-/// The key of the project whose config a client named at `project`, which
-/// must be absolute: a relative path would resolve against the service's own
-/// working directory, not the client's.
-///
-/// # Errors
-/// Returns an invalid request refusal for a relative path.
-fn project_key(project: &Path) -> Result<ProjectKey, ServiceErrorBody> {
-    if project.is_absolute() {
-        Ok(ProjectKey::new(project.to_path_buf()))
-    } else {
-        Err(refused(
-            ServiceErrorKind::InvalidRequest,
-            format!("{RELATIVE_PROJECT} {}", project.display()),
-        ))
-    }
+/// The refusal of `project`, which is not registered.
+fn unknown_project(project: &ProjectRoot) -> ServiceErrorBody {
+    refused(
+        ServiceErrorKind::UnknownProject,
+        ConfigError::UnknownProject {
+            root: project.as_ref().clone(),
+        }
+        .to_string(),
+    )
 }
 
-/// The message for a project with no config at `project`.
-fn unknown_project(project: &Path) -> String {
-    format!("{UNKNOWN_PROJECT} {}", project.display())
-}
-
-/// The refusal for a project whose config failed to load with `error`: an
-/// absent file is an unknown project, anything else an invalid config.
-fn load_refusal(project: &Path, error: &ConfigError) -> ServiceErrorBody {
-    match error {
-        ConfigError::Read { source, .. } if source.kind() == io::ErrorKind::NotFound => {
-            refused(ServiceErrorKind::UnknownProject, unknown_project(project))
-        },
-        error => refused(ServiceErrorKind::InvalidConfig, error.to_string()),
-    }
+/// The refusal of a request the stored state failed to answer with `error`.
+fn store_refusal(error: ConfigError) -> ServiceErrorBody {
+    refused(
+        ServiceErrorKind::Internal,
+        format!("{STORE_UNREADABLE}: {error}"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        os::unix::{
-            fs::symlink,
-            net::{UnixListener, UnixStream},
-        },
+        fs, io,
+        os::unix::net::{UnixListener, UnixStream},
         process,
         sync::{
             Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         thread::JoinHandle,
-        time::Duration,
     };
 
-    use bytesize::ByteSize as RawByteSize;
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
         adapter::{
-            config::load_workspace,
             holder::{
                 ClientMessage, ClientRole, HolderConfig, HolderDirs, HolderError, HolderId,
-                HolderLauncher, HolderRunner, HolderServer, abandon,
+                HolderLauncher, HolderRunner, HolderServer, abandon, client::greet,
+                testing::test_request,
             },
+            ipc,
             service::{
                 BatchOutcome, ProcessStatus,
                 supervisor::{
                     ChannelOutputSink, HolderAdopter, SpawnGeneration,
-                    testing::{KillCountHandle, Orphan, UnreadableAgentSessionStore},
+                    testing::{KillCountHandle, Orphan, test_settings, test_stop},
                 },
             },
-            terminal::SCROLLBACK_LINES,
         },
         domain::{
-            color_scheme::ColorScheme,
-            config::WorkspaceConfig,
-            port::{
-                AgentSessionStore, ConfigWatcher, Notifier, OutputSink, ProcessHandle,
-                ProcessMetrics, ProcessRunner, ProjectRegistry,
+            config::{
+                Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
+                SettingChange,
             },
-            process::{ProcessKind, ProcessState},
-            project::Project,
+            port::{Notifier, OutputSink, ProcessHandle, ProcessMetrics, ProcessRunner},
+            process::{ProcessState, RestartPolicy},
             pty::{ProcessOutput, PtySize, SpawnRequest},
-            value::{ByteSize, Cols, CommandLine, DetachKey, PaneId, Rows},
+            value::{Cols, CommandLine, PaneId, Rows},
         },
     };
 
@@ -809,62 +847,127 @@ mod tests {
         }
     }
 
-    /// Reads project configs straight from disk and writes nothing, so no
-    /// test touches the user's registry.
-    struct FileRegistry;
+    /// Stacks and settings held in memory and shared with the test, which
+    /// edits them as a writer would before telling the service.
+    #[derive(Clone)]
+    struct MemoryStore {
+        stacks: Arc<Mutex<HashMap<ProjectRoot, Vec<ProcessSpec>>>>,
+        settings: Arc<Mutex<Settings>>,
+    }
 
-    impl ProjectRegistry for FileRegistry {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(Vec::new())
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                stacks: Arc::default(),
+                settings: Arc::new(Mutex::new(test_settings())),
+            }
         }
 
-        fn workspace(&self, config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-            load_workspace(config_path)
+        /// Registers `root` with `processes`, replacing its stack.
+        fn put(&self, root: &ProjectRoot, processes: Vec<ProcessSpec>) {
+            self.stacks.lock().unwrap().insert(root.clone(), processes);
         }
 
-        fn workspace_exists(&self, config_path: &Path) -> bool {
-            config_path.exists()
+        /// Unregisters `root`.
+        fn forget(&self, root: &ProjectRoot) {
+            self.stacks.lock().unwrap().remove(root);
         }
 
-        fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
-            Ok(())
+        /// The project at `root`, named for its folder.
+        fn project(root: &ProjectRoot) -> Project {
+            Project::builder()
+                .root(root.clone())
+                .name(ProjectName::candidates(root).next().unwrap())
+                .build()
+        }
+    }
+
+    impl StackStore for MemoryStore {
+        fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
+            Ok(self.stacks.lock().unwrap().get(root).map(|processes| {
+                Stack::builder()
+                    .project(Self::project(root))
+                    .processes(processes.clone())
+                    .build()
+            }))
         }
 
-        fn save_workspace(
+        fn add_process(
             &self,
-            _config_path: &Path,
-            _config: &WorkspaceConfig,
-        ) -> Result<(), ConfigError> {
-            Ok(())
+            root: &ProjectRoot,
+            spec: &ProcessSpec,
+        ) -> Result<Registration, ConfigError> {
+            let mut stacks = self.stacks.lock().unwrap();
+            let newly_registered = !stacks.contains_key(root);
+            stacks.entry(root.clone()).or_default().push(spec.clone());
+            Ok(Registration::builder()
+                .project(Self::project(root))
+                .newly_registered(newly_registered)
+                .build())
+        }
+
+        fn change_process(
+            &self,
+            root: &ProjectRoot,
+            name: &ProcessName,
+            change: &ProcessChange,
+        ) -> Result<ProcessSpec, ConfigError> {
+            let mut stacks = self.stacks.lock().unwrap();
+            let spec = stacks
+                .get_mut(root)
+                .and_then(|processes| processes.iter_mut().find(|spec| spec.name() == name))
+                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+            *spec = spec.clone().with_change(change);
+            Ok(spec.clone())
+        }
+
+        fn remove_process(
+            &self,
+            root: &ProjectRoot,
+            name: &ProcessName,
+        ) -> Result<ProcessSpec, ConfigError> {
+            let mut stacks = self.stacks.lock().unwrap();
+            let processes = stacks
+                .get_mut(root)
+                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+            let index = processes
+                .iter()
+                .position(|spec| spec.name() == name)
+                .ok_or_else(|| ConfigError::Database(name.to_string()))?;
+            Ok(processes.remove(index))
+        }
+
+        fn import(
+            &self,
+            _root: &ProjectRoot,
+            _processes: &[ProcessSpec],
+            _mode: ImportMode,
+        ) -> Result<(Registration, ImportPlan), ConfigError> {
+            Err(ConfigError::Database("not used by these tests".to_string()))
         }
     }
 
-    /// Ports over [`FileRegistry`] with nothing else wired, or with a session
-    /// store that cannot be read when `unreadable_sessions` is set.
-    #[derive(Default)]
-    struct TestPorts {
-        unreadable_sessions: bool,
+    impl SettingsStore for MemoryStore {
+        fn load(&self) -> Result<Settings, ConfigError> {
+            Ok(self.settings.lock().unwrap().clone())
+        }
+
+        fn apply(&self, change: &SettingChange) -> Result<Settings, ConfigError> {
+            let mut settings = self.settings.lock().unwrap();
+            *settings = settings.clone().with_change(change)?;
+            Ok(settings.clone())
+        }
     }
+
+    /// Ports with nothing wired.
+    struct TestPorts;
 
     impl ProjectPorts for TestPorts {
-        fn registry(&self) -> Box<dyn ProjectRegistry> {
-            Box::new(FileRegistry)
-        }
-
-        fn agent_session_store(&self) -> Option<Box<dyn AgentSessionStore>> {
-            self.unreadable_sessions
-                .then(|| Box::new(UnreadableAgentSessionStore) as Box<dyn AgentSessionStore>)
-        }
-
         fn notifier(&self) -> Option<Box<dyn Notifier>> {
             None
         }
 
         fn process_metrics(&self) -> Option<Box<dyn ProcessMetrics>> {
-            None
-        }
-
-        fn config_watcher(&self, _events: Sender<ServiceEvent>) -> Option<Box<dyn ConfigWatcher>> {
             None
         }
     }
@@ -993,8 +1096,8 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn process_log(&self, project: &Path, name: &ProcessName) -> PathBuf {
-            project.with_file_name(format!("{name}.log"))
+        fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {
+            project.as_ref().join(format!("{name}.log"))
         }
 
         fn remove_legacy_logs(&self) -> io::Result<()> {
@@ -1014,26 +1117,6 @@ mod tests {
         fn send(&self, _output: ProcessOutput) {}
     }
 
-    /// Settings with every value explicit and desktop notifications off.
-    fn settings() -> Settings {
-        Settings::builder()
-            .desktop_notifications(false)
-            .default_size(size())
-            .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
-            .log_max_size(ByteSize::try_new(RawByteSize::mib(4)).unwrap())
-            .scrollback(SCROLLBACK_LINES)
-            .color_scheme(ColorScheme::Dark)
-            .build()
-    }
-
-    /// The terminal size every test process starts with.
-    fn size() -> PtySize {
-        PtySize::builder()
-            .rows(Rows::new(24))
-            .cols(Cols::new(80))
-            .build()
-    }
-
     /// Polls `condition` until it holds, failing the test at [`WAIT`].
     fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
         let started = Instant::now();
@@ -1043,12 +1126,39 @@ mod tests {
         }
     }
 
-    /// A scratch state directory, holder dirs and project, plus every holder
-    /// thread started there; dropping it kills every child still recorded and
-    /// lets its holder finish.
+    /// A process `name` running [`SLEEPER`], starting with the project when
+    /// `autostart`.
+    fn sleeper(name: &str, autostart: bool) -> ProcessSpec {
+        ProcessSpec::builder()
+            .name(ProcessName::try_new(name).unwrap())
+            .command(CommandLine::try_new(SLEEPER).unwrap())
+            .environment(Environment::empty())
+            .autostart(autostart)
+            .restart(RestartPolicy::Never)
+            .stop(test_stop())
+            .build()
+    }
+
+    /// Processes `(name, autostart)`, each running [`SLEEPER`].
+    fn commands(entries: &[(&str, bool)]) -> Vec<ProcessSpec> {
+        entries
+            .iter()
+            .map(|(name, autostart)| sleeper(name, *autostart))
+            .collect()
+    }
+
+    /// A client asking with no environment of its own.
+    fn no_env() -> LaunchEnvironment {
+        LaunchEnvironment::default()
+    }
+
+    /// A scratch state directory, holder dirs, projects and their store, plus
+    /// every holder thread started there; dropping it kills every child still
+    /// recorded and lets its holder finish.
     struct Fixture {
         scratch: TempDir,
         holders: Holders,
+        store: MemoryStore,
     }
 
     impl Fixture {
@@ -1060,6 +1170,7 @@ mod tests {
                     .tempdir_in(SHORT_TEMP_ROOT)
                     .unwrap(),
                 holders: Arc::default(),
+                store: MemoryStore::new(),
             }
         }
 
@@ -1081,65 +1192,58 @@ mod tests {
         /// A runner launching in-thread holders into this fixture's dirs, as a
         /// service has.
         fn runner(&self) -> HolderRunner {
-            self.runner_with(Box::new(ThreadLauncher(Arc::clone(&self.holders))))
+            HolderRunner::new(
+                Box::new(ThreadLauncher(Arc::clone(&self.holders))),
+                self.dirs(),
+            )
         }
 
         /// As [`Self::runner`], whose holders start only once `gate` opens.
         fn gated_runner(&self, gate: Receiver<()>) -> HolderRunner {
-            self.runner_with(Box::new(GatedLauncher {
-                holders: Arc::clone(&self.holders),
-                gate,
-            }))
-        }
-
-        /// A runner launching through `launcher` into this fixture's dirs.
-        fn runner_with(&self, launcher: Box<dyn HolderLauncher>) -> HolderRunner {
             HolderRunner::new(
-                launcher,
+                Box::new(GatedLauncher {
+                    holders: Arc::clone(&self.holders),
+                    gate,
+                }),
                 self.dirs(),
-                ByteSize::try_new(RawByteSize::mib(4)).unwrap(),
-                SCROLLBACK_LINES,
-                ColorScheme::Dark,
             )
         }
 
-        /// Writes `config` as the project's `muster.yml` and returns its path.
-        fn project(&self, config: &str) -> PathBuf {
-            self.project_in("project", config)
-        }
-
-        /// Writes `config` as the `muster.yml` of the project in `folder` and
-        /// returns its path.
-        fn project_in(&self, folder: &str, config: &str) -> PathBuf {
+        /// The folder `folder` in the scratch directory, created.
+        fn folder(&self, folder: &str) -> ProjectRoot {
             let dir = self.scratch.path().join(folder);
             fs::create_dir_all(&dir).unwrap();
-            let path = dir.join("muster.yml");
-            fs::write(&path, config).unwrap();
-            path
+            ProjectRoot::try_new(fs::canonicalize(dir).unwrap()).unwrap()
         }
 
-        /// A request for `process` of kind `command` in `project`.
-        fn request(&self, project: &Path, process: &str, command: &str) -> SpawnRequest {
-            SpawnRequest::builder()
-                .process(ProcessName::try_new(process).unwrap())
-                .kind(ProcessKind::Command)
-                .command(Some(CommandLine::try_new(command).unwrap()))
-                .project(Some(project.to_path_buf()))
-                .working_dir(Some(self.scratch.path().to_path_buf()))
-                .size(size())
-                .build()
+        /// Registers the project `project` with `processes` and returns its
+        /// folder.
+        fn project(&self, processes: Vec<ProcessSpec>) -> ProjectRoot {
+            self.project_in("project", processes)
+        }
+
+        /// Registers the project in `folder` with `processes` and returns it.
+        fn project_in(&self, folder: &str, processes: Vec<ProcessSpec>) -> ProjectRoot {
+            let root = self.folder(folder);
+            self.store.put(&root, processes);
+            root
+        }
+
+        /// A request for `process` running `command` in `project`.
+        fn request(&self, project: &ProjectRoot, process: &str, command: &str) -> SpawnRequest {
+            test_request(
+                process,
+                command,
+                Some(project.as_ref().clone()),
+                Some(self.scratch.path().to_path_buf()),
+            )
         }
 
         /// Starts a service over `pool` and waits until it accepts clients.
         fn start(&self, pool: Arc<dyn HolderPool>) -> Running {
-            self.start_with(pool, TestPorts::default())
-        }
-
-        /// Starts a service over `pool` and `ports` and waits until it
-        /// accepts clients.
-        fn start_with(&self, pool: Arc<dyn HolderPool>, ports: TestPorts) -> Running {
             let state_dir = self.state_dir();
             let socket = protocol::socket_path(&state_dir);
+            let store = self.store.clone();
             let thread = thread::spawn(move || {
                 let Some(singleton) = Singleton::acquire(&state_dir)? else {
                     return Ok(());
@@ -1148,8 +1252,9 @@ mod tests {
                     .version(VERSION.to_string())
                     .binary(PathBuf::from(TEST_BINARY))
                     .holders(pool)
-                    .ports(Box::new(ports))
-                    .settings(settings())
+                    .ports(Box::new(TestPorts))
+                    .stacks(Box::new(store.clone()))
+                    .settings(Box::new(store))
                     .build();
                 ServiceRuntime::run(singleton, deps)
             });
@@ -1203,6 +1308,29 @@ mod tests {
             protocol::send(&self.socket, &request).unwrap()
         }
 
+        /// Brings `project` up with no client environment.
+        fn up(&self, project: &ProjectRoot) -> ServiceResponse {
+            self.send(ServiceRequest::Up {
+                project: project.clone(),
+                environment: no_env(),
+            })
+        }
+
+        /// Applies `action` to `name` of `project` with no client environment.
+        fn control(
+            &self,
+            project: &ProjectRoot,
+            name: &str,
+            action: ProcessAction,
+        ) -> ServiceResponse {
+            self.send(ServiceRequest::Control {
+                project: project.clone(),
+                name: ProcessName::try_new(name).unwrap(),
+                action,
+                environment: no_env(),
+            })
+        }
+
         /// Sends `Stop`, then waits for the service to exit.
         fn stop(mut self) {
             assert_eq!(self.send(ServiceRequest::Stop), ServiceResponse::Ok);
@@ -1221,23 +1349,38 @@ mod tests {
 
         /// Polls `ps` until the process `name` of `project` is in `state`,
         /// failing at [`WAIT`], and returns that status.
-        fn wait_for(&self, project: &Path, name: &str, state: ProcessState) -> ProjectStatus {
+        fn wait_for(
+            &self,
+            project: &ProjectRoot,
+            name: &str,
+            state: ProcessState,
+        ) -> ProjectStatus {
             let mut status = self.status(project);
             wait_until("the process to reach its state", || {
                 status = self.status(project);
-                *process(&status, name).state() == state
+                find(&status, name).is_some_and(|process| *process.state() == state)
             });
             status
         }
 
         /// The one project status a `ps` of `project` reports.
-        fn status(&self, project: &Path) -> ProjectStatus {
+        fn status(&self, project: &ProjectRoot) -> ProjectStatus {
             let ServiceResponse::Status(mut statuses) = self.send(ServiceRequest::Ps {
-                project: Some(project.to_path_buf()),
+                project: Some(project.clone()),
             }) else {
                 panic!("ps answers a status");
             };
             statuses.remove(0)
+        }
+
+        /// The notices of `project`.
+        fn notices(&self, project: &ProjectRoot) -> Vec<Notice> {
+            let ServiceResponse::Notices(notices) = self.send(ServiceRequest::Notices {
+                project: project.clone(),
+            }) else {
+                panic!("notices answer notices");
+            };
+            notices
         }
     }
 
@@ -1256,30 +1399,23 @@ mod tests {
         }
     }
 
-    /// A project of commands, each `(name, autostart)` running [`SLEEPER`].
-    fn commands(entries: &[(&str, bool)]) -> String {
-        let commands: String = entries
-            .iter()
-            .map(|(name, autostart)| {
-                format!("  - name: {name}\n    command: {SLEEPER}\n    autostart: {autostart}\n")
-            })
-            .collect();
-        format!("agents: []\nterminals: []\ncommands:\n{commands}")
-    }
-
-    /// The status of the process `name` in `status`.
-    fn process<'a>(status: &'a ProjectStatus, name: &str) -> &'a ProcessStatus {
+    /// The status of the process `name` in `status`, if it has a row.
+    fn find<'a>(status: &'a ProjectStatus, name: &str) -> Option<&'a ProcessStatus> {
         status
             .processes()
             .iter()
             .find(|process| process.name().as_ref() == name)
-            .unwrap()
+    }
+
+    /// The status of the process `name` in `status`.
+    fn process<'a>(status: &'a ProjectStatus, name: &str) -> &'a ProcessStatus {
+        find(status, name).unwrap()
     }
 
     #[test]
     fn service_adopts_live_holders_on_start_and_ps_reports_them_running() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("dev server", false)]));
+        let project = fixture.project(commands(&[("dev server", false)]));
         let handle = fixture
             .runner()
             .spawn(
@@ -1303,17 +1439,16 @@ mod tests {
         );
         let status = service.wait_for(&project, "dev server", ProcessState::Running);
         assert_eq!(*process(&status, "dev server").pid(), Some(pid));
+        assert_eq!(status.project().root(), &project);
         service.stop();
     }
 
     #[test]
     fn stop_request_exits_the_loop_and_holders_keep_running() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let service = fixture.start(Arc::new(fixture.runner()));
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.up(&project);
         let running = service.wait_for(&project, "api", ProcessState::Running);
         let pid = process(&running, "api").pid().unwrap();
         let socket = service.socket.clone();
@@ -1331,7 +1466,6 @@ mod tests {
 
         let successor = fixture.start(Arc::new(fixture.runner()));
         let api = successor.wait_for(&project, "api", ProcessState::Running);
-        assert_eq!(*process(&api, "api").state(), ProcessState::Running);
         assert_eq!(*process(&api, "api").pid(), Some(pid), "the same child");
         successor.stop();
     }
@@ -1339,14 +1473,10 @@ mod tests {
     #[test]
     fn unknown_process_error_lists_candidates() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("dev server", false), ("café", false)]));
+        let project = fixture.project(commands(&[("dev server", false), ("café", false)]));
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let response = service.send(ServiceRequest::Control {
-            project,
-            name: ProcessName::try_new("nope").unwrap(),
-            action: ProcessAction::Start,
-        });
+        let response = service.control(&project, "nope", ProcessAction::Start);
 
         let ServiceResponse::Error(refusal) = response else {
             panic!("an unknown name is refused, got {response:?}");
@@ -1362,7 +1492,7 @@ mod tests {
     #[test]
     fn up_loads_an_unloaded_project_and_starts_only_autostart_true() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("eager", true), ("lazy", false)]));
+        let project = fixture.project(commands(&[("eager", true), ("lazy", false)]));
         let service = fixture.start(Arc::new(fixture.runner()));
         assert_eq!(
             service.send(ServiceRequest::Ps { project: None }),
@@ -1371,9 +1501,7 @@ mod tests {
         );
 
         assert_eq!(
-            service.send(ServiceRequest::Up {
-                project: project.clone()
-            }),
+            service.up(&project),
             ServiceResponse::Batch(
                 BatchOutcome::builder()
                     .acted(vec![ProcessName::try_new("eager").unwrap()])
@@ -1389,28 +1517,22 @@ mod tests {
         service.stop();
     }
 
-    /// A project whose config is missing or invalid is refused with its kind,
-    /// and the invalid config's message names the offending process.
+    /// A folder that is no registered project is refused as unknown, saying
+    /// how to register one.
     #[test]
-    fn a_missing_or_invalid_project_is_refused_with_its_reason() {
+    fn an_unregistered_project_is_refused() {
         let fixture = Fixture::new();
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let missing = service.send(ServiceRequest::Up {
-            project: fixture.scratch.path().join("absent/muster.yml"),
-        });
-        let ServiceResponse::Error(missing) = missing else {
-            panic!("a missing project is refused");
+        let ServiceResponse::Error(missing) = service.up(&fixture.folder("absent")) else {
+            panic!("an unregistered project is refused");
         };
         assert_eq!(*missing.kind(), ServiceErrorKind::UnknownProject);
-
-        let invalid = fixture.project("agents: []\nterminals: []\ncommands:\n  - name: api\n");
-        let ServiceResponse::Error(refusal) = service.send(ServiceRequest::Up { project: invalid })
-        else {
-            panic!("an invalid project is refused");
-        };
-        assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidConfig);
-        assert!(refusal.message().contains("'api'"), "{}", refusal.message());
+        assert!(
+            missing.message().contains("muster add"),
+            "{}",
+            missing.message()
+        );
         service.stop();
     }
 
@@ -1420,7 +1542,7 @@ mod tests {
     #[test]
     fn input_is_delivered_or_refused_like_any_process_request() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", false)]));
+        let project = fixture.project(commands(&[("api", false)]));
         let service = fixture.start(Arc::new(fixture.runner()));
         let send = |name: &str| {
             service.send(ServiceRequest::Workspace {
@@ -1445,39 +1567,9 @@ mod tests {
             &[ProcessName::try_new("api").unwrap()]
         );
 
-        service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name: ProcessName::try_new("api").unwrap(),
-            action: ProcessAction::Start,
-        });
+        service.control(&project, "api", ProcessAction::Start);
         service.wait_for(&project, "api", ProcessState::Running);
         assert_eq!(send("api"), ServiceResponse::Ok);
-        service.stop();
-    }
-
-    /// A session store that cannot be read is refused as the service's own
-    /// failure, with the reason, never answered as an empty listing.
-    #[test]
-    fn an_unreadable_session_store_is_refused() {
-        let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", false)]));
-        let service = fixture.start_with(Arc::new(fixture.runner()), TestPorts {
-            unreadable_sessions: true,
-        });
-
-        let ServiceResponse::Error(refusal) = service.send(ServiceRequest::Workspace {
-            project,
-            request: WorkspaceRequest::ListSessions,
-        }) else {
-            panic!("an unreadable store is refused");
-        };
-
-        assert_eq!(*refusal.kind(), ServiceErrorKind::Internal);
-        assert!(
-            refusal.message().starts_with(SESSIONS_UNREADABLE),
-            "{}",
-            refusal.message()
-        );
         service.stop();
     }
 
@@ -1487,11 +1579,9 @@ mod tests {
     #[test]
     fn locate_names_the_holder_and_attached_is_counted() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let service = fixture.start(Arc::new(fixture.runner()));
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.up(&project);
         service.wait_for(&project, "api", ProcessState::Running);
         let name = ProcessName::try_new("api").unwrap();
 
@@ -1519,11 +1609,7 @@ mod tests {
             *process(&service.status(&project), "api").attached() == 0
         });
 
-        service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name: name.clone(),
-            action: ProcessAction::Kill,
-        });
+        service.control(&project, "api", ProcessAction::Kill);
         wait_until("the kill to settle", || {
             !process(&service.status(&project), "api")
                 .state()
@@ -1544,14 +1630,12 @@ mod tests {
     #[test]
     fn a_stalled_holder_screen_read_never_stalls_the_loop() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let stalled = fixture.scratch.path().join("stalled.sock");
         let _never_accepts = UnixListener::bind(&stalled).unwrap();
         let pool = FakePool::new(Vec::new(), Some(stalled));
         let service = fixture.start(Arc::new(pool));
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.up(&project);
 
         let socket = service.socket.clone();
         service.wait_for(&project, "api", ProcessState::Running);
@@ -1584,7 +1668,7 @@ mod tests {
     #[test]
     fn start_sweeps_handover_files_and_reports_unreadable_records() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", false)]));
+        let project = fixture.project(commands(&[("api", false)]));
         let dirs = fixture.dirs();
         dirs.prepare_sockets().unwrap();
         let id = HolderId::generate().unwrap();
@@ -1602,10 +1686,7 @@ mod tests {
             !spec.exists() && !error.exists(),
             "handover files are swept"
         );
-        let ServiceResponse::Notices(notices) = service.send(ServiceRequest::Notices { project })
-        else {
-            panic!("notices answer notices");
-        };
+        let notices = service.notices(&project);
         assert!(
             notices.iter().any(|notice| {
                 notice.project().is_none()
@@ -1622,7 +1703,7 @@ mod tests {
     #[test]
     fn start_removes_the_legacy_logs_and_reports_a_failure() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", false)]));
+        let project = fixture.project(commands(&[("api", false)]));
         let pool = FakePool::new(Vec::new(), None);
         *pool.legacy_result.lock().unwrap() = Some(io::Error::other("read-only file system"));
         let removals = Arc::clone(&pool.legacy_removals);
@@ -1630,10 +1711,7 @@ mod tests {
         let service = fixture.start(Arc::new(pool));
 
         assert_eq!(removals.load(Ordering::SeqCst), 1);
-        let ServiceResponse::Notices(notices) = service.send(ServiceRequest::Notices { project })
-        else {
-            panic!("notices answer notices");
-        };
+        let notices = service.notices(&project);
         assert!(
             notices.iter().any(|notice| {
                 notice.project().is_none()
@@ -1646,15 +1724,20 @@ mod tests {
         service.stop();
     }
 
-    /// The record a holder running the command `api` of `project` as
-    /// `child_pid` would leave, its socket gone.
-    fn api_record(fixture: &Fixture, project: &Path, child_pid: u32) -> HolderRecord {
+    /// The record a holder running `name` of `project` as `child_pid` would
+    /// leave, its socket gone.
+    fn record(
+        fixture: &Fixture,
+        project: &ProjectRoot,
+        name: &str,
+        child_pid: u32,
+    ) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
-            .project(project.to_path_buf())
-            .process(ProcessName::try_new("api").unwrap())
-            .kind(ProcessKind::Command)
-            .agent_session_id(None)
+            .project(project.clone())
+            .process(ProcessName::try_new(name).unwrap())
+            .command(CommandLine::try_new(SLEEPER).unwrap())
+            .stop(test_stop())
             .socket(fixture.scratch.path().join("gone.sock"))
             .holder_pid(process::id())
             .child_pid(child_pid)
@@ -1670,17 +1753,15 @@ mod tests {
     #[test]
     fn a_holder_that_cannot_be_adopted_blocks_up_and_start() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let orphan = Orphan::spawn();
-        let pool = FakePool::new(vec![api_record(&fixture, &project, orphan.pid())], None);
+        let pool = FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None);
         let spawns = Arc::clone(&pool.spawns);
         let service = fixture.start(Arc::new(pool));
         let name = ProcessName::try_new("api").unwrap();
 
         service.wait_for(&project, "api", ProcessState::Unsupervised);
-        let ServiceResponse::Batch(up) = service.send(ServiceRequest::Up {
-            project: project.clone(),
-        }) else {
+        let ServiceResponse::Batch(up) = service.up(&project) else {
             panic!("up answers what it did");
         };
         assert!(up.acted().is_empty(), "{up:?}");
@@ -1692,25 +1773,18 @@ mod tests {
                 .ends_with(&orphan.pid().to_string()),
             "up says it left api alone and why: {up:?}"
         );
-        service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name,
-            action: ProcessAction::Start,
-        });
+        service.control(&project, "api", ProcessAction::Start);
 
         let status = service.status(&project);
         assert_eq!(*process(&status, "api").state(), ProcessState::Unsupervised);
         assert_eq!(*process(&status, "api").pid(), Some(orphan.pid()));
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
-        let ServiceResponse::Notices(notices) = service.send(ServiceRequest::Notices { project })
-        else {
-            panic!("notices answer notices");
-        };
         assert!(
-            notices
+            service
+                .notices(&project)
                 .iter()
                 .any(|notice| notice.message().ends_with(&orphan.pid().to_string())),
-            "the refused start names the pid: {notices:?}"
+            "the refused start names the pid"
         );
         service.stop();
     }
@@ -1721,14 +1795,12 @@ mod tests {
     #[test]
     fn a_holder_that_never_becomes_ready_does_not_delay_another_project() {
         let fixture = Fixture::new();
-        let slow = fixture.project_in("slow", &commands(&[("api", true)]));
-        let other = fixture.project_in("other", &commands(&[("web", false)]));
+        let slow = fixture.project_in("slow", commands(&[("api", true)]));
+        let other = fixture.project_in("other", commands(&[("web", false)]));
         let (open, gate) = bounded(0);
         let service = fixture.start(Arc::new(FakePool::new(Vec::new(), None).gated(gate)));
 
-        service.send(ServiceRequest::Up {
-            project: slow.clone(),
-        });
+        service.up(&slow);
         let asked = Instant::now();
         let status = service.status(&other);
         assert!(asked.elapsed() < PROMPT_ANSWER, "the loop answered at once");
@@ -1749,21 +1821,15 @@ mod tests {
     fn stop_or_kill_during_starting_leaves_no_running_child() {
         for action in [ProcessAction::Stop, ProcessAction::Kill] {
             let fixture = Fixture::new();
-            let project = fixture.project(&commands(&[("api", true)]));
+            let project = fixture.project(commands(&[("api", true)]));
             let (open, gate) = bounded(0);
             let pool = FakePool::new(Vec::new(), None).gated(gate);
             let kills = Arc::clone(&pool.kills);
             let service = fixture.start(Arc::new(pool));
-            service.send(ServiceRequest::Up {
-                project: project.clone(),
-            });
+            service.up(&project);
             service.wait_for(&project, "api", ProcessState::Starting);
 
-            service.send(ServiceRequest::Control {
-                project: project.clone(),
-                name: ProcessName::try_new("api").unwrap(),
-                action,
-            });
+            service.control(&project, "api", action);
             drop(open);
 
             wait_until("the launched process to be signalled", || {
@@ -1785,38 +1851,25 @@ mod tests {
     #[test]
     fn stop_during_a_failing_adoption_stops_the_child_and_starts_nothing() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let orphan = Orphan::spawn();
         let (open, gate) = bounded(0);
         let pool =
-            FakePool::new(vec![api_record(&fixture, &project, orphan.pid())], None).gated(gate);
+            FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None).gated(gate);
         let spawns = Arc::clone(&pool.spawns);
         let service = fixture.start(Arc::new(pool));
-        let name = ProcessName::try_new("api").unwrap();
         service.wait_for(&project, "api", ProcessState::Starting);
 
         for action in [ProcessAction::Stop, ProcessAction::Start] {
-            service.send(ServiceRequest::Control {
-                project: project.clone(),
-                name: name.clone(),
-                action,
-            });
+            service.control(&project, "api", action);
         }
-        let ServiceResponse::Ok = service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name: name.clone(),
-            action: ProcessAction::Stop,
-        }) else {
+        let ServiceResponse::Ok = service.control(&project, "api", ProcessAction::Stop) else {
             panic!("the stop is accepted while starting");
         };
         drop(open);
 
         service.wait_for(&project, "api", ProcessState::Stopping);
-        service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name,
-            action: ProcessAction::Start,
-        });
+        service.control(&project, "api", ProcessAction::Start);
         wait_until("the unsupervised child to be stopped", || !orphan.alive());
         service.wait_for(&project, "api", ProcessState::Exited);
         assert_eq!(spawns.load(Ordering::SeqCst), 0, "no second copy");
@@ -1829,12 +1882,10 @@ mod tests {
     #[test]
     fn a_launch_in_flight_at_service_stop_survives_and_is_adopted() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let (open, gate) = bounded(0);
         let service = fixture.start(Arc::new(fixture.gated_runner(gate)));
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.up(&project);
         service.wait_for(&project, "api", ProcessState::Starting);
 
         let opener = thread::spawn(move || {
@@ -1866,25 +1917,16 @@ mod tests {
     #[test]
     fn start_during_starting_does_not_double_spawn() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let (open, gate) = bounded(0);
         let pool = FakePool::new(Vec::new(), None).gated(gate);
         let spawns = Arc::clone(&pool.spawns);
         let service = fixture.start(Arc::new(pool));
-        let name = ProcessName::try_new("api").unwrap();
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.up(&project);
         service.wait_for(&project, "api", ProcessState::Starting);
 
-        service.send(ServiceRequest::Control {
-            project: project.clone(),
-            name: name.clone(),
-            action: ProcessAction::Start,
-        });
-        service.send(ServiceRequest::Up {
-            project: project.clone(),
-        });
+        service.control(&project, "api", ProcessAction::Start);
+        service.up(&project);
         drop(open);
 
         service.wait_for(&project, "api", ProcessState::Running);
@@ -1898,11 +1940,11 @@ mod tests {
     #[test]
     fn startup_adoption_of_a_wedged_holder_does_not_delay_requests() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true)]));
+        let project = fixture.project(commands(&[("api", true)]));
         let orphan = Orphan::spawn();
         let (open, gate) = bounded(0);
         let pool =
-            FakePool::new(vec![api_record(&fixture, &project, orphan.pid())], None).gated(gate);
+            FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None).gated(gate);
         let service = fixture.start(Arc::new(pool));
 
         let asked = Instant::now();
@@ -1922,10 +1964,10 @@ mod tests {
     #[test]
     fn a_flood_waits_on_the_bounded_queue_and_the_holder_resyncs() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("flood", false)]));
+        let project = fixture.project(commands(&[("flood", false)]));
         let (sender, events) = bounded(EVENT_CAPACITY);
         let sink = ChannelOutputSink::new(
-            ProjectKey::new(project.clone()),
+            project.clone(),
             PaneId::new(0),
             SpawnGeneration::initial(),
             sender,
@@ -1961,54 +2003,23 @@ mod tests {
         handle.kill().unwrap();
     }
 
-    /// A project named by a relative path is refused, since it would resolve
-    /// against the service's directory, and one `muster.yml` reached through a
-    /// symlink is the same project as through its own path.
+    /// A project named by a relative path is refused as unreadable, since it
+    /// would resolve against the service's directory.
     #[test]
-    fn projects_are_named_absolutely_and_aliases_are_one_project() {
+    fn a_relative_project_is_refused() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", false)]));
-        let alias = fixture.scratch.path().join("alias");
-        symlink(project.parent().unwrap(), &alias).unwrap();
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let ServiceResponse::Error(refusal) = service.send(ServiceRequest::Ps {
-            project: Some(PathBuf::from("project/muster.yml")),
-        }) else {
+        let response: ServiceResponse = ipc::request(
+            &service.socket,
+            &serde_json::json!({ "ps": { "project": "project" } }),
+        )
+        .unwrap();
+
+        let ServiceResponse::Error(refusal) = response else {
             panic!("a relative project is refused");
         };
         assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidRequest);
-
-        service.status(&project);
-        service.status(&alias.join("muster.yml"));
-        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
-        else {
-            panic!("ps answers a status");
-        };
-        assert_eq!(loaded.len(), 1, "both paths name one project");
-        service.stop();
-    }
-
-    /// A project with running holders whose config does not load still
-    /// answers its notices, which say why its processes were left alone.
-    #[test]
-    fn notices_of_a_project_whose_config_fails_to_load_are_answered() {
-        let fixture = Fixture::new();
-        let project = fixture.project("agents: []\nterminals: []\ncommands:\n  - name: api\n");
-        let orphan = Orphan::spawn();
-        let pool = FakePool::new(vec![api_record(&fixture, &project, orphan.pid())], None);
-        let service = fixture.start(Arc::new(pool));
-
-        let ServiceResponse::Notices(notices) = service.send(ServiceRequest::Notices { project })
-        else {
-            panic!("notices of an unloadable project are answered");
-        };
-        assert!(
-            notices
-                .iter()
-                .any(|notice| notice.message().starts_with(UNADOPTABLE_PROJECT_NOTICE)),
-            "{notices:?}"
-        );
         service.stop();
     }
 
@@ -2032,25 +2043,25 @@ mod tests {
     }
 
     /// `Up` and `Down` answer with what they started or stopped and what
-    /// they left alone, and the log of a process is known whether or not it
-    /// runs.
+    /// they left alone, `Down` stops every process, and the log of a process
+    /// is known whether or not it runs.
     #[test]
     fn up_and_down_say_what_they_did_and_logs_are_found_for_stopped_processes() {
         let fixture = Fixture::new();
-        let project = fixture.project(&commands(&[("api", true), ("worker", false)]));
+        let project = fixture.project(commands(&[("api", true), ("web", true), ("worker", false)]));
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let ServiceResponse::Batch(up) = service.send(ServiceRequest::Up {
-            project: project.clone(),
-        }) else {
+        let ServiceResponse::Batch(up) = service.up(&project) else {
             panic!("up answers what it did");
         };
-        assert_eq!(up.acted(), &vec![ProcessName::try_new("api").unwrap()]);
+        assert_eq!(up.acted(), &vec![
+            ProcessName::try_new("api").unwrap(),
+            ProcessName::try_new("web").unwrap()
+        ]);
         assert!(up.refused().is_empty());
         service.wait_for(&project, "api", ProcessState::Running);
-        let ServiceResponse::Batch(again) = service.send(ServiceRequest::Up {
-            project: project.clone(),
-        }) else {
+        service.wait_for(&project, "web", ProcessState::Running);
+        let ServiceResponse::Batch(again) = service.up(&project) else {
             panic!("up answers what it did");
         };
         assert!(again.is_empty(), "a second up starts nothing: {again:?}");
@@ -2065,11 +2076,177 @@ mod tests {
 
         let ServiceResponse::Batch(down) = service.send(ServiceRequest::Down {
             project: project.clone(),
-            agents: false,
         }) else {
             panic!("down answers what it did");
         };
-        assert_eq!(down.acted(), &vec![ProcessName::try_new("api").unwrap()]);
+        assert_eq!(down.acted(), &vec![
+            ProcessName::try_new("api").unwrap(),
+            ProcessName::try_new("web").unwrap()
+        ]);
+        service.wait_for(&project, "api", ProcessState::Exited);
+        service.wait_for(&project, "web", ProcessState::Exited);
+        service.stop();
+    }
+
+    /// A stack change reaches a loaded project: an added process waits
+    /// `Pending`, a changed running one keeps running unrestarted, and a
+    /// removed running one is stopped and its row goes.
+    #[test]
+    fn a_stack_change_adds_updates_and_stops_without_restarting() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true), ("web", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        let before = service.wait_for(&project, "api", ProcessState::Running);
+        service.wait_for(&project, "web", ProcessState::Running);
+        let api_pid = process(&before, "api").pid().unwrap();
+
+        let changed = sleeper("api", true).with_command(CommandLine::try_new("sleep 601").unwrap());
+        fixture
+            .store
+            .put(&project, vec![changed, sleeper("docs", false)]);
+        assert_eq!(
+            service.send(ServiceRequest::StackChanged {
+                project: project.clone()
+            }),
+            ServiceResponse::Ok
+        );
+
+        let status = service.status(&project);
+        assert_eq!(*process(&status, "docs").state(), ProcessState::Pending);
+        assert_eq!(*process(&status, "api").state(), ProcessState::Running);
+        assert_eq!(
+            *process(&status, "api").pid(),
+            Some(api_pid),
+            "not restarted"
+        );
+        wait_until("the removed process to go", || {
+            find(&service.status(&project), "web").is_none()
+        });
+        assert_eq!(
+            fixture.runner().live_records().len(),
+            1,
+            "web's holder ended"
+        );
+        service.stop();
+    }
+
+    /// A change to a project the service has not loaded does nothing: it
+    /// reads its stack fresh when it loads.
+    #[test]
+    fn a_stack_change_to_an_unloaded_project_is_accepted() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        assert_eq!(
+            service.send(ServiceRequest::StackChanged {
+                project: project.clone()
+            }),
+            ServiceResponse::Ok
+        );
+        assert_eq!(
+            service.send(ServiceRequest::Ps { project: None }),
+            ServiceResponse::Status(Vec::new())
+        );
+        service.stop();
+    }
+
+    /// A holder found at start whose process is no longer in the project is
+    /// stopped through the stop policy its record carries, with a notice, and
+    /// its row goes once it has exited.
+    #[test]
+    fn a_removed_process_found_at_start_is_stopped_with_a_notice() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true), ("gone", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "gone", ProcessState::Running);
+        service.stop();
+        fixture.store.put(&project, commands(&[("api", true)]));
+
+        let successor = fixture.start(Arc::new(fixture.runner()));
+
+        wait_until("the removed process to be stopped", || {
+            find(&successor.status(&project), "gone").is_none()
+        });
+        let notices = successor.notices(&project);
+        assert!(
+            notices.iter().any(|notice| {
+                notice.process().as_ref().map(ProcessName::as_ref) == Some("gone")
+                    && notice.message() == "stopped: removed from the project"
+            }),
+            "{notices:?}"
+        );
+        assert_eq!(fixture.runner().live_records().len(), 1, "only api runs");
+        successor.stop();
+    }
+
+    /// A project removed while the service was down has what it still runs
+    /// stopped, and is let go once nothing runs.
+    #[test]
+    fn an_unregistered_project_found_running_is_stopped_and_let_go() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+        service.stop();
+        fixture.store.forget(&project);
+
+        let successor = fixture.start(Arc::new(fixture.runner()));
+
+        wait_until("the project to be let go", || {
+            successor.send(ServiceRequest::Ps { project: None })
+                == ServiceResponse::Status(Vec::new())
+        });
+        assert!(fixture.runner().live_records().is_empty());
+        successor.stop();
+    }
+
+    /// New settings reach the next launch only: a process started after the
+    /// change gets the new terminal size, and a running one keeps its own.
+    #[test]
+    fn settings_change_the_size_of_the_next_launch_only() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true), ("web", false)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+        let bigger = PtySize::builder()
+            .rows(Rows::new(40))
+            .cols(Cols::new(120))
+            .build();
+
+        fixture
+            .store
+            .apply(&SettingChange::DefaultSize(bigger))
+            .unwrap();
+        assert_eq!(
+            service.send(ServiceRequest::SettingsChanged),
+            ServiceResponse::Ok
+        );
+        service.control(&project, "web", ProcessAction::Start);
+        service.wait_for(&project, "web", ProcessState::Running);
+
+        let size_of = |name: &str| {
+            let record = fixture
+                .runner()
+                .live_records()
+                .into_iter()
+                .find(|record| record.process().as_ref() == name)
+                .unwrap();
+            greet(
+                &mut UnixStream::connect(record.socket()).unwrap(),
+                record.socket(),
+                ClientRole::Attach { read_only: true },
+                WAIT,
+            )
+            .unwrap()
+            .size()
+        };
+        assert_eq!(size_of("web"), bigger);
+        assert_eq!(size_of("api"), *test_settings().default_size());
         service.stop();
     }
 

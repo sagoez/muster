@@ -2,6 +2,8 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
+use crate::domain::config::ConfigError;
+
 /// Why the service could not start or keep running.
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -19,4 +21,7 @@ pub enum ServiceError {
         /// The underlying error.
         source: io::Error,
     },
+    /// The settings every launch uses could not be read at start.
+    #[error("could not read the settings: {0}")]
+    Settings(#[source] ConfigError),
 }

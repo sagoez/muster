@@ -1,10 +1,8 @@
-use std::time::Duration;
-
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::adapter::service::OccupancyStatus;
+use crate::adapter::{client::whole_seconds_up, service::OccupancyStatus};
 
 /// Who is in a project and when it stops for want of anyone, as
 /// `stack_status` shows it.
@@ -34,16 +32,10 @@ impl From<&OccupancyStatus> for OccupancyView {
     }
 }
 
-/// `duration` in whole seconds, a started second counted, so a pending stop
-/// never reads as zero.
-fn whole_seconds_up(duration: Duration) -> u64 {
-    duration
-        .as_secs()
-        .saturating_add(u64::from(duration.subsec_nanos() > 0))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::domain::value::{IdleStop, PositiveDuration};
 
@@ -74,7 +66,5 @@ mod tests {
             serde_json::to_value(&occupied).unwrap(),
             serde_json::json!({ "shells": 2, "idle_stop": "30m" })
         );
-        assert_eq!(whole_seconds_up(Duration::from_secs(5)), 5);
-        assert_eq!(whole_seconds_up(Duration::from_nanos(1)), 1);
     }
 }

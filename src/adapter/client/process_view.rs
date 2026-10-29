@@ -96,9 +96,12 @@ pub fn listening_ports(status: &ProcessStatus) -> Vec<u16> {
         .collect()
 }
 
-/// `duration` in whole seconds, any part of a second counting as one.
-pub(super) fn whole_seconds_up(duration: Duration) -> u64 {
-    duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
+/// `duration` in whole seconds, any part of a second counting as one, so
+/// nothing under a second reads as zero.
+pub fn whole_seconds_up(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
 }
 
 #[cfg(test)]
@@ -112,5 +115,6 @@ mod tests {
         assert_eq!(whole_seconds_up(Duration::from_millis(500)), 1);
         assert_eq!(whole_seconds_up(Duration::from_millis(5_001)), 6);
         assert_eq!(whole_seconds_up(Duration::from_secs(5)), 5);
+        assert_eq!(whole_seconds_up(Duration::MAX), u64::MAX);
     }
 }

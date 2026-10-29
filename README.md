@@ -24,7 +24,9 @@ muster up                       # start its autostart processes
 ```
 
 There is no daemon to start. The first `muster` command that needs the service
-starts it in the background. It writes what it reports, one JSON line per
+starts it in the background. A terminate or hangup signal stops it as
+`muster service stop` does: what it still had to record is stored first, and
+every process keeps running. It writes what it reports, one JSON line per
 notice, to `service.log` in the state directory, which moves to
 `service.log.1` once it passes 1 MiB.
 

@@ -2,6 +2,7 @@ mod load_id;
 mod occupancy_change;
 mod report_seq;
 mod report_stamp;
+mod seen;
 mod shell_id;
 mod shell_record;
 mod shell_registry_error;

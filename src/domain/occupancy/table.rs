@@ -1,32 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
-use super::{OccupancyChange, ReportStamp, ShellId, ShellRecord};
+use super::{OccupancyChange, ShellId, ShellRecord, seen::Seen};
 use crate::domain::value::ProjectRoot;
-
-/// What the table knows of one shell: its newest report and the projects
-/// that report counts it in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Seen {
-    /// The newest report applied.
-    stamp: ReportStamp,
-    /// The project it is in and those it holds.
-    projects: BTreeSet<ProjectRoot>,
-}
-
-impl Seen {
-    /// What `record` says of its shell.
-    fn of(record: &ShellRecord) -> Self {
-        Self {
-            stamp: *record.stamp(),
-            projects: record
-                .project()
-                .iter()
-                .chain(record.held())
-                .cloned()
-                .collect(),
-        }
-    }
-}
 
 /// Which live shell is in which project. A project is occupied while at least
 /// one shell is in it; each report says where a shell now is, and the table

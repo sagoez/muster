@@ -19,7 +19,7 @@ use crate::domain::{
 const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, default_cols, \
                                detach_key, log_max_size_bytes, scrollback_lines, color_scheme, \
                                default_autostart, default_restart, default_stop_signal, \
-                               default_stop_grace_ms FROM settings WHERE id = 1";
+                               default_stop_grace_ms, mcp_stack_edits FROM settings WHERE id = 1";
 
 /// Reads a [`SELECT_SETTINGS`] row, validating each value through the domain
 /// so a hand edit cannot smuggle in a value a write would refuse.
@@ -33,6 +33,7 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
     let default_restart: String = row.get(8).map_err(db_error)?;
     let default_stop_signal: String = row.get(9).map_err(db_error)?;
     let default_stop_grace_ms: i64 = row.get(10).map_err(db_error)?;
+    let mcp_stack_edits: String = row.get(11).map_err(db_error)?;
     let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
@@ -72,6 +73,11 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
             "default stop grace",
             default_stop_grace_ms,
         )?)
+        .mcp_stack_edits(
+            mcp_stack_edits
+                .parse()
+                .map_err(|error| corrupt("MCP stack edits", error))?,
+        )
         .build())
 }
 
@@ -91,7 +97,7 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
         "UPDATE settings SET desktop_notifications = ?1, default_rows = ?2, default_cols = ?3, \
          detach_key = ?4, log_max_size_bytes = ?5, scrollback_lines = ?6, color_scheme = ?7, \
          default_autostart = ?8, default_restart = ?9, default_stop_signal = ?10, \
-         default_stop_grace_ms = ?11 WHERE id = 1",
+         default_stop_grace_ms = ?11, mcp_stack_edits = ?12 WHERE id = 1",
         params![
             *settings.desktop_notifications(),
             settings.default_size().rows().into_inner(),
@@ -107,6 +113,7 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
                 "default stop grace",
                 settings.default_stop_grace().into_inner()
             )?,
+            settings.mcp_stack_edits().to_string(),
         ],
     )
     .map_err(db_error)?;
@@ -134,7 +141,7 @@ mod tests {
         adapter::store::test_support::{database, fresh_store},
         domain::{
             color_scheme::ColorScheme,
-            config::SettingKey,
+            config::{McpStackEdits, SettingKey},
             process::{RestartPolicy, StopSignal},
         },
     };
@@ -160,6 +167,7 @@ mod tests {
         assert_eq!(*settings.default_restart(), RestartPolicy::Never);
         assert_eq!(*settings.default_stop_signal(), StopSignal::Terminate);
         assert_eq!(settings.default_stop_grace().to_string(), "5s");
+        assert_eq!(*settings.mcp_stack_edits(), McpStackEdits::Allow);
     }
 
     /// Every setting written reads back, through another connection too.
@@ -177,6 +185,7 @@ mod tests {
             parsed(SettingKey::DefaultRestart, "on-failure"),
             parsed(SettingKey::DefaultStopSignal, "interrupt"),
             parsed(SettingKey::DefaultStopGrace, "1m 30s"),
+            parsed(SettingKey::McpStackEdits, "read-only"),
         ];
 
         let mut expected = store.load().unwrap();

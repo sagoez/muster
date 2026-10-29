@@ -76,7 +76,7 @@ use crate::{
     },
     constants::APP_NAME,
     domain::{
-        config::ImportMode,
+        config::{ImportMode, Stack},
         coordination::Author,
         port::{SettingsStore, StackStore},
         project::Project,
@@ -138,7 +138,11 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
     let invocation = Invocation::new(args.project, ports);
     let invocation = &invocation;
     match args.command {
-        Some(Command::Ps { all, json }) => ps(invocation, all, json),
+        Some(Command::Ps {
+            all,
+            commands,
+            json,
+        }) => ps(invocation, all, commands, json),
         Some(Command::Up { json }) => act(
             invocation,
             Presenter::detect(json),
@@ -299,15 +303,16 @@ fn bare(invocation: &Invocation<'_>) {
         .store()
         .and_then(|store| invocation.target(&store));
     match inside {
-        Ok(ProjectTarget::Registered(_)) => ps(invocation, false, false),
-        Ok(ProjectTarget::Unregistered(_)) => ps(invocation, true, false),
+        Ok(ProjectTarget::Registered(_)) => ps(invocation, false, false, false),
+        Ok(ProjectTarget::Unregistered(_)) => ps(invocation, true, false, false),
         Err(error) => fail_command(false, &error),
     }
 }
 
 /// Prints the current project's processes, or every loaded project's with
-/// `all`, each under a heading naming the project.
-fn ps(invocation: &Invocation<'_>, all: bool, json: bool) {
+/// `all`, each under a heading naming the project, and with `commands` each
+/// process's stored command.
+fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
     let result = (|| {
         let project = if all {
             None
@@ -316,17 +321,41 @@ fn ps(invocation: &Invocation<'_>, all: bool, json: bool) {
             Some(invocation.project(&store)?)
         };
         let client = connect()?;
-        Ok(process::ps(&client, project.as_ref().map(Project::root))?)
+        let statuses = process::ps(&client, project.as_ref().map(Project::root))?;
+        let stacks = if commands {
+            Some(stored_stacks(invocation, &statuses)?)
+        } else {
+            None
+        };
+        Ok((statuses, stacks))
     })();
     match result {
-        Ok(statuses) => {
+        Ok((statuses, stacks)) => {
             let views: Vec<ProjectView> = statuses.iter().map(ProjectView::from).collect();
             print_result(json, &views, |_| {
-                emit_line(&output::render_status(&statuses, all));
+                emit_line(&output::render_status(&statuses, all, stacks.as_deref()));
             });
         },
         Err(error) => fail_command(json, &error),
     }
+}
+
+/// The stored stack of each project in `statuses` that is still registered.
+///
+/// # Errors
+/// Returns a [`CliError`] when the database cannot be opened or read.
+fn stored_stacks(
+    invocation: &Invocation<'_>,
+    statuses: &[ProjectStatus],
+) -> Result<Vec<Stack>, CliError> {
+    let store = invocation.store()?;
+    let mut stacks = Vec::new();
+    for status in statuses {
+        if let Some(stack) = store.stack(status.project().root())? {
+            stacks.push(stack);
+        }
+    }
+    Ok(stacks)
 }
 
 /// Prints `result` of an action into the frame `presenter` opened and exits

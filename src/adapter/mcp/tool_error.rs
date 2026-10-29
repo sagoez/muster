@@ -7,7 +7,10 @@ use crate::{
         client::{ClientError, FailureKind, ResolveError},
         holder::PatternError,
     },
-    domain::{config::ConfigError, value::ValueParseError},
+    domain::{
+        config::{ConfigError, McpStackEdits, SettingKey},
+        value::ValueParseError,
+    },
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
@@ -115,6 +118,34 @@ pub enum ToolError {
         /// The keys the project has.
         valid: Vec<String>,
     },
+    /// The `mcp-stack-edits` setting keeps agents from editing the stack.
+    #[error(
+        "{0} is refused: the {key} setting is {value}, so agents cannot add, change or remove \
+         processes; ask the user to run muster config set {key} {allow} if they want to allow it",
+        key = SettingKey::McpStackEdits,
+        value = McpStackEdits::ReadOnly,
+        allow = McpStackEdits::Allow
+    )]
+    StackEditsReadOnly(&'static str),
+    /// An agent asked to change a setting only the user may change.
+    #[error(
+        "the {0} setting cannot be changed over MCP, only the default-* settings can; ask the \
+         user to change it with muster config set"
+    )]
+    SettingNotForAgents(SettingKey),
+    /// A working directory outside the project root.
+    #[error(
+        "invalid working_dir: {} is outside the project root {}; an agent's process runs \
+         inside its project",
+        dir.display(),
+        root.display()
+    )]
+    WorkingDirOutsideProject {
+        /// The folder asked for, resolved.
+        dir: PathBuf,
+        /// The project's root.
+        root: PathBuf,
+    },
 }
 
 impl From<ResolveError> for ToolError {
@@ -149,7 +180,9 @@ impl ToolError {
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
-            | Self::InvalidKvKey(_) => FailureKind::InvalidInput,
+            | Self::InvalidKvKey(_)
+            | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
+            Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
     }
 
@@ -175,7 +208,10 @@ impl ToolError {
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
             | Self::HeldByOther { .. }
-            | Self::InvalidKvKey(_) => Vec::new(),
+            | Self::InvalidKvKey(_)
+            | Self::StackEditsReadOnly(_)
+            | Self::SettingNotForAgents(_)
+            | Self::WorkingDirOutsideProject { .. } => Vec::new(),
         };
         names.into_iter().take(MAX_CANDIDATES).collect()
     }

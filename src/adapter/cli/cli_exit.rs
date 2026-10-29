@@ -50,7 +50,8 @@ impl From<FailureKind> for CliExit {
             | FailureKind::UnknownTodo
             | FailureKind::UnknownNote
             | FailureKind::UnknownKey
-            | FailureKind::InvalidInput => Self::InvalidInput,
+            | FailureKind::InvalidInput
+            | FailureKind::NotAllowed => Self::InvalidInput,
             FailureKind::NotRunning | FailureKind::ProcessFailed | FailureKind::Io => {
                 Self::ActionFailed
             },

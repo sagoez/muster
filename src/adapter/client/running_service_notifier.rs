@@ -1,7 +1,7 @@
 use super::service_client::ServiceClient;
 use crate::{
     adapter::service::ServiceRequest,
-    domain::{port::StateChangeNotifier, value::ProjectRoot},
+    domain::{config::StackEdit, port::StateChangeNotifier, value::ProjectRoot},
 };
 
 /// Tells this user's service that stored state changed, when one runs. A
@@ -14,6 +14,14 @@ impl StateChangeNotifier for RunningServiceNotifier {
     fn stack_changed(&self, root: &ProjectRoot) {
         ServiceClient::notify_if_running(&ServiceRequest::StackChanged {
             project: root.clone(),
+        });
+    }
+
+    fn stack_edited(&self, root: &ProjectRoot, edit: &StackEdit) {
+        ServiceClient::notify_if_running(&ServiceRequest::StackEdited {
+            project: root.clone(),
+            process: edit.process().clone(),
+            message: edit.to_string(),
         });
     }
 

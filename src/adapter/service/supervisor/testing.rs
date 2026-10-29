@@ -29,7 +29,7 @@ use crate::{
     application::Workspace,
     domain::{
         color_scheme::ColorScheme,
-        config::{Environment, ProcessSpec, Stack},
+        config::{Environment, McpStackEdits, ProcessSpec, Stack},
         notification::Notification,
         port::{Notifier, OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
         process::{Process, RestartPolicy, StopPolicy, StopSignal},
@@ -111,6 +111,7 @@ pub(crate) fn test_settings() -> Settings {
         .default_restart(RestartPolicy::Never)
         .default_stop_signal(StopSignal::Terminate)
         .default_stop_grace(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
+        .mcp_stack_edits(McpStackEdits::Allow)
         .build()
 }
 

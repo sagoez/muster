@@ -23,7 +23,7 @@ use crate::{
         service::ProjectStatus,
         store::SqliteStore,
     },
-    domain::{port::StateChangeNotifier, value::ProjectRoot},
+    domain::{config::StackEdit, port::StateChangeNotifier, value::ProjectRoot},
 };
 
 /// The database file each test's store opens.
@@ -52,6 +52,8 @@ impl ServiceAccess for NoService {
 pub struct RecordingNotifier {
     /// Each project whose stack changed, in order.
     pub stacks: Mutex<Vec<ProjectRoot>>,
+    /// Each agent edit announced, as the user reads it, in order.
+    pub edits: Mutex<Vec<String>>,
     /// How many times the settings changed.
     pub settings: Mutex<usize>,
 }
@@ -59,6 +61,10 @@ pub struct RecordingNotifier {
 impl StateChangeNotifier for RecordingNotifier {
     fn stack_changed(&self, root: &ProjectRoot) {
         self.stacks.lock().unwrap().push(root.clone());
+    }
+
+    fn stack_edited(&self, _root: &ProjectRoot, edit: &StackEdit) {
+        self.edits.lock().unwrap().push(edit.to_string());
     }
 
     fn settings_changed(&self) {

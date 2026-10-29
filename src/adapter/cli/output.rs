@@ -27,6 +27,7 @@ use crate::{
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
     },
     domain::{
+        config::Stack,
         process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
@@ -47,6 +48,8 @@ const PS_HEADERS: [&str; 10] = [
     "ATTACHED",
     "LAST EXIT",
 ];
+/// Header of the column `ps --commands` adds.
+const COMMAND_HEADER: &str = "COMMAND";
 /// The READY cell of a run that passed its readiness check.
 const READY_YES: &str = "yes";
 /// The READY cell of a run still waiting on its readiness check.
@@ -156,8 +159,9 @@ const FALLBACK_FAILURE_JSON: &str =
 
 /// The human `ps` table of `statuses`, each project's table under a heading
 /// naming the project and its folder; with `all`, the tables are indented
-/// under their headings.
-pub fn render_status(statuses: &[ProjectStatus], all: bool) -> String {
+/// under their headings. With `stacks`, each row ends in the process's
+/// command as its project's stored stack holds it.
+pub fn render_status(statuses: &[ProjectStatus], all: bool, stacks: Option<&[Stack]>) -> String {
     if statuses.is_empty() {
         return NO_PROJECTS.to_string();
     }
@@ -165,10 +169,15 @@ pub fn render_status(statuses: &[ProjectStatus], all: bool) -> String {
     statuses
         .iter()
         .map(|status| {
+            let commands = stacks.map(|stacks| {
+                stacks
+                    .iter()
+                    .find(|stack| stack.project().root() == status.project().root())
+            });
             format!(
                 "{}\n{}",
                 project_heading(status.project()),
-                project_table(status, indent)
+                project_table(status, indent, commands)
             )
         })
         .collect::<Vec<_>>()
@@ -185,12 +194,28 @@ fn project_heading(project: &Project) -> String {
 }
 
 /// The table of one project's processes, each line indented by `indent`.
-fn project_table(status: &ProjectStatus, indent: &str) -> String {
+/// With `commands`, a COMMAND column shows each process's command in that
+/// stored stack, empty for a process it no longer holds.
+fn project_table(status: &ProjectStatus, indent: &str, commands: Option<Option<&Stack>>) -> String {
     if status.processes().is_empty() {
         return format!("{indent}{NO_PROCESSES}");
     }
-    let mut rows = vec![PS_HEADERS.map(str::to_string).to_vec()];
-    rows.extend(status.processes().iter().map(process_cells));
+    let mut header = PS_HEADERS.map(str::to_string).to_vec();
+    if commands.is_some() {
+        header.push(COMMAND_HEADER.to_string());
+    }
+    let mut rows = vec![header];
+    rows.extend(status.processes().iter().map(|process| {
+        let mut cells = process_cells(process);
+        if let Some(stack) = commands {
+            cells.push(cell(
+                stack
+                    .and_then(|stack| stack.process(process.name()))
+                    .map(|spec| printable(spec.command().as_ref())),
+            ));
+        }
+        cells
+    }));
     table(&rows, indent)
 }
 
@@ -646,7 +671,11 @@ mod tests {
             client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
             service::{ExitReason, LastExit, ProcessUsage, ServiceErrorKind},
         },
-        domain::value::{Pid, ProjectRoot},
+        domain::{
+            config::{Environment, ProcessSpec},
+            process::{RestartPolicy, StopPolicy, StopSignal},
+            value::{CommandLine, Pid, ProjectRoot, StopGrace},
+        },
     };
 
     /// The folder of the project every fixture belongs to.
@@ -779,16 +808,52 @@ mod tests {
 
     #[test]
     fn ps_table_snapshot() {
-        insta::assert_snapshot!("ps_table", render_status(&[shop()], false));
-        insta::assert_snapshot!("ps_table_all", render_status(&[shop(), blog()], true));
-        insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true));
+        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, None));
+        insta::assert_snapshot!("ps_table_all", render_status(&[shop(), blog()], true, None));
+        insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true, None));
+    }
+
+    /// `ps --commands` ends each row in its stored command, made printable,
+    /// and an empty cell for a process the stored stack no longer holds.
+    #[test]
+    fn ps_commands_shows_each_stored_command() {
+        let stack = Stack::builder()
+            .project(shop_project())
+            .processes(vec![
+                ProcessSpec::builder()
+                    .name(name("dev server"))
+                    .command(CommandLine::try_new("npm run dev \u{1b}[2J").unwrap())
+                    .environment(Environment::empty())
+                    .autostart(true)
+                    .restart(RestartPolicy::Never)
+                    .stop(
+                        StopPolicy::builder()
+                            .signal(StopSignal::Terminate)
+                            .grace_period(StopGrace::try_new(GRACE).unwrap())
+                            .build(),
+                    )
+                    .build(),
+            ])
+            .build();
+
+        let rendered = render_status(&[shop()], false, Some(&[stack]));
+
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines[1].trim_end().ends_with(COMMAND_HEADER), "{rendered}");
+        assert!(lines[2].contains("npm run dev"), "{rendered}");
+        assert!(lines[3].trim_end().ends_with(EMPTY_CELL), "{rendered}");
+        assert!(
+            !rendered.replace('\n', "").chars().any(char::is_control),
+            "{rendered:?}"
+        );
+        assert!(!render_status(&[shop()], false, None).contains(COMMAND_HEADER));
     }
 
     /// Plain `ps` names the project it lists, so a listing from a nested
     /// folder says which project it is.
     #[test]
     fn plain_ps_names_its_project() {
-        let rendered = render_status(&[shop()], false);
+        let rendered = render_status(&[shop()], false, None);
 
         assert_eq!(rendered.lines().next(), Some("shop  /home/me/shop"));
     }
@@ -807,7 +872,7 @@ mod tests {
             .project(project_at("evil\u{1b}]0;x\u{7}", PROJECT))
             .processes(vec![process("api", ProcessState::Exited, None, None)])
             .build();
-        let rendered = render_status(&[hostile], true);
+        let rendered = render_status(&[hostile], true, None);
 
         assert!(
             !rendered.replace('\n', "").chars().any(char::is_control),
@@ -819,7 +884,7 @@ mod tests {
     /// character does not push its row out of line.
     #[test]
     fn ps_columns_align_by_display_width() {
-        let rendered = render_status(&[shop()], false);
+        let rendered = render_status(&[shop()], false, None);
         let state_column: Vec<usize> = rendered
             .lines()
             .skip(1)

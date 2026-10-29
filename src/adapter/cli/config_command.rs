@@ -84,6 +84,7 @@ mod tests {
         adapter::client::SettingsView,
         domain::{
             color_scheme::ColorScheme,
+            config::McpStackEdits,
             process::{RestartPolicy, StopSignal},
             pty::PtySize,
             value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
@@ -103,6 +104,7 @@ mod tests {
             .default_restart(RestartPolicy::Never)
             .default_stop_signal(StopSignal::Terminate)
             .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
+            .mcp_stack_edits(McpStackEdits::Allow)
             .build()
     }
 

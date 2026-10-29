@@ -1,6 +1,6 @@
 use crate::domain::{
     color_scheme::ColorScheme,
-    config::{ConfigError, SettingKey},
+    config::{ConfigError, McpStackEdits, SettingKey},
     process::{RestartPolicy, StopSignal},
     pty::PtySize,
     value::{
@@ -38,6 +38,8 @@ pub enum SettingChange {
     DefaultStopSignal(StopSignal),
     /// A new process's grace period before force-kill.
     DefaultStopGrace(StopGrace),
+    /// Whether an agent over MCP may edit the stack.
+    McpStackEdits(McpStackEdits),
 }
 
 impl SettingChange {
@@ -62,6 +64,7 @@ impl SettingChange {
             SettingKey::DefaultRestart => parse_choice(raw).map(Self::DefaultRestart),
             SettingKey::DefaultStopSignal => parse_choice(raw).map(Self::DefaultStopSignal),
             SettingKey::DefaultStopGrace => raw.parse().map(Self::DefaultStopGrace),
+            SettingKey::McpStackEdits => parse_choice(raw).map(Self::McpStackEdits),
         };
         change.map_err(|error| invalid(key, &error))
     }
@@ -92,6 +95,7 @@ impl SettingChange {
             Self::DefaultRestart(_) => SettingKey::DefaultRestart,
             Self::DefaultStopSignal(_) => SettingKey::DefaultStopSignal,
             Self::DefaultStopGrace(_) => SettingKey::DefaultStopGrace,
+            Self::McpStackEdits(_) => SettingKey::McpStackEdits,
         }
     }
 }

@@ -57,6 +57,20 @@ impl McpDeps {
         self.scope.project(project, self.projects.as_ref())
     }
 
+    /// Refuses `tool`'s stack edit unless the `mcp-stack-edits` setting
+    /// allows agents to edit the stack.
+    ///
+    /// # Errors
+    /// Returns [`ToolError::StackEditsReadOnly`] naming `tool` when the
+    /// setting is read-only, or the store's failure.
+    pub fn allow_stack_edit(&self, tool: &'static str) -> Result<(), ToolError> {
+        if self.settings.load()?.mcp_stack_edits().allows() {
+            Ok(())
+        } else {
+            Err(ToolError::StackEditsReadOnly(tool))
+        }
+    }
+
     /// The project `process_add` adds to, registered or not.
     ///
     /// # Errors

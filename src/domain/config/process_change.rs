@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::FieldEdit,
+    config::{FieldEdit, ProcessField},
     process::{ReadyCheck, RestartPolicy, StopSignal},
     value::{CommandLine, Description, EnvName, EnvValue, StopGrace},
 };
@@ -49,16 +49,28 @@ pub struct ProcessChange {
 impl ProcessChange {
     /// Whether this change leaves every field as it is.
     pub fn is_empty(&self) -> bool {
-        self.command.is_none()
-            && self.working_dir.is_keep()
-            && self.description.is_keep()
-            && self.set_env.is_empty()
-            && self.unset_env.is_empty()
-            && self.autostart.is_none()
-            && self.restart.is_none()
-            && self.stop_signal.is_none()
-            && self.stop_grace.is_none()
-            && self.ready.is_keep()
+        self.fields().is_empty()
+    }
+
+    /// The fields this change edits, in definition order.
+    pub fn fields(&self) -> Vec<ProcessField> {
+        [
+            (self.command.is_some(), ProcessField::Command),
+            (!self.working_dir.is_keep(), ProcessField::WorkingDir),
+            (!self.description.is_keep(), ProcessField::Description),
+            (
+                !self.set_env.is_empty() || !self.unset_env.is_empty(),
+                ProcessField::Environment,
+            ),
+            (self.autostart.is_some(), ProcessField::Autostart),
+            (self.restart.is_some(), ProcessField::Restart),
+            (self.stop_signal.is_some(), ProcessField::StopSignal),
+            (self.stop_grace.is_some(), ProcessField::StopGrace),
+            (!self.ready.is_keep(), ProcessField::Ready),
+        ]
+        .into_iter()
+        .filter_map(|(edited, field)| edited.then_some(field))
+        .collect()
     }
 
     /// Whether a running process only takes this change when it next starts:
@@ -101,6 +113,30 @@ mod tests {
                 .build()
                 .is_empty()
         );
+    }
+
+    /// A change names each field it edits once, environment sets and unsets
+    /// as one field.
+    #[test]
+    fn a_change_names_the_fields_it_edits() {
+        let change = ProcessChange::builder()
+            .command(Some(CommandLine::try_new("npm start").unwrap()))
+            .working_dir(FieldEdit::Clear)
+            .set_env(vec![(
+                EnvName::try_new("PORT").unwrap(),
+                EnvValue::try_new("1").unwrap(),
+            )])
+            .unset_env(vec![EnvName::try_new("HOST").unwrap()])
+            .restart(Some(RestartPolicy::Always))
+            .build();
+
+        assert_eq!(change.fields(), [
+            ProcessField::Command,
+            ProcessField::WorkingDir,
+            ProcessField::Environment,
+            ProcessField::Restart,
+        ]);
+        assert!(ProcessChange::builder().build().fields().is_empty());
     }
 
     /// What a process reads at launch needs a restart; its description,

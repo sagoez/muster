@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{ready_view::ReadyView, stop_view::StopView};
+use super::{environment_view::EnvironmentView, ready_view::ReadyView, stop_view::StopView};
 use crate::domain::{
     config::ProcessSpec,
     process::RestartPolicy,
@@ -27,9 +27,10 @@ pub struct DefinitionView {
     /// Its one-line description.
     #[getset(get = "pub")]
     description: Option<Description>,
-    /// The variables it is given, by name.
+    /// The variables it is given, by name: with values for the user, names
+    /// alone for an agent.
     #[getset(get = "pub")]
-    environment: BTreeMap<String, String>,
+    environment: EnvironmentView,
     /// Whether `muster up` starts it.
     #[getset(get_copy = "pub")]
     autostart: bool,
@@ -46,18 +47,27 @@ pub struct DefinitionView {
 }
 
 impl From<&ProcessSpec> for DefinitionView {
+    /// The definition as the user sees it, environment values included.
     fn from(spec: &ProcessSpec) -> Self {
+        Self::showing(spec, EnvironmentView::for_values(spec.environment()))
+    }
+}
+
+impl DefinitionView {
+    /// The definition as an agent sees it: its environment by name alone, so
+    /// no secret a variable holds reaches the agent.
+    pub fn for_agent(spec: &ProcessSpec) -> Self {
+        Self::showing(spec, EnvironmentView::for_names(spec.environment()))
+    }
+
+    /// `spec`'s definition showing its environment as `environment`.
+    fn showing(spec: &ProcessSpec, environment: EnvironmentView) -> Self {
         Self {
             name: spec.name().clone(),
             command: spec.command().clone(),
             working_dir: spec.working_dir().clone(),
             description: spec.description().clone(),
-            environment: spec
-                .environment()
-                .vars()
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect(),
+            environment,
             autostart: *spec.autostart(),
             restart: *spec.restart(),
             stop: StopView::from(spec.stop()),
@@ -118,5 +128,8 @@ mod tests {
             serde_json::to_value(DefinitionView::from(&regex)).unwrap()["ready"],
             serde_json::json!({"log": r"ready in \d+ms", "regex": true, "timeout": "1m 30s"})
         );
+        let agent = serde_json::to_value(DefinitionView::for_agent(&regex)).unwrap();
+        assert_eq!(agent["environment"], serde_json::json!(["PORT"]));
+        assert!(!agent.to_string().contains("5173"), "{agent}");
     }
 }

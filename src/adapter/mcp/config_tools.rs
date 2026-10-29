@@ -43,15 +43,18 @@ impl MusterMcp {
 
     /// Changes one setting.
     #[tool(
-        description = "Change one of the machine's muster settings. Takes key and value, the \
-            value written as config_get shows it (true, 24x80, 10MiB, on-failure, 5s). The \
-            default-* settings apply to processes added afterwards; default-size, scrollback, \
-            log-max-size and color-scheme to processes started afterwards. Returns {key, value}. \
-            An unknown key or an invalid value is a result flagged isError that names the \
-            accepted form."
+        description = "Change one of the default-* settings, the defaults a new process takes. \
+            Takes key and value, the value written as config_get shows it (true, 24x80, \
+            on-failure, 5s). They apply to processes added, or for default-size started, \
+            afterwards. Every other setting is the user's to change and is refused. Returns \
+            {key, value}. An unknown or refused key or an invalid value is a result flagged \
+            isError that names the accepted form."
     )]
     pub(super) async fn config_set(&self, Parameters(arg): Parameters<ConfigSetArg>) -> ToolResult {
         let key = setting_key(arg.key())?;
+        if !key.agent_may_set() {
+            return Err(ToolError::SettingNotForAgents(key).into());
+        }
         let change = SettingChange::parse(key, arg.value())?;
         let settings = self
             .blocking(move |deps| Ok(deps.editor().configure(&change)?))
@@ -65,7 +68,10 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::mcp::test_support::{add, content, fixture, refusal, runtime};
+    use crate::{
+        adapter::mcp::test_support::{add, content, fixture, refusal, runtime},
+        domain::{config::McpStackEdits, port::SettingsStore},
+    };
 
     /// `config_get` reads every setting or one; an unknown key lists the
     /// valid ones.
@@ -153,5 +159,34 @@ mod tests {
             assert_eq!(added["process"]["restart"], "on-failure");
         });
         assert_eq!(*fixture.notifier.settings.lock().unwrap(), 1);
+    }
+
+    /// `config_set` refuses every key but the `default-*` ones, so an agent
+    /// cannot lift its own guardrail, and nothing is stored.
+    #[test]
+    fn config_set_refuses_every_key_but_the_defaults() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            for key in SettingKey::iter().filter(|key| !key.agent_may_set()) {
+                let refused = refusal(
+                    fixture
+                        .server
+                        .config_set(Parameters(
+                            ConfigSetArg::builder()
+                                .key(key.to_string())
+                                .value("read-only".to_string())
+                                .build(),
+                        ))
+                        .await,
+                );
+                assert!(refused.contains(&key.to_string()), "{refused}");
+                assert!(refused.contains("cannot be changed over MCP"), "{refused}");
+            }
+        });
+        assert_eq!(*fixture.notifier.settings.lock().unwrap(), 0);
+        assert_eq!(
+            *fixture.store.load().unwrap().mcp_stack_edits(),
+            McpStackEdits::Allow
+        );
     }
 }

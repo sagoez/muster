@@ -36,7 +36,7 @@ pub(super) const STOP_GRACE_FIELD: &str = "stop_grace";
 /// The `key` field of the config tools.
 pub(super) const KEY_FIELD: &str = "key";
 /// The form a working directory is written in.
-const WORKING_DIR_FORM: &str = "an existing directory, relative to the project root";
+const WORKING_DIR_FORM: &str = "an existing directory inside the project root";
 /// The form a description is written in.
 const DESCRIPTION_FORM: &str = "non-blank text";
 /// The form an environment variable name is written in.
@@ -131,11 +131,13 @@ pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, ToolError> {
 }
 
 /// Where a process of the project at `root` runs when an agent typed `raw`:
-/// a directory under the root is stored relative to it, one outside it
-/// absolute, and the root itself as none.
+/// a directory under the root is stored relative to it, and the root itself
+/// as none. Symlinks are resolved first, so a link out of the project is
+/// refused like the folder it leads to.
 ///
 /// # Errors
-/// Returns the refusal of a path that is not an existing directory.
+/// Returns the refusal of a path that is not an existing directory, or of
+/// one outside the project root.
 pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBuf>, ToolError> {
     let typed = Path::new(raw);
     let joined = if typed.is_absolute() {
@@ -147,16 +149,20 @@ pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBu
         .ok()
         .filter(|dir| dir.is_dir())
         .ok_or_else(|| invalid(WORKING_DIR_FIELD, WORKING_DIR_FORM, raw))?;
-    match root.relative(&dir) {
-        Some(inside) if inside.as_os_str().is_empty() => Ok(None),
-        Some(inside) => Ok(Some(inside)),
-        None => Ok(Some(dir)),
+    let base = fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().clone());
+    match dir.strip_prefix(&base) {
+        Ok(inside) if inside.as_os_str().is_empty() => Ok(None),
+        Ok(inside) => Ok(Some(inside.to_path_buf())),
+        Err(_) => Err(ToolError::WorkingDirOutsideProject {
+            dir,
+            root: root.as_ref().clone(),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::symlink};
 
     use super::*;
     use crate::domain::process::RestartPolicy;
@@ -186,15 +192,32 @@ mod tests {
         assert!(missing.starts_with("invalid working_dir:"), "{missing}");
     }
 
-    /// A folder outside the root is stored absolute.
+    /// A folder outside the root is refused, whether typed absolute, climbed
+    /// to with `..`, or reached through a symlink inside the project; an
+    /// absolute folder inside it is stored relative.
     #[test]
-    fn a_working_dir_outside_the_root_is_absolute() {
+    fn a_working_dir_outside_the_root_is_refused() {
         let (_dir, root) = project();
         let (_other, elsewhere) = project();
+        symlink(elsewhere.as_ref(), root.as_ref().join("escape")).unwrap();
 
+        for raw in [
+            elsewhere.as_ref().display().to_string(),
+            "..".to_string(),
+            "escape".to_string(),
+            "/".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    working_dir(&root, &raw),
+                    Err(ToolError::WorkingDirOutsideProject { .. })
+                ),
+                "{raw}"
+            );
+        }
         assert_eq!(
-            working_dir(&root, &elsewhere.as_ref().display().to_string()).unwrap(),
-            Some(elsewhere.as_ref().clone())
+            working_dir(&root, &root.as_ref().join("frontend").display().to_string()).unwrap(),
+            Some(PathBuf::from("frontend"))
         );
     }
 

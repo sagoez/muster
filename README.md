@@ -163,21 +163,25 @@ one and `muster config set <key> <value>` changes it.
 | `default-restart` | `never`, `on-failure` or `always` for a new process |
 | `default-stop-signal` | `terminate` or `interrupt` for a new process |
 | `default-stop-grace` | a duration up to `1h`, such as `5s`, for a new process |
+| `mcp-stack-edits` | `allow` or `read-only`: whether an agent over MCP may add, change or remove processes; `allow` by default |
 
-`detach-key` applies at the next attach, `desktop-notifications` at once, the
-size, scrollback, log size and color scheme to processes started afterwards, and
-the `default-*` settings to processes added afterwards.
+`detach-key` applies at the next attach, `desktop-notifications` and
+`mcp-stack-edits` at once, the size, scrollback, log size and color scheme to
+processes started afterwards, and the `default-*` settings to processes added
+afterwards.
 
 With `--json`, `muster config` prints `{"settings": [{"key": "detach-key",
 "value": "ctrl-\\"}, ...]}`, and `get` and `set` print one `{"key", "value"}`;
 each value is written as `config set` reads it. The MCP server's `config_get`
-answers in the same shapes.
+answers in the same shapes. Its `config_set` changes only the `default-*`
+settings; every other key, `mcp-stack-edits` among them, is changed from the
+CLI alone.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `muster ps [--all]` | List processes with state, readiness, pid, uptime, restarts and usage |
+| `muster ps [--all] [--commands]` | List processes with state, readiness, pid, uptime, restarts and usage; `--commands` adds each process's stored command |
 | `muster up` | Start every autostart process |
 | `muster down` | Stop every process |
 | `muster start [name] [--wait [--timeout D]]` | Start a process, and with `--wait` wait until it is ready, or running when it has no readiness check |
@@ -337,12 +341,29 @@ only new output. The tools:
   `process_wait`, `process_logs`, `process_screen` (what the terminal shows
   now), `process_send`;
 - the stack definition: `process_add`, `process_set` and `process_remove`, which
-  edit it exactly as `muster add`, `set` and `rm` do; `process_add` registers
-  the folder when it is not yet a project, and `ready` stores a readiness check;
-- settings: `config_get`, `config_set`;
+  edit it as `muster add`, `set` and `rm` do, within the guardrails below;
+  `process_add` registers the folder when it is not yet a project, and `ready`
+  stores a readiness check;
+- settings: `config_get`, and `config_set` for the `default-*` settings;
 - coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`.
+
+An agent's stack edits are held to guardrails, since a changed command runs
+with the user's rights at the next start:
+
+- `muster config set mcp-stack-edits read-only` refuses every `process_add`,
+  `process_set` and `process_remove` with an `isError` result naming the
+  setting; `allow` lets them through again. Only the CLI changes it.
+- Every edit an agent makes raises a notice naming the agent, the process and
+  the fields changed, with the new command and working directory when it set
+  them, so it shows in `muster notices` and as a `notice` event in
+  `stack_events`. A notice reaches a running service; with none running,
+  `muster ps --commands` shows what is stored.
+- A `working_dir` must be a folder inside the project root; one outside it, or
+  a symlink leading out of it, is refused.
+- A definition an agent reads back lists its `environment` by variable name
+  alone, never a value.
 
 A wait takes one condition: `{"log": "Listening on"}` (add `"regex": true` for a
 regex), `{"port": 3000}`, `{"http": "http://localhost:3000/health"}` (with an

@@ -191,6 +191,10 @@ pub enum Command {
         /// List every project the muster service has loaded.
         #[arg(long)]
         all: bool,
+        /// Add a COMMAND column with each process's stored command, so an
+        /// edit made by an agent shows.
+        #[arg(long)]
+        commands: bool,
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,

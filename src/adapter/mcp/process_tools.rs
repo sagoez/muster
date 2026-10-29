@@ -42,7 +42,7 @@ use crate::{
         service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
     },
     domain::{
-        config::ConfigError,
+        config::{ConfigError, StackEdit},
         process::PatternKind,
         project::Project,
         value::{OutputCursor, ProcessName, ProcessRef},
@@ -75,8 +75,10 @@ const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 const CONTROL_UNREPORTED: &str = "a control answer with no report";
 /// The form a line or byte limit is written in, followed by its maximum.
 const LIMIT_FORM: &str = "a number from 1 to ";
-/// The tool `process_set`'s refusal names.
+/// The stack-editing tools, as their refusals name them.
+const PROCESS_ADD: &str = "process_add";
 const PROCESS_SET: &str = "process_set";
+const PROCESS_REMOVE: &str = "process_remove";
 
 /// The process reference an agent typed as `name`.
 ///
@@ -297,26 +299,34 @@ impl MusterMcp {
     #[tool(
         description = "Add a process to this project's stack, registering the folder as a \
             project if it is not one. Takes name, command (a shell command), and optionally \
-            working_dir (relative to the project root), description, environment (an object of \
-            variable names to values), autostart, restart (never|on-failure|always), \
-            stop_signal (terminate|interrupt), stop_grace (such as 5s) and ready, a readiness \
-            check such as {\"log\": \"Listening on\", \"timeout\": \"60s\"}, {\"port\": 3000, \
-            \"timeout\": \"30s\"} or {\"http\": \"http://localhost:3000/health\", \"timeout\": \
-            \"30s\"}; fields left out take the default-* settings that config_get shows. The \
-            change is saved atomically and is visible to the human's muster ps at once. Does \
+            working_dir (a folder inside the project root, relative to it), description, \
+            environment (an object of variable names to values), autostart, restart \
+            (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (such as \
+            5s) and ready, a readiness check such as {\"log\": \"Listening on\", \"timeout\": \
+            \"60s\"}, {\"port\": 3000, \"timeout\": \"30s\"} or {\"http\": \
+            \"http://localhost:3000/health\", \"timeout\": \"30s\"}; fields left out take the \
+            default-* settings that config_get shows. The change is saved atomically, is \
+            visible to the human's muster ps at once and is shown to them as a notice. Does \
             not start it: call process_start. Returns {project, process: the stored \
-            definition}. Flagged isError, naming the field, when the name is taken or a value \
-            is invalid."
+            definition, its environment as variable names only}. Flagged isError, naming the \
+            field, when the name is taken, a value is invalid or the working_dir is outside \
+            the project, and when the user's mcp-stack-edits setting is read-only."
     )]
     pub(super) async fn process_add(
         &self,
         Parameters(arg): Parameters<ProcessAddArg>,
     ) -> ToolResult {
+        let author = self.identity.author().clone();
         let (project, spec) = self
             .blocking(move |deps| {
+                deps.allow_stack_edit(PROCESS_ADD)?;
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
                 let (registration, spec) = deps.editor().add(&root, draft)?;
+                deps.notifier().stack_edited(&root, &StackEdit::Added {
+                    author,
+                    spec: spec.clone(),
+                });
                 Ok((registration.project().clone(), spec))
             })
             .await?;
@@ -328,7 +338,7 @@ impl MusterMcp {
                     json(&ProjectIdentityView::from(&project))?,
                 ),
                 PROCESS,
-                json(&DefinitionView::from(&spec))?,
+                json(&DefinitionView::for_agent(&spec))?,
             ),
             false,
         )
@@ -337,20 +347,26 @@ impl MusterMcp {
     /// Changes fields of a process in a project's stack.
     #[tool(
         description = "Change fields of a process in this project's stack; omitted fields keep \
-            their value. Takes name and any of command, working_dir (null runs it in the root), \
-            description (null removes it), environment_set (an object of variables to add or \
-            replace), environment_unset (an array of names to remove), autostart, restart, \
-            stop_signal, stop_grace and ready (as process_add takes it; null removes the \
-            readiness check). A running process keeps its current run: restart it to apply the \
-            change. Returns {project, process: the stored definition, running}. An unknown \
-            name, an invalid value, or a call that changes nothing is flagged isError."
+            their value. Takes name and any of command, working_dir (a folder inside the \
+            project root; null runs it in the root), description (null removes it), \
+            environment_set (an object of variables to add or replace), environment_unset (an \
+            array of names to remove), autostart, restart, stop_signal, stop_grace and ready \
+            (as process_add takes it; null removes the readiness check). The change is shown \
+            to the human as a notice naming the fields changed. A running process keeps its \
+            current run: restart it to apply the change. Returns {project, process: the \
+            stored definition, its environment as variable names only, running}. An unknown \
+            name, an invalid value, a working_dir outside the project, a call that changes \
+            nothing, or a call while the user's mcp-stack-edits setting is read-only is \
+            flagged isError."
     )]
     pub(super) async fn process_set(
         &self,
         Parameters(arg): Parameters<ProcessSetArg>,
     ) -> ToolResult {
+        let author = self.identity.author().clone();
         let (project, spec, running) = self
             .blocking(move |deps| {
+                deps.allow_stack_edit(PROCESS_SET)?;
                 let project = deps.project(arg.project().as_deref())?;
                 let name = process_name(arg.name())?;
                 let change = arg.change(project.root())?;
@@ -358,6 +374,12 @@ impl MusterMcp {
                     return Err(ToolError::NothingToChange(PROCESS_SET));
                 }
                 let spec = deps.editor().change(project.root(), &name, &change)?;
+                deps.notifier()
+                    .stack_edited(project.root(), &StackEdit::Changed {
+                        author,
+                        fields: change.fields(),
+                        spec: spec.clone(),
+                    });
                 let running =
                     process::runs_now(deps.service().as_ref(), project.root(), spec.name());
                 Ok((project, spec, running))
@@ -372,7 +394,7 @@ impl MusterMcp {
                         json(&ProjectIdentityView::from(&project))?,
                     ),
                     PROCESS,
-                    json(&DefinitionView::from(&spec))?,
+                    json(&DefinitionView::for_agent(&spec))?,
                 ),
                 RUNNING,
                 Value::Bool(running),
@@ -386,12 +408,16 @@ impl MusterMcp {
         description = "Remove a process from this project's stack, stopping it first if it \
             runs, waiting at most 45 seconds. Returns {project, name, stopped (it was running \
             and has ended), still_stopping (it had not ended when the wait ended; it still \
-            ends), alerts}. An unknown name is flagged isError, listing the valid names."
+            ends), alerts}. The removal is shown to the human as a notice. An unknown name is \
+            flagged isError, listing the valid names, and so is any call while the user's \
+            mcp-stack-edits setting is read-only."
     )]
     pub(super) async fn process_remove(&self, Parameters(arg): Parameters<NameArg>) -> ToolResult {
         let alerts = self.alerts.clone();
+        let author = self.identity.author().clone();
         let (project, removed, heard) = self
             .blocking(move |deps| {
+                deps.allow_stack_edit(PROCESS_REMOVE)?;
                 let project = deps.project(arg.project().as_deref())?;
                 let typed = process_name(arg.name())?;
                 let stack = deps.stacks().stack(project.root())?.ok_or_else(|| {
@@ -404,6 +430,11 @@ impl MusterMcp {
                 let before = process::status(&client, &project)?;
                 let sent = SystemTime::now();
                 deps.editor().remove(project.root(), &name)?;
+                deps.notifier()
+                    .stack_edited(project.root(), &StackEdit::Removed {
+                        author,
+                        name: name.clone(),
+                    });
                 let names = [name];
                 let report = process::settle_removed(
                     &client,
@@ -593,9 +624,10 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
 mod tests {
     use super::*;
     use crate::{
-        adapter::mcp::test_support::{add, content, fixture, refusal, register, runtime},
+        adapter::mcp::test_support::{AGENT, add, content, fixture, refusal, register, runtime},
         domain::{
-            port::{ProjectStore, StackStore},
+            config::{McpStackEdits, SettingChange},
+            port::{ProjectStore, SettingsStore, StackStore},
             value::ProcessName,
         },
     };
@@ -643,7 +675,8 @@ mod tests {
         let definition = &added[PROCESS];
         assert_eq!(definition["name"], "web");
         assert_eq!(definition["working_dir"], "frontend");
-        assert_eq!(definition["environment"]["PORT"], "5173");
+        assert_eq!(definition["environment"], serde_json::json!(["PORT"]));
+        assert!(!added.to_string().contains("5173"), "{added}");
         assert_eq!(definition["restart"], "on-failure");
         assert_eq!(definition["autostart"], false, "the seeded default");
 
@@ -654,9 +687,137 @@ mod tests {
             .unwrap()
             .expect("a stack");
         assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
+        assert_eq!(
+            stack.processes()[0]
+                .environment()
+                .vars()
+                .values()
+                .next()
+                .map(ToString::to_string),
+            Some("5173".to_string()),
+            "the value is stored, only never shown"
+        );
         assert_eq!(*fixture.notifier.stacks.lock().unwrap(), vec![
             fixture.root.clone()
         ]);
+        assert_eq!(*fixture.notifier.edits.lock().unwrap(), vec![format!(
+            "agent {AGENT} added 'web', running `npm run dev` in frontend"
+        )]);
+    }
+
+    /// While the user's `mcp-stack-edits` setting is read-only, every stack
+    /// edit is refused naming the setting and how to allow it, and nothing
+    /// is written or announced; allowing it again lets the edit through.
+    #[test]
+    fn read_only_stack_edits_refuse_every_edit() {
+        let fixture = fixture();
+        register(&fixture);
+        fixture
+            .store
+            .apply(&SettingChange::McpStackEdits(McpStackEdits::ReadOnly))
+            .unwrap();
+
+        runtime().block_on(async {
+            let refusals = [
+                fixture
+                    .server
+                    .process_add(Parameters(add("worker", "bin/worker")))
+                    .await,
+                fixture
+                    .server
+                    .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
+                    .await,
+                fixture.server.process_remove(named("web")).await,
+            ];
+            for (refused, tool) in
+                refusals
+                    .into_iter()
+                    .zip([PROCESS_ADD, PROCESS_SET, PROCESS_REMOVE])
+            {
+                let message = refusal(refused);
+                assert!(message.starts_with(tool), "{message}");
+                assert!(
+                    message.contains("mcp-stack-edits setting is read-only"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("muster config set mcp-stack-edits allow"),
+                    "{message}"
+                );
+            }
+        });
+
+        let stack = fixture
+            .store
+            .stack(&fixture.root)
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
+        assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
+        assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
+        assert_eq!(fixture.notifier.edits.lock().unwrap().len(), 1);
+
+        fixture
+            .store
+            .apply(&SettingChange::McpStackEdits(McpStackEdits::Allow))
+            .unwrap();
+        runtime().block_on(async {
+            content(
+                fixture
+                    .server
+                    .process_add(Parameters(add("worker", "bin/worker")))
+                    .await,
+            );
+        });
+        assert_eq!(fixture.notifier.edits.lock().unwrap().len(), 2);
+    }
+
+    /// A working_dir outside the project root is refused on add and set, and
+    /// nothing is written.
+    #[test]
+    fn a_working_dir_outside_the_project_is_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        let outside = fixture
+            .root
+            .as_ref()
+            .parent()
+            .unwrap()
+            .display()
+            .to_string();
+
+        runtime().block_on(async {
+            let added = refusal(
+                fixture
+                    .server
+                    .process_add(Parameters(
+                        ProcessAddArg::builder()
+                            .name("worker".to_string())
+                            .command("bin/worker".to_string())
+                            .working_dir(Some(outside.clone()))
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(added.contains("outside the project root"), "{added}");
+            let changed = refusal(
+                fixture
+                    .server
+                    .process_set(set(
+                        serde_json::json!({ "name": "web", "working_dir": ".." }),
+                    ))
+                    .await,
+            );
+            assert!(changed.contains("outside the project root"), "{changed}");
+        });
+
+        let stack = fixture
+            .store
+            .stack(&fixture.root)
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names().len(), 1);
+        assert_eq!(*stack.processes()[0].working_dir(), None);
     }
 
     /// A taken name and an invalid field are the caller's mistakes; neither
@@ -742,6 +903,8 @@ mod tests {
                     .server
                     .process_set(set(serde_json::json!({
                         "name": "web",
+                        "command": "npm start",
+                        "working_dir": "frontend",
                         "restart": "always",
                         "environment_set": { "PORT": "3000" },
                     })))
@@ -749,10 +912,23 @@ mod tests {
             )
         });
         assert_eq!(changed[PROCESS]["restart"], "always");
-        assert_eq!(changed[PROCESS]["environment"]["PORT"], "3000");
+        assert_eq!(changed[PROCESS]["environment"], serde_json::json!(["PORT"]));
+        assert!(!changed.to_string().contains("3000"), "{changed}");
         assert_eq!(changed[PROJECT]["name"], "shop");
         assert_eq!(changed[RUNNING], false);
         assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 2);
+        let edits = fixture.notifier.edits.lock().unwrap();
+        assert_eq!(
+            edits.last().map(String::as_str),
+            Some(
+                format!(
+                    "agent {AGENT} changed command, working-dir, environment, restart of 'web'; \
+                     command now `npm start`; working dir now frontend"
+                )
+                .as_str()
+            )
+        );
+        assert!(!edits.iter().any(|edit| edit.contains("3000")));
     }
 
     /// A `process_set` that changes nothing, or names no process, is the

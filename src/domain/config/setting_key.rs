@@ -24,6 +24,28 @@ pub enum SettingKey {
     DefaultStopSignal,
     /// A new process's grace period before force-kill.
     DefaultStopGrace,
+    /// Whether an agent over MCP may edit the stack.
+    McpStackEdits,
+}
+
+impl SettingKey {
+    /// Whether an agent over MCP may change this setting: only the defaults a
+    /// new process takes, so an agent can never lift its own guardrails.
+    pub fn agent_may_set(self) -> bool {
+        match self {
+            Self::DefaultSize
+            | Self::DefaultAutostart
+            | Self::DefaultRestart
+            | Self::DefaultStopSignal
+            | Self::DefaultStopGrace => true,
+            Self::DesktopNotifications
+            | Self::DetachKey
+            | Self::LogMaxSize
+            | Self::Scrollback
+            | Self::ColorScheme
+            | Self::McpStackEdits => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -42,5 +64,18 @@ mod tests {
             SettingKey::DefaultStopGrace.to_string(),
             "default-stop-grace"
         );
+        assert_eq!(SettingKey::McpStackEdits.to_string(), "mcp-stack-edits");
+    }
+
+    /// An agent sets exactly the `default-*` keys.
+    #[test]
+    fn an_agent_sets_only_the_default_keys() {
+        for key in SettingKey::iter() {
+            assert_eq!(
+                key.agent_may_set(),
+                key.to_string().starts_with("default-"),
+                "{key}"
+            );
+        }
     }
 }

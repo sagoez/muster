@@ -133,7 +133,10 @@ pub fn agent_message(error: &ToolError) -> String {
         | ToolError::InvalidTodoTitle(_)
         | ToolError::InvalidTodoId(_)
         | ToolError::HeldByOther { .. }
-        | ToolError::InvalidKvKey(_) => error.to_string(),
+        | ToolError::InvalidKvKey(_)
+        | ToolError::StackEditsReadOnly(_)
+        | ToolError::SettingNotForAgents(_)
+        | ToolError::WorkingDirOutsideProject { .. } => error.to_string(),
     }
 }
 

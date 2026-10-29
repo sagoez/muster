@@ -122,6 +122,16 @@ pub enum ServiceRequest {
         /// The project whose stack changed.
         project: ProjectRoot,
     },
+    /// An agent edited a process of the project's stack; the service raises
+    /// a notice so the user sees it.
+    StackEdited {
+        /// The project whose stack was edited.
+        project: ProjectRoot,
+        /// The process the edit concerns.
+        process: ProcessName,
+        /// The edit, for a person to read.
+        message: String,
+    },
     /// The stored settings changed; later launches use them.
     SettingsChanged,
     /// Exits so a newer service can take over; every process keeps running.

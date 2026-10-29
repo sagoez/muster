@@ -3,7 +3,7 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     color_scheme::ColorScheme,
-    config::{ProcessDefaults, SettingChange, SettingKey},
+    config::{McpStackEdits, ProcessDefaults, SettingChange, SettingKey},
     process::{RestartPolicy, StopPolicy, StopSignal},
     pty::PtySize,
     value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
@@ -43,6 +43,9 @@ pub struct Settings {
     /// A newly added process's grace period before force-kill.
     #[getset(get = "pub", set_with = "pub")]
     default_stop_grace: StopGrace,
+    /// Whether an agent over MCP may edit the stack.
+    #[getset(get = "pub", set_with = "pub")]
+    mcp_stack_edits: McpStackEdits,
 }
 
 impl Settings {
@@ -59,6 +62,7 @@ impl Settings {
             SettingChange::DefaultRestart(policy) => self.with_default_restart(*policy),
             SettingChange::DefaultStopSignal(signal) => self.with_default_stop_signal(*signal),
             SettingChange::DefaultStopGrace(grace) => self.with_default_stop_grace(*grace),
+            SettingChange::McpStackEdits(edits) => self.with_mcp_stack_edits(*edits),
         }
     }
 
@@ -76,6 +80,7 @@ impl Settings {
             SettingKey::DefaultRestart => self.default_restart.to_string(),
             SettingKey::DefaultStopSignal => self.default_stop_signal.to_string(),
             SettingKey::DefaultStopGrace => self.default_stop_grace.to_string(),
+            SettingKey::McpStackEdits => self.mcp_stack_edits.to_string(),
         }
     }
 
@@ -119,6 +124,7 @@ mod tests {
             .default_restart(RestartPolicy::Never)
             .default_stop_signal(StopSignal::Terminate)
             .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
+            .mcp_stack_edits(McpStackEdits::Allow)
             .build()
     }
 

@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         color_scheme::ColorScheme,
-        config::{Environment, Stack},
+        config::{Environment, McpStackEdits, Stack, StackEdit},
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
@@ -121,6 +121,8 @@ mod tests {
         Wrote,
         /// The notifier heard a stack change.
         StackChanged(ProjectRoot),
+        /// The notifier heard an agent's stack edit.
+        StackEdited(ProjectRoot),
         /// The notifier heard a settings change.
         SettingsChanged,
     }
@@ -239,6 +241,10 @@ mod tests {
             self.log.borrow_mut().push(Step::StackChanged(root.clone()));
         }
 
+        fn stack_edited(&self, root: &ProjectRoot, _edit: &StackEdit) {
+            self.log.borrow_mut().push(Step::StackEdited(root.clone()));
+        }
+
         fn settings_changed(&self) {
             self.log.borrow_mut().push(Step::SettingsChanged);
         }
@@ -276,6 +282,7 @@ mod tests {
             .default_restart(RestartPolicy::OnFailure)
             .default_stop_signal(StopSignal::Interrupt)
             .default_stop_grace(grace(7))
+            .mcp_stack_edits(McpStackEdits::Allow)
             .build()
     }
 

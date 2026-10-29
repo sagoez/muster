@@ -37,6 +37,8 @@ pub enum FailureKind {
     Io,
     /// The request's own arguments or files were not usable.
     InvalidInput,
+    /// A setting the user chose forbids what was asked.
+    NotAllowed,
     /// The command line itself could not be parsed, or a question was
     /// cancelled.
     Usage,
@@ -60,6 +62,7 @@ impl FailureKind {
             | Self::NotRunning
             | Self::ProcessFailed
             | Self::InvalidInput
+            | Self::NotAllowed
             | Self::Usage => true,
             Self::ServiceUnavailable
             | Self::VersionMismatch

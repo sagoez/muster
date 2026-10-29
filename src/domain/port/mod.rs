@@ -1,21 +1,25 @@
 mod coordination_store;
 mod listening_ports;
+mod local_state;
 mod notifier;
 mod port_occupants;
 mod process_metrics;
 mod process_runner;
 mod project_store;
 mod settings_store;
+mod stack_edit_log;
 mod stack_store;
 mod state_change_notifier;
 
 pub use coordination_store::*;
 pub use listening_ports::*;
+pub use local_state::*;
 pub use notifier::*;
 pub use port_occupants::*;
 pub use process_metrics::*;
 pub use process_runner::*;
 pub use project_store::*;
 pub use settings_store::*;
+pub use stack_edit_log::*;
 pub use stack_store::*;
 pub use state_change_notifier::*;

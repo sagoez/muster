@@ -10,7 +10,7 @@ use typed_builder::TypedBuilder;
 use super::{
     error::CliError,
     imported_run::ImportedRun,
-    invocation::{Invocation, stack_editor},
+    invocation::Invocation,
     output::project_title,
     report::{Report, Row, RowKind},
     stack_path::StackPath,
@@ -23,11 +23,11 @@ use crate::{
             process::{settle_removed, status},
         },
         exchange::read_stack_file,
-        store::SqliteStore,
     },
+    application::StackEditor,
     domain::{
         config::{ImportMode, ImportPlan, ProcessSpec, Stack},
-        port::StackStore,
+        port::{LocalState, StackStore},
         value::ProcessName,
     },
 };
@@ -122,7 +122,7 @@ pub fn import_mode(merge: bool, replace: bool) -> ImportMode {
 /// cannot be resolved.
 pub fn read(
     invocation: &Invocation<'_>,
-    store: &SqliteStore,
+    store: &dyn LocalState,
     file: Option<&str>,
 ) -> Result<StackRead, CliError> {
     let target = invocation.editing_target(store)?;
@@ -155,7 +155,7 @@ pub fn read(
 /// Returns the [`CliError::Config`] of a conflict, a duplicate name, or a
 /// stack that cannot be read.
 pub fn plan(
-    store: &SqliteStore,
+    store: &dyn StackStore,
     read: &StackRead,
     mode: ImportMode,
 ) -> Result<ImportPlan, CliError> {
@@ -232,7 +232,7 @@ fn runs(read: &StackRead, current: Option<&Stack>, plan: &ImportPlan) -> Vec<Imp
 /// # Errors
 /// Returns the [`CliError`] of a stack that cannot be read.
 pub fn dry_run_view(
-    store: &SqliteStore,
+    store: &dyn StackStore,
     read: &StackRead,
     plan: &ImportPlan,
 ) -> Result<ImportView, CliError> {
@@ -258,7 +258,8 @@ pub fn dry_run_view(
 /// Returns the [`CliError`] of a conflict or a refused write, or of a
 /// service that cannot be reached.
 pub fn apply(
-    store: &SqliteStore,
+    store: &dyn StackStore,
+    editor: &StackEditor<'_>,
     read: &StackRead,
     mode: ImportMode,
     client: Option<&ServiceClient>,
@@ -270,8 +271,7 @@ pub fn apply(
     };
     let current = store.stack(read.target().root())?;
     let sent = SystemTime::now();
-    let (registration, plan) =
-        stack_editor(store).import(read.target().root(), read.processes(), mode)?;
+    let (registration, plan) = editor.import(read.target().root(), read.processes(), mode)?;
     let project = registration.project();
     let (removed, failed) = match (client, before) {
         (Some(client), Some(before)) if !plan.removed().is_empty() => {

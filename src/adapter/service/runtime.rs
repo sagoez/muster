@@ -607,14 +607,6 @@ impl ServiceRuntime {
                 self.stack_changed(&project)?;
                 ServiceResponse::Ok
             },
-            ServiceRequest::StackEdited {
-                project,
-                process,
-                message,
-            } => {
-                self.record_notice(Some(project), Some(process), NoticeLevel::Warning, message);
-                ServiceResponse::Ok
-            },
             ServiceRequest::SettingsChanged => {
                 self.settings_changed()?;
                 ServiceResponse::Ok
@@ -952,25 +944,13 @@ impl ServiceRuntime {
 
     /// Records a notice about `project`, or the service as a whole.
     fn notify(&self, project: Option<ProjectRoot>, level: NoticeLevel, message: String) {
-        self.record_notice(project, None, level, message);
-    }
-
-    /// Records a notice about `project`, or the service as a whole, and the
-    /// process it concerns when one.
-    fn record_notice(
-        &self,
-        project: Option<ProjectRoot>,
-        process: Option<ProcessName>,
-        level: NoticeLevel,
-        message: String,
-    ) {
         self.event_log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .record(
                 EventDraft::builder()
                     .project(project.clone())
-                    .process(process.clone())
+                    .process(None)
                     .kind(EventKind::Notice)
                     .detail(message.clone())
                     .build(),
@@ -978,7 +958,7 @@ impl ServiceRuntime {
         let notice = Notice::builder()
             .at(SystemTime::now())
             .project(project)
-            .process(process)
+            .process(None)
             .level(level)
             .message(message)
             .build();
@@ -1823,33 +1803,6 @@ mod tests {
         let api = successor.wait_for(&project, "api", ProcessState::Running);
         assert_eq!(*process(&api, "api").pid(), Some(pid), "the same child");
         successor.stop();
-    }
-
-    /// An agent's stack edit is raised as a notice on its process, whether or
-    /// not the project is loaded.
-    #[test]
-    fn a_stack_edit_raises_a_notice_on_its_process() {
-        let fixture = Fixture::new();
-        let project = fixture.project(commands(&[("api", false)]));
-        let service = fixture.start(Arc::new(fixture.runner()));
-        let message = "agent claude-code changed command of 'api'; command now `x`";
-
-        let answer = service.send(ServiceRequest::StackEdited {
-            project: project.clone(),
-            process: ProcessName::try_new("api").unwrap(),
-            message: message.to_string(),
-        });
-
-        assert_eq!(answer, ServiceResponse::Ok);
-        let notices = service.notices(&project);
-        let raised = notices
-            .iter()
-            .find(|notice| notice.message() == message)
-            .expect("the edit is a notice");
-        assert_eq!(raised.project().as_ref(), Some(&project));
-        assert_eq!(raised.process().as_ref().map(AsRef::as_ref), Some("api"));
-        assert_eq!(*raised.level(), NoticeLevel::Warning);
-        service.stop();
     }
 
     #[test]

@@ -322,11 +322,12 @@ impl MusterMcp {
                 deps.allow_stack_edit(PROCESS_ADD)?;
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
-                let (registration, spec) = deps.editor().add(&root, draft)?;
-                deps.notifier().stack_edited(&root, &StackEdit::Added {
+                let editor = deps.editor();
+                let (registration, spec) = editor.add(&root, draft)?;
+                editor.announce(&root, &StackEdit::Added {
                     author,
                     spec: spec.clone(),
-                });
+                })?;
                 Ok((registration.project().clone(), spec))
             })
             .await?;
@@ -373,13 +374,13 @@ impl MusterMcp {
                 if change.is_empty() {
                     return Err(ToolError::NothingToChange(PROCESS_SET));
                 }
-                let spec = deps.editor().change(project.root(), &name, &change)?;
-                deps.notifier()
-                    .stack_edited(project.root(), &StackEdit::Changed {
-                        author,
-                        fields: change.fields(),
-                        spec: spec.clone(),
-                    });
+                let editor = deps.editor();
+                let spec = editor.change(project.root(), &name, &change)?;
+                editor.announce(project.root(), &StackEdit::Changed {
+                    author,
+                    fields: change.fields(),
+                    spec: spec.clone(),
+                })?;
                 let running =
                     process::runs_now(deps.service().as_ref(), project.root(), spec.name());
                 Ok((project, spec, running))
@@ -429,12 +430,12 @@ impl MusterMcp {
                 let client = deps.service().connect()?;
                 let before = process::status(&client, &project)?;
                 let sent = SystemTime::now();
-                deps.editor().remove(project.root(), &name)?;
-                deps.notifier()
-                    .stack_edited(project.root(), &StackEdit::Removed {
-                        author,
-                        name: name.clone(),
-                    });
+                let editor = deps.editor();
+                editor.remove(project.root(), &name)?;
+                editor.announce(project.root(), &StackEdit::Removed {
+                    author,
+                    name: name.clone(),
+                })?;
                 let names = [name];
                 let report = process::settle_removed(
                     &client,
@@ -624,7 +625,9 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
 mod tests {
     use super::*;
     use crate::{
-        adapter::mcp::test_support::{AGENT, add, content, fixture, refusal, register, runtime},
+        adapter::mcp::test_support::{
+            AGENT, add, content, edits, fixture, refusal, register, runtime,
+        },
         domain::{
             config::{McpStackEdits, SettingChange},
             port::{ProjectStore, SettingsStore, StackStore},
@@ -700,7 +703,7 @@ mod tests {
         assert_eq!(*fixture.notifier.stacks.lock().unwrap(), vec![
             fixture.root.clone()
         ]);
-        assert_eq!(*fixture.notifier.edits.lock().unwrap(), vec![format!(
+        assert_eq!(edits(&fixture), vec![format!(
             "agent {AGENT} added 'web', running `npm run dev` in frontend"
         )]);
     }
@@ -755,7 +758,7 @@ mod tests {
         assert_eq!(stack.names(), vec![ProcessName::try_new("web").unwrap()]);
         assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
         assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 1);
-        assert_eq!(fixture.notifier.edits.lock().unwrap().len(), 1);
+        assert_eq!(edits(&fixture).len(), 1);
 
         fixture
             .store
@@ -769,7 +772,7 @@ mod tests {
                     .await,
             );
         });
-        assert_eq!(fixture.notifier.edits.lock().unwrap().len(), 2);
+        assert_eq!(edits(&fixture).len(), 2);
     }
 
     /// A working_dir outside the project root is refused on add and set, and
@@ -917,7 +920,7 @@ mod tests {
         assert_eq!(changed[PROJECT]["name"], "shop");
         assert_eq!(changed[RUNNING], false);
         assert_eq!(fixture.notifier.stacks.lock().unwrap().len(), 2);
-        let edits = fixture.notifier.edits.lock().unwrap();
+        let edits = edits(&fixture);
         assert_eq!(
             edits.last().map(String::as_str),
             Some(

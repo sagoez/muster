@@ -19,11 +19,14 @@ use super::{
 };
 use crate::{
     adapter::{
-        client::{ClientError, ServiceAccess, ServiceClient},
-        service::ProjectStatus,
+        client::{ClientError, ServiceAccess, ServiceClient, ServiceStatus},
+        service::{ProjectStatus, ServiceRequest},
         store::SqliteStore,
     },
-    domain::{config::StackEdit, port::StateChangeNotifier, value::ProjectRoot},
+    domain::{
+        port::{StackEditLog, StateChangeNotifier},
+        value::ProjectRoot,
+    },
 };
 
 /// The database file each test's store opens.
@@ -45,6 +48,16 @@ impl ServiceAccess for NoService {
     fn loaded_status(&self, _project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
         Ok(None)
     }
+
+    fn status(&self) -> Result<ServiceStatus, ClientError> {
+        Err(ClientError::NoStateDir)
+    }
+
+    fn stop(&self) -> Result<bool, ClientError> {
+        Ok(false)
+    }
+
+    fn notify(&self, _request: &ServiceRequest) {}
 }
 
 /// A [`StateChangeNotifier`] that records what it was told.
@@ -52,8 +65,6 @@ impl ServiceAccess for NoService {
 pub struct RecordingNotifier {
     /// Each project whose stack changed, in order.
     pub stacks: Mutex<Vec<ProjectRoot>>,
-    /// Each agent edit announced, as the user reads it, in order.
-    pub edits: Mutex<Vec<String>>,
     /// How many times the settings changed.
     pub settings: Mutex<usize>,
 }
@@ -61,10 +72,6 @@ pub struct RecordingNotifier {
 impl StateChangeNotifier for RecordingNotifier {
     fn stack_changed(&self, root: &ProjectRoot) {
         self.stacks.lock().unwrap().push(root.clone());
-    }
-
-    fn stack_edited(&self, _root: &ProjectRoot, edit: &StackEdit) {
-        self.edits.lock().unwrap().push(edit.to_string());
     }
 
     fn settings_changed(&self) {
@@ -132,9 +139,22 @@ fn serving(
         .coordination(Arc::new(store.clone()))
         .stacks(Arc::new(store.clone()))
         .settings(Arc::new(store.clone()))
+        .edits(Arc::new(store.clone()))
         .notifier(notifier.clone())
         .build();
     MusterMcp::new(deps)
+}
+
+/// Each agent edit the fixture's project log keeps, as the user reads it,
+/// oldest first.
+pub fn edits(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .store
+        .edits(&fixture.root)
+        .unwrap()
+        .iter()
+        .map(|edit| edit.message().clone())
+        .collect()
 }
 
 /// `process_add` arguments for `name` running `command`.

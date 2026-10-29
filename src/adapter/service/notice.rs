@@ -7,7 +7,10 @@ use typed_builder::TypedBuilder;
 use super::notice_level::NoticeLevel;
 use crate::{
     adapter::sanitize::printable,
-    domain::value::{ProcessName, ProjectRoot},
+    domain::{
+        config::RecordedEdit,
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
 /// One thing supervision has to tell the user, such as a failed start or a
@@ -31,6 +34,18 @@ pub struct Notice {
 }
 
 impl Notice {
+    /// The warning that tells the user of `edit`, an agent's edit to the
+    /// stack of the project at `root`.
+    pub fn for_edit(root: &ProjectRoot, edit: &RecordedEdit) -> Self {
+        Self {
+            at: *edit.at(),
+            project: Some(root.clone()),
+            process: Some(edit.process().clone()),
+            level: NoticeLevel::Warning,
+            message: edit.message().clone(),
+        }
+    }
+
     /// This notice with its message made [`printable`], since it may carry
     /// text a process or a config produced.
     pub fn printable(self) -> Self {

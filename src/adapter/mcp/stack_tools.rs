@@ -52,10 +52,11 @@ impl MusterMcp {
     )]
     pub(super) async fn stack_status(&self, Parameters(arg): Parameters<ProjectArg>) -> ToolResult {
         let coordination = self.deps.coordination().clone();
+        let edits = self.deps.edits().clone();
         let ((status, notices, locks), alerts) = self
             .ask(arg.project().clone(), move |client, project| {
                 let status = process::status(client, project)?;
-                let notices = process::notices(client, project)?;
+                let notices = process::notices(client, edits.as_ref(), project)?;
                 let locks = coordination.locks(project.root())?;
                 Ok((status, notices, locks))
             })

@@ -13,16 +13,12 @@ use super::{
     report::{Report, Row, RowKind},
 };
 use crate::{
-    adapter::{
-        client::{
-            ActionReport, ProjectIdentityView, RunningServiceNotifier, ServiceClient, SettleWatch,
-            process::down,
-        },
-        store::SqliteStore,
+    adapter::client::{
+        ActionReport, ProjectIdentityView, ServiceClient, SettleWatch, process::down,
     },
     domain::{
         config::ConfigError,
-        port::{ProjectStore, StackStore, StateChangeNotifier},
+        port::{LocalState, StateChangeNotifier},
         project::Project,
     },
 };
@@ -104,7 +100,7 @@ impl ProjectRemoval {
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be read.
-pub fn list(store: &SqliteStore, cwd: &Path) -> Result<Vec<ProjectListing>, CliError> {
+pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, CliError> {
     let current = store.project_containing(cwd)?;
     store
         .projects()?
@@ -185,7 +181,8 @@ fn pad(text: &str, width: usize) -> String {
 /// that cannot be written.
 pub fn remove(
     client: &ServiceClient,
-    store: &SqliteStore,
+    store: &dyn LocalState,
+    notifier: &dyn StateChangeNotifier,
     project: &Project,
     watch: &mut dyn SettleWatch,
 ) -> Result<ProjectRemoval, CliError> {
@@ -202,7 +199,7 @@ pub fn remove(
         Err(error) => return Err(error.into()),
     };
     let removed = store.remove_project(project.root())?;
-    RunningServiceNotifier.stack_changed(project.root());
+    notifier.stack_changed(project.root());
     Ok(ProjectRemoval::builder()
         .project(ProjectIdentityView::from(project))
         .removed(removed)

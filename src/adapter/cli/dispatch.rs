@@ -9,18 +9,18 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
-    sync::Arc,
     time::SystemTime,
 };
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
+use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
 
 use super::{
     add::{add, add_rows},
     args::{
         Args, Command, ConfigCommand, CoordinationCommand, LogFilterArgs, ProcessArgs,
-        ProjectsCommand, RunArgs, ServiceCommand, SetArgs, StartArgs, WaitArgs,
+        ProjectsCommand, RunArgs, ServiceCommand, SetArgs, StartArgs, WaitArgs, completing_command,
     },
     attach::{Announce, attach_named},
     attach_end::AttachEnd,
@@ -46,6 +46,7 @@ use super::{
     invocation::Invocation,
     kv::kv,
     lock::lock,
+    mcp_launch::McpLaunch,
     note::note,
     output,
     presenter::Presenter,
@@ -65,20 +66,18 @@ use crate::{
     adapter::{
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
-            ProjectView, RunningServiceNotifier, ServiceClient, SettingView, SettingsView,
-            SettleWatch, UserService, WaitView, process, resolve_project,
+            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
+            resolve_project,
         },
-        mcp::{self, McpDeps, Scope},
         private_dir::state_dir,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
-        store::SqliteStore,
     },
     constants::APP_NAME,
     domain::{
         config::{ImportMode, Stack},
         coordination::Author,
-        port::{SettingsStore, StackStore},
+        port::LocalState,
         project::Project,
         value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
@@ -109,11 +108,11 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
 
-/// The command line, parsed. A shell's completion hook is answered here and
-/// the process exits; a command line that does not parse exits as a usage
-/// error, in JSON when `--json` was asked for.
-pub fn parse_args() -> Args {
-    clap_complete::CompleteEnv::with_factory(Args::command).complete();
+/// The command line, parsed. A shell's completion hook is answered here from
+/// `ports` and the process exits; a command line that does not parse exits
+/// as a usage error, in JSON when `--json` was asked for.
+pub fn parse_args(ports: &'static dyn CliPorts) -> Args {
+    CompleteEnv::with_factory(move || completing_command(ports)).complete();
     match Args::try_parse() {
         Ok(args) => args,
         Err(error) if error.use_stderr() && json_requested() => {
@@ -186,7 +185,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             json,
         }) => attach(invocation, name.as_ref(), read_only, json),
         Some(Command::Notices { json }) => notices(invocation, json),
-        Some(Command::Service { command }) => service(command),
+        Some(Command::Service { command }) => service(invocation, command),
         Some(Command::Add(args)) => {
             let json = args.json;
             let presenter = Presenter::detect(json);
@@ -290,7 +289,7 @@ fn internal(result: Result<(), MusterError>) {
 fn project_or_fail(invocation: &Invocation<'_>, json: bool) -> Project {
     match invocation
         .store()
-        .and_then(|store| invocation.project(&store))
+        .and_then(|store| invocation.project(store.as_ref()))
     {
         Ok(project) => project,
         Err(error) => fail_command(json, &error),
@@ -301,7 +300,7 @@ fn project_or_fail(invocation: &Invocation<'_>, json: bool) -> Project {
 fn bare(invocation: &Invocation<'_>) {
     let inside = invocation
         .store()
-        .and_then(|store| invocation.target(&store));
+        .and_then(|store| invocation.target(store.as_ref()));
     match inside {
         Ok(ProjectTarget::Registered(_)) => ps(invocation, false, false, false),
         Ok(ProjectTarget::Unregistered(_)) => ps(invocation, true, false, false),
@@ -318,9 +317,9 @@ fn ps(invocation: &Invocation<'_>, all: bool, commands: bool, json: bool) {
             None
         } else {
             let store = invocation.store()?;
-            Some(invocation.project(&store)?)
+            Some(invocation.project(store.as_ref())?)
         };
-        let client = connect()?;
+        let client = invocation.connect()?;
         let statuses = process::ps(&client, project.as_ref().map(Project::root))?;
         let stacks = if commands {
             Some(stored_stacks(invocation, &statuses)?)
@@ -393,17 +392,11 @@ fn act(
     let project = project_or_fail(invocation, json);
     written(presenter.open(&output::action_title(action, project.name())));
     let mut spinners = presenter.spinners();
-    let result = connect().and_then(|client| run(presenter, &client, &project, &mut spinners));
+    let result = invocation
+        .connect()
+        .and_then(|client| run(presenter, &client, &project, &mut spinners));
     drop(spinners);
     finish_action(presenter, json, result);
-}
-
-/// This user's service, started or replaced as needed.
-///
-/// # Errors
-/// Returns the [`CliError`] of a service that cannot be reached.
-fn connect() -> Result<ServiceClient, CliError> {
-    Ok(ServiceClient::connect()?)
 }
 
 /// `presenter`, once `check` says it can ask the question a command needs
@@ -462,7 +455,7 @@ fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
         Presenter::can_choose_process,
     );
     let project = project_or_fail(invocation, json);
-    let result = connect().and_then(|client| {
+    let result = invocation.connect().and_then(|client| {
         let name = named_or_chosen(&project, name.as_ref(), presenter)(&process::status(
             &client, &project,
         )?)?;
@@ -489,7 +482,7 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
     );
     let until = condition(&args).unwrap_or_else(|error| fail_command(json, &error));
     let project = project_or_fail(invocation, json);
-    let result = connect().and_then(|client| {
+    let result = invocation.connect().and_then(|client| {
         let name = named_or_chosen(&project, args.name.as_ref(), presenter)(&process::status(
             &client, &project,
         )?)?;
@@ -551,7 +544,7 @@ fn logs(
         Ok::<_, CliError>(chosen)
     };
     let on_terminal = !json && io::stdout().is_terminal();
-    let result = connect().and_then(|client| {
+    let result = invocation.connect().and_then(|client| {
         if follow {
             let followed = if on_terminal {
                 let mut out = TerminalSafe::new(anstream::stdout());
@@ -609,7 +602,7 @@ fn filtered_logs(
         .query()
         .unwrap_or_else(|error| fail_command(json, &error));
     let project = project_or_fail(invocation, json);
-    let result = connect().and_then(|client| {
+    let result = invocation.connect().and_then(|client| {
         process::log_slice(
             &client,
             &project,
@@ -662,7 +655,7 @@ fn attach(invocation: &Invocation<'_>, name: Option<&ProcessRef>, read_only: boo
             presenter.can_choose_process()?;
         }
         let store = invocation.store()?;
-        let project = invocation.project(&store)?;
+        let project = invocation.project(store.as_ref())?;
         Ok((terminal, project, detach_key(invocation)?))
     });
     let (terminal, project, detach) = match prepared {
@@ -670,7 +663,7 @@ fn attach(invocation: &Invocation<'_>, name: Option<&ProcessRef>, read_only: boo
         Err(error) => fail_command(json, &error),
     };
     written(presenter.open(&output::attach_title(project.name())));
-    let result = connect().and_then(|client| {
+    let result = invocation.connect().and_then(|client| {
         let name = running_named_or_chosen(&client, &project, name, presenter)?;
         attach_named(
             client,
@@ -711,7 +704,10 @@ fn finish_attach(presenter: Presenter, name: &ProcessName, end: &AttachEnd) {
 /// Prints the current project's recent notices and the service's.
 fn notices(invocation: &Invocation<'_>, json: bool) {
     let project = project_or_fail(invocation, json);
-    let result = connect().and_then(|client| Ok(process::notices(&client, &project)?));
+    let result = invocation.store().and_then(|store| {
+        let client = invocation.connect()?;
+        Ok(process::notices(&client, store.as_ref(), &project)?)
+    });
     match result {
         Ok(notices) => {
             let views: Vec<NoticeView> = notices
@@ -727,9 +723,9 @@ fn notices(invocation: &Invocation<'_>, json: bool) {
 }
 
 /// Shows or stops the service, never starting it.
-fn service(command: ServiceCommand) {
+fn service(invocation: &Invocation<'_>, command: ServiceCommand) {
     match command {
-        ServiceCommand::Status { json } => match ServiceClient::status() {
+        ServiceCommand::Status { json } => match invocation.service().status() {
             Ok(status) => {
                 print_result(json, &status, |status| show(&output::service_rows(status)));
             },
@@ -738,7 +734,7 @@ fn service(command: ServiceCommand) {
         ServiceCommand::Stop { json } => {
             let presenter = Presenter::detect(json);
             written(presenter.open(&output::service_title()));
-            match ServiceClient::stop() {
+            match invocation.service().stop() {
                 Ok(was_running) => {
                     let stopped = ServiceStopped::builder().stopped(was_running).build();
                     print_result(json, &stopped, |_| {
@@ -767,8 +763,8 @@ fn change(invocation: &Invocation<'_>, args: SetArgs) {
 fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let project = invocation.editing_project(&store)?;
-        let resolved = removable(&store, &project, names)?;
+        let project = invocation.editing_project(store.as_ref())?;
+        let resolved = removable(store.as_ref(), &project, names)?;
         Ok((store, project, resolved))
     });
     let (store, project, resolved) = match prepared {
@@ -777,8 +773,15 @@ fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
     };
     written(presenter.open(&output::action_title(Action::Remove, project.name())));
     let mut spinners = presenter.spinners();
-    let result = connect()
-        .and_then(|client| remove_processes(&client, &store, &project, &resolved, &mut spinners));
+    let result = invocation.connect().and_then(|client| {
+        remove_processes(
+            &client,
+            &invocation.editor(store.as_ref()),
+            &project,
+            &resolved,
+            &mut spinners,
+        )
+    });
     drop(spinners);
     match result {
         Ok(view) => {
@@ -834,8 +837,8 @@ fn import(
 ) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let stack = read(invocation, &store, file)?;
-        let planned = plan(&store, &stack, mode)?;
+        let stack = read(invocation, store.as_ref(), file)?;
+        let planned = plan(store.as_ref(), &stack, mode)?;
         Ok((store, stack, planned))
     });
     let (store, stack, planned) = match prepared {
@@ -843,7 +846,7 @@ fn import(
         Err(error) => fail_command(json, &error),
     };
     if dry_run {
-        let view = match dry_run_view(&store, &stack, &planned) {
+        let view = match dry_run_view(store.as_ref(), &stack, &planned) {
             Ok(view) => view,
             Err(error) => fail_command(json, &error),
         };
@@ -853,10 +856,20 @@ fn import(
         return;
     }
     let mut spinners = presenter.spinners();
+    let editor = invocation.editor(store.as_ref());
     let result = if planned.removed().is_empty() {
-        apply(&store, &stack, mode, None, &mut spinners)
+        apply(store.as_ref(), &editor, &stack, mode, None, &mut spinners)
     } else {
-        connect().and_then(|client| apply(&store, &stack, mode, Some(&client), &mut spinners))
+        invocation.connect().and_then(|client| {
+            apply(
+                store.as_ref(),
+                &editor,
+                &stack,
+                mode,
+                Some(&client),
+                &mut spinners,
+            )
+        })
     };
     drop(spinners);
     match result {
@@ -877,8 +890,8 @@ fn import(
 fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let target = invocation.editing_target(&store)?;
-        let candidates = offered(&store, target.root())?;
+        let target = invocation.editing_target(store.as_ref())?;
+        let candidates = offered(store.as_ref(), target.root())?;
         let here = !invocation.names_project() && offers_here(&invocation.cwd()?, target.root());
         Ok((store, target, candidates, here))
     });
@@ -889,7 +902,13 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     let root = target.root();
     if json || yes || !presenter.is_interactive() || candidates.is_empty() {
         let added = if yes {
-            match add_chosen(&store, root, &suggested(&candidates), None) {
+            match add_chosen(
+                store.as_ref(),
+                &invocation.editor(store.as_ref()),
+                root,
+                &suggested(&candidates),
+                None,
+            ) {
                 Ok(added) => added,
                 Err(error) => fail_command(json, &error),
             }
@@ -933,7 +952,13 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             AUTOSTART_ASKED,
             YES_FLAG,
         )?;
-        let added = add_chosen(&store, root, &chosen, Some(autostart))?;
+        let added = add_chosen(
+            store.as_ref(),
+            &invocation.editor(store.as_ref()),
+            root,
+            &chosen,
+            Some(autostart),
+        )?;
         Ok(Some((added, autostart)))
     })();
     match result {
@@ -955,7 +980,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     let json = args.json;
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let plan = RunPlan::prepare(invocation, &store, args)?;
+        let plan = RunPlan::prepare(invocation, store.as_ref(), args)?;
         let attach = match (json, HostTerminal::stdio()) {
             (false, Ok(terminal)) => Some((terminal, detach_key(invocation)?)),
             (true, _) | (false, Err(_)) => None,
@@ -971,8 +996,8 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     }
     let name = plan.draft().name().clone();
     let mut spinners = presenter.spinners();
-    let started = connect().and_then(|client| {
-        plan.carry_out(&store, &client, &mut spinners)
+    let started = invocation.connect().and_then(|client| {
+        plan.carry_out(&invocation.editor(store.as_ref()), &client, &mut spinners)
             .map(|(project, report)| (client, project, report))
     });
     drop(spinners);
@@ -1006,7 +1031,7 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
         None => {
             let listed = invocation
                 .store()
-                .and_then(|store| list(&store, &invocation.cwd()?));
+                .and_then(|store| list(store.as_ref(), &invocation.cwd()?));
             match listed {
                 Ok(listings) => {
                     print_result(json, &listings, |listings| show(&list_rows(listings)))
@@ -1026,7 +1051,7 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
         let project =
-            resolve_project(Some(named), None, &invocation.cwd()?, &store)?.registered()?;
+            resolve_project(Some(named), None, &invocation.cwd()?, store.as_ref())?.registered()?;
         if !yes && !presenter.is_interactive() {
             return Err(CliError::NeedsYes(REMOVE_ASKED));
         }
@@ -1045,7 +1070,15 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
         }
     }
     let mut spinners = presenter.spinners();
-    let result = connect().and_then(|client| remove(&client, &store, &project, &mut spinners));
+    let result = invocation.connect().and_then(|client| {
+        remove(
+            &client,
+            store.as_ref(),
+            invocation.notifier(),
+            &project,
+            &mut spinners,
+        )
+    });
     drop(spinners);
     match result {
         Ok(removal) => {
@@ -1064,11 +1097,11 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
 /// rows as data.
 fn with_root(
     invocation: &Invocation<'_>,
-    command: impl FnOnce(&SqliteStore, &ProjectRoot) -> Result<Report, CliError>,
+    command: impl FnOnce(&dyn LocalState, &ProjectRoot) -> Result<Report, CliError>,
 ) {
     let result = invocation.store().and_then(|store| {
-        let project = invocation.project(&store)?;
-        command(&store, project.root())
+        let project = invocation.project(store.as_ref())?;
+        command(store.as_ref(), project.root())
     });
     match result {
         Ok(report) => show(&report),
@@ -1106,40 +1139,27 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path) -> PathBuf {
 fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
     if print_config {
         let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
-        emit_line(&mcp::connection_config(&executable));
+        emit_line(&invocation.ports().mcp_config(&executable));
         return;
     }
-    let prepared = invocation.store().and_then(|store| {
+    let launch = invocation.store().and_then(|store| {
         let cwd = invocation.cwd()?;
         let base = if invocation.names_project() {
-            invocation.target(&store)?.root().as_ref().clone()
+            invocation.target(store.as_ref())?.root().as_ref().clone()
         } else {
             cwd.clone()
         };
-        Ok((store, Scope::builder().cwd(cwd).base(base).build()))
+        Ok(McpLaunch::builder()
+            .cwd(cwd)
+            .base(base)
+            .agent(agent)
+            .build())
     });
-    let (store, scope) = match prepared {
-        Ok(prepared) => prepared,
+    let launch = match launch {
+        Ok(launch) => launch,
         Err(error) => fail_command(false, &error),
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => fail_with(&MusterError::Io(error)),
-    };
-    let deps = McpDeps::builder()
-        .scope(scope)
-        .agent(agent)
-        .service(Arc::new(UserService))
-        .projects(Arc::new(store.clone()))
-        .coordination(Arc::new(store.clone()))
-        .stacks(Arc::new(store.clone()))
-        .settings(Arc::new(store))
-        .notifier(Arc::new(RunningServiceNotifier))
-        .build();
-    if let Err(error) = runtime.block_on(mcp::serve_stdio(deps)) {
+    if let Err(error) = invocation.ports().serve_mcp(launch) {
         fail_with(&error);
     }
 }
@@ -1150,6 +1170,7 @@ fn doctor(invocation: &Invocation<'_>) {
     let opened = invocation.ports().open_state();
     let mut probes = vec![database_probe(&opened)];
     if let Ok(store) = &opened {
+        let store = store.as_ref();
         probes.push(projects_probe(store));
         probes.push(processes_probe(store, store));
         probes.push(project_probe(&invocation.target(store)));

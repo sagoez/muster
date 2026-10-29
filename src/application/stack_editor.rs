@@ -3,9 +3,9 @@ use typed_builder::TypedBuilder;
 use crate::domain::{
     config::{
         ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft, ProcessSpec,
-        Registration, SettingChange,
+        Registration, SettingChange, StackEdit,
     },
-    port::{SettingsStore, StackStore, StateChangeNotifier},
+    port::{SettingsStore, StackEditLog, StackStore, StateChangeNotifier},
     settings::Settings,
     value::{ProcessName, ProjectRoot},
 };
@@ -18,6 +18,8 @@ pub struct StackEditor<'a> {
     stacks: &'a dyn StackStore,
     /// Where the settings are stored.
     settings: &'a dyn SettingsStore,
+    /// Where agent edits are kept for the user.
+    edits: &'a dyn StackEditLog,
     /// Told after each successful write.
     notifier: &'a dyn StateChangeNotifier,
 }
@@ -98,6 +100,16 @@ impl StackEditor<'_> {
         self.notifier.settings_changed();
         Ok(settings)
     }
+
+    /// Keeps `edit`, an agent's committed edit to the stack of the project at
+    /// `root`, in its edit log, so the user is told of it whether or not a
+    /// service runs.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the log cannot be written.
+    pub fn announce(&self, root: &ProjectRoot, edit: &StackEdit) -> Result<(), ConfigError> {
+        self.edits.record_edit(root, edit)
+    }
 }
 
 #[cfg(test)]
@@ -107,7 +119,8 @@ mod tests {
     use super::*;
     use crate::domain::{
         color_scheme::ColorScheme,
-        config::{Environment, McpStackEdits, Stack, StackEdit},
+        config::{Environment, McpStackEdits, RecordedEdit, Stack},
+        coordination::Author,
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
@@ -121,8 +134,8 @@ mod tests {
         Wrote,
         /// The notifier heard a stack change.
         StackChanged(ProjectRoot),
-        /// The notifier heard an agent's stack edit.
-        StackEdited(ProjectRoot),
+        /// The edit log kept an agent's edit, as the user reads it.
+        Announced(String),
         /// The notifier heard a settings change.
         SettingsChanged,
     }
@@ -149,6 +162,7 @@ mod tests {
             StackEditor::builder()
                 .stacks(self)
                 .settings(self)
+                .edits(self)
                 .notifier(self)
                 .build()
         }
@@ -236,13 +250,23 @@ mod tests {
         }
     }
 
+    impl StackEditLog for Fakes {
+        fn record_edit(&self, _root: &ProjectRoot, edit: &StackEdit) -> Result<(), ConfigError> {
+            self.write()?;
+            self.log
+                .borrow_mut()
+                .push(Step::Announced(edit.to_string()));
+            Ok(())
+        }
+
+        fn edits(&self, _root: &ProjectRoot) -> Result<Vec<RecordedEdit>, ConfigError> {
+            Ok(Vec::new())
+        }
+    }
+
     impl StateChangeNotifier for Fakes {
         fn stack_changed(&self, root: &ProjectRoot) {
             self.log.borrow_mut().push(Step::StackChanged(root.clone()));
-        }
-
-        fn stack_edited(&self, root: &ProjectRoot, _edit: &StackEdit) {
-            self.log.borrow_mut().push(Step::StackEdited(root.clone()));
         }
 
         fn settings_changed(&self) {
@@ -375,6 +399,25 @@ mod tests {
 
         assert_eq!(settings.scrollback().into_inner(), 50);
         assert_eq!(fakes.steps(), [Step::Wrote, Step::SettingsChanged]);
+    }
+
+    /// An agent's edit lands in the edit log as the user reads it, and a log
+    /// that refuses the write is reported rather than dropped.
+    #[test]
+    fn announce_keeps_the_edit_in_the_log() {
+        let fakes = Fakes::new(false);
+        let edit = StackEdit::Removed {
+            author: Author::agent("claude"),
+            name: name(),
+        };
+
+        fakes.editor().announce(&root(), &edit).unwrap();
+
+        assert_eq!(fakes.steps(), [
+            Step::Wrote,
+            Step::Announced(edit.to_string())
+        ]);
+        assert!(Fakes::new(true).editor().announce(&root(), &edit).is_err());
     }
 
     /// A refused write is never announced.

@@ -40,6 +40,7 @@ use crate::{
     },
     domain::{
         config::ConfigError,
+        port::StackEditLog,
         project::Project,
         value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
     },
@@ -423,11 +424,46 @@ pub fn runs_now(service: &dyn ServiceAccess, project: &ProjectRoot, name: &Proce
         })
 }
 
-/// The recent notices of `project` and of the service, oldest first.
+/// The recent notices of `project` and of the service, with the agent edits
+/// `edits` keeps for the project, oldest first. An edit shows whether or not
+/// a service ran when it was made.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the service cannot be reached or refuses,
+/// or the edit log cannot be read.
+pub fn notices(
+    client: &ServiceClient,
+    edits: &dyn StackEditLog,
+    project: &Project,
+) -> Result<Vec<Notice>, ClientError> {
+    with_edits(service_notices(client, project)?, edits, project)
+}
+
+/// `notices` with the agent edits `edits` keeps for `project`, oldest first.
+///
+/// # Errors
+/// Returns a [`ClientError`] when the edit log cannot be read.
+fn with_edits(
+    mut notices: Vec<Notice>,
+    edits: &dyn StackEditLog,
+    project: &Project,
+) -> Result<Vec<Notice>, ClientError> {
+    notices.extend(
+        edits
+            .edits(project.root())?
+            .iter()
+            .map(|edit| Notice::for_edit(project.root(), edit)),
+    );
+    notices.sort_by_key(|notice| *notice.at());
+    Ok(notices)
+}
+
+/// The recent notices the service raised about `project` and itself, oldest
+/// first.
 ///
 /// # Errors
 /// Returns a [`ClientError`] when the service cannot be reached or refuses.
-pub fn notices(client: &ServiceClient, project: &Project) -> Result<Vec<Notice>, ClientError> {
+fn service_notices(client: &ServiceClient, project: &Project) -> Result<Vec<Notice>, ClientError> {
     match client.send(&ServiceRequest::Notices {
         project: project.root().clone(),
     })? {
@@ -666,16 +702,17 @@ fn report(
                 .build()
         })
         .collect();
-    let (notices, other_notices): (Vec<NoticeView>, Vec<NoticeView>) = notices(client, project)?
-        .iter()
-        .filter(|notice| *notice.at() >= sent)
-        .map(|notice| NoticeView::for_project(notice, project))
-        .partition(|notice| {
-            notice
-                .process()
-                .as_ref()
-                .is_some_and(|process| names.contains(process))
-        });
+    let (notices, other_notices): (Vec<NoticeView>, Vec<NoticeView>) =
+        service_notices(client, project)?
+            .iter()
+            .filter(|notice| *notice.at() >= sent)
+            .map(|notice| NoticeView::for_project(notice, project))
+            .partition(|notice| {
+                notice
+                    .process()
+                    .as_ref()
+                    .is_some_and(|process| names.contains(process))
+            });
     Ok(ActionReport::builder()
         .project(ProjectIdentityView::from(project))
         .action(action)
@@ -810,7 +847,16 @@ fn refusal(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::{
+        adapter::{
+            service::NoticeLevel,
+            store::test_support::{fresh_store, spec},
+        },
+        domain::{config::StackEdit, coordination::Author, port::StackStore},
+    };
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
     /// ran the action's own timeout timed out.
@@ -824,5 +870,41 @@ mod tests {
         );
         assert_eq!(wait_end_at_deadline(own, UNBOUNDED), WaitEnd::TimedOut);
         assert_eq!(wait_end_at_deadline(own, own), WaitEnd::TimedOut);
+    }
+
+    /// An agent edit recorded while no service ran is shown among the
+    /// service's notices, in time order, as a warning on its process.
+    #[test]
+    fn a_stored_edit_joins_the_service_notices_in_time_order() {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir).unwrap();
+        let registration = store.add_process(&root, &spec("web", "true")).unwrap();
+        let project = registration.project().clone();
+        let edit = StackEdit::Removed {
+            author: Author::agent("claude"),
+            name: ProcessName::try_new("web").unwrap(),
+        };
+        let earlier = Notice::builder()
+            .at(SystemTime::UNIX_EPOCH)
+            .project(None)
+            .process(None)
+            .level(NoticeLevel::Error)
+            .message("old".to_string())
+            .build();
+
+        store.record_edit(&root, &edit).unwrap();
+        let notices = with_edits(vec![earlier.clone()], &store, &project).unwrap();
+
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0], earlier);
+        assert_eq!(notices[1].message(), &edit.to_string());
+        assert_eq!(notices[1].project().as_ref(), Some(&root));
+        assert_eq!(
+            notices[1].process().as_ref().map(AsRef::as_ref),
+            Some("web")
+        );
+        assert_eq!(*notices[1].level(), NoticeLevel::Warning);
     }
 }

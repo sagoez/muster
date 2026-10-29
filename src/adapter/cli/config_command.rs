@@ -5,14 +5,13 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{
     error::CliError,
-    invocation::{Invocation, stack_editor},
+    invocation::Invocation,
     report::{Report, Row, RowKind},
 };
 use crate::{
     adapter::client::SettingView,
     domain::{
         config::{SettingChange, SettingKey},
-        port::SettingsStore,
         settings::Settings,
     },
 };
@@ -45,7 +44,7 @@ pub fn set_setting(
 ) -> Result<SettingView, CliError> {
     let change = SettingChange::parse(key, raw)?;
     let store = invocation.store()?;
-    let settings = stack_editor(&store).configure(&change)?;
+    let settings = invocation.editor(store.as_ref()).configure(&change)?;
     Ok(SettingView::of(&settings, key))
 }
 

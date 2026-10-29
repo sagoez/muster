@@ -10,19 +10,16 @@ use typed_builder::TypedBuilder;
 
 use super::{
     error::CliError,
-    invocation::stack_editor,
     output::action_title,
     report::{Report, Row, RowKind},
 };
 use crate::{
-    adapter::{
-        client::{
-            Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient,
-            SettleWatch, UNBOUNDED,
-            process::{ready_to_send, resolve_among, settle_removed, status},
-        },
-        store::SqliteStore,
+    adapter::client::{
+        Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient,
+        SettleWatch, UNBOUNDED,
+        process::{ready_to_send, resolve_among, settle_removed, status},
     },
+    application::StackEditor,
     domain::{
         config::ConfigError,
         port::StackStore,
@@ -64,7 +61,7 @@ pub struct RmView {
 /// Returns the [`CliError`] of the first name that matches no single
 /// process; nothing is removed then.
 pub fn removable(
-    store: &SqliteStore,
+    store: &dyn StackStore,
     project: &Project,
     names: &[ProcessRef],
 ) -> Result<Vec<ProcessName>, CliError> {
@@ -92,7 +89,7 @@ pub fn removable(
 /// refused, or the wait is interrupted.
 pub fn remove(
     client: &ServiceClient,
-    store: &SqliteStore,
+    editor: &StackEditor<'_>,
     project: &Project,
     names: &[ProcessName],
     watch: &mut dyn SettleWatch,
@@ -100,7 +97,6 @@ pub fn remove(
     let before = status(client, project)?;
     ready_to_send(watch)?;
     let sent = SystemTime::now();
-    let editor = stack_editor(store);
     for name in names {
         editor.remove(project.root(), name)?;
     }

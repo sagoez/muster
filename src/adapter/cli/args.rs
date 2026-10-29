@@ -1,7 +1,7 @@
 use std::{error::Error, fmt::Display, path::PathBuf, str::FromStr, sync::LazyLock};
 
 use clap::{
-    Parser, Subcommand,
+    Command as ClapCommand, CommandFactory, Parser, Subcommand,
     builder::{
         PossibleValuesParser, TypedValueParser,
         styling::{AnsiColor, Styles},
@@ -11,6 +11,7 @@ use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use strum::IntoEnumIterator;
 
 use super::{
+    cli_ports::CliPorts,
     completions::CompletionShell,
     error::CliError,
     process_flags::{ProcessFlags, READY_GROUP},
@@ -19,13 +20,11 @@ use crate::{
     adapter::{
         holder::{HOLDER_SUBCOMMAND, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_LINES},
         service::{StateGoal, protocol::SERVICE_SUBCOMMAND},
-        store::SqliteStore,
     },
     constants::APP_NAME,
     domain::{
         config::SettingKey,
         coordination::TodoStatus,
-        port::ProjectStore,
         process::{PatternKind, RestartPolicy, StopSignal},
         value::{
             CommandLine, CommandLineError, LocalPort, LocalUrl, OutputCursor, PositiveDuration,
@@ -34,6 +33,8 @@ use crate::{
     },
 };
 
+/// The id of the global `--project` argument.
+const PROJECT_ARG: &str = "project";
 /// Help styling matching the CLI's report palette: cyan structure, green
 /// literals, yellow placeholders.
 const HELP_STYLES: Styles = Styles::styled()
@@ -140,14 +141,23 @@ fn line_limit(raw: &str) -> Result<LineLimit, String> {
         .ok_or_else(|| format!("{LINE_LIMIT_FORM}{MAX_LOG_LINES}"))
 }
 
+/// The command line's definition, with `--project` completing the projects
+/// `ports` has registered.
+pub(super) fn completing_command(ports: &'static dyn CliPorts) -> ClapCommand {
+    Args::command().mut_arg(PROJECT_ARG, |arg| {
+        arg.add(ArgValueCandidates::new(move || project_candidates(ports)))
+    })
+}
+
 /// Shell-completion candidates for `--project`: the registered projects'
 /// names, read fresh each time so a new project completes at once. Reads an
 /// existing database read-only and never creates one.
-fn project_candidates() -> Vec<CompletionCandidate> {
-    SqliteStore::open_default_existing()
+fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
+    ports
+        .existing_state()
         .ok()
         .flatten()
-        .and_then(|store| store.projects().ok())
+        .and_then(|state| state.projects().ok())
         .unwrap_or_default()
         .iter()
         .map(|project| CompletionCandidate::new(project.name().as_ref()))
@@ -171,13 +181,7 @@ pub struct Args {
     /// the registered project containing the current folder.
     // Global, so it is recognized before or after a subcommand rather than
     // being swallowed by `run`'s command words.
-    #[arg(
-        short,
-        long,
-        global = true,
-        value_name = "PROJECT",
-        add = ArgValueCandidates::new(project_candidates)
-    )]
+    #[arg(short, long, global = true, value_name = "PROJECT")]
     pub project: Option<String>,
     #[command(subcommand)]
     pub command: Option<Command>,

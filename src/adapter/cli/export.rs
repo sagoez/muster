@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     adapter::exchange::{EnvExport, ExchangeError, write_stack_file},
-    domain::{config::ConfigError, port::StackStore, value::ProjectName},
+    domain::{config::ConfigError, value::ProjectName},
 };
 
 /// The command word of `muster export`.
@@ -67,7 +67,7 @@ pub fn export(
     with_env: bool,
 ) -> Result<Exported, CliError> {
     let store = invocation.store()?;
-    let project = invocation.project(&store)?;
+    let project = invocation.project(store.as_ref())?;
     let stack = store
         .stack(project.root())?
         .ok_or_else(|| ConfigError::UnknownProject {

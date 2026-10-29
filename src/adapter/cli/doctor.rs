@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use getset::{CopyGetters, Getters};
@@ -13,10 +14,10 @@ use super::{
     report::{Report, Row, RowKind},
 };
 use crate::{
-    adapter::{client::ProjectTarget, store::SqliteStore},
+    adapter::client::ProjectTarget,
     domain::{
         config::ConfigError,
-        port::{ProjectStore, SettingsStore, StackStore},
+        port::{LocalState, ProjectStore, StackStore},
     },
 };
 
@@ -122,8 +123,8 @@ fn error_chain(error: &dyn Error) -> String {
 }
 
 /// Whether the database `opened` and its settings row reads.
-pub fn database_probe(opened: &Result<SqliteStore, ConfigError>) -> Probe {
-    match opened.as_ref().map(SettingsStore::load) {
+pub fn database_probe(opened: &Result<Arc<dyn LocalState>, ConfigError>) -> Probe {
+    match opened.as_ref().map(|state| state.load()) {
         Ok(Ok(_)) => probe(DATABASE_LABEL, ProbeOutcome::Ok, DATABASE_OK.to_string()),
         Ok(Err(error)) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(&error)),
         Err(error) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(error)),

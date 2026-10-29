@@ -80,7 +80,7 @@ pub fn connection_config(executable: &Path) -> String {
 ///
 /// # Errors
 /// Returns [`McpError`] if the server cannot be initialized or stops abnormally.
-pub async fn serve_stdio(deps: McpDeps) -> Result<(), McpError> {
+pub(super) async fn serve_stdio(deps: McpDeps) -> Result<(), McpError> {
     let server = MusterMcp::new(deps.clone());
     let identity = server.identity.clone();
     let service = server

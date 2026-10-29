@@ -9,7 +9,7 @@ use super::{
     args::AddArgs,
     command_words::command_string,
     error::CliError,
-    invocation::{Invocation, stack_editor},
+    invocation::Invocation,
     output::project_title,
     report::{Report, Row, RowKind},
     working_dir::stored_working_dir,
@@ -60,7 +60,7 @@ pub struct AddView {
 /// not usable.
 pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliError> {
     let store = invocation.store()?;
-    let target = invocation.editing_target(&store)?;
+    let target = invocation.editing_target(store.as_ref())?;
     let root = target.root().clone();
     let name =
         ProcessName::try_new(args.name.clone()).map_err(|_| CliError::InvalidName(args.name))?;
@@ -86,7 +86,8 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .stop_grace(args.flags.stop_grace)
         .ready(args.flags.ready()?)
         .build();
-    let (registration, spec) = stack_editor(&store)
+    let (registration, spec) = invocation
+        .editor(store.as_ref())
         .add(&root, draft)
         .map_err(|error| CliError::adding(error, target.name(), ""))?;
     Ok(AddView::builder()

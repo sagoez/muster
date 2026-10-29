@@ -8,7 +8,10 @@ use crate::{
     adapter::client::{ProjectTarget, ServiceAccess},
     application::StackEditor,
     domain::{
-        port::{CoordinationStore, ProjectStore, SettingsStore, StackStore, StateChangeNotifier},
+        port::{
+            CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
+            StateChangeNotifier,
+        },
         project::Project,
     },
 };
@@ -34,6 +37,8 @@ pub struct McpDeps {
     stacks: Arc<dyn StackStore + Send + Sync>,
     /// The machine's settings.
     settings: Arc<dyn SettingsStore + Send + Sync>,
+    /// Where each agent edit is kept for the user.
+    edits: Arc<dyn StackEditLog + Send + Sync>,
     /// Told after each committed edit, so a running service picks it up.
     notifier: Arc<dyn StateChangeNotifier + Send + Sync>,
 }
@@ -44,6 +49,7 @@ impl McpDeps {
         StackEditor::builder()
             .stacks(self.stacks.as_ref())
             .settings(self.settings.as_ref())
+            .edits(self.edits.as_ref())
             .notifier(self.notifier.as_ref())
             .build()
     }

@@ -47,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_initial.sql"),
     include_str!("migrations/0002_stack_revision.sql"),
     include_str!("migrations/0003_mcp_stack_edits.sql"),
+    include_str!("migrations/0004_stack_edit_log.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and

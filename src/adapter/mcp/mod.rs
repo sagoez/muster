@@ -49,6 +49,7 @@ mod stack_process_view;
 mod stack_status_view;
 mod stack_tools;
 mod stack_up_arg;
+mod stdio_runtime;
 #[cfg(test)]
 mod test_support;
 mod todo_add_arg;
@@ -65,6 +66,7 @@ mod wait_arg;
 pub use mcp_deps::*;
 pub use mcp_error::*;
 pub use scope::*;
-pub use server::{MusterMcp, connection_config, serve_stdio};
+pub use server::{MusterMcp, connection_config};
+pub use stdio_runtime::*;
 pub use tool_error::*;
 pub use tool_failure::*;

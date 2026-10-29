@@ -10,15 +10,14 @@ use typed_builder::TypedBuilder;
 
 use super::{
     error::CliError,
-    invocation::stack_editor,
     report::{Report, Row, RowKind},
 };
 use crate::{
     adapter::{
         detect::{Candidate, DetectSource, detect},
         path::project_root,
-        store::SqliteStore,
     },
+    application::StackEditor,
     domain::{
         config::{ImportMode, ProcessDraft, ProcessSpec},
         port::{SettingsStore, StackStore},
@@ -114,7 +113,7 @@ fn scan_rows(view: &InitView) -> Vec<Row> {
 ///
 /// # Errors
 /// Returns the [`CliError`] of a stack that cannot be read.
-pub fn offered(store: &SqliteStore, root: &ProjectRoot) -> Result<Vec<Candidate>, CliError> {
+pub fn offered(store: &dyn StackStore, root: &ProjectRoot) -> Result<Vec<Candidate>, CliError> {
     let stack = store.stack(root)?;
     Ok(detect(root)
         .into_iter()
@@ -142,7 +141,8 @@ pub fn suggested(candidates: &[Candidate]) -> Vec<Candidate> {
 /// Returns the [`CliError`] of a name the project took meanwhile or a store
 /// that cannot be written.
 pub fn add_chosen(
-    store: &SqliteStore,
+    settings: &dyn SettingsStore,
+    editor: &StackEditor<'_>,
     root: &ProjectRoot,
     chosen: &[Candidate],
     autostart: Option<bool>,
@@ -150,7 +150,7 @@ pub fn add_chosen(
     if chosen.is_empty() {
         return Ok(Vec::new());
     }
-    let defaults = store.load()?.process_defaults();
+    let defaults = settings.load()?.process_defaults();
     let specs: Vec<ProcessSpec> = chosen
         .iter()
         .map(|candidate| {
@@ -162,7 +162,7 @@ pub fn add_chosen(
                 .complete(&defaults)
         })
         .collect();
-    let (_, plan) = stack_editor(store).import(root, &specs, ImportMode::Strict)?;
+    let (_, plan) = editor.import(root, &specs, ImportMode::Strict)?;
     Ok(plan.added().clone())
 }
 

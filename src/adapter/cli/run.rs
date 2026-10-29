@@ -8,20 +8,18 @@ use super::{
     args::RunArgs,
     command_words::command_string,
     error::{CliError, RUN_NAME_HINT},
-    invocation::{Invocation, stack_editor},
+    invocation::Invocation,
     working_dir::stored_working_dir,
 };
 use crate::{
-    adapter::{
-        client::{
-            ActionReport, ProjectTarget, ServiceClient, SettleWatch,
-            process::{ready_to_send, start_added},
-        },
-        store::SqliteStore,
+    adapter::client::{
+        ActionReport, ProjectTarget, ServiceClient, SettleWatch,
+        process::{ready_to_send, start_added},
     },
+    application::StackEditor,
     domain::{
         config::ProcessDraft,
-        port::StackStore,
+        port::LocalState,
         project::Project,
         value::{ProcessName, ProjectName},
     },
@@ -52,7 +50,7 @@ impl RunPlan {
     /// is taken, or the project cannot be resolved.
     pub fn prepare(
         invocation: &Invocation<'_>,
-        store: &SqliteStore,
+        store: &dyn LocalState,
         args: &RunArgs,
     ) -> Result<Self, CliError> {
         let command = command_string(&args.command)?;
@@ -94,13 +92,13 @@ impl RunPlan {
     /// service cannot start the command.
     pub fn carry_out(
         self,
-        store: &SqliteStore,
+        editor: &StackEditor<'_>,
         client: &ServiceClient,
         watch: &mut dyn SettleWatch,
     ) -> Result<(Project, ActionReport), CliError> {
         ready_to_send(watch)?;
         let name = self.draft.name().clone();
-        let (registration, _) = stack_editor(store)
+        let (registration, _) = editor
             .add(self.target.root(), self.draft)
             .map_err(|error| CliError::adding(error, self.target.name(), RUN_NAME_HINT))?;
         let project = registration.project().clone();

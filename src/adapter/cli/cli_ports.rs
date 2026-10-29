@@ -1,15 +1,43 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
-use crate::{adapter::store::SqliteStore, domain::config::ConfigError, error::MusterError};
+use super::mcp_launch::McpLaunch;
+use crate::{
+    adapter::client::ServiceAccess,
+    domain::{config::ConfigError, port::LocalState},
+    error::MusterError,
+};
 
-/// What the composition root hands the CLI: where muster's state lives and
-/// how the hidden service and holder entry points run.
-pub trait CliPorts {
-    /// Opens muster's local state, for the commands that read or write it.
+/// What the composition root hands the CLI: muster's state and service as
+/// ports, and how the MCP server and the hidden service and holder entry
+/// points run, so the CLI builds none of them itself.
+pub trait CliPorts: Sync {
+    /// Opens muster's local state, creating it when absent, for the commands
+    /// that read or write it.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the database cannot be opened.
-    fn open_state(&self) -> Result<SqliteStore, ConfigError>;
+    fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError>;
+
+    /// Opens muster's local state read-only when it already exists at the
+    /// current schema, creating and migrating nothing.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the database cannot be read.
+    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError>;
+
+    /// How the CLI reaches this user's service.
+    fn service(&self) -> Arc<dyn ServiceAccess>;
+
+    /// Serves muster over MCP on stdio as `launch` describes, until the
+    /// connecting agent disconnects.
+    ///
+    /// # Errors
+    /// Returns a [`MusterError`] when the server cannot start or fails.
+    fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError>;
+
+    /// The config snippet an agent pastes in to run `executable` as its MCP
+    /// server.
+    fn mcp_config(&self, executable: &Path) -> String;
 
     /// Runs this user's service until a client stops or replaces it.
     ///

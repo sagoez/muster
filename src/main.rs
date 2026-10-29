@@ -2,9 +2,11 @@ use std::{env, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
-        cli::{self, CliPorts},
+        cli::{self, CliPorts, McpLaunch},
+        client::{RunningServiceNotifier, ServiceAccess, UserService},
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
+        mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         open_files::OpenFilesLimit,
@@ -18,7 +20,7 @@ use muster::{
     },
     domain::{
         config::ConfigError,
-        port::{Notifier, PortOccupants},
+        port::{LocalState, Notifier, PortOccupants},
     },
     error::MusterError,
 };
@@ -28,12 +30,15 @@ use muster::{
 const SERVICE_ALREADY_RUNNING: &str =
     "another muster service already runs for this state directory; this one exits";
 
+/// The adapters every command of this binary runs on.
+static PORTS: LocalPorts = LocalPorts;
+
 /// Entry point: parses the command line and runs it on the concrete
 /// adapters wired here.
 fn main() {
     restore_terminals_on_panic();
-    let args = cli::parse_args();
-    cli::run(args, &LocalPorts);
+    let args = cli::parse_args(&PORTS);
+    cli::run(args, &PORTS);
 }
 
 /// Installs the top-level panic hook: a terminal `muster attach` holds in
@@ -57,8 +62,25 @@ fn restore_terminals_on_panic() {
 struct LocalPorts;
 
 impl CliPorts for LocalPorts {
-    fn open_state(&self) -> Result<SqliteStore, ConfigError> {
-        SqliteStore::open_default()
+    fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError> {
+        Ok(Arc::new(SqliteStore::open_default()?))
+    }
+
+    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
+        Ok(SqliteStore::open_default_existing()?
+            .map(|store| -> Arc<dyn LocalState> { Arc::new(store) }))
+    }
+
+    fn service(&self) -> Arc<dyn ServiceAccess> {
+        Arc::new(UserService)
+    }
+
+    fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {
+        serve_mcp(launch)
+    }
+
+    fn mcp_config(&self, executable: &Path) -> String {
+        connection_config(executable)
     }
 
     fn run_service(&self) -> Result<(), MusterError> {
@@ -78,6 +100,34 @@ impl ProjectPorts for LocalPorts {
     fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
         Some(Box::new(OsPortOccupants::default()))
     }
+}
+
+/// Serves muster to an agent over MCP on stdio, on this user's database and
+/// service, until the agent disconnects.
+///
+/// # Errors
+/// Returns a [`MusterError`] when the database cannot be opened or the
+/// server fails.
+fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
+    let store = SqliteStore::open_default()?;
+    let service: Arc<dyn ServiceAccess> = Arc::new(UserService);
+    let deps = McpDeps::builder()
+        .scope(
+            Scope::builder()
+                .cwd(launch.cwd().clone())
+                .base(launch.base().clone())
+                .build(),
+        )
+        .agent(launch.agent().clone())
+        .service(service.clone())
+        .projects(Arc::new(store.clone()))
+        .coordination(Arc::new(store.clone()))
+        .stacks(Arc::new(store.clone()))
+        .settings(Arc::new(store.clone()))
+        .edits(Arc::new(store))
+        .notifier(Arc::new(RunningServiceNotifier::new(service)))
+        .build();
+    Ok(run_stdio(deps)?)
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one

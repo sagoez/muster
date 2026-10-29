@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::{
-    adapter::{holder::HolderError, service::ServiceError},
+    adapter::{holder::HolderError, mcp::McpError, service::ServiceError},
     domain::{config::ConfigError, pty::PtyError},
 };
 
@@ -28,4 +28,7 @@ pub enum MusterError {
     /// A service failure.
     #[error(transparent)]
     Service(#[from] ServiceError),
+    /// An MCP server failure.
+    #[error(transparent)]
+    Mcp(#[from] McpError),
 }

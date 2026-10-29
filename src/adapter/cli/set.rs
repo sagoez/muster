@@ -9,7 +9,7 @@ use super::{
     args::SetArgs,
     command_words::command_string,
     error::CliError,
-    invocation::{Invocation, stack_editor},
+    invocation::Invocation,
     output::project_title,
     process_flags::env_name,
     report::{Report, Row, RowKind},
@@ -17,12 +17,11 @@ use super::{
 };
 use crate::{
     adapter::client::{
-        DefinitionView, ProjectIdentityView, UserService,
+        DefinitionView, ProjectIdentityView,
         process::{resolve_among, runs_now},
     },
     domain::{
         config::{ConfigError, FieldEdit, ProcessChange},
-        port::StackStore,
         value::Description,
     },
 };
@@ -94,7 +93,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         return Err(CliError::NothingToChange);
     }
     let store = invocation.store()?;
-    let project = invocation.editing_project(&store)?;
+    let project = invocation.editing_project(store.as_ref())?;
     let root = project.root();
     let words = (!args.words.is_empty())
         .then(|| command_string(&args.words))
@@ -141,8 +140,10 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
             root: root.as_ref().clone(),
         })?;
     let name = resolve_among(stack.names(), &project, &args.name)?;
-    let spec = stack_editor(&store).change(root, &name, &change)?;
-    let running = runs_now(&UserService, root, spec.name());
+    let spec = invocation
+        .editor(store.as_ref())
+        .change(root, &name, &change)?;
+    let running = runs_now(invocation.service(), root, spec.name());
     Ok(SetView::builder()
         .project(ProjectIdentityView::from(&project))
         .process(DefinitionView::from(&spec))

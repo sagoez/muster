@@ -31,7 +31,6 @@ use super::{
 };
 use crate::{
     adapter::{
-        bridge::WorkspaceRequest,
         client::{
             ActionReport, ClientError, DefinitionView, ProjectIdentityView, RemovedView,
             ServiceClient, Unwatched, process,
@@ -40,6 +39,7 @@ use crate::{
             ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
         },
         service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
+        workspace_request::WorkspaceRequest,
     },
     domain::{
         config::{ConfigError, StackEdit},

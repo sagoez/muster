@@ -10,7 +10,7 @@ use super::{
     wait_condition::WaitSpec,
 };
 use crate::{
-    adapter::bridge::WorkspaceRequest,
+    adapter::workspace_request::WorkspaceRequest,
     domain::value::{ProcessName, ProjectRoot},
 };
 

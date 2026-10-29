@@ -10,8 +10,9 @@
 per-user service runs each project's dev processes (servers, workers, watchers)
 under their own holder processes, keeps their logs and screens, and restarts
 them by policy. One SQLite database, `muster.db` in the state directory, holds
-every project's stack, the machine's settings and the shared coordination state
-(notes, todos, key-value). A project is a folder, registered by the first
+every project's stack, the machine's settings, the shared coordination state
+(notes, todos, key-value, locks) and a short log of the stack edits agents
+made. A project is a folder, registered by the first
 process added to it. Users and agents drive muster through the CLI and an MCP
 server; `muster attach` shows a process in the user's own terminal. muster draws
 no panes, and agents and interactive terminals live in herdr.
@@ -40,8 +41,8 @@ plugs into a port.
 
 - **`domain`** - the core. Entities, value objects, and **ports** (traits the
   core needs the outside world to fulfil, e.g. `ProcessRunner`,
-  `StackStore`, `Notifier`). No I/O, no framework types, no `async`. Fully
-  unit-testable in isolation.
+  `StackStore`, `Notifier`). `LocalState` is every store port as one handle.
+  No I/O, no framework types, no `async`. Fully unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
   `domain` only.
@@ -51,10 +52,13 @@ plugs into a port.
     `StackEditor` and drive the service through `adapter/client`, which holds
     the service client, the process use cases, their reports and views, and
     `ClientError`; each driver maps that error to its own surface and neither
-    imports the other.
+    imports the other. Each takes its state and the service as ports
+    (`LocalState`, `ServiceAccess`) from the composition root, so a test
+    injects fakes and never reaches the user's real database or socket.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
-    supervisor per loaded project, the socket protocol and notices. It only
-    reads the database; writers tell it what changed.
+    supervisor per loaded project, the socket protocol and notices. It reads
+    the database through read-only ports (`StackReader`, `SettingsStore`);
+    writers tell it what changed.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service.
   - **driven adapters** `adapter/pty` (portable-pty implements
@@ -63,7 +67,9 @@ plugs into a port.
     detection for `muster init`), `adapter/terminal` (the VT emulator and
     keyboard tracker), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
-  adapter; it constructs them, wires them to ports, and runs.
+  adapter; it constructs them, wires them to ports, and runs. It hands the CLI
+  its ports through `CliPorts`, and builds the MCP server's deps and runtime
+  itself when the CLI asks to serve one.
 
 **Dependency rule (strict):** dependencies point inward. `domain` depends on
 nothing internal. `application` depends on `domain`. `adapter` depends on
@@ -73,31 +79,34 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 
 ```
 src/
-  main.rs              # composition root: CLI dispatch, service and holder entry points
+  main.rs              # composition root: CliPorts, the MCP server, service and holder entry points
+  lib.rs               # the library crate the binary and integration tests link
   error.rs             # MusterError (transparent aggregate of domain/adapter errors)
   constants.rs         # crate-wide named constants (app identity, ...)
   domain/
-    process/           # Process, ProcessState, restart and stop policies
-    config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, settings keys
-    coordination/      # shared notes, todos and key-value entries
+    process/           # Process, ProcessState, restart and stop policies, readiness checks
+    config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
+    coordination/      # shared notes, todos, key-value entries and locks
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    port/              # ProcessRunner, StackStore, SettingsStore, Notifier, ... (traits)
+    port/              # ProcessRunner, StackStore, StackReader, LocalState, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
+    project.rs, settings.rs, color_scheme.rs, notification.rs
   application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
   adapter/
     cli/               # driving: commands, attach
     mcp/               # driving: the MCP server over stdio
-    client/            # what both drivers share: service client, process use cases, reports
-    sanitize.rs        # control characters made safe to print, for the service and the CLI
-    bridge/            # the MCP-to-service requests the service protocol lacks
+    client/            # what both drivers share: ServiceAccess, process use cases, reports
     service/           # the per-user service and its supervisors
     holder/            # one detached process per child, owning its PTY
-    terminal/          # VT emulator, keyboard tracker
+    terminal/          # VT emulator, keyboard tracker, the bounded vte parser
     pty/               # driven: ProcessRunner via portable-pty
     store/             # driven: SqliteStore, migrations
     exchange/          # driven: the `muster export` / `muster import` file
     detect/            # driven: stack detection for `muster init`
     wire/              # the DTOs domain values travel as, and their serde with-modules
+    workspace_request.rs  # the MCP-to-service requests the service protocol lacks
+    sanitize.rs        # control characters made safe to print, for the service and the CLI
+    ipc.rs, private_dir.rs, no_state_dir.rs, ...  # sockets, the state directory, OS probes
 ```
 
 ## Dependencies and libraries
@@ -117,7 +126,8 @@ Chosen libraries (extend deliberately, same rules apply):
 
 | Concern | Crate |
 |---|---|
-| Raw mode, size and polling on a given terminal fd | `rustix` |
+| Raw mode, size and polling on a given terminal fd; rlimits, sessions, process signals | `rustix` |
+| What rustix lacks: `strsignal` text and signal dispositions in tests | `libc` |
 | Unix signals | `signal-hook` |
 | Event loops | std threads + `crossbeam-channel` |
 | PTY | `portable-pty` |
@@ -127,10 +137,18 @@ Chosen libraries (extend deliberately, same rules apply):
 | Arg parsing and completions | `clap` + `clap_complete` |
 | CLI styling | `anstream` + `anstyle` |
 | Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter |
-| MCP server | `rmcp` on `tokio` |
+| MCP server and its tool schemas | `rmcp` on `tokio`, `schemars` |
 | Desktop notifications | `notify-rust` |
 | Process usage | `sysinfo` |
-| State: projects, stacks, settings, coordination | `rusqlite` |
+| Listening sockets of a process tree, and who holds a port | `listeners` |
+| Readiness and wait HTTP probes | `ureq` |
+| Log and wait patterns | `regex` |
+| Shell words of a command line | `shlex` |
+| Platform state and config directories | `directories` |
+| Service version comparison | `semver` |
+| Todo and holder ids | `uuid` |
+| Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |
+| State: projects, stacks, settings, coordination, the edit log | `rusqlite` |
 | Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
 | Durations | `humantime` + `humantime-serde` |
 | Atomic file writes | `atomic-write-file` |
@@ -175,7 +193,13 @@ Chosen libraries (extend deliberately, same rules apply):
 
 ### Imports
 - **Use normal `use` imports, never inline qualified paths** like
-  `std::io::Error`.
+  `std::io::Error`. A crate-level function called through its crate
+  (`serde_json::to_string`) is fine.
+
+### Unsafe and the OS
+- Reach the OS through `rustix` wherever it covers the call. A direct `libc`
+  call is only for what rustix lacks, and every `unsafe` block carries a
+  `// SAFETY:` comment saying why it holds.
 - Formatting owns import order. `just fmt` runs nightly rustfmt with
   `group_imports = "StdExternalCrate"` and `imports_granularity = "Crate"`:
   imports are grouped std -> external -> crate, merged per crate root, and sorted
@@ -251,7 +275,14 @@ pub struct ProcessSpec {
 - **Defaults live in the database, never in Rust or serde.** The initial
   migration seeds the settings row, and a new process takes the `default_*`
   settings for every field `muster add` leaves out, so every stored value is
-  explicit. Never use `#[serde(default)]` on an export-file field.
+  explicit. Never use `#[serde(default)]`: an optional field is an `Option`,
+  and a field that tells absent from `null` is read by hand.
+- **Protocol bounds are named constants, not defaults.** How long an MCP
+  call may block, a page's default and largest size (`DEFAULT_LIST_LIMIT`,
+  `MAX_LIST_LIMIT`) and a log read's size bound what one call costs, not what
+  the user configures, so they are constants beside the code that enforces
+  them. A tool description names them through `adapter/mcp/described.rs`
+  placeholders, never by repeating the number.
 
 ### Secret config fields
 Secrets must use a non-empty newtype, add `#[serde(skip_serializing)]`, and use a
@@ -303,7 +334,12 @@ pub use state::*;
   events to that loop over a `crossbeam-channel`; none of them touches the state.
 - Nothing blocking runs on a loop. A socket read, a holder round trip or a
   bounded wait goes to a helper thread whose result comes back as an event.
-- The only async runtime is the one `rmcp` needs inside `muster mcp`.
+- The only async runtime is the one `rmcp` needs inside `muster mcp`. It is
+  shut down in the background once the client disconnects, so a tool call
+  still blocking never keeps the server alive.
+- Every vte parser goes through `BoundedParser`, which drops a sequence that
+  runs past `MAX_PENDING_BYTES` without dispatching, so no child can grow a
+  parser's buffer without bound.
 
 ### Processes outlive the service
 - Every child runs under its own holder, launched detached from the muster

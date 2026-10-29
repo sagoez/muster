@@ -20,7 +20,7 @@ Commands:
   kill          Kill a process at once, skipping its graceful stop
   logs          Print a process's output log, kept across its runs and after it exits
   attach        Show a running process in this terminal and type into it
-  notices       Show what the muster service reported about this project: failed starts, forced stops, crashes
+  notices       Show what the muster service reported about this project: failed starts, forced stops, crashes, and the stack edits agents made
   service       Show or stop the muster service. Processes keep running either way
   add           Add a process to this project, registering the folder as a project when it is not one yet. Nothing is started
   set           Change a process's definition; a running process takes it at its next start
@@ -241,7 +241,7 @@ Options:
 
 
 $ muster notices --help
-Show what the muster service reported about this project: failed starts, forced stops, crashes
+Show what the muster service reported about this project: failed starts, forced stops, crashes, and the stack edits agents made
 
 Usage: muster notices [OPTIONS]
 

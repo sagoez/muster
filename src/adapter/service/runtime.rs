@@ -39,7 +39,7 @@ use super::{
     usage_sampler::UsageSampler,
 };
 use crate::{
-    adapter::{bridge::WorkspaceRequest, holder::HolderRecord},
+    adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
         port::{ProcessHandle, SettingsStore, StackReader},

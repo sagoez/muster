@@ -1,5 +1,4 @@
 pub mod bounded_read;
-pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod detect;
@@ -27,3 +26,4 @@ pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_scratch;
 pub mod wire;
+pub mod workspace_request;

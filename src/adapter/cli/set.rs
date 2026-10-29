@@ -296,7 +296,7 @@ mod tests {
     use super::{
         super::{
             add::add, add_args::AddArgs, args::Args, cli_exit::CliExit, command::Command,
-            fake_ports::FakePorts,
+            dispatch::parse_failure, fake_ports::FakePorts,
         },
         *,
     };
@@ -307,8 +307,8 @@ mod tests {
             port::StackReader,
             process::{RestartPolicy, StopPolicy, StopSignal},
             value::{
-                CommandLine, EnvName, EnvValue, LocalPort, ProcessName, ProjectName, ProjectRoot,
-                StopGrace,
+                CommandLine, EnvName, EnvValue, LocalPort, PORT_FORM, ProcessName, ProjectName,
+                ProjectRoot, StopGrace,
             },
         },
     };
@@ -470,8 +470,8 @@ mod tests {
         );
     }
 
-    /// A port outside 1 to 65535 is a usage error (exit 2) naming the form
-    /// a port is written in, for `add` and `set` alike.
+    /// A port outside 1 to 65535 is an invalid value (exit 4) naming the
+    /// form a port is written in, for `add` and `set` alike.
     #[test]
     fn a_zero_port_is_refused_by_the_parser_naming_the_form() {
         for words in [
@@ -481,11 +481,10 @@ mod tests {
         ] {
             let error = parse(words).err().expect("the port is refused");
             assert_eq!(error.kind(), ErrorKind::ValueValidation, "{words:?}");
-            assert_eq!(error.exit_code(), 2, "{words:?}");
-            assert!(
-                error.to_string().contains("a port from 1 to 65535"),
-                "{error}"
-            );
+            let exit = CliExit::from(parse_failure(&error).kind());
+            assert_eq!(exit, CliExit::InvalidInput, "{words:?}");
+            assert_eq!(exit.code(), 4, "{words:?}");
+            assert!(error.to_string().contains(PORT_FORM), "{error}");
         }
     }
 

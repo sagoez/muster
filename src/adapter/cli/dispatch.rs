@@ -162,7 +162,7 @@ pub fn parse_args(ports: &'static dyn CliPorts) -> Args {
 
 /// The failure a parse `error` reports: an invalid value when an argument
 /// refused the value given, else a usage error.
-fn parse_failure(error: &ParseError) -> CliError {
+pub(super) fn parse_failure(error: &ParseError) -> CliError {
     let message = error.render().to_string();
     match error.kind() {
         ErrorKind::InvalidValue | ErrorKind::ValueValidation => CliError::InvalidArgument(message),

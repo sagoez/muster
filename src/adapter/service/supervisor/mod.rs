@@ -7,6 +7,7 @@
 //! fields private.
 
 mod adopter;
+mod adoption;
 mod apply_stack;
 mod attach_book;
 mod attention;

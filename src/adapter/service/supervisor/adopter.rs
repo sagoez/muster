@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread};
 
 use super::{
-    carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
+    adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
     config_membership::ConfigMembership, entity::Supervisor, launch_purpose::LaunchPurpose,
     pending_intent::PendingIntent, pending_launch::PendingLaunch,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
@@ -19,15 +19,6 @@ use crate::{
         value::{PaneId, Pid},
     },
 };
-
-/// How an adoption proceeds: inline, its result already in hand, or on a
-/// worker with the adopter and sink it takes there.
-enum Adoption {
-    /// The adoption ran on the caller's thread.
-    Inline(Result<Box<dyn ProcessHandle>, PtyError>),
-    /// The adoption runs on a worker.
-    Detached(Arc<dyn HolderAdopter + Send + Sync>, ChannelOutputSink),
-}
 
 /// Shown when a running holder's process is no longer in the project, so it
 /// is adopted only to be stopped through the stop policy its record carries.
@@ -502,7 +493,6 @@ mod tests {
     use std::{
         cell::Cell,
         ffi::OsString,
-        os::unix::net::UnixListener,
         path::{Path, PathBuf},
         process,
         rc::Rc,
@@ -510,14 +500,12 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    use crossbeam_channel::{Receiver, bounded};
     use rustix::process::Signal;
-    use tempfile::TempDir;
 
     use super::*;
     use crate::{
         adapter::{
-            holder::{ClientMessage, HolderControl, HolderId, HolderMessage},
+            holder::HolderId,
             service::{
                 LaunchEnvironment, ServiceEvent,
                 supervisor::{
@@ -525,12 +513,11 @@ mod tests {
                     unsupervised::UNSUPERVISED_ROW_REMOVED, unsupervised_child::UnsupervisedChild,
                 },
             },
-            test_scratch::short_scratch,
         },
         domain::{
-            port::{ProcessInput, ProcessRunner},
+            port::ProcessRunner,
             process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
-            pty::{ExitOutcome, ProcessOutput, PtySize, ScreenSource, SpawnRequest},
+            pty::{ExitOutcome, ProcessOutput},
             value::{CommandLine, ProcessName, ProjectRoot, StartToken, StopGrace},
         },
     };
@@ -548,19 +535,13 @@ mod tests {
     const RESPAWN_WAIT: Duration = Duration::from_secs(5);
     /// A socket path nothing serves.
     const UNSERVED_SOCKET: &str = "/nonexistent/holder.sock";
-    /// Why a refusing adopter fails.
-    const REFUSAL: &str = "holder unreachable";
     /// Grace the graceful stop policy gives before the kill.
     const STOP_GRACE: Duration = Duration::from_millis(300);
-    /// Longest a test waits for an unsupervised stop to settle.
-    const SETTLE_WAIT: Duration = Duration::from_secs(10);
     /// A grace far longer than an early exit takes to be seen.
     const LONG_STOP_GRACE: Duration = Duration::from_secs(8);
     /// Within this a stopped child's early exit is seen, well inside
     /// [`LONG_STOP_GRACE`].
     const EARLY_EXIT_BOUND: Duration = Duration::from_secs(2);
-    /// Prefix of every test scratch directory.
-    const SCRATCH_PREFIX: &str = "ma-";
 
     /// The test process's name.
     fn p() -> ProcessName {
@@ -578,23 +559,6 @@ mod tests {
             .signal(StopSignal::Interrupt)
             .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
             .build()
-    }
-
-    /// An adopter whose every holder answers with a pid-reporting handle.
-    struct FakeAdopter;
-
-    impl HolderAdopter for FakeAdopter {
-        fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
-            None
-        }
-
-        fn adopt(
-            &self,
-            _record: &HolderRecord,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            Ok(Box::new(PidHandle))
-        }
     }
 
     /// `harness` able to adopt through `adopter`.
@@ -711,22 +675,6 @@ mod tests {
     #[test]
     fn a_removed_process_found_running_is_stopped_with_a_notice_and_discarded() {
         let signals = Arc::new(StopSignals::default());
-        struct SignalAdopter(Arc<StopSignals>);
-        impl HolderAdopter for SignalAdopter {
-            fn locate(&self, _child_pid: Pid) -> Option<HolderRecord> {
-                None
-            }
-
-            fn adopt(
-                &self,
-                _record: &HolderRecord,
-                _sink: Box<dyn OutputSink>,
-            ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-                Ok(Box::new(StopSignalHandle {
-                    signals: Arc::clone(&self.0),
-                }))
-            }
-        }
         let mut harness = with_adopter(
             Harness::over(Box::new(FakeRunner), &[spec(
                 "p",
@@ -773,57 +721,6 @@ mod tests {
         );
         assert!(harness.supervisor.workspace().process(gone).is_none());
         assert_eq!(harness.supervisor.process_names(), vec![p()]);
-    }
-
-    /// A fake holder at a socket in a scratch directory that takes one
-    /// supervisor, tells it the child exited, and reports whether the exit
-    /// was collected.
-    struct ExitedHolder {
-        _scratch: TempDir,
-        socket: PathBuf,
-        collected: Receiver<()>,
-    }
-
-    impl ExitedHolder {
-        fn serve() -> Self {
-            let scratch = short_scratch(SCRATCH_PREFIX);
-            let socket = scratch.path().join("h.sock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let (sender, collected) = bounded(1);
-            thread::spawn(move || {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let mut exit_sent = false;
-                while let Ok(message) = ClientMessage::read_from(&mut stream) {
-                    match message {
-                        ClientMessage::Control(HolderControl::Kill)
-                        | ClientMessage::Hello { .. }
-                            if !exit_sent =>
-                        {
-                            exit_sent = true;
-                            let _ =
-                                HolderMessage::Exited(ExitOutcome::Succeeded).write_to(&mut stream);
-                        },
-                        ClientMessage::CollectExit => {
-                            let _ = sender.send(());
-                            return;
-                        },
-                        _ => {},
-                    }
-                }
-            });
-            Self {
-                _scratch: scratch,
-                socket,
-                collected,
-            }
-        }
-
-        /// Whether a supervisor collected the exit within [`SETTLE_WAIT`].
-        fn was_collected(&self) -> bool {
-            self.collected.recv_timeout(SETTLE_WAIT).is_ok()
-        }
     }
 
     /// A record naming an already supervised process whose child is gone is
@@ -882,92 +779,6 @@ mod tests {
                 .any(|message| message.contains(LEFT_RUNNING))
         );
         assert_eq!(state(&harness), ProcessState::Pending);
-    }
-
-    /// An adopter that finds `record` for its child's pid, and adopts it unless
-    /// it `refuses`, counting each adoption.
-    struct ReconnectingAdopter {
-        record: Option<HolderRecord>,
-        refuses: bool,
-        adoptions: Rc<Cell<usize>>,
-    }
-
-    impl HolderAdopter for ReconnectingAdopter {
-        fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
-            self.record
-                .clone()
-                .filter(|record| record.child_pid() == child_pid)
-        }
-
-        fn adopt(
-            &self,
-            record: &HolderRecord,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            if self.refuses {
-                return Err(PtyError::System(REFUSAL.to_string()));
-            }
-            self.adoptions.set(self.adoptions.get() + 1);
-            Ok(Box::new(FixedPidHandle(record.child_pid())))
-        }
-    }
-
-    /// A handle that reports a fixed pid and accepts every request.
-    struct FixedPidHandle(Pid);
-
-    impl ProcessHandle for FixedPidHandle {
-        fn input(&self) -> Option<Box<dyn ProcessInput>> {
-            None
-        }
-
-        fn screen_source(&self) -> ScreenSource {
-            ScreenSource::Kept
-        }
-
-        fn abandon(mut self: Box<Self>) {
-            let _ = self.kill();
-        }
-
-        fn process_id(&self) -> Option<Pid> {
-            Some(self.0)
-        }
-
-        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn pause(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resume(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn kill(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-    }
-
-    /// A runner whose every process reports `pid`, counting its spawns.
-    struct FixedPidRunner {
-        pid: Pid,
-        spawns: Arc<AtomicUsize>,
-    }
-
-    impl ProcessRunner for FixedPidRunner {
-        fn spawn(
-            &self,
-            _request: SpawnRequest,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            self.spawns.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::new(FixedPidHandle(self.pid)))
-        }
     }
 
     /// The test process `p`, restarting always and stopped gracefully,
@@ -1554,33 +1365,6 @@ mod tests {
         harness.supervisor.start(&p(), &no_env());
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert!(stranger.alive(), "the stranger is never signalled");
-    }
-
-    /// An adopter that runs on a worker, as the service's does, finds
-    /// `record` for its child's pid and fails every adoption.
-    #[derive(Clone)]
-    struct FailingWorkerAdopter {
-        record: Option<HolderRecord>,
-    }
-
-    impl HolderAdopter for FailingWorkerAdopter {
-        fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
-            self.record
-                .clone()
-                .filter(|record| record.child_pid() == child_pid)
-        }
-
-        fn adopt(
-            &self,
-            _record: &HolderRecord,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            Err(PtyError::System(REFUSAL.to_string()))
-        }
-
-        fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {
-            Some(Arc::new(self.clone()))
-        }
     }
 
     /// The adoption result a worker posted for `harness`, skipping any other

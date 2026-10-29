@@ -188,7 +188,8 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::InvalidSetting { .. }
         | ConfigError::InvalidDefaultSize { .. }
         | ConfigError::RootNotADirectory { .. }
-        | ConfigError::RootNotUtf8 { .. } => error.to_string(),
+        | ConfigError::RootNotUtf8 { .. }
+        | ConfigError::HoldsProject { .. } => error.to_string(),
     }
 }
 

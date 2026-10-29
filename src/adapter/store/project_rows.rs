@@ -90,7 +90,13 @@ pub(super) fn require_project(
 
 /// The project at `root`, registering it first under the first free name
 /// [`ProjectName::candidates`] yields. Runs inside the caller's write
-/// transaction, so the name stays free until it commits.
+/// transaction, so the name stays free, and no project is registered inside
+/// `root`, until it commits: of two folders registered at once, one inside
+/// the other, the outer one is refused whichever commits first.
+///
+/// # Errors
+/// Returns [`ConfigError::HoldsProject`] when a registered project lies
+/// inside `root`, or a store failure.
 pub(super) fn register(
     conn: &Connection,
     root: &ProjectRoot,
@@ -103,6 +109,15 @@ pub(super) fn register(
                 .newly_registered(false)
                 .build(),
         ));
+    }
+    if let Some((_, held)) = projects_where(conn, SELECT_PROJECT, [])?
+        .into_iter()
+        .find(|(_, other)| other.root().as_ref().starts_with(root.as_ref()))
+    {
+        return Err(ConfigError::HoldsProject {
+            dir: root.as_ref().clone(),
+            project: held.name().clone(),
+        });
     }
     let mut taken = conn
         .prepare("SELECT 1 FROM projects WHERE name = ?1")
@@ -187,13 +202,13 @@ impl ProjectStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, sync::Barrier, thread};
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
-        adapter::store::test_support::{fresh_store, spec},
+        adapter::store::test_support::{database, fresh_store, spec},
         domain::{
             config::Environment,
             coordination::{Author, KvKey, KvValue},
@@ -201,6 +216,9 @@ mod tests {
             value::{EnvName, EnvValue},
         },
     };
+
+    /// How many times the registration race is run.
+    const RACES: usize = 20;
 
     /// A real folder under `scratch`, as a project root.
     fn folder(scratch: &TempDir, relative: &str) -> ProjectRoot {
@@ -277,6 +295,79 @@ mod tests {
             .map(|project| project.name().to_string())
             .collect();
         assert_eq!(listed, ["shop", "shop-2", "shop-3"], "listed by name");
+    }
+
+    /// A folder holding a project, which a caller's earlier check missed
+    /// when the project inside it registered in between, is refused in the
+    /// write itself, naming that project, and nothing of it is written; a
+    /// sibling sharing a name prefix is not inside it.
+    #[test]
+    fn registering_a_folder_holding_a_project_is_refused_in_the_write() {
+        let (store, scratch) = fresh_store();
+        let outer = folder(&scratch, "a");
+        let inner = folder(&scratch, "a/b");
+        store
+            .add_process(&inner, &spec("web", "true"), &Author::human())
+            .unwrap();
+
+        let refused = store
+            .add_process(&outer, &spec("web", "true"), &Author::human())
+            .unwrap_err();
+
+        assert!(
+            matches!(&refused, ConfigError::HoldsProject { dir, project }
+                if dir == outer.as_ref() && project.as_ref() == "b"),
+            "{refused:?}"
+        );
+        assert_eq!(store.project_at(&outer).unwrap(), None);
+        assert_eq!(rows_in(&store, "processes"), 1);
+        store
+            .add_process(
+                &folder(&scratch, "ab"),
+                &spec("web", "true"),
+                &Author::human(),
+            )
+            .unwrap();
+    }
+
+    /// Adds racing to register a folder and one inside it never leave the
+    /// outer folder registered after the inner one: whichever registers
+    /// second, holding the other, is refused.
+    #[test]
+    fn concurrent_adds_never_register_a_folder_around_a_project() {
+        for _ in 0..RACES {
+            let (store, scratch) = fresh_store();
+            let outer = folder(&scratch, "a");
+            let inner = folder(&scratch, "a/b");
+            let other = SqliteStore::open(&database(&scratch)).unwrap();
+            let barrier = Barrier::new(2);
+            let (outer_added, inner_added) = thread::scope(|scope| {
+                let outer_add = scope.spawn(|| {
+                    barrier.wait();
+                    store.add_process(&outer, &spec("web", "true"), &Author::human())
+                });
+                let inner_add = scope.spawn(|| {
+                    barrier.wait();
+                    other.add_process(&inner, &spec("web", "true"), &Author::human())
+                });
+                (outer_add.join().unwrap(), inner_add.join().unwrap())
+            });
+
+            assert!(inner_added.is_ok(), "{inner_added:?}");
+            if outer_added.is_ok() {
+                let id = |root: &ProjectRoot| {
+                    store
+                        .read(|conn| Ok(require_project(conn, root)?.0))
+                        .unwrap()
+                };
+                assert!(
+                    id(&outer) < id(&inner),
+                    "the outer folder registered second"
+                );
+            } else {
+                assert!(matches!(outer_added, Err(ConfigError::HoldsProject { .. })));
+            }
+        }
     }
 
     /// The deepest registered ancestor wins, and containment is by whole

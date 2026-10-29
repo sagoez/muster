@@ -100,7 +100,8 @@ impl From<&ConfigError> for FailureKind {
             | ConfigError::InvalidDefaultSize { .. }
             | ConfigError::TooLarge { .. }
             | ConfigError::RootNotADirectory { .. }
-            | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
+            | ConfigError::RootNotUtf8 { .. }
+            | ConfigError::HoldsProject { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
             ConfigError::CoordinationId(_)
             | ConfigError::Storage(_)

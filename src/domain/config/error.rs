@@ -2,7 +2,11 @@ use std::{error::Error as StdError, path::PathBuf};
 
 use thiserror::Error;
 
-use crate::domain::{config::SettingKey, pty::PtyError, value::ProcessName};
+use crate::domain::{
+    config::SettingKey,
+    pty::PtyError,
+    value::{ProcessName, ProjectName},
+};
 
 /// Separates names listed in an error message.
 const NAME_SEPARATOR: &str = ", ";
@@ -103,6 +107,18 @@ pub enum ConfigError {
     RootNotUtf8 {
         /// The path refused.
         path: PathBuf,
+    },
+    /// A folder would become a project holding a registered one, which
+    /// another write registered first.
+    #[error(
+        "{} holds the project '{project}', so it cannot be a muster project",
+        dir.display()
+    )]
+    HoldsProject {
+        /// The folder refused.
+        dir: PathBuf,
+        /// The registered project inside it.
+        project: ProjectName,
     },
 }
 

@@ -217,7 +217,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::no_state_dir::NoStateDir,
+        adapter::{client::RefusedFolder, no_state_dir::NoStateDir},
         domain::value::{ProcessName, ProjectName},
     };
 
@@ -344,5 +344,34 @@ mod tests {
         let error = ToolFailure::from(unreadable).answer().unwrap_err();
 
         assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    /// A request the stored state refuses is answered to the agent with the
+    /// kind `conflict`: a taken name, an import conflict and a folder holding
+    /// a project.
+    #[test]
+    fn a_refusal_over_state_is_answered_as_a_conflict() {
+        let web = ProcessName::try_new("web").unwrap();
+        let shop = ProjectName::try_new("shop").unwrap();
+        let refusals: Vec<ToolError> = vec![
+            ConfigError::DuplicateProcessName { name: web.clone() }.into(),
+            ConfigError::ImportConflict { names: vec![web] }.into(),
+            ConfigError::HoldsProject {
+                dir: PathBuf::from("/work"),
+                project: shop.clone(),
+            }
+            .into(),
+            ToolError::Unregistrable {
+                dir: PathBuf::from("/work"),
+                why: RefusedFolder::HoldsProject(shop),
+            },
+        ];
+
+        for refusal in refusals {
+            let result = ToolFailure::from(refusal).answer().unwrap();
+            assert_eq!(result.is_error, Some(true));
+            let error = &result.structured_content.expect("structured")["error"];
+            assert_eq!(error["kind"], "conflict", "{error}");
+        }
     }
 }

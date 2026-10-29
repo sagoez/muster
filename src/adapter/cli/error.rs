@@ -348,7 +348,12 @@ impl CliError {
             Self::Config(error) => FailureKind::from(error),
             Self::Client(error) => error.kind(),
             Self::NothingRunning(_) => FailureKind::NotRunning,
-            Self::HeldByOther { .. } => FailureKind::Conflict,
+            Self::HeldByOther { .. }
+            | Self::ProcessNameTaken { .. }
+            | Self::Unregistrable {
+                why: RefusedFolder::HoldsProject(_),
+                ..
+            } => FailureKind::Conflict,
             Self::UnknownNote(_) => FailureKind::UnknownNote,
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
@@ -381,7 +386,6 @@ impl CliError {
             | Self::EmptyDescription
             | Self::NotADirectory(_)
             | Self::UnrepresentablePath(_)
-            | Self::ProcessNameTaken { .. }
             | Self::StackFile { .. }
             | Self::SnapshotFile { .. }
             | Self::FileExists(_)
@@ -505,7 +509,8 @@ mod tests {
     }
 
     /// Each stored-state failure exits by its kind: the caller's mistakes
-    /// as invalid input, a store that cannot be used as a failed action.
+    /// as invalid input, a refusal by the stored state as a conflict, and a
+    /// store that cannot be used as a failed action.
     #[test]
     fn stored_state_failures_exit_by_their_kind() {
         let exit = |error: ConfigError| CliExit::from(CliError::Config(error).kind());
@@ -513,12 +518,6 @@ mod tests {
         assert_eq!(
             exit(ConfigError::UnknownProject {
                 root: PathBuf::from("/p")
-            }),
-            CliExit::InvalidInput
-        );
-        assert_eq!(
-            exit(ConfigError::ImportConflict {
-                names: vec![name("web")]
             }),
             CliExit::InvalidInput
         );
@@ -546,6 +545,48 @@ mod tests {
             ),
             CliExit::InvalidInput
         );
+    }
+
+    /// A request the stored state refuses is a conflict that exits 1: a
+    /// taken name, an import conflict, a folder holding a project and a held
+    /// todo. A folder refused for what it is stays invalid input.
+    #[test]
+    fn a_refusal_over_state_is_a_conflict() {
+        let project = ProjectName::try_new("shop").unwrap();
+        let refusals = [
+            CliError::adding(
+                ConfigError::DuplicateProcessName { name: name("api") },
+                Some(project.clone()),
+                RUN_NAME_HINT,
+            ),
+            CliError::Config(ConfigError::DuplicateProcessName { name: name("api") }),
+            CliError::Config(ConfigError::ImportConflict {
+                names: vec![name("web")],
+            }),
+            CliError::Config(ConfigError::HoldsProject {
+                dir: PathBuf::from("/work"),
+                project: project.clone(),
+            }),
+            CliError::Unregistrable {
+                dir: PathBuf::from("/work"),
+                why: RefusedFolder::HoldsProject(project),
+            },
+            CliError::HeldByOther {
+                what: "todo 't'".into(),
+                owner: Author::agent("claude"),
+                expires_in: Duration::from_secs(60),
+            },
+        ];
+
+        for refusal in refusals {
+            assert_eq!(refusal.kind(), FailureKind::Conflict, "{refusal}");
+            assert_eq!(CliExit::from(refusal.kind()), CliExit::ActionFailed);
+        }
+        let home = CliError::Unregistrable {
+            dir: PathBuf::from("/home/me"),
+            why: RefusedFolder::Home,
+        };
+        assert_eq!(home.kind(), FailureKind::InvalidInput);
     }
 
     /// An unknown process the store names carries the valid names as

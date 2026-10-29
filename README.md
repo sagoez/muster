@@ -237,18 +237,20 @@ crashed or exited rather than started.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A process did not end up as asked, the action failed, or the current state refused it (a todo another agent holds) |
+| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds) |
 | 2 | The command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
-| 4 | An invalid value: not a project, an unknown project or process, a taken name, a refused argument, an import conflict, or an unusable file |
+| 4 | An invalid value: not a project, an unknown project or process, a refused argument, or an unusable file |
 | 130 | Interrupted with Ctrl-C while it waited at a terminal |
 
 Every invalid value exits 4, whether the command line parser refuses it
 (`--timeout 0s`, an unknown setting key) or the command does (a bad regex, an
 unknown project). Exit 2 is kept for a command line that does not parse at
 all, such as an unknown flag or a missing argument. A valid request the
-current state refuses, such as changing a todo another agent holds without
-`--force`, exits 1 with the kind `conflict`. A question is cancelled
+current state refuses exits 1 with the kind `conflict`: adding a name the
+project already has, an import whose names collide with ones it keeps,
+registering a folder that holds a registered project, or changing a todo
+another agent holds without `--force`. A question is cancelled
 with Esc or Ctrl-C.
 
 ### At a terminal

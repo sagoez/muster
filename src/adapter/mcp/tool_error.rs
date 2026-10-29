@@ -212,6 +212,11 @@ impl ToolError {
             Self::UnknownTodo { .. } => FailureKind::UnknownTodo,
             Self::UnknownValue { .. } => FailureKind::UnknownKey,
             Self::NothingToChange(_) => FailureKind::Usage,
+            Self::Unregistrable {
+                why: RefusedFolder::HoldsProject(_),
+                ..
+            }
+            | Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::Unregistrable { .. }
             | Self::OutsideBase { .. }
             | Self::ProjectRequired { .. }
@@ -224,7 +229,6 @@ impl ToolError {
             | Self::InvalidTodoId(_)
             | Self::InvalidKvKey(_)
             | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
-            Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
     }

@@ -89,20 +89,21 @@ impl From<ServiceErrorKind> for FailureKind {
 }
 
 impl From<&ConfigError> for FailureKind {
-    /// The caller's mistake for a wrong name, value or file; muster's own
-    /// for a store that cannot be used.
+    /// The caller's mistake for a wrong name, value or file, a conflict for
+    /// a request the stored state refuses, and muster's own for a store that
+    /// cannot be used.
     fn from(error: &ConfigError) -> Self {
         match error {
             ConfigError::UnknownProject { .. } => Self::UnknownProject,
             ConfigError::UnknownProcess { .. } => Self::UnknownProcess,
             ConfigError::DuplicateProcessName { .. }
             | ConfigError::ImportConflict { .. }
-            | ConfigError::InvalidSetting { .. }
+            | ConfigError::HoldsProject { .. } => Self::Conflict,
+            ConfigError::InvalidSetting { .. }
             | ConfigError::InvalidDefaultSize { .. }
             | ConfigError::TooLarge { .. }
             | ConfigError::RootNotADirectory { .. }
-            | ConfigError::RootNotUtf8 { .. }
-            | ConfigError::HoldsProject { .. } => Self::InvalidInput,
+            | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
             ConfigError::CoordinationId(_)
             | ConfigError::Storage(_)

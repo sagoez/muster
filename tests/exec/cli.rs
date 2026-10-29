@@ -823,7 +823,7 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
     let second = run_here(&["sleep", "601"]);
     assert_eq!(
         second.status.code(),
-        Some(INVALID_INPUT),
+        Some(ACTION_FAILED),
         "{}",
         shown(&second)
     );
@@ -877,7 +877,7 @@ fn add_up_set_rm_against_a_real_service() {
     let taken = scratch.muster(&["-p", dir, "add", "web", "--", "true"]);
     assert_eq!(
         taken.status.code(),
-        Some(INVALID_INPUT),
+        Some(ACTION_FAILED),
         "{}",
         shown(&taken)
     );
@@ -1182,7 +1182,7 @@ fn export_and_import_move_a_stack_between_projects() {
     let conflict = scratch.on(&copy, &["import", file.to_str().unwrap()]);
     assert_eq!(
         conflict.status.code(),
-        Some(INVALID_INPUT),
+        Some(ACTION_FAILED),
         "{}",
         shown(&conflict)
     );
@@ -2599,6 +2599,71 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
 
     let stop = scratch.muster(&["service", "stop"]);
     assert!(stop.status.success(), "{}", shown(&stop));
+}
+
+/// A request the stored state refuses exits 1 with the kind `conflict`,
+/// changing nothing: a name the project already has, an import whose names
+/// the project keeps, and registering a folder that holds a project. A
+/// malformed name still exits 4 as invalid input.
+#[test]
+fn a_refusal_over_state_exits_1_as_a_conflict() {
+    let scratch = Scratch::new();
+    let project = scratch.project("outer/shop", &single());
+    let shop = project.to_str().unwrap();
+    let outer = scratch.path().join("outer");
+    let before = scratch.exported(&project);
+
+    let answered = |args: &[&str]| {
+        let output = scratch.muster(args);
+        let failure = parsed(&output);
+        (output, failure)
+    };
+
+    let refusals = [
+        (
+            "a taken name",
+            answered(&["-p", shop, "add", "--json", "api", "--", "true"]),
+        ),
+        (
+            "an import conflict",
+            answered(&["-p", shop, "import", "--json"]),
+        ),
+        (
+            "a folder holding a project",
+            answered(&[
+                "-p",
+                outer.to_str().unwrap(),
+                "add",
+                "--json",
+                "web",
+                "--",
+                "true",
+            ]),
+        ),
+    ];
+
+    for (what, (output, failure)) in refusals {
+        assert_eq!(
+            output.status.code(),
+            Some(ACTION_FAILED),
+            "{what}: {}",
+            shown(&output)
+        );
+        assert_eq!(failure["error"]["kind"], "conflict", "{what}: {failure}");
+    }
+    assert_eq!(scratch.exported(&project), before, "nothing changed");
+    let (projects, listed) = scratch.json(&["projects"]);
+    assert!(projects.status.success(), "{}", shown(&projects));
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    let (malformed, failure) =
+        answered(&["-p", shop, "add", "--json", "line\nbreak", "--", "true"]);
+    assert_eq!(
+        malformed.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&malformed)
+    );
+    assert_eq!(failure["error"]["kind"], "invalid-input", "{failure}");
 }
 
 /// Changing a todo another agent holds is a refusal over state: it exits 1

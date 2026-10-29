@@ -2,17 +2,24 @@ use crate::domain::{
     config::{
         ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration, Stack,
     },
-    value::{ProcessName, ProjectRoot},
+    value::{ProcessName, ProjectRoot, StackRevision},
 };
 
 /// Driven port: each project's process definitions. Every write is one atomic
-/// transaction.
+/// transaction, and moves the project's [`StackRevision`].
 pub trait StackStore {
     /// The project's stack, or none when `root` is not registered.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be read.
     fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError>;
+
+    /// The revision the project's stack is at, or none when `root` is not
+    /// registered.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be read.
+    fn stack_revision(&self, root: &ProjectRoot) -> Result<Option<StackRevision>, ConfigError>;
 
     /// Adds `spec`, registering `root` first when it is not a project.
     ///

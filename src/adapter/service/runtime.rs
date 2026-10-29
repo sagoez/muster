@@ -45,7 +45,7 @@ use crate::{
         project::Project,
         pty::PtyError,
         settings::Settings,
-        value::{ProcessName, ProjectName, ProjectRoot},
+        value::{ProcessName, ProjectName, ProjectRoot, StackRevision},
     },
 };
 
@@ -141,6 +141,9 @@ pub struct ServiceRuntime {
     notices: SharedNotices,
     /// The supervisor of every loaded project.
     supervisors: HashMap<ProjectRoot, Supervisor>,
+    /// The stored stack revision each loaded supervisor last applied, so a
+    /// write whose notice never arrived is still caught.
+    stack_revisions: HashMap<ProjectRoot, Option<StackRevision>>,
     /// Loaded projects that are no longer registered, kept only until the
     /// processes they still ran have stopped.
     unregistered: HashSet<ProjectRoot>,
@@ -223,6 +226,7 @@ impl ServiceRuntime {
             events,
             notices: Notices::shared(Some(protocol::log_path(state_dir))),
             supervisors: HashMap::new(),
+            stack_revisions: HashMap::new(),
             unregistered: HashSet::new(),
             event_log: EventLog::shared(),
             event_waiters: Vec::new(),
@@ -357,6 +361,7 @@ impl ServiceRuntime {
         for root in finished {
             self.unregistered.remove(&root);
             self.supervisors.remove(&root);
+            self.stack_revisions.remove(&root);
         }
     }
 
@@ -468,11 +473,22 @@ impl ServiceRuntime {
         request: ServiceRequest,
         reply: &Sender<ServiceResponse>,
     ) -> Result<Reply, ServiceErrorBody> {
-        if let ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } =
-            &request
-        {
-            self.supervisor(project)?;
-            self.share_held_ports();
+        match &request {
+            ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } => {
+                self.refresh_stack(project)?;
+                self.supervisor(project)?;
+                self.share_held_ports();
+            },
+            ServiceRequest::Ps {
+                project: Some(project),
+            } => self.refresh_stack(project)?,
+            ServiceRequest::Ps { project: None } => {
+                let loaded: Vec<ProjectRoot> = self.supervisors.keys().cloned().collect();
+                for project in &loaded {
+                    self.refresh_stack(project)?;
+                }
+            },
+            _ => {},
         }
         let response = match request {
             ServiceRequest::Replace | ServiceRequest::Stop => return Ok(Reply::Exit),
@@ -608,7 +624,9 @@ impl ServiceRuntime {
         if !self.supervisors.contains_key(project) {
             return Ok(());
         }
+        let revision = self.stacks.stack_revision(project).map_err(store_refusal)?;
         let stored = self.stacks.stack(project).map_err(store_refusal)?;
+        self.stack_revisions.insert(project.clone(), revision);
         let Some(supervisor) = self.supervisors.get_mut(project) else {
             return Ok(());
         };
@@ -624,6 +642,22 @@ impl ServiceRuntime {
         };
         supervisor.apply_stack(&stack);
         Ok(())
+    }
+
+    /// Applies `project`'s stored stack again when it is loaded and the store
+    /// moved past the revision its supervisor last applied, which a writer
+    /// that committed but never told the service leaves behind.
+    ///
+    /// # Errors
+    /// Returns the refusal when the revision or stack cannot be read.
+    fn refresh_stack(&mut self, project: &ProjectRoot) -> Result<(), ServiceErrorBody> {
+        let Some(applied) = self.stack_revisions.get(project).copied() else {
+            return Ok(());
+        };
+        if self.stacks.stack_revision(project).map_err(store_refusal)? == applied {
+            return Ok(());
+        }
+        self.stack_changed(project)
     }
 
     /// Reads the stored settings for every later launch, and hands them to
@@ -764,6 +798,7 @@ impl ServiceRuntime {
             .iter()
             .filter(|record| record.project() == project)
             .collect();
+        let revision = self.stacks.stack_revision(project).map_err(store_refusal)?;
         let stack = match self.stacks.stack(project).map_err(store_refusal)? {
             Some(stack) => stack,
             None if !held.is_empty() => {
@@ -791,6 +826,7 @@ impl ServiceRuntime {
             supervisor.adopt(record.clone());
         }
         self.supervisors.insert(project.clone(), supervisor);
+        self.stack_revisions.insert(project.clone(), revision);
         Ok(())
     }
 
@@ -1101,6 +1137,8 @@ mod tests {
     #[derive(Clone)]
     struct MemoryStore {
         stacks: Arc<Mutex<HashMap<ProjectRoot, Vec<ProcessSpec>>>>,
+        /// The writes made so far, and the revision of each registered stack.
+        revisions: Arc<Mutex<(i64, HashMap<ProjectRoot, StackRevision>)>>,
         settings: Arc<Mutex<Settings>>,
     }
 
@@ -1108,6 +1146,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 stacks: Arc::default(),
+                revisions: Arc::default(),
                 settings: Arc::new(Mutex::new(test_settings())),
             }
         }
@@ -1115,11 +1154,21 @@ mod tests {
         /// Registers `root` with `processes`, replacing its stack.
         fn put(&self, root: &ProjectRoot, processes: Vec<ProcessSpec>) {
             self.stacks.lock().unwrap().insert(root.clone(), processes);
+            self.bump(root);
         }
 
         /// Unregisters `root`.
         fn forget(&self, root: &ProjectRoot) {
             self.stacks.lock().unwrap().remove(root);
+            self.revisions.lock().unwrap().1.remove(root);
+        }
+
+        /// Moves `root`'s stack to the next revision, as every write does.
+        fn bump(&self, root: &ProjectRoot) {
+            let mut revisions = self.revisions.lock().unwrap();
+            revisions.0 += 1;
+            let next = StackRevision::new(revisions.0);
+            revisions.1.insert(root.clone(), next);
         }
 
         /// The project at `root`, named for its folder.
@@ -1141,6 +1190,10 @@ mod tests {
             }))
         }
 
+        fn stack_revision(&self, root: &ProjectRoot) -> Result<Option<StackRevision>, ConfigError> {
+            Ok(self.revisions.lock().unwrap().1.get(root).copied())
+        }
+
         fn add_process(
             &self,
             root: &ProjectRoot,
@@ -1149,6 +1202,7 @@ mod tests {
             let mut stacks = self.stacks.lock().unwrap();
             let newly_registered = !stacks.contains_key(root);
             stacks.entry(root.clone()).or_default().push(spec.clone());
+            self.bump(root);
             Ok(Registration::builder()
                 .project(Self::project(root))
                 .newly_registered(newly_registered)
@@ -1167,7 +1221,9 @@ mod tests {
                 .and_then(|processes| processes.iter_mut().find(|spec| spec.name() == name))
                 .ok_or_else(|| ConfigError::Database(name.to_string()))?;
             *spec = spec.clone().with_change(change);
-            Ok(spec.clone())
+            let changed = spec.clone();
+            self.bump(root);
+            Ok(changed)
         }
 
         fn remove_process(
@@ -1183,7 +1239,9 @@ mod tests {
                 .iter()
                 .position(|spec| spec.name() == name)
                 .ok_or_else(|| ConfigError::Database(name.to_string()))?;
-            Ok(processes.remove(index))
+            let removed = processes.remove(index);
+            self.bump(root);
+            Ok(removed)
         }
 
         fn import(
@@ -2458,7 +2516,11 @@ mod tests {
         }) else {
             panic!("a stopped process's log is found");
         };
-        assert_eq!(log.file_name().unwrap(), "worker.log");
+        let file_name = log.file_name().unwrap().to_string_lossy();
+        assert!(
+            file_name.starts_with("worker.") && file_name.ends_with(".log"),
+            "{file_name}"
+        );
 
         let ServiceResponse::Batch(down) = service.send(ServiceRequest::Down {
             project: project.clone(),

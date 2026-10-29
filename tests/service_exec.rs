@@ -726,3 +726,33 @@ fn a_child_keeps_the_open_files_limit_the_service_started_with() {
     });
     scratch.stop_service(service);
 }
+
+/// A stack write the service was never told about still reaches it: the next
+/// `ps` shows the process it added and stops the one it removed.
+#[test]
+fn a_stack_write_whose_notice_was_missed_reaches_the_next_request() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project();
+    let service = scratch.start_service();
+    scratch.up_running(&project);
+    let store = scratch.store();
+
+    store
+        .add_process(
+            &project,
+            &process("docs", SLEEPER, RestartPolicy::Never).with_autostart(false),
+        )
+        .unwrap();
+    store
+        .remove_process(&project, &ProcessName::try_new("api").unwrap())
+        .unwrap();
+
+    assert_eq!(
+        *scratch.named(&project, "docs").unwrap().state(),
+        ProcessState::Pending
+    );
+    wait_until("api to be stopped and gone", || {
+        scratch.named(&project, "api").is_none() && scratch.holders().is_empty()
+    });
+    scratch.stop_service(service);
+}

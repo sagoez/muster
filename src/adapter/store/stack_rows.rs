@@ -3,10 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, Row, ffi, params, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, Row, ffi, params, params_from_iter, types::Value};
 
 use super::{
-    project_rows::{ProjectRow, find_project, register, require_project},
+    project_rows::{ProjectRow, find_project, register, require_project, root_text},
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
     },
@@ -19,7 +19,7 @@ use crate::domain::{
     port::StackStore,
     process::{ReadyCheck, ReadyProbe, StopPolicy},
     project::Project,
-    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot},
+    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StackRevision},
 };
 
 /// Selects a process's definition columns in the order
@@ -284,6 +284,26 @@ fn delete_process(
     Ok(())
 }
 
+/// Moves the stack of the project `project_id` to the store's next revision,
+/// inside the caller's write transaction.
+///
+/// # Errors
+/// Returns [`ConfigError::Database`] when the revision cannot be written.
+fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
+    conn.execute(
+        "UPDATE stack_revision_counter SET value = value + 1 WHERE id = 1",
+        [],
+    )
+    .map_err(db_error)?;
+    conn.execute(
+        "UPDATE projects SET stack_revision = \
+         (SELECT value FROM stack_revision_counter WHERE id = 1) WHERE id = ?1",
+        params![project_id],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
 /// The spec in `processes` whose name shares `name`'s key.
 fn named<'a>(processes: &'a [ProcessSpec], name: &ProcessName) -> Option<&'a ProcessSpec> {
     let key = name.key();
@@ -299,6 +319,19 @@ impl StackStore for SqliteStore {
         })
     }
 
+    fn stack_revision(&self, root: &ProjectRoot) -> Result<Option<StackRevision>, ConfigError> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT stack_revision FROM projects WHERE root = ?1",
+                params![root_text(root)?],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|revision| revision.map(StackRevision::new))
+            .map_err(db_error)
+        })
+    }
+
     fn add_process(
         &self,
         root: &ProjectRoot,
@@ -307,6 +340,7 @@ impl StackStore for SqliteStore {
         self.write(|conn| {
             let (project_id, registration) = register(conn, root)?;
             insert_process(conn, project_id, spec)?;
+            bump_revision(conn, project_id)?;
             Ok(registration)
         })
     }
@@ -325,6 +359,7 @@ impl StackStore for SqliteStore {
                 .clone()
                 .with_change(change);
             update_process(conn, project_id, &changed)?;
+            bump_revision(conn, project_id)?;
             Ok(changed)
         })
     }
@@ -339,6 +374,7 @@ impl StackStore for SqliteStore {
             let project_id = project.0;
             let removed = stack_of(conn, project)?.require(name)?.clone();
             delete_process(conn, project_id, name)?;
+            bump_revision(conn, project_id)?;
             Ok(removed)
         })
     }
@@ -366,6 +402,7 @@ impl StackStore for SqliteStore {
                     insert_process(conn, project_id, spec)?;
                 }
             }
+            bump_revision(conn, project_id)?;
             Ok((registration, plan))
         })
     }
@@ -697,6 +734,48 @@ mod tests {
         assert_eq!(names_of(&stack), ["web", "api", "worker"]);
         assert_eq!(stack.processes()[0], full_spec());
         assert_eq!(ready_target(&store, "web"), None);
+    }
+
+    /// Every write to a stack moves its revision, and a project removed and
+    /// registered again never comes back at a revision it had.
+    #[test]
+    fn every_stack_write_moves_the_revision() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        assert_eq!(store.stack_revision(&root).unwrap(), None);
+        let mut seen = Vec::new();
+        let mut moved = |store: &SqliteStore| {
+            let revision = store.stack_revision(&root).unwrap().unwrap();
+            assert!(!seen.contains(&revision), "{revision} repeated");
+            seen.push(revision);
+        };
+
+        store
+            .add_process(&root, &spec("web", "npm run dev"))
+            .unwrap();
+        moved(&store);
+        store
+            .change_process(
+                &root,
+                &name("web"),
+                &ProcessChange::builder()
+                    .working_dir(FieldEdit::Clear)
+                    .build(),
+            )
+            .unwrap();
+        moved(&store);
+        store
+            .import(&root, &[spec("api", "cargo run")], ImportMode::Merge)
+            .unwrap();
+        moved(&store);
+        store.remove_process(&root, &name("api")).unwrap();
+        moved(&store);
+        assert!(store.remove_project(&root).unwrap());
+        assert_eq!(store.stack_revision(&root).unwrap(), None);
+        store
+            .add_process(&root, &spec("web", "npm run dev"))
+            .unwrap();
+        moved(&store);
     }
 
     #[test]

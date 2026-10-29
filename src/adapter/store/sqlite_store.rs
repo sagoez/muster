@@ -42,7 +42,10 @@ PRAGMA foreign_keys = ON;";
 const USER_VERSION: &str = "user_version";
 /// Every schema migration, in order. A shipped migration is never edited; a
 /// change is a new file appended here.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_stack_revision.sql"),
+];
 
 /// The one SQLite database holding projects, processes, settings and
 /// coordination. Clones share one connection; every write is one

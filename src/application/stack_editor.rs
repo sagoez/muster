@@ -111,7 +111,10 @@ mod tests {
         process::{RestartPolicy, StopSignal},
         project::Project,
         pty::PtySize,
-        value::{Cols, CommandLine, DetachKey, ProjectName, Rows, ScrollbackLines, StopGrace},
+        value::{
+            Cols, CommandLine, DetachKey, ProjectName, Rows, ScrollbackLines, StackRevision,
+            StopGrace,
+        },
     };
 
     /// One step the fakes record, so a test can check what happened in order.
@@ -167,6 +170,13 @@ mod tests {
 
     impl StackStore for Fakes {
         fn stack(&self, _root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
+            Ok(None)
+        }
+
+        fn stack_revision(
+            &self,
+            _root: &ProjectRoot,
+        ) -> Result<Option<StackRevision>, ConfigError> {
             Ok(None)
         }
 

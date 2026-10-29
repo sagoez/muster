@@ -447,6 +447,10 @@ with the user's rights at the next start:
   process has at most 64 variables, each name at most 128 characters and
   each value 8192; a project holds at most 100 processes. A longer or larger
   one is refused naming the limit over MCP, the CLI and `muster import`.
+  The caps hold every write, never a read: a name or variables stored past
+  them before they existed keep the project readable and exportable, but
+  that process is never started; `muster ps` and `muster doctor` name it, and
+  `muster set <name> --unset-env <KEY>` or `muster rm <name>` fixes it.
 - One MCP connection holds at most 32 live locks; the next `lock_acquire` is
   refused until it releases one or one expires.
 - A definition an agent reads back lists its `environment` by variable name

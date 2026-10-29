@@ -48,8 +48,9 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
 }
 
 /// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`.
-/// A working directory that leaves the root reads as stored, so the process
-/// can be changed or removed; [`ProcessSpec::launch_dir`] never launches it.
+/// A working directory that leaves the root, or a name or variables past a
+/// cap, read as stored, so the process can be changed, removed or exported;
+/// [`ProcessSpec::stored_problem`] keeps it from starting.
 fn process_from_row(
     row: &Row,
     environments: &mut HashMap<i64, Environment>,
@@ -133,8 +134,7 @@ fn environments_of(
         let environment = environments
             .remove(&process_id)
             .unwrap_or_else(Environment::empty)
-            .with_var(name, value)
-            .map_err(|error| corrupt("environment", error))?;
+            .with_var(name, value);
         environments.insert(process_id, environment);
     }
     Ok(environments)
@@ -363,6 +363,7 @@ impl StackStore for SqliteStore {
         author: &Author,
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
+            spec.check_caps()?;
             let (project_id, registration) = register(conn, root)?;
             Stack::check_count(process_count(conn, project_id)? + 1)?;
             insert_process(conn, project_id, spec)?;
@@ -464,10 +465,10 @@ mod tests {
     use crate::{
         adapter::store::test_support::{fresh_store, spec},
         domain::{
-            config::{FieldEdit, PROCESSES_MAX},
+            config::{ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
             port::{ProjectStore, StackEditLog},
             process::{RestartPolicy, StopSignal},
-            value::PositiveDuration,
+            value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
         },
     };
 
@@ -499,12 +500,10 @@ mod tests {
                         EnvName::try_new("PORT").unwrap(),
                         EnvValue::try_new("5173").unwrap(),
                     )
-                    .unwrap()
                     .with_var(
                         EnvName::try_new("EMPTY").unwrap(),
                         EnvValue::try_new("").unwrap(),
-                    )
-                    .unwrap(),
+                    ),
             )
             .with_autostart(true)
             .with_restart(RestartPolicy::OnFailure)
@@ -617,6 +616,122 @@ mod tests {
             .remove_process(&root, &name("web"), &Author::human())
             .unwrap();
         assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), ["api"]);
+    }
+
+    /// Rows written before the caps, as raw SQL stands in for here, keep the
+    /// project readable: a value past 8 KiB, more than the most variables
+    /// and a name past the cap each read as stored with the cap named, the
+    /// neighbour reads clean, an unrelated change and a repairing one land,
+    /// and the over-long name is removed by that name.
+    #[test]
+    fn rows_stored_past_a_cap_read_and_repair() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        for process in ["web", "crowded", "api"] {
+            store
+                .add_process(&root, &spec(process, "true"), &Author::human())
+                .unwrap();
+        }
+        let overlong = "n".repeat(PROCESS_NAME_MAX_CHARS + 1);
+        store
+            .write(|conn| {
+                let id_of = |process: &str| -> Result<i64, ConfigError> {
+                    conn.query_row(
+                        "SELECT id FROM processes WHERE name = ?1",
+                        params![process],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)
+                };
+                let insert = |id: i64, var: &str, value: &str| {
+                    conn.execute(
+                        "INSERT INTO process_env (process_id, name, value) VALUES (?1, ?2, ?3)",
+                        params![id, var, value],
+                    )
+                    .map_err(db_error)
+                };
+                insert(id_of("web")?, "CERT", &"v".repeat(ENV_VALUE_MAX_CHARS + 1))?;
+                let crowded = id_of("crowded")?;
+                for index in 0..=ENV_VARS_MAX {
+                    insert(crowded, &format!("V{index}"), "1")?;
+                }
+                conn.execute(
+                    "UPDATE processes SET name = ?1, name_key = ?1 WHERE name = 'api'",
+                    params![overlong],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        let stack = store.stack(&root).unwrap().unwrap();
+        let over = |process: &str| stack.process(&name(process)).unwrap().over_cap();
+        assert!(matches!(over("web"), Some(OverCap::VarValue { .. })));
+        assert!(
+            matches!(over("crowded"), Some(OverCap::Vars { found }) if found == ENV_VARS_MAX + 1)
+        );
+        assert!(matches!(over(&overlong), Some(OverCap::Name { .. })));
+
+        let described = ProcessChange::builder()
+            .description(FieldEdit::Set(Description::try_new("kept").unwrap()))
+            .build();
+        let kept = store
+            .change_process(&root, &name("web"), &described, &Author::human())
+            .unwrap();
+        assert!(kept.changed());
+        assert!(matches!(
+            kept.spec().over_cap(),
+            Some(OverCap::VarValue { .. })
+        ));
+        let unset = ProcessChange::builder()
+            .unset_env(vec![EnvName::try_new("CERT").unwrap()])
+            .build();
+        let repaired = store
+            .change_process(&root, &name("web"), &unset, &Author::human())
+            .unwrap();
+        assert_eq!(repaired.spec().over_cap(), None);
+        let grow = ProcessChange::builder()
+            .set_env(vec![(
+                EnvName::try_new("EXTRA").unwrap(),
+                EnvValue::try_new("1").unwrap(),
+            )])
+            .build();
+        assert!(matches!(
+            store.change_process(&root, &name("crowded"), &grow, &Author::human()),
+            Err(ConfigError::OverCap { .. })
+        ));
+        store
+            .remove_process(&root, &name(&overlong), &Author::human())
+            .unwrap();
+        assert_eq!(names_of(&store.stack(&root).unwrap().unwrap()), [
+            "web", "crowded"
+        ]);
+    }
+
+    /// A new process past a cap is refused, by an add or an import, naming
+    /// the process and the cap, and nothing is written.
+    #[test]
+    fn a_new_process_past_a_cap_is_refused() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let long = spec("web", "true").with_environment(Environment::of([(
+            EnvName::try_new("CERT").unwrap(),
+            EnvValue::try_new("v".repeat(ENV_VALUE_MAX_CHARS + 1)).unwrap(),
+        )]));
+
+        let added = store
+            .add_process(&root, &long, &Author::human())
+            .unwrap_err();
+        let imported = store.import(&root, &[long], ImportMode::Merge).unwrap_err();
+
+        for refused in [added, imported] {
+            assert!(
+                refused
+                    .to_string()
+                    .starts_with("'web': variable 'CERT' is 8193 characters"),
+                "{refused}"
+            );
+        }
+        assert!(store.stack(&root).unwrap().is_none());
     }
 
     /// A hand-edited row a validator's own rule refuses names that rule in

@@ -612,14 +612,10 @@ mod tests {
         let (store, scratch) = fresh_store();
         let root = folder(&scratch, "shop");
         let other = folder(&scratch, "other");
-        let with_port = spec("web", "true").with_environment(
-            Environment::empty()
-                .with_var(
-                    EnvName::try_new("PORT").unwrap(),
-                    EnvValue::try_new("3000").unwrap(),
-                )
-                .unwrap(),
-        );
+        let with_port = spec("web", "true").with_environment(Environment::empty().with_var(
+            EnvName::try_new("PORT").unwrap(),
+            EnvValue::try_new("3000").unwrap(),
+        ));
         store
             .add_process(&root, &with_port, &Author::human())
             .unwrap();

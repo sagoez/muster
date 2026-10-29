@@ -104,7 +104,7 @@ impl From<&ConfigError> for FailureKind {
             ConfigError::InvalidSetting { .. }
             | ConfigError::InvalidDefaultSize { .. }
             | ConfigError::TooLarge { .. }
-            | ConfigError::TooManyVars(_)
+            | ConfigError::OverCap { .. }
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,

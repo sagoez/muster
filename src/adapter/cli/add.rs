@@ -12,7 +12,7 @@ use super::{
 use crate::{
     adapter::client::{DefinitionView, ProjectIdentityView, WorkingDirPlace},
     domain::{
-        config::{ConfigError, Environment, ProcessDraft},
+        config::{Environment, ProcessDraft},
         coordination::Author,
         value::{Description, ProcessName},
     },
@@ -73,7 +73,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
                 .map_err(|error| CliError::description(&text, &error))
         })
         .transpose()?;
-    let environment = Environment::of(args.flags().environment()?).map_err(ConfigError::from)?;
+    let environment = Environment::of(args.flags().environment()?);
     let draft = ProcessDraft::builder()
         .name(name)
         .command(command)

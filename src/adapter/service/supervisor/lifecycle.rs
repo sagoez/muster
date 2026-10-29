@@ -526,16 +526,17 @@ impl Supervisor {
     }
 
     /// Refuses `pane`'s launch with an error notice naming the process and
-    /// the fix when its stored working directory leaves the project root.
-    fn refuse_unconfined_launch(&self, pane: PaneId) -> bool {
-        let Some(unconfined) = self
+    /// the fix when its stored definition has a stored problem: a working
+    /// directory leaving the project root, or a value past a cap.
+    fn refuse_stored_problem(&self, pane: PaneId) -> bool {
+        let Some(problem) = self
             .workspace
             .process(pane)
-            .and_then(|process| process.spec().unconfined_dir())
+            .and_then(|process| process.spec().stored_problem())
         else {
             return false;
         };
-        self.notify(NoticeLevel::Error, Some(pane), unconfined.to_string());
+        self.notify(NoticeLevel::Error, Some(pane), problem.to_string());
         true
     }
 
@@ -549,11 +550,11 @@ impl Supervisor {
     /// with, now and on its policy restarts, once the launch goes ahead; a
     /// refused launch leaves the environment of the last one in place. Every
     /// launch, a policy respawn included, is refused while a port it needs
-    /// is taken, and always when its stored directory leaves the root.
+    /// is taken, and always while its stored definition has a problem.
     fn spawn_with(&mut self, pane: PaneId, environment: Option<&LaunchEnvironment>) {
         if self.is_starting(pane)
             || self.refuse_unsupervised_launch(pane)
-            || self.refuse_unconfined_launch(pane)
+            || self.refuse_stored_problem(pane)
             || self.refuse_blocked_launch(pane)
         {
             return;
@@ -1528,14 +1529,10 @@ mod tests {
         let spawns = SpawnRecorder::default();
         let own = spec("p", "npm run dev", RestartPolicy::Always)
             .with_working_dir(Some("web".into()))
-            .with_environment(
-                Environment::empty()
-                    .with_var(
-                        EnvName::try_new("PORT").unwrap(),
-                        EnvValue::try_new("5173").unwrap(),
-                    )
-                    .unwrap(),
-            );
+            .with_environment(Environment::empty().with_var(
+                EnvName::try_new("PORT").unwrap(),
+                EnvValue::try_new("5173").unwrap(),
+            ));
         let mut harness = Harness::over(
             Box::new(
                 RequestRecordingRunner::builder()

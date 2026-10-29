@@ -55,7 +55,7 @@ const PS_HEADERS: [&str; 10] = [
 /// Header of the column `ps --commands` adds.
 const COMMAND_HEADER: &str = "COMMAND";
 /// Opens the line under a `ps` table naming a process that is never started.
-const UNCONFINED_MARK: &str = "! ";
+const NEVER_STARTED_MARK: &str = "! ";
 /// The READY cell of a run that passed its readiness check.
 const READY_YES: &str = "yes";
 /// The READY cell of a run still waiting on its readiness check.
@@ -167,7 +167,7 @@ const FALLBACK_FAILURE_JSON: &str =
 /// naming the project and its folder; with `all`, the tables are indented
 /// under their headings. With `commands`, each row ends in the process's
 /// command as its project's stored stack in `stacks` holds it. Each process
-/// whose stored directory leaves its root is named below its table.
+/// never started for a stored problem is named below its table, with the fix.
 pub fn render_status(
     statuses: &[ProjectStatus],
     all: bool,
@@ -189,14 +189,14 @@ pub fn render_status(
                 project_heading(status.project()),
                 project_table(status, indent, commands.then_some(stack))
             );
-            for unconfined in stack
+            for problem in stack
                 .into_iter()
                 .flat_map(|stack| stack.processes())
-                .filter_map(ProcessSpec::unconfined_dir)
+                .filter_map(ProcessSpec::stored_problem)
             {
                 rendered.push_str(&format!(
-                    "\n{indent}{UNCONFINED_MARK}{}",
-                    printable(&unconfined.to_string())
+                    "\n{indent}{NEVER_STARTED_MARK}{}",
+                    printable(&problem.to_string())
                 ));
             }
             rendered
@@ -919,7 +919,7 @@ mod tests {
 
         let marked: Vec<&str> = rendered
             .lines()
-            .filter(|line| line.trim_start().starts_with(UNCONFINED_MARK))
+            .filter(|line| line.trim_start().starts_with(NEVER_STARTED_MARK))
             .collect();
         assert_eq!(marked.len(), 1, "{rendered}");
         assert!(marked[0].contains("'dev server'"), "{rendered}");

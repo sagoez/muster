@@ -144,7 +144,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        config::{ENV_VARS_MAX, Environment},
+        config::{ENV_VARS_MAX, Environment, OverCap},
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
             COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, ENV_NAME_MAX_CHARS,
@@ -203,14 +203,10 @@ processes:
                 .command(CommandLine::try_new("npm run dev").unwrap())
                 .working_dir(Some(PathBuf::from("frontend")))
                 .description(Some(Description::try_new("Vite dev server").unwrap()))
-                .environment(
-                    Environment::empty()
-                        .with_var(
-                            EnvName::try_new("PORT").unwrap(),
-                            EnvValue::try_new("5173").unwrap(),
-                        )
-                        .unwrap(),
-                )
+                .environment(Environment::empty().with_var(
+                    EnvName::try_new("PORT").unwrap(),
+                    EnvValue::try_new("5173").unwrap(),
+                ))
                 .autostart(true)
                 .restart(RestartPolicy::OnFailure)
                 .stop(
@@ -412,19 +408,14 @@ processes:
         );
     }
 
-    /// A name, a variable's name or value, or a variable count past its
-    /// maximum is refused naming the limit; at the maximum each is read.
+    /// A name, a variable's name or value, or a variable count past its cap
+    /// still reads, as a stack stored before the caps exports it; the
+    /// import that would write it is what refuses it, naming the cap.
     #[test]
-    fn an_overlong_name_or_environment_is_refused() {
+    fn an_entry_past_a_cap_reads_with_the_cap_it_runs_past() {
         let named = |length: usize| {
             entry_with("").replace("name: web", &format!("name: {}", "n".repeat(length)))
         };
-        assert!(read_stack_file(&named(PROCESS_NAME_MAX_CHARS)).is_ok());
-        assert!(
-            refusal(&named(PROCESS_NAME_MAX_CHARS + 1)).ends_with(&format!(
-                "name is longer than {PROCESS_NAME_MAX_CHARS} characters"
-            ))
-        );
         let vars = |count: usize, name_chars: usize, value_chars: usize| {
             let width = name_chars - 1;
             let lines: String = (0..count)
@@ -432,26 +423,29 @@ processes:
                 .collect();
             entry_with(&format!("environment:{lines}"))
         };
-        assert!(
-            read_stack_file(&vars(ENV_VARS_MAX, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS)).is_ok()
+        let over = |file: &str| read_stack_file(file).unwrap()[0].over_cap();
+
+        assert_eq!(over(&named(PROCESS_NAME_MAX_CHARS)), None);
+        assert_eq!(
+            over(&vars(ENV_VARS_MAX, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS)),
+            None
         );
-        for (refused, limit) in [
-            (
-                vars(1, ENV_NAME_MAX_CHARS + 1, 1),
-                format!("at most {ENV_NAME_MAX_CHARS} are allowed"),
-            ),
-            (
-                vars(1, 1, ENV_VALUE_MAX_CHARS + 1),
-                format!("at most {ENV_VALUE_MAX_CHARS} are allowed"),
-            ),
-            (
-                vars(ENV_VARS_MAX + 1, 4, 1),
-                format!("more than the {ENV_VARS_MAX} a process may have"),
-            ),
-        ] {
-            let reason = refusal(&refused);
-            assert!(reason.contains(&limit), "{reason}");
-        }
+        assert!(matches!(
+            over(&named(PROCESS_NAME_MAX_CHARS + 1)),
+            Some(OverCap::Name { .. })
+        ));
+        assert!(matches!(
+            over(&vars(1, ENV_NAME_MAX_CHARS + 1, 1)),
+            Some(OverCap::VarName { .. })
+        ));
+        assert!(matches!(
+            over(&vars(1, 1, ENV_VALUE_MAX_CHARS + 1)),
+            Some(OverCap::VarValue { .. })
+        ));
+        assert!(matches!(
+            over(&vars(ENV_VARS_MAX + 1, 4, 1)),
+            Some(OverCap::Vars { .. })
+        ));
     }
 
     /// The example the README points at reads as a stack.

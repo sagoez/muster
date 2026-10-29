@@ -3,27 +3,26 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::steers_the_terminal;
 
-/// Most characters a process name holds: it labels tables, titles and
-/// notices, so one name cannot flood every listing that shows it.
+/// Most characters a new process name holds: it labels tables, titles and
+/// notices, so one name cannot flood every listing that shows it. A name
+/// stored before the cap still reads, so only a write is held to it.
 pub const PROCESS_NAME_MAX_CHARS: usize = 64;
 
 /// Whether `name` holds no control character, tab included, and no format
 /// character such as a bidi override or a zero-width space, so printing it
 /// can neither drive a terminal nor hide or reorder the text around it.
 fn is_terminal_safe(name: &str) -> bool {
-    !name.chars().any(unsafe_in_a_name)
+    !name
+        .chars()
+        .any(|character| character.is_control() || steers_the_terminal(character))
 }
 
-/// Whether `character` is one [`is_terminal_safe`] refuses in a name.
-pub(super) fn unsafe_in_a_name(character: char) -> bool {
-    character.is_control() || steers_the_terminal(character)
-}
-
-/// A process's display name: trimmed, non-empty, at most
-/// [`PROCESS_NAME_MAX_CHARS`] long and free of control and format characters.
+/// A process's display name: trimmed, non-empty and free of control and
+/// format characters. [`PROCESS_NAME_MAX_CHARS`] bounds a new one, through
+/// [`ProcessName::char_count`], never a stored one.
 #[nutype(
     sanitize(trim),
-    validate(not_empty, len_char_max = PROCESS_NAME_MAX_CHARS, predicate = is_terminal_safe),
+    validate(not_empty, predicate = is_terminal_safe),
     derive(
         Debug,
         Clone,
@@ -39,6 +38,11 @@ pub(super) fn unsafe_in_a_name(character: char) -> bool {
 pub struct ProcessName(String);
 
 impl ProcessName {
+    /// How many characters the name holds, as its cap counts them.
+    pub fn char_count(&self) -> usize {
+        self.as_ref().chars().count()
+    }
+
     /// The name in Unicode normal form C: two names with the same key read
     /// the same, however their accents were encoded.
     pub fn key(&self) -> String {
@@ -90,14 +94,12 @@ mod tests {
         assert_eq!(name.as_ref(), "Claude Code");
     }
 
-    /// A name up to the maximum is kept; one past it is refused.
+    /// A name past the cap still reads, so a stored one stays addressable,
+    /// and counts its characters for the cap a write holds it to.
     #[test]
-    fn a_name_is_bounded() {
-        assert!(ProcessName::try_new("n".repeat(PROCESS_NAME_MAX_CHARS)).is_ok());
-        assert_eq!(
-            ProcessName::try_new("n".repeat(PROCESS_NAME_MAX_CHARS + 1)),
-            Err(ProcessNameError::LenCharMaxViolated)
-        );
+    fn a_name_past_the_cap_reads_and_counts_its_characters() {
+        let long = ProcessName::try_new("\u{e9}".repeat(PROCESS_NAME_MAX_CHARS + 1)).unwrap();
+        assert_eq!(long.char_count(), PROCESS_NAME_MAX_CHARS + 1);
     }
 
     #[test]

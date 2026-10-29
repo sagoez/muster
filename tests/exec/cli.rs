@@ -2068,6 +2068,126 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
     assert!(stop.status.success(), "{}", shown(&stop));
 }
 
+/// Rows written before the caps, inserted here through sqlite, keep the
+/// project usable: a variable value past 8 KiB, more than the most
+/// variables and a name past the cap each refuse only their own process,
+/// which `ps` and `doctor` name with the fix and never send to `projects
+/// rm`; `export` writes them as stored, the neighbour starts, and `set` and
+/// `rm` work on each.
+#[test]
+fn rows_stored_past_a_cap_refuse_only_their_process() {
+    let scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[
+            entry("cert", "sleep 600", false),
+            entry("crowded", "sleep 600", false),
+            entry("named", "sleep 600", false),
+            entry("fine", "sleep 600", false),
+        ]),
+    );
+    let overlong = "n".repeat(PROCESS_NAME_MAX_CHARS + 1);
+    let database = Connection::open(scratch.database()).unwrap();
+    let id_of = |process: &str| -> i64 {
+        database
+            .query_row(
+                "SELECT id FROM processes WHERE name = ?1",
+                [process],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let insert = |id: i64, var: &str, value: &str| {
+        database
+            .execute(
+                "INSERT INTO process_env (process_id, name, value) VALUES (?1, ?2, ?3)",
+                (id, var, value),
+            )
+            .unwrap();
+    };
+    insert(id_of("cert"), "CERT", &"v".repeat(ENV_VALUE_MAX_CHARS + 1));
+    let crowded = id_of("crowded");
+    for index in 0..=ENV_VARS_MAX {
+        insert(crowded, &format!("V{index}"), "1");
+    }
+    database
+        .execute(
+            "UPDATE processes SET name = ?1, name_key = ?1 WHERE name = 'named'",
+            [&overlong],
+        )
+        .unwrap();
+    drop(database);
+    let quoted = format!("'{overlong}'");
+
+    let ps = scratch.on(&project, &["ps"]);
+    assert!(ps.status.success(), "{}", shown(&ps));
+    for named in [
+        "`muster set 'cert' --unset-env CERT`",
+        &format!("'crowded' has {} stored variables", ENV_VARS_MAX + 1),
+        &format!("`muster rm {quoted}` fixes it"),
+        "fine",
+    ] {
+        assert!(stdout(&ps).contains(named), "{named}: {}", shown(&ps));
+    }
+    let doctor = scratch.muster(&["doctor"]);
+    assert_eq!(
+        doctor.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&doctor)
+    );
+    assert!(
+        stdout(&doctor).contains("the stored variable CERT of 'cert'"),
+        "{}",
+        shown(&doctor)
+    );
+    assert!(
+        !stdout(&doctor).contains("projects rm"),
+        "{}",
+        shown(&doctor)
+    );
+    for refused in ["cert", "crowded", overlong.as_str()] {
+        let start = scratch.on(&project, &["start", refused]);
+        assert!(!start.status.success(), "{}", shown(&start));
+        assert!(
+            stdout(&start).contains("so it is never started"),
+            "{}",
+            shown(&start)
+        );
+    }
+    assert!(
+        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
+        "nothing was launched"
+    );
+    let export = scratch.on(&project, &["export", "-"]);
+    assert!(export.status.success(), "{}", shown(&export));
+    for kept in [overlong.as_str(), "CERT", &format!("V{ENV_VARS_MAX}")] {
+        assert!(stdout(&export).contains(kept), "{kept}: {}", shown(&export));
+    }
+    let fine = scratch.on(&project, &["start", "fine"]);
+    assert!(fine.status.success(), "{}", shown(&fine));
+
+    for repair in [
+        vec!["set", "crowded", "--description", "kept"],
+        vec!["set", "cert", "--unset-env", "CERT"],
+        vec!["rm", "crowded"],
+        vec!["rm", overlong.as_str()],
+    ] {
+        let repaired = scratch.on(&project, &repair);
+        assert!(repaired.status.success(), "{}", shown(&repaired));
+    }
+    let doctor = scratch.muster(&["doctor"]);
+    assert!(
+        stdout(&doctor).contains("every stored process reads"),
+        "{}",
+        shown(&doctor)
+    );
+    let cert = scratch.on(&project, &["start", "cert"]);
+    assert!(cert.status.success(), "{}", shown(&cert));
+    let stop = scratch.on(&project, &["down"]);
+    assert!(stop.status.success(), "{}", shown(&stop));
+}
+
 /// A project row edited by hand to a name muster refuses breaks only that
 /// project: every other project keeps working, `projects` lists it by its
 /// folder, a command on it names that folder, `doctor` names it, and
@@ -3020,7 +3140,7 @@ fn process_names_and_environments_are_bounded() {
     for (arguments, limit) in [
         (
             serde_json::json!({ "name": long(PROCESS_NAME_MAX_CHARS), "command": "true" }),
-            format!("longer than {PROCESS_NAME_MAX_CHARS} characters"),
+            format!("at most {PROCESS_NAME_MAX_CHARS} are allowed"),
         ),
         (
             serde_json::json!({
@@ -3028,7 +3148,7 @@ fn process_names_and_environments_are_bounded() {
                 "command": "true",
                 "environment": { long(ENV_NAME_MAX_CHARS): "1" },
             }),
-            format!("at most {ENV_NAME_MAX_CHARS} characters"),
+            format!("at most {ENV_NAME_MAX_CHARS} are allowed"),
         ),
         (
             serde_json::json!({
@@ -3036,7 +3156,10 @@ fn process_names_and_environments_are_bounded() {
                 "command": "true",
                 "environment": { "BIG": long(ENV_VALUE_MAX_CHARS) },
             }),
-            format!("at most {ENV_VALUE_MAX_CHARS} characters"),
+            format!(
+                "variable 'BIG' is {} characters; at most {ENV_VALUE_MAX_CHARS} are allowed",
+                ENV_VALUE_MAX_CHARS + 1
+            ),
         ),
         (
             serde_json::json!({
@@ -3044,7 +3167,7 @@ fn process_names_and_environments_are_bounded() {
                 "command": "true",
                 "environment": many(ENV_VARS_MAX + 1, 4),
             }),
-            format!("at most {ENV_VARS_MAX} variables"),
+            format!("more than the {ENV_VARS_MAX} a process may have"),
         ),
     ] {
         let refused = result_text(&mcp.mistake("process_add", arguments));
@@ -3056,10 +3179,10 @@ fn process_names_and_environments_are_bounded() {
     }
     let refused = result_text(&mcp.mistake(
         "process_set",
-        serde_json::json!({ "name": "web", "environment_set": many(ENV_VARS_MAX + 1, 4) }),
+        serde_json::json!({ "name": "api", "environment_set": many(ENV_VARS_MAX + 1, 4) }),
     ));
     assert!(
-        refused.contains(&format!("at most {ENV_VARS_MAX} variables")),
+        refused.contains(&format!("more than the {ENV_VARS_MAX} a process may have")),
         "{refused}"
     );
 
@@ -3091,7 +3214,7 @@ fn process_names_and_environments_are_bounded() {
     ]);
     assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
     assert!(
-        stderr(&cli).contains(&format!("longer than {PROCESS_NAME_MAX_CHARS} characters")),
+        stderr(&cli).contains(&format!("at most {PROCESS_NAME_MAX_CHARS} are allowed")),
         "{}",
         shown(&cli)
     );
@@ -3109,7 +3232,7 @@ fn process_names_and_environments_are_bounded() {
         shown(&cli)
     );
     let value = format!("V={}", long(ENV_VALUE_MAX_CHARS));
-    let cli = scratch.on(&project, &["set", "web", "--env", &value]);
+    let cli = scratch.on(&project, &["set", "api", "--env", &value]);
     assert_eq!(cli.status.code(), Some(INVALID_INPUT), "{}", shown(&cli));
     assert!(
         stderr(&cli).contains(&format!("at most {ENV_VALUE_MAX_CHARS} are allowed")),

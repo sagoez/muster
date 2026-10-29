@@ -176,8 +176,8 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
 }
 
 /// Whether every registered project's stored processes read and may start,
-/// naming each project whose rows do not and why, and each process whose
-/// stored directory leaves its root with the commands that fix it.
+/// naming each project whose rows do not and why, and each process never
+/// started for a stored problem, with the commands that fix it.
 pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> Probe {
     let projects = match projects.projects() {
         Ok(projects) => projects,
@@ -190,15 +190,15 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
         },
     };
     let mut invalid = Vec::new();
-    let mut unconfined = Vec::new();
+    let mut never_started = Vec::new();
     for project in &projects {
         match stacks.stack(project.root()) {
-            Ok(stack) => unconfined.extend(
+            Ok(stack) => never_started.extend(
                 stack
                     .iter()
                     .flat_map(Stack::processes)
-                    .filter_map(ProcessSpec::unconfined_dir)
-                    .map(|dir| format!("in {}, {dir}", project.name())),
+                    .filter_map(ProcessSpec::stored_problem)
+                    .map(|problem| format!("in {}, {problem}", project.name())),
             ),
             Err(error) => invalid.push(format!("{} ({})", project.name(), error_chain(&error))),
         }
@@ -210,7 +210,7 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
             invalid.join(LIST_SEPARATOR)
         ));
     }
-    problems.extend(unconfined);
+    problems.extend(never_started);
     if problems.is_empty() {
         probe(
             DoctorCheck::Processes,

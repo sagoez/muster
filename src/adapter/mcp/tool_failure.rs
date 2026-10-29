@@ -183,7 +183,7 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::Busy(_)
         | ConfigError::CorruptRow { .. }
         | ConfigError::TooLarge { .. }
-        | ConfigError::TooManyVars(_)
+        | ConfigError::OverCap { .. }
         | ConfigError::TooManyProcesses { .. }
         | ConfigError::TooManyLocks
         | ConfigError::UnsupportedSchema { .. }

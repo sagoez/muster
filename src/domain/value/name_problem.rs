@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use super::{
-    process_name::{PROCESS_NAME_MAX_CHARS, ProcessName, ProcessNameError, unsafe_in_a_name},
+    process_name::{PROCESS_NAME_MAX_CHARS, ProcessNameError},
     process_ref::ProcessRefError,
 };
 
@@ -14,19 +14,16 @@ const ELIDED: &str = "...";
 pub enum NameProblem {
     /// Nothing but whitespace.
     Empty,
-    /// More than [`PROCESS_NAME_MAX_CHARS`] characters.
-    TooLong,
     /// A control character, such as a newline or an escape, or a format
     /// character, such as a bidi override or a zero-width space.
     UnsafeCharacter,
 }
 
 impl Display for NameProblem {
-    /// The reason, naming the limit a name ran past.
+    /// The reason.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("is empty"),
-            Self::TooLong => write!(f, "is longer than {PROCESS_NAME_MAX_CHARS} characters"),
             Self::UnsafeCharacter => f.write_str("holds a control or format character"),
         }
     }
@@ -36,7 +33,6 @@ impl From<ProcessNameError> for NameProblem {
     fn from(error: ProcessNameError) -> Self {
         match error {
             ProcessNameError::NotEmptyViolated => Self::Empty,
-            ProcessNameError::LenCharMaxViolated => Self::TooLong,
             ProcessNameError::PredicateViolated => Self::UnsafeCharacter,
         }
     }
@@ -46,7 +42,6 @@ impl From<ProcessRefError> for NameProblem {
     fn from(error: ProcessRefError) -> Self {
         match error {
             ProcessRefError::NotEmptyViolated => Self::Empty,
-            ProcessRefError::LenCharMaxViolated => Self::TooLong,
         }
     }
 }
@@ -60,29 +55,6 @@ pub fn refused_name(raw: &str) -> String {
     }
 }
 
-/// `raw`, a name stored before [`PROCESS_NAME_MAX_CHARS`] bounded it, as a
-/// name to show: every character a name refuses escaped, then cut so that it
-/// ends in the elision mark within the cap.
-///
-/// # Errors
-/// Returns the [`ProcessNameError`] of a result that is still not a name,
-/// which the escape and the mark rule out.
-pub fn elided_name(raw: &str) -> Result<ProcessName, ProcessNameError> {
-    let mut escaped = String::new();
-    for character in raw.chars() {
-        if unsafe_in_a_name(character) {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
-    }
-    let kept: String = escaped
-        .chars()
-        .take(PROCESS_NAME_MAX_CHARS - ELIDED.chars().count())
-        .collect();
-    ProcessName::try_new(format!("{kept}{ELIDED}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,30 +66,7 @@ mod tests {
         let problem = |raw: &str| NameProblem::from(ProcessName::try_new(raw).unwrap_err());
         assert_eq!(problem("  "), NameProblem::Empty);
         assert_eq!(problem("a\u{1b}]0;x\u{7}"), NameProblem::UnsafeCharacter);
-        assert_eq!(
-            problem(&"n".repeat(PROCESS_NAME_MAX_CHARS + 1)),
-            NameProblem::TooLong
-        );
         assert_eq!(NameProblem::Empty.to_string(), "is empty");
-        assert_eq!(
-            NameProblem::TooLong.to_string(),
-            format!("is longer than {PROCESS_NAME_MAX_CHARS} characters")
-        );
-    }
-
-    /// A name stored past the cap shows escaped and cut to the cap, ending
-    /// in the mark.
-    #[test]
-    fn an_overlong_stored_name_shows_escaped_within_the_cap() {
-        let shown = elided_name(&format!(
-            "\u{1b}[2J\t{}",
-            "n".repeat(PROCESS_NAME_MAX_CHARS)
-        ))
-        .unwrap();
-
-        assert_eq!(shown.as_ref().chars().count(), PROCESS_NAME_MAX_CHARS);
-        assert!(shown.as_ref().starts_with("\\u{1b}[2J\\tnnn"), "{shown}");
-        assert!(shown.as_ref().ends_with(ELIDED), "{shown}");
     }
 
     /// A refusal shows a long name cut short, and a short one whole.

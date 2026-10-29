@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::domain::{config::TooManyVars, value::NameProblem};
+use crate::domain::value::NameProblem;
 
 /// Why one process entry of a stack file is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -69,9 +69,6 @@ pub enum EntryError {
         /// The variable whose value was refused.
         name: String,
     },
-    /// `environment` names more variables than a process may have.
-    #[error(transparent)]
-    TooManyVars(#[from] TooManyVars),
     /// An environment variable still holds the export's placeholder.
     #[error("{name} has no value; fill it in (or remove it) before importing")]
     MissingEnvValue {

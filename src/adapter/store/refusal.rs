@@ -75,7 +75,6 @@ impl Refusal for ProcessNameError {
     fn reason(&self) -> &'static str {
         match self {
             Self::NotEmptyViolated => EMPTY,
-            Self::LenCharMaxViolated => TOO_LONG,
             Self::PredicateViolated => UNSAFE_TEXT,
         }
     }
@@ -105,7 +104,6 @@ impl Refusal for EnvNameError {
     /// The reason a stored variable name is refused.
     fn reason(&self) -> &'static str {
         match self {
-            Self::LenCharMaxViolated => TOO_LONG,
             Self::PredicateViolated => NOT_AN_ENV_NAME,
         }
     }
@@ -115,7 +113,6 @@ impl Refusal for EnvValueError {
     /// The reason a stored variable value is refused.
     fn reason(&self) -> &'static str {
         match self {
-            Self::LenCharMaxViolated => TOO_LONG,
             Self::PredicateViolated => HOLDS_NUL,
         }
     }

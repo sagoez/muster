@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{candidate::Candidate, compose, justfile, makefile, package_json, procfile};
+use super::{
+    candidate::Candidate, compose, justfile, makefile, package_json, procfile,
+    source_file::new_name,
+};
 use crate::domain::value::{ProcessName, ProjectRoot};
 
 /// Every candidate the files under `root` offer, by source in a fixed order,
@@ -36,8 +39,7 @@ pub fn detect(root: &ProjectRoot, taken: impl Fn(&ProcessName) -> bool) -> Vec<C
                 return Some(candidate);
             }
             let renamed = format!("{}-{}", candidate.source(), candidate.name());
-            ProcessName::try_new(renamed)
-                .ok()
+            new_name(&renamed)
                 .filter(|name| !taken(name))
                 .map(|name| candidate.with_name(name))
         })

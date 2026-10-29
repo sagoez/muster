@@ -90,8 +90,10 @@ impl Stack {
     /// # Errors
     /// Returns [`ConfigError::DuplicateProcessName`] when `incoming` repeats a
     /// name, and [`ConfigError::ImportConflict`] listing every already-defined
-    /// name under [`ImportMode::Strict`], and [`ConfigError::TooManyProcesses`]
-    /// when the project would end up past [`PROCESSES_MAX`].
+    /// name under [`ImportMode::Strict`], [`ConfigError::TooManyProcesses`]
+    /// when the project would end up past [`PROCESSES_MAX`], and
+    /// [`ConfigError::OverCap`] for a definition it writes past a cap; one
+    /// equal to the stored definition is not written, so it is never refused.
     pub fn plan_import(
         &self,
         incoming: &[ProcessSpec],
@@ -122,6 +124,9 @@ impl Stack {
             ImportMode::Strict | ImportMode::Merge => Vec::new(),
         };
         Self::check_count(self.processes.len() + added.len() - removed.len())?;
+        for spec in added.iter().chain(&updated) {
+            spec.check_caps()?;
+        }
         Ok(ImportPlan::builder()
             .added(names_of(&added))
             .updated(names_of(&updated))

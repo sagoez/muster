@@ -3,10 +3,10 @@ use std::{error::Error as StdError, path::PathBuf};
 use thiserror::Error;
 
 use crate::domain::{
-    config::{PROCESSES_MAX, SettingKey, TooManyVars},
+    config::{OverCap, PROCESSES_MAX, SettingKey},
     coordination::LOCKS_PER_SESSION_MAX,
     pty::PtyError,
-    value::{ProcessName, ProjectName},
+    value::{ProcessName, ProjectName, refused_name},
 };
 
 /// Separates names listed in an error message.
@@ -73,9 +73,14 @@ pub enum ConfigError {
         /// The names the project defines.
         valid: Vec<ProcessName>,
     },
-    /// A process would be given more variables than it may have.
-    #[error(transparent)]
-    TooManyVars(#[from] TooManyVars),
+    /// A write would leave a process with a value past a cap.
+    #[error("'{}': {over}", refused_name(name.as_ref()))]
+    OverCap {
+        /// The process written.
+        name: ProcessName,
+        /// The cap it would run past.
+        over: OverCap,
+    },
     /// A write would leave the project with more processes than it may have.
     #[error(
         "this would leave the project with {found} processes, more than the {PROCESSES_MAX} it may have; remove one first"

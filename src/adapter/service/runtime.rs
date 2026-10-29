@@ -93,7 +93,7 @@ const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
 
 /// The one service of a user: owns every loaded project's supervisor on a
 /// single thread, which every other thread only sends events to. Clients
-/// connect on `service.sock`; holders run every process and outlive it. The
+/// connect on its socket; holders run every process and outlive it. The
 /// service only reads the stored stacks and settings; writers tell it what
 /// changed.
 pub struct ServiceRuntime {
@@ -164,7 +164,7 @@ impl ServiceRuntime {
         let state_dir = singleton.state_dir().clone();
         let settings = deps.settings.load().map_err(ServiceError::Settings)?;
         let (sender, events) = bounded(EVENT_CAPACITY);
-        let mut acceptor = Acceptor::bind(&protocol::socket_path(&state_dir), sender.clone())?;
+        let mut acceptor = Acceptor::bind(&deps.socket, sender.clone())?;
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         let exit = runtime.serve(&events);
@@ -199,6 +199,7 @@ impl ServiceRuntime {
         let ServiceDeps {
             version,
             binary,
+            socket: _,
             holders,
             ports,
             metrics,

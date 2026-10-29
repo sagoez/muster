@@ -289,6 +289,16 @@ impl Scratch {
         self.root.path().join("state").join(APP_DIR)
     }
 
+    /// The runtime directory every command over this scratch is given.
+    fn runtime_dir(&self) -> PathBuf {
+        self.root.path().join("run")
+    }
+
+    /// The socket every service over this scratch listens on.
+    fn socket(&self) -> PathBuf {
+        protocol::socket_path(&self.runtime_dir().join(APP_DIR), &self.state_dir())
+    }
+
     /// The database every command over this scratch reads and writes.
     fn database(&self) -> PathBuf {
         self.state_dir().join(DATABASE_FILE)
@@ -314,6 +324,7 @@ impl Scratch {
             .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
+            .env("XDG_RUNTIME_DIR", self.runtime_dir())
             .env_remove("MUSTER_PROJECT");
         command
     }
@@ -368,7 +379,7 @@ impl Scratch {
     /// Sends `request` straight to the service socket, as an in-process
     /// client.
     fn send(&self, request: &ServiceRequest) -> ServiceResponse {
-        protocol::send(&protocol::socket_path(&self.state_dir()), request).unwrap()
+        protocol::send(&self.socket(), request).unwrap()
     }
 
     /// The state and pid of the first process of `project`, as the service
@@ -477,7 +488,8 @@ fn in_process_service(
 ) -> JoinHandle<Result<(), ServiceError>> {
     let state_dir = scratch.state_dir();
     let database = scratch.database();
-    let started = state_dir.clone();
+    let started = scratch.socket();
+    let socket = started.clone();
     let version: ServiceVersion = version.parse().expect("a test version is semantic");
     let service = thread::spawn(move || {
         let singleton = Singleton::acquire(&state_dir)?.expect("no other service runs");
@@ -494,6 +506,7 @@ fn in_process_service(
         let deps = ServiceDeps::builder()
             .version(version)
             .binary(PathBuf::from(IN_PROCESS_BINARY))
+            .socket(socket)
             .holders(Arc::new(HolderRunner::new(
                 launcher,
                 HolderDirs::under(&state_dir),
@@ -510,7 +523,7 @@ fn in_process_service(
         ServiceRuntime::run(singleton, deps)
     });
     wait_until("the in-process service to accept", || {
-        UnixStream::connect(protocol::socket_path(&started)).is_ok()
+        UnixStream::connect(&started).is_ok()
     });
     service
 }
@@ -637,8 +650,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         .spawn()
         .unwrap();
     wait_until("the old service to start making way", || {
-        !protocol::socket_path(&scratch.state_dir()).exists()
-            || replacing.try_wait().unwrap().is_some()
+        !scratch.socket().exists() || replacing.try_wait().unwrap().is_some()
     });
     let second = scratch.on(&project, &["ps", "--json"]);
 
@@ -1288,7 +1300,7 @@ fn notices_read_stored_edits_without_starting_the_service() {
         shown(&idle)
     );
     assert!(processes_under(SERVICE_SUBCOMMAND, &scratch.path()).is_empty());
-    assert!(!protocol::socket_path(&scratch.state_dir()).exists());
+    assert!(!scratch.socket().exists());
 
     let ps = scratch.on(&project, &["ps"]);
     assert!(ps.status.success(), "{}", shown(&ps));
@@ -1723,7 +1735,8 @@ fn request_name(request: &ServiceRequest) -> &'static str {
 /// what it asks for. Returns what it was asked, in order.
 fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'static str>>> {
     fs::create_dir_all(scratch.state_dir()).unwrap();
-    let listener = UnixListener::bind(protocol::socket_path(&scratch.state_dir())).unwrap();
+    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    let listener = UnixListener::bind(scratch.socket()).unwrap();
     let asked = Arc::new(Mutex::new(Vec::new()));
     let heard = Arc::clone(&asked);
     thread::spawn(move || {
@@ -1767,7 +1780,8 @@ fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'s
 /// the matching error notice raised now.
 fn scripted_service(scratch: &Scratch, project: PathBuf) {
     fs::create_dir_all(scratch.state_dir()).unwrap();
-    let listener = UnixListener::bind(protocol::socket_path(&scratch.state_dir())).unwrap();
+    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    let listener = UnixListener::bind(scratch.socket()).unwrap();
     let api = ProcessName::try_new("api").unwrap();
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -1864,7 +1878,8 @@ fn an_up_refusal_is_reported_once_with_its_reason() {
 fn service_stop_needs_no_hello() {
     let scratch = Scratch::new();
     fs::create_dir_all(scratch.state_dir()).unwrap();
-    let listener = UnixListener::bind(protocol::socket_path(&scratch.state_dir())).unwrap();
+    fs::create_dir_all(scratch.runtime_dir().join(APP_DIR)).unwrap();
+    let listener = UnixListener::bind(scratch.socket()).unwrap();
     let service = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let mut request = String::new();
@@ -2122,6 +2137,7 @@ fn completing_a_project_never_creates_the_database() {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_RUNTIME_DIR", root.join("run"))
             .output()
             .unwrap()
     };
@@ -3545,6 +3561,9 @@ const SHARED_FILE_MODE: u32 = 0o644;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
+/// Length of a state home whose holder sockets just fit on every platform,
+/// but where a service socket bound beside them would not have.
+const LONG_STATE_HOME_CHARS: usize = 40;
 
 /// A folder whose name carries an OSC title sequence registers under that
 /// name escaped, so neither `projects` nor shell completion sends the
@@ -3657,6 +3676,66 @@ fn a_state_dir_too_deep_for_a_socket_is_reported() {
     assert!(
         stderr(&up).contains("too long for a Unix socket")
             && stderr(&up).contains("XDG_STATE_HOME")
+            && stderr(&up).contains(deep.to_str().unwrap()),
+        "{}",
+        shown(&up)
+    );
+}
+
+/// A state directory whose holder sockets fit serves, however long: the
+/// service socket lives in the short runtime directory, and the name it is
+/// first bound at is no longer than its own.
+#[test]
+fn a_long_state_dir_whose_sockets_fit_serves() {
+    let scratch = Scratch::new();
+    let shop = scratch.path().join("shop");
+    fs::create_dir_all(&shop).unwrap();
+    fs::write(shop.join(STACK_FILE), single()).unwrap();
+    let prefix = scratch.path().join("s");
+    let padding = LONG_STATE_HOME_CHARS - prefix.as_os_str().len();
+    let long = PathBuf::from(format!("{}{}", prefix.display(), "s".repeat(padding)));
+    fs::create_dir_all(&long).unwrap();
+    let in_long = |args: &[&str]| {
+        let mut all = vec!["-p", shop.to_str().unwrap()];
+        all.extend_from_slice(args);
+        scratch
+            .command(&all)
+            .env("XDG_STATE_HOME", &long)
+            .output()
+            .unwrap()
+    };
+    assert!(in_long(&["import"]).status.success());
+
+    let up = in_long(&["up"]);
+    let stopped = in_long(&["service", "stop"]);
+
+    assert!(up.status.success(), "{}", shown(&up));
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+}
+
+/// A runtime directory too deep for the service socket is refused before a
+/// service is started, naming the socket and the variable that moves it.
+#[test]
+fn a_runtime_dir_too_deep_for_a_socket_is_reported() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let deep = scratch.path().join("r".repeat(DEEP_STATE_DIR_CHARS));
+
+    let up = scratch
+        .command(&["-p", shop.to_str().unwrap(), "up"])
+        .env("XDG_RUNTIME_DIR", &deep)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        up.status.code(),
+        Some(SERVICE_UNAVAILABLE),
+        "{}",
+        shown(&up)
+    );
+    assert!(
+        stderr(&up).contains("too long for a Unix socket")
+            && stderr(&up).contains("XDG_RUNTIME_DIR")
             && stderr(&up).contains(deep.to_str().unwrap()),
         "{}",
         shown(&up)

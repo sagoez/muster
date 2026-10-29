@@ -207,9 +207,17 @@ impl Scratch {
         SqliteStore::open(&self.state_root().join(APP_DIR).join(DATABASE_FILE)).unwrap()
     }
 
+    /// The XDG runtime directory the services run under.
+    fn runtime_root(&self) -> PathBuf {
+        self.root.path().join("run")
+    }
+
     /// The socket a service over this scratch listens on.
     fn socket(&self) -> PathBuf {
-        protocol::socket_path(&self.state_root().join(APP_DIR))
+        protocol::socket_path(
+            &self.runtime_root().join(APP_DIR),
+            &self.state_root().join(APP_DIR),
+        )
     }
 
     /// Registers the project with one process `api` running [`SLEEPER`].
@@ -312,6 +320,7 @@ impl Scratch {
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
+            .env("XDG_RUNTIME_DIR", self.runtime_root())
             .env(LEAKED_VAR, "leaked")
             .env(INHERITED_VAR, "leaked")
             .stdin(Stdio::null())

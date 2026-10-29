@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     env,
     fs::{File, OpenOptions, TryLockError},
-    io, iter,
+    io,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, Command},
@@ -19,7 +19,7 @@ use crate::{
     adapter::{
         holder::{HolderDirs, HolderId, detached, reap},
         ipc::fits_a_socket,
-        private_dir::{prepare_state_dir, state_dir},
+        private_dir::{RUNTIME_DIR_ENV, STATE_HOME_ENV, prepare_state_dir, socket_dir, state_dir},
         service::{
             Notice, ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
             ServiceVersion,
@@ -216,7 +216,7 @@ impl ServiceClient {
     /// cannot be found.
     fn local() -> Result<Self, ClientError> {
         let state_dir = state_dir()?;
-        let socket = protocol::socket_path(&state_dir);
+        let socket = protocol::socket_path(&socket_dir(), &state_dir);
         let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),
             log: protocol::log_path(&state_dir),
@@ -229,22 +229,29 @@ impl ServiceClient {
         })
     }
 
-    /// Refuses a state directory too deep for the service's socket or a
-    /// holder's to fit in a Unix socket address, before a service is started
-    /// that could never listen.
+    /// Refuses a runtime directory too deep for the service's socket, or a
+    /// state directory too deep for a holder's, to fit in a Unix socket
+    /// address, before a service is started that could never listen. Every
+    /// path the service binds is checked, the name it binds first included.
     ///
     /// # Errors
     /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
-    /// not fit.
+    /// not fit and the variable that moves it.
     fn check_socket_room(&self) -> Result<(), ClientError> {
-        let holder = HolderId::generate()
-            .ok()
-            .map(|id| HolderDirs::under(&self.state_dir).socket_path(&id));
-        match iter::once(self.socket.clone())
+        let service = [self.socket.clone(), protocol::staging_socket(&self.socket)]
+            .into_iter()
+            .map(|socket| (socket, RUNTIME_DIR_ENV));
+        let holder = HolderId::generate().ok().map(|id| {
+            (
+                HolderDirs::under(&self.state_dir).socket_path(&id),
+                STATE_HOME_ENV,
+            )
+        });
+        match service
             .chain(holder)
-            .find(|socket| !fits_a_socket(socket))
+            .find(|(socket, _)| !fits_a_socket(socket))
         {
-            Some(socket) => Err(ClientError::SocketPathTooLong { socket }),
+            Some((socket, variable)) => Err(ClientError::SocketPathTooLong { socket, variable }),
             None => Ok(()),
         }
     }

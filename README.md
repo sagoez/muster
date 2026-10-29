@@ -44,10 +44,12 @@ every project's stack, the machine's settings and the shared notes, todos and
 key-values. The CLI and the MCP server write it directly and tell a running
 service what changed, so an edit reaches the service at once and works without
 it. The service keeps there how each process last crashed or exited, so `ps`
-after a service restart still shows it until the process starts again. The
-service and each process listen on Unix sockets in that directory, so a state
-directory too deep for a socket path is refused with a hint to set a shorter
-`XDG_STATE_HOME`.
+after a service restart still shows it until the process starts again. Each
+process listens on a Unix socket in that directory. The service listens in a
+short runtime directory instead, `$XDG_RUNTIME_DIR/muster`, else
+`/tmp/muster-<uid>`, which must be yours with mode 0700, on a socket named for
+the state directory. A socket path too long to fit is refused naming it, with a
+hint to set a shorter `XDG_STATE_HOME` or `XDG_RUNTIME_DIR`.
 
 Commands act on the project given by `--project` (a registered name, or a
 folder when the value contains `/` or starts with `.` or `~`; such a value

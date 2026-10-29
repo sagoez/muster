@@ -2,7 +2,10 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use crate::{adapter::no_state_dir::NoStateDir, domain::config::ConfigError};
+use crate::{
+    adapter::{no_state_dir::NoStateDir, private_dir::RUNTIME_DIR_ENV},
+    domain::config::ConfigError,
+};
 
 /// Why the service could not start or keep running.
 #[derive(Debug, Error)]
@@ -20,6 +23,16 @@ pub enum ServiceError {
         path: PathBuf,
         /// The underlying error.
         source: io::Error,
+    },
+    /// A path the service binds or listens at does not fit in a Unix socket
+    /// address.
+    #[error(
+        "the socket path {path} is too long for a Unix socket; set {variable} to a shorter folder",
+        variable = RUNTIME_DIR_ENV
+    )]
+    SocketPathTooLong {
+        /// The path that does not fit.
+        path: PathBuf,
     },
     /// The settings every launch uses could not be read at start.
     #[error("could not read the settings: {0}")]

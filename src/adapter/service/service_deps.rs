@@ -18,6 +18,8 @@ pub struct ServiceDeps {
     /// The running binary's path, answered to a client's hello so an older
     /// client can say which muster it found.
     pub(super) binary: PathBuf,
+    /// The socket clients reach the service at.
+    pub(super) socket: PathBuf,
     /// The holders every project's processes run under.
     pub(super) holders: Arc<dyn HolderPool>,
     /// Builds each project's driven adapters as it is loaded.

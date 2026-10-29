@@ -12,7 +12,7 @@ use muster::{
         open_files::OpenFilesLimit,
         path::home_dir,
         port_occupants::OsPortOccupants,
-        private_dir::{prepare_state_dir, state_dir},
+        private_dir::{prepare_state_dir, socket_dir, state_dir},
         pty::PortablePtyRunner,
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
@@ -162,6 +162,7 @@ fn run_service() -> Result<(), MusterError> {
     let deps = ServiceDeps::builder()
         .version(ServiceVersion::current())
         .binary(binary)
+        .socket(protocol::socket_path(&socket_dir(), &state_dir))
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))
         .metrics(Some(Box::new(SysinfoMetrics::default())))

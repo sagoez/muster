@@ -2,6 +2,7 @@
 //! a user's processes: logs, records, sockets and shared state.
 
 use std::{
+    env,
     fs::{self, DirBuilder, Permissions},
     io,
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
@@ -21,6 +22,19 @@ const APP_DIR: &str = APP_NAME;
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Mode bits granting the group or other users any access.
 pub const GROUP_OTHER_BITS: u32 = 0o077;
+/// The permission bits of a mode.
+const PERMISSION_BITS: u32 = 0o777;
+/// Variable naming the user's runtime directory, where the service socket
+/// goes; set it to a shorter folder when the socket path does not fit.
+pub const RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
+/// Variable naming the state directory's parent; set it to a shorter folder
+/// when a holder's socket path does not fit.
+pub const STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+/// Short folder the socket directory goes in when no runtime directory is
+/// set, as on macOS.
+const FALLBACK_SOCKET_ROOT: &str = "/tmp";
+/// Name of the fallback socket directory, before the user's uid.
+const FALLBACK_SOCKET_PREFIX: &str = "muster-";
 
 /// Muster's platform state directory (`~/.local/state/muster` on Linux),
 /// falling back to local data on platforms without a distinct state location.
@@ -35,6 +49,48 @@ pub fn state_dir() -> Result<PathBuf, NoStateDir> {
                 .to_path_buf()
         })
         .ok_or(NoStateDir)
+}
+
+/// The short directory the service socket goes in, so its path fits a Unix
+/// socket address wherever the state directory is: `muster` in
+/// `$XDG_RUNTIME_DIR`, else `/tmp/muster-<uid>`.
+pub fn socket_dir() -> PathBuf {
+    env::var_os(RUNTIME_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|runtime| runtime.is_absolute())
+        .map_or_else(
+            || {
+                Path::new(FALLBACK_SOCKET_ROOT)
+                    .join(format!("{FALLBACK_SOCKET_PREFIX}{}", geteuid().as_raw()))
+            },
+            |runtime| runtime.join(APP_DIR),
+        )
+}
+
+/// Readies `dir` for the service socket: creates it and any missing parents
+/// owner-only, then refuses it unless it is a real directory this user owns
+/// with mode 0700, since it lies in a folder other users may write to.
+///
+/// # Errors
+/// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
+/// directory when it is not private to this user, or the I/O error from
+/// creating or inspecting it.
+pub fn prepare_socket_dir(dir: &Path) -> io::Result<()> {
+    create_private_dir_all(dir)?;
+    let metadata = fs::symlink_metadata(dir)?;
+    let private = metadata.is_dir()
+        && metadata.uid() == geteuid().as_raw()
+        && metadata.permissions().mode() & PERMISSION_BITS == PRIVATE_DIR_MODE;
+    if private {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "the socket directory {} is not a directory private to this user (mode {PRIVATE_DIR_MODE:o}); muster will not listen there",
+            dir.display()
+        ),
+    ))
 }
 
 /// Creates `dir` and any missing parents owner-only. An existing directory is
@@ -80,12 +136,12 @@ pub fn prepare_state_dir(state_dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use tempfile::TempDir;
 
     use super::*;
 
-    /// Mode bits a permission check compares.
-    const PERMISSION_BITS: u32 = 0o777;
     /// A directory mode other users can enter.
     const SHARED_DIR_MODE: u32 = 0o755;
     /// A directory root owns.
@@ -122,6 +178,41 @@ mod tests {
         prepare_state_dir(&state_dir).unwrap();
 
         assert_eq!(mode_of(&state_dir), PRIVATE_DIR_MODE);
+    }
+
+    /// A socket directory the service creates is private to its owner.
+    #[test]
+    fn a_created_socket_dir_is_private() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path().join("run/muster");
+
+        prepare_socket_dir(&dir).unwrap();
+
+        assert_eq!(mode_of(&dir), PRIVATE_DIR_MODE);
+    }
+
+    /// An existing socket directory other users can enter, or a link in its
+    /// place, is refused rather than narrowed or followed.
+    #[test]
+    fn a_socket_dir_that_is_not_private_is_refused() {
+        let scratch = TempDir::new().unwrap();
+        let shared = scratch.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+        let private = scratch.path().join("private");
+        fs::create_dir(&private).unwrap();
+        let link = scratch.path().join("link");
+        symlink(&private, &link).unwrap();
+
+        for dir in [&shared, &link] {
+            let error = prepare_socket_dir(dir).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(
+                error.to_string().contains(&*dir.to_string_lossy()),
+                "{error}"
+            );
+        }
+        assert_eq!(mode_of(&shared), SHARED_DIR_MODE);
     }
 
     /// A state directory another user owns is refused, naming it, and left

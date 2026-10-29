@@ -25,15 +25,17 @@ pub enum ClientError {
     /// muster has no state directory to find the service in.
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
-    /// A socket under the state directory would not fit in a Unix socket
-    /// address, so no service could listen there.
+    /// A socket the service or a holder would bind does not fit in a Unix
+    /// socket address, so no service could listen there.
     #[error(
-        "the socket path {} is too long for a Unix socket; set XDG_STATE_HOME to a shorter folder",
+        "the socket path {} is too long for a Unix socket; set {variable} to a shorter folder",
         socket.display()
     )]
     SocketPathTooLong {
-        /// The longest socket path muster would bind.
+        /// The socket path that does not fit.
         socket: PathBuf,
+        /// The variable whose folder holds it.
+        variable: &'static str,
     },
     /// The service could not be started, or did not answer.
     #[error("{}", unavailable(reason, log, tail))]

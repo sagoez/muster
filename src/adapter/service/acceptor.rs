@@ -1,11 +1,10 @@
 use std::{
-    fs::{self, DirBuilder, Permissions},
+    fs::{self, Permissions},
     os::unix::{
-        fs::{DirBuilderExt, PermissionsExt},
+        fs::PermissionsExt,
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    process,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,21 +15,19 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use serde_json::Value;
-use uuid::Uuid;
 
 use super::{
-    event::ServiceEvent, service_error::ServiceError, service_error_body::ServiceErrorBody,
-    service_error_kind::ServiceErrorKind, service_request::ServiceRequest,
-    service_response::ServiceResponse,
+    event::ServiceEvent, protocol, service_error::ServiceError,
+    service_error_body::ServiceErrorBody, service_error_kind::ServiceErrorKind,
+    service_request::ServiceRequest, service_response::ServiceResponse,
 };
-use crate::adapter::ipc;
+use crate::adapter::{
+    ipc::{self, fits_a_socket},
+    private_dir::prepare_socket_dir,
+};
 
-/// Mode of the directory a socket is bound in before it is moved into place.
-const STAGING_DIR_MODE: u32 = 0o700;
 /// Mode of the service socket: only its owner may connect.
 const SOCKET_MODE: u32 = 0o600;
-/// Prefix of the private directory a socket is bound in.
-const STAGING_PREFIX: &str = ".service-";
 /// Longest the service waits, as it exits, for connections still writing
 /// their answers.
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -103,36 +100,37 @@ fn busy() -> ServiceResponse {
     )
 }
 
-/// Binds the service socket in a fresh private directory, makes it
-/// owner-only, then moves it into place, so it is never reachable by another
-/// user, even for a moment. A socket already at `socket` is stale: the service
-/// lock proves no other service runs.
+/// Binds the service socket at a fresh short name in its directory, which
+/// must be private to this user, makes it owner-only, then moves it into
+/// place, so it is never reachable by another user, even for a moment. A
+/// socket already at `socket` is stale: the service lock proves no other
+/// service runs.
 ///
 /// # Errors
-/// Returns [`ServiceError::Bind`] when any step fails.
+/// Returns [`ServiceError::SocketPathTooLong`] naming the first path bound or
+/// connected to that does not fit a Unix socket address, or
+/// [`ServiceError::Bind`] when any step fails.
 fn bind_private(socket: &Path) -> Result<UnixListener, ServiceError> {
     let bind_error = |source| ServiceError::Bind {
         path: socket.to_path_buf(),
         source,
     };
-    let parent = socket.parent().unwrap_or(Path::new("."));
-    let staging = parent.join(format!(
-        "{STAGING_PREFIX}{}-{}",
-        process::id(),
-        Uuid::new_v4().simple()
-    ));
-    DirBuilder::new()
-        .mode(STAGING_DIR_MODE)
-        .create(&staging)
-        .map_err(bind_error)?;
-    let staged = staging.join(socket.file_name().unwrap_or(socket.as_os_str()));
+    prepare_socket_dir(socket.parent().unwrap_or(Path::new("."))).map_err(bind_error)?;
+    let staged = protocol::staging_socket(socket);
+    if let Some(path) = [&staged, socket]
+        .into_iter()
+        .find(|path| !fits_a_socket(path))
+    {
+        return Err(ServiceError::SocketPathTooLong {
+            path: path.to_path_buf(),
+        });
+    }
     let moved = ipc::bind(&staged).and_then(|listener| {
         fs::set_permissions(&staged, Permissions::from_mode(SOCKET_MODE))?;
         fs::rename(&staged, socket)?;
         Ok(listener)
     });
     ipc::unlink(&staged);
-    let _ = fs::remove_dir(&staging);
     moved.map_err(bind_error)
 }
 
@@ -202,10 +200,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::test_scratch::short_scratch;
+    use crate::adapter::{private_dir::RUNTIME_DIR_ENV, test_scratch::short_scratch};
 
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "ma-";
+    /// Bytes of a Unix socket address's path on macOS, the smaller of the
+    /// platforms, its terminating zero included.
+    const SUN_PATH_BYTES: usize = 104;
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
 
@@ -219,7 +220,9 @@ mod tests {
     #[test]
     fn the_service_socket_is_private_and_replaces_a_stale_one() {
         let scratch = scratch();
-        let socket = scratch.path().join("service.sock");
+        let dir = scratch.path().join("run");
+        prepare_socket_dir(&dir).unwrap();
+        let socket = dir.join("service.sock");
         drop(UnixListener::bind(&socket).unwrap());
         let (events, _received) = unbounded();
 
@@ -228,13 +231,58 @@ mod tests {
         let mode = fs::metadata(&socket).unwrap().permissions().mode() & PERMISSION_BITS;
         assert_eq!(mode, SOCKET_MODE);
         assert!(UnixStream::connect(&socket).is_ok());
-        let leftovers: Vec<_> = fs::read_dir(scratch.path())
+        let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(leftovers, vec!["service.sock"], "no staging dir is left");
+        assert_eq!(leftovers, vec!["service.sock"], "no staging file is left");
         acceptor.close();
         assert!(!socket.exists());
+    }
+
+    /// A socket that fits is bound, however little room it leaves: the name
+    /// first bound is no longer than the socket's own.
+    #[test]
+    fn a_socket_that_barely_fits_is_bound() {
+        let scratch = scratch();
+        let name = "service.sock";
+        let room = SUN_PATH_BYTES - 1 - scratch.path().as_os_str().len() - 2 - name.len();
+        let dir = scratch.path().join("d".repeat(room));
+        let socket = dir.join(name);
+        assert!(fits_a_socket(&socket));
+        let (events, _received) = unbounded();
+
+        let mut acceptor = Acceptor::bind(&socket, events).unwrap();
+
+        assert!(UnixStream::connect(&socket).is_ok());
+        acceptor.close();
+    }
+
+    /// A socket too long for a Unix socket address is refused naming the
+    /// path and what to change, before anything is bound.
+    #[test]
+    fn a_socket_too_long_is_refused_naming_it() {
+        let scratch = scratch();
+        let socket = scratch
+            .path()
+            .join("d".repeat(SUN_PATH_BYTES))
+            .join("s.sock");
+        let (events, _received) = unbounded();
+
+        let Err(error) = Acceptor::bind(&socket, events) else {
+            panic!("a socket too long was bound");
+        };
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, ServiceError::SocketPathTooLong { .. }),
+            "{message}"
+        );
+        assert!(message.contains(RUNTIME_DIR_ENV), "{message}");
+        assert!(
+            message.contains(&*scratch.path().to_string_lossy()),
+            "{message}"
+        );
     }
 
     /// A request the loop drops unanswered, as it exits, is told the service
@@ -260,7 +308,7 @@ mod tests {
     #[test]
     fn an_unreadable_request_is_answered_with_why() {
         let scratch = scratch();
-        let socket = scratch.path().join("service.sock");
+        let socket = scratch.path().join("run/service.sock");
         let (events, _received) = unbounded();
         let mut acceptor = Acceptor::bind(&socket, events).unwrap();
 

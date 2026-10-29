@@ -125,8 +125,9 @@ impl Fixture {
     /// Starts a service over `pool` and waits until it accepts clients.
     pub(super) fn start(&self, pool: Arc<dyn HolderPool>) -> Running {
         let state_dir = self.state_dir();
-        let socket = protocol::socket_path(&state_dir);
+        let socket = protocol::socket_path(&self.scratch.path().join("run"), &state_dir);
         let store = self.store.clone();
+        let bound = socket.clone();
         let thread = thread::spawn(move || {
             let Some(singleton) = Singleton::acquire(&state_dir)? else {
                 return Ok(());
@@ -134,6 +135,7 @@ impl Fixture {
             let deps = ServiceDeps::builder()
                 .version(VERSION.parse().unwrap())
                 .binary(PathBuf::from(TEST_BINARY))
+                .socket(bound)
                 .holders(pool)
                 .ports(Box::new(TestPorts))
                 .metrics(None)

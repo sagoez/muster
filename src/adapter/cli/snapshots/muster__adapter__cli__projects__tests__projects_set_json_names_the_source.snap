@@ -1,10 +1,11 @@
 ---
 source: src/adapter/cli/projects.rs
+assertion_line: 562
 expression: "serde_json::to_string_pretty(&views).unwrap()"
 ---
 [
   {
-    "idle_stop": "10m",
+    "idle_stop": 600,
     "project": {
       "name": "shop",
       "root": "/home/me/shop"
@@ -12,7 +13,7 @@ expression: "serde_json::to_string_pretty(&views).unwrap()"
     "source": "project"
   },
   {
-    "idle_stop": "never",
+    "idle_stop": null,
     "project": {
       "name": "shop",
       "root": "/home/me/shop"
@@ -20,7 +21,7 @@ expression: "serde_json::to_string_pretty(&views).unwrap()"
     "source": "project"
   },
   {
-    "idle_stop": "30m",
+    "idle_stop": 1800,
     "project": {
       "name": "shop",
       "root": "/home/me/shop"

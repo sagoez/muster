@@ -1,6 +1,6 @@
 ---
 source: src/adapter/mcp/stack_tools.rs
-assertion_line: 314
+assertion_line: 321
 expression: occupied
 ---
 {
@@ -11,7 +11,7 @@ expression: occupied
   "you": "test",
   "occupancy": {
     "shells": 2,
-    "idle_stop": "30m"
+    "idle_stop": 1800
   },
   "processes": [],
   "notices": [],

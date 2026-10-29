@@ -12,8 +12,8 @@ pub struct IdleStopView {
     /// The project.
     #[getset(get = "pub")]
     project: ProjectIdentityView,
-    /// The idle stop in effect.
-    #[serde(with = "crate::adapter::wire::form")]
+    /// The idle stop in effect: whole seconds in JSON, or null for never.
+    #[serde(with = "crate::adapter::client::idle_stop_seconds")]
     #[getset(get_copy = "pub")]
     idle_stop: IdleStop,
     /// Where it comes from.

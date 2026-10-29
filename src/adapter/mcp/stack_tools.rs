@@ -51,8 +51,8 @@ impl MusterMcp {
             ports, urls, run_start, cpu_percent, memory_bytes, last_exit: {status, signal, \
             reason, at}, blocked_on: {port, holder, hint}}], notices, locks, events_cursor, \
             alerts}; a field with no value is left out. occupancy counts the user's shells in \
-            the project; with none, the project is stopped idle_stop after the last one left, \
-            stops_in_s from now. blocked_on names the first declared or readiness port that \
+            the project; with none, the project is stopped idle_stop seconds after the last \
+            one left (null idle_stop: never), stops_in_s from now. blocked_on names the first declared or readiness port that \
             was held when its start was refused. Pass run_start as since to process_logs to \
             read only the current run."
     )]

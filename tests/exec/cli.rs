@@ -1705,7 +1705,7 @@ fn a_start_on_a_held_port_says_why() {
     let (_, statuses) = scratch.json_on(&project, &["ps"]);
     assert_eq!(statuses[0]["occupancy"]["shells"], 0, "{statuses}");
     assert_eq!(
-        statuses[0]["occupancy"]["idle_stop"], "30m",
+        statuses[0]["occupancy"]["idle_stop"], 1800,
         "the seeded setting: {statuses}"
     );
     let listed = stdout(&scratch.on(&project, &["ps"]));
@@ -4754,16 +4754,25 @@ fn projects_set_gives_a_project_its_own_idle_stop() {
 
     let (set, own) = scratch.json_on(&shop, &["projects", "set", "--idle-stop", "10m"]);
     assert!(set.status.success(), "{}", shown(&set));
-    assert_eq!(own["idle_stop"], "10m", "{own}");
+    assert_eq!(own["idle_stop"], 600, "{own}");
     assert_eq!(own["source"], "project", "{own}");
     let (_, listed) = scratch.json(&["projects"]);
-    assert_eq!(listed[0]["idle_stop"], "10m", "{listed}");
+    assert_eq!(listed[0]["idle_stop"], 600, "{listed}");
+    assert_eq!(listed[0]["source"], "project", "{listed}");
 
-    let (_, inherited) = scratch.json(&["projects", "set", "shop", "--idle-stop", "default"]);
-    assert_eq!(inherited["idle_stop"], "30m", "{inherited}");
-    assert_eq!(inherited["source"], "setting", "{inherited}");
+    let (_, never) = scratch.json(&["projects", "set", "shop", "--idle-stop", "never"]);
+    assert_eq!(never["idle_stop"], Value::Null, "{never}");
+    assert_eq!(never["source"], "project", "{never}");
     let (_, listed) = scratch.json(&["projects"]);
     assert_eq!(listed[0]["idle_stop"], Value::Null, "{listed}");
+    assert_eq!(listed[0]["source"], "project", "{listed}");
+
+    let (_, inherited) = scratch.json(&["projects", "set", "shop", "--idle-stop", "default"]);
+    assert_eq!(inherited["idle_stop"], 1800, "{inherited}");
+    assert_eq!(inherited["source"], "setting", "{inherited}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], 1800, "{listed}");
+    assert_eq!(listed[0]["source"], "setting", "{listed}");
 
     let invalid = scratch.on(&shop, &["projects", "set", "--idle-stop", "soon"]);
     assert_eq!(

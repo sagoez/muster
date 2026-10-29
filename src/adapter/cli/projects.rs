@@ -88,17 +88,24 @@ pub struct ProjectListing {
     /// Whether it contains the current folder.
     #[getset(get_copy = "pub")]
     current: bool,
-    /// Its own idle stop, or none when it follows the setting.
-    #[serde(with = "crate::adapter::wire::optional_form")]
+    /// The idle stop in effect, its own or the setting's: whole seconds in
+    /// JSON, or null for never or when its stored row does not read.
+    #[serde(serialize_with = "crate::adapter::client::idle_stop_seconds::serialize_optional")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     idle_stop: Option<IdleStop>,
+    /// Where its idle stop comes from, or none when its stored row does not
+    /// read.
+    #[builder(default)]
+    #[getset(get_copy = "pub")]
+    source: Option<IdleStopSource>,
 }
 
 /// Every registered project, the one containing `cwd` marked current, then
 /// every project whose stored row does not read, by folder. A project whose
 /// row or processes do not read is listed with the reason, so one corrupt
-/// row never hides the others.
+/// row never hides the others. Each readable project carries the idle stop
+/// in effect and its source.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be read.
@@ -108,11 +115,16 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
         Err(ConfigError::CorruptRow { .. }) => None,
         Err(error) => return Err(error.into()),
     };
+    let setting = *store.load()?.idle_stop();
     let readable = store.projects()?.into_iter().map(|project| {
         let (processes, invalid) = match store.stack(project.root()) {
             Ok(stack) => (Some(stack.map_or(0, |stack| stack.processes().len())), None),
             Err(error @ ConfigError::CorruptRow { .. }) => (None, Some(error.to_string())),
             Err(error) => return Err(error.into()),
+        };
+        let (idle_stop, source) = match project.idle_stop() {
+            Some(own) => (*own, IdleStopSource::Project),
+            None => (setting, IdleStopSource::Setting),
         };
         Ok(ProjectListing::builder()
             .current(current.as_ref() == Some(&project))
@@ -120,7 +132,8 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
             .root(project.root().as_ref().clone())
             .processes(processes)
             .invalid(invalid)
-            .idle_stop(*project.idle_stop())
+            .idle_stop(Some(idle_stop))
+            .source(Some(source))
             .build())
     });
     let unreadable = store.unreadable_projects()?.into_iter().map(|project| {
@@ -160,10 +173,12 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
                     .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
                 printable(&listing.root().to_string_lossy()),
                 contents,
-                listing
-                    .idle_stop()
-                    .map(|idle_stop| format!("{IDLE_STOP_LABEL} {idle_stop}"))
-                    .unwrap_or_default(),
+                match (listing.source(), listing.idle_stop()) {
+                    (Some(IdleStopSource::Project), Some(own)) => {
+                        format!("{IDLE_STOP_LABEL} {own}")
+                    },
+                    _ => String::new(),
+                },
             ]
         })
         .collect();
@@ -341,13 +356,16 @@ mod tests {
         },
     };
 
-    /// A listing of `name` at `root` with `processes`, `current` or not.
+    /// A listing of `name` at `root` with `processes`, `current` or not,
+    /// following a 30 minute idle-stop setting.
     fn listing(name: &str, root: &str, processes: usize, current: bool) -> ProjectListing {
         ProjectListing::builder()
             .name(Some(ProjectName::try_new(name).unwrap()))
             .root(PathBuf::from(root))
             .processes(Some(processes))
             .current(current)
+            .idle_stop(Some(idle("30m")))
+            .source(Some(IdleStopSource::Setting))
             .build()
     }
 
@@ -373,7 +391,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(broken).unwrap(),
-            serde_json::json!({"name": null, "root": "/srv/odd", "processes": null, "current": false, "invalid": "its name is refused", "idle_stop": null})
+            serde_json::json!({"name": null, "root": "/srv/odd", "processes": null, "current": false, "invalid": "its name is refused", "idle_stop": null, "source": null})
         );
     }
 
@@ -398,7 +416,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(broken).unwrap(),
-            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid", "idle_stop": null})
+            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid", "idle_stop": null, "source": null})
         );
     }
 
@@ -418,13 +436,25 @@ mod tests {
         assert!(plain(&list_rows(&[])).contains("muster add"));
     }
 
-    /// The JSON names, roots, counts and marks each project, with its own
-    /// idle stop or null when it follows the setting.
+    /// The JSON names, roots, counts and marks each project, with the idle
+    /// stop in effect in whole seconds, null for never, and its source.
     #[test]
     fn a_listing_reads_as_json() {
         assert_eq!(
             serde_json::to_value(listing("shop", "/home/me/shop", 3, true)).unwrap(),
-            serde_json::json!({"name": "shop", "root": "/home/me/shop", "processes": 3, "current": true, "idle_stop": null})
+            serde_json::json!({"name": "shop", "root": "/home/me/shop", "processes": 3, "current": true, "idle_stop": 1800, "source": "setting"})
+        );
+        let never = ProjectListing::builder()
+            .name(Some(ProjectName::try_new("blog").unwrap()))
+            .root(PathBuf::from("/srv/blog"))
+            .processes(Some(1))
+            .current(false)
+            .idle_stop(Some(IdleStop::Never))
+            .source(Some(IdleStopSource::Project))
+            .build();
+        assert_eq!(
+            serde_json::to_value(never).unwrap(),
+            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": 1, "current": false, "idle_stop": null, "source": "project"})
         );
     }
 
@@ -533,7 +563,8 @@ mod tests {
     }
 
     /// `muster projects` lists a project's own idle stop, and nothing for one
-    /// following the setting.
+    /// following the setting; its JSON gives each the idle stop in effect
+    /// and where it comes from.
     #[test]
     fn projects_lists_the_override() {
         let (store, project, scratch) = shop_store();
@@ -547,17 +578,33 @@ mod tests {
 
         let listings = list(&store, scratch.path()).unwrap();
 
-        let own: Vec<Option<IdleStop>> = listings.iter().map(ProjectListing::idle_stop).collect();
-        assert_eq!(own, vec![None, Some(idle("10m"))]);
+        let in_effect: Vec<(Option<IdleStop>, Option<IdleStopSource>)> = listings
+            .iter()
+            .map(|listing| (listing.idle_stop(), listing.source()))
+            .collect();
+        assert_eq!(in_effect, vec![
+            (
+                Some(*store.load().unwrap().idle_stop()),
+                Some(IdleStopSource::Setting)
+            ),
+            (Some(idle("10m")), Some(IdleStopSource::Project))
+        ]);
         let rows = plain(&list_rows(&listings));
         assert!(rows.ends_with("1 process  idle-stop 10m"), "{rows}");
         assert!(
             !rows.lines().next().unwrap().contains("idle-stop"),
             "{rows}"
         );
-        assert_eq!(
-            serde_json::to_value(&listings[1]).unwrap()["idle_stop"],
-            serde_json::json!("10m")
-        );
+        let json: Vec<serde_json::Value> = listings
+            .iter()
+            .map(|listing| {
+                let json = serde_json::to_value(listing).unwrap();
+                serde_json::json!([json["idle_stop"], json["source"]])
+            })
+            .collect();
+        assert_eq!(json, [
+            serde_json::json!([1800, "setting"]),
+            serde_json::json!([600, "project"])
+        ]);
     }
 }

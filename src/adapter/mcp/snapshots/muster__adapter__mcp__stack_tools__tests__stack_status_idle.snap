@@ -1,6 +1,6 @@
 ---
 source: src/adapter/mcp/stack_tools.rs
-assertion_line: 315
+assertion_line: 322
 expression: pending
 ---
 {
@@ -11,7 +11,7 @@ expression: pending
   "you": "test",
   "occupancy": {
     "shells": 0,
-    "idle_stop": "30m",
+    "idle_stop": 1800,
     "stops_in_s": 1734
   },
   "processes": [],

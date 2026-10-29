@@ -50,8 +50,8 @@ Exit codes:
   130  interrupted with Ctrl-C while it waited at a terminal
 
 With --json, results and failures print as JSON on stdout. Object keys are
-snake_case, enum values are kebab-case, durations are seconds, and times are
-RFC 3339 in UTC.";
+snake_case, enum values are kebab-case, durations are seconds (an idle_stop
+that never comes is null), and times are RFC 3339 in UTC.";
 
 /// What `muster logs --lines` takes, followed by its maximum.
 const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";

@@ -393,10 +393,13 @@ shell that kept your home, reports nothing.
 `idle-stop` is `30m` by default: `muster config set idle-stop 30m` or `never`
 changes it for every project, and `muster projects set --idle-stop 10m` gives
 one project its own value (`never` included). `muster projects set --idle-stop
-default` makes it follow the setting again. `muster doctor` has a `shell hook`
-check: it is ok when the shell it was run from, directly or through a wrapper
-such as `env` or `timeout`, loaded the hook, and otherwise warns with the line
-to add for `$SHELL`.
+default` makes it follow the setting again. With `--json`, `muster projects`
+and `muster projects set` give each project the `idle_stop` in effect, in
+whole seconds or null for `never`, and its `source`: `project` for its own
+value or `setting` when it follows the setting. `muster doctor` has a `shell
+hook` check: it is ok when the shell it was run from, directly or through a
+wrapper such as `env` or `timeout`, loaded the hook, and otherwise warns with
+the line to add for `$SHELL`.
 
 ### Ports
 
@@ -415,7 +418,8 @@ which need not be the declared ones. With `--json` a process carries `ports`
 (listening) and `blocked_on` (`{"port", "holder"}`, where `holder` is
 `{"kind": "supervised", "project", "process"}` or `{"kind": "other", "pid",
 "command"}`), and a project carries `occupancy`: `{"shells", "idle_stop",
-"stops_in"}`, with `stops_in` in whole seconds or null.
+"stops_in"}`, with `idle_stop` in whole seconds or null for `never`, and
+`stops_in` in whole seconds or null.
 
 ## Attach
 
@@ -568,8 +572,9 @@ Cursors are offsets in a process's output that run on across restarts, so
 process's readiness, the ports its process tree listens on, its URLs, how it
 last exited and why, and `blocked_on` when its start was refused because
 another process holds a declared or readiness port (the first one held). It
-also carries `occupancy`: `{shells, idle_stop, stops_in_s}`, with `stops_in_s`
-in whole seconds, left out when no stop is pending. `stack_events` lists an
+also carries `occupancy`: `{shells, idle_stop, stops_in_s}`, with `idle_stop`
+in whole seconds or null for `never`, and `stops_in_s` in whole seconds, left
+out when no stop is pending. `stack_events` lists an
 `idle-stopped` event when a project with no shell in it was stopped.
 
 Event cursors, such as `e:3141592:9921`, name the service that numbered them.

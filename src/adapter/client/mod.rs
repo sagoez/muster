@@ -18,6 +18,7 @@ mod failure_view;
 pub(crate) mod fake_service;
 #[cfg(test)]
 pub(crate) mod fixed_projects;
+pub mod idle_stop_seconds;
 mod listed_value;
 mod lock_view;
 mod log_read;

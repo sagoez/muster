@@ -12,9 +12,9 @@ use crate::{adapter::service::OccupancyStatus, domain::value::IdleStop};
 pub struct OccupancyView {
     /// Live shells whose folder is in the project.
     shells: u32,
-    /// How long it keeps running with no shell in it, such as `30m` or
-    /// `never`.
-    #[serde(with = "crate::adapter::wire::form")]
+    /// How long it keeps running with no shell in it: whole seconds in JSON,
+    /// or null for never.
+    #[serde(with = "super::idle_stop_seconds")]
     idle_stop: IdleStop,
     /// Whole seconds, rounded up, until the pending idle stop; none when
     /// none is pending.
@@ -63,7 +63,22 @@ mod tests {
         assert_eq!(OccupancyView::from(&left(None)).stops_in(), None);
         assert_eq!(
             serde_json::to_value(view(1_733_400)).unwrap(),
-            json!({"shells": 0, "idle_stop": "30m", "stops_in": 1734})
+            json!({"shells": 0, "idle_stop": 1800, "stops_in": 1734})
+        );
+    }
+
+    /// An idle stop that never comes is null in JSON.
+    #[test]
+    fn a_never_idle_stop_is_null() {
+        let never = OccupancyStatus::builder()
+            .shells(1)
+            .idle_stop(IdleStop::Never)
+            .stops_in(None)
+            .build();
+
+        assert_eq!(
+            serde_json::to_value(OccupancyView::from(&never)).unwrap(),
+            json!({"shells": 1, "idle_stop": null, "stops_in": null})
         );
     }
 }

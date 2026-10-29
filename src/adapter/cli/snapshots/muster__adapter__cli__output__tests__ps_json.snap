@@ -1,5 +1,6 @@
 ---
 source: src/adapter/cli/output.rs
+assertion_line: 1204
 expression: json(&views).unwrap()
 ---
 [
@@ -10,7 +11,7 @@ expression: json(&views).unwrap()
     },
     "occupancy": {
       "shells": 2,
-      "idle_stop": "30m",
+      "idle_stop": 1800,
       "stops_in": null
     },
     "processes": [

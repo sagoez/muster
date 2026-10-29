@@ -4,6 +4,7 @@
 use std::{
     cmp::Ordering,
     io,
+    path::Path,
     time::{Duration, SystemTime},
 };
 
@@ -34,7 +35,7 @@ use crate::{
         process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
-        value::{ProcessName, ProjectName, ProjectRoot},
+        value::{ProcessName, ProjectName},
     },
 };
 
@@ -391,10 +392,10 @@ pub fn project_title(command: &str, project: &ProjectName) -> String {
 
 /// `muster <command> · <folder>`, for a project known only by its folder,
 /// the folder made printable.
-pub fn folder_title(command: &str, root: &ProjectRoot) -> String {
+pub fn folder_title(command: &str, root: &Path) -> String {
     format!(
         "{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{}",
-        printable(&root.as_ref().to_string_lossy())
+        printable(&root.to_string_lossy())
     )
 }
 

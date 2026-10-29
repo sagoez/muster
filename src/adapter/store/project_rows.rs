@@ -285,6 +285,27 @@ impl ProjectStore for SqliteStore {
             Ok(removed > 0)
         })
     }
+
+    fn remove_unreadable_project(&self, stored: &Path) -> Result<bool, ConfigError> {
+        let Some(text) = stored.to_str() else {
+            return Ok(false);
+        };
+        self.write(|conn| {
+            let still_unreadable =
+                stored_where(conn, &format!("{SELECT_PROJECT} WHERE root = ?1"), params![
+                    text
+                ])?
+                .iter()
+                .any(Result::is_err);
+            if !still_unreadable {
+                return Ok(false);
+            }
+            let removed = conn
+                .execute("DELETE FROM projects WHERE root = ?1", params![text])
+                .map_err(db_error)?;
+            Ok(removed > 0)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +436,42 @@ mod tests {
                 &Author::human(),
             )
             .unwrap();
+    }
+
+    /// A row whose stored root is not absolute is listed under that text and
+    /// removed by it, with its processes; a readable project is never removed
+    /// that way.
+    #[test]
+    fn an_unreadable_row_is_removed_by_the_text_it_is_listed_under() {
+        let (store, scratch) = fresh_store();
+        let shop = folder(&scratch, "shop");
+        let blog = folder(&scratch, "blog");
+        for root in [&shop, &blog] {
+            store
+                .add_process(root, &spec("web", "true"), &Author::human())
+                .unwrap();
+        }
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE projects SET root = 'relative/blog' WHERE name = 'blog'",
+                    [],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        let unreadable = store.unreadable_projects().unwrap();
+        assert_eq!(unreadable.len(), 1);
+        let stored = unreadable[0].root().clone();
+        assert_eq!(stored, PathBuf::from("relative/blog"));
+
+        assert!(!store.remove_unreadable_project(shop.as_ref()).unwrap());
+        assert!(store.remove_unreadable_project(&stored).unwrap());
+        assert!(!store.remove_unreadable_project(&stored).unwrap());
+        assert!(store.unreadable_projects().unwrap().is_empty());
+        assert_eq!(rows_in(&store, "processes"), 1);
+        assert!(store.project_at(&shop).unwrap().is_some());
     }
 
     /// A project row whose name the domain refuses is left out of the

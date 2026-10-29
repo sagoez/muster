@@ -198,8 +198,9 @@ pub fn remove(
         .build())
 }
 
-/// The folder of the project whose stored row does not read that `named`,
-/// a folder given against `cwd`, names; none when no such project is there.
+/// The stored root of the project whose row does not read that `named`
+/// names, either as the exact text it is listed under or as a folder given
+/// against `cwd`; none when no such project is there.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be read.
@@ -207,32 +208,36 @@ pub fn unreadable_named(
     store: &dyn LocalState,
     named: &str,
     cwd: &Path,
-) -> Result<Option<ProjectRoot>, CliError> {
-    let path = cwd.join(expand_home(Path::new(named)));
+) -> Result<Option<PathBuf>, CliError> {
+    let typed = Path::new(named);
+    let path = cwd.join(expand_home(typed));
     let resolved = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
     Ok(store
         .unreadable_projects()?
         .into_iter()
-        .find(|project| project.root() == &path || project.root() == &resolved)
-        .and_then(|project| ProjectRoot::try_new(project.root().clone()).ok()))
+        .map(|project| project.root().clone())
+        .find(|stored| stored == typed || stored == &path || stored == &resolved))
 }
 
-/// Forgets the project at `root`, whose stored row does not read, with its
-/// processes, environment and coordination state, and tells the service. No
-/// service could load it, so nothing of it runs to stop first.
+/// Forgets the project stored at `stored`, whose row does not read, with its
+/// processes, environment and coordination state, and tells the service when
+/// `stored` is a folder it could know. No service could load it, so nothing
+/// of it runs to stop first.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be written.
 pub fn remove_unreadable(
     store: &dyn LocalState,
     notifier: &dyn StateChangeNotifier,
-    root: &ProjectRoot,
+    stored: &Path,
 ) -> Result<ProjectRemoval, CliError> {
-    let removed = store.remove_project(root)?;
-    notifier.stack_changed(root);
+    let removed = store.remove_unreadable_project(stored)?;
+    if let Ok(root) = ProjectRoot::try_new(stored.to_path_buf()) {
+        notifier.stack_changed(&root);
+    }
     Ok(ProjectRemoval::builder()
         .name(None)
-        .root(root.as_ref().clone())
+        .root(stored.to_path_buf())
         .removed(removed)
         .stopped(None)
         .build())

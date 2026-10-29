@@ -54,4 +54,8 @@ impl ProjectStore for FixedProjects {
     fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {
         Ok(false)
     }
+
+    fn remove_unreadable_project(&self, _stored: &Path) -> Result<bool, ConfigError> {
+        Ok(false)
+    }
 }

@@ -218,7 +218,7 @@ CLI alone.
 | `muster export [FILE] [--force] [--with-env]` | Write the project's stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
 | `muster init [--yes]` | Detect a stack in the folder and add it |
-| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read and listing by folder any whose own stored row does not, or remove one with its processes and coordination state; a project whose row does not read is removed by its folder, and breaks no other project |
+| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read and listing by folder any whose own stored row does not, or remove one with its processes and coordination state; a project whose row does not read is removed by the folder text it is listed under, even one that is not an absolute path, and breaks no other project |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes a running service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long. `todo` and `kv` list a page of `--limit` entries (50 by default, at most 200) as `todo_list` and `kv_read` do: `todo --cursor <id>` reads on, and a `kv` listing cuts each value to 200 characters |

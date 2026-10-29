@@ -2238,6 +2238,42 @@ fn a_corrupt_project_row_breaks_only_that_project() {
     assert_eq!(projects[0]["name"], "shop");
 }
 
+/// A project row whose stored root is not absolute is listed under that text
+/// and `projects rm` with the same text forgets it, leaving the others.
+#[test]
+fn a_project_row_with_a_relative_root_is_removed_by_its_listed_text() {
+    let scratch = Scratch::new();
+    scratch.project("shop", &single());
+    scratch.project("blog", &single());
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE projects SET root = 'relative/blog' WHERE name = 'blog'",
+            [],
+        )
+        .unwrap();
+
+    let (_, projects) = scratch.json(&["projects"]);
+    let listed = projects
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"].is_null())
+        .unwrap_or_else(|| panic!("no unreadable row: {projects}"))["root"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(listed, "relative/blog", "{projects}");
+
+    let (rm, removal) = scratch.json(&["projects", "rm", &listed, "--yes"]);
+    assert!(rm.status.success(), "{}", shown(&rm));
+    assert_eq!(removal["removed"], true, "{removal}");
+    assert_eq!(removal["root"], "relative/blog", "{removal}");
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects.as_array().unwrap().len(), 1, "{projects}");
+    assert_eq!(projects[0]["name"], "shop");
+}
+
 /// A setting or field past its bound is refused as invalid input, never as a
 /// database error, and changes nothing; `config set` answers with the value
 /// the database holds.

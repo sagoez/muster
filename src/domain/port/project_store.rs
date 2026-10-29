@@ -49,4 +49,13 @@ pub trait ProjectStore {
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be written.
     fn remove_project(&self, root: &ProjectRoot) -> Result<bool, ConfigError>;
+
+    /// Deletes the project stored at exactly `stored`, as
+    /// [`ProjectStore::unreadable_projects`] lists it, with its processes and
+    /// coordination, only while its row still does not read; that covers a
+    /// root no [`ProjectRoot`] holds. Returns whether it was deleted.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be written.
+    fn remove_unreadable_project(&self, stored: &Path) -> Result<bool, ConfigError>;
 }

@@ -4,6 +4,7 @@
 
 mod action;
 mod action_report;
+mod asked;
 mod client_error;
 mod condition_view;
 mod definition_view;
@@ -71,6 +72,7 @@ mod working_dir_place;
 
 pub use action::*;
 pub use action_report::*;
+pub use asked::*;
 pub use client_error::*;
 pub use condition_view::*;
 pub use definition_view::*;

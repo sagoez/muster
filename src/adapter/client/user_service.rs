@@ -1,9 +1,9 @@
 use super::{
-    client_error::ClientError, service_access::ServiceAccess, service_client::ServiceClient,
-    service_status::ServiceStatus,
+    asked::Asked, client_error::ClientError, service_access::ServiceAccess,
+    service_client::ServiceClient, service_status::ServiceStatus,
 };
 use crate::{
-    adapter::service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
+    adapter::service::{Notice, ProjectStatus, ServiceRequest},
     domain::value::ProjectRoot,
 };
 
@@ -36,10 +36,7 @@ impl ServiceAccess for UserService {
         ServiceClient::notify_if_running(request);
     }
 
-    fn ask_if_running(
-        &self,
-        request: &ServiceRequest,
-    ) -> Result<Option<ServiceResponse>, ClientError> {
+    fn ask_if_running(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
         ServiceClient::ask_if_running(request)
     }
 }

@@ -11,7 +11,7 @@ use std::{
 };
 
 use super::{
-    client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
+    asked::Asked, client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
     running_service::RunningService, service_log::ServiceLog, service_start::ServiceStart,
     service_status::ServiceStatus, socket_dir_check::SocketDirCheck,
     unavailable_reason::UnavailableReason,
@@ -230,40 +230,59 @@ impl ServiceClient {
     }
 
     /// Sends `request` to a running service of this version and returns its
-    /// answer, never starting or replacing one; none when no service runs
-    /// or it runs another version.
+    /// answer, never starting or replacing one; otherwise says whether a
+    /// service of another version runs, one is being started, or none is.
     ///
     /// # Errors
     /// Returns a [`ClientError`] when there is no state directory, or a
     /// service holds the socket but does not answer within
     /// `NOTIFY_TIMEOUT`.
-    pub fn ask_if_running(
-        request: &ServiceRequest,
-    ) -> Result<Option<ServiceResponse>, ClientError> {
+    pub fn ask_if_running(request: &ServiceRequest) -> Result<Asked, ClientError> {
         Self::local()?.ask(request)
     }
 
-    /// [`Self::ask_if_running`] on the socket [`Self::socket`] trusts.
+    /// [`Self::ask_if_running`] on the socket [`Self::socket`] trusts. A
+    /// service that predates the greeting counts as another version, and
+    /// one that is exiting as none.
     ///
     /// # Errors
     /// Returns a [`ClientError`] when the socket's directory is not private
     /// to this user, or a service holds the socket but does not answer within
     /// [`NOTIFY_TIMEOUT`].
-    fn ask(&self, request: &ServiceRequest) -> Result<Option<ServiceResponse>, ClientError> {
+    fn ask(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
         let ours = ServiceVersion::current();
         let hello = ServiceRequest::Hello {
             version: ours.clone(),
         };
         match self.send_once(&hello, NOTIFY_TIMEOUT) {
             Ok(ServiceResponse::Hello { version, .. }) if version == ours => {},
-            Ok(ServiceResponse::Hello { .. } | ServiceResponse::Error(_)) => return Ok(None),
+            Ok(ServiceResponse::Hello { .. }) => return Ok(Asked::OtherVersion),
+            Ok(ServiceResponse::Error(body))
+                if *body.kind() == ServiceErrorKind::InvalidRequest =>
+            {
+                return Ok(Asked::OtherVersion);
+            },
+            Ok(ServiceResponse::Error(_)) => return Ok(Asked::Absent),
             Ok(other) => return Err(ClientError::UnexpectedAnswer((&other).into())),
-            Err(error) if not_listening(&error) || gone(&error) => return Ok(None),
+            Err(error) if not_listening(&error) || gone(&error) => {
+                return Ok(if self.is_starting() {
+                    Asked::Starting
+                } else {
+                    Asked::Absent
+                });
+            },
             Err(failure) => return Err(io_error(failure)),
         }
         self.send_once(request, NOTIFY_TIMEOUT)
-            .map(Some)
+            .map(Asked::Answered)
             .map_err(io_error)
+    }
+
+    /// Whether another client holds the start lock, so a service is being
+    /// started; the lock file is never created here.
+    fn is_starting(&self) -> bool {
+        File::open(self.state_dir.join(START_LOCK_FILE))
+            .is_ok_and(|lock| matches!(lock.try_lock(), Err(TryLockError::WouldBlock)))
     }
 
     /// The client of the service under this user's state directory, started
@@ -930,11 +949,32 @@ mod tests {
 
         assert!(matches!(
             client.ask(&ServiceRequest::SettingsChanged),
-            Ok(None)
+            Ok(Asked::Absent)
         ));
 
         assert!(!client.own_socket.exists(), "no socket was created");
         assert_eq!(fs::read_dir(&client.state_dir).unwrap().count(), 0);
+    }
+
+    /// Correctness M5: with no service answering while another client holds
+    /// the start lock, asking says one is starting, so a report waits for
+    /// it rather than taking it as absent; once the lock is let go, none is.
+    #[test]
+    fn ask_if_running_tells_a_service_being_started_from_none() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let client = client_in(scratch.path());
+        let starter = client.start_lock().unwrap();
+
+        assert!(matches!(
+            client.ask(&ServiceRequest::SettingsChanged),
+            Ok(Asked::Starting)
+        ));
+
+        drop(starter);
+        assert!(matches!(
+            client.ask(&ServiceRequest::SettingsChanged),
+            Ok(Asked::Absent)
+        ));
     }
 
     /// A running service of this version is asked; one of another version
@@ -948,7 +988,7 @@ mod tests {
             .ask(&ServiceRequest::SettingsChanged)
             .unwrap();
 
-        assert_eq!(answer, Some(notes.clone()));
+        assert_eq!(answer, Asked::Answered(notes.clone()));
         assert!(matches!(ours.asked()[..], [
             ServiceRequest::Hello { .. },
             ServiceRequest::SettingsChanged
@@ -960,7 +1000,7 @@ mod tests {
             .ask(&ServiceRequest::SettingsChanged)
             .unwrap();
 
-        assert_eq!(answer, None);
+        assert_eq!(answer, Asked::OtherVersion);
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 }

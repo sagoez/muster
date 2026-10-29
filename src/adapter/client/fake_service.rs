@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use super::{
+    asked::Asked,
     client_error::ClientError,
     served_service::{Connector, ServedService},
     service_access::ServiceAccess,
@@ -21,7 +22,7 @@ use crate::{
 /// A service a test never reaches unless told to: connecting fails as an
 /// unreachable service would, or reaches the [`ServedService`] it was handed,
 /// and is counted either way; nothing is loaded, notices are answered as
-/// `running` says, a request asked of a running service gets the answer the
+/// `running` says, a request asked of a service that may run gets what the
 /// test scripted, and every request it is told or asked is recorded.
 #[derive(Default)]
 pub(crate) struct FakeService {
@@ -29,9 +30,9 @@ pub(crate) struct FakeService {
     starts: Option<Connector>,
     /// The live notices of a running service, or none when none runs.
     running: Option<Vec<Notice>>,
-    /// What a request asked of a running service is answered, or none when
-    /// no service runs to ask.
-    answer: Option<ServiceResponse>,
+    /// What each ask is answered, in turn, the last one for every ask after
+    /// it; none scripted answers that no service runs.
+    asks: Mutex<Vec<Asked>>,
     /// Every request the service was told, in order.
     told: Mutex<Vec<ServiceRequest>>,
     /// Every request the service was asked, in order.
@@ -52,8 +53,14 @@ impl FakeService {
     /// This service, running, answering every request asked of it with
     /// `answer`.
     pub(crate) fn answering(self, answer: ServiceResponse) -> Self {
+        self.asked_in_turn(vec![Asked::Answered(answer)])
+    }
+
+    /// This service, giving `asks` to the asks made of it in turn, the last
+    /// to every ask after it.
+    pub(crate) fn asked_in_turn(self, asks: Vec<Asked>) -> Self {
         Self {
-            answer: Some(answer),
+            asks: Mutex::new(asks),
             ..self
         }
     }
@@ -111,12 +118,14 @@ impl ServiceAccess for FakeService {
         self.told.lock().unwrap().push(request.clone());
     }
 
-    fn ask_if_running(
-        &self,
-        request: &ServiceRequest,
-    ) -> Result<Option<ServiceResponse>, ClientError> {
+    fn ask_if_running(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
         self.asked.lock().unwrap().push(request.clone());
-        Ok(self.answer.clone())
+        let mut asks = self.asks.lock().unwrap();
+        Ok(match asks.len() {
+            0 => Asked::Absent,
+            1 => asks[0].clone(),
+            _ => asks.remove(0),
+        })
     }
 }
 
@@ -124,21 +133,28 @@ impl ServiceAccess for FakeService {
 mod tests {
     use super::*;
 
-    /// A fake with no answer scripted runs no service; one answering gives
-    /// its answer, and both record what they were asked.
+    /// A fake with nothing scripted runs no service; one answering gives its
+    /// answer every time, one scripted in turn gives each then keeps the
+    /// last, and all record what they were asked.
     #[test]
-    fn a_scripted_answer_is_given_and_every_ask_recorded() {
+    fn scripted_asks_are_given_in_turn_and_every_ask_recorded() {
         let request = ServiceRequest::SettingsChanged;
         let absent = FakeService::default();
         let running = FakeService::default().answering(ServiceResponse::Ok);
+        let starting = FakeService::default().asked_in_turn(vec![Asked::Starting, Asked::Absent]);
 
-        assert_eq!(absent.ask_if_running(&request).unwrap(), None);
-        assert_eq!(
-            running.ask_if_running(&request).unwrap(),
-            Some(ServiceResponse::Ok)
-        );
+        assert_eq!(absent.ask_if_running(&request).unwrap(), Asked::Absent);
+        for _ in 0..2 {
+            assert_eq!(
+                running.ask_if_running(&request).unwrap(),
+                Asked::Answered(ServiceResponse::Ok)
+            );
+        }
+        for expected in [Asked::Starting, Asked::Absent, Asked::Absent] {
+            assert_eq!(starting.ask_if_running(&request).unwrap(), expected);
+        }
         assert_eq!(absent.asked(), vec![request.clone()]);
-        assert_eq!(running.asked(), vec![request]);
+        assert_eq!(running.asked(), vec![request.clone(), request]);
         assert!(running.told().is_empty());
         assert_eq!(running.connects(), 0);
     }

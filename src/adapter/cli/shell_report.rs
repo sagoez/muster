@@ -8,7 +8,7 @@ use std::path::Path;
 use super::{cli_ports::CliPorts, shell_note_text::note_lines, shell_report_skip::ShellReportSkip};
 use crate::{
     adapter::{
-        client::ClientError,
+        client::{Asked, ClientError},
         service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
     },
     domain::{
@@ -18,14 +18,14 @@ use crate::{
 };
 
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
-/// gives, in the folder `cwd`. A running service is always told; with none
-/// running, one is started only when `cwd` is inside a registered project,
-/// and otherwise only the shell's record is kept. The shell's environment
-/// goes along only when the report may enter its project: one registered
-/// around the shell since its last report is not entered. The notes the service
-/// answers are left for the hook, then the record is written; a report that
-/// fails writes neither, so the next prompt reports the same move again. It
-/// never prints.
+/// gives, in the folder `cwd`, sending its environment only when it may
+/// enter its project. A service of this version is told, one of another
+/// version replaced and one being started waited for. With none, one is
+/// started only when `cwd` is in a registered project; otherwise the record
+/// is kept and the service asked again, so one that started meanwhile from
+/// the old records still hears it. The answered notes are left for the
+/// hook, then the record is written; a report that fails writes neither, so
+/// the next prompt reports the same move again. It never prints.
 ///
 /// # Errors
 /// Returns the [`ShellReportSkip`] saying why nothing was written: the state
@@ -73,11 +73,17 @@ pub fn shell_report(
     };
     let service = ports.service();
     let answer = match service.ask_if_running(&request)? {
-        Some(answer) => answer,
-        None if in_project => service.connect()?.send(&request)?,
-        None => {
+        Asked::Answered(answer) => answer,
+        Asked::Absent if !in_project => {
             shells.save_if_newer(&record)?;
-            return Ok(());
+            match service.ask_if_running(&request)? {
+                Asked::Answered(answer) => answer,
+                Asked::Absent => return Ok(()),
+                Asked::OtherVersion | Asked::Starting => service.connect()?.send(&request)?,
+            }
+        },
+        Asked::Absent | Asked::OtherVersion | Asked::Starting => {
+            service.connect()?.send(&request)?
         },
     };
     let ServiceResponse::ShellNotes(notes) = answer else {
@@ -187,7 +193,8 @@ mod tests {
     }
 
     /// Outside every project, with no service running, the service is asked
-    /// whether it runs, never started, and only the record is written.
+    /// whether it runs, before and after the record is written, never
+    /// started, and only the record is written.
     #[test]
     fn outside_any_project_with_no_service_only_the_record_is_written() {
         let (ports, _shop, scratch) = shop_ports(FakeService::default());
@@ -195,7 +202,7 @@ mod tests {
         shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
 
         let service = ports.fake_service();
-        assert_eq!(service.asked().len(), 1);
+        assert_eq!(service.asked().len(), 2);
         assert_eq!(service.connects(), 0);
         assert_eq!(
             record(&ports),
@@ -252,6 +259,61 @@ mod tests {
         assert_eq!(ports.fake_service().connects(), 0);
         assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
         assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(2)));
+    }
+
+    /// CR-4: a leave reported while a service of another version runs
+    /// replaces it, as an entering would, so the new service hears it.
+    #[test]
+    fn a_leave_replaces_a_service_of_another_version() {
+        let served = ServedService::answering(ServiceResponse::ShellNotes(Vec::new()));
+        let (ports, _shop, scratch) = shop_ports(
+            FakeService::default()
+                .asked_in_turn(vec![Asked::OtherVersion])
+                .starting(&served),
+        );
+
+        shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
+
+        assert_eq!(ports.fake_service().connects(), 1);
+        let told = served.asked();
+        assert!(
+            matches!(&told[..], [ServiceRequest::ShellReport { record, .. }]
+                if record.project().is_none()),
+            "{told:?}"
+        );
+        assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(1)));
+    }
+
+    /// Correctness M5: a leave reported while another client starts the
+    /// service waits for it and tells it, whether the start was under way
+    /// when asked or began between the record's write and the second ask.
+    #[test]
+    fn a_leave_while_a_service_starts_is_told_once_it_runs() {
+        let no_notes = ServiceResponse::ShellNotes(Vec::new());
+        for (asks, started) in [
+            (vec![Asked::Starting], 1),
+            (vec![Asked::Absent, Asked::Starting], 1),
+            (vec![Asked::Absent, Asked::Answered(no_notes.clone())], 0),
+        ] {
+            let served = ServedService::answering(no_notes.clone());
+            let (ports, _shop, scratch) = shop_ports(
+                FakeService::default()
+                    .asked_in_turn(asks.clone())
+                    .starting(&served),
+            );
+
+            shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
+
+            let service = ports.fake_service();
+            assert_eq!(service.asked().len(), asks.len(), "{asks:?}");
+            assert_eq!(service.connects(), started, "{asks:?}");
+            assert_eq!(served.asked().len(), started, "{asks:?}");
+            assert_eq!(
+                record(&ports).map(|record| *record.stamp()),
+                Some(seq(1)),
+                "{asks:?}"
+            );
+        }
     }
 
     /// A service that cannot be started, or that refuses the report,

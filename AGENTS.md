@@ -15,8 +15,12 @@ every project's stack, the machine's settings, the shared coordination state
 made, and how each process last ended. A project is a folder, registered by
 the first
 process added to it. Users and agents drive muster through the CLI and an MCP
-server; `muster attach` shows a process in the user's own terminal. muster draws
-no panes, and agents and interactive terminals live in herdr.
+server; `muster attach` shows a process in the user's own terminal. A prompt
+hook (`muster shell-init`) in the user's shell reports which project each shell
+is in: entering one starts its autostart processes, and a project no shell has
+been in for the `idle-stop` time is stopped. A process may declare the TCP
+ports it listens on, which a launch checks are free. muster draws no panes, and
+agents and interactive terminals live in herdr.
 
 > Architecture and the database schema are agreed in discussion before
 > implementation. This file governs *how* we write the code, not *what* it does.
@@ -66,13 +70,23 @@ plugs into a port.
     the database through read-only ports (`StackReader`, `SettingsReader`,
     `StackEditLog`); writers tell it what changed. What it writes, through
     `RunHistory` and `RaisedEdits` from a thread of its own, is how each
-    process last ended and which agent edits it raised.
+    process last ended and which agent edits it raised. Shell occupancy lives
+    in the loop (`Occupancy`, in `domain/occupancy`); a `ShellSweeper` thread
+    only checks that reported shells are alive and posts the ended ones back
+    as an event, and the loop starts an entered project and stops an idle one.
+  - **`adapter/shell`** - the hook each shell loads (`hook_script`, over the
+    scripts in `adapter/shell/scripts`) and `ShellFiles`, the shell records
+    and pending notes kept under `shells/` in the state directory, behind the
+    `ShellRegistry` port. `muster __shell-report` is the hidden command the
+    hook runs.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service. It spawns its child through
     the `ProcessRunner` the composition root hands it.
   - **driven adapters** `adapter/pty` (portable-pty implements
     `ProcessRunner`), `adapter/store` (one `SqliteStore` implements every store
-    port), `adapter/exchange` (the export file), `adapter/detect` (stack
+    port; its schema holds the `process_ports` table of declared ports and
+    the `idle_stop_*` columns of `settings` and `projects`),
+    `adapter/exchange` (the export file), `adapter/detect` (stack
     detection for `muster init`), `adapter/terminal` (the VT emulator and
     keyboard tracker), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
@@ -106,6 +120,7 @@ src/
     process/           # Process, ProcessState, restart and stop policies, readiness checks
     config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
     coordination/      # shared notes, todos, key-value entries and locks
+    occupancy/         # which shell is in which project: Occupancy, ShellRecord, ShellRegistry
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
     port/              # ProcessRunner, StackStore, StackReader, LocalState, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
@@ -121,6 +136,7 @@ src/
     pty/               # driven: ProcessRunner via portable-pty
     store/             # driven: SqliteStore, migrations
     exchange/          # driven: the `muster export` / `muster import` file
+    shell/             # driven: the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # driven: stack detection for `muster init`
     wire/              # the DTOs domain values travel as, and their serde with-modules
     workspace_request.rs  # the MCP-to-service requests the service protocol lacks
@@ -168,7 +184,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
 | Log and wait patterns | `regex` |
-| Shell words of a command line | `shlex` |
+| Shell words of a command line, and the paths quoted into a shell hook | `shlex` |
 | Platform state and config directories | `directories` |
 | Service version comparison | `semver` |
 | Todo and holder ids | `uuid` |

@@ -66,40 +66,86 @@ fn rotated_log(log: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The mirror thread's open log: one append handle and how many bytes the
+/// log holds, so a line costs one write rather than a stat and an open.
+struct LogAppender {
+    /// The live log, or `None` until an open succeeds.
+    file: Option<File>,
+    /// The log's size when opened plus every byte appended since.
+    written: u64,
+}
+
+impl LogAppender {
+    /// The appender for `log`, opened now when it can be.
+    fn open(log: &Path) -> Self {
+        let mut appender = Self {
+            file: None,
+            written: 0,
+        };
+        appender.adopt(open_log(log).ok());
+        appender
+    }
+
+    /// Takes `file` as the live log, its current size as the count.
+    fn adopt(&mut self, file: Option<File>) {
+        self.written = file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .map_or(0, |metadata| metadata.len());
+        self.file = file;
+    }
+
+    /// Appends `line` to `log`, rotating first when it would carry the log
+    /// past [`SERVICE_LOG_MAX_BYTES`]; a failed rotation reopens whatever
+    /// sits at `log`. A failed write drops the handle, so the next line opens
+    /// the log afresh.
+    fn append(&mut self, log: &Path, line: &[u8], stream: &mut dyn FollowedStream) {
+        if self.file.is_none() {
+            self.adopt(open_log(log).ok());
+        }
+        if self.written > 0
+            && self.written.saturating_add(line.len() as u64) > SERVICE_LOG_MAX_BYTES
+        {
+            let fresh = rotate(log, stream).or_else(|| open_log(log).ok());
+            self.adopt(fresh);
+        }
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        if file.write_all(line).is_ok() {
+            self.written = self.written.saturating_add(line.len() as u64);
+        } else {
+            self.file = None;
+        }
+    }
+}
+
 /// Writes each line from `writes` to `log` in order, rotating it first when
 /// the line would carry it past [`SERVICE_LOG_MAX_BYTES`].
 fn write_all(log: &Path, writes: &Receiver<MirrorWrite>, stream: &mut dyn FollowedStream) {
+    let mut appender = LogAppender::open(log);
     for write in writes {
-        let line = match write {
-            MirrorWrite::Line(line) => line,
+        match write {
+            MirrorWrite::Line(line) => appender.append(log, &line, stream),
             MirrorWrite::Flush(done) => {
                 let _ = done.send(());
-                continue;
             },
-        };
-        let written = fs::metadata(log).map_or(0, |metadata| metadata.len());
-        if written > 0 && written.saturating_add(line.len() as u64) > SERVICE_LOG_MAX_BYTES {
-            rotate(log, stream);
-        }
-        if let Ok(mut file) = open_log(log) {
-            let _ = file.write_all(&line);
         }
     }
 }
 
 /// Moves `log` to its rotated name and starts a fresh one, pointing `stream`
 /// at it when the stream wrote to the log rotated out, so its writes never
-/// land in a file the next rotation unlinks.
-fn rotate(log: &Path, stream: &mut dyn FollowedStream) {
+/// land in a file the next rotation unlinks. Returns the fresh log, or `None`
+/// when the log could not be moved or reopened.
+fn rotate(log: &Path, stream: &mut dyn FollowedStream) -> Option<File> {
     let followed = writes_to(stream, log);
-    if fs::rename(log, rotated_log(log)).is_err() {
-        return;
-    }
-    if let Ok(fresh) = open_log(log)
-        && followed
-    {
+    fs::rename(log, rotated_log(log)).ok()?;
+    let fresh = open_log(log).ok()?;
+    if followed {
         let _ = stream.repoint(&fresh);
     }
+    Some(fresh)
 }
 
 /// Whether `stream` writes to the file at `log`.

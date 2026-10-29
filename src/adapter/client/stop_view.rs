@@ -9,6 +9,7 @@ use crate::domain::process::{StopPolicy, StopSignal};
 #[getset(get_copy = "pub")]
 pub struct StopView {
     /// The signal a graceful stop sends.
+    #[serde(with = "crate::adapter::wire::form")]
     signal: StopSignal,
     /// Seconds a graceful stop waits before it kills.
     grace: f64,

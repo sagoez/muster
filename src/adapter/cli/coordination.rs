@@ -1,33 +1,15 @@
 use std::{fs, path::Path};
 
-use serde::{Deserialize, Serialize};
-
 use super::{
     args::CoordinationCommand,
     error::CliError,
     report::{Row, RowKind},
     text_file::write_atomically,
 };
-use crate::domain::{
-    coordination::{KeyValue, Scratchpad, Todo},
-    port::CoordinationStore,
-    value::ProjectRoot,
+use crate::{
+    adapter::exchange::{CoordinationSnapshot, SNAPSHOT_VERSION},
+    domain::{port::CoordinationStore, value::ProjectRoot},
 };
-
-/// Current snapshot schema version, checked on import so a file from a newer
-/// muster is refused rather than silently half-read.
-const SNAPSHOT_VERSION: u8 = 1;
-
-/// A portable snapshot of one project's coordination state. SQLite is the
-/// operational store; this YAML form is the interchange format - a backup, a
-/// file to commit alongside a repo, or a way to move state between machines.
-#[derive(Serialize, Deserialize)]
-struct CoordinationSnapshot {
-    version: u8,
-    scratchpads: Vec<Scratchpad>,
-    todos: Vec<Todo>,
-    values: Vec<KeyValue>,
-}
 
 /// Runs a `muster coordination` action against `store` for `project`, returning
 /// the rows to print.
@@ -55,17 +37,16 @@ fn export(
     project: &ProjectRoot,
     file: &Path,
 ) -> Result<Vec<Row>, CliError> {
-    let snapshot = CoordinationSnapshot {
-        version: SNAPSHOT_VERSION,
-        scratchpads: store.scratchpads(project)?,
-        todos: store.todos(project)?,
-        values: store.values(project)?,
-    };
+    let snapshot = CoordinationSnapshot::builder()
+        .scratchpads(store.scratchpads(project)?)
+        .todos(store.todos(project)?)
+        .values(store.values(project)?)
+        .build();
     let summary = format!(
         "exported {} scratchpads, {} todos, {} values to {}",
-        snapshot.scratchpads.len(),
-        snapshot.todos.len(),
-        snapshot.values.len(),
+        snapshot.scratchpads().len(),
+        snapshot.todos().len(),
+        snapshot.values().len(),
         file.display(),
     );
     let text = serde_yaml_ng::to_string(&snapshot).map_err(|error| CliError::SnapshotFile {
@@ -101,25 +82,25 @@ fn import(
     };
     let snapshot: CoordinationSnapshot =
         serde_yaml_ng::from_str(&raw).map_err(|error| invalid(error.to_string()))?;
-    if snapshot.version != SNAPSHOT_VERSION {
+    if snapshot.version() != SNAPSHOT_VERSION {
         return Err(invalid(format!(
             "version {} is not the version {SNAPSHOT_VERSION} this muster reads",
-            snapshot.version
+            snapshot.version()
         )));
     }
     store.import(
         project,
-        &snapshot.scratchpads,
-        &snapshot.todos,
-        &snapshot.values,
+        snapshot.scratchpads(),
+        snapshot.todos(),
+        snapshot.values(),
     )?;
     Ok(vec![Row::unlabeled(
         RowKind::Ok,
         format!(
             "imported {} scratchpads, {} todos, {} values from {}",
-            snapshot.scratchpads.len(),
-            snapshot.todos.len(),
-            snapshot.values.len(),
+            snapshot.scratchpads().len(),
+            snapshot.todos().len(),
+            snapshot.values().len(),
             file.display(),
         ),
     )])

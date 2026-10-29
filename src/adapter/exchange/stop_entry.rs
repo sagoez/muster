@@ -12,6 +12,7 @@ use crate::domain::process::StopSignal;
 #[getset(get = "pub")]
 pub struct StopEntry {
     /// The graceful signal.
+    #[serde(with = "crate::adapter::wire::form")]
     signal: StopSignal,
     /// Time allowed before a force-kill, in humantime (`5s`).
     #[serde(with = "humantime_serde")]

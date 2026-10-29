@@ -1,28 +1,13 @@
 use std::{collections::HashMap, net::IpAddr};
 
 use getset::CopyGetters;
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::value::Pid;
 
 /// One TCP socket a supervised process tree is listening on.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    CopyGetters,
-    TypedBuilder,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, CopyGetters, TypedBuilder)]
 #[getset(get_copy = "pub")]
-#[serde(rename_all = "kebab-case")]
 pub struct ListeningSocket {
     /// The port it listens on.
     port: u16,

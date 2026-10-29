@@ -1,6 +1,5 @@
 use getset::Getters;
 use nutype::nutype;
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::coordination::Author;
@@ -27,7 +26,7 @@ pub struct ScratchpadKey(String);
 /// A durable, shared markdown note in a project: a named place where agents and
 /// the human pass context and feedback to each other. The body is arbitrary
 /// markdown; only the key is validated.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Scratchpad {
     /// The note's addressable name.

@@ -11,6 +11,7 @@ use crate::domain::project::Project;
 #[serde(rename_all = "kebab-case")]
 pub struct ProjectStatus {
     /// The project the processes belong to.
+    #[serde(with = "crate::adapter::wire::form")]
     project: Project,
     /// Every process, in stack order.
     processes: Vec<ProcessStatus>,

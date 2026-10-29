@@ -12,7 +12,7 @@ pub enum PortOwner {
     /// A process muster supervises, named by its project.
     Supervised(PortHolder),
     /// A process muster does not supervise.
-    Other(PortOccupant),
+    Other(#[serde(with = "crate::adapter::wire::form")] PortOccupant),
 }
 
 impl fmt::Display for PortOwner {

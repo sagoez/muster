@@ -1,10 +1,8 @@
-use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum::{Display, EnumString};
 
 /// Lifecycle state of a managed process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display, EnumString)]
 #[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
 pub enum ProcessState {
     /// Configured but not yet started.
     #[default]

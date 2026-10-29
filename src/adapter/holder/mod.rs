@@ -26,6 +26,7 @@ mod protocol;
 mod record;
 mod runner;
 mod server;
+mod spawn_request_wire;
 mod strip;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -50,4 +51,5 @@ pub use protocol::*;
 pub use record::*;
 pub use runner::*;
 pub use server::*;
+pub use spawn_request_wire::*;
 pub use strip::*;

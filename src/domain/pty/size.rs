@@ -1,7 +1,6 @@
 use std::fmt;
 
 use getset::CopyGetters;
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::PtyError;
@@ -14,8 +13,7 @@ const SIZE_FORM: &str = "ROWSxCOLS such as 24x80";
 
 /// Dimensions of a pseudo-terminal, in character cells. Its [`Rows`] and
 /// [`Cols`] keep every size within the PTY bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, CopyGetters, TypedBuilder)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CopyGetters, TypedBuilder)]
 #[getset(get_copy = "pub")]
 pub struct PtySize {
     rows: Rows,

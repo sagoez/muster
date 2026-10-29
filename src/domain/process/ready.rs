@@ -2,7 +2,6 @@ use std::fmt;
 
 use getset::Getters;
 use nutype::nutype;
-use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 use typed_builder::TypedBuilder;
 
@@ -23,9 +22,8 @@ const PATTERN_FORM: &str = "a pattern of 1 to 512 characters";
 pub struct PatternText(String);
 
 /// How a log pattern is matched against one output line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString)]
 #[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
 pub enum PatternKind {
     /// The line contains the text.
     Substring,
@@ -41,9 +39,8 @@ impl PatternKind {
 }
 
 /// A pattern one output line is tested against.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-#[serde(rename_all = "kebab-case")]
 pub struct LogPattern {
     /// What to look for.
     text: PatternText,
@@ -76,8 +73,7 @@ pub enum ReadyKind {
 }
 
 /// What a readiness check waits for.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReadyProbe {
     /// An output line matching the pattern.
     Log(LogPattern),
@@ -141,9 +137,8 @@ impl ReadyProbe {
 
 /// A process's stored readiness check: what to wait for after each spawn, and
 /// how long before it counts as not ready.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-#[serde(rename_all = "kebab-case")]
 pub struct ReadyCheck {
     /// What to wait for.
     probe: ReadyProbe,

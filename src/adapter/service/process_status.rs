@@ -21,9 +21,11 @@ pub struct ProcessStatus {
     /// The process's name within its project.
     name: ProcessName,
     /// Lifecycle state.
+    #[serde(with = "crate::adapter::wire::form")]
     state: ProcessState,
     /// Whether its current run passed its readiness check.
     #[builder(default)]
+    #[serde(with = "crate::adapter::wire::form")]
     ready: Readiness,
     /// OS process id while a child is live.
     pid: Option<Pid>,
@@ -38,6 +40,7 @@ pub struct ProcessStatus {
     attached: u32,
     /// The TCP ports its process tree was last seen listening on.
     #[builder(default)]
+    #[serde(with = "crate::adapter::wire::form_list")]
     ports: Vec<ListeningSocket>,
     /// The URLs it serves: the one its readiness check declares, else one per
     /// detected port.

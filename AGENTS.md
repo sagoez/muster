@@ -97,6 +97,7 @@ src/
     store/             # driven: SqliteStore, migrations
     exchange/          # driven: the `muster export` / `muster import` file
     detect/            # driven: stack detection for `muster init`
+    wire/              # the DTOs domain values travel as, and their serde with-modules
 ```
 
 ## Dependencies and libraries
@@ -226,7 +227,10 @@ than passing bare `u16`/`usize`.
   their kin derive `WithSetters` with `#[set_with]` and `#[getset(get = "pub",
   set_with = "pub")]` where they are edited by value. The export file has its
   own serde DTOs in `adapter/exchange`, each with `#[serde(deny_unknown_fields)]`
-  and converted to and from the domain with `TryFrom`/`From`.
+  and converted to and from the domain with `TryFrom`/`From`. A domain value on
+  a wire or in a file names its DTO through `adapter::wire::WireForm`, and the
+  field keeps its domain type with `#[serde(with = "...::wire::form")]`
+  (`optional_form`, `form_list`). Only validated newtypes derive serde.
 - Fields are private; expose access through `Getters`, never `pub` fields.
 
 ```rust

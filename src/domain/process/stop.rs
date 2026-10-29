@@ -1,15 +1,11 @@
 use getset::{Getters, WithSetters};
-use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 use typed_builder::TypedBuilder;
 
 use crate::domain::value::StopGrace;
 
 /// Graceful signal sent before a command is force-killed.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString, EnumIter,
-)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
 #[strum(serialize_all = "kebab-case")]
 pub enum StopSignal {
     /// Requests the conventional service shutdown path (SIGTERM on Unix).
@@ -19,19 +15,7 @@ pub enum StopSignal {
 }
 
 /// Graceful shutdown policy for one process.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    Getters,
-    WithSetters,
-    TypedBuilder,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Getters, WithSetters, TypedBuilder)]
 #[set_with]
 pub struct StopPolicy {
     /// Graceful signal sent to the process group.

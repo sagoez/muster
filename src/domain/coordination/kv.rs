@@ -1,6 +1,5 @@
 use getset::Getters;
 use nutype::nutype;
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::coordination::Author;
@@ -28,7 +27,7 @@ pub struct KvKey(String);
 /// state agents pass between each other (a chosen port, a build id, a flag). The
 /// value is an arbitrary string; only the key is validated. The store stamps
 /// `updated_at`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct KeyValue {
     /// The entry's addressable name.

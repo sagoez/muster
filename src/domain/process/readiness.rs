@@ -1,12 +1,10 @@
-use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum::{Display, EnumString};
 
 use super::ReadyCheck;
 
 /// Whether one run of a process has passed its readiness check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display, EnumString)]
 #[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
 pub enum Readiness {
     /// No check, or no run to check.
     #[default]

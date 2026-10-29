@@ -12,6 +12,7 @@ pub struct LockView {
     name: String,
     /// Who holds it.
     #[getset(get = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     owner: Author,
     /// Why, as its holder said.
     #[serde(skip_serializing_if = "Option::is_none")]

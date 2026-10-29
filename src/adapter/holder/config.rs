@@ -32,6 +32,7 @@ pub struct HolderConfig {
     id: HolderId,
     /// The child to spawn.
     #[getset(get = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     request: SpawnRequest,
     /// Socket the holder serves clients on.
     #[getset(get = "pub")]

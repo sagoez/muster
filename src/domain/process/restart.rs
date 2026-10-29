@@ -1,13 +1,9 @@
-use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 
 use crate::domain::pty::ExitOutcome;
 
 /// How a process should be restarted when its child exits.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString, EnumIter,
-)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
 #[strum(serialize_all = "kebab-case")]
 pub enum RestartPolicy {
     /// Never restart; a stopped process stays stopped.

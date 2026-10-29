@@ -12,10 +12,13 @@ use super::{
     error::HolderError,
     frame::{Frame, FrameTag, read_frame, write_frame},
 };
-use crate::domain::{
-    process::StopSignal,
-    pty::{ExitOutcome, PtySize},
-    value::{OutputCursor, Pid},
+use crate::{
+    adapter::wire::WireForm,
+    domain::{
+        process::StopSignal,
+        pty::{ExitOutcome, PtySize},
+        value::{OutputCursor, Pid},
+    },
 };
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
@@ -61,6 +64,7 @@ pub enum HolderControl {
     /// Sends `signal`, allowing `grace` before the group is force-killed.
     Terminate {
         /// The graceful signal to send.
+        #[serde(with = "crate::adapter::wire::form")]
         signal: StopSignal,
         /// Time allowed for a graceful exit.
         grace: Duration,
@@ -258,7 +262,9 @@ impl TryFrom<HolderMessage> for Frame {
                 payload.extend(bytes);
                 (FrameTag::Output, payload)
             },
-            HolderMessage::Exited(outcome) => (FrameTag::Exited, serde_json::to_vec(&outcome)?),
+            HolderMessage::Exited(outcome) => {
+                (FrameTag::Exited, serde_json::to_vec(&outcome.to_wire())?)
+            },
             HolderMessage::Rejected(reason) => (FrameTag::Rejected, serde_json::to_vec(&reason)?),
             HolderMessage::Warning(text) => (FrameTag::Warning, serde_json::to_vec(&text)?),
             HolderMessage::Attached(count) => (FrameTag::Attached, count.to_be_bytes().to_vec()),
@@ -306,7 +312,9 @@ impl TryFrom<Frame> for HolderMessage {
                 let at = decode_offset(&payload).ok_or(HolderError::MalformedPayload(tag))?;
                 Ok(Self::Output { at, bytes })
             },
-            FrameTag::Exited => Ok(Self::Exited(serde_json::from_slice(&payload)?)),
+            FrameTag::Exited => ExitOutcome::from_wire(serde_json::from_slice(&payload)?)
+                .map(Self::Exited)
+                .map_err(|_| HolderError::MalformedPayload(tag)),
             FrameTag::Rejected => Ok(Self::Rejected(serde_json::from_slice(&payload)?)),
             FrameTag::Warning => Ok(Self::Warning(serde_json::from_slice(&payload)?)),
             FrameTag::Attached => decode_u32(&payload)

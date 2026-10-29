@@ -23,3 +23,4 @@ pub mod service;
 pub mod signal_target;
 pub mod store;
 pub mod terminal;
+pub mod wire;

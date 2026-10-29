@@ -14,19 +14,23 @@ pub struct TodoView {
     /// What the task is.
     title: TodoTitle,
     /// Where it sits in its lifecycle.
+    #[serde(with = "crate::adapter::wire::form")]
     status: TodoStatus,
     /// Ids of todos it depends on.
     deps: Vec<TodoId>,
     /// Who holds it under a live claim.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::adapter::wire::optional_form")]
     owner: Option<Author>,
     /// Seconds until that claim lapses.
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_in_s: Option<u64>,
     /// Who held it under a claim that lapsed.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::adapter::wire::optional_form")]
     stale_owner: Option<Author>,
     /// Who last wrote it.
+    #[serde(with = "crate::adapter::wire::form")]
     author: Author,
     /// When it was last written, in seconds since the Unix epoch.
     updated_at: u64,

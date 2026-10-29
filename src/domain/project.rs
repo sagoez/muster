@@ -1,11 +1,10 @@
 use getset::Getters;
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::domain::value::{ProjectName, ProjectRoot};
 
 /// A registered project: a folder, which is its identity, and its display name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Project {
     /// The canonical folder the project is.

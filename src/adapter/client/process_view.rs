@@ -22,9 +22,11 @@ pub struct ProcessView {
     name: ProcessName,
     /// Its lifecycle state.
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     state: ProcessState,
     /// Whether its current run passed its readiness check.
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     ready: Readiness,
     /// The OS process id while a child runs.
     #[getset(get_copy = "pub")]

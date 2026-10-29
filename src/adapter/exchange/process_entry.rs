@@ -42,6 +42,7 @@ pub struct ProcessEntry {
     /// Whether `muster up` starts it.
     autostart: bool,
     /// Its restart policy.
+    #[serde(with = "crate::adapter::wire::form")]
     restart: RestartPolicy,
     /// How it is stopped.
     stop: StopEntry,

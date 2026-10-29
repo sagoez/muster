@@ -1,15 +1,11 @@
 use getset::{CopyGetters, Getters};
-use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::ExitOutcome;
 
 /// What a process's earlier runs leave to the one being spawned, carried with
 /// it so a service that adopts it later still knows them.
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder,
-)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
 pub struct SpawnHistory {
     /// Times the process was restarted, this spawn included when it is one.
     #[getset(get_copy = "pub")]

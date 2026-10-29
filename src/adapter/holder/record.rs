@@ -45,6 +45,7 @@ pub struct HolderRecord {
     command: CommandLine,
     /// How the process stops.
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     stop: StopPolicy,
     /// The environment of the command that launched the child, which its
     /// restarts are launched with too.
@@ -74,6 +75,7 @@ pub struct HolderRecord {
     /// the restart count and last exit.
     #[getset(get = "pub")]
     #[builder(default)]
+    #[serde(with = "crate::adapter::wire::form")]
     history: SpawnHistory,
 }
 

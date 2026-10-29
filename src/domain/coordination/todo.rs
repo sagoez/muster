@@ -2,7 +2,6 @@ use std::{collections::HashMap, time::Duration};
 
 use getset::Getters;
 use nutype::nutype;
-use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 use typed_builder::TypedBuilder;
 
@@ -57,9 +56,8 @@ impl TodoId {
 pub struct TodoTitle(String);
 
 /// Where a todo sits in its lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString)]
 #[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
 pub enum TodoStatus {
     /// Not started.
     Pending,
@@ -72,7 +70,7 @@ pub enum TodoStatus {
 /// A structured unit of shared work: a titled task with a lifecycle status and
 /// optional dependencies on other todos, so agents and the human coordinate who
 /// does what and in which order. The store stamps `updated_at`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Todo {
     /// The todo's stable identity.
@@ -162,7 +160,7 @@ impl Todo {
 
 /// An agent's hold on an in-progress todo: who works it, and the Unix second
 /// its lease runs out.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct TodoClaim {
     /// The agent working the todo.

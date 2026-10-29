@@ -1,7 +1,5 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
 use super::exit_cause::ExitCause;
 use crate::domain::value::OutputCursor;
 
@@ -15,8 +13,7 @@ const STATUS_WORD: &str = "status";
 const SIGNAL_WORD: &str = "signal";
 
 /// The exit disposition of a process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitOutcome {
     /// Exited with status zero.
     Succeeded,

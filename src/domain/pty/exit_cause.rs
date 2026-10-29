@@ -1,12 +1,10 @@
-use serde::{Deserialize, Serialize};
 use strum::Display;
 
 use super::signal_name::SignalName;
 
 /// Why a process ended without success.
-#[derive(Debug, Clone, PartialEq, Eq, Display, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Display)]
 #[strum(serialize_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
 pub enum ExitCause {
     /// It exited with this non-zero status.
     #[strum(to_string = "exited with status {0}")]

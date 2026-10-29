@@ -29,14 +29,17 @@ use super::{
     todo_view::TodoView,
     tool_error::ToolError,
 };
-use crate::domain::{
-    coordination::{
-        Claim, KvKey, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
-        ScratchpadKey, TODO_LEASE_MAX, TodoChange, TodoId, TodoLease, TodoStatus, TodoTitle,
-        TodoUpdate, claimable,
+use crate::{
+    adapter::wire::WireForm,
+    domain::{
+        coordination::{
+            Claim, KvKey, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
+            ScratchpadKey, TODO_LEASE_MAX, TodoChange, TodoId, TodoLease, TodoStatus, TodoTitle,
+            TodoUpdate, claimable,
+        },
+        port::CoordinationStore,
+        value::ProjectRoot,
     },
-    port::CoordinationStore,
-    value::ProjectRoot,
 };
 
 /// Pause between attempts at a lock someone else holds.
@@ -282,7 +285,7 @@ impl MusterMcp {
                 object_of!({ CLAIMED: true, TODO: json(&TodoView::at(&todo, now))? })
             },
             Claim::HeldBy { owner, expires_in } => {
-                object_of!({ CLAIMED: false, OWNER: owner, EXPIRES_IN_S: expires_in.as_secs() })
+                object_of!({ CLAIMED: false, OWNER: owner.to_string(), EXPIRES_IN_S: expires_in.as_secs() })
             },
             Claim::Unavailable(todo) => {
                 object_of!({ CLAIMED: false, TODO: json(&TodoView::at(&todo, now))? })
@@ -405,7 +408,9 @@ impl MusterMcp {
             match release {
                 LockRelease::Released => object_of!({ RELEASED: true }),
                 LockRelease::NotHeld => object_of!({ RELEASED: false }),
-                LockRelease::HeldBy { owner } => object_of!({ RELEASED: false, OWNER: owner }),
+                LockRelease::HeldBy { owner } => {
+                    object_of!({ RELEASED: false, OWNER: owner.to_string() })
+                },
             },
             false,
         )
@@ -431,7 +436,7 @@ impl MusterMcp {
             return structured(object_of!({ NOTES: json(&page)? }), false);
         };
         match notes.iter().find(|note| note.key() == &key) {
-            Some(note) => structured(json(note)?, false),
+            Some(note) => structured(json(&note.to_wire())?, false),
             None => Err(ToolError::UnknownNote {
                 key: key.to_string(),
                 valid: notes.iter().map(|note| note.key().to_string()).collect(),
@@ -493,11 +498,11 @@ impl MusterMcp {
             })
             .await?;
         let Some(key) = key else {
-            let page: Vec<_> = entries.iter().take(limit).collect();
+            let page: Vec<_> = entries.iter().take(limit).map(WireForm::to_wire).collect();
             return structured(object_of!({ ENTRIES: json(&page)? }), false);
         };
         match entries.iter().find(|entry| entry.key() == &key) {
-            Some(entry) => structured(json(entry)?, false),
+            Some(entry) => structured(json(&entry.to_wire())?, false),
             None => Err(ToolError::UnknownValue {
                 key: key.to_string(),
                 valid: entries
@@ -589,7 +594,7 @@ impl MusterMcp {
                     expires_in,
                 } => object_of!({
                     ACQUIRED: false,
-                    OWNER: owner,
+                    OWNER: owner.to_string(),
                     NOTE: note.as_ref().map(ToString::to_string),
                     EXPIRES_IN_S: expires_in.as_secs(),
                 }),

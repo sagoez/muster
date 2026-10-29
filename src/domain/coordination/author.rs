@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use super::BlankAuthor;
 
 /// Stored label for a write the human made through the CLI.
 pub(crate) const HUMAN_LABEL: &str = "human";
@@ -74,18 +74,17 @@ impl fmt::Display for Author {
     }
 }
 
-impl Serialize for Author {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.label())
-    }
-}
+impl FromStr for Author {
+    type Err = BlankAuthor;
 
-impl<'de> Deserialize<'de> for Author {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
+    /// Reads a label as [`Author::label`] writes it, trimmed.
+    ///
+    /// # Errors
+    /// Returns [`BlankAuthor`] for a blank label.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(D::Error::custom("author label must not be empty"));
+            return Err(BlankAuthor);
         }
         Ok(if trimmed == HUMAN_LABEL {
             Author::Human
@@ -103,12 +102,8 @@ mod tests {
     #[test]
     fn the_human_round_trips() {
         assert_eq!(Author::human().label(), "human");
-        let json = serde_json::to_string(&Author::Human).unwrap();
-        assert_eq!(json, "\"human\"");
-        assert_eq!(
-            serde_json::from_str::<Author>(&json).unwrap(),
-            Author::Human
-        );
+        assert_eq!(Author::Human.to_string(), "human");
+        assert_eq!("human".parse::<Author>().unwrap(), Author::Human);
     }
 
     /// A named agent trims and round-trips.
@@ -116,8 +111,8 @@ mod tests {
     fn an_agent_name_trims_and_round_trips() {
         let author = Author::agent("  claude  ");
         assert_eq!(author.label(), "claude");
-        let json = serde_json::to_string(&author).unwrap();
-        assert_eq!(serde_json::from_str::<Author>(&json).unwrap(), author);
+        assert_eq!(author.to_string().parse::<Author>().unwrap(), author);
+        assert!(" ".parse::<Author>().is_err());
     }
 
     /// A blank name, or one impersonating the human, collapses to the generic

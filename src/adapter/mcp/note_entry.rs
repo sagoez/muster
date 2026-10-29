@@ -12,6 +12,7 @@ pub struct NoteEntry {
     /// The note's key.
     key: String,
     /// Who last wrote it.
+    #[serde(with = "crate::adapter::wire::form")]
     author: Author,
     /// When it was last written, in seconds since the Unix epoch.
     updated_at: u64,

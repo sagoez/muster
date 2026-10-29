@@ -35,6 +35,7 @@ pub struct DefinitionView {
     autostart: bool,
     /// What happens when its child exits.
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     restart: RestartPolicy,
     /// How it is stopped.
     #[getset(get = "pub")]

@@ -54,6 +54,7 @@ impl ExitReason {
 pub struct LastExit {
     /// Its exit status or signal.
     #[getset(get = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     outcome: ExitOutcome,
     /// Why it ended.
     #[getset(get_copy = "pub")]

@@ -21,10 +21,12 @@ pub struct StackProcessView {
     name: ProcessName,
     /// Its lifecycle state.
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::form")]
     state: ProcessState,
     /// Whether its current run passed its readiness check, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get_copy = "pub")]
+    #[serde(with = "crate::adapter::wire::optional_form")]
     ready: Option<Readiness>,
     /// The OS process id while a child runs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,6 +42,7 @@ pub struct StackProcessView {
     /// The TCP ports its process tree listens on.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[getset(get = "pub")]
+    #[serde(with = "crate::adapter::wire::form_list")]
     ports: Vec<ListeningSocket>,
     /// The URLs it serves: declared by its readiness check, else detected.
     #[serde(skip_serializing_if = "Vec::is_empty")]

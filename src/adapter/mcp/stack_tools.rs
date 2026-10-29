@@ -13,7 +13,7 @@ use super::{
     process_fields::invalid,
     progress::with_progress,
     project_arg::ProjectArg,
-    server::{MusterMcp, json, structured, unix_now, with_alerts},
+    server::{MusterMcp, json, structured, with_alerts},
     stack_events_arg::StackEventsArg,
     stack_process_view::StackProcessView,
     stack_status_view::StackStatusView,
@@ -24,6 +24,7 @@ use super::{
 };
 use crate::adapter::{
     client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
+    clock::epoch_now,
     service::{EventKind, EventSeq, WaitSpec},
 };
 
@@ -61,7 +62,7 @@ impl MusterMcp {
                 Ok((status, notices, locks))
             })
             .await?;
-        let now = unix_now();
+        let now = epoch_now();
         let recent = notices.len().saturating_sub(STATUS_NOTICES);
         let view = StackStatusView::builder()
             .project(ProjectIdentityView::from(status.project()))

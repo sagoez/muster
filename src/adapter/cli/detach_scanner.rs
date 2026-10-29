@@ -1,12 +1,13 @@
 use std::mem;
 
-use alacritty_terminal::vte::Parser;
-
 use super::{
     held_sequence::HeldSequence, key_press::KeyPress, parsed::Parsed, scan_result::ScanResult,
 };
 use crate::{
-    adapter::terminal::escape::{CSI, ESC},
+    adapter::terminal::{
+        bounded_parser::BoundedParser,
+        escape::{CSI, ESC},
+    },
     domain::value::DetachKey,
 };
 
@@ -21,7 +22,7 @@ pub struct DetachScanner {
     /// The key code and held modifiers of the key's enhanced press.
     kitty: Option<KeyPress>,
     /// Parses the escape sequence being held.
-    parser: Parser,
+    parser: BoundedParser,
     /// The start of an escape sequence, held until it shows whether it is
     /// the detach key.
     pending: Vec<u8>,
@@ -31,11 +32,11 @@ impl DetachScanner {
     /// A scanner for `key`.
     pub fn new(key: &DetachKey) -> Self {
         let mut parsed = Parsed::default();
-        Parser::new().advance(&mut parsed, &key.kitty_sequence());
+        BoundedParser::new().advance(&mut parsed, &key.kitty_sequence());
         Self {
             legacy: key.legacy_byte(),
             kitty: parsed.press,
-            parser: Parser::new(),
+            parser: BoundedParser::new(),
             pending: Vec::new(),
         }
     }
@@ -106,7 +107,7 @@ impl DetachScanner {
     /// Gives up the held escape sequence, once no more input came to finish
     /// it, so a lone Escape key still reaches the process.
     pub fn flush(&mut self) -> Vec<u8> {
-        self.parser = Parser::new();
+        self.parser = BoundedParser::new();
         mem::take(&mut self.pending)
     }
 }

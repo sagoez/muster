@@ -24,7 +24,7 @@ pub(super) const WAIT: Duration = Duration::from_secs(10);
 /// only the deadline test ever reaches one.
 pub(super) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
 /// Interval between checks of a polled condition.
-const POLL: Duration = Duration::from_millis(10);
+pub(super) const POLL: Duration = Duration::from_millis(10);
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "mh-";
 /// Initial PTY rows of every test child.

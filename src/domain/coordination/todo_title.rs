@@ -1,14 +1,11 @@
 use nutype::nutype;
 
-/// Most characters a todo's title holds.
-pub const TODO_TITLE_MAX_CHARS: usize = 500;
-
-/// A todo's human-readable title. Trimmed, non-empty and at most
-/// [`TODO_TITLE_MAX_CHARS`] long, so a blank line can never masquerade as a
-/// task and one title cannot flood a listing.
+/// A todo's human-readable title: trimmed and non-empty, so a blank line can
+/// never masquerade as a task. A title being written is capped by
+/// [`NewTodoTitle`]; a stored one is read back whatever its length.
 #[nutype(
     sanitize(trim),
-    validate(not_empty, len_char_max = TODO_TITLE_MAX_CHARS),
+    validate(not_empty),
     derive(
         Debug,
         Clone,
@@ -26,14 +23,11 @@ pub struct TodoTitle(String);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::coordination::TODO_TITLE_MAX_CHARS;
 
-    /// A title up to the maximum is kept; one past it is refused.
+    /// A stored title past the write cap still reads back.
     #[test]
-    fn a_title_is_bounded() {
-        assert!(TodoTitle::try_new("x".repeat(TODO_TITLE_MAX_CHARS)).is_ok());
-        assert_eq!(
-            TodoTitle::try_new("x".repeat(TODO_TITLE_MAX_CHARS + 1)),
-            Err(TodoTitleError::LenCharMaxViolated)
-        );
+    fn a_stored_title_is_not_capped() {
+        assert!(TodoTitle::try_new("x".repeat(TODO_TITLE_MAX_CHARS + 1)).is_ok());
     }
 }

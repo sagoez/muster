@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::Sender;
 use portable_pty::{ChildKiller, MasterPty};
@@ -14,7 +14,7 @@ use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
-    value::Pid,
+    value::{OutputCursor, Pid},
 };
 
 /// Live handle to a PTY-backed process.
@@ -27,6 +27,38 @@ pub(super) struct PtyProcessHandle {
 }
 
 impl ProcessHandle for PtyProcessHandle {
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn run_start(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn output_end(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
+        Ok(())
+    }
+
     fn process_id(&self) -> Option<Pid> {
         self.pid
     }

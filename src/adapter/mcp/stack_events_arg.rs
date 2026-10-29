@@ -21,7 +21,7 @@ pub struct StackEventsArg {
     #[builder(default)]
     #[getset(get = "pub")]
     kinds: Option<Vec<String>>,
-    /// Seconds to wait for a new event, at most 45; without it the call
+    /// Seconds to wait for a new event, at most <call-bound-s>; without it the call
     /// answers at once.
     #[builder(default)]
     #[getset(get_copy = "pub")]

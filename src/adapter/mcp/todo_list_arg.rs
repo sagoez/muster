@@ -24,7 +24,7 @@ pub struct TodoListArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     claimable: Option<bool>,
-    /// Most todos returned, default 50, at most 200.
+    /// Most todos returned, default <default-list-limit>, at most <max-list-limit>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     limit: Option<usize>,

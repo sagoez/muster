@@ -19,6 +19,7 @@ use crate::{
             ClientMessage, ClientRole, HolderConfig, HolderControl, HolderError, HolderId,
             HolderMessage, HolderRecord, HolderServer, client::greet,
         },
+        pty::PortablePtyRunner,
         signal_target::SignalTarget,
     },
     domain::{
@@ -71,7 +72,7 @@ impl Holder {
             .supervisor_deadline(SUPERVISOR_DEADLINE)
             .build();
         let server_config = config.clone();
-        let server = thread::spawn(move || HolderServer::run(server_config));
+        let server = thread::spawn(move || HolderServer::run(server_config, &PortablePtyRunner));
         let mut supervisor = None;
         wait_until("the holder socket", || {
             supervisor = UnixStream::connect(config.socket()).ok();

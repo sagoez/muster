@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use super::{retry_stop_signals::RetryStopSignals, terminate_outcome::TerminateOutcome};
@@ -8,7 +8,7 @@ use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
-    value::Pid,
+    value::{OutputCursor, Pid},
 };
 
 /// A handle whose graceful termination follows its configured outcome and
@@ -19,6 +19,38 @@ pub(crate) struct RetryStopHandle {
 }
 
 impl ProcessHandle for RetryStopHandle {
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn run_start(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn output_end(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
+        Ok(())
+    }
+
     fn process_id(&self) -> Option<Pid> {
         None
     }

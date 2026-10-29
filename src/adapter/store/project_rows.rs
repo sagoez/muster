@@ -2,12 +2,15 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Params, Row, params};
 
-use super::sqlite_store::{SqliteStore, corrupt, db_error, now_epoch_secs};
-use crate::domain::{
-    config::{ConfigError, Registration},
-    port::ProjectStore,
-    project::Project,
-    value::{ProjectName, ProjectRoot},
+use super::sqlite_store::{SqliteStore, corrupt, db_error, epoch_param};
+use crate::{
+    adapter::clock::epoch_now,
+    domain::{
+        config::{ConfigError, Registration},
+        port::ProjectStore,
+        project::Project,
+        value::{ProjectName, ProjectRoot},
+    },
 };
 
 /// Selects a project's row id, root and name, in that order.
@@ -118,7 +121,7 @@ pub(super) fn register(
     let id = conn
         .query_row(
             "INSERT INTO projects (root, name, created_at) VALUES (?1, ?2, ?3) RETURNING id",
-            params![root_text(root)?, name.as_ref(), now_epoch_secs()],
+            params![root_text(root)?, name.as_ref(), epoch_param(epoch_now())],
             |row| row.get(0),
         )
         .map_err(db_error)?;

@@ -9,12 +9,11 @@ use super::{
     error::{CliError, RUN_NAME_HINT},
     invocation::Invocation,
     run_args::RunArgs,
-    working_dir::stored_working_dir,
 };
 use crate::{
     adapter::{
         client::{
-            ActionReport, ProjectTarget, ServiceClient, SettleWatch,
+            ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
             process::{ready_to_send, start_added},
         },
         path::home_dir,
@@ -73,7 +72,7 @@ impl RunPlan {
                 hint: RUN_NAME_HINT,
             });
         }
-        let working_dir = stored_working_dir(target.root(), &invocation.cwd()?)?;
+        let working_dir = WorkingDirPlace::of(target.root(), &invocation.cwd()?)?.stored();
         let draft = ProcessDraft::builder()
             .name(name)
             .command(command)
@@ -171,12 +170,15 @@ mod tests {
         let refused = process_name(Some("web\u{1b}]0;x\u{7}"), &[]).unwrap_err();
 
         assert!(matches!(refused, CliError::InvalidName {
-            problem: NameProblem::ControlCharacter,
+            problem: NameProblem::UnsafeCharacter,
             ..
         }));
         let message = refused.to_string();
         assert!(!message.chars().any(char::is_control), "{message}");
         assert!(message.contains("web\\u{1b}]0;x\\u{7}"), "{message}");
-        assert!(message.contains("holds a control character"), "{message}");
+        assert!(
+            message.contains("holds a control or format character"),
+            "{message}"
+        );
     }
 }

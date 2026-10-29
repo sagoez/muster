@@ -15,7 +15,7 @@ pub struct ProcessLogsArg {
     #[builder(default)]
     #[getset(get = "pub")]
     project: Option<String>,
-    /// Most lines returned, default 100, at most 2000.
+    /// Most lines returned, default <default-log-lines>, at most <max-log-lines>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     lines: Option<usize>,
@@ -35,7 +35,7 @@ pub struct ProcessLogsArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     errors_only: Option<bool>,
-    /// Most bytes returned, default 16384, at most 65536.
+    /// Most bytes returned, default <default-log-bytes>, at most <max-log-bytes>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     max_bytes: Option<usize>,

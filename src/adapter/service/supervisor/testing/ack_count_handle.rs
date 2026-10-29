@@ -1,12 +1,16 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime},
 };
 
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
-    value::Pid,
+    value::{OutputCursor, Pid},
 };
 
 /// A handle that counts the exits acknowledged to it.
@@ -15,6 +19,38 @@ pub(crate) struct AckCountHandle {
 }
 
 impl ProcessHandle for AckCountHandle {
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn run_start(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn output_end(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
+    fn terminate(&mut self, _signal: StopSignal, _grace: Duration) -> Result<(), PtyError> {
+        self.kill()
+    }
+
     fn process_id(&self) -> Option<Pid> {
         None
     }

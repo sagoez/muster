@@ -15,11 +15,7 @@ mod exit_reason;
 #[cfg(test)]
 mod fake_pool;
 mod flow;
-#[cfg(test)]
-mod gated_launcher;
 mod holder_pool;
-#[cfg(test)]
-mod holders;
 mod last_exit;
 mod launch_environment;
 mod located;
@@ -81,8 +77,6 @@ pub mod supervisor;
 mod tap_line;
 #[cfg(test)]
 mod test_ports;
-#[cfg(test)]
-mod thread_launcher;
 mod url_source;
 mod usage_sampler;
 mod wait_condition;

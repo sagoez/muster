@@ -150,7 +150,7 @@ impl HolderRunner {
             HOLDER_READY_TIMEOUT.into_inner(),
         )?
         .with_started_at(record.child_started_at())
-        .with_backlog(record.log(), since);
+        .with_log(record.log(), since);
         Ok(Box::new(handle))
     }
 
@@ -281,7 +281,7 @@ impl ProcessRunner for HolderRunner {
             Ok(handle) => Ok(handle),
         };
         let _ = fs::remove_file(&error_file);
-        Ok(Box::new(supervised?.with_backlog(&log, None)))
+        Ok(Box::new(supervised?.with_log(&log, None)))
     }
 }
 
@@ -434,50 +434,48 @@ fn reported_failure(socket: &Path, error_file: &Path) -> Option<HolderError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs, mem,
+        fs,
         os::unix::net::{UnixDatagram, UnixListener},
-        path::PathBuf,
         process,
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicBool, Ordering},
         },
         thread::JoinHandle,
     };
 
-    use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-    use rustix::{net::listen, process::Signal};
-    use tempfile::TempDir;
+    use crossbeam_channel::bounded;
+    use rustix::net::listen;
 
     use super::*;
     use crate::{
         adapter::{
             holder::{
-                HolderServer,
+                ServedScreen,
                 client::{greet, screen_text},
-                error_path_beside, run_holder,
+                error_path_beside,
+                losing_sink::LosingSink,
+                runner_fixture::Fixture,
+                sabotage::Sabotage,
+                server_testing::{POLL, WAIT, wait_until},
+                spec_launcher::CORRUPT_SPEC,
                 testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
+                thread_launcher::ThreadLauncher,
+                watch::Watch,
             },
             terminal::TerminalEmulator,
-            test_scratch::short_scratch,
         },
         domain::{
             color_scheme::ColorScheme,
             process::StopSignal,
-            pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
+            pty::{ExitCause, ExitOutcome, PtySize, ScreenSource},
             value::{Cols, CommandLine, ProcessName, Rows, StartToken},
         },
     };
 
-    /// Bound on every wait in these tests; reaching it fails the test.
-    const WAIT: Duration = Duration::from_secs(10);
-    /// Interval between checks of a polled condition.
-    const POLL: Duration = Duration::from_millis(10);
     /// Longest one screen probe waits for the holder, far below [`WAIT`] so a
     /// polling loop stays within its bound.
     const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
-    /// Prefix of every test scratch directory.
-    const SCRATCH_PREFIX: &str = "mr-";
     /// PTY rows of every test child.
     const ROWS: u16 = TEST_ROWS;
     /// PTY cols of every test child.
@@ -515,171 +513,12 @@ mod tests {
     const LONG_SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
     /// A regular file the bad-log test makes the log directory's parent.
     const NOT_A_DIRECTORY: &str = "not-a-dir";
-    /// A spec no holder can parse.
-    const CORRUPT_SPEC: &[u8] = b"{not a spec";
     /// A handover name the sweep cannot remove, made a directory.
     const STUCK_HANDOVER: &str = "stuck.json";
     /// File the pid-reporting child writes its pid to.
     const PID_FILE: &str = "child.pid";
     /// Time a surviving child would need to write its pid file late.
     const PID_FILE_GRACE: Duration = Duration::from_millis(500);
-
-    /// Every holder thread a fixture's runners started.
-    type Holders = Arc<Mutex<Vec<JoinHandle<Result<(), HolderError>>>>>;
-
-    /// Runs each holder on a thread of the test process, after `delay`.
-    struct ThreadHolderLauncher {
-        holders: Holders,
-        delay: Duration,
-    }
-
-    impl HolderLauncher for ThreadHolderLauncher {
-        fn launch(&self, config: HolderConfig) -> Result<(), PtyError> {
-            let delay = self.delay;
-            let holder = thread::spawn(move || {
-                thread::sleep(delay);
-                HolderServer::run(config)
-            });
-            self.holders.lock().unwrap().push(holder);
-            Ok(())
-        }
-    }
-
-    /// How a [`SpecLauncher`] breaks the holder it starts.
-    enum Sabotage {
-        /// An unreadable spec, as a service and holder binary that disagree
-        /// on its shape would hand over.
-        CorruptSpec,
-        /// The child's working directory disappears after the runner checked
-        /// it, so the PTY spawn fails.
-        RemoveDir(PathBuf),
-    }
-
-    /// Hands each holder its spec file and runs it through the real entry
-    /// point on a thread, sabotaged first.
-    struct SpecLauncher {
-        holders: Holders,
-        sabotage: Option<Sabotage>,
-    }
-
-    impl HolderLauncher for SpecLauncher {
-        fn launch(&self, config: HolderConfig) -> Result<(), PtyError> {
-            let spec = config.spec_path();
-            match &self.sabotage {
-                Some(Sabotage::CorruptSpec) => fs::write(&spec, CORRUPT_SPEC).unwrap(),
-                Some(Sabotage::RemoveDir(dir)) => {
-                    config.write_private(&spec).unwrap();
-                    fs::remove_dir(dir).unwrap();
-                },
-                None => config.write_private(&spec).unwrap(),
-            }
-            let holder = thread::spawn(move || run_holder(&spec));
-            self.holders.lock().unwrap().push(holder);
-            Ok(())
-        }
-    }
-
-    /// Forwards a holder handle's output into a channel.
-    struct ChannelSink(Sender<ProcessOutput>);
-
-    impl OutputSink for ChannelSink {
-        fn send(&self, output: ProcessOutput) {
-            let _ = self.0.send(output);
-        }
-    }
-
-    /// A sink whose receiver is gone: it notes that the exit arrived and
-    /// delivers nothing.
-    struct LosingSink(Arc<AtomicBool>);
-
-    impl OutputSink for LosingSink {
-        fn send(&self, output: ProcessOutput) {
-            if matches!(output, ProcessOutput::Exited(_)) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-    }
-
-    /// What a sink received: each chunk, the exit, and the screen they draw.
-    struct Watch {
-        outputs: Receiver<ProcessOutput>,
-        chunks: Vec<Vec<u8>>,
-        exit: Option<ExitOutcome>,
-        screen: TerminalEmulator,
-    }
-
-    impl Watch {
-        fn new() -> (Box<dyn OutputSink>, Self) {
-            let (sender, outputs) = unbounded();
-            let watch = Self {
-                outputs,
-                chunks: Vec::new(),
-                exit: None,
-                screen: TerminalEmulator::new(
-                    Rows::try_new(ROWS).unwrap(),
-                    Cols::try_new(COLS).unwrap(),
-                    TEST_SCROLLBACK,
-                    ColorScheme::Dark,
-                ),
-            };
-            (Box::new(ChannelSink(sender)), watch)
-        }
-
-        /// Receives until `condition` holds, failing the test at [`WAIT`].
-        fn until(&mut self, what: &str, condition: impl Fn(&Self) -> bool) {
-            let deadline = Instant::now() + WAIT;
-            while !condition(self) {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                match self.outputs.recv_timeout(remaining) {
-                    Ok(output) => self.apply(output),
-                    Err(_) => panic!("timed out waiting for {what}"),
-                }
-            }
-        }
-
-        /// Applies everything received so far without waiting.
-        fn drain(&mut self) {
-            while let Ok(output) = self.outputs.try_recv() {
-                self.apply(output);
-            }
-        }
-
-        fn apply(&mut self, output: ProcessOutput) {
-            match output {
-                ProcessOutput::Chunk(bytes)
-                | ProcessOutput::Placed { bytes, .. }
-                | ProcessOutput::Repaint { bytes, .. } => {
-                    self.screen.process(&bytes);
-                    self.chunks.push(bytes);
-                },
-                ProcessOutput::Exited(outcome) => self.exit = Some(outcome),
-                ProcessOutput::Warning(_) | ProcessOutput::Attached(_) => {},
-                ProcessOutput::Unreadable(reason) => panic!("unreadable output: {reason}"),
-            }
-        }
-
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.chunks.concat()).into_owned()
-        }
-
-        /// Paints the screen `handle` connected with first, as the service
-        /// does, since it is handed back rather than sent to the sink.
-        fn connected(&mut self, handle: &mut Box<dyn ProcessHandle>) {
-            let screen = handle
-                .take_initial_screen()
-                .expect("a holder connection carries its screen");
-            self.apply(ProcessOutput::Chunk(screen));
-        }
-    }
-
-    /// Polls `condition` until it holds, failing the test at [`WAIT`].
-    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-        let started = Instant::now();
-        while !condition() {
-            assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-            thread::sleep(POLL);
-        }
-    }
 
     /// Whether the holder at `socket` serves its screen at `size`. A holder
     /// applies one connection's frames in order, so once it serves at a size a
@@ -697,119 +536,6 @@ mod tests {
         .is_ok_and(|greeting| greeting.size() == size)
     }
 
-    /// Holder dirs in a scratch directory, plus every holder thread started
-    /// there; dropping it kills and collects every child left running.
-    struct Fixture {
-        dirs: HolderDirs,
-        holders: Holders,
-        scratch: TempDir,
-    }
-
-    impl Fixture {
-        fn new() -> Self {
-            let scratch = short_scratch(SCRATCH_PREFIX);
-            let root = scratch.path();
-            let dirs = HolderDirs::builder()
-                .sockets(root.join("sock"))
-                .records(root.join("records"))
-                .logs(root.join("logs"))
-                .build();
-            Self {
-                dirs,
-                holders: Arc::default(),
-                scratch,
-            }
-        }
-
-        /// A fresh runner over the same dirs, as a restarted service has.
-        fn runner(&self) -> HolderRunner {
-            self.runner_with(Box::new(ThreadHolderLauncher {
-                holders: Arc::clone(&self.holders),
-                delay: Duration::ZERO,
-            }))
-        }
-
-        fn runner_with(&self, launcher: Box<dyn HolderLauncher>) -> HolderRunner {
-            self.runner_over(self.dirs.clone(), launcher)
-        }
-
-        fn runner_over(&self, dirs: HolderDirs, launcher: Box<dyn HolderLauncher>) -> HolderRunner {
-            HolderRunner::new(launcher, dirs)
-        }
-
-        /// The project every test child belongs to: the scratch directory.
-        fn root(&self) -> ProjectRoot {
-            ProjectRoot::try_new(self.scratch.path().to_path_buf()).unwrap()
-        }
-
-        /// A launcher running holders from spec files, sabotaged as given.
-        fn spec_launcher(&self, sabotage: Option<Sabotage>) -> Box<dyn HolderLauncher> {
-            Box::new(SpecLauncher {
-                holders: Arc::clone(&self.holders),
-                sabotage,
-            })
-        }
-
-        /// A holder config for `command` as the runner would build it, with
-        /// `supervisor_deadline`.
-        fn config(&self, command: &str, supervisor_deadline: Duration) -> HolderConfig {
-            let id = HolderId::generate().unwrap();
-            let request = self.request(command);
-            HolderConfig::builder()
-                .log(self.dirs.process_log(&self.root(), request.process()))
-                .socket(self.dirs.socket_path(&id))
-                .id(id)
-                .request(request)
-                .record_dir(self.dirs.records().clone())
-                .supervisor_deadline(supervisor_deadline)
-                .build()
-        }
-
-        /// A request to run `command` as `dev server` of this fixture's
-        /// project.
-        fn request(&self, command: &str) -> SpawnRequest {
-            test_request(
-                "dev server",
-                command,
-                Some(self.scratch.path().to_path_buf()),
-                None,
-            )
-        }
-
-        fn record_files(&self) -> Vec<HolderRecord> {
-            HolderRecord::load_all(self.dirs.records())
-        }
-
-        fn log(&self, record: &HolderRecord) -> String {
-            String::from_utf8_lossy(&fs::read(record.log()).unwrap_or_default()).into_owned()
-        }
-    }
-
-    impl Drop for Fixture {
-        /// Kills every child still recorded, collects its exit so its holder
-        /// returns, and joins every holder thread, all bounded by [`WAIT`].
-        /// A record naming the test process itself (a stale-record test's
-        /// stand-in) is never signalled.
-        fn drop(&mut self) {
-            for record in self.record_files() {
-                if record.child_pid().into_inner() != process::id() {
-                    let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
-                }
-                abandon(record.socket());
-            }
-            let started = Instant::now();
-            let holders = mem::take(&mut *self.holders.lock().unwrap());
-            for holder in holders {
-                while !holder.is_finished() && started.elapsed() < WAIT {
-                    thread::sleep(POLL);
-                }
-                if holder.is_finished() {
-                    let _ = holder.join();
-                }
-            }
-        }
-    }
-
     #[test]
     fn spawned_process_streams_output_through_the_sink() {
         let fixture = Fixture::new();
@@ -825,13 +551,13 @@ mod tests {
         let record = runner.locate(pid).unwrap();
         assert_eq!(
             record.socket().parent(),
-            Some(fixture.dirs.sockets().as_path())
+            Some(fixture.dirs().sockets().as_path())
         );
         assert!(fixture.log(&record).contains("hello"));
 
         handle.write_input(b"\n").unwrap();
-        watch.until("the child's exit", |watch| watch.exit.is_some());
-        assert_eq!(watch.exit, Some(ExitOutcome::Succeeded));
+        watch.until("the child's exit", |watch| watch.exit().is_some());
+        assert_eq!(watch.exit(), Some(ExitOutcome::Succeeded));
         handle.acknowledge_exit().unwrap();
         wait_until("the holder to finish once the exit is collected", || {
             fixture.record_files().is_empty()
@@ -849,7 +575,7 @@ mod tests {
         let mut handle = runner
             .spawn(
                 fixture.request("read x"),
-                Box::new(LosingSink(Arc::clone(&reported))),
+                Box::new(LosingSink::new(Arc::clone(&reported))),
             )
             .unwrap();
         let record = runner.locate(handle.process_id().unwrap()).unwrap();
@@ -876,8 +602,8 @@ mod tests {
         assert_eq!(runner.live_records(), vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
         let mut adopted = runner.adopt(&record, None, sink).unwrap();
-        watch.until("the held exit", |watch| watch.exit.is_some());
-        assert_eq!(watch.exit, Some(ExitOutcome::Succeeded));
+        watch.until("the held exit", |watch| watch.exit().is_some());
+        assert_eq!(watch.exit(), Some(ExitOutcome::Succeeded));
         adopted.acknowledge_exit().unwrap();
         wait_until("the holder to finish once the exit is acknowledged", || {
             fixture.record_files().is_empty()
@@ -894,7 +620,7 @@ mod tests {
         let mut handle = runner.spawn(fixture.request("read x"), sink).unwrap();
 
         handle.write_input(b"\n").unwrap();
-        watch.until("the child's exit", |watch| watch.exit.is_some());
+        watch.until("the child's exit", |watch| watch.exit().is_some());
         handle.acknowledge_exit().unwrap();
         drop(handle);
 
@@ -965,15 +691,15 @@ mod tests {
         assert_eq!(adopted.process_id(), Some(pid));
         watch.until("a tick after the adoption snapshot", |watch| {
             watch
-                .chunks
+                .chunks()
                 .iter()
                 .skip(1)
                 .any(|chunk| String::from_utf8_lossy(chunk).contains("tick"))
         });
-        assert!(watch.exit.is_none(), "the adopted child is still running");
+        assert!(watch.exit().is_none(), "the adopted child is still running");
 
         adopted.kill().unwrap();
-        watch.until("the child's exit", |watch| watch.exit.is_some());
+        watch.until("the child's exit", |watch| watch.exit().is_some());
     }
 
     #[test]
@@ -1030,11 +756,11 @@ mod tests {
         let holder_screen = replayed.screen_text();
         assert_eq!(screen_text(record.socket()).unwrap(), holder_screen);
         watch.until("the adopted screen to match the holder's", |watch| {
-            watch.screen.screen_text() == holder_screen
+            watch.screen().screen_text() == holder_screen
         });
 
         adopted.kill().unwrap();
-        watch.until("the child's exit", |watch| watch.exit.is_some());
+        watch.until("the child's exit", |watch| watch.exit().is_some());
     }
 
     #[test]
@@ -1044,8 +770,8 @@ mod tests {
         let missing_dir = test_request(
             "dev server",
             "true",
-            Some(fixture.scratch.path().to_path_buf()),
-            Some(fixture.scratch.path().join("absent")),
+            Some(fixture.scratch().path().to_path_buf()),
+            Some(fixture.scratch().path().join("absent")),
         );
         let no_project = test_request("dev server", "true", None, None);
 
@@ -1057,7 +783,7 @@ mod tests {
         let (sink, _watch) = Watch::new();
         assert!(runner.spawn(no_project, sink).is_err());
         assert!(
-            fixture.holders.lock().unwrap().is_empty(),
+            fixture.holders().lock().unwrap().is_empty(),
             "nothing launched"
         );
     }
@@ -1072,8 +798,8 @@ mod tests {
     ) -> HolderRecord {
         let id = HolderId::generate().unwrap();
         let record = HolderRecord::builder()
-            .socket(fixture.dirs.socket_path(&id))
-            .log(fixture.dirs.process_log(
+            .socket(fixture.dirs().socket_path(&id))
+            .log(fixture.dirs().process_log(
                 &fixture.root(),
                 &ProcessName::try_new("dev server").unwrap(),
             ))
@@ -1087,7 +813,7 @@ mod tests {
             .child_start_token(child_start_token)
             .child_started_at(SystemTime::now())
             .build();
-        record.save(fixture.dirs.records()).unwrap();
+        record.save(fixture.dirs().records()).unwrap();
         record
     }
 
@@ -1110,7 +836,7 @@ mod tests {
     fn stale_record_with_reused_pid_is_removed_not_adopted() {
         let fixture = Fixture::new();
         let record = save_reused_pid_record(&fixture, own_pid(), foreign_start_token());
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         // A datagram socket refuses every stream connect even when a child
         // another test forks inherits it; a dropped stream listener would
         // keep accepting in such a child until it execs.
@@ -1151,7 +877,7 @@ mod tests {
         forget_records(&fixture);
 
         let fixture = Fixture::new();
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         let live = save_reused_pid_record(&fixture, own_pid(), own_start_token());
         let _serving = UnixListener::bind(live.socket()).unwrap();
         for _ in 0..STALE_RECORDS {
@@ -1167,7 +893,7 @@ mod tests {
     #[test]
     fn a_holder_too_busy_to_accept_is_probed_in_bounded_time_and_kept_live() {
         let fixture = Fixture::new();
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         let record = save_reused_pid_record(&fixture, own_pid(), foreign_start_token());
         let listener = UnixListener::bind(record.socket()).unwrap();
         listen(&listener, 0).unwrap();
@@ -1187,7 +913,7 @@ mod tests {
     /// Deletes the fixture's stand-in records, which name no holder, so its
     /// drop does not wait out an abandon of each.
     fn forget_records(fixture: &Fixture) {
-        fs::remove_dir_all(fixture.dirs.records()).unwrap();
+        fs::remove_dir_all(fixture.dirs().records()).unwrap();
     }
 
     /// A settled socket no live holder's record names is swept, even one
@@ -1197,18 +923,18 @@ mod tests {
     #[test]
     fn the_sweep_removes_orphan_sockets_by_record_and_age() {
         let fixture = Fixture::new();
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         let runner = fixture.runner().with_ready_timeout(SHORT_READY);
-        let orphan = fixture.dirs.socket_path(&HolderId::generate().unwrap());
+        let orphan = fixture.dirs().socket_path(&HolderId::generate().unwrap());
         drop(UnixListener::bind(&orphan).unwrap());
-        let accepting = fixture.dirs.socket_path(&HolderId::generate().unwrap());
+        let accepting = fixture.dirs().socket_path(&HolderId::generate().unwrap());
         let _accepting = UnixListener::bind(&accepting).unwrap();
         let served = save_reused_pid_record(&fixture, own_pid(), own_start_token());
         let _serving = UnixListener::bind(served.socket()).unwrap();
         let dead_holder = save_dead_holder_record(&fixture);
         drop(UnixListener::bind(dead_holder.socket()).unwrap());
         thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
-        let young = fixture.dirs.socket_path(&HolderId::generate().unwrap());
+        let young = fixture.dirs().socket_path(&HolderId::generate().unwrap());
         drop(UnixListener::bind(&young).unwrap());
 
         assert!(runner.sweep_orphan_sockets().unwrap().is_empty());
@@ -1235,8 +961,8 @@ mod tests {
         let id = HolderId::generate().unwrap();
         let name = ProcessName::try_new("dev server").unwrap();
         let record = HolderRecord::builder()
-            .socket(fixture.dirs.socket_path(&id))
-            .log(fixture.dirs.process_log(&fixture.root(), &name))
+            .socket(fixture.dirs().socket_path(&id))
+            .log(fixture.dirs().process_log(&fixture.root(), &name))
             .id(id)
             .project(fixture.root())
             .process(name)
@@ -1247,7 +973,7 @@ mod tests {
             .child_start_token(None)
             .child_started_at(SystemTime::now())
             .build();
-        record.save(fixture.dirs.records()).unwrap();
+        record.save(fixture.dirs().records()).unwrap();
         record
     }
 
@@ -1255,12 +981,12 @@ mod tests {
     fn a_holder_the_runner_gave_up_on_kills_its_child_and_leaves_no_record() {
         let fixture = Fixture::new();
         let runner = fixture
-            .runner_with(Box::new(ThreadHolderLauncher {
-                holders: Arc::clone(&fixture.holders),
-                delay: SLOW_START,
-            }))
+            .runner_with(Box::new(ThreadLauncher::delayed(
+                Arc::clone(fixture.holders()),
+                SLOW_START,
+            )))
             .with_ready_timeout(SHORT_READY);
-        let pid_file = fixture.scratch.path().join(PID_FILE);
+        let pid_file = fixture.scratch().path().join(PID_FILE);
         let command = format!(
             "echo $$ > {}; while :; do sleep 0.05; done",
             pid_file.display()
@@ -1270,7 +996,7 @@ mod tests {
         assert!(runner.spawn(fixture.request(&command), sink).is_err());
         wait_until("the abandoned holder to stop", || {
             fixture
-                .holders
+                .holders()
                 .lock()
                 .unwrap()
                 .iter()
@@ -1311,7 +1037,7 @@ mod tests {
         abandon(record.socket());
         wait_until("the holder to finish", || {
             fixture
-                .holders
+                .holders()
                 .lock()
                 .unwrap()
                 .iter()
@@ -1335,14 +1061,17 @@ mod tests {
             .unwrap();
         let record = runner.locate(handle.process_id().unwrap()).unwrap();
         assert_eq!(
-            handle.screen_source(),
-            ScreenSource::Served(record.socket().clone())
+            format!("{:?}", handle.screen_source()),
+            format!(
+                "{:?}",
+                ScreenSource::Served(Arc::new(ServedScreen::new(record.socket().clone())))
+            )
         );
 
         handle.abandon();
         wait_until("the holder to finish", || {
             fixture
-                .holders
+                .holders()
                 .lock()
                 .unwrap()
                 .iter()
@@ -1366,11 +1095,11 @@ mod tests {
     #[test]
     fn a_holder_whose_log_cannot_open_reports_why_without_serving() {
         let fixture = Fixture::new();
-        let blocker = fixture.scratch.path().join(NOT_A_DIRECTORY);
+        let blocker = fixture.scratch().path().join(NOT_A_DIRECTORY);
         fs::write(&blocker, b"").unwrap();
         let dirs = HolderDirs::builder()
-            .sockets(fixture.dirs.sockets().clone())
-            .records(fixture.dirs.records().clone())
+            .sockets(fixture.dirs().sockets().clone())
+            .records(fixture.dirs().records().clone())
             .logs(blocker.join("logs"))
             .build();
         let runner = fixture.runner_over(dirs, fixture.spec_launcher(None));
@@ -1382,14 +1111,14 @@ mod tests {
     #[test]
     fn a_holder_whose_child_cannot_spawn_reports_why_without_serving() {
         let fixture = Fixture::new();
-        let workdir = fixture.scratch.path().join("work");
+        let workdir = fixture.scratch().path().join("work");
         fs::create_dir(&workdir).unwrap();
         let runner =
             fixture.runner_with(fixture.spec_launcher(Some(Sabotage::RemoveDir(workdir.clone()))));
         let request = test_request(
             "dev server",
             "true",
-            Some(fixture.scratch.path().to_path_buf()),
+            Some(fixture.scratch().path().to_path_buf()),
             Some(workdir),
         );
 
@@ -1419,7 +1148,7 @@ mod tests {
             started.elapsed() < HOLDER_READY_TIMEOUT.into_inner(),
             "the report ends the wait"
         );
-        let leftovers = fs::read_dir(fixture.dirs.sockets()).unwrap().count();
+        let leftovers = fs::read_dir(fixture.dirs().sockets()).unwrap().count();
         assert_eq!(leftovers, 0, "no socket, spec or error file is left");
         assert!(fixture.record_files().is_empty(), "no record is left");
         error
@@ -1428,20 +1157,17 @@ mod tests {
     #[test]
     fn abandoning_a_holder_still_starting_reaches_it_once_it_serves() {
         let fixture = Fixture::new();
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         let config = fixture.config("while :; do sleep 0.05; done", LONG_SUPERVISOR_DEADLINE);
         let socket = config.socket().clone();
-        ThreadHolderLauncher {
-            holders: Arc::clone(&fixture.holders),
-            delay: STARTING_DELAY,
-        }
-        .launch(config)
-        .unwrap();
+        ThreadLauncher::delayed(Arc::clone(fixture.holders()), STARTING_DELAY)
+            .launch(config)
+            .unwrap();
 
         abandon(&socket);
         wait_until("the abandoned holder to finish", || {
             fixture
-                .holders
+                .holders()
                 .lock()
                 .unwrap()
                 .iter()
@@ -1468,9 +1194,9 @@ mod tests {
         watch.until("the trap to be set", |watch| watch.text().contains("ready"));
         let started = Instant::now();
         handle.terminate(StopSignal::Interrupt, WAIT).unwrap();
-        watch.until("the graceful exit", |watch| watch.exit.is_some());
+        watch.until("the graceful exit", |watch| watch.exit().is_some());
         assert!(watch.text().contains("got-int"), "the signal was delivered");
-        assert_eq!(watch.exit, Some(ExitOutcome::Succeeded));
+        assert_eq!(watch.exit(), Some(ExitOutcome::Succeeded));
         assert!(started.elapsed() < WAIT, "a graceful exit needs no kill");
 
         let (sink, mut watch) = Watch::new();
@@ -1487,14 +1213,17 @@ mod tests {
         thread::sleep(STOP_GRACE / 2);
         watch.drain();
         assert!(
-            watch.exit.is_none(),
+            watch.exit().is_none(),
             "the child outlives the ignored signal within its grace"
         );
-        watch.until("the forced exit", |watch| watch.exit.is_some());
+        watch.until("the forced exit", |watch| watch.exit().is_some());
         assert!(
-            matches!(watch.exit, Some(ExitOutcome::Failed(ExitCause::Signal(_)))),
+            matches!(
+                watch.exit(),
+                Some(ExitOutcome::Failed(ExitCause::Signal(_)))
+            ),
             "the forced stop ends the child by a signal: {:?}",
-            watch.exit
+            watch.exit()
         );
         assert!(
             started.elapsed() >= STOP_GRACE,
@@ -1509,15 +1238,15 @@ mod tests {
         let fixture = Fixture::new();
         let runner = fixture.runner();
         assert!(runner.sweep_handover_files().unwrap().is_empty());
-        fixture.dirs.prepare_sockets().unwrap();
+        fixture.dirs().prepare_sockets().unwrap();
         let id = HolderId::generate().unwrap();
-        let socket = fixture.dirs.socket_path(&id);
+        let socket = fixture.dirs().socket_path(&id);
         let spec = fixture.config("true", LONG_SUPERVISOR_DEADLINE).spec_path();
         let error = error_path_beside(&spec);
         for path in [&socket, &spec, &error] {
             fs::write(path, b"x").unwrap();
         }
-        let stuck = fixture.dirs.sockets().join(STUCK_HANDOVER);
+        let stuck = fixture.dirs().sockets().join(STUCK_HANDOVER);
         fs::create_dir(&stuck).unwrap();
 
         let failures = runner.sweep_handover_files().unwrap();
@@ -1540,8 +1269,8 @@ mod tests {
     #[test]
     fn an_unreadable_record_is_reported() {
         let fixture = Fixture::new();
-        fs::create_dir_all(fixture.dirs.records()).unwrap();
-        let corrupt = fixture.dirs.records().join("corrupt.json");
+        fs::create_dir_all(fixture.dirs().records()).unwrap();
+        let corrupt = fixture.dirs().records().join("corrupt.json");
         fs::write(&corrupt, CORRUPT_SPEC).unwrap();
 
         let runner = fixture.runner();

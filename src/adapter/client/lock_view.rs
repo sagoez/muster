@@ -2,7 +2,10 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{Author, Lock};
+use crate::domain::{
+    coordination::{Author, Lock},
+    value::EpochSeconds,
+};
 
 /// A held lock as `stack_status` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -25,7 +28,7 @@ pub struct LockView {
 
 impl LockView {
     /// `lock` as read at `now`, Unix seconds.
-    pub fn at(lock: &Lock, now: u64) -> Self {
+    pub fn at(lock: &Lock, now: EpochSeconds) -> Self {
         Self {
             name: lock.name().to_string(),
             owner: lock.owner().clone(),

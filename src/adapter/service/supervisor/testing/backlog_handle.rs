@@ -1,6 +1,9 @@
+use std::time::{Duration, SystemTime};
+
 use super::fixtures::{BACKLOG, BACKLOG_RUN_START};
 use crate::domain::{
     port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
@@ -10,6 +13,34 @@ use crate::domain::{
 pub(crate) struct BacklogHandle;
 
 impl ProcessHandle for BacklogHandle {
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn output_end(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
+        Ok(())
+    }
+
+    fn terminate(&mut self, _signal: StopSignal, _grace: Duration) -> Result<(), PtyError> {
+        self.kill()
+    }
+
     fn process_id(&self) -> Option<Pid> {
         None
     }

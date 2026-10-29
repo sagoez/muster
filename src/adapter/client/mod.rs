@@ -55,6 +55,8 @@ mod unwatched;
 mod user_service;
 mod wait_end;
 mod wait_view;
+mod working_dir_error;
+mod working_dir_place;
 
 pub use action::*;
 pub use action_report::*;
@@ -104,3 +106,5 @@ pub use unwatched::*;
 pub use user_service::*;
 pub use wait_end::*;
 pub use wait_view::*;
+pub use working_dir_error::*;
+pub use working_dir_place::*;

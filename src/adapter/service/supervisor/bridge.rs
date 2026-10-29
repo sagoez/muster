@@ -34,12 +34,12 @@ impl Supervisor {
             .as_ref()
             .map(|handle| handle.screen_source());
         match (source, self.generations.get(&pane)) {
-            (Some(ScreenSource::Served(socket)), Some(generation)) => ScreenReply::ReadHolder(
+            (Some(ScreenSource::Served(reader)), Some(generation)) => ScreenReply::ReadHolder(
                 HolderScreen::builder()
                     .project(self.root().clone())
                     .pane(pane)
                     .generation(*generation)
-                    .socket(socket)
+                    .reader(reader)
                     .fallback(fallback)
                     .build(),
             ),
@@ -111,15 +111,15 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
-            holder::{ClientMessage, HolderMessage},
+            holder::{ClientMessage, HolderMessage, ServedScreen},
             service::{LaunchEnvironment, supervisor::testing::*},
             test_scratch::short_scratch,
         },
         domain::{
-            port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
+            port::ProcessRunner,
             process::RestartPolicy,
-            pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-            value::{OutputCursor, Pid},
+            pty::{ExitOutcome, ProcessOutput, PtySize},
+            value::OutputCursor,
         },
     };
 
@@ -178,75 +178,10 @@ mod tests {
         }
     }
 
-    /// A handle to a process a holder at `socket` runs.
-    struct HolderRunHandle {
-        socket: PathBuf,
-    }
-
-    impl ProcessHandle for HolderRunHandle {
-        fn process_id(&self) -> Option<Pid> {
-            None
-        }
-
-        fn input(&self) -> Option<Box<dyn ProcessInput>> {
-            None
-        }
-
-        fn screen_source(&self) -> ScreenSource {
-            ScreenSource::Served(self.socket.clone())
-        }
-
-        fn abandon(mut self: Box<Self>) {
-            let _ = self.kill();
-        }
-
-        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn pause(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resume(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn kill(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-    }
-
-    /// A runner whose every process runs under a holder at `socket`.
-    struct HolderRunRunner {
-        socket: PathBuf,
-    }
-
-    impl ProcessRunner for HolderRunRunner {
-        fn spawn(
-            &self,
-            _request: SpawnRequest,
-            _sink: Box<dyn OutputSink>,
-        ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-            Ok(Box::new(HolderRunHandle {
-                socket: self.socket.clone(),
-            }))
-        }
-    }
-
     /// A started process run by a holder at `socket`, whose last screen the
     /// service saw shows [`SERVICE_SCREEN`].
     fn holder_run(socket: &Path) -> Harness {
-        let mut harness = over(
-            Box::new(HolderRunRunner {
-                socket: socket.to_path_buf(),
-            }),
-            true,
-        );
+        let mut harness = over(Box::new(HolderRunRunner::new(socket.to_path_buf())), true);
         harness.up();
         repaint(&mut harness, SERVICE_SCREEN);
         harness
@@ -365,7 +300,10 @@ mod tests {
         let screen = handed_out(&mut harness);
 
         assert_eq!(screen.pane(), PaneId::new(PANE));
-        assert_eq!(screen.socket(), Path::new(UNSERVED_SOCKET));
+        assert_eq!(
+            format!("{:?}", screen.reader()),
+            format!("{:?}", ServedScreen::new(PathBuf::from(UNSERVED_SOCKET)))
+        );
         assert!(screen.fallback().contains(SERVICE_SCREEN));
     }
 

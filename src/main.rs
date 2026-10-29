@@ -13,6 +13,7 @@ use muster::{
         path::home_dir,
         port_occupants::OsPortOccupants,
         private_dir::{prepare_state_dir, state_dir},
+        pty::PortablePtyRunner,
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
             protocol, redirect_stderr,
@@ -89,7 +90,7 @@ impl CliPorts for LocalPorts {
     }
 
     fn run_holder(&self, spec: &Path) -> Result<(), MusterError> {
-        Ok(run_holder(spec)?)
+        Ok(run_holder(spec, &PortablePtyRunner)?)
     }
 }
 

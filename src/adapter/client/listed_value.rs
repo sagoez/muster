@@ -39,7 +39,10 @@ impl From<&KeyValue> for ListedValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::coordination::{Author, KvKey};
+    use crate::domain::{
+        coordination::{Author, KvKey},
+        value::EpochSeconds,
+    };
 
     /// A long value is cut and marked; a short one is listed whole, unmarked.
     #[test]
@@ -49,7 +52,7 @@ mod tests {
                 .key(KvKey::try_new("blob").unwrap())
                 .value(value)
                 .author(Author::human())
-                .updated_at(1)
+                .updated_at(EpochSeconds::new(1))
                 .build()
         };
 

@@ -195,9 +195,10 @@ mod tests {
             config::ConfigError,
             coordination::{
                 Claim, KeyValue, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease,
-                LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoId,
-                TodoLease, TodoTitle, TodoUpdate,
+                LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
+                TodoChange, TodoId, TodoLease, TodoUpdate,
             },
+            value::EpochSeconds,
         },
     };
 
@@ -236,7 +237,7 @@ mod tests {
                 .key(key.clone())
                 .value(value.to_string())
                 .author(author.clone())
-                .updated_at(0)
+                .updated_at(EpochSeconds::new(0))
                 .build();
             let mut entries = self.entries.borrow_mut();
             entries.retain(|existing| existing.key() != key);
@@ -293,7 +294,7 @@ mod tests {
             &self,
             _project: &ProjectRoot,
             _author: &Author,
-            _title: &TodoTitle,
+            _title: &NewTodoTitle,
             _deps: &[TodoId],
         ) -> Result<Todo, ConfigError> {
             unreachable!("kv commands never touch todos")

@@ -12,10 +12,10 @@ pub struct LockAcquireArg {
     #[builder(default)]
     #[getset(get = "pub")]
     project: Option<String>,
-    /// The lock's name: 1 to 64 of a-z, 0-9, '.', '_' and '-'.
+    /// The lock's name: 1 to <lock-name-max-chars> of a-z, 0-9, '.', '_' and '-'.
     #[getset(get = "pub")]
     name: String,
-    /// Seconds until it lapses, default 300, at most 3600.
+    /// Seconds until it lapses, default <default-ttl-s>, at most <max-ttl-s>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     ttl_s: Option<u64>,
@@ -23,7 +23,7 @@ pub struct LockAcquireArg {
     #[builder(default)]
     #[getset(get = "pub")]
     note: Option<String>,
-    /// Seconds to wait for it to free up, at most 45.
+    /// Seconds to wait for it to free up, at most <call-bound-s>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     wait_s: Option<u64>,

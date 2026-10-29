@@ -1,17 +1,22 @@
 use nutype::nutype;
 use unicode_normalization::UnicodeNormalization;
 
-/// Whether `name` holds no control character, so printing it cannot drive a
-/// terminal.
-fn has_no_control_characters(name: &str) -> bool {
-    !name.chars().any(char::is_control)
+use super::steers_the_terminal;
+
+/// Whether `name` holds no control character, tab included, and no format
+/// character such as a bidi override or a zero-width space, so printing it
+/// can neither drive a terminal nor hide or reorder the text around it.
+fn is_terminal_safe(name: &str) -> bool {
+    !name
+        .chars()
+        .any(|character| character.is_control() || steers_the_terminal(character))
 }
 
-/// A process's display name: trimmed, non-empty and free of control
-/// characters.
+/// A process's display name: trimmed, non-empty and free of control and
+/// format characters.
 #[nutype(
     sanitize(trim),
-    validate(not_empty, predicate = has_no_control_characters),
+    validate(not_empty, predicate = is_terminal_safe),
     derive(
         Debug,
         Clone,
@@ -90,5 +95,15 @@ mod tests {
         for refused in ["\u{1b}[2Japi", "a\u{7}b", "web\nworker", "x\u{9b}"] {
             assert!(ProcessName::try_new(refused).is_err(), "{refused:?}");
         }
+    }
+
+    /// A name carrying a bidi override, an isolate or a zero-width character
+    /// is refused, so it cannot reverse or hide the text after it.
+    #[test]
+    fn rejects_format_characters() {
+        for refused in ["api\u{202e}gpj", "a\u{2066}b", "we\u{200b}b", "\u{feff}api"] {
+            assert!(ProcessName::try_new(refused).is_err(), "{refused:?}");
+        }
+        assert!(ProcessName::try_new("caf\u{e9} server").is_ok());
     }
 }

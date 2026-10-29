@@ -16,7 +16,7 @@ pub struct TodoClaimArg {
     #[builder(default)]
     #[getset(get = "pub")]
     id: Option<String>,
-    /// Seconds the claim lasts, default 1800, at most 28800.
+    /// Seconds the claim lasts, default <default-lease-s>, at most <max-lease-s>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     lease_s: Option<u64>,

@@ -2,8 +2,8 @@ use crate::domain::{
     config::ConfigError,
     coordination::{
         Author, Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
-        LockRelease, LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange,
-        TodoId, TodoLease, TodoTitle, TodoUpdate,
+        LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad, ScratchpadKey, SessionId, Todo,
+        TodoChange, TodoId, TodoLease, TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -78,7 +78,7 @@ pub trait CoordinationStore {
         &self,
         project: &ProjectRoot,
         author: &Author,
-        title: &TodoTitle,
+        title: &NewTodoTitle,
         deps: &[TodoId],
     ) -> Result<Todo, ConfigError>;
 

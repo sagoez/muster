@@ -1,7 +1,10 @@
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{Author, KvKey};
+use crate::domain::{
+    coordination::{Author, KvKey},
+    value::EpochSeconds,
+};
 
 /// A shared, durable key-value entry in a project: the low-ceremony scratch
 /// state agents pass between each other (a chosen port, a build id, a flag). The
@@ -16,6 +19,6 @@ pub struct KeyValue {
     value: String,
     /// Who last wrote the entry, stamped by the store.
     author: Author,
-    /// Unix epoch seconds of the last write, stamped by the store.
-    updated_at: u64,
+    /// When it was last written, stamped by the store.
+    updated_at: EpochSeconds,
 }

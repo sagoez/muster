@@ -164,9 +164,10 @@ mod tests {
         config::ConfigError,
         coordination::{
             Claim, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder, LockName, LockNote,
-            LockRelease, LockTtl, Scratchpad, SessionId, Todo, TodoChange, TodoId, TodoLease,
-            TodoTitle, TodoUpdate,
+            LockRelease, LockTtl, NewTodoTitle, Scratchpad, SessionId, Todo, TodoChange, TodoId,
+            TodoLease, TodoUpdate,
         },
+        value::EpochSeconds,
     };
 
     /// An in-memory coordination store recording scratchpads for one project.
@@ -204,7 +205,7 @@ mod tests {
                 .key(key.clone())
                 .body(body.to_string())
                 .author(author.clone())
-                .updated_at(0)
+                .updated_at(EpochSeconds::new(0))
                 .build();
             let mut notes = self.notes.borrow_mut();
             notes.retain(|existing| existing.key() != key);
@@ -235,7 +236,7 @@ mod tests {
             &self,
             _project: &ProjectRoot,
             _author: &Author,
-            _title: &TodoTitle,
+            _title: &NewTodoTitle,
             _deps: &[TodoId],
         ) -> Result<Todo, ConfigError> {
             unreachable!("note commands never touch todos")
@@ -401,7 +402,7 @@ mod tests {
                 .key(ScratchpadKey::try_new("theirs").unwrap())
                 .body("agent note".to_string())
                 .author(Author::agent("claude"))
-                .updated_at(0)
+                .updated_at(EpochSeconds::new(0))
                 .build(),
         );
 

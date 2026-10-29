@@ -1,20 +1,17 @@
 //! Reads the fields an agent passes to the stack-editing tools into domain
 //! values, naming the field and the accepted form on a refusal.
 
-use std::{
-    collections::BTreeMap,
-    fmt::Display,
-    fs,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
 use strum::IntoEnumIterator;
 
 use super::tool_error::ToolError;
-use crate::domain::value::{
-    CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
-    ValueParseError, parse_choice,
+use crate::{
+    adapter::client::WorkingDirPlace,
+    domain::value::{
+        CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace,
+        ValueParseError, parse_choice,
+    },
 };
 
 /// The `working_dir` field.
@@ -133,33 +130,22 @@ pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, ToolError> {
     })
 }
 
-/// Where a process of the project at `root` runs when an agent typed `raw`:
-/// a directory under the root is stored relative to it, and the root itself
-/// as none. Symlinks are resolved first, so a link out of the project is
-/// refused like the folder it leads to.
+/// Where a process of the project at `root` runs when an agent typed `raw`,
+/// read relative to the root: placed as the CLI places a folder, and confined
+/// to the project, so a folder outside it, or a link out of it, is refused.
 ///
 /// # Errors
 /// Returns the refusal of a path that is not an existing directory, or of
 /// one outside the project root.
 pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBuf>, ToolError> {
-    let typed = Path::new(raw);
-    let joined = if typed.is_absolute() {
-        typed.to_path_buf()
-    } else {
-        root.as_ref().join(typed)
-    };
-    let dir = fs::canonicalize(&joined)
-        .ok()
-        .filter(|dir| dir.is_dir())
-        .ok_or_else(|| invalid(WORKING_DIR_FIELD, WORKING_DIR_FORM, raw))?;
-    let base = fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().clone());
-    match dir.strip_prefix(&base) {
-        Ok(inside) if inside.as_os_str().is_empty() => Ok(None),
-        Ok(inside) => Ok(Some(inside.to_path_buf())),
-        Err(_) => Err(ToolError::WorkingDirOutsideProject {
+    let place = WorkingDirPlace::of(root, &root.as_ref().join(raw))
+        .map_err(|_| invalid(WORKING_DIR_FIELD, WORKING_DIR_FORM, raw))?;
+    match place {
+        WorkingDirPlace::Outside(dir) => Err(ToolError::WorkingDirOutsideProject {
             dir,
             root: root.as_ref().clone(),
         }),
+        WorkingDirPlace::Root | WorkingDirPlace::Inside(_) => Ok(place.stored()),
     }
 }
 

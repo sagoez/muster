@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError},
+        client::{ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError},
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
         sanitize::printable,
@@ -272,6 +272,15 @@ impl From<ResolveError> for CliError {
             ResolveError::NotAProject { dir } => Self::NotAProject { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
             ResolveError::Config(error) => Self::Config(error),
+        }
+    }
+}
+
+impl From<WorkingDirError> for CliError {
+    fn from(error: WorkingDirError) -> Self {
+        match error {
+            WorkingDirError::NotADirectory(dir) => Self::NotADirectory(dir),
+            WorkingDirError::Unrepresentable(dir) => Self::UnrepresentablePath(dir),
         }
     }
 }

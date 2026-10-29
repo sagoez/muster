@@ -16,7 +16,10 @@ use super::{
     holder_launcher::HolderLauncher,
     server::HolderServer,
 };
-use crate::{adapter::open_files::OpenFilesLimit, domain::pty::PtyError};
+use crate::{
+    adapter::open_files::OpenFilesLimit,
+    domain::{port::ProcessRunner, pty::PtyError},
+};
 
 /// Hidden subcommand that runs one holder in the current process.
 pub const HOLDER_SUBCOMMAND: &str = "__holder";
@@ -65,11 +68,12 @@ impl HolderLauncher for ExecHolderLauncher {
 /// Runs the holder handed the spec at `spec` until its child's exit is
 /// collected. A holder has no stdio, so an error it fails with is also written
 /// to an owner-only file beside the spec, where the launching runner reads it.
+/// `runner` spawns the child.
 ///
 /// # Errors
 /// Returns a [`HolderError`] when the spec cannot be read or the holder fails.
-pub fn run_holder(spec: &Path) -> Result<(), HolderError> {
-    let ran = HolderConfig::take_from(spec).and_then(HolderServer::run);
+pub fn run_holder(spec: &Path, runner: &dyn ProcessRunner) -> Result<(), HolderError> {
+    let ran = HolderConfig::take_from(spec).and_then(|config| HolderServer::run(config, runner));
     if let Err(error) = &ran {
         let _ = write_private_file(&error_path_beside(spec), error.to_string().as_bytes());
     }

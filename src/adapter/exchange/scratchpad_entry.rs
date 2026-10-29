@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter::wire::{WireForm, form},
-    domain::coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, Scratchpad, ScratchpadKey},
+    domain::{
+        coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, Scratchpad, ScratchpadKey},
+        value::EpochSeconds,
+    },
 };
 
 /// A scratchpad as a coordination snapshot and an agent read it.
@@ -17,7 +20,7 @@ pub struct ScratchpadEntry {
     #[serde(with = "form")]
     author: Author,
     /// Unix epoch seconds of the last write.
-    updated_at: u64,
+    updated_at: EpochSeconds,
 }
 
 impl WireForm for Scratchpad {

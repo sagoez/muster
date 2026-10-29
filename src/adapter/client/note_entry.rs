@@ -2,7 +2,10 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{Author, Scratchpad};
+use crate::domain::{
+    coordination::{Author, Scratchpad},
+    value::EpochSeconds,
+};
 
 /// A note without its body: the index `note_read` and `muster note --json`
 /// list, so a project full of long notes cannot flood the caller in one call.
@@ -15,7 +18,7 @@ pub struct NoteEntry {
     #[serde(with = "crate::adapter::wire::form")]
     author: Author,
     /// When it was last written, in seconds since the Unix epoch.
-    updated_at: u64,
+    updated_at: EpochSeconds,
 }
 
 impl From<&Scratchpad> for NoteEntry {

@@ -14,7 +14,7 @@ pub enum EntryError {
         /// The parser's account of what is wrong.
         reason: String,
     },
-    /// `name` is blank or holds a control character.
+    /// `name` is blank or holds a control or format character.
     #[error("name {0}")]
     InvalidName(NameProblem),
     /// `command` is blank.

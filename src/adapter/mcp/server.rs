@@ -1,8 +1,4 @@
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -19,7 +15,7 @@ use tokio::task;
 use super::{
     alerts::{ALERT_KINDS, Alerts},
     alerts_view::AlertsView,
-    described::described,
+    described::{described, resolved},
     identity::Identity,
     mcp_deps::McpDeps,
     mcp_error::McpError,
@@ -48,13 +44,18 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     process_logs with errors_only=true, then follow up with since=cursor to read only new \
     output. Results carry alerts when a process crashed since your last call. Before work other \
     agents must not repeat, take a lock (lock_acquire) or claim a todo (todo_claim). Calls never \
-    block more than 45 seconds; a wait that has not finished returns status waiting with a \
+    block more than <call-bound-s> seconds; a wait that has not finished returns status waiting with a \
     cursor to continue from. Tools default to the project containing your working directory; \
     pass project to reach another.";
 /// Key of the author's label echoed on a coordination write.
 const YOU: &str = "you";
 /// Opens each alert line appended to a rendered result's text.
 const ALERT_LINE_PREFIX: &str = "[alert]";
+
+/// The guidance shown to connecting agents, with its bounds resolved.
+pub(super) fn instructions() -> String {
+    resolved(MCP_INSTRUCTIONS)
+}
 
 /// Builds the pretty-printed JSON snippet an agent pastes into its
 /// MCP-servers config to launch muster's server. It names no project, so one
@@ -259,13 +260,6 @@ pub(super) fn rendered(
     Ok(result)
 }
 
-/// Now, in whole seconds since the Unix epoch, as leases and locks count.
-pub(super) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 /// An empty JSON object, to build a result from.
 pub(super) fn object() -> Value {
     Value::Object(Map::new())
@@ -280,7 +274,7 @@ impl ServerHandler for MusterMcp {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = implementation;
-        info.instructions = Some(MCP_INSTRUCTIONS.to_string());
+        info.instructions = Some(instructions());
         info
     }
 

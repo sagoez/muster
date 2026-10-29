@@ -114,6 +114,14 @@ pub fn live_start(log: &Path, live: &File) -> io::Result<OutputCursor> {
     Ok(OutputCursor::new(resolved.offset()))
 }
 
+/// Where the output logged at `log` ends now.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the files cannot be inspected.
+pub(super) fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
+    Ok(Span::open(log)?.end)
+}
+
 /// The raw bytes of the log at `log` from `from` up to `to`, and where they
 /// start: at the oldest kept byte when rotation discarded what `from` names.
 ///

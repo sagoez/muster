@@ -7,15 +7,15 @@ use super::{
 use crate::{
     adapter::{
         client::{PageSize, TodoPage, TodoView},
-        store::now_epoch_secs,
+        clock::epoch_now,
     },
     domain::{
         coordination::{
-            Author, ClaimState, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoStatus,
-            TodoTitle, TodoTitleError, TodoUpdate,
+            Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_TITLE_MAX_CHARS, Todo,
+            TodoChange, TodoId, TodoStatus, TodoUpdate,
         },
         port::CoordinationStore,
-        value::ProjectRoot,
+        value::{EpochSeconds, ProjectRoot},
     },
 };
 
@@ -49,7 +49,7 @@ pub fn todo(
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, limit, cursor, now_epoch_secs() as u64),
+        None => list(store, project, limit, cursor, epoch_now()),
         Some(TodoCommand::Add { title, deps }) => add(store, project, author, &title, &deps),
         Some(TodoCommand::Status { id, status, force }) => {
             set_status(store, project, author, &id, status, force)
@@ -78,7 +78,7 @@ fn list(
     project: &ProjectRoot,
     limit: PageSize,
     cursor: Option<&str>,
-    now: u64,
+    now: EpochSeconds,
 ) -> Result<Answer, CliError> {
     let after = cursor.map(parse_id).transpose()?;
     let todos = store.todos(project)?;
@@ -117,7 +117,7 @@ fn list(
 
 /// Who holds `todo` at `now`, as a suffix for its listed line: the holder and
 /// what its lease has left, or whose lease ran out.
-fn claim_note(todo: &Todo, now: u64) -> String {
+fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
     match todo.claim_state(now) {
         ClaimState::Unclaimed => String::new(),
         ClaimState::Held { owner, expires_in } => format!(
@@ -141,13 +141,13 @@ fn add(
     title: &str,
     deps: &[String],
 ) -> Result<Answer, CliError> {
-    let title = TodoTitle::try_new(title).map_err(|error| match error {
-        TodoTitleError::LenCharMaxViolated => CliError::TooLong {
+    let title = NewTodoTitle::try_new(title).map_err(|error| match error {
+        NewTodoTitleError::TooLong => CliError::TooLong {
             what: TODO_TITLE,
             max: TODO_TITLE_MAX_CHARS,
             found: title.chars().count(),
         },
-        TodoTitleError::NotEmptyViolated => CliError::InvalidTodoTitle(title.to_string()),
+        NewTodoTitleError::Blank => CliError::InvalidTodoTitle(title.to_string()),
     })?;
     let deps = deps
         .iter()
@@ -159,7 +159,7 @@ fn add(
             RowKind::Ok,
             created.id().as_ref().to_string(),
         )],
-        &TodoView::at(&created, now_epoch_secs() as u64),
+        &TodoView::at(&created, epoch_now()),
     )
 }
 
@@ -187,7 +187,7 @@ fn set_status(
     match store.update_todo(project, author, &parsed, &change)? {
         TodoUpdate::Updated(updated) => Answer::of(
             vec![Row::unlabeled(RowKind::Ok, format!("{parsed} is {status}"))],
-            &TodoView::at(&updated, now_epoch_secs() as u64),
+            &TodoView::at(&updated, epoch_now()),
         ),
         TodoUpdate::HeldBy { owner, expires_in } => Err(CliError::HeldByOther {
             what: format!("todo '{parsed}'"),
@@ -273,8 +273,8 @@ mod tests {
         todo
     }
 
-    fn now() -> u64 {
-        now_epoch_secs() as u64
+    fn now() -> EpochSeconds {
+        epoch_now()
     }
 
     /// Adding prints the id; listing shows it with the pending status and title.
@@ -302,7 +302,14 @@ mod tests {
         let todo = claim(&store, &root, "claude", &id);
         let until = *todo.claim().as_ref().unwrap().claimed_until();
 
-        let held = list(&store, &root, PageSize::default(), None, until - 90).unwrap();
+        let held = list(
+            &store,
+            &root,
+            PageSize::default(),
+            None,
+            EpochSeconds::new(until.into_inner() - 90),
+        )
+        .unwrap();
         assert_eq!(
             held.rows()[0].detail(),
             &format!(
@@ -310,7 +317,14 @@ mod tests {
                 humantime::format_duration(Duration::from_secs(90))
             )
         );
-        let lapsed = list(&store, &root, PageSize::default(), None, until + 1).unwrap();
+        let lapsed = list(
+            &store,
+            &root,
+            PageSize::default(),
+            None,
+            until.after(Duration::from_secs(1)),
+        )
+        .unwrap();
         assert_eq!(
             lapsed.rows()[0].detail(),
             &format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")

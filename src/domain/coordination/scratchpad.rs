@@ -1,7 +1,10 @@
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{Author, ScratchpadKey};
+use crate::domain::{
+    coordination::{Author, ScratchpadKey},
+    value::EpochSeconds,
+};
 
 /// A durable, shared markdown note in a project: a named place where agents and
 /// the human pass context and feedback to each other. The body is arbitrary
@@ -15,6 +18,6 @@ pub struct Scratchpad {
     body: String,
     /// Who last wrote the note, stamped by the store.
     author: Author,
-    /// Unix epoch seconds of the last write, stamped by the store.
-    updated_at: u64,
+    /// When it was last written, stamped by the store.
+    updated_at: EpochSeconds,
 }

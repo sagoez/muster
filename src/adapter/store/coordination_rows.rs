@@ -3,18 +3,22 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params}
 use super::{
     lock_rows,
     project_rows::require_project,
-    sqlite_store::{SqliteStore, corrupt, db_error, now_epoch_secs},
+    sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param},
     store_error::StoreError,
 };
-use crate::domain::{
-    config::ConfigError,
-    coordination::{
-        Author, Claim, ClaimState, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder,
-        LockName, LockNote, LockRelease, LockTtl, NoteBody, Scratchpad, ScratchpadKey, SessionId,
-        Todo, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+use crate::{
+    adapter::clock::epoch_now,
+    domain::{
+        config::ConfigError,
+        coordination::{
+            Author, Claim, ClaimState, KeyValue, KvKey, KvValue, Lock, LockAttempt, LockHolder,
+            LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, Scratchpad,
+            ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus,
+            TodoTitle, TodoUpdate,
+        },
+        port::CoordinationStore,
+        value::{EpochSeconds, ProjectRoot},
     },
-    port::CoordinationStore,
-    value::ProjectRoot,
 };
 
 /// Selects the scratchpad columns [`scratchpad_from_row`] reads by name.
@@ -44,16 +48,10 @@ WHERE t.project_id = :project \
       WHERE dep.status <> 'done') \
 ORDER BY t.rowid LIMIT 1";
 
-/// The clock as Unix seconds, for comparing leases and expiries.
-fn now() -> u64 {
-    now_epoch_secs() as u64
-}
-
 /// A row's stored write time, which the store only ever stamps from the
 /// clock.
-fn updated_at(row: &Row) -> Result<u64, ConfigError> {
-    let stamp: i64 = row.get("updated_at").map_err(db_error)?;
-    u64::try_from(stamp).map_err(|error| corrupt("write time", error))
+fn updated_at(row: &Row) -> Result<EpochSeconds, ConfigError> {
+    epoch_from_secs("write time", row.get("updated_at").map_err(db_error)?)
 }
 
 /// Serializes a todo's dependency ids to the JSON stored in `deps`.
@@ -87,7 +85,7 @@ fn todo_from_row(row: &Row) -> Result<Todo, ConfigError> {
         Some((owner, until)) => Some(
             TodoClaim::builder()
                 .owner(Author::from_label(&owner))
-                .claimed_until(u64::try_from(until).map_err(|error| corrupt("todo lease", error))?)
+                .claimed_until(epoch_from_secs("todo lease", until)?)
                 .build(),
         ),
         None => None,
@@ -150,7 +148,7 @@ fn put_scratchpad(
             note.key().as_ref(),
             note.body(),
             note.author().label(),
-            *note.updated_at() as i64
+            epoch_param(*note.updated_at())
         ],
     )
     .map_err(db_error)?;
@@ -162,7 +160,7 @@ fn claim_columns(todo: &Todo) -> (Option<&str>, Option<i64>) {
     todo.claim().as_ref().map_or((None, None), |claim| {
         (
             Some(claim.owner().label()),
-            Some(*claim.claimed_until() as i64),
+            Some(epoch_param(*claim.claimed_until())),
         )
     })
 }
@@ -181,7 +179,7 @@ fn put_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), Confi
             todo.status().to_string(),
             deps_json(todo.deps())?,
             todo.author().label(),
-            *todo.updated_at() as i64,
+            epoch_param(*todo.updated_at()),
             owner,
             claimed_until
         ],
@@ -201,7 +199,7 @@ fn rewrite_todo(conn: &Connection, project_id: i64, todo: &Todo) -> Result<(), C
             todo.title().as_ref(),
             todo.status().to_string(),
             todo.author().label(),
-            *todo.updated_at() as i64,
+            epoch_param(*todo.updated_at()),
             owner,
             claimed_until,
             project_id,
@@ -230,8 +228,8 @@ fn claim_by_id(
     project_id: i64,
     me: &Author,
     id: &TodoId,
-    until: u64,
-    now: u64,
+    until: EpochSeconds,
+    now: EpochSeconds,
 ) -> Result<Claim, ConfigError> {
     let claimed = collect(
         conn,
@@ -240,8 +238,8 @@ fn claim_by_id(
             ":project": project_id,
             ":id": id.as_ref(),
             ":me": me.label(),
-            ":until": until as i64,
-            ":now": now as i64,
+            ":until": epoch_param(until),
+            ":now": epoch_param(now),
         },
         todo_from_row,
     )?
@@ -271,7 +269,7 @@ fn put_value(conn: &Connection, project_id: i64, entry: &KeyValue) -> Result<(),
             entry.key().as_ref(),
             entry.value(),
             entry.author().label(),
-            *entry.updated_at() as i64
+            epoch_param(*entry.updated_at())
         ],
     )
     .map_err(db_error)?;
@@ -334,7 +332,7 @@ impl CoordinationStore for SqliteStore {
                 .key(key.clone())
                 .body(body.to_string())
                 .author(author.clone())
-                .updated_at(now())
+                .updated_at(epoch_now())
                 .build();
             put_scratchpad(conn, project_id, &note)
         })
@@ -379,18 +377,18 @@ impl CoordinationStore for SqliteStore {
         &self,
         project: &ProjectRoot,
         author: &Author,
-        title: &TodoTitle,
+        title: &NewTodoTitle,
         deps: &[TodoId],
     ) -> Result<Todo, ConfigError> {
         let todo = Todo::builder()
             .id(TodoId::generate()
                 .map_err(|error| ConfigError::CoordinationId(error.to_string()))?)
-            .title(title.clone())
+            .title(title.title().clone())
             .status(TodoStatus::Pending)
             .deps(deps.to_vec())
             .claim(None)
             .author(author.clone())
-            .updated_at(now())
+            .updated_at(epoch_now())
             .build();
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -411,7 +409,7 @@ impl CoordinationStore for SqliteStore {
             let Some(todo) = find_todo(conn, project_id, id)? else {
                 return Ok(TodoUpdate::Missing);
             };
-            let update = todo.changed(me, change, now());
+            let update = todo.changed(me, change, epoch_now());
             if let TodoUpdate::Updated(changed) = &update {
                 rewrite_todo(conn, project_id, changed)?;
             }
@@ -428,15 +426,15 @@ impl CoordinationStore for SqliteStore {
     ) -> Result<Claim, ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            let now = now();
-            let until = now + lease.as_ref().as_secs();
+            let now = epoch_now();
+            let until = now.after(*lease.as_ref());
             if let Some(id) = id {
                 return claim_by_id(conn, project_id, me, id, until, now);
             }
             let next: Option<String> = conn
                 .query_row(
                     NEXT_CLAIMABLE,
-                    named_params! { ":project": project_id, ":now": now as i64 },
+                    named_params! { ":project": project_id, ":now": epoch_param(now) },
                     |row| row.get(0),
                 )
                 .optional()
@@ -501,7 +499,7 @@ impl CoordinationStore for SqliteStore {
                 .key(key.clone())
                 .value(value.to_string())
                 .author(author.clone())
-                .updated_at(now())
+                .updated_at(epoch_now())
                 .build();
             put_value(conn, project_id, &entry)
         })
@@ -529,7 +527,7 @@ impl CoordinationStore for SqliteStore {
     ) -> Result<LockAttempt, ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            lock_rows::acquire(conn, project_id, me, name, ttl, note, now())
+            lock_rows::acquire(conn, project_id, me, name, ttl, note, epoch_now())
         })
     }
 
@@ -541,7 +539,7 @@ impl CoordinationStore for SqliteStore {
     ) -> Result<LockRelease, ConfigError> {
         self.write(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            lock_rows::release(conn, project_id, me, name, now())
+            lock_rows::release(conn, project_id, me, name, epoch_now())
         })
     }
 
@@ -563,7 +561,7 @@ impl CoordinationStore for SqliteStore {
     fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            lock_rows::live(conn, project_id, now())
+            lock_rows::live(conn, project_id, epoch_now())
         })
     }
 
@@ -599,7 +597,10 @@ mod tests {
     use super::*;
     use crate::{
         adapter::store::test_support::{database, fresh_store, spec},
-        domain::{coordination::claimable, port::StackStore},
+        domain::{
+            coordination::{TODO_TITLE_MAX_CHARS, claimable},
+            port::StackStore,
+        },
     };
 
     /// Registers a project at a fresh folder under `scratch`.
@@ -705,7 +706,7 @@ mod tests {
         assert!(refused(store.todos(&ghost).map(|_| ())));
         assert!(refused(
             store
-                .add_todo(&ghost, &author(), &TodoTitle::try_new("t").unwrap(), &[])
+                .add_todo(&ghost, &author(), &NewTodoTitle::try_new("t").unwrap(), &[])
                 .map(|_| ())
         ));
         assert!(refused(store.set_value(
@@ -752,7 +753,7 @@ mod tests {
             .add_todo(
                 &root,
                 &author(),
-                &TodoTitle::try_new("wire the store").unwrap(),
+                &NewTodoTitle::try_new("wire the store").unwrap(),
                 slice::from_ref(&dep),
             )
             .unwrap();
@@ -810,7 +811,12 @@ mod tests {
     /// A pending todo titled `title` under `root`.
     fn add(store: &SqliteStore, root: &ProjectRoot, title: &str, deps: &[TodoId]) -> Todo {
         store
-            .add_todo(root, &author(), &TodoTitle::try_new(title).unwrap(), deps)
+            .add_todo(
+                root,
+                &author(),
+                &NewTodoTitle::try_new(title).unwrap(),
+                deps,
+            )
             .unwrap()
     }
 
@@ -820,11 +826,35 @@ mod tests {
             .write(|conn| {
                 conn.execute(
                     "UPDATE todos SET claimed_until = ?1 WHERE id = ?2",
-                    params![now() as i64 - 3600, id.as_ref()],
+                    params![epoch_param(epoch_now()) - 3600, id.as_ref()],
                 )
                 .map_err(db_error)
             })
             .unwrap();
+    }
+
+    /// A title stored past the write cap, as one written before the cap
+    /// existed, still lists: the cap binds writes, never reads.
+    #[test]
+    fn a_stored_title_past_the_write_cap_still_lists() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        let todo = add(&store, &root, "short", &[]);
+        let long = "x".repeat(TODO_TITLE_MAX_CHARS + 1);
+        store
+            .write(|conn| {
+                conn.execute("UPDATE todos SET title = ?1 WHERE id = ?2", params![
+                    long,
+                    todo.id().as_ref()
+                ])
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        let listed = store.todos(&root).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title().as_ref(), long);
     }
 
     /// The todo `claim` took, or a panic naming what it came to.
@@ -872,7 +902,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            renewed.claim().as_ref().unwrap().is_live(now()),
+            renewed.claim().as_ref().unwrap().is_live(epoch_now()),
             "renewal extends it"
         );
 
@@ -944,7 +974,7 @@ mod tests {
         let codex = Author::agent("codex");
         let lease = TodoLease::DEFAULT;
         let next_by_domain = |store: &SqliteStore| {
-            claimable(&store.todos(&root).unwrap(), now())
+            claimable(&store.todos(&root).unwrap(), epoch_now())
                 .next()
                 .map(|todo| todo.id().clone())
         };
@@ -1181,7 +1211,7 @@ mod tests {
         store
             .write(|conn| {
                 conn.execute("UPDATE locks SET expires_at = ?1", params![
-                    now() as i64 - 3600
+                    epoch_param(epoch_now()) - 3600
                 ])
                 .map_err(db_error)
             })
@@ -1253,7 +1283,7 @@ mod tests {
             .key(key("plan"))
             .body("# plan\n- step".to_string())
             .author(Author::human())
-            .updated_at(99)
+            .updated_at(EpochSeconds::new(99))
             .build();
         let todo = Todo::builder()
             .id(TodoId::generate().unwrap())
@@ -1262,7 +1292,7 @@ mod tests {
             .deps(vec![TodoId::generate().unwrap()])
             .claim(None)
             .author(Author::agent("claude"))
-            .updated_at(1234)
+            .updated_at(EpochSeconds::new(1234))
             .build();
         let held = Todo::builder()
             .id(TodoId::generate().unwrap())
@@ -1272,17 +1302,17 @@ mod tests {
             .claim(Some(
                 TodoClaim::builder()
                     .owner(Author::agent("codex"))
-                    .claimed_until(5678)
+                    .claimed_until(EpochSeconds::new(5678))
                     .build(),
             ))
             .author(Author::agent("codex"))
-            .updated_at(1200)
+            .updated_at(EpochSeconds::new(1200))
             .build();
         let entry = KeyValue::builder()
             .key(KvKey::try_new("port").unwrap())
             .value("3000".to_string())
             .author(Author::agent("codex"))
-            .updated_at(7)
+            .updated_at(EpochSeconds::new(7))
             .build();
 
         CoordinationStore::import(

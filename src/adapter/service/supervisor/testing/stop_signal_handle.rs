@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use super::stop_signals::StopSignals;
@@ -8,7 +8,7 @@ use crate::domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
-    value::Pid,
+    value::{OutputCursor, Pid},
 };
 
 /// A handle that distinguishes graceful termination from a hard kill.
@@ -17,6 +17,38 @@ pub(crate) struct StopSignalHandle {
 }
 
 impl ProcessHandle for StopSignalHandle {
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn screen_size(&self) -> Option<PtySize> {
+        None
+    }
+
+    fn attached_clients(&self) -> u32 {
+        0
+    }
+
+    fn started_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn run_start(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn output_end(&self) -> Option<OutputCursor> {
+        None
+    }
+
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
+        Ok(())
+    }
+
     fn process_id(&self) -> Option<Pid> {
         None
     }

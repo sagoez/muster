@@ -75,7 +75,8 @@ muster rm worker
 taken as a shell expression; several are joined as shell words. Each process
 has:
 
-- a name, unique within the project and free of control characters, that
+- a name, unique within the project and free of control and format
+  characters (such as bidi overrides and zero-width spaces), that
   every command addresses it by;
 - a command, run by the shell;
 - `--cwd`, where it runs, stored relative to the project folder when inside it;

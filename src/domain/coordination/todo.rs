@@ -3,8 +3,12 @@ use std::collections::HashMap;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{
-    Author, ClaimState, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+use crate::domain::{
+    coordination::{
+        Author, ClaimState, TodoChange, TodoClaim, TodoId, TodoLease, TodoStatus, TodoTitle,
+        TodoUpdate,
+    },
+    value::EpochSeconds,
 };
 
 /// A structured unit of shared work: a titled task with a lifecycle status and
@@ -26,14 +30,14 @@ pub struct Todo {
     claim: Option<TodoClaim>,
     /// Who last wrote the todo, stamped by the store.
     author: Author,
-    /// Unix epoch seconds of the last write, stamped by the store.
-    updated_at: u64,
+    /// When it was last written, stamped by the store.
+    updated_at: EpochSeconds,
 }
 
 impl Todo {
-    /// Who holds this todo at `now` (Unix seconds), if anyone.
+    /// Who holds this todo at `now`, if anyone.
     #[must_use]
-    pub fn claim_state(&self, now: u64) -> ClaimState<'_> {
+    pub fn claim_state(&self, now: EpochSeconds) -> ClaimState<'_> {
         match &self.claim {
             None => ClaimState::Unclaimed,
             Some(claim) if claim.is_live(now) => ClaimState::Held {
@@ -49,7 +53,7 @@ impl Todo {
     /// The status agents read at `now`: a todo whose lease ran out reads as
     /// pending, so abandoned work is picked up again.
     #[must_use]
-    pub fn effective_status(&self, now: u64) -> TodoStatus {
+    pub fn effective_status(&self, now: EpochSeconds) -> TodoStatus {
         match self.claim_state(now) {
             ClaimState::Stale { .. } => TodoStatus::Pending,
             ClaimState::Unclaimed | ClaimState::Held { .. } => self.status,
@@ -60,7 +64,11 @@ impl Todo {
     /// reads as pending and every dependency `is_done` (a dependency that no
     /// longer exists does not block).
     #[must_use]
-    pub fn is_claimable(&self, now: u64, is_done: impl Fn(&TodoId) -> Option<bool>) -> bool {
+    pub fn is_claimable(
+        &self,
+        now: EpochSeconds,
+        is_done: impl Fn(&TodoId) -> Option<bool>,
+    ) -> bool {
         self.effective_status(now) == TodoStatus::Pending
             && self.deps.iter().all(|dep| is_done(dep).unwrap_or(true))
     }
@@ -72,7 +80,7 @@ impl Todo {
     /// another holds it moves the claim to `me`, so an in-progress todo always
     /// has an owner.
     #[must_use]
-    pub fn changed(&self, me: &Author, change: &TodoChange, now: u64) -> TodoUpdate {
+    pub fn changed(&self, me: &Author, change: &TodoChange, now: EpochSeconds) -> TodoUpdate {
         let taken_over = match self.claim_state(now) {
             ClaimState::Held { owner, expires_in } if owner != me => {
                 if !change.force() {
@@ -103,7 +111,12 @@ impl Todo {
         TodoUpdate::Updated(
             Todo::builder()
                 .id(self.id.clone())
-                .title(change.title().clone().unwrap_or_else(|| self.title.clone()))
+                .title(
+                    change
+                        .title()
+                        .clone()
+                        .map_or_else(|| self.title.clone(), TodoTitle::from),
+                )
                 .status(status)
                 .deps(self.deps.clone())
                 .claim(claim)
@@ -116,7 +129,7 @@ impl Todo {
 
 /// The todos of one project an agent can claim at `now`, oldest first: the
 /// ones [`Todo::is_claimable`] accepts, reading dependencies from `todos`.
-pub fn claimable(todos: &[Todo], now: u64) -> impl Iterator<Item = &Todo> {
+pub fn claimable(todos: &[Todo], now: EpochSeconds) -> impl Iterator<Item = &Todo> {
     let done: HashMap<&TodoId, bool> = todos
         .iter()
         .map(|todo| (todo.id(), todo.status == TodoStatus::Done))
@@ -131,6 +144,12 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// The moment `secs` seconds after the epoch.
+    fn at(secs: u64) -> EpochSeconds {
+        EpochSeconds::new(secs)
+    }
+    use crate::domain::coordination::NewTodoTitle;
 
     /// Generated ids are unique and non-empty.
     #[test]
@@ -168,11 +187,11 @@ mod tests {
             .claim(claim.map(|(owner, until)| {
                 TodoClaim::builder()
                     .owner(Author::agent(owner))
-                    .claimed_until(until)
+                    .claimed_until(at(until))
                     .build()
             }))
             .author(Author::human())
-            .updated_at(0)
+            .updated_at(at(0))
             .build()
     }
 
@@ -189,15 +208,15 @@ mod tests {
     #[test]
     fn a_lease_runs_out_after_its_last_second() {
         let claimed = todo(TodoStatus::InProgress, vec![], Some(("claude", 100)));
-        assert_eq!(claimed.claim_state(40), ClaimState::Held {
+        assert_eq!(claimed.claim_state(at(40)), ClaimState::Held {
             owner: &Author::agent("claude"),
             expires_in: Duration::from_secs(60),
         });
-        assert_eq!(claimed.effective_status(100), TodoStatus::InProgress);
-        assert_eq!(claimed.claim_state(101), ClaimState::Stale {
+        assert_eq!(claimed.effective_status(at(100)), TodoStatus::InProgress);
+        assert_eq!(claimed.claim_state(at(101)), ClaimState::Stale {
             owner: &Author::agent("claude"),
         });
-        assert_eq!(claimed.effective_status(101), TodoStatus::Pending);
+        assert_eq!(claimed.effective_status(at(101)), TodoStatus::Pending);
     }
 
     /// Only pending or stale todos whose dependencies are done, or gone, are
@@ -223,7 +242,7 @@ mod tests {
             unowned,
         ];
 
-        let ids: Vec<_> = claimable(&all, 50).map(Todo::id).collect();
+        let ids: Vec<_> = claimable(&all, at(50)).map(Todo::id).collect();
 
         assert_eq!(ids, vec![open.id(), ready.id(), orphan.id(), stale.id()]);
     }
@@ -236,7 +255,7 @@ mod tests {
         let done = change(Some(TodoStatus::Done), false);
 
         assert_eq!(
-            claimed.changed(&Author::agent("codex"), &done, 40),
+            claimed.changed(&Author::agent("codex"), &done, at(40)),
             TodoUpdate::HeldBy {
                 owner: Author::agent("claude"),
                 expires_in: Duration::from_secs(60),
@@ -250,14 +269,14 @@ mod tests {
             let TodoUpdate::Updated(updated) = claimed.changed(
                 &Author::agent(me),
                 &change(Some(TodoStatus::Done), force),
-                now,
+                at(now),
             ) else {
                 panic!("{me} at {now} should change it");
             };
             assert_eq!(*updated.status(), TodoStatus::Done);
             assert_eq!(updated.claim(), &None, "done drops the claim");
             assert_eq!(updated.author(), &Author::agent(me));
-            assert_eq!(*updated.updated_at(), now);
+            assert_eq!(*updated.updated_at(), at(now));
         }
     }
 
@@ -269,7 +288,7 @@ mod tests {
         let me = Author::agent("claude");
 
         let TodoUpdate::Updated(released) =
-            claimed.changed(&me, &change(Some(TodoStatus::Pending), false), 40)
+            claimed.changed(&me, &change(Some(TodoStatus::Pending), false), at(40))
         else {
             panic!("the owner releases");
         };
@@ -277,11 +296,11 @@ mod tests {
         assert_eq!(released.claim(), &None);
 
         let retitle = TodoChange::builder()
-            .title(Some(TodoTitle::try_new("renamed").unwrap()))
+            .title(Some(NewTodoTitle::try_new("renamed").unwrap()))
             .status(None)
             .force(false)
             .build();
-        let TodoUpdate::Updated(renamed) = claimed.changed(&me, &retitle, 40) else {
+        let TodoUpdate::Updated(renamed) = claimed.changed(&me, &retitle, at(40)) else {
             panic!("the owner renames");
         };
         assert_eq!(renamed.title().as_ref(), "renamed");
@@ -296,17 +315,17 @@ mod tests {
         let me = Author::agent("codex");
         let start = change(Some(TodoStatus::InProgress), false);
 
-        let TodoUpdate::Updated(started) = open.changed(&me, &start, 40) else {
+        let TodoUpdate::Updated(started) = open.changed(&me, &start, at(40)) else {
             panic!("anyone may start an unclaimed todo");
         };
         assert_eq!(*started.status(), TodoStatus::InProgress);
         assert_eq!(
             started.claim(),
-            &Some(TodoClaim::fresh(&me, TodoLease::DEFAULT, 40))
+            &Some(TodoClaim::fresh(&me, TodoLease::DEFAULT, at(40)))
         );
 
         let held = todo(TodoStatus::InProgress, vec![], Some(("codex", 100)));
-        let TodoUpdate::Updated(again) = held.changed(&me, &start, 40) else {
+        let TodoUpdate::Updated(again) = held.changed(&me, &start, at(40)) else {
             panic!("the owner may set it again");
         };
         assert_eq!(again.claim(), held.claim());
@@ -318,12 +337,12 @@ mod tests {
         let held = todo(TodoStatus::InProgress, vec![], Some(("claude", 100)));
         let me = Author::agent("codex");
         let retitle = TodoChange::builder()
-            .title(Some(TodoTitle::try_new("renamed").unwrap()))
+            .title(Some(NewTodoTitle::try_new("renamed").unwrap()))
             .status(None)
             .force(true)
             .build();
 
-        let TodoUpdate::Updated(taken) = held.changed(&me, &retitle, 40) else {
+        let TodoUpdate::Updated(taken) = held.changed(&me, &retitle, at(40)) else {
             panic!("a forced change goes through");
         };
         assert_eq!(*taken.status(), TodoStatus::InProgress);

@@ -6,7 +6,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use rusqlite::{
@@ -19,7 +19,7 @@ use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
     domain::{
         config::ConfigError,
-        value::{PositiveDuration, StopGrace},
+        value::{EpochSeconds, PositiveDuration, StopGrace},
     },
 };
 
@@ -330,15 +330,20 @@ pub(super) fn grace_from_millis(what: &str, millis: i64) -> Result<StopGrace, Co
     StopGrace::try_new(duration_from_millis(what, millis)?).map_err(|error| corrupt(what, error))
 }
 
-/// Seconds since the Unix epoch, or zero if the clock predates it. The store
-/// stamps write times so the domain need not depend on a clock, and the CLI
-/// reads leases against the same clock.
-pub(crate) fn now_epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(0)
+/// `at` as a seconds column holds it, held at the latest second SQLite can
+/// store.
+pub(super) fn epoch_param(at: EpochSeconds) -> i64 {
+    i64::try_from(at.into_inner()).unwrap_or(i64::MAX)
+}
+
+/// The moment a seconds column holds.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming `what` when it is negative.
+pub(super) fn epoch_from_secs(what: &str, secs: i64) -> Result<EpochSeconds, ConfigError> {
+    u64::try_from(secs)
+        .map(EpochSeconds::new)
+        .map_err(|error| corrupt(what, error))
 }
 
 #[cfg(test)]

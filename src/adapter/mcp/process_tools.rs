@@ -1121,7 +1121,10 @@ mod tests {
                     .process_add(Parameters(add("web\u{1b}]0;owned\u{7}", "true")))
                     .await,
             );
-            assert!(control.contains("holds a control character"), "{control}");
+            assert!(
+                control.contains("holds a control or format character"),
+                "{control}"
+            );
             assert!(!control.contains('\u{1b}'), "{control:?}");
             assert!(control.contains("\\u{1b}"), "{control}");
             let empty = refusal(

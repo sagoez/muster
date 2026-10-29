@@ -44,6 +44,9 @@ pub(crate) const BACKLOG: &[u8] = b"READY on 3000\nbooting\n";
 /// The log offset a [`BacklogHandle`](super::backlog_handle::BacklogHandle)'s
 /// run began at.
 pub(crate) const BACKLOG_RUN_START: u64 = 4096;
+/// Where a [`LoggedAheadHandle`](super::logged_ahead_handle::LoggedAheadHandle)'s
+/// log ends.
+pub(crate) const LOGGED_AHEAD_END: u64 = 64;
 /// Longest a test waits for a worker's launch result.
 const WORKER_WAIT: Duration = Duration::from_secs(5);
 /// Why a refusing adopter fails.

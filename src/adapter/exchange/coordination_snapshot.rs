@@ -40,8 +40,9 @@ pub struct CoordinationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::coordination::{
-        Author, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS, ScratchpadKey,
+    use crate::domain::{
+        coordination::{Author, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS, ScratchpadKey},
+        value::EpochSeconds,
     };
 
     /// A snapshot round-trips through YAML with its authors as labels.
@@ -53,7 +54,7 @@ mod tests {
                     .key(ScratchpadKey::try_new("plan").unwrap())
                     .body("ship it".to_string())
                     .author(Author::agent("claude"))
-                    .updated_at(7)
+                    .updated_at(EpochSeconds::new(7))
                     .build(),
             ])
             .todos(Vec::new())
@@ -62,7 +63,7 @@ mod tests {
                     .key(KvKey::try_new("port").unwrap())
                     .value("3000".to_string())
                     .author(Author::human())
-                    .updated_at(9)
+                    .updated_at(EpochSeconds::new(9))
                     .build(),
             ])
             .build();

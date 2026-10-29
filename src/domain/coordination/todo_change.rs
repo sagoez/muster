@@ -1,7 +1,7 @@
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{TodoStatus, TodoTitle};
+use crate::domain::coordination::{NewTodoTitle, TodoStatus};
 
 /// A change to one todo: a new title, a new status, or both. Handing a todo
 /// back is the status [`TodoStatus::Pending`], which drops its claim.
@@ -9,7 +9,7 @@ use crate::domain::coordination::{TodoStatus, TodoTitle};
 pub struct TodoChange {
     /// The new title, or `None` to keep it.
     #[getset(get = "pub")]
-    title: Option<TodoTitle>,
+    title: Option<NewTodoTitle>,
     /// The new status, or `None` to keep it.
     #[getset(get_copy = "pub")]
     status: Option<TodoStatus>,

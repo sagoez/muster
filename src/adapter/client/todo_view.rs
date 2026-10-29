@@ -2,7 +2,10 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::domain::coordination::{Author, ClaimState, Todo, TodoId, TodoStatus, TodoTitle};
+use crate::domain::{
+    coordination::{Author, ClaimState, Todo, TodoId, TodoStatus, TodoTitle},
+    value::EpochSeconds,
+};
 
 /// One todo as an agent reads it, with who holds it. An expired claim reads
 /// as pending, its holder shown as `stale_owner`.
@@ -33,12 +36,12 @@ pub struct TodoView {
     #[serde(with = "crate::adapter::wire::form")]
     author: Author,
     /// When it was last written, in seconds since the Unix epoch.
-    updated_at: u64,
+    updated_at: EpochSeconds,
 }
 
 impl TodoView {
     /// `todo` as read at `now`, Unix seconds.
-    pub fn at(todo: &Todo, now: u64) -> Self {
+    pub fn at(todo: &Todo, now: EpochSeconds) -> Self {
         let (owner, expires_in_s, stale_owner) = match todo.claim_state(now) {
             ClaimState::Unclaimed => (None, None, None),
             ClaimState::Held { owner, expires_in } => {

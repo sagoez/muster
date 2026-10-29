@@ -1,6 +1,9 @@
 pub mod bounded_read;
+#[cfg(test)]
+pub(crate) mod channel_sink;
 pub mod cli;
 pub mod client;
+pub mod clock;
 pub mod detect;
 pub mod exchange;
 pub mod holder;

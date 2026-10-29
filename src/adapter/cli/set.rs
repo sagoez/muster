@@ -8,11 +8,10 @@ use typed_builder::TypedBuilder;
 use super::{
     command_words::command_string, error::CliError, invocation::Invocation, output::project_title,
     process_flags::env_name, report::Report, row::Row, row_kind::RowKind, set_args::SetArgs,
-    working_dir::stored_working_dir,
 };
 use crate::{
     adapter::client::{
-        DefinitionView, ProjectIdentityView,
+        DefinitionView, ProjectIdentityView, WorkingDirPlace,
         process::{resolve_among, runs_now},
     },
     domain::{
@@ -95,7 +94,7 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         .then(|| command_string(&args.words))
         .transpose()?;
     let working_dir = match (args.cwd, args.no_cwd) {
-        (Some(dir), _) => match stored_working_dir(root, &invocation.in_cwd(&dir)?)? {
+        (Some(dir), _) => match WorkingDirPlace::of(root, &invocation.in_cwd(&dir)?)?.stored() {
             Some(dir) => FieldEdit::Set(dir),
             None => FieldEdit::Clear,
         },

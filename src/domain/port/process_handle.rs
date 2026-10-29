@@ -24,54 +24,44 @@ pub trait ProcessHandle: Send {
     fn abandon(self: Box<Self>);
 
     /// The screen the process already had when this handle connected, to paint
-    /// before any output that follows. Taken once; later calls return none.
-    /// Defaults to none: a fresh PTY starts blank.
-    fn take_initial_screen(&mut self) -> Option<Vec<u8>> {
-        None
-    }
+    /// before any output that follows. Taken once; later calls return none,
+    /// as does a fresh PTY, which starts blank.
+    fn take_initial_screen(&mut self) -> Option<Vec<u8>>;
 
     /// The PTY size of that screen, which a viewer of it must take rather than
-    /// impose its own on a running process. Defaults to none: a fresh PTY has
+    /// impose its own on a running process; none for a fresh PTY, which has
     /// the size it was spawned with.
-    fn screen_size(&self) -> Option<PtySize> {
-        None
-    }
+    fn screen_size(&self) -> Option<PtySize>;
 
     /// The writable clients attached to the process's terminal when this
-    /// handle connected. Defaults to none attached.
-    fn attached_clients(&self) -> u32 {
-        0
-    }
+    /// handle connected.
+    fn attached_clients(&self) -> u32;
 
-    /// When the process started, when that predates this handle. Defaults to
-    /// none: it started as the handle was made.
-    fn started_at(&self) -> Option<SystemTime> {
-        None
-    }
+    /// When the process started, when that predates this handle; none when it
+    /// started as the handle was made.
+    fn started_at(&self) -> Option<SystemTime>;
 
-    /// Where the process's current run began in its logged output, when the
-    /// output is logged with offsets. Defaults to none: a bare PTY logs
-    /// nothing.
-    fn run_start(&self) -> Option<OutputCursor> {
-        None
-    }
+    /// Where the process's current run began in its logged output; none when
+    /// the output is not logged with offsets.
+    fn run_start(&self) -> Option<OutputCursor>;
+
+    /// Where the process's logged output ends now, read from its log; none
+    /// when the output is not logged or the log cannot be read. It may run
+    /// ahead of the output this handle has delivered.
+    fn output_end(&self) -> Option<OutputCursor>;
 
     /// The logged output the process wrote before this handle connected, and
     /// where it starts, so every byte is seen before the output that follows.
-    /// Taken once. Defaults to none: a bare PTY streams every byte.
-    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
-        None
-    }
+    /// Taken once; none when every byte is streamed.
+    fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)>;
 
     /// Tells whatever holds the finished process that its exit was handled, so
     /// it can let go of it. Until then a holder keeps the exit for a later
-    /// supervisor. Defaults to nothing to release.
+    /// supervisor.
     ///
     /// # Errors
     /// Returns a `PtyError` if the acknowledgement cannot be delivered.
-    fn acknowledge_exit(&mut self) -> Result<(), PtyError> {
-        Ok(())
-    }
+    fn acknowledge_exit(&mut self) -> Result<(), PtyError>;
 
     /// Writes raw input bytes to the process's PTY.
     ///
@@ -97,14 +87,12 @@ pub trait ProcessHandle: Send {
     /// Returns a `PtyError` if the signal cannot be sent.
     fn resume(&mut self) -> Result<(), PtyError>;
 
-    /// Requests graceful process termination with `signal` and `grace`, falling
-    /// back to [`Self::kill`] for adapters without a distinct mechanism.
+    /// Requests graceful process termination with `signal`, giving it `grace`
+    /// before a kill.
     ///
     /// # Errors
     /// Returns a `PtyError` if the termination signal cannot be sent.
-    fn terminate(&mut self, _signal: StopSignal, _grace: Duration) -> Result<(), PtyError> {
-        self.kill()
-    }
+    fn terminate(&mut self, signal: StopSignal, grace: Duration) -> Result<(), PtyError>;
 
     /// Forcibly terminates the process.
     ///

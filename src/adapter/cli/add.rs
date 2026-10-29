@@ -8,10 +8,9 @@ use typed_builder::TypedBuilder;
 use super::{
     add_args::AddArgs, command_words::command_string, error::CliError, invocation::Invocation,
     output::project_title, report::Report, row::Row, row_kind::RowKind,
-    working_dir::stored_working_dir,
 };
 use crate::{
-    adapter::client::{DefinitionView, ProjectIdentityView},
+    adapter::client::{DefinitionView, ProjectIdentityView, WorkingDirPlace},
     domain::{
         config::{Environment, ProcessDraft},
         coordination::Author,
@@ -63,7 +62,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .map_err(|error| CliError::invalid_name(&args.name, error))?;
     let command = command_string(&args.command)?;
     let working_dir = match args.cwd {
-        Some(dir) => stored_working_dir(&root, &invocation.in_cwd(&dir)?)?,
+        Some(dir) => WorkingDirPlace::of(&root, &invocation.in_cwd(&dir)?)?.stored(),
         None => None,
     };
     let description = args

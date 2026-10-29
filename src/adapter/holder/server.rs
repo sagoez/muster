@@ -44,7 +44,6 @@ use crate::{
         ipc,
         private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
         process_identity::LocalProcessIdentity,
-        pty::PortablePtyRunner,
         terminal::{KittyKeyboardTracker, TerminalEmulator},
     },
     domain::{
@@ -118,14 +117,14 @@ impl HolderServer {
     /// it follows the bind, and the runner recovers it by abandoning the holder
     /// and re-reading its error file. Any failure after the spawn kills the
     /// child. A holder no supervisor reaches by its deadline kills its child
-    /// and finishes the same way.
+    /// and finishes the same way. `runner` spawns the child.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the request names no project or a size
     /// outside the PTY bounds, the socket directory is not private, the
     /// socket, log or record cannot be written, or the child cannot be
     /// spawned.
-    pub fn run(config: HolderConfig) -> Result<(), HolderError> {
+    pub fn run(config: HolderConfig, runner: &dyn ProcessRunner) -> Result<(), HolderError> {
         let request = config.request();
         let project = request
             .project()
@@ -134,8 +133,7 @@ impl HolderServer {
             .ok_or(HolderError::MissingProject)?;
         let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
-        let handle =
-            PortablePtyRunner.spawn(request.clone(), Box::new(HolderSink(sender.clone())))?;
+        let handle = runner.spawn(request.clone(), Box::new(HolderSink(sender.clone())))?;
         let child_started_at = SystemTime::now();
         let server = Self::new(handle, log, (sender.clone(), events), request)?;
         let listener = bind_private(config.socket())?;
@@ -852,6 +850,7 @@ mod tests {
                 },
                 testing::{test_request, test_stop},
             },
+            pty::PortablePtyRunner,
             signal_target::SignalTarget,
             terminal::TerminalEmulator,
         },
@@ -1326,7 +1325,7 @@ mod tests {
         fs::write(&blocker, b"").unwrap();
         let bad_log = unbound_config(dir, dir.to_path_buf(), blocker.join("dev.log"));
         assert!(matches!(
-            HolderServer::run(bad_log),
+            HolderServer::run(bad_log, &PortablePtyRunner),
             Err(HolderError::Io(_))
         ));
         assert!(
@@ -1336,7 +1335,7 @@ mod tests {
 
         let missing_dir = unbound_config(dir, dir.join("gone"), dir.join("logs").join("dev.log"));
         assert!(matches!(
-            HolderServer::run(missing_dir),
+            HolderServer::run(missing_dir, &PortablePtyRunner),
             Err(HolderError::Pty(PtyError::InvalidWorkingDir(_)))
         ));
         assert!(

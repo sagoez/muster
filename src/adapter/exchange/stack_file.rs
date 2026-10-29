@@ -422,7 +422,7 @@ processes:
     fn a_name_with_a_control_character_says_so() {
         let refused = refusal(&entry_with("").replace("name: web", "name: \"we\\eb\""));
         assert!(
-            refused.ends_with(": name holds a control character"),
+            refused.ends_with(": name holds a control or format character"),
             "{refused}"
         );
     }

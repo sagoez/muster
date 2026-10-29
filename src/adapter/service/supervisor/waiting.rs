@@ -79,8 +79,7 @@ impl Supervisor {
                     .build()
             })?;
         if let Some(since) = spec.since()
-            && let Some(end) = self.known_output_end(*process.id())
-            && *since > end
+            && let Some(end) = self.end_before(*process.id(), *since)
         {
             return Err(invalid_input(format!(
                 "{name}: {SINCE_PAST_END} ({since} > {end})"
@@ -356,6 +355,23 @@ impl Supervisor {
             .get(&pane)
             .filter(|tap| tap.run_start().is_some())
             .map(OutputTap::cursor)
+    }
+
+    /// The end of `pane`'s output when `since` is past it. A cursor ahead of
+    /// the tap is checked against the log as well, since a cursor read from
+    /// the log reaches output the tap is still catching up on.
+    fn end_before(&self, pane: PaneId, since: OutputCursor) -> Option<OutputCursor> {
+        let tapped = self.known_output_end(pane)?;
+        if since <= tapped {
+            return None;
+        }
+        let logged = self
+            .panes
+            .get(&pane)
+            .and_then(|target| target.handle().as_ref())
+            .and_then(|handle| handle.output_end())
+            .map_or(tapped, |logged| logged.max(tapped));
+        (since > logged).then_some(logged)
     }
 
     /// Places `pane`'s current run at `start`, the offset its holder's log
@@ -963,6 +979,39 @@ mod tests {
                 .supervisor
                 .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(19))))
                 .is_ok()
+        );
+    }
+
+    /// A cursor read from the log, ahead of output the tap has not caught up
+    /// on yet, is accepted up to the log's end; past it, it is refused.
+    #[test]
+    fn a_cursor_up_to_the_log_end_is_accepted_while_the_tap_catches_up() {
+        let mut harness = Harness::over(Box::new(LoggedAheadRunner), &[api(
+            RestartPolicy::Never,
+            None,
+        )]);
+        harness.up();
+        print(&mut harness, "api", b"Listening on :3000\n");
+        let name = super::super::testing::name("api");
+        let log_end = OutputCursor::new(LOGGED_AHEAD_END);
+
+        assert!(
+            harness
+                .supervisor
+                .prepare_wait(&name, &spec(Some(log("x")), Some(log_end)))
+                .is_ok()
+        );
+        let Err(refused) = harness
+            .supervisor
+            .prepare_wait(&name, &spec(Some(log("x")), Some(log_end.advanced(1))))
+        else {
+            panic!("a cursor past the log's end is refused");
+        };
+        assert_eq!(refused.kind(), &ServiceErrorKind::InvalidInput);
+        assert!(
+            refused.message().contains(&format!("> {log_end}")),
+            "{}",
+            refused.message()
         );
     }
 

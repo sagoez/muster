@@ -106,7 +106,6 @@ mod todo;
 mod todo_command;
 mod wait;
 mod wait_args;
-mod working_dir;
 #[cfg(test)]
 mod wrapped;
 

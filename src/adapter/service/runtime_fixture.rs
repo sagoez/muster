@@ -7,9 +7,7 @@ use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::{
-    gated_launcher::GatedLauncher,
     holder_pool::HolderPool,
-    holders::Holders,
     memory_store::MemoryStore,
     protocol,
     running::Running,
@@ -18,11 +16,13 @@ use super::{
     service_deps::ServiceDeps,
     singleton::Singleton,
     test_ports::TestPorts,
-    thread_launcher::ThreadLauncher,
 };
 use crate::{
     adapter::{
-        holder::{HolderDirs, HolderRecord, HolderRunner, abandon, testing::test_request},
+        holder::{
+            HolderDirs, HolderRecord, HolderRunner, abandon, holders::Holders,
+            testing::test_request, thread_launcher::ThreadLauncher,
+        },
         signal_target::SignalTarget,
         test_scratch::short_scratch,
     },
@@ -69,7 +69,7 @@ impl Fixture {
     /// service has.
     pub(super) fn runner(&self) -> HolderRunner {
         HolderRunner::new(
-            Box::new(ThreadLauncher(Arc::clone(&self.holders))),
+            Box::new(ThreadLauncher::new(Arc::clone(&self.holders))),
             self.dirs(),
         )
     }
@@ -77,10 +77,7 @@ impl Fixture {
     /// As [`Self::runner`], whose holders start only once `gate` opens.
     pub(super) fn gated_runner(&self, gate: Receiver<()>) -> HolderRunner {
         HolderRunner::new(
-            Box::new(GatedLauncher {
-                holders: Arc::clone(&self.holders),
-                gate,
-            }),
+            Box::new(ThreadLauncher::gated(Arc::clone(&self.holders), gate, WAIT)),
             self.dirs(),
         )
     }

@@ -16,9 +16,10 @@ use super::{
     client_role::ClientRole,
     error::HolderError,
     holder_control::HolderControl,
-    log_reader::read_log_range,
+    log_reader::{log_end, read_log_range},
     reader::{Reader, spawn_reader},
     runner::abandon,
+    served_screen::ServedScreen,
     shared_writer::SharedWriter,
 };
 use crate::domain::{
@@ -72,6 +73,8 @@ pub struct HolderHandle {
     log_end: OutputCursor,
     /// Output logged before `log_end`, and where it starts, until taken.
     backlog: Option<(OutputCursor, Vec<u8>)>,
+    /// The child's log, once known.
+    log: Option<PathBuf>,
     /// Set when this handle is dropped, so the reader reports no exit.
     detached: Arc<AtomicBool>,
     /// Set once the holder reported the exit, which it then holds until
@@ -124,6 +127,7 @@ impl HolderHandle {
             run_start: greeting.run_start(),
             log_end: greeting.log_end(),
             backlog: None,
+            log: None,
             initial_screen: Some(greeting.into_repaint()),
             detached,
             exit_held,
@@ -137,11 +141,13 @@ impl HolderHandle {
         self
     }
 
-    /// Reads what the child wrote to `log` before this handle connected, from
-    /// `since` or the run's start and at most the last [`BACKLOG_MAX_BYTES`],
-    /// for [`ProcessHandle::take_backlog`]. A log that cannot be read leaves
-    /// none, and the output from here on is still streamed.
-    pub(super) fn with_backlog(mut self, log: &Path, since: Option<OutputCursor>) -> Self {
+    /// Keeps `log`, where the child's output is logged, and reads what the
+    /// child wrote there before this handle connected, from `since` or the
+    /// run's start and at most the last [`BACKLOG_MAX_BYTES`], for
+    /// [`ProcessHandle::take_backlog`]. A log that cannot be read leaves no
+    /// backlog, and the output from here on is still streamed.
+    pub(super) fn with_log(mut self, log: &Path, since: Option<OutputCursor>) -> Self {
+        self.log = Some(log.to_path_buf());
         let from = since
             .unwrap_or(self.run_start)
             .max(self.run_start)
@@ -176,7 +182,7 @@ impl ProcessHandle for HolderHandle {
 
     /// The holder serves the screen it renders on its socket.
     fn screen_source(&self) -> ScreenSource {
-        ScreenSource::Served(self.socket.clone())
+        ScreenSource::Served(Arc::new(ServedScreen::new(self.socket.clone())))
     }
 
     /// Disconnects, then reaches the holder afresh off the caller's thread,
@@ -208,6 +214,12 @@ impl ProcessHandle for HolderHandle {
 
     fn run_start(&self) -> Option<OutputCursor> {
         Some(self.run_start)
+    }
+
+    /// Reads the end of the holder's log, which the holder writes before it
+    /// forwards the same output.
+    fn output_end(&self) -> Option<OutputCursor> {
+        self.log.as_deref().and_then(|log| log_end(log).ok())
     }
 
     fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
@@ -271,9 +283,9 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
+            channel_sink::ChannelSink,
             holder::{
-                channel_sink::ChannelSink, protocol::HolderMessage, reader::HOLDER_LOST,
-                shared_writer::WRITE_TIMED_OUT,
+                protocol::HolderMessage, reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT,
             },
             test_scratch::short_scratch,
         },
@@ -333,7 +345,7 @@ mod tests {
         let mut handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
-            Box::new(ChannelSink(sender)),
+            Box::new(ChannelSink::new(sender)),
             WAIT,
         )
         .unwrap();
@@ -360,7 +372,7 @@ mod tests {
         let _handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
-            Box::new(ChannelSink(sender)),
+            Box::new(ChannelSink::new(sender)),
             WAIT,
         )
         .unwrap();
@@ -384,7 +396,8 @@ mod tests {
         let (service, holder) = greeted_pair();
         let (sender, outputs) = unbounded();
         let _handle =
-            HolderHandle::supervise(service, &socket, Box::new(ChannelSink(sender)), WAIT).unwrap();
+            HolderHandle::supervise(service, &socket, Box::new(ChannelSink::new(sender)), WAIT)
+                .unwrap();
 
         holder.shutdown(Shutdown::Both).unwrap();
         thread::sleep(LISTENER_LINGER);
@@ -406,8 +419,15 @@ mod tests {
         let (service, holder) = greeted_pair();
         let (sender, outputs) = unbounded();
         let mut handle =
-            HolderHandle::supervise(service, &socket, Box::new(ChannelSink(sender)), WAIT).unwrap();
-        assert_eq!(handle.screen_source(), ScreenSource::Served(socket.clone()));
+            HolderHandle::supervise(service, &socket, Box::new(ChannelSink::new(sender)), WAIT)
+                .unwrap();
+        assert_eq!(
+            format!("{:?}", handle.screen_source()),
+            format!(
+                "{:?}",
+                ScreenSource::Served(Arc::new(ServedScreen::new(socket.clone())))
+            )
+        );
         assert_eq!(
             handle.take_initial_screen(),
             Some(SCREEN.to_vec()),
@@ -440,7 +460,7 @@ mod tests {
         let mut handle = HolderHandle::supervise(
             service,
             Path::new(UNSERVED_SOCKET),
-            Box::new(ChannelSink(sender)),
+            Box::new(ChannelSink::new(sender)),
             WAIT,
         )
         .unwrap();

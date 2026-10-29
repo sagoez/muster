@@ -16,7 +16,7 @@ pub struct ReadArg {
     #[builder(default)]
     #[getset(get = "pub")]
     key: Option<String>,
-    /// Most entries listed, default 50, at most 200.
+    /// Most entries listed, default <default-list-limit>, at most <max-list-limit>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     limit: Option<usize>,

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter::wire::{WireForm, form},
-    domain::coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
+    domain::{
+        coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
+        value::EpochSeconds,
+    },
 };
 
 /// A key-value entry as a coordination snapshot and an agent read it.
@@ -17,7 +20,7 @@ pub struct KeyValueEntry {
     #[serde(with = "form")]
     author: Author,
     /// Unix epoch seconds of the last write.
-    updated_at: u64,
+    updated_at: EpochSeconds,
 }
 
 impl WireForm for KeyValue {

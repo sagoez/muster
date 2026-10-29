@@ -22,7 +22,7 @@ use super::{
     process_fields::invalid,
     progress::with_progress,
     read_arg::ReadArg,
-    server::{MusterMcp, json, structured, unix_now},
+    server::{MusterMcp, json, structured},
     todo_add_arg::TodoAddArg,
     todo_claim_arg::TodoClaimArg,
     todo_id_arg::TodoIdArg,
@@ -34,14 +34,15 @@ use super::{
 use crate::{
     adapter::{
         client::{ListedValue, NoteEntry, TodoPage, TodoView},
+        clock::epoch_now,
         wire::WireForm,
     },
     domain::{
         coordination::{
             Claim, KV_VALUE_MAX_CHARS, KvKey, KvValue, LOCK_TTL_MAX, LockAttempt, LockName,
-            LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NoteBody, ScratchpadKey,
-            TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoId, TodoLease, TodoStatus,
-            TodoTitle, TodoTitleError, TodoUpdate, claimable,
+            LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NewTodoTitle, NewTodoTitleError,
+            NoteBody, ScratchpadKey, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange,
+            TodoId, TodoLease, TodoStatus, TodoUpdate, claimable,
         },
         port::CoordinationStore,
         value::ProjectRoot,
@@ -151,10 +152,10 @@ fn kv_value(value: &str) -> Result<KvValue, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a blank title or one past
 /// [`TODO_TITLE_MAX_CHARS`].
-fn todo_title(title: &str) -> Result<TodoTitle, ToolError> {
-    TodoTitle::try_new(title).map_err(|error| match error {
-        TodoTitleError::LenCharMaxViolated => too_long(TITLE_FIELD, TODO_TITLE_MAX_CHARS, title),
-        TodoTitleError::NotEmptyViolated => ToolError::InvalidTodoTitle(title.to_string()),
+fn todo_title(title: &str) -> Result<NewTodoTitle, ToolError> {
+    NewTodoTitle::try_new(title).map_err(|error| match error {
+        NewTodoTitleError::TooLong => too_long(TITLE_FIELD, TODO_TITLE_MAX_CHARS, title),
+        NewTodoTitleError::Blank => ToolError::InvalidTodoTitle(title.to_string()),
     })
 }
 
@@ -266,7 +267,7 @@ impl MusterMcp {
                 after.as_ref().map_or("", AsRef::as_ref),
             )
         })?;
-        let now = unix_now();
+        let now = epoch_now();
         let listed: Vec<_> = if only_claimable {
             let earlier: HashSet<&TodoId> = todos[..start].iter().map(Todo::id).collect();
             claimable(&todos, now)
@@ -313,7 +314,7 @@ impl MusterMcp {
             })
             .await?;
         structured(
-            self.introduced(json(&TodoView::at(&created, unix_now()))?),
+            self.introduced(json(&TodoView::at(&created, epoch_now()))?),
             false,
         )
     }
@@ -343,7 +344,7 @@ impl MusterMcp {
                 }
             })
             .await?;
-        let now = unix_now();
+        let now = epoch_now();
         let value = match claim {
             Claim::Claimed(todo) => {
                 object_of!({ CLAIMED: true, TODO: json(&TodoView::at(&todo, now))? })
@@ -404,7 +405,7 @@ impl MusterMcp {
             })
             .await?;
         structured(
-            self.introduced(json(&TodoView::at(&updated, unix_now()))?),
+            self.introduced(json(&TodoView::at(&updated, epoch_now()))?),
             false,
         )
     }

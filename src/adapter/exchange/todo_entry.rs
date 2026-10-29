@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter::wire::{WireForm, form, optional_form},
-    domain::coordination::{Author, Todo, TodoClaim, TodoId, TodoStatus, TodoTitle},
+    domain::{
+        coordination::{Author, Todo, TodoClaim, TodoId, TodoStatus, TodoTitle},
+        value::EpochSeconds,
+    },
 };
 
 /// A todo as a coordination snapshot keeps it.
@@ -25,7 +28,7 @@ pub struct TodoEntry {
     #[serde(with = "form")]
     author: Author,
     /// Unix epoch seconds of the last write.
-    updated_at: u64,
+    updated_at: EpochSeconds,
 }
 
 impl WireForm for Todo {

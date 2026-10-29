@@ -686,7 +686,7 @@ mod tests {
         domain::{
             config::{Environment, ProcessSpec},
             process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, Pid, ProjectRoot, StopGrace, steers_the_terminal},
+            value::{CommandLine, Pid, ProjectRoot, StopGrace},
         },
     };
 
@@ -874,28 +874,6 @@ mod tests {
     fn ps_json_is_stable() {
         let views: Vec<ProjectView> = [shop()].iter().map(ProjectView::from).collect();
         insta::assert_snapshot!("ps_json", json(&views).unwrap());
-    }
-
-    /// A process name carrying a bidi override is shown as text; neither
-    /// name can carry a control character, and a project name no format
-    /// character either.
-    #[test]
-    fn ps_never_prints_control_or_format_characters() {
-        let hostile = ProjectStatus::builder()
-            .project(shop_project())
-            .processes(vec![process(
-                "api\u{202e}gpj",
-                ProcessState::Exited,
-                None,
-                None,
-            )])
-            .build();
-        let rendered = render_status(&[hostile], true, None);
-
-        assert!(
-            !rendered.replace('\n', "").chars().any(steers_the_terminal),
-            "{rendered:?}"
-        );
     }
 
     /// Columns line up by display width, so a name with an accent or a wide

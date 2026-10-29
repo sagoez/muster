@@ -1,20 +1,18 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::spawn_generation::SpawnGeneration;
-use crate::{
-    adapter::holder::client,
-    domain::{
-        pty::PtyError,
-        value::{PaneId, ProjectRoot},
-    },
+use crate::domain::{
+    port::ScreenReader,
+    pty::PtyError,
+    value::{PaneId, ProjectRoot},
 };
 
-/// The screen of a holder-run process, still to be read from its holder. The
-/// read can block, so the supervisor hands it to its caller instead of reading
-/// it on its own loop.
+/// The screen of a process served elsewhere, still to be read. The read can
+/// block, so the supervisor hands it to its caller instead of reading it on
+/// its own loop.
 #[derive(Debug, Clone, Getters, CopyGetters, TypedBuilder)]
 pub struct HolderScreen {
     /// The project the pane belonged to when the read was handed out.
@@ -27,9 +25,9 @@ pub struct HolderScreen {
     /// that outlived its process is told apart.
     #[getset(get_copy = "pub")]
     generation: SpawnGeneration,
-    /// The socket of the holder that serves it.
+    /// Reads the screen from where it is served.
     #[getset(get = "pub")]
-    socket: PathBuf,
+    reader: Arc<dyn ScreenReader>,
     /// The last screen the service saw of the process, used when the holder
     /// cannot be read.
     #[getset(get = "pub")]
@@ -37,13 +35,11 @@ pub struct HolderScreen {
 }
 
 impl HolderScreen {
-    /// Reads the visible screen from the holder, blocking for at most the
-    /// holder client's read timeout.
+    /// Reads the visible screen from where it is served.
     ///
     /// # Errors
-    /// Returns a [`PtyError`] when the holder cannot be reached or sends no
-    /// screen.
+    /// Returns a [`PtyError`] when the screen cannot be reached or read.
     pub fn read(&self) -> Result<String, PtyError> {
-        client::screen_text(&self.socket)
+        self.reader.read_screen()
     }
 }

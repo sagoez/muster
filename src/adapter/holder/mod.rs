@@ -4,8 +4,6 @@
 
 mod byte_limit;
 mod byte_queue;
-#[cfg(test)]
-mod channel_sink;
 mod child_guard;
 pub mod client;
 mod client_id;
@@ -30,6 +28,8 @@ mod holder_control;
 mod holder_event;
 mod holder_launcher;
 mod holder_sink;
+#[cfg(test)]
+pub(crate) mod holders;
 mod id;
 mod kept;
 mod launcher;
@@ -43,6 +43,8 @@ mod log_fixture;
 mod log_query;
 mod log_reader;
 mod log_slice;
+#[cfg(test)]
+mod losing_sink;
 mod matcher;
 mod pattern_error;
 mod piece;
@@ -57,6 +59,11 @@ mod recording_input;
 mod reject_reason;
 mod resolved;
 mod runner;
+#[cfg(test)]
+mod runner_fixture;
+#[cfg(test)]
+mod sabotage;
+mod served_screen;
 mod server;
 #[cfg(test)]
 mod server_testing;
@@ -65,11 +72,17 @@ mod socket_guard;
 mod span;
 mod span_reader;
 mod spawn_request_wire;
+#[cfg(test)]
+mod spec_launcher;
 mod strip;
 #[cfg(test)]
 mod test_client;
 #[cfg(test)]
 pub(crate) mod testing;
+#[cfg(test)]
+pub(crate) mod thread_launcher;
+#[cfg(test)]
+mod watch;
 
 pub use byte_limit::*;
 pub use client_message::*;
@@ -96,6 +109,7 @@ pub use protocol::*;
 pub use record::*;
 pub use reject_reason::*;
 pub use runner::*;
+pub use served_screen::*;
 pub use server::*;
 pub use spawn_request_wire::*;
 pub use strip::*;

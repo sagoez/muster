@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use super::{
     coordination_rows::collect,
-    sqlite_store::{corrupt, db_error},
+    sqlite_store::{corrupt, db_error, epoch_from_secs, epoch_param},
     store_error::StoreError,
 };
 use crate::domain::{
@@ -10,6 +10,7 @@ use crate::domain::{
     coordination::{
         Author, Lock, LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, SessionId,
     },
+    value::EpochSeconds,
 };
 
 /// The columns [`lock_from_row`] reads, in order.
@@ -42,7 +43,7 @@ fn lock_from_row(row: &Row) -> Result<Lock, ConfigError> {
                 .transpose()
                 .map_err(|error| corrupt("lock note", error))?,
         )
-        .expires_at(u64::try_from(expires_at).map_err(|error| corrupt("lock expiry", error))?)
+        .expires_at(epoch_from_secs("lock expiry", expires_at)?)
         .build())
 }
 
@@ -68,9 +69,9 @@ pub(super) fn acquire(
     name: &LockName,
     ttl: LockTtl,
     note: Option<&LockNote>,
-    now: u64,
+    now: EpochSeconds,
 ) -> Result<LockAttempt, ConfigError> {
-    let until = now + ttl.as_ref().as_secs();
+    let until = now.after(*ttl.as_ref());
     let taken: Option<i64> = conn
         .query_row(
             ACQUIRE,
@@ -80,8 +81,8 @@ pub(super) fn acquire(
                 ":me": me.author().label(),
                 ":session": me.session().as_ref(),
                 ":note": note.map(AsRef::<str>::as_ref),
-                ":until": until as i64,
-                ":now": now as i64,
+                ":until": epoch_param(until),
+                ":now": epoch_param(now),
             },
             |row| row.get(0),
         )
@@ -111,7 +112,7 @@ pub(super) fn release(
     project_id: i64,
     me: &LockHolder,
     name: &LockName,
-    now: u64,
+    now: EpochSeconds,
 ) -> Result<LockRelease, ConfigError> {
     let removed = conn
         .execute(
@@ -170,14 +171,18 @@ pub(super) fn release_all_of(conn: &Connection, session: &SessionId) -> Result<u
 ///
 /// # Errors
 /// Returns a [`ConfigError`] when SQLite fails or a stored row is invalid.
-pub(super) fn live(conn: &Connection, project_id: i64, now: u64) -> Result<Vec<Lock>, ConfigError> {
+pub(super) fn live(
+    conn: &Connection,
+    project_id: i64,
+    now: EpochSeconds,
+) -> Result<Vec<Lock>, ConfigError> {
     collect(
         conn,
         &format!(
             "SELECT {LOCK_COLUMNS} FROM locks WHERE project_id = ?1 AND expires_at >= ?2 \
              ORDER BY name"
         ),
-        params![project_id, now as i64],
+        params![project_id, epoch_param(now)],
         lock_from_row,
     )
 }

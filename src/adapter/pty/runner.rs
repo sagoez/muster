@@ -303,7 +303,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::pty::channel_sink::ChannelSink,
+        adapter::channel_sink::ChannelSink,
         domain::{
             color_scheme::ColorScheme,
             process::StopPolicy,
@@ -357,7 +357,7 @@ mod tests {
     fn output_of(request: SpawnRequest) -> String {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request, Box::new(ChannelSink(tx)))
+            .spawn(request, Box::new(ChannelSink::new(tx)))
             .unwrap();
         let mut bytes = Vec::new();
         while let Ok(output) = rx.recv_timeout(OUTPUT_TIMEOUT) {
@@ -439,7 +439,7 @@ mod tests {
     fn streams_output_then_reports_success() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request("printf hello"), Box::new(ChannelSink(tx)))
+            .spawn(request("printf hello"), Box::new(ChannelSink::new(tx)))
             .unwrap();
 
         let mut bytes = Vec::new();
@@ -464,7 +464,10 @@ mod tests {
     fn final_output_is_delivered_before_exit() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request("printf hello; exit 1"), Box::new(ChannelSink(tx)))
+            .spawn(
+                request("printf hello; exit 1"),
+                Box::new(ChannelSink::new(tx)),
+            )
             .unwrap();
 
         let mut events = Vec::new();
@@ -500,7 +503,7 @@ mod tests {
                 request(
                     "trap 'printf shutdown; exit 0' TERM; printf ready; while :; do sleep 1; done",
                 ),
-                Box::new(ChannelSink(tx)),
+                Box::new(ChannelSink::new(tx)),
             )
             .unwrap();
 
@@ -546,7 +549,7 @@ mod tests {
         PortablePtyRunner
             .spawn(
                 request("printf 'shlvl=%s' \"$SHLVL\""),
-                Box::new(ChannelSink(tx)),
+                Box::new(ChannelSink::new(tx)),
             )
             .unwrap();
 
@@ -570,7 +573,7 @@ mod tests {
         let mut handle = PortablePtyRunner
             .spawn(
                 request(DESCENDANT_CLEANUP_COMMAND),
-                Box::new(ChannelSink(tx)),
+                Box::new(ChannelSink::new(tx)),
             )
             .unwrap();
 
@@ -626,7 +629,7 @@ mod tests {
         let _handle = PortablePtyRunner
             .spawn(
                 request(r"head -c 200000 /dev/zero | tr '\0' x"),
-                Box::new(ChannelSink(tx)),
+                Box::new(ChannelSink::new(tx)),
             )
             .unwrap();
 
@@ -663,7 +666,7 @@ mod tests {
     fn reports_failure_for_nonzero_exit() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request("exit 3"), Box::new(ChannelSink(tx)))
+            .spawn(request("exit 3"), Box::new(ChannelSink::new(tx)))
             .unwrap();
 
         let mut outcome = None;
@@ -681,7 +684,7 @@ mod tests {
     fn reports_the_signal_that_ended_a_child() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request("kill -KILL $$"), Box::new(ChannelSink(tx)))
+            .spawn(request("kill -KILL $$"), Box::new(ChannelSink::new(tx)))
             .unwrap();
 
         let mut outcome = None;
@@ -719,7 +722,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let request = request_in("true", Some(PathBuf::from("/no/such/muster/dir")));
 
-        let result = PortablePtyRunner.spawn(request, Box::new(ChannelSink(tx)));
+        let result = PortablePtyRunner.spawn(request, Box::new(ChannelSink::new(tx)));
         assert!(matches!(result, Err(PtyError::InvalidWorkingDir(_))));
     }
 
@@ -727,7 +730,7 @@ mod tests {
     fn inherits_the_current_directory_when_no_working_dir_is_set() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let _handle = PortablePtyRunner
-            .spawn(request("pwd -P"), Box::new(ChannelSink(tx)))
+            .spawn(request("pwd -P"), Box::new(ChannelSink::new(tx)))
             .unwrap();
 
         let mut bytes = Vec::new();
@@ -746,7 +749,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let start = Instant::now();
         let _handle = PortablePtyRunner
-            .spawn(request("sleep 5 &"), Box::new(ChannelSink(tx)))
+            .spawn(request("sleep 5 &"), Box::new(ChannelSink::new(tx)))
             .unwrap();
 
         loop {

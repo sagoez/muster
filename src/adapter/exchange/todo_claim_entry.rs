@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapter::wire::{WireForm, form},
-    domain::coordination::{Author, TodoClaim},
+    domain::{
+        coordination::{Author, TodoClaim},
+        value::EpochSeconds,
+    },
 };
 
 /// An agent's hold on a todo, as a coordination snapshot keeps it.
@@ -13,7 +16,7 @@ pub struct TodoClaimEntry {
     #[serde(with = "form")]
     owner: Author,
     /// Unix epoch seconds after which the lease has run out.
-    claimed_until: u64,
+    claimed_until: EpochSeconds,
 }
 
 impl WireForm for TodoClaim {

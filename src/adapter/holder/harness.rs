@@ -21,7 +21,7 @@ use super::{
     test_client::TestClient,
 };
 use crate::{
-    adapter::signal_target::SignalTarget,
+    adapter::{pty::PortablePtyRunner, signal_target::SignalTarget},
     domain::{color_scheme::ColorScheme, pty::PtySize},
 };
 
@@ -57,7 +57,7 @@ impl Harness {
             .supervisor_deadline(supervisor_deadline)
             .build();
         let server_config = config.clone();
-        let server = thread::spawn(move || HolderServer::run(server_config));
+        let server = thread::spawn(move || HolderServer::run(server_config, &PortablePtyRunner));
         let harness = Self {
             config,
             server: Some(server),

@@ -17,7 +17,7 @@ pub struct StackUpArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     wait: Option<bool>,
-    /// Seconds to wait, default 30, at most 45.
+    /// Seconds to wait, default <default-wait-s>, at most <call-bound-s>.
     #[builder(default)]
     #[getset(get_copy = "pub")]
     timeout_s: Option<u64>,

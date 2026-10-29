@@ -4,11 +4,11 @@ use super::{
     answer::Answer, error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind,
 };
 use crate::{
-    adapter::{client::LockView, store::now_epoch_secs, wire::WireForm},
+    adapter::{client::LockView, clock::epoch_now, wire::WireForm},
     domain::{
         coordination::{Lock, LockName},
         port::CoordinationStore,
-        value::ProjectRoot,
+        value::{EpochSeconds, ProjectRoot},
     },
 };
 
@@ -37,7 +37,7 @@ pub fn lock(
     project: &ProjectRoot,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, now_epoch_secs() as u64),
+        None => list(store, project, epoch_now()),
         Some(LockCommand::Release { name }) => release(store, project, &name),
     }
 }
@@ -50,7 +50,7 @@ pub fn lock(
 fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
-    now: u64,
+    now: EpochSeconds,
 ) -> Result<Answer, CliError> {
     let locks = store.locks(project)?;
     let views: Vec<LockView> = locks.iter().map(|lock| LockView::at(lock, now)).collect();
@@ -66,7 +66,7 @@ fn list(
 }
 
 /// One listed lock at `now`.
-fn line(lock: &Lock, now: u64) -> String {
+fn line(lock: &Lock, now: EpochSeconds) -> String {
     let note = lock
         .note()
         .as_ref()
@@ -144,7 +144,7 @@ mod tests {
     fn list_shows_holder_lease_and_note() {
         let (store, root, _scratch) = fixture();
         assert_eq!(
-            list(&store, &root, now_epoch_secs() as u64).unwrap().rows()[0].detail(),
+            list(&store, &root, epoch_now()).unwrap().rows()[0].detail(),
             EMPTY_NOTE
         );
         store
@@ -158,7 +158,12 @@ mod tests {
             .unwrap();
         let lock = store.locks(&root).unwrap().remove(0);
 
-        let listed = list(&store, &root, lock.expires_at() - 90).unwrap();
+        let listed = list(
+            &store,
+            &root,
+            EpochSeconds::new(lock.expires_at().into_inner() - 90),
+        )
+        .unwrap();
 
         assert_eq!(
             listed.rows()[0].detail(),

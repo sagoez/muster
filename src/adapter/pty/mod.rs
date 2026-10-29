@@ -1,5 +1,3 @@
-#[cfg(test)]
-mod channel_sink;
 mod drain_status;
 mod environment;
 mod pty_input;

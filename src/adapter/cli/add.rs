@@ -85,7 +85,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .stop_signal(args.flags().stop_signal())
         .stop_grace(args.flags().stop_grace())
         .ready(args.flags().ready()?)
-        .ports(args.flags().ports().unwrap_or_default())
+        .ports(args.flags().ports()?.unwrap_or_default())
         .build();
     let (registration, spec) = invocation
         .editor(store.as_ref())

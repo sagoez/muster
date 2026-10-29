@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use getset::CopyGetters;
 
 use super::{
@@ -9,6 +7,7 @@ use super::{
 use crate::{
     adapter::holder::LineMatcher,
     domain::{
+        config::{ConfigError, DeclaredPorts},
         process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
         value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
     },
@@ -113,8 +112,15 @@ impl ProcessFlags {
     }
 
     /// The `--port` ports, each once, when any was given.
-    pub fn ports(&self) -> Option<BTreeSet<LocalPort>> {
-        (!self.port.is_empty()).then(|| self.port.iter().copied().collect())
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::TooManyPorts`] past
+    /// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
+    pub fn ports(&self) -> Result<Option<DeclaredPorts>, ConfigError> {
+        if self.port.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(DeclaredPorts::of(self.port.iter().copied())?))
     }
 
     /// Whether no flag was given.

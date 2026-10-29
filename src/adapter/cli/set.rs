@@ -1,8 +1,6 @@
 //! `muster set`: changes to one process's stored definition. A running
 //! process keeps running and takes the change at its next start.
 
-use std::collections::BTreeSet;
-
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
@@ -17,7 +15,7 @@ use crate::{
         process::{resolve_among, runs_now},
     },
     domain::{
-        config::{ConfigError, FieldEdit, ProcessChange},
+        config::{ConfigError, DeclaredPorts, FieldEdit, ProcessChange},
         coordination::Author,
         value::{CommandLine, Description},
     },
@@ -145,9 +143,9 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
             (None, true) => FieldEdit::Clear,
             (None, false) => FieldEdit::Keep,
         })
-        .ports(match (args.flags().ports(), args.no_ports()) {
+        .ports(match (args.flags().ports()?, args.no_ports()) {
             (Some(ports), _) => Some(ports),
-            (None, true) => Some(BTreeSet::new()),
+            (None, true) => Some(DeclaredPorts::default()),
             (None, false) => None,
         })
         .build();
@@ -335,10 +333,8 @@ mod tests {
     }
 
     /// The ports `raw` names.
-    fn ports(raw: &[u16]) -> BTreeSet<LocalPort> {
-        raw.iter()
-            .map(|port| LocalPort::try_new(*port).unwrap())
-            .collect()
+    fn ports(raw: &[u16]) -> DeclaredPorts {
+        DeclaredPorts::of(raw.iter().map(|port| LocalPort::try_new(*port).unwrap())).unwrap()
     }
 
     /// Ports over a fresh database, the folder of a project `shop` in it,
@@ -351,7 +347,7 @@ mod tests {
     }
 
     /// The ports stored for `web` in the project at `dir`.
-    fn stored_ports(fakes: &FakePorts, dir: &Path) -> BTreeSet<LocalPort> {
+    fn stored_ports(fakes: &FakePorts, dir: &Path) -> DeclaredPorts {
         let root = ProjectRoot::try_new(dir.to_path_buf()).unwrap();
         let stack = fakes.store().stack(&root).unwrap().unwrap();
         stack
@@ -454,7 +450,7 @@ mod tests {
             "updated api  ports 3000, 5173"
         );
         let cleared = ProcessChange::builder()
-            .ports(Some(BTreeSet::new()))
+            .ports(Some(DeclaredPorts::default()))
             .build();
         assert_eq!(
             plain(&set_rows(&running_view(&cleared))),

@@ -3,17 +3,16 @@ name = "muster-workspace"
 version = "0.9.1"
 edition = "2024"
 rust-version = "1.89"
-description = "The supervisor and control plane behind your terminal for dev processes and CLI agents"
+description = "The supervisor and control plane behind your terminal for a project's dev processes"
 license = "MIT"
 repository = "https://github.com/sagoez/muster"
 readme = "README.md"
-keywords = ["terminal", "supervisor", "process-manager", "agents", "mcp"]
+keywords = ["terminal", "supervisor", "process-manager", "dev-server", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
     "/src/**",
     "/examples/**",
     "/docs/muster-demo.gif",
-    "/docs/agent-protocol.md",
     "/Cargo.lock",
     "/LICENSE",
     "/README.md",
@@ -32,7 +31,6 @@ alacritty_terminal = "0.26"
 anstream = "1.0.0"
 anstyle = "1.0.14"
 atomic-write-file = "0.3.0"
-base64 = "0.22.1"
 bytesize = { version = "2.7.0", features = ["serde"] }
 clap = { version = "4.6.2", features = ["derive"] }
 clap_complete = { version = "4.6.7", features = ["unstable-dynamic"] }
@@ -40,12 +38,10 @@ cliclack = "0.5.6"
 console = "0.16.4"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-fake = "4.4.0"
 getset = "0.1.7"
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
 libc = "0.2.186"
-notify = "8.2.0"
 notify-rust = "4.11.7"
 nutype = { version = "0.7.0", features = ["serde"] }
 portable-pty = "0.9.0"
@@ -63,7 +59,6 @@ strum = { version = "0.28.0", features = ["derive"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt", "macros", "io-std", "io-util", "time"] }
-toml_edit = { version = "0.23.7", features = ["serde"] }
 typed-builder = "0.23.2"
 unicode-normalization = "0.1.25"
 unicode-width = "0.2.2"

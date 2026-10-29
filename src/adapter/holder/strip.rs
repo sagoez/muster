@@ -6,6 +6,10 @@ use alacritty_terminal::vte::{Params, Perform};
 
 use crate::adapter::terminal::bounded_parser::BoundedParser;
 
+/// Longest a line of output grows without a newline before it is cut into a
+/// line of its own, so a stream with no newlines never grows one line
+/// without bound.
+pub const LINE_MAX_BYTES: usize = 64 * 1024;
 /// Returns the cursor to the start of the line.
 const CARRIAGE_RETURN: u8 = b'\r';
 /// Moves the cursor one column left.

@@ -489,7 +489,7 @@ mod tests {
         adapter::{
             channel_sink::ChannelSink,
             holder::{
-                ServedScreen,
+                LineMatcher, ServedScreen,
                 client::{greet, screen_text},
                 error_path_beside,
                 losing_sink::LosingSink,
@@ -505,7 +505,7 @@ mod tests {
         },
         domain::{
             color_scheme::ColorScheme,
-            process::StopSignal,
+            process::{LogPattern, PatternKind, StopSignal},
             pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
             value::{Cols, CommandLine, ProcessName, Rows, StartToken},
         },
@@ -678,9 +678,15 @@ mod tests {
         });
     }
 
-    /// An adopting handle reads back what the child logged before it
-    /// connected, from the run's start or from a given cursor, so no byte
-    /// falls between the earlier connection and the new stream.
+    /// The pattern `text` as a regex.
+    fn regex(text: &str) -> LogPattern {
+        LineMatcher::checked(text, PatternKind::Regex).unwrap()
+    }
+
+    /// An adopting handle reads back the lines asked for that the child
+    /// logged before it connected, from the run's start or from a given
+    /// cursor, so no wanted line falls between the earlier connection and
+    /// the new stream.
     #[test]
     fn an_adoption_reads_back_what_was_logged_before_it_connected() {
         let fixture = Fixture::new();
@@ -702,6 +708,8 @@ mod tests {
             .adopt(&record, None, Box::new(ChannelSink::new(sender)))
             .unwrap();
         assert_eq!(whole.take_backlog(), None, "replayed through the sink");
+        let lines = [regex("first|second")];
+        assert!(whole.replay_matching(&lines).is_some());
         assert_eq!(
             replayed(&outputs, 2),
             (start, b"first\r\nsecond\r\n".to_vec())
@@ -713,16 +721,49 @@ mod tests {
         let mut rest = runner
             .adopt(&record, Some(later), Box::new(ChannelSink::new(sender)))
             .unwrap();
-        let _ = rest.take_backlog();
+        let _ = rest.replay_matching(&lines);
         assert_eq!(replayed(&outputs, 1), (later, b"second\r\n".to_vec()));
         rest.kill().unwrap();
     }
 
-    /// An adopting handle replays nothing until its backlog is taken, then
-    /// the whole run back to a line far past what one read used to hold, in
-    /// pieces, so readiness and waits still see it.
+    /// An adopting handle asked for no lines reads nothing back: no logged
+    /// output is forwarded, and it says where its stream begins, the log's
+    /// end as it connected.
     #[test]
-    fn an_adoption_replays_a_run_far_back_once_its_backlog_is_taken() {
+    fn an_adoption_asked_for_no_lines_replays_nothing() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let (sink, _watch) = Watch::new();
+        let handle = runner
+            .spawn(fixture.request("echo first; echo second; sleep 600"), sink)
+            .unwrap();
+        drop(handle);
+        let record = runner.live_records().remove(0);
+        wait_until("both lines in the log", || {
+            fixture.log(&record).contains("second")
+        });
+
+        let (sender, outputs) = unbounded();
+        let mut adopted = runner
+            .adopt(&record, None, Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        let end = adopted.output_end();
+
+        assert_eq!(adopted.replay_matching(&[]), end);
+        thread::sleep(HELD_REPLAY);
+        let placed = outputs
+            .try_iter()
+            .find(|output| matches!(output, ProcessOutput::Placed { .. }));
+        assert!(placed.is_none(), "replayed {placed:?}");
+        adopted.kill().unwrap();
+    }
+
+    /// An adopting handle replays nothing until it is told what to look for,
+    /// then scans the whole run back to a line far past what one read used to
+    /// hold and forwards only the lines asked for, never the flood between
+    /// them, so readiness and waits still see a line printed long ago.
+    #[test]
+    fn an_adoption_forwards_only_the_lines_asked_for_from_far_back() {
         let fixture = Fixture::new();
         let runner = fixture.runner();
         let command = format!(
@@ -741,22 +782,21 @@ mod tests {
         let mut adopted = runner
             .adopt(&record, None, Box::new(ChannelSink::new(sender)))
             .unwrap();
+        let _ = adopted.take_backlog();
         assert!(
             outputs.recv_timeout(HELD_REPLAY).is_err(),
-            "nothing is replayed before the backlog is taken"
+            "nothing is replayed before the handle is told what to look for"
         );
-        let _ = adopted.take_backlog();
+        let _ = adopted.replay_matching(&[regex(&format!("{REPLAY_MARKER}|{REPLAY_DONE}"))]);
 
-        let mut text = Vec::new();
-        let mut pieces = 0;
-        while !String::from_utf8_lossy(&text).contains(REPLAY_DONE) {
+        let mut lines = Vec::new();
+        while !lines.iter().any(|line: &String| line.contains(REPLAY_DONE)) {
             if let ProcessOutput::Placed { bytes, .. } = outputs.recv_timeout(WAIT).unwrap() {
-                text.extend_from_slice(&bytes);
-                pieces += 1;
+                lines.push(String::from_utf8_lossy(&bytes).into_owned());
             }
         }
-        assert!(String::from_utf8_lossy(&text).contains(REPLAY_MARKER));
-        assert!(pieces > 1, "replayed in pieces");
+        assert_eq!(lines.len(), 2, "only the lines asked for: {lines:?}");
+        assert!(lines[0].contains(REPLAY_MARKER), "{lines:?}");
         adopted.kill().unwrap();
     }
 

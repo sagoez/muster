@@ -835,6 +835,7 @@ impl Supervisor {
                 self.rearm_force_stop(pane);
             }
         }
+        self.start_replay(pane);
         self.replay(pane, generation, backlog, launch.into_early());
         let suspend = suspend.filter(|_| self.runs_launch(pane, generation));
         self.apply_pending(pane, membership, suspend, intent);
@@ -865,7 +866,10 @@ mod tests {
         path::{Path, PathBuf},
         process,
         rc::Rc,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant, SystemTime},
     };
 
@@ -889,9 +893,14 @@ mod tests {
         },
         domain::{
             port::ProcessRunner,
-            process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
+            process::{
+                LogPattern, ProcessState, ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy,
+                StopSignal,
+            },
             pty::{ExitOutcome, ProcessOutput},
-            value::{CommandLine, ProcessName, ProjectRoot, StartToken, StopGrace},
+            value::{
+                CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace,
+            },
         },
     };
 
@@ -982,6 +991,49 @@ mod tests {
         let pid = Pid::try_new(exited.id()).unwrap();
         exited.wait().unwrap();
         pid
+    }
+
+    /// The patterns each replay of an adoption of `p`, defined as `spec`,
+    /// asked its handle for, and the harness.
+    fn replay_asked(spec: ProcessSpec) -> (Harness, Vec<Vec<LogPattern>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = with_adopter(
+            Harness::over(Box::new(FakeRunner), &[spec]),
+            Box::new(ReplayAskAdopter::builder().asked(asked.clone()).build()),
+        );
+        harness.supervisor_mut().adopt(record("p"));
+        let asked = asked.lock().unwrap().clone();
+        (harness, asked)
+    }
+
+    /// An adoption with no readiness check or wait looking at its log reads
+    /// nothing back, so no replayed line reaches the loop, and only places
+    /// its tap where the streamed output begins.
+    #[test]
+    fn an_adoption_nothing_waits_on_replays_nothing() {
+        let (harness, asked) = replay_asked(spec("p", "true", RestartPolicy::Always));
+
+        assert_eq!(asked, vec![Vec::<LogPattern>::new()]);
+        let tap = &harness.supervisor().taps[&PaneId::new(PANE)];
+        assert!(tap.is_placed());
+        assert_eq!(tap.cursor(), OutputCursor::new(REPLAY_STREAM_START));
+    }
+
+    /// An adoption whose log readiness check still waits reads back only
+    /// the lines its pattern matches.
+    #[test]
+    fn an_adoption_whose_log_check_waits_replays_its_pattern() {
+        let check = ReadyCheck::builder()
+            .probe(ReadyProbe::from_stored("log", "compiled").unwrap())
+            .timeout(PositiveDuration::try_new(RESPAWN_WAIT).unwrap())
+            .build();
+        let (_, asked) =
+            replay_asked(spec("p", "true", RestartPolicy::Always).with_ready(Some(check.clone())));
+
+        let ReadyProbe::Log(pattern) = check.probe() else {
+            panic!("a log check");
+        };
+        assert_eq!(asked, vec![vec![pattern.clone()]]);
     }
 
     #[test]

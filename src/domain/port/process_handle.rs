@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use super::ProcessInput;
 use crate::domain::{
-    process::StopSignal,
+    process::{LogPattern, StopSignal},
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
@@ -50,10 +50,20 @@ pub trait ProcessHandle: Send {
     /// ahead of the output this handle has delivered.
     fn output_end(&self) -> Option<OutputCursor>;
 
-    /// The logged output the process wrote before this handle connected, and
-    /// where it starts, so every byte is seen before the output that follows.
-    /// Taken once; none when every byte is streamed.
+    /// The logged output a freshly launched process wrote before this handle
+    /// connected, and where it starts, so every byte is seen before the
+    /// output that follows. Taken once; none when every byte is streamed.
     fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)>;
+
+    /// For a handle adopting a process that already ran: lets its output
+    /// through, first forwarding, from the run's logged output, only the
+    /// lines one of `patterns` matches, scanned off the caller's thread, and
+    /// nothing with no patterns. Returns where the streamed output begins,
+    /// for the caller to place itself at; none for a handle that replays
+    /// nothing.
+    fn replay_matching(&mut self, _patterns: &[LogPattern]) -> Option<OutputCursor> {
+        None
+    }
 
     /// Tells whatever holds the finished process that its exit was handled, so
     /// it can let go of it. Until then a holder keeps the exit for a later

@@ -22,7 +22,7 @@ use crate::{
     },
     domain::{
         port::ListeningSocket,
-        process::{ProcessState, Readiness, ReadyCheck, ReadyProbe},
+        process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
         value::{OutputCursor, PaneId, Pid, ProcessName},
     },
 };
@@ -773,6 +773,59 @@ impl Supervisor {
             .get(&pane)
             .copied()
             .unwrap_or_else(SpawnGeneration::initial)
+    }
+
+    /// The log patterns a replay of `pane`'s adopted run is scanned for: its
+    /// readiness check's while that still waits, and those of the log waits
+    /// on its current run, registered or held. None when nothing waits on a
+    /// line.
+    fn replay_patterns(&self, pane: PaneId) -> Vec<LogPattern> {
+        let generation = self.current_generation(pane);
+        let readiness = self
+            .readiness
+            .get(&pane)
+            .filter(|readiness| readiness.state().is_waiting())
+            .and_then(|readiness| match readiness.check().probe() {
+                ReadyProbe::Log(pattern) => Some(pattern.clone()),
+                ReadyProbe::Port(_) | ReadyProbe::Http(_) => None,
+            });
+        let registered = self
+            .waiters
+            .iter()
+            .filter(|waiter| waiter.pane() == pane && waiter.pin().counts(generation))
+            .map(Waiter::until);
+        let held = self
+            .held_waits
+            .get(&pane)
+            .into_iter()
+            .flatten()
+            .map(|held| &held.prepared.until);
+        let waited = registered.chain(held).filter_map(|until| match until {
+            WaitCondition::Log(pattern) => Some(pattern.clone()),
+            WaitCondition::Port(_)
+            | WaitCondition::Http { .. }
+            | WaitCondition::State(_)
+            | WaitCondition::Ready => None,
+        });
+        readiness.into_iter().chain(waited).collect()
+    }
+
+    /// Lets `pane`'s freshly adopted handle replay its run's logged lines
+    /// that a readiness check or wait still looks for, scanned off the loop
+    /// so only matches arrive; with nothing looking, nothing is read back
+    /// and the tap is only placed where the streamed output begins.
+    pub(super) fn start_replay(&mut self, pane: PaneId) {
+        let patterns = self.replay_patterns(pane);
+        let start = self
+            .panes
+            .get_mut(&pane)
+            .and_then(|target| target.handle_mut().as_mut())
+            .and_then(|handle| handle.replay_matching(&patterns));
+        if patterns.is_empty()
+            && let Some(start) = start
+        {
+            self.tap(pane).seed_at(start, &[]);
+        }
     }
 
     /// Where a wait with no cursor of its own starts counting `pane`'s lines

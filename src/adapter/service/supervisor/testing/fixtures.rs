@@ -47,6 +47,9 @@ pub(crate) const BACKLOG_RUN_START: u64 = 4096;
 /// Where a [`LoggedAheadHandle`](super::logged_ahead_handle::LoggedAheadHandle)'s
 /// log ends.
 pub(crate) const LOGGED_AHEAD_END: u64 = 64;
+/// Where a [`ReplayAskHandle`](super::replay_ask_handle::ReplayAskHandle)'s
+/// streamed output begins.
+pub(crate) const REPLAY_STREAM_START: u64 = 4096;
 /// Longest a test waits for a worker's launch result.
 const WORKER_WAIT: Duration = Duration::from_secs(5);
 /// Why a refusing adopter fails.

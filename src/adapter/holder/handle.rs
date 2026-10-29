@@ -20,13 +20,14 @@ use super::{
     holder_control::HolderControl,
     log_reader::{log_end, read_log_range},
     reader::{Reader, spawn_reader},
+    replay_request::ReplayRequest,
     runner::abandon,
     served_screen::ServedScreen,
     shared_writer::SharedWriter,
 };
 use crate::domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
-    process::StopSignal,
+    process::{LogPattern, StopSignal},
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
@@ -81,10 +82,10 @@ pub struct HolderHandle {
     log_end: OutputCursor,
     /// Output logged before `log_end`, and where it starts, until taken.
     backlog: Option<(OutputCursor, Vec<u8>)>,
-    /// Tells the held-back reader where to replay the log from, until the
-    /// backlog is taken; dropping it lets the reader on with no replay.
-    replay: Option<Sender<OutputCursor>>,
-    /// Where the reader replays the log from once the backlog is taken.
+    /// Tells the held-back reader where to replay the log from and which
+    /// lines to forward; dropping it lets the reader on with no replay.
+    replay: Option<Sender<ReplayRequest>>,
+    /// Where the reader replays the log from, when asked to.
     replay_from: Option<OutputCursor>,
     /// The child's log, once known.
     log: Option<PathBuf>,
@@ -114,12 +115,12 @@ impl HolderHandle {
         Self::connect(stream, socket, log, sink, timeout, false)
     }
 
-    /// As [`Self::supervise`], for a holder whose child already ran: once
-    /// [`ProcessHandle::take_backlog`] is called, as the handle is installed,
-    /// its reader replays the log from `since`, or from the run's start,
-    /// within the last [`REPLAY_MAX_BYTES`], in pieces and before the
-    /// holder's frames, so output logged before this connection is seen in
-    /// order without being read on the caller's thread.
+    /// As [`Self::supervise`], for a holder whose child already ran: its
+    /// reader is held until [`ProcessHandle::replay_matching`] is called, as
+    /// the handle is installed, then scans the log from `since`, or from the
+    /// run's start, within the last [`REPLAY_MAX_BYTES`], for the lines it
+    /// was asked for, which it forwards before the holder's frames, so they
+    /// are seen in order without the log being read on the caller's thread.
     ///
     /// # Errors
     /// As [`Self::supervise`].
@@ -287,14 +288,28 @@ impl ProcessHandle for HolderHandle {
         self.log.as_deref().and_then(|log| log_end(log).ok())
     }
 
-    /// The backlog a fresh launch read as it connected. An adopting handle
-    /// has none here: taking it lets the reader replay the log through the
-    /// sink, ahead of the holder's frames.
+    /// The backlog a fresh launch read as it connected; an adopting handle
+    /// has none.
     fn take_backlog(&mut self) -> Option<(OutputCursor, Vec<u8>)> {
-        if let (Some(replay), Some(from)) = (self.replay.take(), self.replay_from.take()) {
-            let _ = replay.send(from);
-        }
         self.backlog.take()
+    }
+
+    /// Lets the held-back reader on, asking it to forward from the log only
+    /// the lines `patterns` match; with none it reads nothing back. Returns
+    /// where the holder's frames begin.
+    fn replay_matching(&mut self, patterns: &[LogPattern]) -> Option<OutputCursor> {
+        let replay = self.replay.take()?;
+        if let Some(from) = self.replay_from.take()
+            && !patterns.is_empty()
+        {
+            let _ = replay.send(
+                ReplayRequest::builder()
+                    .from(from)
+                    .patterns(patterns.to_vec())
+                    .build(),
+            );
+        }
+        Some(self.log_end)
     }
 
     /// Collects the exit the holder is keeping, letting it finish. Nothing is

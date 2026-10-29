@@ -57,6 +57,7 @@ mod record_guard;
 #[cfg(test)]
 mod recording_input;
 mod reject_reason;
+mod replay_request;
 mod resolved;
 mod runner;
 #[cfg(test)]

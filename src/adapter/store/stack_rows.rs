@@ -19,7 +19,7 @@ use super::{
 use crate::domain::{
     config::{
         ConfigError, Environment, ImportMode, ImportPlan, ProcessChange, ProcessSpec, Registration,
-        Stack, StackEdit,
+        Stack, StackEdit, stays_under_root,
     },
     coordination::Author,
     port::{StackReader, StackStore},
@@ -44,6 +44,24 @@ const READY_TIMEOUT: &str = "readiness timeout";
 fn path_text(path: &Path) -> Result<&str, ConfigError> {
     path.to_str()
         .ok_or_else(|| StoreError::NotUtf8(path.to_path_buf()).into())
+}
+
+/// The stored working directory `dir` of the process `name`. A relative one
+/// is read against the project root and refused unless it stays under it,
+/// so a hand edit can never climb out of the project; an absolute one is a
+/// folder a person chose outside the project with `--cwd`.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming the process for an empty
+/// directory or a relative one that climbs out of the root.
+fn confined(name: &ProcessName, dir: PathBuf) -> Result<PathBuf, ConfigError> {
+    if dir.as_os_str().is_empty() || (dir.is_relative() && !stays_under_root(&dir)) {
+        return Err(corrupt(
+            &format!("working dir of {}", name.shell_quoted()),
+            format!("{} is not a folder under the project root", dir.display()),
+        ));
+    }
+    Ok(dir)
 }
 
 /// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`.
@@ -75,10 +93,14 @@ fn process_from_row(
         ),
         _ => None,
     };
+    let name = ProcessName::try_new(name).map_err(|error| corrupt("process name", error))?;
+    let working_dir = working_dir
+        .map(|dir| confined(&name, PathBuf::from(dir)))
+        .transpose()?;
     Ok(ProcessSpec::builder()
-        .name(ProcessName::try_new(name).map_err(|error| corrupt("process name", error))?)
+        .name(name)
         .command(CommandLine::try_new(command).map_err(|error| corrupt("command", error))?)
-        .working_dir(working_dir.map(PathBuf::from))
+        .working_dir(working_dir)
         .description(
             description
                 .map(Description::try_new)
@@ -529,6 +551,38 @@ mod tests {
         assert_eq!(names_of(&stack), ["web", "api", "db"]);
         assert_eq!(stack.processes()[0], full_spec());
         assert_eq!(stack.project().root(), &root);
+    }
+
+    /// A stored relative working directory that climbs out of the root is
+    /// refused when read, naming the process; one under the root, or an
+    /// absolute one a person chose outside the project, reads.
+    #[test]
+    fn a_stored_working_dir_climbing_out_of_the_root_is_refused() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &full_spec(), &Author::human())
+            .unwrap();
+        let stored = |dir: &str| {
+            store
+                .write(|conn| {
+                    conn.execute("UPDATE processes SET working_dir = ?1", params![dir])
+                        .map_err(db_error)
+                })
+                .unwrap();
+            store.stack(&root)
+        };
+
+        for escaping in ["../../../../etc", "a/../..", ""] {
+            let refused = stored(escaping).unwrap_err();
+            assert!(
+                matches!(&refused, ConfigError::CorruptRow { what, .. } if what == "working dir of 'web'"),
+                "{escaping}: {refused}"
+            );
+        }
+        for reads in ["frontend/../src", "/srv/elsewhere"] {
+            assert!(stored(reads).is_ok(), "{reads}");
+        }
     }
 
     #[test]

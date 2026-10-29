@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    path::{Component, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use getset::Getters;
 use serde::{Deserialize, Serialize};
@@ -9,7 +6,7 @@ use typed_builder::TypedBuilder;
 
 use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
-    config::{Environment, ProcessSpec},
+    config::{Environment, ProcessSpec, stays_under_root},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
@@ -156,19 +153,8 @@ fn working_dir(dir: PathBuf) -> Result<PathBuf, EntryError> {
     if dir.as_os_str().is_empty() {
         return Err(EntryError::EmptyWorkingDir);
     }
-    let mut depth: usize = 0;
-    for component in dir.components() {
-        depth = match component {
-            Component::Normal(_) => depth + 1,
-            Component::CurDir => depth,
-            Component::ParentDir => match depth.checked_sub(1) {
-                Some(depth) => depth,
-                None => return Err(EntryError::WorkingDirOutsideRoot { dir }),
-            },
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(EntryError::WorkingDirOutsideRoot { dir });
-            },
-        };
+    if !stays_under_root(&dir) {
+        return Err(EntryError::WorkingDirOutsideRoot { dir });
     }
     Ok(dir)
 }

@@ -2097,6 +2097,38 @@ fn a_corrupt_process_row_breaks_only_its_project() {
     );
 }
 
+/// A stored working directory that climbs out of the project, which only a
+/// hand edit of the database can make, is refused naming the process, and
+/// the process never starts.
+#[test]
+fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
+    let scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[entry("escape", "pwd > ran; sleep 600", false)]),
+    );
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE processes SET working_dir = '../../../../etc' WHERE name = 'escape'",
+            [],
+        )
+        .unwrap();
+
+    let start = scratch.on(&project, &["start", "escape"]);
+
+    assert!(!start.status.success(), "{}", shown(&start));
+    assert!(
+        stderr(&start).contains("working dir of 'escape'"),
+        "{}",
+        shown(&start)
+    );
+    assert!(
+        processes_under(HOLDER_SUBCOMMAND, scratch.root.path()).is_empty(),
+        "nothing was launched"
+    );
+}
+
 /// A setting or field past its bound is refused as invalid input, never as a
 /// database error, and changes nothing; `config set` answers with the value
 /// the database holds.

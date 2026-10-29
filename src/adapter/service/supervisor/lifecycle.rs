@@ -251,6 +251,7 @@ impl Supervisor {
 
     /// Stops `pane` without letting its restart policy respawn it.
     pub(crate) fn stop_pane(&mut self, pane: PaneId) {
+        self.supersede_retry_adoption(pane);
         if self.launches.record_intent(pane, PendingIntent::Stop) {
             return;
         }
@@ -304,6 +305,7 @@ impl Supervisor {
 
     /// Immediately force-kills `pane` and cancels a pending respawn.
     pub(crate) fn force_kill_pane(&mut self, pane: PaneId) {
+        self.supersede_retry_adoption(pane);
         if self.launches.record_intent(pane, PendingIntent::Kill) {
             return;
         }

@@ -360,12 +360,7 @@ impl Supervisor {
             return;
         };
         match record.filter(|record| record.child_pid() == pid) {
-            Some(record) => {
-                if let Some(target) = self.panes.get_mut(&pane) {
-                    target.set_unsupervised(None);
-                }
-                self.begin_adoption(&record, None);
-            },
+            Some(record) => self.begin_retry_adoption(pane, &record),
             None => {
                 if asked {
                     self.refuse_unsupervised_start(pane, pid);
@@ -375,13 +370,55 @@ impl Supervisor {
         }
     }
 
+    /// Adopts the holder `record` describes for `pane`'s unsupervised child,
+    /// which stays recorded and shown unsupervised until the adoption
+    /// succeeds, so a stop meanwhile reaches the child directly and the
+    /// adoption is superseded. A failure leaves it as it was and schedules
+    /// the next timed try.
+    fn begin_retry_adoption(&mut self, pane: PaneId, record: &HolderRecord) {
+        if self.adopter.is_none() {
+            return;
+        }
+        let generation = self.bump_generation(pane);
+        let sink =
+            ChannelOutputSink::new(self.root().clone(), pane, generation, self.events.clone());
+        let Some(adopter) = self.adopter.as_ref() else {
+            return;
+        };
+        let adoption = match adopter.detached() {
+            Some(detached) => Adoption::Detached(detached, sink),
+            None => Adoption::Inline(adopter.adopt(record, None, Box::new(sink))),
+        };
+        self.launches
+            .set_environment(pane, record.launch_environment().iter().cloned().collect());
+        self.launches.begin(
+            pane,
+            PendingLaunch::new(
+                generation,
+                ProcessState::Unsupervised,
+                LaunchPurpose::Adopt { carried: None },
+            ),
+        );
+        self.run_adoption(pane, generation, record, None, adoption);
+    }
+
+    /// Supersedes the timed retry adopting `pane`'s unsupervised child, when
+    /// one is in flight, so a stop or kill reaches that child directly; the
+    /// adoption's result then comes back stale and is let go.
+    pub(super) fn supersede_retry_adoption(&mut self, pane: PaneId) {
+        if self.is_unsupervised(pane) && self.is_starting(pane) {
+            self.bump_generation(pane);
+        }
+    }
+
     /// The pid of `pane`'s unsupervised child while it runs and is left
-    /// alone: neither stopped nor being stopped.
+    /// alone: neither stopped nor being stopped, nor being adopted.
     fn retryable_pid(&self, pane: PaneId) -> Option<Pid> {
-        let left_alone = self
-            .workspace
-            .process(pane)
-            .is_some_and(|process| *process.state() == ProcessState::Unsupervised);
+        let left_alone = !self.is_starting(pane)
+            && self
+                .workspace
+                .process(pane)
+                .is_some_and(|process| *process.state() == ProcessState::Unsupervised);
         left_alone
             .then(|| self.running_unsupervised_pid(pane))
             .flatten()
@@ -549,9 +586,8 @@ impl Supervisor {
         }
         let carried = reconnecting.map(|(_, carried)| carried);
         let generation = self.bump_generation(pane);
-        let project = self.root().clone();
-        let events = self.events.clone();
-        let sink = ChannelOutputSink::new(project.clone(), pane, generation, events.clone());
+        let sink =
+            ChannelOutputSink::new(self.root().clone(), pane, generation, self.events.clone());
         let Some(adopter) = self.adopter.as_ref() else {
             let running =
                 self.leave_unsupervised(pane, record.child_pid(), record.child_start_token());
@@ -582,9 +618,26 @@ impl Supervisor {
         if removed {
             self.stop_removed(pane);
         }
+        self.run_adoption(pane, generation, record, since, adoption);
+    }
+
+    /// Carries `adoption` of the holder `record` describes for `pane` at
+    /// `generation` through: a worker adopts it with the output logged after
+    /// `since` and posts the result to the loop, and an inline result is
+    /// settled at once.
+    fn run_adoption(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        record: &HolderRecord,
+        since: Option<OutputCursor>,
+        adoption: Adoption,
+    ) {
         match adoption {
             Adoption::Detached(adopter, sink) => {
                 let record = record.clone();
+                let project = self.root().clone();
+                let events = self.events.clone();
                 thread::spawn(move || {
                     let result = adopter.adopt(&record, since, Box::new(sink));
                     let _ = events.send(ServiceEvent::Adopted {
@@ -1422,6 +1475,76 @@ mod tests {
         assert_eq!(state(&harness), ProcessState::Stopping);
         drive_until_exited(&mut harness);
         assert!(!orphan.alive(), "the stop killed the child");
+    }
+
+    /// While a timed retry greets the holder of an unsupervised child, the
+    /// process still shows unsupervised, and a stop meanwhile goes the
+    /// unsupervised path at once and ends as exited; the late adoption is
+    /// let go rather than installed.
+    #[test]
+    fn a_stop_while_a_retry_greets_goes_the_unsupervised_path() {
+        let orphan = Orphan::spawn();
+        let (open, gate) = crossbeam_channel::unbounded();
+        let adoptions = Arc::new(AtomicUsize::new(0));
+        let (mut harness, _) = reconnectable_over(
+            orphan.pid(),
+            GatedAdoptAdopter::builder()
+                .record(record_with_pid("p", orphan.pid()))
+                .gate(gate)
+                .adoptions(adoptions.clone())
+                .build(),
+        );
+        let pane = PaneId::new(PANE);
+        assert!(
+            harness
+                .supervisor_mut()
+                .leave_unsupervised(pane, orphan.pid(), None)
+        );
+
+        assert!(harness.supervisor_mut().retry_adoption_now(pane));
+        probed(&mut harness);
+        assert_eq!(state(&harness), ProcessState::Unsupervised);
+        harness.supervisor_mut().stop(&p());
+        assert_eq!(state(&harness), ProcessState::Stopping);
+
+        open.send(()).unwrap();
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        assert_eq!(adoptions.load(Ordering::SeqCst), 1);
+        assert_ne!(state(&harness), ProcessState::Running, "never installed");
+        drive_until_exited(&mut harness);
+        assert!(!orphan.alive(), "the stop ended the child");
+    }
+
+    /// Hands the supervisor of `harness` what a worker found looking for the
+    /// holder of an unsupervised child, failing the test after
+    /// [`SETTLE_WAIT`].
+    fn probed(harness: &mut Harness) {
+        let deadline = Instant::now() + SETTLE_WAIT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match harness.events().recv_timeout(remaining) {
+                Ok(ServiceEvent::AdoptionProbed {
+                    pane,
+                    attempt,
+                    asked,
+                    record,
+                    ..
+                }) => {
+                    harness.supervisor_mut().handle_adoption_probed(
+                        pane,
+                        attempt,
+                        asked,
+                        record.map(|record| *record),
+                    );
+                    return;
+                },
+                Ok(_) => {},
+                Err(_) => panic!("the worker posts the holder it looked for"),
+            }
+        }
     }
 
     /// A holder that cannot be adopted at startup, while its child runs, is

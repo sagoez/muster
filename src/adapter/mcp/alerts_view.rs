@@ -14,4 +14,9 @@ pub struct AlertsView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get_copy = "pub")]
     alerts_omitted: Option<usize>,
+    /// Present, and true, when events since the last call were dropped
+    /// before they were read, so alerts among them were missed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[getset(get_copy = "pub")]
+    alerts_gap: Option<bool>,
 }

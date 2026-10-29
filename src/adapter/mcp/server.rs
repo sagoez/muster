@@ -42,7 +42,9 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     watchers) and shares coordination state between agents. Typical loop: stack_status to see \
     what runs; after a code change, process_restart with wait=true; when something breaks, \
     process_logs with errors_only=true, then follow up with since=cursor to read only new \
-    output. Results carry alerts when a process crashed since your last call. Before work other \
+    output. Results carry alerts when a process crashed since your last call, and \
+    alerts_gap=true when some were missed: stack_status then shows how each process stands. \
+    Before work other \
     agents must not repeat, take a lock (lock_acquire) or claim a todo (todo_claim). Calls never \
     block more than <call-bound-s> seconds; a wait that has not finished returns status waiting with a \
     cursor to continue from. Tools default to the project containing your working directory; \
@@ -191,7 +193,7 @@ impl MusterMcp {
 pub(super) fn unheard(alerts: &Alerts, client: &ServiceClient, project: &Project) -> AlertsView {
     let since = alerts.since(project.root());
     match process::events(client, project, since, &ALERT_KINDS, Duration::ZERO) {
-        Ok(page) => alerts.take(project.root(), &page),
+        Ok(page) => alerts.take(project.root(), since, &page),
         Err(_) => AlertsView::default(),
     }
 }

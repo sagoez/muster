@@ -968,6 +968,7 @@ impl Supervisor {
     /// Retires a process that no longer belongs in the workspace.
     pub(super) fn retire_pane(&mut self, pane: PaneId) {
         self.end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
+        self.log_tail_reads.remove(&pane);
         if let Some(probes) = &self.probes {
             probes.forget(self.root(), pane);
         }

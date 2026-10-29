@@ -164,72 +164,62 @@ impl Supervisor {
             self.register(prepared, after, WaitReply::Direct(reply));
             return;
         }
-        let id = self.next_held_wait;
-        self.next_held_wait += 1;
-        let held = HeldWait {
-            id,
+        let held_at = Instant::now();
+        self.held_waits.entry(pane).or_default().push(HeldWait {
             prepared,
             after,
             reply,
-        };
-        match self.held_waits.get_mut(&pane) {
-            Some(waits) => waits.push(held),
-            None => {
-                self.held_waits.insert(pane, vec![held]);
-                self.read_log_tail(pane);
-            },
-        }
-        if self
-            .held_waits
-            .get(&pane)
-            .is_some_and(|waits| waits.iter().any(|held| held.id == id))
-        {
-            self.time_held_wait(pane, id);
-        }
-    }
-
-    /// Refuses the wait `id` held on `pane` if the read of its log has not
-    /// answered it within `LOG_TAIL_TIMEOUT`, so a log that cannot be read
-    /// never holds a wait past its caller's patience.
-    pub fn handle_held_wait_overdue(&mut self, pane: PaneId, id: u64) {
-        let Some(waits) = self.held_waits.get_mut(&pane) else {
-            return;
-        };
-        let Some(index) = waits.iter().position(|held| held.id == id) else {
-            return;
-        };
-        let overdue = waits.remove(index);
-        if waits.is_empty() {
-            self.held_waits.remove(&pane);
-        }
-        let _ = overdue.reply.send(ServiceResponse::Error(
-            ServiceErrorBody::builder()
-                .kind(ServiceErrorKind::Internal)
-                .message(format!(
-                    "{}: {LOG_TAIL_OVERDUE} {}",
-                    overdue.prepared.process,
-                    humantime::format_duration(LOG_TAIL_TIMEOUT)
-                ))
-                .build(),
-        ));
-    }
-
-    /// Tells the loop, once [`LOG_TAIL_TIMEOUT`] has passed, to refuse the
-    /// wait `id` held on `pane` if its log's end was not read by then.
-    fn time_held_wait(&self, pane: PaneId, id: u64) {
-        let events = self.events.clone();
-        let project = self.root().clone();
-        thread::spawn(move || {
-            thread::sleep(LOG_TAIL_TIMEOUT);
-            let _ = events.send(ServiceEvent::HeldWaitOverdue { project, pane, id });
+            held_at,
+            deadline: held_at + LOG_TAIL_TIMEOUT,
         });
+        self.read_log_tail(pane);
+    }
+
+    /// Refuses each wait held on a log read past its deadline, so a log that
+    /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`]. The read
+    /// itself stays in flight, and later waits join it.
+    fn refuse_overdue_held_waits(&mut self, now: Instant) {
+        let mut overdue = Vec::new();
+        for waits in self.held_waits.values_mut() {
+            overdue.extend(waits.extract_if(.., |held| held.deadline <= now));
+        }
+        self.held_waits.retain(|_, waits| !waits.is_empty());
+        for held in overdue {
+            let _ = held.reply.send(ServiceResponse::Error(
+                ServiceErrorBody::builder()
+                    .kind(ServiceErrorKind::Internal)
+                    .message(format!(
+                        "{}: {LOG_TAIL_OVERDUE} {}",
+                        held.prepared.process,
+                        humantime::format_duration(LOG_TAIL_TIMEOUT)
+                    ))
+                    .build(),
+            ));
+        }
+    }
+
+    /// Answers the waits held on `pane` once the read `read` of its log's end
+    /// landed, as [`Self::answer_held_waits`] does. A read for a pane retired
+    /// or replaced since it started is dropped: it seeds no output and
+    /// answers no wait.
+    pub fn handle_log_tail(
+        &mut self,
+        pane: PaneId,
+        read: u64,
+        tail: Option<(OutputCursor, Vec<u8>)>,
+    ) {
+        if self.log_tail_reads.get(&pane) != Some(&read) {
+            return;
+        }
+        self.log_tail_reads.remove(&pane);
+        self.answer_held_waits(pane, tail);
     }
 
     /// Answers the waits held on `pane` once the end of its log was read:
     /// `tail`, the log's last bytes and where they start, seeds its output
     /// when it still never ran here, then each wait is refused when its
     /// `since` is past that end and registered otherwise.
-    pub fn handle_log_tail(&mut self, pane: PaneId, tail: Option<(OutputCursor, Vec<u8>)>) {
+    fn answer_held_waits(&mut self, pane: PaneId, tail: Option<(OutputCursor, Vec<u8>)>) {
         let Some(held) = self.held_waits.remove(&pane) else {
             return;
         };
@@ -272,32 +262,100 @@ impl Supervisor {
     }
 
     /// Reads the end of `pane`'s log on a worker when the adopter allows it,
-    /// and inline otherwise, then answers the waits held on it.
+    /// and inline otherwise, then answers the waits held on it. A read
+    /// already in flight for `pane` is joined rather than started again.
     fn read_log_tail(&mut self, pane: PaneId) {
+        if self.log_tail_reads.contains_key(&pane) {
+            return;
+        }
         let (Some(adopter), Some(name)) = (
             self.adopter.as_ref(),
             self.workspace
                 .process(pane)
                 .map(|process| process.name().clone()),
         ) else {
-            self.handle_log_tail(pane, None);
+            self.answer_held_waits(pane, None);
             return;
         };
         let project = self.root().clone();
         let Some(detached) = adopter.detached() else {
             let tail = adopter.log_tail(&project, &name);
-            self.handle_log_tail(pane, tail);
+            self.answer_held_waits(pane, tail);
             return;
         };
+        let read = self.next_log_tail_read;
+        self.next_log_tail_read += 1;
+        self.log_tail_reads.insert(pane, read);
         let events = self.events.clone();
         thread::spawn(move || {
             let tail = detached.log_tail(&project, &name);
             let _ = events.send(ServiceEvent::LogTailRead {
                 project,
                 pane,
+                read,
                 tail,
             });
         });
+    }
+
+    /// Answers the waits held on `pane` that count `generation`, or all of
+    /// them when none is given, as [`Self::end_waits`] answers registered
+    /// ones.
+    fn end_held_waits(
+        &mut self,
+        pane: PaneId,
+        generation: Option<SpawnGeneration>,
+        status: WaitStatus,
+        next: ProcessState,
+    ) {
+        let Some(waits) = self.held_waits.get_mut(&pane) else {
+            return;
+        };
+        let ended: Vec<HeldWait> = waits
+            .extract_if(.., |held| {
+                generation.is_none_or(|generation| {
+                    held.after
+                        .is_none_or(|after| RunPin::After(after).counts(generation))
+                })
+            })
+            .collect();
+        if waits.is_empty() {
+            self.held_waits.remove(&pane);
+        }
+        for held in ended {
+            let waiter = self.held_waiter(held);
+            let status = ended_status(waiter.until(), status, next);
+            self.answer(waiter, status, None);
+        }
+    }
+
+    /// The waiter `held` stands for, timed from when it was held, to answer
+    /// it without registering it.
+    fn held_waiter(&self, held: HeldWait) -> Waiter {
+        let HeldWait {
+            prepared,
+            after,
+            reply,
+            held_at,
+            ..
+        } = held;
+        let pin = after.map_or(
+            RunPin::From(self.current_generation(prepared.pane)),
+            RunPin::After,
+        );
+        Waiter::builder()
+            .pane(prepared.pane)
+            .process(prepared.process)
+            .until(prepared.until)
+            .matcher(prepared.matcher)
+            .pin(pin)
+            .started(held_at)
+            .deadline(held_at + prepared.timeout)
+            .reply(WaitReply::Direct(reply))
+            .scanned_from(None)
+            .since(prepared.since)
+            .already_running(prepared.already_running)
+            .build()
     }
 
     /// Starts every autostart process that is not running, like
@@ -368,7 +426,8 @@ impl Supervisor {
                         .is_some_and(|process| *process.state() == ProcessState::Running)
             })
             .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
-        waits.chain(checks).chain(windows).min()
+        let held = self.held_waits.values().flatten().map(|held| held.deadline);
+        waits.chain(checks).chain(windows).chain(held).min()
     }
 
     /// When the quick-exit window of `pane`'s live run ends.
@@ -379,10 +438,11 @@ impl Supervisor {
             .map(|target| target.started_at() + QUICK_EXIT_WINDOW)
     }
 
-    /// Times out the readiness checks and waits whose deadline passed, and
-    /// answers every wait whose state or readiness condition now holds. The
-    /// host runs it after each event it hands the supervisor.
+    /// Times out the readiness checks, waits and held waits whose deadline
+    /// passed, and answers every wait whose state or readiness condition now
+    /// holds. The host runs it after each event it hands the supervisor.
     pub fn settle_waits(&mut self, now: Instant) {
+        self.refuse_overdue_held_waits(now);
         let expired: Vec<PaneId> = self
             .readiness
             .iter()
@@ -666,8 +726,8 @@ impl Supervisor {
     }
 
     /// Answers the waits on `pane` that count `generation`, or all of them
-    /// when none is given: matched when one waited for the state `next`,
-    /// otherwise with `status`.
+    /// when none is given, those held on a log read included: matched when
+    /// one waited for the state `next`, otherwise with `status`.
     pub(super) fn end_waits(
         &mut self,
         pane: PaneId,
@@ -675,6 +735,7 @@ impl Supervisor {
         status: WaitStatus,
         next: ProcessState,
     ) {
+        self.end_held_waits(pane, generation, status, next);
         let mut index = 0;
         while index < self.waiters.len() {
             let waiter = &self.waiters[index];
@@ -682,14 +743,7 @@ impl Supervisor {
                 && generation.is_none_or(|generation| waiter.pin().counts(generation))
             {
                 let waiter = self.waiters.remove(index);
-                let status = match waiter.until() {
-                    WaitCondition::State(goal) if goal.reached(next) => WaitStatus::Matched,
-                    WaitCondition::State(_)
-                    | WaitCondition::Log(_)
-                    | WaitCondition::Port(_)
-                    | WaitCondition::Http { .. }
-                    | WaitCondition::Ready => status,
-                };
+                let status = ended_status(waiter.until(), status, next);
                 self.answer(waiter, status, None);
             } else {
                 index += 1;
@@ -956,6 +1010,19 @@ impl Supervisor {
     }
 }
 
+/// How a wait for `until` ends when its run ends with `status` and the
+/// process goes on to `next`: matched when it waited for that state.
+fn ended_status(until: &WaitCondition, status: WaitStatus, next: ProcessState) -> WaitStatus {
+    match until {
+        WaitCondition::State(goal) if goal.reached(next) => WaitStatus::Matched,
+        WaitCondition::State(_)
+        | WaitCondition::Log(_)
+        | WaitCondition::Port(_)
+        | WaitCondition::Http { .. }
+        | WaitCondition::Ready => status,
+    }
+}
+
 /// The probe a port or HTTP condition is tested with.
 fn probe_of(condition: &WaitCondition) -> Option<ProbeTarget> {
     match condition {
@@ -1023,6 +1090,8 @@ mod tests {
 
     /// How long every test wait may take.
     const WAIT: Duration = Duration::from_secs(30);
+    /// How long a test lets a second log read start, were one started.
+    const READ_SETTLE: Duration = Duration::from_millis(200);
 
     /// A substring pattern.
     fn log(text: &str) -> WaitCondition {
@@ -1664,38 +1733,143 @@ mod tests {
         assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
     }
 
-    /// A wait held on a log read that never finishes is refused once
-    /// [`LOG_TAIL_TIMEOUT`] has passed, naming the timeout, rather than held
-    /// for as long as the read hangs.
-    #[test]
-    fn a_wait_held_on_a_stuck_log_read_is_refused_after_its_timeout() {
-        let (_release, gate) = unbounded::<()>();
-        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
-            .adopting_through(Box::new(StuckLogAdopter::builder().gate(gate).build()));
-        let held = Instant::now();
+    /// A harness over `api` adopting through `adopter`, whose log reads
+    /// stall until its gate is released.
+    fn stalled(adopter: &StuckLogAdopter) -> Harness {
+        Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(adopter.clone()))
+    }
 
-        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
-        assert!(answers.try_recv().is_err(), "the wait is held for the read");
-
-        let deadline = held + LOG_TAIL_TIMEOUT * 3;
-        let refusal = loop {
-            match harness
-                .events()
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
-                Ok(ServiceEvent::HeldWaitOverdue { pane, id, .. }) => {
-                    harness.supervisor_mut().handle_held_wait_overdue(pane, id);
-                    match answers.try_recv() {
-                        Ok(ServiceResponse::Error(refusal)) => break refusal,
-                        other => panic!("an overdue wait is refused, got {other:?}"),
-                    }
-                },
+    /// The `LogTailRead` the harness's worker sent, with its read id and
+    /// tail.
+    fn landed_read(harness: &Harness) -> (PaneId, u64, Option<(OutputCursor, Vec<u8>)>) {
+        loop {
+            match harness.events().recv_timeout(WAIT) {
+                Ok(ServiceEvent::LogTailRead {
+                    pane, read, tail, ..
+                }) => return (pane, read, tail),
                 Ok(_) => {},
-                Err(_) => panic!("the held wait never became overdue"),
+                Err(_) => panic!("the log read never landed"),
             }
-        };
-        assert!(held.elapsed() >= LOG_TAIL_TIMEOUT);
-        assert!(refusal.message().contains(LOG_TAIL_OVERDUE), "{refusal:?}");
+        }
+    }
+
+    /// Waits held on a stalled log read are refused through the loop's own
+    /// deadline once [`LOG_TAIL_TIMEOUT`] passes, naming the timeout; the
+    /// read stays in flight, so however many waits come and go it runs once.
+    #[test]
+    fn held_waits_time_out_on_the_loop_deadline_and_share_one_stalled_read() {
+        let (_release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let held = Instant::now();
+        let never = spec(Some(log("never")), None);
+
+        let first: Vec<_> = (0..5)
+            .map(|_| wait_on(&mut harness, "api", &never, None))
+            .collect();
+        let deadline = harness
+            .supervisor()
+            .next_wait_deadline()
+            .expect("a held wait has a deadline");
+        assert!(deadline >= held + LOG_TAIL_TIMEOUT, "{deadline:?}");
+        assert!(
+            deadline <= Instant::now() + LOG_TAIL_TIMEOUT,
+            "{deadline:?}"
+        );
+        harness.supervisor_mut().settle_waits(Instant::now());
+        assert!(first.iter().all(|answers| answers.try_recv().is_err()));
+
+        harness
+            .supervisor_mut()
+            .settle_waits(Instant::now() + LOG_TAIL_TIMEOUT);
+        for answers in &first {
+            let Ok(ServiceResponse::Error(refusal)) = answers.try_recv() else {
+                panic!("an overdue held wait is refused");
+            };
+            assert!(refusal.message().contains(LOG_TAIL_OVERDUE), "{refusal:?}");
+        }
+        let later: Vec<_> = (0..5)
+            .map(|_| wait_on(&mut harness, "api", &never, None))
+            .collect();
+        assert!(later.iter().all(|answers| answers.try_recv().is_err()));
+
+        let started = Instant::now();
+        while adopter.reads_started() == 0 && started.elapsed() < WAIT {
+            thread::yield_now();
+        }
+        thread::sleep(READ_SETTLE);
+        assert_eq!(adopter.reads_started(), 1, "one read serves every wait");
+    }
+
+    /// A wait held on a log read ends as stopped when its pane is retired
+    /// before the read lands, and the read then landing is dropped: it seeds
+    /// no output and registers no wait.
+    #[test]
+    fn a_retire_before_the_read_lands_stops_the_wait_and_drops_the_read() {
+        let (release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        harness.supervisor_mut().retire_pane(pane);
+        let outcome = answered(&answers).expect("a retired pane ends its held wait");
+        assert_eq!(outcome.status(), WaitStatus::Stopped);
+
+        drop(release);
+        let (landed, read, _) = landed_read(&harness);
+        harness.supervisor_mut().handle_log_tail(
+            landed,
+            read,
+            Some((OutputCursor::new(0), b"late\n".to_vec())),
+        );
+        let supervisor = harness.supervisor();
+        assert!(!supervisor.taps.contains_key(&pane), "no tap is seeded");
+        assert!(supervisor.waiters.is_empty(), "no wait is registered");
+        assert!(supervisor.held_waits.is_empty());
+    }
+
+    /// Ending a pane's waits ends one still held on its log read as stopped,
+    /// and a wait held after joins the read in flight; a read that lands
+    /// before the pane is retired answers that wait from the log as usual,
+    /// and the retire after leaves nothing of it behind.
+    #[test]
+    fn ended_waits_include_held_ones_and_a_read_landing_before_a_retire_answers() {
+        let (release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let never = spec(Some(log("never")), None);
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        let ended = wait_on(&mut harness, "api", &never, None);
+        harness
+            .supervisor_mut()
+            .end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
+        let outcome = answered(&ended).expect("ending the pane's waits ends a held one");
+        assert_eq!(outcome.status(), WaitStatus::Stopped);
+
+        let answers = wait_on(&mut harness, "api", &never, None);
+        drop(release);
+        let (landed, read, tail) = landed_read(&harness);
+        harness.supervisor_mut().handle_log_tail(landed, read, tail);
+        let outcome = answered(&answers).expect("the landed read answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::NotRunning);
+        assert_eq!(adopter.reads_started(), 1, "the later wait joined the read");
+        assert!(harness.supervisor().taps.contains_key(&pane));
+
+        harness.supervisor_mut().retire_pane(pane);
+        let supervisor = harness.supervisor();
+        assert!(answers.try_recv().is_err(), "a wait is answered once");
+        assert!(!supervisor.taps.contains_key(&pane));
+        assert!(!supervisor.log_tail_reads.contains_key(&pane));
+        assert!(supervisor.held_waits.is_empty() && supervisor.waiters.is_empty());
     }
 
     /// A `restart: always` run that exits 0 is recorded as exited, never as

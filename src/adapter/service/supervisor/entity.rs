@@ -70,8 +70,11 @@ pub struct Supervisor {
     /// Waits held, by pane, while the log's end of a process this service
     /// never saw run is read.
     pub(super) held_waits: HashMap<PaneId, Vec<HeldWait>>,
-    /// The id the next held wait takes, so its timeout finds it.
-    pub(super) next_held_wait: u64,
+    /// The log-tail read in flight for each pane, at most one, by its id, so
+    /// a read that lands for a pane retired or replaced since is dropped.
+    pub(super) log_tail_reads: HashMap<PaneId, u64>,
+    /// The id the next log-tail read takes.
+    pub(super) next_log_tail_read: u64,
     /// Waits of a project-wide start, answered together, by group.
     pub(super) wait_groups: HashMap<u64, WaitGroup>,
     /// The id the next group of waits takes.
@@ -118,7 +121,8 @@ impl Supervisor {
             taps: HashMap::new(),
             waiters: Vec::new(),
             held_waits: HashMap::new(),
-            next_held_wait: 0,
+            log_tail_reads: HashMap::new(),
+            next_log_tail_read: 0,
             wait_groups: HashMap::new(),
             next_wait_group: 0,
             readiness: HashMap::new(),

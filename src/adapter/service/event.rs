@@ -136,16 +136,6 @@ pub enum ServiceEvent {
         /// this rare event does not size every other one.
         record: Option<Box<HolderRecord>>,
     },
-    /// A wait held while the end of a log is read has been held its longest;
-    /// refuse it unless the read answered it.
-    HeldWaitOverdue {
-        /// Project the process belongs to.
-        project: ProjectRoot,
-        /// Pane of the process.
-        pane: PaneId,
-        /// Which held wait it is.
-        id: u64,
-    },
     /// A worker read the end of the log of a process this service never saw
     /// run; answer the waits held on it.
     LogTailRead {
@@ -153,6 +143,9 @@ pub enum ServiceEvent {
         project: ProjectRoot,
         /// Pane of the process.
         pane: PaneId,
+        /// Which read it is, so one for a pane retired or replaced since is
+        /// dropped.
+        read: u64,
         /// The last bytes of its log, with where they start, which end where
         /// the log does; none when no log could be read.
         tail: Option<(OutputCursor, Vec<u8>)>,

@@ -49,7 +49,6 @@ use super::{
     output,
     presenter::Presenter,
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
-    project_target::{ProjectTarget, resolve_project},
     projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
     report::{Report, Row, RowKind, print_error},
     rm::{removable, remove as remove_processes, rm_rows},
@@ -62,8 +61,9 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            Action, ActionReport, ClientError, NoticeView, ProjectView, RunningServiceNotifier,
-            ServiceClient, SettingView, SettingsView, SettleWatch, UserService, WaitView, process,
+            Action, ActionReport, ClientError, NoticeView, ProjectTarget, ProjectView,
+            RunningServiceNotifier, ServiceClient, SettingView, SettingsView, SettleWatch,
+            UserService, WaitView, process, resolve_project,
         },
         mcp::{self, McpDeps, Scope},
         private_dir::state_dir,

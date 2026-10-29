@@ -3,13 +3,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{
-    cli_ports::CliPorts,
-    error::CliError,
-    project_target::{ProjectTarget, env_project, resolve_project},
-};
+use super::{cli_ports::CliPorts, error::CliError};
 use crate::{
-    adapter::{client::RunningServiceNotifier, store::SqliteStore},
+    adapter::{
+        client::{ProjectTarget, RunningServiceNotifier, env_project, resolve_project},
+        store::SqliteStore,
+    },
     application::StackEditor,
     constants::MUSTER_PROJECT_ENV,
     domain::project::Project,
@@ -74,12 +73,12 @@ impl<'a> Invocation<'a> {
     /// # Errors
     /// Returns the [`CliError`] of a project that cannot be resolved.
     pub fn target(&self, store: &SqliteStore) -> Result<ProjectTarget, CliError> {
-        resolve_project(
+        Ok(resolve_project(
             self.project.as_deref(),
             env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from)).as_deref(),
             &self.cwd()?,
             store,
-        )
+        )?)
     }
 
     /// The registered project the command acts on.
@@ -88,7 +87,7 @@ impl<'a> Invocation<'a> {
     /// Returns [`CliError::NotAProject`] outside every project, or the
     /// [`CliError`] of a project that cannot be resolved.
     pub fn project(&self, store: &SqliteStore) -> Result<Project, CliError> {
-        self.target(store)?.registered()
+        Ok(self.target(store)?.registered()?)
     }
 
     /// `path` as typed, read against the current directory.

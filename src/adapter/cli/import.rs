@@ -16,14 +16,13 @@ use super::{
     error::CliError,
     invocation::{Invocation, stack_editor},
     output::project_title,
-    project_target::ProjectTarget,
     report::{Report, Row, RowKind},
     stack_path::StackPath,
 };
 use crate::{
     adapter::{
         client::{
-            ProjectIdentityView, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
+            ProjectIdentityView, ProjectTarget, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
             process::{settle_removed, status},
         },
         exchange::read_stack_file,

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind},
+        client::{ClientError, FailureKind, ResolveError},
         holder::PatternError,
     },
     domain::{config::ConfigError, value::ValueParseError},
@@ -115,6 +115,19 @@ pub enum ToolError {
         /// The keys the project has.
         valid: Vec<String>,
     },
+}
+
+impl From<ResolveError> for ToolError {
+    fn from(error: ResolveError) -> Self {
+        match error {
+            ResolveError::UnknownProject { name, valid } => Self::UnknownProject {
+                name,
+                valid: valid.iter().map(ToString::to_string).collect(),
+            },
+            ResolveError::NotAProject { dir } => Self::NoProjectHere { dir },
+            ResolveError::Config(error) => Self::Config(error),
+        }
+    }
 }
 
 impl ToolError {

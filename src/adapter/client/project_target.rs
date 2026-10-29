@@ -1,8 +1,8 @@
-//! The one rule every command finds its project by.
+//! The one rule every command and tool call finds its project by.
 
 use std::path::{Path, PathBuf};
 
-use super::error::CliError;
+use super::resolve_error::ResolveError;
 use crate::{
     adapter::path::{absolutize, expand_home, names_a_folder, project_root},
     domain::{
@@ -43,13 +43,33 @@ impl ProjectTarget {
     /// The registered project, for a command that acts on an existing one.
     ///
     /// # Errors
-    /// Returns [`CliError::NotAProject`] for a folder that is not one.
-    pub fn registered(self) -> Result<Project, CliError> {
+    /// Returns [`ResolveError::NotAProject`] for a folder that is not one.
+    pub fn registered(self) -> Result<Project, ResolveError> {
         match self {
             Self::Registered(project) => Ok(project),
-            Self::Unregistered(root) => Err(CliError::NotAProject {
+            Self::Unregistered(root) => Err(ResolveError::NotAProject {
                 dir: root.into_inner(),
             }),
+        }
+    }
+
+    /// The registered project, or for a folder no project is rooted at, the
+    /// deepest one containing it: what an agent naming a folder inside a
+    /// project means.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::NotAProject`] when no project contains the
+    /// folder, or the store's failure.
+    pub fn within(self, projects: &dyn ProjectStore) -> Result<Project, ResolveError> {
+        match self {
+            Self::Registered(project) => Ok(project),
+            Self::Unregistered(root) => {
+                projects.project_containing(root.as_ref())?.ok_or_else(|| {
+                    ResolveError::NotAProject {
+                        dir: root.into_inner(),
+                    }
+                })
+            },
         }
     }
 }
@@ -62,14 +82,15 @@ impl ProjectTarget {
 /// There is no fallback to some other registered project.
 ///
 /// # Errors
-/// Returns [`CliError::UnknownProject`] for an unregistered name, or the
+/// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
 /// failure of a folder that is neither a directory nor a registered root.
 pub fn resolve_project(
     explicit: Option<&str>,
     env_project: Option<&Path>,
     cwd: &Path,
     projects: &dyn ProjectStore,
-) -> Result<ProjectTarget, CliError> {
+) -> Result<ProjectTarget, ResolveError> {
+    let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
     if let Some(value) = explicit {
         if !names_a_folder(value) {
             return named(value, projects);
@@ -93,14 +114,24 @@ pub fn env_project(value: Option<PathBuf>) -> Option<PathBuf> {
 /// The registered project called `value`.
 ///
 /// # Errors
-/// Returns [`CliError::UnknownProject`] when none is.
-fn named(value: &str, projects: &dyn ProjectStore) -> Result<ProjectTarget, CliError> {
-    let unknown = || CliError::UnknownProject(value.to_string());
-    let name = ProjectName::try_new(value).map_err(|_| unknown())?;
-    projects
-        .project_named(&name)?
-        .map(ProjectTarget::Registered)
-        .ok_or_else(unknown)
+/// Returns [`ResolveError::UnknownProject`] listing the registered names
+/// when none is.
+fn named(value: &str, projects: &dyn ProjectStore) -> Result<ProjectTarget, ResolveError> {
+    let found = match ProjectName::try_new(value) {
+        Ok(name) => projects.project_named(&name)?,
+        Err(_) => None,
+    };
+    match found {
+        Some(project) => Ok(ProjectTarget::Registered(project)),
+        None => Err(ResolveError::UnknownProject {
+            name: value.to_string(),
+            valid: projects
+                .projects()?
+                .iter()
+                .map(|project| project.name().clone())
+                .collect(),
+        }),
+    }
 }
 
 /// The project rooted at the folder `path`. A folder that no longer exists
@@ -110,7 +141,7 @@ fn named(value: &str, projects: &dyn ProjectStore) -> Result<ProjectTarget, CliE
 /// # Errors
 /// Returns the failure of a path that is not a directory and not a
 /// registered root.
-fn folder(path: &Path, projects: &dyn ProjectStore) -> Result<ProjectTarget, CliError> {
+fn folder(path: &Path, projects: &dyn ProjectStore) -> Result<ProjectTarget, ResolveError> {
     match project_root(path) {
         Ok(root) => Ok(match projects.project_at(&root)? {
             Some(project) => ProjectTarget::Registered(project),
@@ -123,7 +154,7 @@ fn folder(path: &Path, projects: &dyn ProjectStore) -> Result<ProjectTarget, Cli
                 .transpose()?
                 .flatten();
             gone.map(ProjectTarget::Registered)
-                .ok_or(CliError::Config(error))
+                .ok_or(ResolveError::Config(error))
         },
     }
 }
@@ -210,7 +241,29 @@ mod tests {
         assert!(matches!(outside, ProjectTarget::Unregistered(_)));
         assert!(matches!(
             outside.registered(),
-            Err(CliError::NotAProject { dir }) if dir == base.join("elsewhere")
+            Err(ResolveError::NotAProject { dir }) if dir == base.join("elsewhere")
+        ));
+    }
+
+    /// A folder named inside a project, which is no project's root, is read
+    /// as the deepest project containing it; outside every project it is
+    /// none.
+    #[test]
+    fn a_folder_inside_a_project_is_within_it() {
+        let (_scratch, base) = tree();
+        let shop = project("shop", &base.join("shop"));
+        let projects = Projects(vec![shop.clone()]);
+
+        let nested = resolve_project(Some("./web/src"), None, &base.join("shop"), &projects)
+            .unwrap()
+            .within(&projects)
+            .unwrap();
+        assert_eq!(nested, shop);
+        assert!(matches!(
+            resolve_project(Some("."), None, &base.join("elsewhere"), &projects)
+                .unwrap()
+                .within(&projects),
+            Err(ResolveError::NotAProject { .. })
         ));
     }
 
@@ -266,7 +319,7 @@ mod tests {
 
         assert!(matches!(
             resolve_project(Some("blog"), None, &base, &projects),
-            Err(CliError::UnknownProject(name)) if name == "blog"
+            Err(ResolveError::UnknownProject { name, valid }) if name == "blog" && valid.is_empty()
         ));
     }
 

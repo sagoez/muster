@@ -1,15 +1,16 @@
-//! Which project each tool call acts on, resolved per call so a folder
-//! registered after the server started is found.
+//! Which project each tool call acts on, resolved per call through the rule
+//! the CLI follows, so a folder registered after the server started is
+//! found.
 
 use std::path::{Path, PathBuf};
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::{scope_target::ScopeTarget, tool_error::ToolError};
+use super::tool_error::ToolError;
 use crate::{
-    adapter::path::{absolutize, expand_home, names_a_folder, project_root},
-    domain::{port::ProjectStore, project::Project, value::ProjectName},
+    adapter::client::{ProjectTarget, resolve_project},
+    domain::{port::ProjectStore, project::Project},
 };
 
 /// Where a server resolves projects from: the folder it was started in, and
@@ -40,16 +41,7 @@ impl Scope {
         project: Option<&str>,
         projects: &dyn ProjectStore,
     ) -> Result<Project, ToolError> {
-        let dir = match given(project) {
-            Some(value) if names_a_folder(value) => self.folder(value),
-            Some(value) => return named(value, projects),
-            None => self.base.clone(),
-        };
-        let found = match project_root(&dir) {
-            Ok(root) => projects.project_containing(root.as_ref())?,
-            Err(_) => projects.project_containing(&absolutize(&dir))?,
-        };
-        found.ok_or(ToolError::NoProjectHere { dir })
+        Ok(self.target(project, projects)?.within(projects)?)
     }
 
     /// The project `process_add` adds to: like [`Scope::project`], except a
@@ -63,52 +55,10 @@ impl Scope {
         &self,
         project: Option<&str>,
         projects: &dyn ProjectStore,
-    ) -> Result<ScopeTarget, ToolError> {
-        let root = match given(project) {
-            Some(value) if names_a_folder(value) => project_root(&self.folder(value))?,
-            Some(value) => return named(value, projects).map(ScopeTarget::Registered),
-            None => match projects.project_containing(&self.base)? {
-                Some(project) => return Ok(ScopeTarget::Registered(project)),
-                None => project_root(&self.base)?,
-            },
-        };
-        Ok(match projects.project_at(&root)? {
-            Some(project) => ScopeTarget::Registered(project),
-            None => ScopeTarget::Unregistered(root),
-        })
-    }
-
-    /// The folder `value` names, read against the server's directory.
-    fn folder(&self, value: &str) -> PathBuf {
-        self.cwd.join(expand_home(Path::new(value)))
-    }
-}
-
-/// The `project` argument, unless blank.
-fn given(project: Option<&str>) -> Option<&str> {
-    project.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// The registered project called `value`.
-///
-/// # Errors
-/// Returns [`ToolError::UnknownProject`] listing the registered names when
-/// none is.
-fn named(value: &str, projects: &dyn ProjectStore) -> Result<Project, ToolError> {
-    let found = match ProjectName::try_new(value) {
-        Ok(name) => projects.project_named(&name)?,
-        Err(_) => None,
-    };
-    match found {
-        Some(project) => Ok(project),
-        None => Err(ToolError::UnknownProject {
-            name: value.to_string(),
-            valid: projects
-                .projects()?
-                .iter()
-                .map(|project| project.name().to_string())
-                .collect(),
-        }),
+    ) -> Result<ProjectTarget, ToolError> {
+        let given = project.is_some_and(|value| !value.trim().is_empty());
+        let from: &Path = if given { &self.cwd } else { &self.base };
+        Ok(resolve_project(project, None, from, projects)?)
     }
 }
 
@@ -200,6 +150,23 @@ mod tests {
         assert!(matches!(&unknown, ToolError::UnknownProject { valid, .. } if valid.len() == 2));
     }
 
+    /// `--project` sets the base folder, while a folder given per call is
+    /// read against the server's own directory.
+    #[test]
+    fn the_base_folder_serves_calls_without_project() {
+        let (_scratch, base, store) = tree();
+        let scope = Scope::builder()
+            .cwd(base.join("elsewhere"))
+            .base(base.join("shop/web"))
+            .build();
+
+        assert_eq!(name_of(&scope.project(None, &store).unwrap()), "web");
+        assert!(matches!(
+            scope.project(Some("."), &store),
+            Err(ToolError::NoProjectHere { .. })
+        ));
+    }
+
     /// A folder registered after the server started is found on the next
     /// call.
     #[test]
@@ -222,18 +189,18 @@ mod tests {
         let outside = scope(&base.join("elsewhere")).target(None, &store).unwrap();
         assert_eq!(
             outside,
-            ScopeTarget::Unregistered(ProjectRoot::try_new(base.join("elsewhere")).unwrap())
+            ProjectTarget::Unregistered(ProjectRoot::try_new(base.join("elsewhere")).unwrap())
         );
         let nested = scope(&base.join("shop"))
             .target(Some("./api"), &store)
             .unwrap();
         assert_eq!(
             nested,
-            ScopeTarget::Unregistered(ProjectRoot::try_new(base.join("shop/api")).unwrap())
+            ProjectTarget::Unregistered(ProjectRoot::try_new(base.join("shop/api")).unwrap())
         );
         let inside = scope(&base.join("shop/api")).target(None, &store).unwrap();
         assert!(
-            matches!(inside, ScopeTarget::Registered(project) if project.name().to_string() == "shop")
+            matches!(inside, ProjectTarget::Registered(project) if project.name().to_string() == "shop")
         );
     }
 }

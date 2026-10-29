@@ -9,13 +9,12 @@ use super::{
     command_words::command_string,
     error::{CliError, RUN_NAME_HINT},
     invocation::{Invocation, stack_editor},
-    project_target::ProjectTarget,
     working_dir::stored_working_dir,
 };
 use crate::{
     adapter::{
         client::{
-            ActionReport, ServiceClient, SettleWatch,
+            ActionReport, ProjectTarget, ServiceClient, SettleWatch,
             process::{ready_to_send, start_added},
         },
         store::SqliteStore,

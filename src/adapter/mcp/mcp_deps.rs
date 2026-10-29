@@ -3,9 +3,9 @@ use std::sync::Arc;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::{scope::Scope, scope_target::ScopeTarget, tool_error::ToolError};
+use super::{scope::Scope, tool_error::ToolError};
 use crate::{
-    adapter::client::ServiceAccess,
+    adapter::client::{ProjectTarget, ServiceAccess},
     application::StackEditor,
     domain::{
         port::{CoordinationStore, ProjectStore, SettingsStore, StackStore, StateChangeNotifier},
@@ -62,7 +62,7 @@ impl McpDeps {
     /// # Errors
     /// Returns the caller's mistake for a project that does not resolve, or
     /// the store's failure.
-    pub fn target(&self, project: Option<&str>) -> Result<ScopeTarget, ToolError> {
+    pub fn target(&self, project: Option<&str>) -> Result<ProjectTarget, ToolError> {
         self.scope.target(project, self.projects.as_ref())
     }
 }

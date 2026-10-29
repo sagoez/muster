@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind},
+        client::{ClientError, FailureKind, ResolveError},
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
         service::ServiceErrorKind,
@@ -214,6 +214,16 @@ pub enum CliError {
         #[source]
         source: HolderError,
     },
+}
+
+impl From<ResolveError> for CliError {
+    fn from(error: ResolveError) -> Self {
+        match error {
+            ResolveError::UnknownProject { name, .. } => Self::UnknownProject(name),
+            ResolveError::NotAProject { dir } => Self::NotAProject { dir },
+            ResolveError::Config(error) => Self::Config(error),
+        }
+    }
 }
 
 impl CliError {

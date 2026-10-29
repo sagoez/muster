@@ -10,11 +10,10 @@ use typed_builder::TypedBuilder;
 use super::{
     completions::{CompletionShell, registration_line},
     error::CliError,
-    project_target::ProjectTarget,
     report::{Report, Row, RowKind},
 };
 use crate::{
-    adapter::store::SqliteStore,
+    adapter::{client::ProjectTarget, store::SqliteStore},
     domain::{
         config::ConfigError,
         port::{ProjectStore, SettingsStore},

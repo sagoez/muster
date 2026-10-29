@@ -106,7 +106,7 @@ pub(super) fn store_idle_stop(
     idle_stop: Option<&IdleStop>,
 ) -> Result<(), ConfigError> {
     let (kind, millis) = match idle_stop.map(idle_stop_columns).transpose()? {
-        Some((kind, millis)) => (Some(kind), millis),
+        Some((kind, millis)) => (Some(kind.to_string()), millis),
         None => (None, None),
     };
     conn.execute(

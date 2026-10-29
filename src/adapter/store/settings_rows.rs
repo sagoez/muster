@@ -5,6 +5,7 @@ use rusqlite::{Connection, Row, params};
 
 use super::{
     edit_log_rows::record_edit_everywhere,
+    idle_stop_kind::IdleStopKind,
     idle_stop_refusal::IdleStopRefusal,
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
@@ -26,10 +27,6 @@ const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, defau
                                default_autostart, default_restart, default_stop_signal, \
                                default_stop_grace_ms, mcp_stack_edits, idle_stop_kind, \
                                idle_stop_ms FROM settings WHERE id = 1";
-/// The stored kind of an idle stop that waits `idle_stop_ms`.
-const IDLE_STOP_AFTER: &str = "after";
-/// The stored kind of an idle stop that never comes.
-const IDLE_STOP_NEVER: &str = "never";
 /// An idle stop, as its errors name it.
 const IDLE_STOP: &str = "idle stop";
 
@@ -40,13 +37,13 @@ const IDLE_STOP: &str = "idle stop";
 /// Returns [`ConfigError::TooLarge`] for a duration too long to store.
 pub(super) fn idle_stop_columns(
     idle_stop: &IdleStop,
-) -> Result<(&'static str, Option<i64>), ConfigError> {
+) -> Result<(IdleStopKind, Option<i64>), ConfigError> {
     match idle_stop {
         IdleStop::After(duration) => Ok((
-            IDLE_STOP_AFTER,
+            IdleStopKind::After,
             Some(duration_millis(IDLE_STOP, duration.into_inner())?),
         )),
-        IdleStop::Never => Ok((IDLE_STOP_NEVER, None)),
+        IdleStop::Never => Ok((IdleStopKind::Never, None)),
     }
 }
 
@@ -60,13 +57,16 @@ pub(super) fn idle_stop_from_columns(
     kind: &str,
     millis: Option<i64>,
 ) -> Result<IdleStop, IdleStopRefusal> {
+    let kind = kind
+        .parse::<IdleStopKind>()
+        .map_err(|_| IdleStopRefusal::Mismatched)?;
     match (kind, millis) {
-        (IDLE_STOP_AFTER, Some(millis)) => u64::try_from(millis)
+        (IdleStopKind::After, Some(millis)) => u64::try_from(millis)
             .ok()
             .and_then(|millis| PositiveDuration::try_new(Duration::from_millis(millis)).ok())
             .map(IdleStop::After)
             .ok_or(IdleStopRefusal::NotPositive),
-        (IDLE_STOP_NEVER, None) => Ok(IdleStop::Never),
+        (IdleStopKind::Never, None) => Ok(IdleStop::Never),
         _ => Err(IdleStopRefusal::Mismatched),
     }
 }
@@ -172,7 +172,7 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
                 settings.default_stop_grace().into_inner()
             )?,
             settings.mcp_stack_edits().to_string(),
-            idle_stop_kind,
+            idle_stop_kind.to_string(),
             idle_stop_ms,
         ],
     )

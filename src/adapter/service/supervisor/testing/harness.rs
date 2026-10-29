@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crossbeam_channel::{Receiver, unbounded};
 use getset::{Getters, MutGetters};
 
@@ -5,11 +7,14 @@ use super::fixtures::{stack, test_project, test_settings};
 use crate::{
     adapter::service::{
         EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
-        supervisor::{HolderAdopter, Supervisor, SupervisorDeps},
+        supervisor::{HolderAdopter, LogReadResult, Supervisor, SupervisorDeps},
     },
     application::Workspace,
     domain::{config::ProcessSpec, port::ProcessRunner, process::Process, value::PaneId},
 };
+
+/// Longest a test waits for a worker's log read to land.
+const LOG_READ_WAIT: Duration = Duration::from_secs(30);
 
 /// A supervisor under test, with the channel its timers and output arrive on
 /// and the notices it raises.
@@ -87,6 +92,22 @@ impl Harness {
             .iter()
             .map(|notice| notice.message().clone())
             .collect()
+    }
+
+    /// The pane, id and result of the next log read a worker posted, skipping
+    /// every other event, failing the test after [`LOG_READ_WAIT`].
+    pub(crate) fn landed_log_read(&self) -> (PaneId, u64, LogReadResult) {
+        let deadline = Instant::now() + LOG_READ_WAIT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.events.recv_timeout(remaining) {
+                Ok(ServiceEvent::LogRead {
+                    pane, read, result, ..
+                }) => return (pane, read, *result),
+                Ok(_) => {},
+                Err(_) => panic!("the log read never landed"),
+            }
+        }
     }
 
     /// The lines of `pane`'s current run its output tap holds, oldest first.

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::{HolderRecord, HolderRunner, abandon, collect},
+        holder::{HolderRecord, HolderRunner, LineMatcher, LogScan, abandon, collect},
         service::{NoticeLevel, ServiceEvent},
     },
     domain::{
@@ -123,6 +123,34 @@ pub trait HolderAdopter {
         None
     }
 
+    /// The first line of the log of the process `name` of `project` that
+    /// begins from `from` up to `until` and `matcher` matches, with where the
+    /// scan began. Defaults to none: no log is known.
+    fn log_scan(
+        &self,
+        _project: &ProjectRoot,
+        _name: &ProcessName,
+        _from: OutputCursor,
+        _until: OutputCursor,
+        _matcher: &LineMatcher,
+    ) -> Option<LogScan> {
+        None
+    }
+
+    /// The last `count` lines of the log of the process `name` of `project`
+    /// that begin from `from` up to `until`. Defaults to none: no log is
+    /// known.
+    fn log_lines(
+        &self,
+        _project: &ProjectRoot,
+        _name: &ProcessName,
+        _from: OutputCursor,
+        _until: OutputCursor,
+        _count: usize,
+    ) -> Option<Vec<String>> {
+        None
+    }
+
     /// This adopter, shareable with a worker thread, when an adoption may
     /// block long enough that the supervisor must not wait for it on its
     /// loop. Defaults to none: adoptions run inline.
@@ -155,6 +183,28 @@ impl HolderAdopter for HolderRunner {
         name: &ProcessName,
     ) -> Option<(OutputCursor, Vec<u8>)> {
         HolderRunner::log_tail(self, project, name)
+    }
+
+    fn log_scan(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        matcher: &LineMatcher,
+    ) -> Option<LogScan> {
+        HolderRunner::log_scan(self, project, name, from, until, matcher)
+    }
+
+    fn log_lines(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        count: usize,
+    ) -> Option<Vec<String>> {
+        HolderRunner::log_lines(self, project, name, from, until, count)
     }
 }
 
@@ -873,15 +923,16 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    use crossbeam_channel::Sender;
+    use crossbeam_channel::{Receiver, Sender, unbounded};
     use rustix::process::Signal;
 
     use super::*;
     use crate::{
         adapter::{
-            holder::HolderId,
+            holder::{HolderId, LoggedLine},
             service::{
-                LaunchEnvironment, ServiceEvent,
+                LaunchEnvironment, ServiceEvent, ServiceResponse, WaitCondition, WaitOutcome,
+                WaitSpec, WaitStatus,
                 supervisor::{
                     ConfigMembership, SpawnGeneration,
                     lifecycle::FORCE_STOP_NOTICE,
@@ -894,10 +945,10 @@ mod tests {
         domain::{
             port::ProcessRunner,
             process::{
-                LogPattern, ProcessState, ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy,
-                StopSignal,
+                LogPattern, PatternKind, PatternText, ProcessState, ReadyCheck, ReadyProbe,
+                RestartPolicy, StopPolicy, StopSignal,
             },
-            pty::{ExitOutcome, ProcessOutput},
+            pty::{ExitCause, ExitOutcome, ProcessOutput},
             value::{
                 CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace,
             },
@@ -1034,6 +1085,171 @@ mod tests {
             panic!("a log check");
         };
         assert_eq!(asked, vec![vec![pattern.clone()]]);
+    }
+
+    /// A line the log of an adopted `p` holds at `at`.
+    fn logged_line(at: u64, text: &str) -> LoggedLine {
+        LoggedLine::builder()
+            .at(OutputCursor::new(at))
+            .text(text.to_string())
+            .build()
+    }
+
+    /// A harness whose adoptions of `p`, restarting never, read a log of
+    /// `logged` lines, on a worker when `detach` is set. Nothing waits on
+    /// `p` as it is adopted, so its tap holds none of those lines.
+    fn logging(logged: Vec<LoggedLine>, detach: bool) -> Harness {
+        with_adopter(
+            Harness::over(Box::new(FakeRunner), &[spec(
+                "p",
+                "true",
+                RestartPolicy::Never,
+            )]),
+            Box::new(
+                ReplayAskAdopter::builder()
+                    .asked(Arc::default())
+                    .logged(logged)
+                    .detach(detach)
+                    .build(),
+            ),
+        )
+    }
+
+    /// `p` adopted inline from a log of `logged` lines.
+    fn adopted_logging(logged: Vec<LoggedLine>) -> Harness {
+        let mut harness = logging(logged, false);
+        harness.supervisor_mut().adopt(record("p"));
+        harness
+    }
+
+    /// Waits on `p` for a line holding `text`, from `since` when given, and
+    /// where its answer comes.
+    fn wait_for_line(
+        harness: &mut Harness,
+        text: &str,
+        since: Option<OutputCursor>,
+    ) -> Receiver<ServiceResponse> {
+        let (reply, answers) = unbounded();
+        let until = WaitCondition::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new(text).unwrap())
+                .kind(PatternKind::Substring)
+                .build(),
+        );
+        let wait = WaitSpec::builder()
+            .until(Some(until))
+            .since(since)
+            .timeout(RESPAWN_WAIT)
+            .build();
+        let prepared = harness.supervisor_mut().prepare_wait(&p(), &wait).unwrap();
+        harness.supervisor_mut().begin_wait(prepared, None, reply);
+        answers
+    }
+
+    /// The wait outcome answered on `answers`, if any yet.
+    fn waited(answers: &Receiver<ServiceResponse>) -> Option<WaitOutcome> {
+        match answers.try_recv() {
+            Ok(ServiceResponse::Waited(outcome)) => Some(outcome),
+            Ok(_) => panic!("a wait answers with how it ended"),
+            Err(_) => None,
+        }
+    }
+
+    /// Hands `p`'s current run `output`.
+    fn run_output(harness: &mut Harness, output: ProcessOutput) {
+        let pane = PaneId::new(PANE);
+        let generation = harness.supervisor().generations()[&pane];
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, output);
+    }
+
+    /// A wait asked after an adoption from a cursor older than every line
+    /// the tap holds matches a line only the log holds, at its offset.
+    #[test]
+    fn a_wait_after_an_adoption_from_an_old_cursor_matches_a_line_only_its_log_holds() {
+        let mut harness =
+            adopted_logging(vec![logged_line(0, "booting"), logged_line(8, "compiled")]);
+
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+
+        let outcome = waited(&answers).expect("the logged line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        let matched = outcome.matched().clone().unwrap();
+        assert_eq!(*matched.at(), OutputCursor::new(8));
+        assert_eq!(matched.line(), "compiled");
+        assert_eq!(*outcome.scanned_from(), None);
+    }
+
+    /// A scan of the log from a cursor rotation discarded says where it
+    /// began, and a wait it found nothing for is answered by the output that
+    /// follows.
+    #[test]
+    fn a_scan_from_a_rotated_cursor_says_where_it_began_and_the_tap_answers_after() {
+        let mut harness = adopted_logging(vec![logged_line(1000, "booting")]);
+
+        let answers = wait_for_line(&mut harness, "ready", Some(OutputCursor::new(0)));
+        assert!(waited(&answers).is_none(), "no logged line matches");
+        run_output(&mut harness, ProcessOutput::Chunk(b"ready\n".to_vec()));
+
+        let outcome = waited(&answers).expect("the streamed line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        assert_eq!(
+            *outcome.matched().clone().unwrap().at(),
+            OutputCursor::new(REPLAY_STREAM_START)
+        );
+        assert_eq!(*outcome.scanned_from(), Some(OutputCursor::new(1000)));
+    }
+
+    /// The scan runs on a worker, never on the loop: the wait is held until
+    /// it lands, and a crash meanwhile still lets the line it found match.
+    #[test]
+    fn a_scan_on_a_worker_holds_its_wait_through_a_crash_until_it_lands() {
+        let mut harness = logging(vec![logged_line(0, "compiled")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        run_output(
+            &mut harness,
+            ProcessOutput::Exited(ExitOutcome::Failed(ExitCause::Status(1))),
+        );
+        assert!(waited(&answers).is_none(), "held until the scan lands");
+
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        let outcome = waited(&answers).expect("the landed scan answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        assert_eq!(
+            *outcome.matched().clone().unwrap().at(),
+            OutputCursor::new(0)
+        );
+    }
+
+    /// A crash after an adoption answers a wait with its run's last lines
+    /// read from the log, though the tap holds none from before the
+    /// adoption.
+    #[test]
+    fn a_crash_after_an_adoption_answers_with_the_run_s_last_lines_from_its_log() {
+        let mut harness = adopted_logging(vec![
+            logged_line(0, "booting"),
+            logged_line(8, "Error: EADDRINUSE"),
+        ]);
+        let answers = wait_for_line(&mut harness, "never", None);
+
+        run_output(
+            &mut harness,
+            ProcessOutput::Exited(ExitOutcome::Failed(ExitCause::Status(1))),
+        );
+
+        let outcome = waited(&answers).expect("the crash answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Crashed);
+        assert_eq!(*outcome.tail(), ["booting", "Error: EADDRINUSE"]);
     }
 
     #[test]

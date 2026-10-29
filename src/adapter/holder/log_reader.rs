@@ -3,15 +3,30 @@
 //! log, stripping and filtering them, and capping what is returned.
 
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, BufRead, BufReader, Read},
+    mem,
+    ops::ControlFlow,
     path::Path,
 };
 
 use super::{
-    error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
-    log::rotated_path, log_base::LogBase, log_query::LogQuery, log_slice::LogSlice, span::Span,
-    span_reader::SpanReader, strip::strip_line,
+    error::HolderError,
+    filter_state::FilterState,
+    generation::Generation,
+    kept::Kept,
+    line_matcher::LineMatcher,
+    log::rotated_path,
+    log_base::LogBase,
+    log_query::LogQuery,
+    log_scan::LogScan,
+    log_slice::LogSlice,
+    logged_line::LoggedLine,
+    reader::CATCH_UP_CHUNK_BYTES,
+    span::Span,
+    span_reader::SpanReader,
+    strip::{LINE_MAX_BYTES, strip_line},
 };
 use crate::domain::value::OutputCursor;
 
@@ -139,6 +154,132 @@ pub(super) fn read_log_range(
         .take(length)
         .read_to_end(&mut bytes)?;
     Ok((start, bytes))
+}
+
+/// The first line of the log at `log` that begins from `from` up to `until`
+/// and `matcher` matches, with where the scan began.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the log cannot be read.
+pub fn first_match(
+    log: &Path,
+    from: OutputCursor,
+    until: OutputCursor,
+    matcher: &LineMatcher,
+) -> Result<LogScan, HolderError> {
+    let mut matched = None;
+    let began = visit_lines(log, from, until, |at, line| {
+        let text = strip_line(line);
+        if !matcher.is_match(&text) {
+            return ControlFlow::Continue(());
+        }
+        matched = Some(LoggedLine::builder().at(at).text(text).build());
+        ControlFlow::Break(())
+    })?;
+    Ok(LogScan::builder().from(began).matched(matched).build())
+}
+
+/// The last `count` lines of the log at `log` that begin from `from` up to
+/// `until`, stripped, oldest first, read from at most `max` bytes before
+/// `until`; a line cut by that bound is left out.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the log cannot be read.
+pub fn last_lines(
+    log: &Path,
+    from: OutputCursor,
+    until: OutputCursor,
+    count: usize,
+    max: u64,
+) -> Result<Vec<String>, HolderError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut lines = VecDeque::with_capacity(count);
+    let bound = from.max(OutputCursor::new(until.offset().saturating_sub(max)));
+    let mut cut = bound > from;
+    let start = if cut {
+        OutputCursor::new(bound.offset() - 1)
+    } else {
+        bound
+    };
+    visit_lines(log, start, until, |_, line| {
+        if mem::take(&mut cut) {
+            return ControlFlow::Continue(());
+        }
+        if lines.len() == count {
+            lines.pop_front();
+        }
+        lines.push_back(strip_line(line));
+        ControlFlow::Continue(())
+    })?;
+    Ok(lines.into())
+}
+
+/// Hands `visit` each raw line of the log at `log` that begins from `from` up
+/// to `until`, with where it began, reading at most [`CATCH_UP_CHUNK_BYTES`]
+/// at a time; a line cut at [`LINE_MAX_BYTES`], at a gap rotation left, or at
+/// `until` is handed as it stands. Stops once `visit` breaks. Returns where
+/// the read began: `from`, or the oldest byte kept when that is newer.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the first read fails; a later failure
+/// ends the lines early.
+pub(super) fn visit_lines(
+    log: &Path,
+    from: OutputCursor,
+    until: OutputCursor,
+    mut visit: impl FnMut(OutputCursor, &[u8]) -> ControlFlow<()>,
+) -> Result<OutputCursor, HolderError> {
+    let mut began = None;
+    let mut next = from;
+    let mut line: Vec<u8> = Vec::new();
+    let mut line_at = from;
+    'read: while next < until {
+        let (at, bytes) = match read_log_range(log, next, until, CATCH_UP_CHUNK_BYTES) {
+            Ok(read) => read,
+            Err(error) if began.is_none() => return Err(error),
+            Err(_) => break,
+        };
+        began.get_or_insert(at);
+        if bytes.is_empty() {
+            break;
+        }
+        if at > next && hand_line(&mut visit, line_at, &mut line).is_break() {
+            break;
+        }
+        let mut cursor = at;
+        for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
+            if line.is_empty() {
+                line_at = cursor;
+            }
+            line.extend_from_slice(piece);
+            cursor = cursor.advanced(piece.len() as u64);
+            if (piece.ends_with(&[LINE_FEED]) || line.len() >= LINE_MAX_BYTES)
+                && hand_line(&mut visit, line_at, &mut line).is_break()
+            {
+                break 'read;
+            }
+        }
+        next = cursor;
+    }
+    let _ = hand_line(&mut visit, line_at, &mut line);
+    Ok(began.unwrap_or(from))
+}
+
+/// Hands `line`, which began at `at`, to `visit` unless it is empty, and
+/// empties it.
+fn hand_line(
+    visit: &mut impl FnMut(OutputCursor, &[u8]) -> ControlFlow<()>,
+    at: OutputCursor,
+    line: &mut Vec<u8>,
+) -> ControlFlow<()> {
+    if line.is_empty() {
+        return ControlFlow::Continue(());
+    }
+    let flow = visit(at, line);
+    line.clear();
+    flow
 }
 
 /// Reads the next line from `reader`, stripped, keeping at most
@@ -323,6 +464,61 @@ mod tests {
             read_log_stream(fixture.path()).unwrap().1,
             b"\x1b[31maaaa\nlive \xff\n"
         );
+    }
+
+    /// A scan finds the first line its pattern matches that begins before
+    /// its bound, at its offset, and one from a cursor rotation discarded
+    /// says it began at the oldest byte kept.
+    #[test]
+    fn a_scan_finds_the_first_match_before_its_bound_and_where_it_began() {
+        let mut fixture = Fixture::with_cap(12);
+        let first = fixture.write(b"aaaa\nbbbb\n");
+        let second = fixture.write(b"cccc\ndddd\n");
+        let last = fixture.write(b"dd2\n");
+        let matcher = LineMatcher::of_text("d", PatternKind::Substring).unwrap();
+
+        let rotated = first_match(fixture.path(), first, last.advanced(4), &matcher).unwrap();
+        let bounded = first_match(fixture.path(), second, second.advanced(5), &matcher).unwrap();
+        let kept = first_match(
+            fixture.path(),
+            second.advanced(6),
+            last.advanced(4),
+            &matcher,
+        )
+        .unwrap();
+
+        assert_eq!(rotated.from(), second);
+        let found = rotated.matched().clone().unwrap();
+        assert_eq!(
+            (found.at(), found.text().as_str()),
+            (second.advanced(5), "dddd")
+        );
+        assert_eq!(bounded.from(), second);
+        assert_eq!(*bounded.matched(), None);
+        assert_eq!(kept.from(), second.advanced(6));
+        let found = kept.matched().clone().unwrap();
+        assert_eq!(
+            (found.at(), found.text().as_str()),
+            (second.advanced(6), "ddd")
+        );
+    }
+
+    /// The last lines of a span come back oldest first, across both
+    /// generations, and a line the byte bound cuts is left out.
+    #[test]
+    fn the_last_lines_span_both_generations_and_leave_out_a_cut_line() {
+        let mut fixture = Fixture::with_cap(12);
+        let first = fixture.write(b"aaaa\nbbbb\n");
+        fixture.write(b"cccc\ndddd\n");
+        let end = fixture.write(b"eeee\n").advanced(5);
+
+        let whole = last_lines(fixture.path(), first, end, 2, BLOCK_BYTES as u64).unwrap();
+        let cut = last_lines(fixture.path(), first, end, 10, 7).unwrap();
+        let aligned = last_lines(fixture.path(), first, end, 10, 10).unwrap();
+
+        assert_eq!(whole, ["dddd", "eeee"]);
+        assert_eq!(cut, ["eeee"]);
+        assert_eq!(aligned, ["dddd", "eeee"]);
     }
 
     /// The tail spans the rotated and live files as one stream.

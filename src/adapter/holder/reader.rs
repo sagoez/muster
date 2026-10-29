@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read},
-    mem,
+    ops::ControlFlow,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
@@ -15,10 +15,10 @@ use crossbeam_channel::Receiver;
 
 use super::{
     line_matcher::LineMatcher,
-    log_reader::read_log_range,
+    log_reader::{read_log_range, visit_lines},
     protocol::HolderMessage,
     replay_request::ReplayRequest,
-    strip::{LINE_MAX_BYTES, strip_line},
+    strip::strip_line,
 };
 use crate::{
     adapter::ipc,
@@ -80,10 +80,8 @@ impl Reader {
         self.delivered = until;
     }
 
-    /// Reads the log from `from` up to `until` in pieces of at most
-    /// [`CATCH_UP_CHUNK_BYTES`] and forwards each line one of `matchers`
-    /// matches; a line cut at [`LINE_MAX_BYTES`], at a gap rotation left, or
-    /// at `until` is tested as it stands.
+    /// Reads the log from `from` up to `until` in pieces and forwards each
+    /// line one of `matchers` matches, as [`visit_lines`] hands it.
     fn forward_matching(
         &mut self,
         from: OutputCursor,
@@ -96,49 +94,13 @@ impl Reader {
         if matchers.is_empty() {
             return;
         }
-        let mut next = from;
-        let mut line: Vec<u8> = Vec::new();
-        let mut line_at = from;
-        while next < until {
-            let (at, bytes) = match read_log_range(&log, next, until, CATCH_UP_CHUNK_BYTES) {
-                Ok((at, bytes)) if !bytes.is_empty() => (at, bytes),
-                Ok(_) | Err(_) => break,
-            };
-            if at > next {
-                self.forward_if_matching(line_at, &mut line, matchers);
+        let _ = visit_lines(&log, from, until, |at, line| {
+            let text = strip_line(line);
+            if matchers.iter().any(|matcher| matcher.is_match(&text)) {
+                self.forward(at, line.to_vec());
             }
-            let mut cursor = at;
-            for piece in bytes.split_inclusive(|byte| *byte == b'\n') {
-                if line.is_empty() {
-                    line_at = cursor;
-                }
-                line.extend_from_slice(piece);
-                cursor = cursor.advanced(piece.len() as u64);
-                if piece.ends_with(b"\n") || line.len() >= LINE_MAX_BYTES {
-                    self.forward_if_matching(line_at, &mut line, matchers);
-                }
-            }
-            next = cursor;
-        }
-        self.forward_if_matching(line_at, &mut line, matchers);
-    }
-
-    /// Forwards `line`, which began at `at`, when one of `matchers` matches
-    /// its text, and empties it either way.
-    fn forward_if_matching(
-        &mut self,
-        at: OutputCursor,
-        line: &mut Vec<u8>,
-        matchers: &[LineMatcher],
-    ) {
-        if line.is_empty() {
-            return;
-        }
-        let text = strip_line(line);
-        let bytes = mem::take(line);
-        if matchers.iter().any(|matcher| matcher.is_match(&text)) {
-            self.forward(at, bytes);
-        }
+            ControlFlow::Continue(())
+        });
     }
 
     /// Forwards `bytes` the child wrote at `at`.

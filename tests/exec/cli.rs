@@ -4208,6 +4208,107 @@ fn a_wait_after_a_service_restart_makes_up_no_run_start() {
     assert!(read["structuredContent"]["run_start"].is_null(), "{read}");
 }
 
+/// Restarts the service over `project`, whose process `name` runs, and
+/// returns once the next service has adopted it.
+fn restart_service_adopting(scratch: &Scratch, project: &Path, name: &str) {
+    let (stopped, _) = scratch.json(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    wait_until("the next service to adopt the process", || {
+        scratch.row(project, name)["state"] == "running"
+    });
+}
+
+/// A wait asked after a service restart adopted its process, from a cursor
+/// older than anything the new service streamed, still sees a line only the
+/// log holds, at the offset the first service saw it.
+#[test]
+fn a_wait_after_an_adoption_from_an_old_cursor_sees_a_logged_line() {
+    let scratch = Scratch::new();
+    let shop = scratch.project(
+        "shop",
+        &stack(&[entry("web", "echo compiled; sleep 600", false)]),
+    );
+    scratch.on(&shop, &["start", "web"]);
+    let (_, seen) = scratch.json_on(&shop, &[
+        "wait", "web", "--log", "compiled", "--since", "o:0",
+    ]);
+    assert_eq!(seen["status"], "matched", "{seen}");
+    restart_service_adopting(&scratch, &shop, "web");
+
+    let (_, waited) = scratch.json_on(&shop, &[
+        "wait",
+        "web",
+        "--log",
+        "compiled",
+        "--since",
+        "o:0",
+        "--timeout",
+        "10s",
+    ]);
+
+    assert_eq!(waited["status"], "matched", "{waited}");
+    assert!(seen["match"].is_object(), "{seen}");
+    assert_eq!(waited["match"], seen["match"], "{waited}");
+    assert!(waited["scanned_from"].is_null(), "{waited}");
+    let stopped = scratch.on(&shop, &["stop", "web"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+}
+
+/// A wait that the crash of a process a service restart adopted ends
+/// answers with the run's last lines, read from its log, though the new
+/// service streamed none of them.
+#[test]
+fn a_crash_after_an_adoption_answers_a_wait_with_the_lines_before_it() {
+    let mut scratch = Scratch::new();
+    let go = scratch.path().join("go");
+    let command = format!(
+        "echo booting; echo 'Error: EADDRINUSE'; while [ ! -e '{}' ]; do sleep 0.05; done; exit 3",
+        go.display()
+    );
+    let shop = scratch.project("shop", &stack(&[entry("web", &command, false)]));
+    scratch.on(&shop, &["start", "web"]);
+    let (_, seen) = scratch.json_on(&shop, &[
+        "wait",
+        "web",
+        "--log",
+        "EADDRINUSE",
+        "--since",
+        "o:0",
+    ]);
+    assert_eq!(seen["status"], "matched", "{seen}");
+    restart_service_adopting(&scratch, &shop, "web");
+
+    let waiting = scratch
+        .command(&[
+            "-p",
+            shop.to_str().unwrap(),
+            "wait",
+            "web",
+            "--log",
+            "never",
+            "--timeout",
+            "30s",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    scratch.keep_child(waiting.id());
+    fs::write(&go, "").unwrap();
+    let ended = parsed(&waiting.wait_with_output().unwrap());
+
+    assert!(
+        ["crashed", "not-running"].contains(&ended["status"].as_str().unwrap_or_default()),
+        "{ended}"
+    );
+    assert_eq!(
+        ended["tail"],
+        serde_json::json!(["booting", "Error: EADDRINUSE"]),
+        "{ended}"
+    );
+}
+
 /// When `max_bytes` cuts lines, `from` names the first byte returned, so
 /// reading again from it gives back exactly the text that was returned.
 #[test]

@@ -16,7 +16,9 @@ use super::{
     holder_control::HolderControl,
     holder_launcher::HolderLauncher,
     id::HolderId,
-    log_reader::{log_end, read_log_range},
+    line_matcher::LineMatcher,
+    log_reader::{first_match, last_lines, log_end, read_log_range},
+    log_scan::LogScan,
     protocol::HolderMessage,
     record::HolderRecord,
 };
@@ -206,6 +208,35 @@ impl HolderRunner {
         let end = log_end(&log).ok()?;
         let from = OutputCursor::new(end.offset().saturating_sub(LOG_TAIL_BYTES));
         read_log_range(&log, from, end, LOG_TAIL_BYTES).ok()
+    }
+
+    /// The first line of the log of the process `name` of `project` that
+    /// begins from `from` up to `until` and `matcher` matches, with where the
+    /// scan began. None when the log cannot be read.
+    pub fn log_scan(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        matcher: &LineMatcher,
+    ) -> Option<LogScan> {
+        first_match(&self.dirs.process_log(project, name), from, until, matcher).ok()
+    }
+
+    /// The last `count` lines of the log of the process `name` of `project`
+    /// that begin from `from` up to `until`, read from at most
+    /// `LOG_TAIL_BYTES`. None when the log cannot be read.
+    pub fn log_lines(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        count: usize,
+    ) -> Option<Vec<String>> {
+        let log = self.dirs.process_log(project, name);
+        last_lines(&log, from, until, count, LOG_TAIL_BYTES).ok()
     }
 
     /// The record of a live holder supervising the child with `child_pid`,

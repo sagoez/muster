@@ -8,9 +8,9 @@ use getset::{Getters, MutGetters};
 
 use super::{
     adopter::HolderAdopter, adoption_retries::AdoptionRetries, attach_book::AttachBook,
-    attention::Attention, deps::SupervisorDeps, held_wait::HeldWait, launch_book::LaunchBook,
-    metrics_book::MetricsBook, pane::Pane, restart_book::RestartBook, run_readiness::RunReadiness,
-    spawn_generation::SpawnGeneration,
+    attention::Attention, deps::SupervisorDeps, held_answer::HeldAnswer, held_wait::HeldWait,
+    launch_book::LaunchBook, metrics_book::MetricsBook, pane::Pane, pending_read::PendingRead,
+    restart_book::RestartBook, run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
 use crate::{
     adapter::service::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter},
@@ -78,14 +78,16 @@ pub struct Supervisor {
     pub(super) replays: HashMap<PaneId, OutputCursor>,
     /// Waits not yet answered.
     pub(super) waiters: Vec<Waiter>,
-    /// Waits held, by pane, while the log's end of a process this service
-    /// never saw run is read.
+    /// Waits held, by pane, while their process's log is read.
     pub(super) held_waits: HashMap<PaneId, Vec<HeldWait>>,
-    /// The log-tail read in flight for each pane, at most one, by its id, so
-    /// a read that lands for a pane retired or replaced since is dropped.
-    pub(super) log_tail_reads: HashMap<PaneId, u64>,
-    /// The id the next log-tail read takes.
-    pub(super) next_log_tail_read: u64,
+    /// Answers held while their run's last lines are read from its log.
+    pub(super) held_answers: Vec<HeldAnswer>,
+    /// The log read in flight for each pane, at most one.
+    pub(super) log_reads: HashMap<PaneId, PendingRead>,
+    /// The id the next log read takes.
+    pub(super) next_log_read: u64,
+    /// The key the next held wait or answer takes.
+    pub(super) next_log_ask: u64,
     /// Waits of a project-wide start, answered together, by group.
     pub(super) wait_groups: HashMap<u64, WaitGroup>,
     /// The id the next group of waits takes.
@@ -134,8 +136,10 @@ impl Supervisor {
             replays: HashMap::new(),
             waiters: Vec::new(),
             held_waits: HashMap::new(),
-            log_tail_reads: HashMap::new(),
-            next_log_tail_read: 0,
+            held_answers: Vec::new(),
+            log_reads: HashMap::new(),
+            next_log_read: 0,
+            next_log_ask: 0,
             wait_groups: HashMap::new(),
             next_wait_group: 0,
             readiness: HashMap::new(),

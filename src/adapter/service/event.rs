@@ -6,14 +6,14 @@ use super::{
     probe_target::ProbeTarget,
     service_request::ServiceRequest,
     service_response::ServiceResponse,
-    supervisor::{HolderScreen, RetryId, ShutdownGeneration, SpawnGeneration},
+    supervisor::{HolderScreen, LogReadResult, RetryId, ShutdownGeneration, SpawnGeneration},
 };
 use crate::{
     adapter::holder::HolderRecord,
     domain::{
         port::{ListeningSocket, PortOccupant, ProcessHandle},
         pty::{ProcessOutput, PtyError},
-        value::{LocalPort, OutputCursor, PaneId, Pid, ProjectRoot},
+        value::{LocalPort, PaneId, Pid, ProjectRoot},
     },
 };
 
@@ -136,9 +136,9 @@ pub enum ServiceEvent {
         /// this rare event does not size every other one.
         record: Option<Box<HolderRecord>>,
     },
-    /// A worker read the end of the log of a process this service never saw
-    /// run; answer the waits held on it.
-    LogTailRead {
+    /// A worker read what the waits and answers held on a process's log
+    /// asked of it; settle them.
+    LogRead {
         /// Project the process belongs to.
         project: ProjectRoot,
         /// Pane of the process.
@@ -146,9 +146,9 @@ pub enum ServiceEvent {
         /// Which read it is, so one for a pane retired or replaced since is
         /// dropped.
         read: u64,
-        /// The last bytes of its log, with where they start, which end where
-        /// the log does; none when no log could be read.
-        tail: Option<(OutputCursor, Vec<u8>)>,
+        /// What it read, boxed so this rare event does not size every other
+        /// one.
+        result: Box<LogReadResult>,
     },
     /// A port or HTTP probe passed for one run of a process; a pass for a run
     /// that is no longer current is ignored.

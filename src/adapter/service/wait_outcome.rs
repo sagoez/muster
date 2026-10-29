@@ -56,6 +56,12 @@ impl WaitOutcome {
         self.elapsed = elapsed;
         self
     }
+
+    /// This outcome with `tail` as the run's last lines.
+    pub fn with_tail(mut self, tail: Vec<String>) -> Self {
+        self.tail = tail;
+        self
+    }
 }
 
 #[cfg(test)]

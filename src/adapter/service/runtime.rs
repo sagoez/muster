@@ -501,14 +501,14 @@ impl ServiceRuntime {
                     );
                 }
             },
-            ServiceEvent::LogTailRead {
+            ServiceEvent::LogRead {
                 project,
                 pane,
                 read,
-                tail,
+                result,
             } => {
                 if let Some(supervisor) = self.supervisors.get_mut(&project) {
-                    supervisor.handle_log_tail(pane, read, tail);
+                    supervisor.handle_log_read(pane, read, *result);
                 }
             },
             ServiceEvent::AdoptionProbed {

@@ -1,14 +1,13 @@
 use std::{
     collections::HashMap,
-    thread,
     time::{Duration, Instant, SystemTime},
 };
 
 use crossbeam_channel::Sender;
 
 use super::{
-    entity::Supervisor, held_wait::HeldWait, run_end::RunEnd, run_readiness::RunReadiness,
-    spawn_generation::SpawnGeneration,
+    entity::Supervisor, held_scan::HeldScan, held_wait::HeldWait, log_ask::LogAsk, run_end::RunEnd,
+    run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
 use crate::{
     adapter::{
@@ -16,8 +15,8 @@ use crate::{
         service::{
             EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
             OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
-            ServiceEvent, ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup,
-            WaitOutcome, WaitReply, WaitSpec, WaitStatus, Waiter,
+            ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
+            WaitSpec, WaitStatus, Waiter,
         },
     },
     domain::{
@@ -36,12 +35,16 @@ const UNKNOWN_PROCESS: &str = "no process with that name in this project";
 /// Why a wait from a cursor past a process's output is refused, before the
 /// cursor and the output's end.
 const SINCE_PAST_END: &str = "since is past the end of the output";
-/// Longest a wait on a process this service never saw run is held while the
-/// end of its log is read; past it the wait is refused.
-const LOG_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
-/// Why a held wait is refused once its log read is overdue, before the
-/// timeout.
+/// Longest a wait is held while its process's log is read, past which it is
+/// refused, and longest an answer waits for its run's last lines from the
+/// log, past which it is sent with those the tap holds.
+pub(super) const LOG_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Why a wait held on its log's end is refused once the read is overdue,
+/// before the timeout.
 const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
+/// Why a wait held on a scan of its log from its cursor is refused once the
+/// read is overdue, before the timeout.
+const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
 
@@ -71,6 +74,16 @@ impl PreparedWait {
     pub fn on_a_running_process(mut self) -> Self {
         self.already_running = true;
         self
+    }
+
+    /// The scan of the log from this wait's cursor up to `until` for its
+    /// pattern; none for a wait with no cursor or no pattern.
+    pub(super) fn scan_ask(&self, until: OutputCursor) -> Option<LogAsk> {
+        Some(LogAsk::Scan {
+            since: self.since?,
+            until,
+            matcher: self.matcher.clone()?,
+        })
     }
 }
 
@@ -159,25 +172,100 @@ impl Supervisor {
         after: Option<SpawnGeneration>,
         reply: Sender<ServiceResponse>,
     ) {
-        let pane = prepared.pane;
-        if !self.knows_no_output(pane) {
-            self.register(prepared, after, WaitReply::Direct(reply));
+        if self.knows_no_output(prepared.pane) {
+            self.hold_wait(prepared, after, reply, None);
             return;
         }
+        self.register_or_scan(prepared, after, reply);
+    }
+
+    /// Registers `prepared`, or, when its cursor is older than every line its
+    /// process's tap holds, as after an adoption, holds it while the log from
+    /// that cursor up to the tap is scanned off the loop, so no line from
+    /// the cursor on is missed.
+    fn register_or_scan(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+    ) {
+        match self.scan_for(&prepared, after) {
+            Some(scan) => self.hold_wait(prepared, after, reply, Some(scan)),
+            None => self.register(prepared, after, WaitReply::Direct(reply)),
+        }
+    }
+
+    /// The scan of the log `prepared` needs before its process's tap: a log
+    /// wait on every run from now whose cursor is older than the lines the
+    /// tap holds, when the log can be read and no launch or adoption is in
+    /// flight.
+    fn scan_for(
+        &self,
+        prepared: &PreparedWait,
+        after: Option<SpawnGeneration>,
+    ) -> Option<HeldScan> {
+        let pane = prepared.pane;
+        if self.adopter.is_none()
+            || after.is_some()
+            || prepared.matcher.is_none()
+            || self.is_starting(pane)
+        {
+            return None;
+        }
+        let since = prepared.since?;
+        let until = self.tapped_from(pane)?;
+        (since < until).then(|| HeldScan {
+            until,
+            pin: RunPin::From(self.current_generation(pane)),
+            ended: None,
+            found: None,
+        })
+    }
+
+    /// Where `pane`'s tap holds every line from, once it is placed: its
+    /// oldest line, or the start of an adopted run's streamed output when
+    /// that is later, since the replay before it forwards only some lines.
+    pub(super) fn tapped_from(&self, pane: PaneId) -> Option<OutputCursor> {
+        let held = self
+            .taps
+            .get(&pane)
+            .filter(|tap| tap.is_placed())?
+            .held_from();
+        Some(
+            self.replays
+                .get(&pane)
+                .map_or(held, |streamed| held.max(*streamed)),
+        )
+    }
+
+    /// Holds `prepared` on a read of its process's log: of `scan`, or of the
+    /// log's end without one.
+    fn hold_wait(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+        scan: Option<HeldScan>,
+    ) {
+        let pane = prepared.pane;
         let held_at = Instant::now();
+        let key = self.next_ask_key();
         self.held_waits.entry(pane).or_default().push(HeldWait {
             prepared,
             after,
             reply,
             held_at,
             deadline: held_at + LOG_TAIL_TIMEOUT,
+            key,
+            scan,
+            read: None,
         });
-        self.read_log_tail(pane);
+        self.read_log(pane);
     }
 
     /// Refuses each wait held on a log read past its deadline, so a log that
     /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`]. The read
-    /// itself stays in flight, and later waits join it.
+    /// itself stays in flight, and later waits on the log's end join it.
     fn refuse_overdue_held_waits(&mut self, now: Instant) {
         let mut overdue = Vec::new();
         for waits in self.held_waits.values_mut() {
@@ -185,11 +273,16 @@ impl Supervisor {
         }
         self.held_waits.retain(|_, waits| !waits.is_empty());
         for held in overdue {
+            let why = if held.scan.is_some() {
+                LOG_SCAN_OVERDUE
+            } else {
+                LOG_TAIL_OVERDUE
+            };
             let _ = held.reply.send(ServiceResponse::Error(
                 ServiceErrorBody::builder()
                     .kind(ServiceErrorKind::Internal)
                     .message(format!(
-                        "{}: {LOG_TAIL_OVERDUE} {}",
+                        "{}: {why} {}",
                         held.prepared.process,
                         humantime::format_duration(LOG_TAIL_TIMEOUT)
                     ))
@@ -198,31 +291,25 @@ impl Supervisor {
         }
     }
 
-    /// Answers the waits held on `pane` once the read `read` of its log's end
-    /// landed with `tail`: it seeds the pane's output, then each wait is
-    /// refused or registered. A read for a pane retired or replaced since it
-    /// started is dropped: it seeds no output and answers no wait.
-    pub fn handle_log_tail(
-        &mut self,
-        pane: PaneId,
-        read: u64,
-        tail: Option<(OutputCursor, Vec<u8>)>,
-    ) {
-        if self.log_tail_reads.get(&pane) != Some(&read) {
-            return;
-        }
-        self.log_tail_reads.remove(&pane);
-        self.answer_held_waits(pane, tail);
-    }
-
-    /// Answers the waits held on `pane` once the end of its log was read:
+    /// Answers the waits held on `pane`'s log's end once it was read:
     /// `tail`, the log's last bytes and where they start, seeds its output
     /// when it still never ran here, then each wait is refused when its
-    /// `since` is past that end and registered otherwise.
-    fn answer_held_waits(&mut self, pane: PaneId, tail: Option<(OutputCursor, Vec<u8>)>) {
-        let Some(held) = self.held_waits.remove(&pane) else {
+    /// `since` is past that end and registered, or held on a scan, otherwise.
+    pub(super) fn answer_held_waits(
+        &mut self,
+        pane: PaneId,
+        tail: Option<(OutputCursor, Vec<u8>)>,
+    ) {
+        let Some(waits) = self.held_waits.get_mut(&pane) else {
             return;
         };
+        let held: Vec<HeldWait> = waits.extract_if(.., |held| held.scan.is_none()).collect();
+        if waits.is_empty() {
+            self.held_waits.remove(&pane);
+        }
+        if held.is_empty() {
+            return;
+        }
         if self.knows_no_output(pane) {
             let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
             self.tap(pane).seed_at(at, &bytes);
@@ -243,7 +330,7 @@ impl Supervisor {
                 ))));
                 continue;
             }
-            self.register(prepared, after, WaitReply::Direct(reply));
+            self.register_or_scan(prepared, after, reply);
         }
     }
 
@@ -257,46 +344,10 @@ impl Supervisor {
             && self.taps.get(&pane).is_none_or(|tap| !tap.is_placed())
     }
 
-    /// Reads the end of `pane`'s log on a worker when the adopter allows it,
-    /// and inline otherwise, then answers the waits held on it. A read
-    /// already in flight for `pane` is joined rather than started again.
-    fn read_log_tail(&mut self, pane: PaneId) {
-        if self.log_tail_reads.contains_key(&pane) {
-            return;
-        }
-        let (Some(adopter), Some(name)) = (
-            self.adopter.as_ref(),
-            self.workspace
-                .process(pane)
-                .map(|process| process.name().clone()),
-        ) else {
-            self.answer_held_waits(pane, None);
-            return;
-        };
-        let project = self.root().clone();
-        let Some(detached) = adopter.detached() else {
-            let tail = adopter.log_tail(&project, &name);
-            self.answer_held_waits(pane, tail);
-            return;
-        };
-        let read = self.next_log_tail_read;
-        self.next_log_tail_read += 1;
-        self.log_tail_reads.insert(pane, read);
-        let events = self.events.clone();
-        thread::spawn(move || {
-            let tail = detached.log_tail(&project, &name);
-            let _ = events.send(ServiceEvent::LogTailRead {
-                project,
-                pane,
-                read,
-                tail,
-            });
-        });
-    }
-
     /// Answers the waits held on `pane` that count `generation`, or all of
     /// them when none is given, as [`Self::end_waits`] answers registered
-    /// ones.
+    /// ones. A wait held on a scan of its log is not answered when its run
+    /// ends: it keeps how, so a line the scan finds still matches it.
     fn end_held_waits(
         &mut self,
         pane: PaneId,
@@ -307,12 +358,23 @@ impl Supervisor {
         let Some(waits) = self.held_waits.get_mut(&pane) else {
             return;
         };
+        if let Some(generation) = generation {
+            for held in waits.iter_mut() {
+                if let Some(scan) = held.scan.as_mut()
+                    && scan.ended.is_none()
+                    && scan.pin.counts(generation)
+                {
+                    scan.ended = Some(ended_status(&held.prepared.until, status, next));
+                }
+            }
+        }
         let ended: Vec<HeldWait> = waits
-            .extract_if(.., |held| {
-                generation.is_none_or(|generation| {
-                    held.after
-                        .is_none_or(|after| RunPin::After(after).counts(generation))
-                })
+            .extract_if(.., |held| match (generation, &held.scan) {
+                (None, _) => true,
+                (Some(_), Some(_)) => false,
+                (Some(generation), None) => held
+                    .after
+                    .is_none_or(|after| RunPin::After(after).counts(generation)),
             })
             .collect();
         if waits.is_empty() {
@@ -333,11 +395,17 @@ impl Supervisor {
             after,
             reply,
             held_at,
+            scan,
             ..
         } = held;
-        let pin = after.map_or(
-            RunPin::From(self.current_generation(prepared.pane)),
-            RunPin::After,
+        let pin = scan.map_or_else(
+            || {
+                after.map_or(
+                    RunPin::From(self.current_generation(prepared.pane)),
+                    RunPin::After,
+                )
+            },
+            |scan| scan.pin,
         );
         Waiter::builder()
             .pane(prepared.pane)
@@ -423,7 +491,13 @@ impl Supervisor {
             })
             .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
         let held = self.held_waits.values().flatten().map(|held| held.deadline);
-        waits.chain(checks).chain(windows).chain(held).min()
+        let answers = self.held_answers.iter().map(|held| held.deadline);
+        waits
+            .chain(checks)
+            .chain(windows)
+            .chain(held)
+            .chain(answers)
+            .min()
     }
 
     /// When the quick-exit window of `pane`'s live run ends.
@@ -434,11 +508,13 @@ impl Supervisor {
             .map(|target| target.started_at() + QUICK_EXIT_WINDOW)
     }
 
-    /// Times out the readiness checks, waits and held waits whose deadline
-    /// passed, and answers every wait whose state or readiness condition now
-    /// holds. The host runs it after each event it hands the supervisor.
+    /// Times out the readiness checks, waits, held waits and held answers
+    /// whose deadline passed, and answers every wait whose state or
+    /// readiness condition now holds. The host runs it after each event it
+    /// hands the supervisor.
     pub fn settle_waits(&mut self, now: Instant) {
         self.refuse_overdue_held_waits(now);
+        self.send_overdue_answers(now);
         let expired: Vec<PaneId> = self
             .readiness
             .iter()
@@ -845,6 +921,20 @@ impl Supervisor {
         after: Option<SpawnGeneration>,
         reply: WaitReply,
     ) {
+        self.register_held(prepared, after, reply, None);
+    }
+
+    /// Registers `prepared` as [`Self::register`] does, after the scan of its
+    /// log it was held on, when it was: a line that scan found matches it,
+    /// otherwise the tap is tested from where the scan stopped, and a run
+    /// that ended meanwhile answers it as it ended.
+    pub(super) fn register_held(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: WaitReply,
+        scan: Option<HeldScan>,
+    ) {
         let PreparedWait {
             pane,
             process,
@@ -856,17 +946,40 @@ impl Supervisor {
         } = prepared;
         let since = since.or_else(|| self.replay_floor(pane));
         let current = self.current_generation(pane);
-        let pin = after.map_or(RunPin::From(current), RunPin::After);
+        let pin = scan.as_ref().map_or_else(
+            || after.map_or(RunPin::From(current), RunPin::After),
+            |scan| scan.pin,
+        );
         let now = Instant::now();
         let mut matched = None;
         let mut scanned_from = None;
         if let (Some(since), Some(matcher), false) = (since, matcher.as_ref(), pin.is_fresh()) {
-            let (lines, from) = self.tap(pane).scan_from(since);
-            scanned_from = from;
-            matched = lines
-                .into_iter()
-                .find(|line| matcher.is_match(line.text()))
-                .map(matched_line);
+            let logged = scan
+                .as_ref()
+                .and_then(|scan| scan.found.as_ref().map(|found| (scan.until, found)));
+            let tapped_since = match logged {
+                Some((tapped, found)) => {
+                    scanned_from = (since < found.from()).then(|| found.from().min(tapped));
+                    matched = found.matched().as_ref().map(|line| {
+                        MatchedLine::builder()
+                            .at(line.at())
+                            .line(line.text().clone())
+                            .build()
+                    });
+                    tapped
+                },
+                None => since,
+            };
+            if matched.is_none() {
+                let (lines, from) = self.tap(pane).scan_from(tapped_since);
+                if logged.is_none() {
+                    scanned_from = from;
+                }
+                matched = lines
+                    .into_iter()
+                    .find(|line| matcher.is_match(line.text()))
+                    .map(matched_line);
+            }
         }
         let waiter = Waiter::builder()
             .pane(pane)
@@ -881,10 +994,12 @@ impl Supervisor {
             .since(since)
             .already_running(already_running)
             .build();
+        let ended = scan.and_then(|scan| scan.ended);
         let settled = match matched {
             Some(line) => Some((WaitStatus::Matched, Some(line))),
-            None => self
-                .check(&waiter, now)
+            None => ended
+                .map(|status| (status, None))
+                .or_else(|| self.check(&waiter, now))
                 .or_else(|| self.not_running(&waiter).map(|status| (status, None))),
         };
         if let Some((status, matched)) = settled {
@@ -959,7 +1074,10 @@ impl Supervisor {
     }
 
     /// Answers `waiter` with `status`, the line that matched, where the
-    /// output stands, and the run's last lines when it did not match.
+    /// output stands, and the run's last lines when it did not match. When
+    /// the tap holds fewer of those than an answer shows and missed the
+    /// run's start, as after an adoption, the answer is held while they are
+    /// read from the log off the loop.
     fn answer(&mut self, waiter: Waiter, status: WaitStatus, matched: Option<MatchedLine>) {
         let pane = waiter.pane();
         let (cursor, _) = self.output_position(pane);
@@ -982,7 +1100,31 @@ impl Supervisor {
             .scanned_from(waiter.scanned_from())
             .already_running(waiter.already_running())
             .build();
-        match waiter.into_reply() {
+        let reply = waiter.into_reply();
+        if status != WaitStatus::Matched
+            && let Some((from, until)) = self.short_tail(pane, outcome.tail().len())
+        {
+            self.hold_answer(pane, outcome, reply, from, until);
+            return;
+        }
+        self.deliver(outcome, reply);
+    }
+
+    /// Where `pane`'s current run began and where its output stands, when
+    /// its tap holds only `held` of the run's last [`FAILURE_TAIL_LINES`]
+    /// lines and none from its start, so the log holds lines it lacks.
+    fn short_tail(&self, pane: PaneId, held: usize) -> Option<(OutputCursor, OutputCursor)> {
+        if held >= FAILURE_TAIL_LINES || self.adopter.is_none() {
+            return None;
+        }
+        let tap = self.taps.get(&pane)?;
+        let start = tap.run_start()?;
+        (self.tapped_from(pane)? > start).then(|| (start, tap.cursor()))
+    }
+
+    /// Sends `outcome` to `reply`.
+    pub(super) fn deliver(&mut self, outcome: WaitOutcome, reply: WaitReply) {
+        match reply {
             WaitReply::Direct(reply) => {
                 let _ = reply.send(ServiceResponse::Waited(outcome));
             },
@@ -1130,7 +1272,7 @@ fn invalid_input(message: String) -> ServiceErrorBody {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::{sync::atomic::AtomicUsize, thread};
 
     use crossbeam_channel::{Receiver, unbounded};
 
@@ -1138,7 +1280,10 @@ mod tests {
     use crate::{
         adapter::service::{
             LaunchEnvironment, StackEvent, StateGoal,
-            supervisor::testing::{name as process_name, spec as process_spec, *},
+            supervisor::{
+                LogReadResult,
+                testing::{name as process_name, spec as process_spec, *},
+            },
         },
         domain::{
             config::ProcessSpec,
@@ -1838,20 +1983,6 @@ mod tests {
             .adopting_through(Box::new(adopter.clone()))
     }
 
-    /// The `LogTailRead` the harness's worker sent, with its read id and
-    /// tail.
-    fn landed_read(harness: &Harness) -> (PaneId, u64, Option<(OutputCursor, Vec<u8>)>) {
-        loop {
-            match harness.events().recv_timeout(WAIT) {
-                Ok(ServiceEvent::LogTailRead {
-                    pane, read, tail, ..
-                }) => return (pane, read, tail),
-                Ok(_) => {},
-                Err(_) => panic!("the log read never landed"),
-            }
-        }
-    }
-
     /// Waits held on a stalled log read are refused through the loop's own
     /// deadline once [`LOG_TAIL_TIMEOUT`] passes, naming the timeout; the
     /// read stays in flight, so however many waits come and go it runs once.
@@ -1919,11 +2050,13 @@ mod tests {
         assert_eq!(outcome.status(), WaitStatus::Stopped);
 
         drop(release);
-        let (landed, read, _) = landed_read(&harness);
-        harness.supervisor_mut().handle_log_tail(
+        let (landed, read, _) = harness.landed_log_read();
+        harness.supervisor_mut().handle_log_read(
             landed,
             read,
-            Some((OutputCursor::new(0), b"late\n".to_vec())),
+            LogReadResult::builder()
+                .tail(Some((OutputCursor::new(0), b"late\n".to_vec())))
+                .build(),
         );
         let supervisor = harness.supervisor();
         assert!(!supervisor.taps.contains_key(&pane), "no tap is seeded");
@@ -1955,8 +2088,10 @@ mod tests {
 
         let answers = wait_on(&mut harness, "api", &never, None);
         drop(release);
-        let (landed, read, tail) = landed_read(&harness);
-        harness.supervisor_mut().handle_log_tail(landed, read, tail);
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
         let outcome = answered(&answers).expect("the landed read answers the wait");
         assert_eq!(outcome.status(), WaitStatus::NotRunning);
         assert_eq!(adopter.reads_started(), 1, "the later wait joined the read");
@@ -1966,7 +2101,7 @@ mod tests {
         let supervisor = harness.supervisor();
         assert!(answers.try_recv().is_err(), "a wait is answered once");
         assert!(!supervisor.taps.contains_key(&pane));
-        assert!(!supervisor.log_tail_reads.contains_key(&pane));
+        assert!(!supervisor.log_reads.contains_key(&pane));
         assert!(supervisor.held_waits.is_empty() && supervisor.waiters.is_empty());
     }
 

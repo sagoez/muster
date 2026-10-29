@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{holder_pool::HolderPool, supervisor::HolderAdopter};
 use crate::{
-    adapter::holder::HolderRecord,
+    adapter::holder::{HolderRecord, LineMatcher, LogScan},
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
@@ -62,6 +62,28 @@ impl HolderAdopter for SharedHolders {
         name: &ProcessName,
     ) -> Option<(OutputCursor, Vec<u8>)> {
         self.0.log_tail(project, name)
+    }
+
+    fn log_scan(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        matcher: &LineMatcher,
+    ) -> Option<LogScan> {
+        self.0.log_scan(project, name, from, until, matcher)
+    }
+
+    fn log_lines(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+        from: OutputCursor,
+        until: OutputCursor,
+        count: usize,
+    ) -> Option<Vec<String>> {
+        self.0.log_lines(project, name, from, until, count)
     }
 
     /// An adoption waits for the holder's screen, and a log is read from

@@ -139,7 +139,7 @@ impl OutputTap {
     /// The held lines that began at or after `since`, with the unfinished
     /// line last, and where the held output starts when `since` is older.
     pub fn scan_from(&self, since: OutputCursor) -> (Vec<TapLine>, Option<OutputCursor>) {
-        let held_from = self.ring.front().map_or(self.partial_at, TapLine::at);
+        let held_from = self.held_from();
         let scanned_from = (since < held_from).then_some(held_from);
         let lines = self
             .ring
@@ -149,6 +149,12 @@ impl OutputTap {
             .chain(self.unfinished().filter(|line| line.at() >= since))
             .collect();
         (lines, scanned_from)
+    }
+
+    /// Where the oldest line held begins, or where the next one will when
+    /// none is.
+    pub fn held_from(&self) -> OutputCursor {
+        self.ring.front().map_or(self.partial_at, TapLine::at)
     }
 
     /// The last `count` lines of the current run, oldest first, the

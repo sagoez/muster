@@ -1466,6 +1466,34 @@ mod tests {
         ));
     }
 
+    /// A connection at the cap asking for a lock another agent holds learns
+    /// who holds it, as anyone would, rather than that it holds too many.
+    #[test]
+    fn a_lock_held_by_another_is_answered_before_the_cap() {
+        let (store, scratch) = fresh_store();
+        let shop = project(&store, &scratch, "shop");
+        let me = LockHolder::fresh("claude");
+        let codex = LockHolder::fresh("codex");
+        let ttl = LockTtl::DEFAULT;
+        let lock = |index: usize| LockName::try_new(format!("l{index}")).unwrap();
+        for index in 0..LOCKS_PER_SESSION_MAX {
+            store
+                .acquire_lock(&shop, &me, &lock(index), ttl, None)
+                .unwrap();
+        }
+        let taken = LockName::try_new("deploy").unwrap();
+        store
+            .acquire_lock(&shop, &codex, &taken, ttl, None)
+            .unwrap();
+
+        let answered = store.acquire_lock(&shop, &me, &taken, ttl, None).unwrap();
+
+        assert!(
+            matches!(&answered, LockAttempt::HeldBy { owner, .. } if owner == codex.author()),
+            "{answered:?}"
+        );
+    }
+
     /// Runs every lock out, as if their holders went away an hour ago.
     fn expire_locks(store: &SqliteStore) {
         store

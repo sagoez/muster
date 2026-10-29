@@ -59,6 +59,43 @@ fn find(conn: &Connection, project_id: i64, name: &LockName) -> Result<Option<Lo
     .pop())
 }
 
+/// The lock `name` of project `project_id` while someone other than `me`'s
+/// session holds it live at `now`: exactly the lock [`ACQUIRE`] would not
+/// take.
+fn held_by_another(
+    conn: &Connection,
+    project_id: i64,
+    me: &LockHolder,
+    name: &LockName,
+    now: EpochSeconds,
+) -> Result<Option<Lock>, ConfigError> {
+    Ok(collect(
+        conn,
+        &format!(
+            "SELECT {LOCK_COLUMNS} FROM locks WHERE project_id = :project AND name = :name \
+             AND expires_at >= :now AND NOT (owner = :me AND session = :session)"
+        ),
+        named_params! {
+            ":project": project_id,
+            ":name": name.as_ref(),
+            ":now": epoch_param(now),
+            ":me": me.author().label(),
+            ":session": me.session().as_ref(),
+        },
+        lock_from_row,
+    )?
+    .pop())
+}
+
+/// The answer that `holder` holds the lock, at `now`.
+fn held_by(holder: &Lock, now: EpochSeconds) -> LockAttempt {
+    LockAttempt::HeldBy {
+        expires_in: holder.expires_in(now),
+        owner: holder.owner().clone(),
+        note: holder.note().clone(),
+    }
+}
+
 /// Whether `session` already ended and had its locks released.
 fn has_ended(conn: &Connection, session: &SessionId) -> Result<bool, ConfigError> {
     conn.prepare_cached("SELECT 1 FROM ended_sessions WHERE session = ?1")
@@ -93,12 +130,14 @@ fn other_live_locks(
 
 /// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`,
 /// unless `me`'s session already ended: an acquire still running when its
-/// connection closed can then never commit a lock nobody releases.
+/// connection closed can then never commit a lock nobody releases. A lock
+/// someone else holds is answered with its holder before the session's cap
+/// is checked, so a caller at the cap still learns who holds it.
 ///
 /// # Errors
-/// Returns [`ConfigError::TooManyLocks`] when the session already holds
-/// [`LOCKS_PER_SESSION_MAX`] other live locks, and a [`ConfigError`] when
-/// SQLite fails or a stored row is invalid.
+/// Returns [`ConfigError::TooManyLocks`] when the lock is free to take but
+/// the session already holds [`LOCKS_PER_SESSION_MAX`] other live locks,
+/// and a [`ConfigError`] when SQLite fails or a stored row is invalid.
 pub(super) fn acquire(
     conn: &Connection,
     project_id: i64,
@@ -110,6 +149,9 @@ pub(super) fn acquire(
 ) -> Result<LockAttempt, ConfigError> {
     if has_ended(conn, me.session())? {
         return Ok(LockAttempt::SessionEnded);
+    }
+    if let Some(holder) = held_by_another(conn, project_id, me, name, now)? {
+        return Ok(held_by(&holder, now));
     }
     if other_live_locks(conn, project_id, me, name, now)? >= LOCKS_PER_SESSION_MAX {
         return Err(ConfigError::TooManyLocks);
@@ -138,11 +180,7 @@ pub(super) fn acquire(
     }
     let holder =
         find(conn, project_id, name)?.ok_or_else(|| StoreError::LockVanished(name.to_string()))?;
-    Ok(LockAttempt::HeldBy {
-        expires_in: holder.expires_in(now),
-        owner: holder.owner().clone(),
-        note: holder.note().clone(),
-    })
+    Ok(held_by(&holder, now))
 }
 
 /// Releases the lock `name` of project `project_id` when `me` holds it

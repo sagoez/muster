@@ -20,7 +20,7 @@ use super::{
     process_fields::invalid,
     progress::with_progress,
     read_arg::ReadArg,
-    server::{MusterMcp, ToolResult, json, structured, unix_now},
+    server::{MusterMcp, json, structured, unix_now},
     todo_add_arg::TodoAddArg,
     todo_claim_arg::TodoClaimArg,
     todo_id_arg::TodoIdArg,
@@ -28,6 +28,7 @@ use super::{
     todo_update_arg::TodoUpdateArg,
     todo_view::TodoView,
     tool_error::ToolError,
+    tool_result::ToolResult,
 };
 use crate::{
     adapter::wire::WireForm,

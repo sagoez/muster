@@ -25,6 +25,7 @@ use super::{
     mcp_error::McpError,
     tool_error::ToolError,
     tool_failure::ToolFailure,
+    tool_result::ToolResult,
 };
 use crate::{
     adapter::client::{ServiceClient, process},
@@ -54,9 +55,6 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
 const YOU: &str = "you";
 /// Opens each alert line appended to a rendered result's text.
 const ALERT_LINE_PREFIX: &str = "[alert]";
-
-/// What a tool answers: its result, or why it has none.
-pub type ToolResult = Result<CallToolResult, ToolFailure>;
 
 /// Builds the pretty-printed JSON snippet an agent pastes into its
 /// MCP-servers config to launch muster's server. It names no project, so one

@@ -28,6 +28,8 @@ mod lock_view;
 mod mcp_deps;
 mod mcp_error;
 mod name_arg;
+#[cfg(test)]
+mod no_service;
 mod note_entry;
 mod note_write_arg;
 mod process_add_arg;
@@ -40,6 +42,8 @@ mod progress;
 mod project_arg;
 mod read_arg;
 mod ready_arg;
+#[cfg(test)]
+mod recording_notifier;
 mod rendering;
 mod scope;
 mod send_input_arg;
@@ -60,6 +64,7 @@ mod todo_update_arg;
 mod todo_view;
 mod tool_error;
 mod tool_failure;
+mod tool_result;
 mod up_view;
 mod wait_arg;
 

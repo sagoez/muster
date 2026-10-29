@@ -6,20 +6,30 @@ mod byte_limit;
 mod byte_queue;
 #[cfg(test)]
 mod channel_sink;
+mod child_guard;
 pub mod client;
+mod client_id;
 mod client_message;
 mod client_role;
 mod config;
+mod connected_client;
 mod dirs;
 mod error;
 mod error_line;
+#[cfg(test)]
+mod fake_child;
 mod filter_state;
+mod flow;
 mod frame;
 mod frame_tag;
 mod generation;
 mod handle;
+#[cfg(test)]
+mod harness;
 mod holder_control;
+mod holder_event;
 mod holder_launcher;
+mod holder_sink;
 mod id;
 mod kept;
 mod launcher;
@@ -41,15 +51,23 @@ mod reader;
 #[cfg(all(test, target_os = "linux"))]
 mod reaped;
 mod record;
+mod record_guard;
+#[cfg(test)]
+mod recording_input;
 mod reject_reason;
 mod resolved;
 mod runner;
 mod server;
+#[cfg(test)]
+mod server_testing;
 mod shared_writer;
+mod socket_guard;
 mod span;
 mod span_reader;
 mod spawn_request_wire;
 mod strip;
+#[cfg(test)]
+mod test_client;
 #[cfg(test)]
 pub(crate) mod testing;
 

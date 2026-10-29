@@ -14,12 +14,13 @@ use super::{
     process_fields::invalid,
     progress::with_progress,
     project_arg::ProjectArg,
-    server::{MusterMcp, ToolResult, json, structured, unix_now, with_alerts},
+    server::{MusterMcp, json, structured, unix_now, with_alerts},
     stack_events_arg::StackEventsArg,
     stack_process_view::StackProcessView,
     stack_status_view::StackStatusView,
     stack_up_arg::StackUpArg,
     tool_error::ToolError,
+    tool_result::ToolResult,
     up_view::UpView,
 };
 use crate::adapter::{

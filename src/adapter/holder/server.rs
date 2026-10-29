@@ -6,7 +6,7 @@ use std::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
     },
-    path::{Path, PathBuf},
+    path::Path,
     process,
     sync::{
         Arc,
@@ -20,16 +20,24 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use super::{
     byte_queue::ByteQueue,
+    child_guard::ChildGuard,
+    client_id::ClientId,
     client_message::ClientMessage,
     client_role::ClientRole,
     config::HolderConfig,
+    connected_client::Client,
     error::HolderError,
+    flow::Flow,
     frame::{Frame, write_frame},
     holder_control::HolderControl,
+    holder_event::HolderEvent,
+    holder_sink::HolderSink,
     log::RotatingLog,
     protocol::HolderMessage,
     record::HolderRecord,
+    record_guard::RecordGuard,
     reject_reason::RejectReason,
+    socket_guard::SocketGuard,
 };
 use crate::{
     adapter::{
@@ -40,7 +48,7 @@ use crate::{
         terminal::{KittyKeyboardTracker, TerminalEmulator},
     },
     domain::{
-        port::{OutputSink, ProcessHandle, ProcessInput, ProcessRunner},
+        port::{ProcessHandle, ProcessInput, ProcessRunner},
         pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
         value::{OutputCursor, Pid, ProjectRoot},
     },
@@ -61,130 +69,6 @@ const PRIVATE_SOCKET_MODE: u32 = 0o600;
 /// What the supervisor is told when the screen had to be reset.
 const SCREEN_RESET_WARNING: &str =
     "the terminal emulator failed on the process's output; its screen was reset";
-
-/// Identity of one connection, unique for the holder's lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ClientId(u64);
-
-/// One message for the holder loop.
-enum HolderEvent {
-    /// The child wrote output or exited.
-    Child(ProcessOutput),
-    /// A client connected.
-    Connected {
-        /// The new connection's identity.
-        client: ClientId,
-        /// The connection's write half.
-        stream: UnixStream,
-    },
-    /// A client sent a message.
-    Message {
-        /// The sender.
-        client: ClientId,
-        /// What it sent.
-        message: ClientMessage,
-    },
-    /// A client's connection closed or sent something unreadable.
-    Disconnected {
-        /// The client that went away.
-        client: ClientId,
-    },
-    /// A graceful stop's grace ran out; a child still running is killed.
-    GraceElapsed,
-    /// The first-supervisor deadline passed; a holder never supervised stops.
-    SupervisorDeadline,
-}
-
-/// Whether the holder loop keeps serving after a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flow {
-    /// Keep draining events.
-    Continue,
-    /// A supervisor collected the exit; stop serving.
-    Finish,
-}
-
-/// A connected client as the holder loop tracks it.
-struct Client {
-    /// Its role, fixed by its hello; `None` until then.
-    role: Option<ClientRole>,
-    /// The connection, kept to shut it down when the client is dropped.
-    stream: UnixStream,
-    /// Frames awaiting its writer thread; dropping it lets the writer finish.
-    outbox: ByteQueue<Frame>,
-}
-
-/// Forwards the child's output into the holder loop.
-struct HolderSink(Sender<HolderEvent>);
-
-impl OutputSink for HolderSink {
-    /// Queues one child event; a finished holder simply drops it.
-    fn send(&self, output: ProcessOutput) {
-        let _ = self.0.send(HolderEvent::Child(output));
-    }
-}
-
-/// Stops the accept loop and removes the socket when the holder ends.
-struct SocketGuard {
-    path: PathBuf,
-    closing: Arc<AtomicBool>,
-}
-
-impl Drop for SocketGuard {
-    /// Flags the acceptor, wakes it with a throwaway connection and unlinks the
-    /// socket so no client can reach a holder that has stopped serving.
-    fn drop(&mut self) {
-        self.closing.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.path);
-        ipc::unlink(&self.path);
-    }
-}
-
-/// Removes the holder record on every exit path, so a failed holder never
-/// leaves a record pointing at a socket nobody serves.
-struct RecordGuard {
-    record: HolderRecord,
-    dir: PathBuf,
-    removed: bool,
-}
-
-impl RecordGuard {
-    /// Removes the record now, reporting a failure the drop would swallow.
-    ///
-    /// # Errors
-    /// Returns a [`HolderError`] when the record file cannot be removed.
-    fn remove(mut self) -> Result<(), HolderError> {
-        self.removed = true;
-        Ok(self.record.remove(&self.dir)?)
-    }
-}
-
-impl Drop for RecordGuard {
-    /// Removes the record unless [`RecordGuard::remove`] already did.
-    fn drop(&mut self) {
-        if !self.removed {
-            let _ = self.record.remove(&self.dir);
-        }
-    }
-}
-
-/// The running child, force-killed when dropped before its exit was seen, so
-/// a holder that stops serving on any path never leaves it running unreachable.
-struct ChildGuard {
-    /// The child's handle.
-    handle: Box<dyn ProcessHandle>,
-    /// Whether the child's exit has been observed.
-    exited: bool,
-}
-
-impl Drop for ChildGuard {
-    /// Kills a child whose exit was never observed.
-    fn drop(&mut self) {
-        if !self.exited {
-            let _ = self.handle.kill();
-        }
-    }
-}
 
 /// Runs one child under a PTY and serves it to clients until its exit has been
 /// collected. A single loop owns the emulator, keyboard tracker and log; the PTY
@@ -942,16 +826,14 @@ fn spawn_writer(
 mod tests {
     use std::{
         fs::{self, Permissions},
-        io,
         os::unix::{fs::PermissionsExt, net::UnixStream},
         path::{Path, PathBuf},
         sync::Mutex,
-        thread::{self, JoinHandle},
-        time::{Duration, Instant, SystemTime},
+        thread,
+        time::{Duration, SystemTime},
     };
 
     use bytesize::ByteSize as RawByteSize;
-    use rustix::process::Signal;
     use tempfile::TempDir;
 
     use super::*;
@@ -961,40 +843,26 @@ mod tests {
                 ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
                 HolderRecord, RejectReason,
                 client::repaint_text,
+                fake_child::FakeChild,
+                harness::Harness,
+                server_testing::{
+                    COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
+                    WAIT, request, scratch, size, wait_until,
+                },
                 testing::{test_request, test_stop},
             },
             signal_target::SignalTarget,
             terminal::TerminalEmulator,
-            test_scratch::short_scratch,
         },
         domain::{
             color_scheme::ColorScheme,
-            pty::{ExitOutcome, PtySize, ScreenSource, SpawnRequest},
+            pty::ExitOutcome,
             value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
         },
     };
 
-    /// Bound on every wait in these tests; reaching it fails the test.
-    const WAIT: Duration = Duration::from_secs(10);
-    /// First-supervisor deadline of a test holder: past any test's length, so
-    /// only the deadline test ever reaches one.
-    const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
     /// A first-supervisor deadline short enough to test.
     const SHORT_SUPERVISOR_DEADLINE: Duration = Duration::from_millis(300);
-    /// Interval between checks of a polled condition.
-    const POLL: Duration = Duration::from_millis(10);
-    /// Prefix of every test scratch directory.
-    const SCRATCH_PREFIX: &str = "mh-";
-    /// Initial PTY rows of every test child.
-    const ROWS: u16 = 24;
-    /// Initial PTY cols of every test child.
-    const COLS: u16 = 80;
-    /// Scrollback the test holder keeps.
-    const SCROLLBACK: usize = 100;
-    /// Directory the holder creates for its socket inside the scratch dir.
-    const SOCKET_DIR: &str = "sock";
-    /// File name of the test holder's socket.
-    const SOCKET_FILE: &str = "h.sock";
     /// Output a flooding child writes: past what any client outbox and socket
     /// buffer can hold, so only a holder that never blocks on clients keeps up.
     const FLOOD_BYTES: usize = 6 * 1024 * 1024;
@@ -1010,247 +878,6 @@ mod tests {
     const SHARED_DIR_MODE: u32 = 0o755;
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
-    /// Pid the fake handle reports.
-    const FAKE_PID: u32 = 4242;
-    /// Why the fake handle refuses a resize.
-    const RESIZE_REFUSED: &str = "resize refused";
-
-    fn size(rows: u16, cols: u16) -> PtySize {
-        PtySize::try_new(rows, cols).unwrap()
-    }
-
-    /// A request to run `command` as `dev server` of the project at `dir`,
-    /// whose terminal answers color queries from `color_scheme`.
-    fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> SpawnRequest {
-        let request = test_request("dev server", command, Some(dir.to_path_buf()), None);
-        SpawnRequest::builder()
-            .process(request.process().clone())
-            .command(request.command().clone())
-            .project(request.project().clone())
-            .size(size(ROWS, COLS))
-            .scrollback(SCROLLBACK)
-            .log_max_size(request.log_max_size())
-            .color_scheme(color_scheme)
-            .stop(request.stop())
-            .build()
-    }
-
-    /// Polls `condition` until it holds, failing the test at [`WAIT`].
-    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-        let started = Instant::now();
-        while !condition() {
-            assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-            thread::sleep(POLL);
-        }
-    }
-
-    /// A scratch directory under a short root, removed even when a test panics.
-    fn scratch() -> TempDir {
-        short_scratch(SCRATCH_PREFIX)
-    }
-
-    /// A running holder on a thread, with its scratch directory.
-    struct Harness {
-        config: HolderConfig,
-        server: Option<JoinHandle<Result<(), HolderError>>>,
-        _scratch: TempDir,
-    }
-
-    impl Harness {
-        fn start(command: &str) -> Self {
-            Self::start_with(command, SUPERVISOR_DEADLINE, ColorScheme::Dark)
-        }
-
-        fn start_with_deadline(command: &str, supervisor_deadline: Duration) -> Self {
-            Self::start_with(command, supervisor_deadline, ColorScheme::Dark)
-        }
-
-        fn start_with(
-            command: &str,
-            supervisor_deadline: Duration,
-            color_scheme: ColorScheme,
-        ) -> Self {
-            let scratch = scratch();
-            let dir = scratch.path();
-            let config = HolderConfig::builder()
-                .id(HolderId::generate().unwrap())
-                .request(request(dir, command, color_scheme))
-                .socket(dir.join(SOCKET_DIR).join(SOCKET_FILE))
-                .record_dir(dir.join("records"))
-                .log(dir.join("logs").join("dev.log"))
-                .supervisor_deadline(supervisor_deadline)
-                .build();
-            let server_config = config.clone();
-            let server = thread::spawn(move || HolderServer::run(server_config));
-            let harness = Self {
-                config,
-                server: Some(server),
-                _scratch: scratch,
-            };
-            wait_until("the holder record", || harness.record().is_some());
-            harness
-        }
-
-        fn record(&self) -> Option<HolderRecord> {
-            HolderRecord::load_all(self.config.record_dir()).pop()
-        }
-
-        fn log(&self) -> String {
-            String::from_utf8_lossy(&fs::read(self.config.log()).unwrap_or_default()).into_owned()
-        }
-
-        fn connect(&self, role: ClientRole) -> (TestClient, HolderMessage) {
-            TestClient::connect(self.config.socket(), role)
-        }
-
-        fn server_finished(&self) -> bool {
-            self.server.as_ref().is_none_or(JoinHandle::is_finished)
-        }
-
-        /// The PTY size a fresh read-only client is told.
-        fn current_size(&self) -> PtySize {
-            match self.connect(ClientRole::Attach { read_only: true }).1 {
-                HolderMessage::Snapshot { size, .. } => size,
-                other => panic!("expected a snapshot, got {other:?}"),
-            }
-        }
-
-        /// Kills the child, collects its exit and checks the holder cleaned up.
-        fn finish(self) {
-            let (mut supervisor, _) = self.connect(ClientRole::Supervisor);
-            supervisor.send(ClientMessage::Control(HolderControl::Kill));
-            supervisor.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
-            supervisor.send(ClientMessage::CollectExit);
-            self.finish_collected();
-        }
-
-        /// Joins a holder whose exit a test already collected.
-        fn finish_collected(mut self) {
-            wait_until("the holder to return", || self.server_finished());
-            let server = self.server.take().unwrap();
-            server.join().unwrap().unwrap();
-            assert!(self.record().is_none(), "the record is removed");
-            assert!(!self.config.socket().exists(), "the socket is removed");
-        }
-    }
-
-    impl Drop for Harness {
-        /// Kills the process group of a child a failed test left running, so a
-        /// panicking test does not leak it; the scratch directory drops after.
-        fn drop(&mut self) {
-            if !self.server_finished()
-                && let Some(record) = self.record()
-            {
-                let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
-            }
-        }
-    }
-
-    /// One client connection with a bounded read timeout, mirroring the screen
-    /// it is shown.
-    struct TestClient {
-        stream: UnixStream,
-        output: Vec<u8>,
-        frames: Vec<(OutputCursor, usize)>,
-        screen: Option<TerminalEmulator>,
-        snapshots: usize,
-    }
-
-    impl TestClient {
-        fn connect(socket: &Path, role: ClientRole) -> (Self, HolderMessage) {
-            let mut stream = None;
-            wait_until("the holder socket", || {
-                stream = UnixStream::connect(socket).ok();
-                stream.is_some()
-            });
-            let stream = stream.unwrap();
-            stream.set_read_timeout(Some(WAIT)).unwrap();
-            let mut client = Self {
-                stream,
-                output: Vec::new(),
-                frames: Vec::new(),
-                screen: None,
-                snapshots: 0,
-            };
-            client.send(ClientMessage::Hello { role });
-            let snapshot = client.recv();
-            (client, snapshot)
-        }
-
-        fn send(&mut self, message: ClientMessage) {
-            message.write_to(&mut self.stream).unwrap();
-        }
-
-        fn recv(&mut self) -> HolderMessage {
-            let message = HolderMessage::read_from(&mut self.stream).unwrap();
-            match &message {
-                HolderMessage::Output { at, bytes } => {
-                    self.frames.push((*at, bytes.len()));
-                    self.output.extend_from_slice(bytes);
-                    if let Some(screen) = self.screen.as_mut() {
-                        screen.process(bytes);
-                    }
-                },
-                HolderMessage::Snapshot { repaint, size, .. } => {
-                    let mut screen = TerminalEmulator::new(
-                        size.rows(),
-                        size.cols(),
-                        SCROLLBACK,
-                        ColorScheme::Dark,
-                    );
-                    screen.process(repaint);
-                    self.screen = Some(screen);
-                    self.snapshots += 1;
-                },
-                _ => {},
-            }
-            message
-        }
-
-        /// Reads until the mirrored screen shows `needle`, returning its text.
-        fn screen_until(&mut self, needle: &str) -> String {
-            loop {
-                let text = self
-                    .screen
-                    .as_ref()
-                    .map(TerminalEmulator::screen_text)
-                    .unwrap_or_default();
-                if text.contains(needle) {
-                    return text;
-                }
-                self.recv();
-            }
-        }
-
-        /// Reads until the holder closes the connection, failing on a timeout.
-        fn expect_closed(&mut self) {
-            loop {
-                match HolderMessage::read_from(&mut self.stream) {
-                    Ok(_) => {},
-                    Err(HolderError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                        return;
-                    },
-                    Err(error) => panic!("expected the holder to close the connection: {error}"),
-                }
-            }
-        }
-
-        fn recv_until(&mut self, mut wanted: impl FnMut(&HolderMessage) -> bool) -> HolderMessage {
-            loop {
-                let message = self.recv();
-                if wanted(&message) {
-                    return message;
-                }
-            }
-        }
-
-        fn output_until(&mut self, needle: &str) -> String {
-            while !String::from_utf8_lossy(&self.output).contains(needle) {
-                self.recv();
-            }
-            String::from_utf8_lossy(&self.output).into_owned()
-        }
-    }
 
     #[test]
     fn attach_receives_snapshot_with_prior_output_then_live_output() {
@@ -1778,62 +1405,6 @@ mod tests {
             HolderRecord::load_all(&dir).is_empty(),
             "removed explicitly"
         );
-    }
-
-    /// Records whatever is written to it.
-    struct RecordingInput(Arc<Mutex<Vec<u8>>>);
-
-    impl ProcessInput for RecordingInput {
-        fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(())
-        }
-    }
-
-    /// A live child whose PTY refuses every resize and that records a kill
-    /// and its input.
-    struct FakeChild {
-        killed: Arc<AtomicBool>,
-        written: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl ProcessHandle for FakeChild {
-        fn screen_source(&self) -> ScreenSource {
-            ScreenSource::Kept
-        }
-
-        fn abandon(mut self: Box<Self>) {
-            let _ = self.kill();
-        }
-
-        fn process_id(&self) -> Option<Pid> {
-            Some(Pid::try_new(FAKE_PID).unwrap())
-        }
-
-        fn input(&self) -> Option<Box<dyn ProcessInput>> {
-            Some(Box::new(RecordingInput(Arc::clone(&self.written))))
-        }
-
-        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resize(&mut self, _size: PtySize) -> Result<(), PtyError> {
-            Err(PtyError::System(RESIZE_REFUSED.to_string()))
-        }
-
-        fn pause(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn resume(&mut self) -> Result<(), PtyError> {
-            Ok(())
-        }
-
-        fn kill(&mut self) -> Result<(), PtyError> {
-            self.killed.store(true, Ordering::SeqCst);
-            Ok(())
-        }
     }
 
     /// A server around a [`FakeChild`], with the flag its kill sets.

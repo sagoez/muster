@@ -6,8 +6,9 @@ use super::{
     config_get_arg::ConfigGetArg,
     config_set_arg::ConfigSetArg,
     process_fields::{KEY_FIELD, choice},
-    server::{MusterMcp, ToolResult, json, structured},
+    server::{MusterMcp, json, structured},
     tool_error::ToolError,
+    tool_result::ToolResult,
 };
 use crate::{
     adapter::client::{SettingView, SettingsView},

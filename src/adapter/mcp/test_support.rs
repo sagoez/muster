@@ -1,10 +1,7 @@
 //! A server over a scratch database whose service is never reached, so no
 //! test touches the user's real state or service socket.
 
-use std::{
-    fs,
-    sync::{Arc, Mutex},
-};
+use std::{fs, sync::Arc};
 
 use rmcp::{
     ErrorData,
@@ -16,20 +13,13 @@ use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
 
 use super::{
-    mcp_deps::McpDeps, process_add_arg::ProcessAddArg, scope::Scope, server::MusterMcp,
+    mcp_deps::McpDeps, no_service::NoService, process_add_arg::ProcessAddArg,
+    recording_notifier::RecordingNotifier, scope::Scope, server::MusterMcp,
     tool_failure::ToolFailure,
 };
 use crate::{
-    adapter::{
-        client::{ClientError, ServiceAccess, ServiceClient, ServiceStatus},
-        no_state_dir::NoStateDir,
-        service::{Notice, ProjectStatus, ServiceRequest},
-        store::SqliteStore,
-    },
-    domain::{
-        port::{StackEditLog, StateChangeNotifier},
-        value::ProjectRoot,
-    },
+    adapter::store::SqliteStore,
+    domain::{port::StackEditLog, value::ProjectRoot},
 };
 
 /// The database file each test's store opens.
@@ -38,53 +28,6 @@ const DATABASE: &str = "muster.db";
 const PROJECT_DIR: &str = "shop";
 /// The `--as` name each test server writes under.
 pub const AGENT: &str = "test";
-
-/// A service that is never running: connecting fails as an unreachable
-/// service would, and nothing is loaded.
-pub struct NoService;
-
-impl ServiceAccess for NoService {
-    fn connect(&self) -> Result<ServiceClient, ClientError> {
-        Err(ClientError::NoStateDir(NoStateDir))
-    }
-
-    fn loaded_status(&self, _project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {
-        Ok(None)
-    }
-
-    fn running_notices(&self, _project: &ProjectRoot) -> Result<Option<Vec<Notice>>, ClientError> {
-        Ok(None)
-    }
-
-    fn status(&self) -> Result<ServiceStatus, ClientError> {
-        Err(ClientError::NoStateDir(NoStateDir))
-    }
-
-    fn stop(&self) -> Result<bool, ClientError> {
-        Ok(false)
-    }
-
-    fn notify(&self, _request: &ServiceRequest) {}
-}
-
-/// A [`StateChangeNotifier`] that records what it was told.
-#[derive(Default)]
-pub struct RecordingNotifier {
-    /// Each project whose stack changed, in order.
-    pub stacks: Mutex<Vec<ProjectRoot>>,
-    /// How many times the settings changed.
-    pub settings: Mutex<usize>,
-}
-
-impl StateChangeNotifier for RecordingNotifier {
-    fn stack_changed(&self, root: &ProjectRoot) {
-        self.stacks.lock().unwrap().push(root.clone());
-    }
-
-    fn settings_changed(&self) {
-        *self.settings.lock().unwrap() += 1;
-    }
-}
 
 /// A server started in a folder no project claims yet, with the store and
 /// notifier it writes through.

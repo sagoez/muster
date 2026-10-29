@@ -24,10 +24,9 @@ use super::{
     progress::with_progress,
     rendering::{log_text, screen_text, tail_text},
     send_input_arg::SendInputArg,
-    server::{
-        MusterMcp, ToolResult, json, object, rendered, structured, unheard, with_alerts, with_field,
-    },
+    server::{MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field},
     tool_error::ToolError,
+    tool_result::ToolResult,
 };
 use crate::{
     adapter::{

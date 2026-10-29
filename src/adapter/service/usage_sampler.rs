@@ -48,7 +48,7 @@ impl UsageSampler {
             return false;
         }
         self.deadline = now + USAGE_SAMPLE_INTERVAL;
-        let mut sampled: Vec<&mut Supervisor> = supervisors
+        let sampled: Vec<&mut Supervisor> = supervisors
             .into_iter()
             .filter(|supervisor| supervisor.wants_usage())
             .collect();
@@ -60,9 +60,11 @@ impl UsageSampler {
             .flat_map(|supervisor| supervisor.usage_pids())
             .collect();
         let samples = self.metrics.sample(&pids);
-        sampled.iter_mut().fold(false, |changed, supervisor| {
-            supervisor.take_usage(&samples) || changed
-        })
+        let mut changed = false;
+        for supervisor in sampled {
+            changed |= supervisor.take_usage(&samples);
+        }
+        changed
     }
 }
 

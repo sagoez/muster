@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
@@ -7,6 +8,7 @@ use crate::{
     adapter::{
         client::{ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier},
         no_state_dir::NoStateDir,
+        private_dir::owned_by,
         shell::ShellFiles,
         store::SqliteStore,
     },
@@ -19,12 +21,14 @@ use crate::{
 
 /// Ports over a scratch database, a [`FakeService`], a
 /// [`RecordingNotifier`] and shell files in a scratch state directory,
-/// serving nothing.
+/// serving nothing, run as this process's user or another.
 pub(super) struct FakePorts {
     store: SqliteStore,
     service: Arc<FakeService>,
     notifier: Arc<RecordingNotifier>,
     state_dir: TempDir,
+    /// The effective user the ports run as.
+    user: u32,
 }
 
 impl FakePorts {
@@ -42,7 +46,14 @@ impl FakePorts {
             service: Arc::new(service),
             notifier: Arc::new(RecordingNotifier::default()),
             state_dir: TempDir::new().unwrap(),
+            user: geteuid().as_raw(),
         }
+    }
+
+    /// These ports run as the user `uid`, as a root shell that kept this
+    /// user's home would.
+    pub(super) fn running_as(self, uid: u32) -> Self {
+        Self { user: uid, ..self }
     }
 
     /// The notifier these ports hand out, to read what it was told.
@@ -80,6 +91,10 @@ impl CliPorts for FakePorts {
 
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
         Ok(Arc::new(ShellFiles::under(self.state_dir.path())))
+    }
+
+    fn owns_state_dir(&self) -> bool {
+        owned_by(self.state_dir.path(), self.user)
     }
 
     fn serve_mcp(&self, _launch: McpLaunch) -> Result<(), MusterError> {

@@ -120,6 +120,18 @@ pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
+/// Whether `dir` exists and this process's effective user owns it, so what
+/// runs as another user, root in a `sudo -s` shell that kept the user's
+/// home, leaves it alone.
+pub fn owned_by_effective_user(dir: &Path) -> bool {
+    owned_by(dir, geteuid().as_raw())
+}
+
+/// Whether `dir` exists and the user `uid` owns it.
+pub fn owned_by(dir: &Path, uid: u32) -> bool {
+    fs::metadata(dir).is_ok_and(|metadata| metadata.uid() == uid)
+}
+
 /// Readies muster's state directory: creates it and any missing parents
 /// owner-only, and narrows an existing one this user owns to owner-only. One
 /// another user owns is refused, since its owner could read or replace
@@ -260,5 +272,21 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("another user"), "{error}");
+    }
+
+    /// A folder is this user's only when it exists and this user owns it;
+    /// the same folder seen as another user, or one that is absent, is not.
+    #[test]
+    fn a_dir_is_owned_only_by_its_owner_and_only_when_it_exists() {
+        let scratch = TempDir::new().unwrap();
+        let user = geteuid().as_raw();
+
+        assert!(owned_by_effective_user(scratch.path()));
+        assert!(owned_by(scratch.path(), user));
+        assert!(!owned_by(scratch.path(), user + 1));
+        assert!(!owned_by_effective_user(&scratch.path().join("absent")));
+        if !geteuid().is_root() {
+            assert!(!owned_by_effective_user(Path::new(ROOT_OWNED_DIR)));
+        }
     }
 }

@@ -12,6 +12,10 @@ pub enum ShellReportSkip {
     /// The platform offers no state directory to keep shell files in.
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
+    /// The state directory is absent, or another user owns it, as when a
+    /// root shell kept this user's home.
+    #[error("the state directory is absent or not this user's")]
+    NotOwnState,
     /// No live process runs as the pid the hook reported.
     #[error("no shell runs as pid {0}")]
     UnknownShell(Pid),

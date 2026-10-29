@@ -26,15 +26,18 @@ use crate::{
 /// never prints.
 ///
 /// # Errors
-/// Returns the [`ShellReportSkip`] saying why nothing was written: the pid
-/// is no live shell, a report as new is stored, or the database, service or
-/// shell files failed.
+/// Returns the [`ShellReportSkip`] saying why nothing was written: the state
+/// directory is absent or another user's, the pid is no live shell, a
+/// report as new is stored, or the database, service or shell files failed.
 pub fn shell_report(
     ports: &dyn CliPorts,
     pid: Pid,
     stamp: ReportStamp,
     cwd: &Path,
 ) -> Result<(), ShellReportSkip> {
+    if !ports.owns_state_dir() {
+        return Err(ShellReportSkip::NotOwnState);
+    }
     let shells = ports.shell_registry()?;
     let shell = shells
         .identify(pid)
@@ -86,6 +89,7 @@ mod tests {
         process::{self, Command},
     };
 
+    use rustix::process::geteuid;
     use tempfile::TempDir;
 
     use super::{super::fake_ports::FakePorts, *};
@@ -320,6 +324,25 @@ mod tests {
             Some(stamp(LOAD + 1, 1))
         );
         assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
+    }
+
+    /// A report run as a user that does not own the state directory, as in
+    /// a root shell that kept this user's home, opens and writes nothing
+    /// there: no database read, no service asked, no shells folder made.
+    #[test]
+    fn a_report_as_another_user_touches_nothing() {
+        let (ports, shop, _scratch) = shop_ports(FakeService::default().answering(started()));
+        let ports = ports.running_as(geteuid().as_raw() + 1);
+        let shells_dir = ports.shell_registry().unwrap().notes_dir();
+
+        assert!(matches!(
+            shell_report(&ports, this_shell(), seq(1), &shop),
+            Err(ShellReportSkip::NotOwnState)
+        ));
+
+        assert!(ports.fake_service().asked().is_empty());
+        assert_eq!(ports.fake_service().connects(), 0);
+        assert!(!shells_dir.exists(), "no shells folder is made");
     }
 
     /// A pid no process runs as is no shell: nothing is asked or written.

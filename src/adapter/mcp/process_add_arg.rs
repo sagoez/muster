@@ -11,6 +11,7 @@ use super::{
         env_vars, process_name, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
+    seconds_arg::SecondsArg,
 };
 use crate::{
     adapter::mcp::tool_error::ToolError,
@@ -53,12 +54,13 @@ pub struct ProcessAddArg {
     /// `terminate` (SIGTERM) or `interrupt` (SIGINT).
     #[builder(default)]
     stop_signal: Option<String>,
-    /// How long a stop waits before it kills, such as `5s`.
+    /// Seconds a stop waits before it kills, such as 5, at most
+    /// <max-stop-grace-s>.
     #[builder(default)]
-    stop_grace: Option<String>,
-    /// A readiness check such as {"log": "Listening on", "timeout": "60s"},
-    /// {"port": 3000, "timeout": "30s"} or {"http":
-    /// "http://localhost:3000/health", "timeout": "30s"}.
+    stop_grace: Option<SecondsArg>,
+    /// A readiness check, its timeout in seconds, such as {"log": "Listening
+    /// on", "timeout": 60}, {"port": 3000, "timeout": 30} or {"http":
+    /// "http://localhost:3000/health", "timeout": 30}.
     #[builder(default)]
     ready: Option<ReadyArg>,
 }
@@ -96,7 +98,7 @@ impl ProcessAddArg {
                     .map(|raw| choice(STOP_SIGNAL_FIELD, raw))
                     .transpose()?,
             )
-            .stop_grace(self.stop_grace.as_deref().map(stop_grace).transpose()?)
+            .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)
             .ready(self.ready.as_ref().map(ReadyArg::check).transpose()?)
             .build())
     }

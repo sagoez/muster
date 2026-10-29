@@ -313,10 +313,13 @@ impl MusterMcp {
             must pass project. Takes name, command (a shell command), and optionally \
             working_dir (a folder inside the project root, relative to it), description, \
             environment (an object of variable names to values), autostart, restart \
-            (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (such as \
-            5s) and ready, a readiness check such as {\"log\": \"Listening on\", \"timeout\": \
-            \"60s\"}, {\"port\": 3000, \"timeout\": \"30s\"} or {\"http\": \
-            \"http://localhost:3000/health\", \"timeout\": \"30s\"}; fields left out take the \
+            (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (a number of \
+            seconds, at most <max-stop-grace-s>) and ready, a readiness check whose timeout is \
+            a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
+            {\"port\": 3000, \"timeout\": 30} or {\"http\": \
+            \"http://localhost:3000/health\", \"timeout\": 30}. Durations are numbers of \
+            seconds in both directions, as results report them: text such as \"30s\" is \
+            refused. Fields left out take the \
             default-* settings that config_get shows. The change is saved atomically, is \
             visible to the human's muster ps at once and is shown to them as a notice. Does \
             not start it: call process_start. Returns {project, process: the stored \
@@ -358,8 +361,9 @@ impl MusterMcp {
             their value. Takes name and any of command, working_dir (a folder inside the \
             project root; null runs it in the root), description (null removes it), \
             environment_set (an object of variables to add or replace), environment_unset (an \
-            array of names to remove), autostart, restart, stop_signal, stop_grace and ready \
-            (as process_add takes it; null removes the readiness check). The change is shown \
+            array of names to remove), autostart, restart, stop_signal, stop_grace (a number \
+            of seconds, at most <max-stop-grace-s>) and ready (as process_add takes it, its \
+            timeout in seconds; null removes the readiness check). The change is shown \
             to the human as a notice naming the fields changed. A running process keeps its \
             current run: restart it to apply the change. Returns {project, process: the \
             stored definition, its environment as variable names only, running}. An unknown \
@@ -994,7 +998,7 @@ mod tests {
                         serde_json::from_value(serde_json::json!({
                             "name": "api",
                             "command": "npm start",
-                            "ready": { "http": "http://example.com/", "timeout": "30s" },
+                            "ready": { "http": "http://example.com/", "timeout": 30 },
                         }))
                         .unwrap(),
                     ))

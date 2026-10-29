@@ -434,8 +434,10 @@ A wait takes one condition: `{"log": "Listening on"}` (add `"regex": true` for a
 regex), `{"port": 3000}`, `{"http": "http://localhost:3000/health"}` (with an
 optional `status`), `{"state": "running"}` or `{"ready": true}`. A `port` or
 `http` condition only reaches loopback hosts. A stored readiness check takes
-the same shape with a `timeout`, such as `{"log": "Listening on", "timeout":
-"60s"}`; `process_set` with `ready: null` removes it.
+the same shape with a `timeout` in seconds, such as `{"log": "Listening on",
+"timeout": 60}`; `process_set` with `ready: null` removes it. Durations go in
+as they come out, as numbers of seconds: `stop_grace` is `5`, never `"5s"`,
+and text is refused naming seconds.
 
 Cursors are offsets in a process's output that run on across restarts, so
 `process_logs` with `since` set to a wait's `cursor`, or to `run_start` from

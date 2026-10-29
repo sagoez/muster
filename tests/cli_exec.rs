@@ -2656,13 +2656,24 @@ fn mcp_waits_reads_logs_and_hears_crashes() {
 
     let set = mcp.result(
         "process_set",
-        serde_json::json!({ "name": "api", "ready": { "log": "ready on", "timeout": "30s" } }),
+        serde_json::json!({ "name": "api", "ready": { "log": "ready on", "timeout": 30 }, "stop_grace": 2.5 }),
     );
     assert_eq!(
         set["structuredContent"]["process"]["ready"],
         serde_json::json!({ "log": "ready on", "timeout": 30.0 }),
         "{set}"
     );
+    assert_eq!(
+        set["structuredContent"]["process"]["stop"]["grace"], 2.5,
+        "{set}"
+    );
+    for humantime in [
+        serde_json::json!({ "name": "api", "ready": { "log": "ready on", "timeout": "30s" } }),
+        serde_json::json!({ "name": "api", "stop_grace": "5s" }),
+    ] {
+        let refused = mcp.call("process_set", humantime).to_string();
+        assert!(refused.contains("number of seconds"), "{refused}");
+    }
     let started = mcp.result(
         "process_start",
         serde_json::json!({ "name": "api", "wait": true }),

@@ -42,6 +42,7 @@ mod ready_arg;
 mod recording_notifier;
 mod rendering;
 mod scope;
+mod seconds_arg;
 mod send_input_arg;
 mod server;
 mod stack_events_arg;

@@ -21,7 +21,7 @@ use crate::{
             LOCK_TTL_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
             TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
         },
-        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS},
+        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, MAX_STOP_GRACE},
     },
 };
 
@@ -29,8 +29,9 @@ use crate::{
 const DESCRIPTION_KEY: &str = "description";
 
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 24] {
+fn placeholders() -> [(&'static str, String); 25] {
     [
+        ("<max-stop-grace-s>", MAX_STOP_GRACE.as_secs().to_string()),
         ("<listed-value-chars>", LISTED_VALUE_CHARS.to_string()),
         ("<note-key-max-chars>", NOTE_KEY_MAX_CHARS.to_string()),
         ("<note-body-max-chars>", NOTE_BODY_MAX_CHARS.to_string()),

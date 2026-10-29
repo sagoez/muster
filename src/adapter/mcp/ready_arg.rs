@@ -6,6 +6,7 @@ use typed_builder::TypedBuilder;
 use super::{
     condition_arg::{local_port, local_url, log_pattern},
     process_fields::invalid,
+    seconds_arg::SecondsArg,
     tool_error::ToolError,
 };
 use crate::domain::{
@@ -20,14 +21,14 @@ const ONE_PROBE_FORM: &str = "exactly one of log, port or http, and a timeout";
 /// What `regex` needs beside it.
 const REGEX_FORM: &str = "regex only together with log";
 /// The form a timeout is written in.
-const TIMEOUT_FORM: &str = "a positive duration such as 30s";
+const TIMEOUT_FORM: &str = "a positive number of seconds such as 30";
 /// Separates the probes a refused check named.
 const PROBE_SEPARATOR: &str = ", ";
 /// How a check naming no probe is described.
 const NO_PROBE: &str = "none";
 
 /// A stored readiness check as an agent writes it, such as
-/// {"log": "Listening on", "timeout": "60s"}.
+/// {"log": "Listening on", "timeout": 60}.
 #[derive(
     Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema, Getters, CopyGetters, TypedBuilder,
 )]
@@ -50,9 +51,9 @@ pub struct ReadyArg {
     #[builder(default)]
     #[getset(get = "pub")]
     http: Option<String>,
-    /// How long a run may take to become ready, such as 60s.
+    /// Seconds a run may take to become ready, such as 60.
     #[getset(get = "pub")]
-    timeout: String,
+    timeout: SecondsArg,
 }
 
 impl ReadyArg {
@@ -92,14 +93,17 @@ impl ReadyArg {
         };
         let timeout = self
             .timeout
-            .parse::<PositiveDuration>()
-            .map_err(|_| invalid(READY_FIELD, TIMEOUT_FORM, &self.timeout))?;
+            .duration()
+            .and_then(|timeout| PositiveDuration::try_new(timeout).ok())
+            .ok_or_else(|| invalid(READY_FIELD, TIMEOUT_FORM, &self.timeout.written()))?;
         Ok(ReadyCheck::builder().probe(probe).timeout(timeout).build())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::Value;
 
     use super::*;
@@ -113,23 +117,22 @@ mod tests {
     #[test]
     fn each_probe_reads() {
         assert!(matches!(
-            read(serde_json::json!({ "log": "Listening on", "timeout": "60s" }))
+            read(serde_json::json!({ "log": "Listening on", "timeout": 60 }))
                 .unwrap()
                 .probe(),
             ReadyProbe::Log(_)
         ));
         assert!(matches!(
-            read(serde_json::json!({ "port": 3000, "timeout": "30s" }))
+            read(serde_json::json!({ "port": 3000, "timeout": 30 }))
                 .unwrap()
                 .probe(),
             ReadyProbe::Port(_)
         ));
-        assert!(matches!(
-            read(serde_json::json!({ "http": "http://127.0.0.1:3000/health", "timeout": "30s" }))
-                .unwrap()
-                .probe(),
-            ReadyProbe::Http(_)
-        ));
+        let http =
+            read(serde_json::json!({ "http": "http://127.0.0.1:3000/health", "timeout": 2.5 }))
+                .unwrap();
+        assert!(matches!(http.probe(), ReadyProbe::Http(_)));
+        assert_eq!(http.timeout().into_inner(), Duration::from_millis(2500));
     }
 
     /// Two probes, none, a bad timeout or a non-loopback URL are refused
@@ -137,14 +140,27 @@ mod tests {
     #[test]
     fn a_check_out_of_form_is_refused() {
         for json in [
-            serde_json::json!({ "log": "x", "port": 1, "timeout": "1s" }),
-            serde_json::json!({ "timeout": "1s" }),
-            serde_json::json!({ "port": 1, "timeout": "0s" }),
-            serde_json::json!({ "http": "http://10.0.0.1/", "timeout": "1s" }),
+            serde_json::json!({ "log": "x", "port": 1, "timeout": 1 }),
+            serde_json::json!({ "timeout": 1 }),
+            serde_json::json!({ "port": 1, "timeout": 0 }),
+            serde_json::json!({ "port": 1, "timeout": -5 }),
+            serde_json::json!({ "http": "http://10.0.0.1/", "timeout": 1 }),
         ] {
             let refused = read(json).unwrap_err().to_string();
             assert!(refused.contains("invalid ready"), "{refused}");
         }
         assert!(serde_json::from_value::<ReadyArg>(serde_json::json!({ "port": 1 })).is_err());
+    }
+
+    /// A timeout written as humantime text is refused naming seconds, the
+    /// form every result reports a timeout in.
+    #[test]
+    fn a_timeout_as_text_is_refused_naming_seconds() {
+        let refused =
+            serde_json::from_value::<ReadyArg>(serde_json::json!({ "port": 1, "timeout": "30s" }))
+                .unwrap_err()
+                .to_string();
+
+        assert!(refused.contains("number of seconds"), "{refused}");
     }
 }

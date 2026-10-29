@@ -16,6 +16,7 @@ use super::{
         description, env_name, env_vars, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
+    seconds_arg::SecondsArg,
 };
 use crate::{
     adapter::mcp::tool_error::ToolError,
@@ -88,9 +89,10 @@ pub struct ProcessSetArg {
     /// `terminate` (SIGTERM) or `interrupt` (SIGINT).
     #[builder(default)]
     stop_signal: Option<String>,
-    /// How long a stop waits before it kills, such as `5s`.
+    /// Seconds a stop waits before it kills, such as 5, at most
+    /// <max-stop-grace-s>.
     #[builder(default)]
-    stop_grace: Option<String>,
+    stop_grace: Option<SecondsArg>,
     /// A readiness check as process_add takes; null removes it.
     #[builder(default)]
     ready: Option<Option<ReadyArg>>,
@@ -190,7 +192,7 @@ impl ProcessSetArg {
                     .map(|raw| choice(STOP_SIGNAL_FIELD, raw))
                     .transpose()?,
             )
-            .stop_grace(self.stop_grace.as_deref().map(stop_grace).transpose()?)
+            .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)
             .ready(self.ready_edit()?)
             .build())
     }
@@ -268,7 +270,7 @@ mod tests {
         let cleared = arg(serde_json::json!({ "name": "web", "ready": null }));
         let set = arg(serde_json::json!({
             "name": "web",
-            "ready": { "port": 3000, "timeout": "30s" },
+            "ready": { "port": 3000, "timeout": 30 },
         }));
 
         assert_eq!(kept.ready_edit().unwrap(), FieldEdit::Keep);

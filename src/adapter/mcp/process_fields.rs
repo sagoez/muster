@@ -5,13 +5,13 @@ use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
 use strum::IntoEnumIterator;
 
-use super::tool_error::ToolError;
+use super::{seconds_arg::SecondsArg, tool_error::ToolError};
 use crate::{
     adapter::client::WorkingDirPlace,
     domain::value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-        DescriptionError, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace, ValueParseError,
-        parse_choice,
+        DescriptionError, EnvName, EnvValue, MAX_STOP_GRACE, ProcessName, ProjectRoot, StopGrace,
+        ValueParseError, parse_choice,
     },
 };
 
@@ -37,6 +37,8 @@ pub(super) const STOP_SIGNAL_FIELD: &str = "stop_signal";
 pub(super) const STOP_GRACE_FIELD: &str = "stop_grace";
 /// The `key` field of the config tools.
 pub(super) const KEY_FIELD: &str = "key";
+/// The form a stop grace is written in, followed by its maximum.
+const STOP_GRACE_FORM: &str = "a positive number of seconds up to ";
 /// The form a working directory is written in.
 const WORKING_DIR_FORM: &str = "an existing directory inside the project root";
 /// The form a description is written in.
@@ -145,15 +147,22 @@ where
     parse_choice(raw).map_err(|reason| ToolError::InvalidField { field, reason })
 }
 
-/// The stop grace an agent typed as `raw`, a humantime duration.
+/// The stop grace an agent wrote as `seconds`.
 ///
 /// # Errors
-/// Returns the refusal of unreadable text, zero, or more than an hour.
-pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, ToolError> {
-    raw.parse().map_err(|reason| ToolError::InvalidField {
-        field: STOP_GRACE_FIELD,
-        reason,
-    })
+/// Returns the refusal of zero, a negative number, or more than
+/// [`MAX_STOP_GRACE`].
+pub(super) fn stop_grace(seconds: &SecondsArg) -> Result<StopGrace, ToolError> {
+    seconds
+        .duration()
+        .and_then(|grace| StopGrace::try_new(grace).ok())
+        .ok_or_else(|| {
+            invalid(
+                STOP_GRACE_FIELD,
+                &format!("{STOP_GRACE_FORM}{}", MAX_STOP_GRACE.as_secs()),
+                &seconds.written(),
+            )
+        })
 }
 
 /// Where a process of the project at `root` runs when an agent typed `raw`,
@@ -265,18 +274,35 @@ mod tests {
         assert!(refused.contains("MUSTER_PROJECT"), "{refused}");
     }
 
-    /// A grace period reads as a humantime duration and refuses zero.
+    /// A grace period reads as seconds and refuses zero, a negative number
+    /// or more than the maximum, naming seconds.
     #[test]
     fn a_stop_grace_must_be_positive() {
-        assert_eq!(stop_grace("10s").unwrap().to_string(), "10s");
-        assert!(stop_grace("0s").is_err());
-        assert!(matches!(
-            stop_grace("2h"),
-            Err(ToolError::InvalidField {
-                field: STOP_GRACE_FIELD,
-                ..
-            })
-        ));
-        assert!(stop_grace("300000000y").is_err());
+        let seconds = |json| serde_json::from_value::<SecondsArg>(json).unwrap();
+
+        assert_eq!(
+            stop_grace(&seconds(serde_json::json!(10)))
+                .unwrap()
+                .to_string(),
+            "10s"
+        );
+        assert_eq!(
+            stop_grace(&seconds(serde_json::json!(0.5)))
+                .unwrap()
+                .to_string(),
+            "500ms"
+        );
+        for refused in [0.0, -1.0, 7200.0, 1e300] {
+            let refused = stop_grace(&seconds(serde_json::json!(refused))).unwrap_err();
+            assert!(
+                matches!(refused, ToolError::InvalidField {
+                    field: STOP_GRACE_FIELD,
+                    ..
+                }),
+                "{refused}"
+            );
+            let named = format!("seconds up to {}", MAX_STOP_GRACE.as_secs());
+            assert!(refused.to_string().contains(&named), "{refused}");
+        }
     }
 }

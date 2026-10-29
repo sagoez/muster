@@ -14,9 +14,9 @@ use crate::{
         holder::LineMatcher,
         service::{
             EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
-            OutputTap, ProbeTarget, RunPin, ServiceErrorBody, ServiceErrorKind, ServiceResponse,
-            TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply, WaitSpec, WaitStatus,
-            Waiter,
+            OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
+            ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
+            WaitSpec, WaitStatus, Waiter,
         },
     },
     domain::{
@@ -191,7 +191,8 @@ impl Supervisor {
         Ok(())
     }
 
-    /// When the next wait or readiness check times out.
+    /// When the next wait or readiness check times out, or a wait for
+    /// `running` outlasts its run's quick-exit window.
     pub fn next_wait_deadline(&self) -> Option<Instant> {
         let waits = self.waiters.iter().map(Waiter::deadline);
         let checks = self
@@ -199,7 +200,27 @@ impl Supervisor {
             .values()
             .filter(|readiness| readiness.state.is_waiting())
             .map(|readiness| readiness.deadline);
-        waits.chain(checks).min()
+        let windows = self
+            .waiters
+            .iter()
+            .filter(|waiter| {
+                *waiter.until() == WaitCondition::State(StateGoal::Running)
+                    && waiter.pin().counts(self.current_generation(waiter.pane()))
+                    && self
+                        .workspace
+                        .process(waiter.pane())
+                        .is_some_and(|process| *process.state() == ProcessState::Running)
+            })
+            .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
+        waits.chain(checks).chain(windows).min()
+    }
+
+    /// When the quick-exit window of `pane`'s live run ends.
+    fn quick_exit_end(&self, pane: PaneId) -> Option<Instant> {
+        self.panes
+            .get(&pane)
+            .filter(|_| self.is_live(pane))
+            .map(|target| target.started_at() + QUICK_EXIT_WINDOW)
     }
 
     /// Times out the readiness checks and waits whose deadline passed, and
@@ -219,7 +240,7 @@ impl Supervisor {
         while index < self.waiters.len() {
             let waiter = &self.waiters[index];
             let settled = self
-                .check(waiter)
+                .check(waiter, now)
                 .or_else(|| (waiter.deadline() <= now).then_some((WaitStatus::Waiting, None)));
             match settled {
                 Some((status, matched)) => {
@@ -560,7 +581,7 @@ impl Supervisor {
         let settled = match matched {
             Some(line) => Some((WaitStatus::Matched, Some(line))),
             None => self
-                .check(&waiter)
+                .check(&waiter, now)
                 .or_else(|| self.not_running(&waiter).map(|status| (status, None))),
         };
         if let Some((status, matched)) = settled {
@@ -577,9 +598,11 @@ impl Supervisor {
         self.waiters.push(waiter);
     }
 
-    /// How `waiter` ends now when its state or readiness condition holds, or
-    /// its readiness check timed out.
-    fn check(&self, waiter: &Waiter) -> Option<(WaitStatus, Option<MatchedLine>)> {
+    /// How `waiter` ends at `now` when its state or readiness condition
+    /// holds, or its readiness check timed out. A wait for `running` holds on
+    /// through the run's [`QUICK_EXIT_WINDOW`], so a run that ends inside it
+    /// answers crashed or exited instead.
+    fn check(&self, waiter: &Waiter, now: Instant) -> Option<(WaitStatus, Option<MatchedLine>)> {
         let pane = waiter.pane();
         if !waiter.pin().counts(self.current_generation(pane)) {
             return None;
@@ -589,6 +612,10 @@ impl Supervisor {
                 .workspace
                 .process(pane)
                 .filter(|process| goal.reached(*process.state()))
+                .filter(|_| {
+                    *goal != StateGoal::Running
+                        || self.quick_exit_end(pane).is_none_or(|end| end <= now)
+                })
                 .map(|_| (WaitStatus::Matched, None)),
             WaitCondition::Ready => {
                 match self.readiness.get(&pane).map(|readiness| readiness.state) {
@@ -1013,6 +1040,36 @@ mod tests {
         assert_eq!(crashed.status(), WaitStatus::Crashed);
         assert_eq!(crashed.tail(), &["Error: EADDRINUSE", "    at listen"]);
         assert!(event_kinds(&harness).contains(&EventKind::Crashed));
+    }
+
+    /// A wait for `running` holds on through the quick-exit window: a run
+    /// that ends inside it answers crashed or exited, and one that outlasts
+    /// it answers matched once the window ends, which the loop wakes for.
+    #[test]
+    fn a_running_wait_holds_through_the_quick_exit_window() {
+        for (outcome, status) in [
+            (
+                ExitOutcome::Failed(ExitCause::Status(1)),
+                WaitStatus::Crashed,
+            ),
+            (ExitOutcome::Succeeded, WaitStatus::Exited),
+        ] {
+            let mut harness = up(&[api(RestartPolicy::Never, None)]);
+            let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+            harness.supervisor.settle_waits(Instant::now());
+            assert!(answered(&answers).is_none(), "running, inside the window");
+
+            end(&mut harness, "api", outcome);
+            harness.supervisor.settle_waits(Instant::now());
+            assert_eq!(answered(&answers).unwrap().status(), status);
+        }
+
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+        let window_end = harness.supervisor.next_wait_deadline().unwrap();
+        assert!(window_end <= Instant::now() + QUICK_EXIT_WINDOW);
+        harness.supervisor.settle_waits(window_end);
+        assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Matched);
     }
 
     #[test]

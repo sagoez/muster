@@ -221,6 +221,10 @@ CLI alone.
 | `muster doctor` | Diagnose the database, projects, stored processes and completions |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
+A command that starts processes, and a wait for `running`, hold on until each
+child has run for half a second, so one that exits at once is reported
+crashed or exited rather than started.
+
 ### Exit codes
 
 | Code | Meaning |

@@ -6,6 +6,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     last_exit::LastExit, port_block::PortBlock, process_usage::ProcessUsage, stack_url::StackUrl,
+    state_goal::QUICK_EXIT_WINDOW,
 };
 use crate::domain::{
     port::ListeningSocket,
@@ -58,4 +59,13 @@ pub struct ProcessStatus {
     /// process holds the port its readiness check names.
     #[builder(default)]
     blocked_on: Option<PortBlock>,
+}
+
+impl ProcessStatus {
+    /// Whether it runs a child that started less than [`QUICK_EXIT_WINDOW`]
+    /// ago, which may yet exit at once.
+    pub fn in_quick_exit_window(&self) -> bool {
+        self.state == ProcessState::Running
+            && self.uptime.is_some_and(|uptime| uptime < QUICK_EXIT_WINDOW)
+    }
 }

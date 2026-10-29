@@ -1,7 +1,14 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
 
 use crate::domain::process::ProcessState;
+
+/// How long a run must have lasted before it counts as running: a launch
+/// report and a wait for `running` hold on this long, so a process that exits
+/// at once is reported crashed or exited rather than started.
+pub const QUICK_EXIT_WINDOW: Duration = Duration::from_millis(500);
 
 /// A lifecycle state a wait can be for: one `ps` shows, or `stopped` for not
 /// running for any reason.

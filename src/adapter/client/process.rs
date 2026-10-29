@@ -689,7 +689,7 @@ fn report(
         let moving: Vec<&ProcessStatus> = names
             .iter()
             .filter_map(|name| find(&after, name))
-            .filter(|process| action.in_transition(*process.state()))
+            .filter(|process| action.settling(process))
             .collect();
         moved.extend(moving.iter().map(|process| process.name().clone()));
         if watch.waiting(action, &moving).is_break() {

@@ -3,7 +3,10 @@ use std::time::Duration;
 use serde::Serialize;
 use strum::{Display, EnumIter, EnumMessage};
 
-use crate::{adapter::service::ProcessAction, domain::process::ProcessState};
+use crate::{
+    adapter::service::{ProcessAction, ProcessStatus},
+    domain::process::ProcessState,
+};
 
 /// Longest a command waits for a launch to settle. Above a holder's 5 s
 /// ready timeout and the 2 s to stop a holder that failed, so a launch that
@@ -77,6 +80,19 @@ impl Action {
                 false
             },
         }
+    }
+
+    /// Whether `process` is still settling after this action: on its way, or
+    /// launched so recently that it may yet exit at once, so a launch report
+    /// sees a child that dies at once crash rather than start.
+    pub fn settling(self, process: &ProcessStatus) -> bool {
+        let launches = match self {
+            Self::Up | Self::Start | Self::Restart | Self::Run => true,
+            Self::Down | Self::Stop | Self::Kill | Self::Remove | Self::Pause | Self::Resume => {
+                false
+            },
+        };
+        self.in_transition(*process.state()) || (launches && process.in_quick_exit_window())
     }
 
     /// Whether a process in `state` is still on its way to what this action

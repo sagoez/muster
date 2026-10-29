@@ -2489,6 +2489,40 @@ fn mcp_waits_reads_logs_and_hears_crashes() {
     mcp.result("process_stop", serde_json::json!({ "name": "api" }));
 }
 
+/// A start sees a child that dies moments after it runs: `start` and
+/// `start --wait` fail, and MCP `process_start` with `wait: true` flags the
+/// crash as an error, with or without a restart policy.
+#[test]
+fn a_waited_start_reports_a_child_that_dies_at_once() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[entry("bad", "sleep 0.2; exit 3", false), Entry {
+            restart: "on-failure",
+            ..entry("ronfail", "sleep 0.2; exit 3", false)
+        }]),
+    );
+
+    let (started, report) = scratch.json_on(&project, &["start", "bad", "--wait"]);
+    assert_eq!(started.status.code(), Some(ACTION_FAILED), "{report}");
+    assert_eq!(report["status"], "crashed", "{report}");
+    let (unwaited, report) = scratch.json_on(&project, &["start", "bad"]);
+    assert_eq!(unwaited.status.code(), Some(ACTION_FAILED), "{report}");
+    assert_eq!(report["processes"][0]["outcome"], "crashed", "{report}");
+
+    let mut mcp = McpSession::start(&mut scratch, &project);
+    let waited = mcp.result(
+        "process_start",
+        serde_json::json!({ "name": "ronfail", "wait": true }),
+    );
+    assert_eq!(waited["isError"], true, "{waited}");
+    assert_eq!(
+        waited["structuredContent"]["wait"]["status"], "crashed",
+        "{waited}"
+    );
+    mcp.result("process_stop", serde_json::json!({ "name": "ronfail" }));
+}
+
 /// Reading events filtered to other kinds never marks a crash heard: the
 /// next stack call still alerts it.
 #[test]

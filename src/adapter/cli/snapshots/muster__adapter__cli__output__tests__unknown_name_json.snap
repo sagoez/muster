@@ -1,6 +1,5 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 868
 expression: failure_json(&error)
 ---
 {
@@ -11,6 +10,6 @@ expression: failure_json(&error)
       "it's"
     ],
     "kind": "unknown-process",
-    "message": "no process 'dev' in /home/me/shop/muster.yml; valid names: 'dev server', 'café', \"it's\""
+    "message": "no process 'dev' in shop; valid names: 'dev server', 'café', \"it's\""
   }
 }

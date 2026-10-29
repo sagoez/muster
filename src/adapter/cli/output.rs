@@ -4,7 +4,6 @@
 use std::{
     cmp::Ordering,
     io,
-    path::Path,
     time::{Duration, SystemTime},
 };
 
@@ -25,21 +24,22 @@ use super::{
     process_outcome::ProcessOutcome,
     report::{Report, Row, RowKind, tally},
     running_service::RunningService,
+    sanitize::printable,
     service_status::ServiceStatus,
 };
 use crate::{
     adapter::service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
     domain::{
         process::ProcessState,
+        project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
-        value::ProcessName,
+        value::{ProcessName, ProjectName},
     },
 };
 
 /// Column headers of the `ps` table, in order.
-const PS_HEADERS: [&str; 10] = [
+const PS_HEADERS: [&str; 9] = [
     "NAME",
-    "KIND",
     "STATE",
     "PID",
     "UPTIME",
@@ -49,7 +49,7 @@ const PS_HEADERS: [&str; 10] = [
     "ATTACHED",
     "LAST EXIT",
 ];
-/// Gap between two table columns.
+/// Gap between two table columns, and between a project's name and folder.
 const COLUMN_GAP: &str = "  ";
 /// Shown in a table cell with nothing to show.
 const EMPTY_CELL: &str = "-";
@@ -75,7 +75,7 @@ const FAILED: &str = "failed";
 const NO_PROJECTS: &str =
     "no projects are loaded; `muster up` in a project folder starts its processes";
 /// `ps` of a project with no processes.
-const NO_PROCESSES: &str = "no processes; add some to muster.yml";
+const NO_PROCESSES: &str = "no processes; `muster add <name> -- <command>` adds one";
 /// `muster notices` with nothing to report.
 const NO_NOTICES: &str = "no notices";
 /// Label of a notice about the whole service.
@@ -86,16 +86,20 @@ const PROJECT_LABEL: &str = "project";
 const NOTHING_TO_START: &str = "nothing to start: every process set to autostart is running";
 /// How to start what `up` leaves alone.
 const UP_HINT: &str = "`muster start <name>` starts a process that does not autostart";
-/// The `down` report when the service stopped nothing.
+/// The report of an action that stopped nothing.
 const NOTHING_RUNNING: &str = "nothing was running";
-/// How to stop the agents `down` leaves running.
-const DOWN_AGENTS_HINT: &str = "agents keep running; `muster down --agents` stops them too";
+/// The report of an action that touched no process.
+const NOTHING_DONE: &str = "nothing to do";
 /// Heading of the notices an action raised about processes it did not act on.
 const OTHER_NOTICES: &str = "other notices, about processes this command did not touch:";
 /// What follows an outcome the command stopped waiting for.
 const PS_FOLLOW_UP: &str = "when the wait ended; `muster ps` shows how it ends";
 /// What follows a crash its restart policy is about to retry.
 const RESTARTING_FOLLOW_UP: &str = "restarting under its restart policy";
+/// What a pause that did not apply says, before the state.
+const NOT_PAUSED: &str = "not paused: it is";
+/// What a resume that did not apply says, before the state.
+const NOT_RESUMED: &str = "not resumed: it is";
 /// Title of the `notices` report, after the prefix.
 const NOTICES_TITLE: &str = "notices";
 /// Title of the `service` reports, after the prefix.
@@ -112,10 +116,6 @@ const ATTACH_COMMAND_WORD: &str = "attach";
 const LOGS_COMMAND_WORD: &str = "logs";
 /// Between a command and its project in a title.
 const TITLE_SEPARATOR: &str = " · ";
-/// Between the words of an action's kebab-case name.
-const KEBAB_SEPARATOR: char = '-';
-/// Between the words of a command as typed.
-const WORD_SEPARATOR: &str = " ";
 /// Start of the line saying the service runs, before its version.
 const SERVICE_RUNNING: &str = "running, version";
 /// What happens to an older service.
@@ -144,31 +144,34 @@ const BINARY_LABEL: &str = "binary";
 const FALLBACK_FAILURE_JSON: &str =
     r#"{"error":{"kind":"io","message":"the failure could not be described","candidates":[]}}"#;
 
-/// The human `ps` table of `statuses`. With `all`, each project's table sits
-/// under a heading naming the project; without it, the one project's table
-/// stands alone.
+/// The human `ps` table of `statuses`, each project's table under a heading
+/// naming the project and its folder; with `all`, the tables are indented
+/// under their headings.
 pub fn render_status(statuses: &[ProjectStatus], all: bool) -> String {
     if statuses.is_empty() {
         return NO_PROJECTS.to_string();
     }
-    if !all {
-        return statuses
-            .iter()
-            .map(|status| project_table(status, ""))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-    }
+    let indent = if all { PROJECT_INDENT } else { "" };
     statuses
         .iter()
         .map(|status| {
             format!(
                 "{}\n{}",
-                status.project().as_ref().display(),
-                project_table(status, PROJECT_INDENT)
+                project_heading(status.project()),
+                project_table(status, indent)
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The line naming `project` and its folder.
+fn project_heading(project: &Project) -> String {
+    printable(&format!(
+        "{}{COLUMN_GAP}{}",
+        project.name(),
+        project.root().as_ref().display()
+    ))
 }
 
 /// The table of one project's processes, each line indented by `indent`.
@@ -181,12 +184,11 @@ fn project_table(status: &ProjectStatus, indent: &str) -> String {
     table(&rows, indent)
 }
 
-/// The cells of one process's `ps` row.
+/// The cells of one process's `ps` row, made printable.
 fn process_cells(process: &ProcessStatus) -> Vec<String> {
     let usage = process.usage().as_ref();
     vec![
-        process.name().to_string(),
-        process.kind().to_string(),
+        printable(process.name().as_ref()),
         process.state().to_string(),
         cell(process.pid().map(|pid| pid.to_string())),
         cell(process.uptime().map(short_duration)),
@@ -200,7 +202,7 @@ fn process_cells(process: &ProcessStatus) -> Vec<String> {
 
 /// How a process last ended, in a `ps` cell: `status 1`, `signal SIGKILL`.
 fn exit_cell(exit: &ExitOutcome) -> String {
-    exit.summary().unwrap_or_else(|| UNKNOWN_EXIT.to_string())
+    printable(&exit.summary().unwrap_or_else(|| UNKNOWN_EXIT.to_string()))
 }
 
 /// `value`, or the empty-cell marker.
@@ -254,12 +256,11 @@ fn table(rows: &[Vec<String>], indent: &str) -> String {
 pub fn action_rows(report: &ActionReport) -> Report {
     let mut rows = vec![Row::unlabeled(
         RowKind::Dim,
-        report.project().display().to_string(),
+        report.project().root().display().to_string(),
     )];
     let acted: Vec<Row> = report
         .processes()
         .iter()
-        .filter(|process| process.outcome() != Outcome::KeptRunning)
         .map(|process| {
             Row::labeled(
                 outcome_kind(process.outcome()),
@@ -273,13 +274,6 @@ pub fn action_rows(report: &ActionReport) -> Report {
         rows.extend(nothing_done(report.action()));
     }
     rows.extend(acted);
-    if report
-        .processes()
-        .iter()
-        .any(|process| process.outcome() == Outcome::KeptRunning)
-    {
-        rows.push(Row::unlabeled(RowKind::Hint, DOWN_AGENTS_HINT));
-    }
     if !report.other_notices().is_empty() {
         rows.push(Row::unlabeled(RowKind::Dim, OTHER_NOTICES));
         rows.extend(report.other_notices().iter().map(|notice| {
@@ -290,7 +284,7 @@ pub fn action_rows(report: &ActionReport) -> Report {
             )
         }));
     }
-    let titled = Report::new(action_title(report.action(), report.project()), rows)
+    let titled = Report::new(action_title(report.action(), report.project().name()), rows)
         .with_failure(report.failed());
     match summary {
         Some(summary) => titled.with_summary(summary),
@@ -298,20 +292,20 @@ pub fn action_rows(report: &ActionReport) -> Report {
     }
 }
 
-/// The title a command acting on the project at `project` opens with: the
-/// command and the project's folder, such as `muster up · shop`.
-pub fn action_title(action: Action, project: &Path) -> String {
-    project_title(&action_words(action), project)
+/// The title a command acting on the project `project` opens with: the
+/// command and the project's name, such as `muster up · shop`.
+pub fn action_title(action: Action, project: &ProjectName) -> String {
+    project_title(command_word(action), project)
 }
 
 /// The title `muster attach` opens with, such as `muster attach · shop`.
-pub fn attach_title(project: &Path) -> String {
+pub fn attach_title(project: &ProjectName) -> String {
     project_title(ATTACH_COMMAND_WORD, project)
 }
 
 /// The title `muster logs` opens its question with, such as
 /// `muster logs · shop`.
-pub fn logs_title(project: &Path) -> String {
+pub fn logs_title(project: &ProjectName) -> String {
     project_title(LOGS_COMMAND_WORD, project)
 }
 
@@ -320,18 +314,25 @@ pub fn service_title() -> String {
     format!("{TITLE_PREFIX} {SERVICE_TITLE}")
 }
 
-/// `muster <command> · <folder>`, for the project whose config is `project`.
-fn project_title(command: &str, project: &Path) -> String {
-    let folder = project.parent().and_then(Path::file_name).map_or_else(
-        || project.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    format!("{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{folder}")
+/// `muster <command> · <project>`.
+pub fn project_title(command: &str, project: &ProjectName) -> String {
+    format!("{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{project}")
 }
 
-/// How the command line spells `action`: `agent new`, not `agent-new`.
-fn action_words(action: Action) -> String {
-    action.to_string().replace(KEBAB_SEPARATOR, WORD_SEPARATOR)
+/// The command a person types for `action`.
+fn command_word(action: Action) -> &'static str {
+    match action {
+        Action::Up => "up",
+        Action::Down => "down",
+        Action::Start => "start",
+        Action::Stop => "stop",
+        Action::Restart => "restart",
+        Action::Pause => "pause",
+        Action::Resume => "resume",
+        Action::Kill => "kill",
+        Action::Run => "run",
+        Action::Remove => "rm",
+    }
 }
 
 /// What to say when an action touched no process.
@@ -341,7 +342,12 @@ fn nothing_done(action: Action) -> Vec<Row> {
             Row::unlabeled(RowKind::Ok, NOTHING_TO_START),
             Row::unlabeled(RowKind::Dim, UP_HINT),
         ],
-        _ => vec![Row::unlabeled(RowKind::Ok, NOTHING_RUNNING)],
+        Action::Down | Action::Stop | Action::Kill | Action::Remove => {
+            vec![Row::unlabeled(RowKind::Ok, NOTHING_RUNNING)]
+        },
+        Action::Start | Action::Restart | Action::Pause | Action::Resume | Action::Run => {
+            vec![Row::unlabeled(RowKind::Ok, NOTHING_DONE)]
+        },
     }
 }
 
@@ -349,10 +355,24 @@ fn nothing_done(action: Action) -> Vec<Row> {
 fn outcome_kind(outcome: Outcome) -> RowKind {
     if outcome.is_failure() {
         RowKind::Fail
-    } else if outcome.is_pending() {
-        RowKind::Hint
     } else {
         RowKind::Ok
+    }
+}
+
+/// What a pause or resume that did not apply says before the state.
+fn unchanged_words(action: Action) -> Option<&'static str> {
+    match action {
+        Action::Pause => Some(NOT_PAUSED),
+        Action::Resume => Some(NOT_RESUMED),
+        Action::Up
+        | Action::Down
+        | Action::Start
+        | Action::Stop
+        | Action::Restart
+        | Action::Kill
+        | Action::Run
+        | Action::Remove => None,
     }
 }
 
@@ -367,7 +387,9 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
     match outcome {
         Outcome::Unchanged => {
             if let Some(status) = status {
-                parts[0] = format!("{} {}", parts[0], status.state());
+                let words = unchanged_words(report.action())
+                    .map_or_else(|| parts[0].clone(), str::to_string);
+                parts[0] = format!("{words} {}", status.state());
             }
         },
         Outcome::Crashed | Outcome::Exited => {
@@ -386,7 +408,18 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
                 parts[0].clone_from(reason);
             }
         },
-        _ => {},
+        Outcome::Started
+        | Outcome::Restarted
+        | Outcome::AlreadyRunning
+        | Outcome::Unsupervised
+        | Outcome::NotStarted
+        | Outcome::Stopped
+        | Outcome::WasNotRunning
+        | Outcome::StillRunning
+        | Outcome::Paused
+        | Outcome::AlreadyPaused
+        | Outcome::Resumed
+        | Outcome::Gone => {},
     }
     for notice in report
         .notices()
@@ -425,7 +458,7 @@ fn exit_words(status: &Option<u32>, signal: &Option<SignalName>) -> String {
 fn level_kind(level: NoticeLevel) -> RowKind {
     match level {
         NoticeLevel::Error => RowKind::Fail,
-        NoticeLevel::Warning | NoticeLevel::Attention => RowKind::Hint,
+        NoticeLevel::Warning => RowKind::Hint,
     }
 }
 
@@ -440,8 +473,11 @@ fn notice_label(notice: &NoticeView) -> String {
 
 /// The human list of `notices` of `project`, oldest first, each with how
 /// long before `now` it was raised.
-pub fn notices_rows(project: &Path, notices: &[Notice], now: SystemTime) -> Report {
-    let mut rows = vec![Row::unlabeled(RowKind::Dim, project.display().to_string())];
+pub fn notices_rows(project: &Project, notices: &[Notice], now: SystemTime) -> Report {
+    let mut rows = vec![Row::unlabeled(
+        RowKind::Dim,
+        project.root().as_ref().display().to_string(),
+    )];
     if notices.is_empty() {
         rows.push(Row::unlabeled(RowKind::Ok, NO_NOTICES));
     }
@@ -457,7 +493,7 @@ pub fn notices_rows(project: &Path, notices: &[Notice], now: SystemTime) -> Repo
             format!("{age}{AGE_SEPARATOR}{}", notice.message()),
         )
     }));
-    Report::new(format!("{TITLE_PREFIX} {NOTICES_TITLE}"), rows)
+    Report::new(project_title(NOTICES_TITLE, project.name()), rows)
 }
 
 /// The human `muster service status` report.
@@ -584,20 +620,18 @@ mod tests {
         adapter::{
             cli::{
                 ending_signal::EndingSignal, failure_kind::FailureKind, process_view::ProcessView,
-                project_view::ProjectView, report::plain,
+                project_identity_view::ProjectIdentityView, project_view::ProjectView,
+                report::plain,
             },
-            service::{ProcessUsage, ProjectKey, ServiceErrorKind},
+            service::{ProcessUsage, ServiceErrorKind},
         },
-        domain::{
-            process::{ActivityState, ProcessKind},
-            value::ProcessName,
-        },
+        domain::value::ProjectRoot,
     };
 
-    /// The project every fixture belongs to.
-    const PROJECT: &str = "/home/me/shop/muster.yml";
+    /// The folder of the project every fixture belongs to.
+    const PROJECT: &str = "/home/me/shop";
     /// A second project for `ps --all`.
-    const OTHER_PROJECT: &str = "/home/me/blog/muster.yml";
+    const OTHER_PROJECT: &str = "/home/me/blog";
     /// A fixed instant fixtures are timed from.
     const EPOCH_OFFSET: Duration = Duration::from_secs(1_800_000_000);
     /// A stop grace fixtures run with.
@@ -608,20 +642,35 @@ mod tests {
         ProcessName::try_new(name).unwrap()
     }
 
-    /// Process `named` of `kind` in `state`, with usage while it has `pid`,
-    /// and `last_exit` while it does not.
+    /// The project called `name` at `root`.
+    fn project_at(name: &str, root: &str) -> Project {
+        Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from(root)).unwrap())
+            .name(ProjectName::try_new(name).unwrap())
+            .build()
+    }
+
+    /// The shop project.
+    fn shop_project() -> Project {
+        project_at("shop", PROJECT)
+    }
+
+    /// The shop project as `--json` names it.
+    fn shop_view() -> ProjectIdentityView {
+        ProjectIdentityView::from(&shop_project())
+    }
+
+    /// Process `named` in `state`, with usage while it has `pid`, and
+    /// `last_exit` while it does not.
     fn process(
         named: &str,
-        kind: ProcessKind,
         state: ProcessState,
         pid: Option<u32>,
         last_exit: Option<ExitOutcome>,
     ) -> ProcessStatus {
         ProcessStatus::builder()
             .name(name(named))
-            .kind(kind)
             .state(state)
-            .activity(ActivityState::Idle)
             .pid(pid)
             .uptime(pid.map(|_| Duration::from_millis(3_723_400)))
             .restarts(0)
@@ -634,61 +683,38 @@ mod tests {
             }))
             .attached(0)
             .last_exit(last_exit)
-            .stop_grace((kind == ProcessKind::Command).then_some(GRACE))
+            .stop_grace(Some(GRACE))
             .build()
     }
 
-    /// A project with an agent, an attached command that restarted, a
-    /// crashed terminal, a starting command and one killed by a signal.
+    /// A project with an attached process that restarted, a crashed one,
+    /// a starting one and one killed by a signal.
     fn shop() -> ProjectStatus {
-        let dev = process(
-            "dev server",
-            ProcessKind::Command,
-            ProcessState::Running,
-            Some(4123),
-            None,
-        );
+        let dev = process("dev server", ProcessState::Running, Some(4123), None);
         let dev = ProcessStatus::builder()
             .name(dev.name().clone())
-            .kind(*dev.kind())
             .state(*dev.state())
-            .activity(ActivityState::Working)
             .pid(*dev.pid())
             .uptime(*dev.uptime())
             .restarts(2)
             .usage(*dev.usage())
             .attached(1)
             .last_exit(None)
-            .stop_grace(Some(GRACE))
+            .stop_grace(Some(Duration::from_millis(500)))
             .build();
         ProjectStatus::builder()
-            .project(ProjectKey::new(PathBuf::from(PROJECT)))
+            .project(shop_project())
             .processes(vec![
-                process(
-                    "claude",
-                    ProcessKind::Agent,
-                    ProcessState::Running,
-                    Some(4100),
-                    None,
-                ),
                 dev,
                 process(
                     "café",
-                    ProcessKind::Terminal,
                     ProcessState::Crashed,
                     None,
                     Some(ExitOutcome::Failed(ExitCause::Status(127))),
                 ),
-                process(
-                    "worker",
-                    ProcessKind::Command,
-                    ProcessState::Starting,
-                    None,
-                    None,
-                ),
+                process("worker", ProcessState::Starting, None, None),
                 process(
                     "cron",
-                    ProcessKind::Command,
                     ProcessState::Crashed,
                     None,
                     Some(ExitOutcome::Failed(ExitCause::Signal(
@@ -702,7 +728,7 @@ mod tests {
     /// A project with no processes.
     fn blog() -> ProjectStatus {
         ProjectStatus::builder()
-            .project(ProjectKey::new(PathBuf::from(OTHER_PROJECT)))
+            .project(project_at("blog", OTHER_PROJECT))
             .processes(vec![])
             .build()
     }
@@ -711,7 +737,7 @@ mod tests {
     fn notice(process: Option<&str>, level: NoticeLevel, message: &str) -> Notice {
         Notice::builder()
             .at(SystemTime::UNIX_EPOCH + EPOCH_OFFSET)
-            .project(Some(ProjectKey::new(PathBuf::from(PROJECT))))
+            .project(Some(shop_project().root().clone()))
             .process(process.map(name))
             .level(level)
             .message(message.to_string())
@@ -725,10 +751,39 @@ mod tests {
         insta::assert_snapshot!("ps_table_none_loaded", render_status(&[], true));
     }
 
+    /// Plain `ps` names the project it lists, so a listing from a nested
+    /// folder says which project it is.
+    #[test]
+    fn plain_ps_names_its_project() {
+        let rendered = render_status(&[shop()], false);
+
+        assert_eq!(rendered.lines().next(), Some("shop  /home/me/shop"));
+    }
+
     #[test]
     fn ps_json_is_stable() {
         let views: Vec<ProjectView> = [shop()].iter().map(ProjectView::from).collect();
         insta::assert_snapshot!("ps_json", json(&views).unwrap());
+    }
+
+    /// A process name or exit carrying control characters is shown as text.
+    #[test]
+    fn ps_never_prints_control_characters() {
+        let hostile = ProjectStatus::builder()
+            .project(project_at("evil\u{1b}]0;x\u{7}", PROJECT))
+            .processes(vec![process(
+                "a\u{1b}[2Jb",
+                ProcessState::Exited,
+                None,
+                None,
+            )])
+            .build();
+        let rendered = render_status(&[hostile], true);
+
+        assert!(
+            !rendered.replace('\n', "").chars().any(char::is_control),
+            "{rendered:?}"
+        );
     }
 
     /// Columns line up by display width, so a name with an accent or a wide
@@ -736,20 +791,21 @@ mod tests {
     #[test]
     fn ps_columns_align_by_display_width() {
         let rendered = render_status(&[shop()], false);
-        let kind_column: Vec<usize> = rendered
+        let state_column: Vec<usize> = rendered
             .lines()
+            .skip(1)
             .map(|line| {
                 let byte = line
-                    .find("agent")
-                    .or_else(|| line.find("command"))
-                    .or_else(|| line.find("terminal"))
-                    .or_else(|| line.find("KIND"))
+                    .find("running")
+                    .or_else(|| line.find("crashed"))
+                    .or_else(|| line.find("starting"))
+                    .or_else(|| line.find("STATE"))
                     .unwrap();
                 UnicodeWidthStr::width(&line[..byte])
             })
             .collect();
         assert!(
-            kind_column.windows(2).all(|pair| pair[0] == pair[1]),
+            state_column.windows(2).all(|pair| pair[0] == pair[1]),
             "{rendered}"
         );
     }
@@ -767,7 +823,7 @@ mod tests {
     /// a third, while a process it did not touch raised an error.
     fn up_report() -> ActionReport {
         ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
+            .project(shop_view())
             .action(Action::Up)
             .processes(vec![
                 outcome(
@@ -775,7 +831,6 @@ mod tests {
                     Outcome::Started,
                     Some(process(
                         "dev server",
-                        ProcessKind::Command,
                         ProcessState::Running,
                         Some(4123),
                         None,
@@ -786,17 +841,16 @@ mod tests {
                     Outcome::Crashed,
                     Some(process(
                         "café",
-                        ProcessKind::Terminal,
                         ProcessState::Crashed,
                         None,
                         Some(ExitOutcome::Failed(ExitCause::Status(127))),
                     )),
                 ),
                 ProcessOutcome::builder()
-                    .name(name("claude"))
+                    .name(name("api"))
                     .outcome(Outcome::Refused)
                     .reason(Some(
-                        "left stopped: its agent session cannot be resumed".to_string(),
+                        "cannot start: the pid 4242 may still run unsupervised".to_string(),
                     ))
                     .status(None)
                     .build(),
@@ -827,60 +881,27 @@ mod tests {
     }
 
     /// Every framed command's plain fallback, which a pipe, `NO_COLOR` or a
-    /// dumb terminal gets: one line per fact under the project's path, with
-    /// no title, summary or frame.
+    /// dumb terminal gets: one line per fact under the project's folder,
+    /// with no title, summary or frame.
     #[test]
     fn every_framed_command_falls_back_to_plain_lines() {
-        let running = |named: &str, kind: ProcessKind| {
-            Some(process(
-                named,
-                kind,
-                ProcessState::Running,
-                Some(4200),
-                None,
-            ))
-        };
+        let running = || Some(process("api", ProcessState::Running, Some(4200), None));
         let framed = [
-            (
-                Action::Up,
-                Outcome::Started,
-                running("api", ProcessKind::Command),
-            ),
+            (Action::Up, Outcome::Started, running()),
             (Action::Down, Outcome::Stopped, None),
-            (
-                Action::Start,
-                Outcome::Started,
-                running("api", ProcessKind::Command),
-            ),
+            (Action::Start, Outcome::Started, running()),
             (Action::Stop, Outcome::Stopped, None),
-            (
-                Action::Restart,
-                Outcome::Restarted,
-                running("api", ProcessKind::Command),
-            ),
-            (
-                Action::Run,
-                Outcome::Started,
-                running("api", ProcessKind::Command),
-            ),
-            (
-                Action::AgentNew,
-                Outcome::Started,
-                running("claude", ProcessKind::Agent),
-            ),
-            (Action::AgentClose, Outcome::Stopped, None),
-            (Action::AgentReopen, Outcome::Queued, None),
+            (Action::Restart, Outcome::Restarted, running()),
+            (Action::Run, Outcome::Started, running()),
+            (Action::Remove, Outcome::Stopped, None),
         ];
         let reports: Vec<Report> = framed
             .into_iter()
             .map(|(action, settled, status)| {
-                let named = status
-                    .as_ref()
-                    .map_or_else(|| "api".to_string(), |status| status.name().to_string());
                 let report = ActionReport::builder()
-                    .project(PathBuf::from(PROJECT))
+                    .project(shop_view())
                     .action(action)
-                    .processes(vec![outcome(&named, settled, status)])
+                    .processes(vec![outcome("api", settled, status)])
                     .notices(vec![])
                     .other_notices(vec![])
                     .build();
@@ -901,9 +922,7 @@ mod tests {
             "muster stop · shop",
             "muster restart · shop",
             "muster run · shop",
-            "muster agent new · shop",
-            "muster agent close · shop",
-            "muster agent reopen · shop",
+            "muster rm · shop",
             "muster service",
         ]);
         let printed: Vec<String> = reports.iter().map(plain).collect();
@@ -917,7 +936,7 @@ mod tests {
     fn a_refusal_notice_is_printed_once_on_its_row() {
         let reason = "cannot start: the pid 4242 may still run unsupervised";
         let report = ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
+            .project(shop_view())
             .action(Action::Up)
             .processes(vec![
                 ProcessOutcome::builder()
@@ -947,7 +966,7 @@ mod tests {
     #[test]
     fn a_neighbours_crash_does_not_fail_the_command() {
         let report = ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
+            .project(shop_view())
             .action(Action::Stop)
             .processes(vec![outcome("api", Outcome::Stopped, None)])
             .notices(vec![])
@@ -966,7 +985,7 @@ mod tests {
     #[test]
     fn an_up_that_started_nothing_says_so_and_how_to_start_the_rest() {
         let report = ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
+            .project(shop_view())
             .action(Action::Up)
             .processes(vec![])
             .notices(vec![])
@@ -976,30 +995,26 @@ mod tests {
         insta::assert_snapshot!("up_nothing", plain(&action_rows(&report)));
     }
 
+    /// A pause of a process that is not running says it was not paused and
+    /// why, rather than that there was nothing to do.
     #[test]
-    fn a_down_that_kept_agents_says_how_to_stop_them() {
+    fn a_pause_of_a_stopped_process_says_it_was_not_paused() {
         let report = ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
-            .action(Action::Down)
-            .processes(vec![
-                outcome("dev server", Outcome::Stopped, None),
-                outcome(
-                    "claude",
-                    Outcome::KeptRunning,
-                    Some(process(
-                        "claude",
-                        ProcessKind::Agent,
-                        ProcessState::Running,
-                        Some(4100),
-                        None,
-                    )),
-                ),
-            ])
+            .project(shop_view())
+            .action(Action::Pause)
+            .processes(vec![outcome(
+                "api",
+                Outcome::Unchanged,
+                Some(process("api", ProcessState::Exited, None, None)),
+            )])
             .notices(vec![])
             .other_notices(vec![])
             .build();
-        assert!(!report.failed());
-        insta::assert_snapshot!("down_kept_agents", plain(&action_rows(&report)));
+
+        assert_eq!(
+            plain(&action_rows(&report)),
+            "/home/me/shop\n✗ api: not paused: it is exited"
+        );
     }
 
     /// A stop still waiting on its process when the wait ends fails and says
@@ -1007,14 +1022,13 @@ mod tests {
     #[test]
     fn a_stop_still_stopping_fails_and_says_so() {
         let report = ActionReport::builder()
-            .project(PathBuf::from(PROJECT))
+            .project(shop_view())
             .action(Action::Stop)
             .processes(vec![outcome(
                 "dev server",
                 Outcome::StillStopping,
                 Some(process(
                     "dev server",
-                    ProcessKind::Command,
                     ProcessState::Stopping,
                     Some(4123),
                     None,
@@ -1036,15 +1050,19 @@ mod tests {
                 NoticeLevel::Error,
                 "crashed: exited with status 1",
             ),
-            notice(None, NoticeLevel::Warning, "the config was reloaded"),
+            notice(
+                None,
+                NoticeLevel::Warning,
+                "stopped worker: removed from the project",
+            ),
         ];
         insta::assert_snapshot!(
             "notices",
-            plain(&notices_rows(Path::new(PROJECT), &notices, now))
+            plain(&notices_rows(&shop_project(), &notices, now))
         );
         insta::assert_snapshot!(
             "notices_none",
-            plain(&notices_rows(Path::new(PROJECT), &[], now))
+            plain(&notices_rows(&shop_project(), &[], now))
         );
         let views: Vec<NoticeView> = notices.iter().map(NoticeView::from).collect();
         insta::assert_snapshot!("notices_json", json(&views).unwrap());
@@ -1056,7 +1074,7 @@ mod tests {
     fn unknown_name_prints_valid_names() {
         let error = CliError::UnknownProcess {
             name: "dev".to_string(),
-            project: PathBuf::from(PROJECT),
+            project: ProjectName::try_new("shop").unwrap(),
             valid: vec![name("dev server"), name("café"), name("it's")],
         };
 

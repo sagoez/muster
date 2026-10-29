@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::{
     args::TodoCommand,
     error::CliError,
@@ -8,6 +6,7 @@ use super::{
 use crate::domain::{
     coordination::{Author, TodoId, TodoStatus, TodoTitle},
     port::CoordinationStore,
+    value::ProjectRoot,
 };
 
 /// Line printed when the project has no todos yet.
@@ -24,7 +23,7 @@ const FIELD_GAP: &str = "  ";
 pub fn todo(
     command: Option<TodoCommand>,
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
 ) -> Result<Vec<Row>, CliError> {
     match command {
@@ -47,7 +46,7 @@ fn parse_id(id: &str) -> Result<TodoId, CliError> {
 ///
 /// # Errors
 /// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliError> {
+fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Vec<Row>, CliError> {
     let todos = store.todos(project)?;
     if todos.is_empty() {
         return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
@@ -76,7 +75,7 @@ fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliEr
 /// [`CliError::InvalidTodoId`] for a blank dependency id, or a store failure.
 fn add(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     title: &str,
     deps: &[String],
@@ -101,7 +100,7 @@ fn add(
 /// when no todo has that id, or a store failure.
 fn set_status(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     id: &str,
     status: TodoStatus,
@@ -121,7 +120,11 @@ fn set_status(
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoId`] for a blank id, or a store failure.
-fn remove(store: &dyn CoordinationStore, project: &Path, id: &str) -> Result<Vec<Row>, CliError> {
+fn remove(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    id: &str,
+) -> Result<Vec<Row>, CliError> {
     let parsed = parse_id(id)?;
     if store.delete_todo(project, &parsed)? {
         Ok(vec![Row::unlabeled(
@@ -153,11 +156,11 @@ mod tests {
     }
 
     impl CoordinationStore for FakeStore {
-        fn todos(&self, _project: &Path) -> Result<Vec<Todo>, ConfigError> {
+        fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
             Ok(self.todos.borrow().clone())
         }
 
-        fn todo(&self, _project: &Path, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
+        fn todo(&self, _project: &ProjectRoot, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
             Ok(self
                 .todos
                 .borrow()
@@ -168,7 +171,7 @@ mod tests {
 
         fn add_todo(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             author: &Author,
             title: &TodoTitle,
             deps: &[TodoId],
@@ -187,7 +190,7 @@ mod tests {
 
         fn set_todo_status(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             author: &Author,
             id: &TodoId,
             status: TodoStatus,
@@ -209,20 +212,20 @@ mod tests {
             }
         }
 
-        fn delete_todo(&self, _project: &Path, id: &TodoId) -> Result<bool, ConfigError> {
+        fn delete_todo(&self, _project: &ProjectRoot, id: &TodoId) -> Result<bool, ConfigError> {
             let mut todos = self.todos.borrow_mut();
             let before = todos.len();
             todos.retain(|todo| todo.id() != id);
             Ok(todos.len() != before)
         }
 
-        fn scratchpads(&self, _project: &Path) -> Result<Vec<Scratchpad>, ConfigError> {
+        fn scratchpads(&self, _project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError> {
             unreachable!("todo commands never touch scratchpads")
         }
 
         fn scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _key: &ScratchpadKey,
         ) -> Result<Option<Scratchpad>, ConfigError> {
             unreachable!("todo commands never touch scratchpads")
@@ -230,7 +233,7 @@ mod tests {
 
         fn set_scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _author: &Author,
             _key: &ScratchpadKey,
             _body: &str,
@@ -240,23 +243,27 @@ mod tests {
 
         fn delete_scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _key: &ScratchpadKey,
         ) -> Result<bool, ConfigError> {
             unreachable!("todo commands never touch scratchpads")
         }
 
-        fn values(&self, _project: &Path) -> Result<Vec<KeyValue>, ConfigError> {
+        fn values(&self, _project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError> {
             unreachable!("todo commands never touch key-values")
         }
 
-        fn value(&self, _project: &Path, _key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {
+        fn value(
+            &self,
+            _project: &ProjectRoot,
+            _key: &KvKey,
+        ) -> Result<Option<KeyValue>, ConfigError> {
             unreachable!("todo commands never touch key-values")
         }
 
         fn set_value(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _author: &Author,
             _key: &KvKey,
             _value: &str,
@@ -264,13 +271,13 @@ mod tests {
             unreachable!("todo commands never touch key-values")
         }
 
-        fn delete_value(&self, _project: &Path, _key: &KvKey) -> Result<bool, ConfigError> {
+        fn delete_value(&self, _project: &ProjectRoot, _key: &KvKey) -> Result<bool, ConfigError> {
             unreachable!("todo commands never touch key-values")
         }
 
         fn import(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _scratchpads: &[Scratchpad],
             _todos: &[Todo],
             _values: &[KeyValue],
@@ -279,8 +286,8 @@ mod tests {
         }
     }
 
-    fn project() -> PathBuf {
-        PathBuf::from("/repo/muster.yml")
+    fn project() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
     }
 
     /// The added id is the row detail, so a script can capture it directly.

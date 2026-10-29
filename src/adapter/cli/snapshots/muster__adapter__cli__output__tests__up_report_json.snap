@@ -1,10 +1,12 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 773
 expression: json(&report).unwrap()
 ---
 {
-  "project": "/home/me/shop/muster.yml",
+  "project": {
+    "name": "shop",
+    "root": "/home/me/shop"
+  },
   "action": "up",
   "processes": [
     {
@@ -13,9 +15,7 @@ expression: json(&report).unwrap()
       "reason": null,
       "status": {
         "name": "dev server",
-        "kind": "command",
         "state": "running",
-        "activity": "idle",
         "pid": 4123,
         "uptime": 3723,
         "restarts": 0,
@@ -32,9 +32,7 @@ expression: json(&report).unwrap()
       "reason": null,
       "status": {
         "name": "café",
-        "kind": "terminal",
         "state": "crashed",
-        "activity": "idle",
         "pid": null,
         "uptime": null,
         "restarts": 0,
@@ -45,20 +43,20 @@ expression: json(&report).unwrap()
           "status": 127,
           "signal": null
         },
-        "stop_grace": null
+        "stop_grace": 5
       }
     },
     {
-      "name": "claude",
+      "name": "api",
       "outcome": "refused",
-      "reason": "left stopped: its agent session cannot be resumed",
+      "reason": "cannot start: the pid 4242 may still run unsupervised",
       "status": null
     }
   ],
   "notices": [
     {
       "at": "2027-01-15T08:00:00Z",
-      "project": "/home/me/shop/muster.yml",
+      "project": "/home/me/shop",
       "process": "café",
       "level": "error",
       "message": "crashed: exited with status 127"
@@ -67,7 +65,7 @@ expression: json(&report).unwrap()
   "other_notices": [
     {
       "at": "2027-01-15T08:00:00Z",
-      "project": "/home/me/shop/muster.yml",
+      "project": "/home/me/shop",
       "process": "cron",
       "level": "error",
       "message": "crashed: ended by signal: Killed"

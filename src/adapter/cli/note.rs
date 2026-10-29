@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::{
     args::NoteCommand,
     error::CliError,
@@ -8,6 +6,7 @@ use super::{
 use crate::domain::{
     coordination::{Author, ScratchpadKey},
     port::CoordinationStore,
+    value::ProjectRoot,
 };
 
 /// Line printed when the project has no notes yet.
@@ -22,7 +21,7 @@ const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>
 pub fn note(
     command: Option<NoteCommand>,
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
 ) -> Result<Vec<Row>, CliError> {
     match command {
@@ -45,7 +44,7 @@ fn parse_key(key: &str) -> Result<ScratchpadKey, CliError> {
 ///
 /// # Errors
 /// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliError> {
+fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Vec<Row>, CliError> {
     let notes = store.scratchpads(project)?;
     if notes.is_empty() {
         return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
@@ -67,7 +66,11 @@ fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliEr
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, [`CliError::UnknownNote`]
 /// when no note is stored under it, or a store read failure.
-fn get(store: &dyn CoordinationStore, project: &Path, key: &str) -> Result<Vec<Row>, CliError> {
+fn get(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Vec<Row>, CliError> {
     let parsed = parse_key(key)?;
     let note = store
         .scratchpad(project, &parsed)?
@@ -85,7 +88,7 @@ fn get(store: &dyn CoordinationStore, project: &Path, key: &str) -> Result<Vec<R
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     key: &str,
     body: &str,
@@ -102,7 +105,11 @@ fn set(
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, or a store write failure.
-fn remove(store: &dyn CoordinationStore, project: &Path, key: &str) -> Result<Vec<Row>, CliError> {
+fn remove(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Vec<Row>, CliError> {
     let parsed = parse_key(key)?;
     if store.delete_scratchpad(project, &parsed)? {
         Ok(vec![Row::unlabeled(
@@ -134,13 +141,13 @@ mod tests {
     }
 
     impl CoordinationStore for FakeStore {
-        fn scratchpads(&self, _project: &Path) -> Result<Vec<Scratchpad>, ConfigError> {
+        fn scratchpads(&self, _project: &ProjectRoot) -> Result<Vec<Scratchpad>, ConfigError> {
             Ok(self.notes.borrow().clone())
         }
 
         fn scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             key: &ScratchpadKey,
         ) -> Result<Option<Scratchpad>, ConfigError> {
             Ok(self
@@ -153,7 +160,7 @@ mod tests {
 
         fn set_scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             author: &Author,
             key: &ScratchpadKey,
             body: &str,
@@ -172,7 +179,7 @@ mod tests {
 
         fn delete_scratchpad(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             key: &ScratchpadKey,
         ) -> Result<bool, ConfigError> {
             let mut notes = self.notes.borrow_mut();
@@ -181,17 +188,17 @@ mod tests {
             Ok(notes.len() != before)
         }
 
-        fn todos(&self, _project: &Path) -> Result<Vec<Todo>, ConfigError> {
+        fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
             unreachable!("note commands never touch todos")
         }
 
-        fn todo(&self, _project: &Path, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
+        fn todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
             unreachable!("note commands never touch todos")
         }
 
         fn add_todo(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _author: &Author,
             _title: &TodoTitle,
             _deps: &[TodoId],
@@ -201,7 +208,7 @@ mod tests {
 
         fn set_todo_status(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _author: &Author,
             _id: &TodoId,
             _status: TodoStatus,
@@ -209,21 +216,25 @@ mod tests {
             unreachable!("note commands never touch todos")
         }
 
-        fn delete_todo(&self, _project: &Path, _id: &TodoId) -> Result<bool, ConfigError> {
+        fn delete_todo(&self, _project: &ProjectRoot, _id: &TodoId) -> Result<bool, ConfigError> {
             unreachable!("note commands never touch todos")
         }
 
-        fn values(&self, _project: &Path) -> Result<Vec<KeyValue>, ConfigError> {
+        fn values(&self, _project: &ProjectRoot) -> Result<Vec<KeyValue>, ConfigError> {
             unreachable!("note commands never touch key-values")
         }
 
-        fn value(&self, _project: &Path, _key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {
+        fn value(
+            &self,
+            _project: &ProjectRoot,
+            _key: &KvKey,
+        ) -> Result<Option<KeyValue>, ConfigError> {
             unreachable!("note commands never touch key-values")
         }
 
         fn set_value(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _author: &Author,
             _key: &KvKey,
             _value: &str,
@@ -231,13 +242,13 @@ mod tests {
             unreachable!("note commands never touch key-values")
         }
 
-        fn delete_value(&self, _project: &Path, _key: &KvKey) -> Result<bool, ConfigError> {
+        fn delete_value(&self, _project: &ProjectRoot, _key: &KvKey) -> Result<bool, ConfigError> {
             unreachable!("note commands never touch key-values")
         }
 
         fn import(
             &self,
-            _project: &Path,
+            _project: &ProjectRoot,
             _scratchpads: &[Scratchpad],
             _todos: &[Todo],
             _values: &[KeyValue],
@@ -246,8 +257,8 @@ mod tests {
         }
     }
 
-    fn project() -> PathBuf {
-        PathBuf::from("/repo/muster.yml")
+    fn project() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
     }
 
     /// Setting then listing shows the key; getting returns the body verbatim.

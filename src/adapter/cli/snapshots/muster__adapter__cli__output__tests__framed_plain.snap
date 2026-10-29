@@ -2,32 +2,26 @@
 source: src/adapter/cli/output.rs
 expression: "printed.join(\"\\n\\n\")"
 ---
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: running (pid 4200)
 
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: stopped
 
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: running (pid 4200)
 
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: stopped
 
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: restarted (pid 4200)
 
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: running (pid 4200)
 
-/home/me/shop/muster.yml
-● claude: running (pid 4200)
-
-/home/me/shop/muster.yml
+/home/me/shop
 ● api: stopped
-
-/home/me/shop/muster.yml
-! api: queued: it reopens once its previous run has exited
 
 stopped the muster service
 every process keeps running; the next muster command starts the service again

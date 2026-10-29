@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::{
-    adapter::{holder::HolderError, hooks::HookError, service::ServiceError},
+    adapter::{holder::HolderError, service::ServiceError},
     domain::{config::ConfigError, pty::PtyError},
 };
 
@@ -16,15 +16,12 @@ pub enum MusterError {
     /// An I/O failure while driving the terminal or a child process.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
-    /// A workspace configuration failure.
+    /// A failure reading or writing muster's stored state.
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// A PTY / process-spawning failure.
     #[error(transparent)]
     Pty(#[from] PtyError),
-    /// A provider lifecycle integration failure.
-    #[error(transparent)]
-    Hook(#[from] HookError),
     /// A process holder failure.
     #[error(transparent)]
     Holder(#[from] HolderError),

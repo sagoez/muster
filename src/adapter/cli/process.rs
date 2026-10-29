@@ -4,10 +4,13 @@
 //! with the notices supervision raised about them meanwhile.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     convert::Infallible,
-    fs,
-    io::{self, Write},
+    env,
+    ffi::OsString,
+    fs::{self, File},
+    io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -19,12 +22,13 @@ use super::{
     error::CliError,
     json_log_lines::JsonLogLines,
     log_follower::LogFollower,
-    log_text::LogText,
+    log_read::LogRead,
     notice_view::NoticeView,
     outcome::Outcome,
     presenter::Presenter,
     process_outcome::ProcessOutcome,
     process_view::ProcessView,
+    project_identity_view::ProjectIdentityView,
     service_client::ServiceClient,
     settle_watch::SettleWatch,
     settling::{Settling, UNBOUNDED},
@@ -34,13 +38,15 @@ use crate::{
     adapter::{
         holder::rotated_path,
         service::{
-            BatchOutcome, Notice, NoticeLevel, ProcessAction, ProcessStatus, ProjectStatus,
-            ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+            BatchOutcome, Notice, ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody,
+            ServiceErrorKind, ServiceRequest, ServiceResponse,
         },
     },
     domain::{
-        process::{ProcessKind, ProcessState},
-        value::{ProcessName, ProcessRef, UnresolvedProcess},
+        config::ConfigError,
+        process::ProcessState,
+        project::Project,
+        value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
     },
 };
 
@@ -48,26 +54,36 @@ use crate::{
 const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// Pause between reads of a followed log.
 const FOLLOW_POLL: Duration = Duration::from_millis(200);
-/// Longest `muster run` waits for the service to see the command it added
-/// to `muster.yml`, which reaches the service through its config watcher.
-const PICKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How an answer to `ps` of one project that listed none is reported.
 const EMPTY_STATUS: &str = "a status listing no project";
+/// Attempts at reading a log's two generations from one rotation, before
+/// reading them as they are.
+const LOG_READ_ATTEMPTS: usize = 3;
 
-/// What `ps` reports: the processes of `project`, or of every project the
-/// service has loaded when it is `None`.
+/// What `ps` reports: the processes of the project at `project`, or of
+/// every project the service has loaded when it is `None`.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the service cannot be reached or the project
 /// does not load.
-pub fn ps(client: &ServiceClient, project: Option<&Path>) -> Result<Vec<ProjectStatus>, CliError> {
+pub fn ps(
+    client: &ServiceClient,
+    project: Option<&ProjectRoot>,
+) -> Result<Vec<ProjectStatus>, CliError> {
     let request = ServiceRequest::Ps {
-        project: project.map(Path::to_path_buf),
+        project: project.cloned(),
     };
     match client.send(&request)? {
         ServiceResponse::Status(statuses) => Ok(statuses),
-        other => Err(unexpected(other, project.unwrap_or(Path::new("")), None)),
+        ServiceResponse::Error(body) => Err(refusal(body, None, None)),
+        other => Err(CliError::UnexpectedAnswer((&other).into())),
     }
+}
+
+/// The environment this command runs in, which the service gives each
+/// process it starts for the command.
+pub fn caller_environment() -> BTreeMap<OsString, OsString> {
+    env::vars_os().collect()
 }
 
 /// Starts `project`'s `autostart` processes that are not running and
@@ -78,7 +94,7 @@ pub fn ps(client: &ServiceClient, project: Option<&Path>) -> Result<Vec<ProjectS
 /// Returns a [`CliError`] when the service cannot be reached or refuses.
 pub fn up(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, CliError> {
     let before = status(client, project)?;
@@ -86,7 +102,8 @@ pub fn up(
     let sent = SystemTime::now();
     let batch = batch(
         client.send(&ServiceRequest::Up {
-            project: project.to_path_buf(),
+            project: project.root().clone(),
+            environment: caller_environment(),
         })?,
         project,
     )?;
@@ -112,34 +129,14 @@ pub(super) fn ready_to_send(watch: &mut dyn SettleWatch) -> Result<(), CliError>
     Ok(())
 }
 
-/// Whether `process` is an agent that may still be running.
-fn running_agent(process: &ProcessStatus) -> bool {
-    *process.kind() == ProcessKind::Agent && process.state().may_be_running()
-}
-
-/// Whether any agent of `project` may still be running, so stopping its
-/// agents would stop something.
-///
-/// # Errors
-/// Returns a [`CliError`] when the service cannot be reached or the project
-/// does not load.
-pub fn agents_may_run(client: &ServiceClient, project: &Path) -> Result<bool, CliError> {
-    Ok(status(client, project)?
-        .processes()
-        .iter()
-        .any(running_agent))
-}
-
-/// Stops `project`'s commands and terminals, and its agents too when
-/// `agents` is set, and reports each one the service stopped once it has
-/// gone, and each agent left running. `watch` hears what is still stopping.
+/// Stops every process of `project` and reports each one the service
+/// stopped once it has gone. `watch` hears what is still stopping.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the service cannot be reached or refuses.
 pub fn down(
     client: &ServiceClient,
-    project: &Path,
-    agents: bool,
+    project: &Project,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, CliError> {
     let before = status(client, project)?;
@@ -147,8 +144,7 @@ pub fn down(
     let sent = SystemTime::now();
     let batch = batch(
         client.send(&ServiceRequest::Down {
-            project: project.to_path_buf(),
-            agents,
+            project: project.root().clone(),
         })?,
         project,
     )?;
@@ -159,23 +155,7 @@ pub fn down(
         .sent(sent)
         .build();
     let report = report(client, project, settling, watch)?;
-    let report = with_refusals(report, &batch, client, project)?;
-    if agents {
-        return Ok(report);
-    }
-    let kept: Vec<ProcessOutcome> = status(client, project)?
-        .processes()
-        .iter()
-        .filter(|process| running_agent(process))
-        .map(|process| {
-            ProcessOutcome::builder()
-                .name(process.name().clone())
-                .outcome(Outcome::KeptRunning)
-                .status(Some(ProcessView::from(process)))
-                .build()
-        })
-        .collect();
-    Ok(report.with_more(kept))
+    with_refusals(report, &batch, client, project)
 }
 
 /// Applies `action` to the process of `project` that `pick` picks from its
@@ -187,7 +167,7 @@ pub fn down(
 /// cannot be reached or refuses.
 pub fn control(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     action: ProcessAction,
     watch: &mut dyn SettleWatch,
@@ -196,14 +176,16 @@ pub fn control(
 }
 
 /// Like [`control`], but waits at most `bound` for the process to settle and
-/// otherwise reports it as still starting or stopping.
+/// otherwise reports it as still starting or stopping. A stop or kill of a
+/// process that is not running is not sent, so a crashed process stays
+/// crashed and is reported as not running.
 ///
 /// # Errors
 /// Returns a [`CliError`] when `pick` finds no process, or the service
 /// cannot be reached or refuses.
 pub fn control_within(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     action: ProcessAction,
     bound: Duration,
@@ -213,15 +195,19 @@ pub fn control_within(
     let name = pick(&before)?;
     ready_to_send(watch)?;
     let sent = SystemTime::now();
-    expect_ok(
-        client.send(&ServiceRequest::Control {
-            project: project.to_path_buf(),
-            name: name.clone(),
-            action,
-        })?,
-        project,
-        Some(&name),
-    )?;
+    let idle = find(&before, &name).is_some_and(|process| !process.state().may_be_running());
+    if !(Action::from(action).halts() && idle) {
+        expect_ok(
+            client.send(&ServiceRequest::Control {
+                project: project.root().clone(),
+                name: name.clone(),
+                action,
+                environment: caller_environment(),
+            })?,
+            project,
+            Some(&name),
+        )?;
+    }
     let names = [name];
     let settling = Settling::builder()
         .action(action.into())
@@ -233,65 +219,69 @@ pub fn control_within(
     report(client, project, settling, watch)
 }
 
-/// Starts `name`, which `muster run` has just added to `project`'s config,
-/// once the service has picked the change up, and reports it like `start`,
-/// telling `watch` while it waits.
+/// Starts `name`, which `muster run` has just added to `project`, and
+/// reports it like `start`, telling `watch` while it waits.
 ///
 /// # Errors
-/// Returns [`CliError::NotPickedUp`] when the service does not know the
-/// process within a few seconds, or another [`CliError`] when it cannot be
-/// reached or refuses.
-pub fn start_registered(
+/// Returns a [`CliError`] when the service cannot be reached or refuses.
+pub fn start_added(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     name: ProcessName,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, CliError> {
-    let deadline = Instant::now() + PICKUP_TIMEOUT;
-    let request = ServiceRequest::Control {
-        project: project.to_path_buf(),
-        name: name.clone(),
-        action: ProcessAction::Start,
-    };
-    loop {
-        let before = status(client, project)?;
-        let sent = SystemTime::now();
-        match client.send(&request)? {
-            ServiceResponse::Ok => {
-                let names = [name];
-                let settling = Settling::builder()
-                    .action(Action::Run)
-                    .before(&before)
-                    .names(&names)
-                    .sent(sent)
-                    .build();
-                return report(client, project, settling, watch);
-            },
-            ServiceResponse::Error(body)
-                if *body.kind() == ServiceErrorKind::UnknownProcess
-                    && Instant::now() < deadline =>
-            {
-                thread::sleep(SETTLE_POLL);
-            },
-            ServiceResponse::Error(body) if *body.kind() == ServiceErrorKind::UnknownProcess => {
-                return Err(CliError::NotPickedUp {
-                    name,
-                    project: project.to_path_buf(),
-                    waited: PICKUP_TIMEOUT,
-                });
-            },
-            other => return Err(unexpected(other, project, Some(&name))),
-        }
-    }
+    let before = status(client, project)?;
+    let sent = SystemTime::now();
+    expect_ok(
+        client.send(&ServiceRequest::Control {
+            project: project.root().clone(),
+            name: name.clone(),
+            action: ProcessAction::Start,
+            environment: caller_environment(),
+        })?,
+        project,
+        Some(&name),
+    )?;
+    let names = [name];
+    let settling = Settling::builder()
+        .action(Action::Run)
+        .before(&before)
+        .names(&names)
+        .sent(sent)
+        .build();
+    report(client, project, settling, watch)
+}
+
+/// Waits for the processes `names` of `project`, just removed from its
+/// stack while listed as `before`, to stop and leave the listing, and
+/// reports each as stopped or as not having run.
+///
+/// # Errors
+/// Returns a [`CliError`] when the service cannot be reached.
+pub fn settle_removed(
+    client: &ServiceClient,
+    project: &Project,
+    before: &ProjectStatus,
+    names: &[ProcessName],
+    sent: SystemTime,
+    watch: &mut dyn SettleWatch,
+) -> Result<ActionReport, CliError> {
+    let settling = Settling::builder()
+        .action(Action::Remove)
+        .before(before)
+        .names(names)
+        .sent(sent)
+        .build();
+    report(client, project, settling, watch)
 }
 
 /// The recent notices of `project` and of the service, oldest first.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the service cannot be reached or refuses.
-pub fn notices(client: &ServiceClient, project: &Path) -> Result<Vec<Notice>, CliError> {
+pub fn notices(client: &ServiceClient, project: &Project) -> Result<Vec<Notice>, CliError> {
     match client.send(&ServiceRequest::Notices {
-        project: project.to_path_buf(),
+        project: project.root().clone(),
     })? {
         ServiceResponse::Notices(notices) => Ok(notices),
         other => Err(unexpected(other, project, None)),
@@ -307,49 +297,111 @@ pub fn notices(client: &ServiceClient, project: &Path) -> Result<Vec<Notice>, Cl
 /// read.
 pub fn logs(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     screen: bool,
-) -> Result<LogText, CliError> {
+) -> Result<LogRead, CliError> {
     let name = pick(&status(client, project)?)?;
-    let text = LogText::builder()
-        .project(project.to_path_buf())
-        .name(name.clone());
+    let read = LogRead::builder().name(name.clone());
     if screen {
         return match client.send(&ServiceRequest::Screen {
-            project: project.to_path_buf(),
+            project: project.root().clone(),
             name: name.clone(),
         })? {
-            ServiceResponse::Screen(screen) => Ok(text.log(None).text(screen).build()),
+            ServiceResponse::Screen(screen) => {
+                Ok(read.log(None).bytes(screen.into_bytes()).build())
+            },
             other => Err(unexpected(other, project, Some(&name))),
         };
     }
     let log = log_path(client, project, &name)?;
-    let mut bytes = Vec::new();
-    for path in [rotated_path(&log), log.clone()] {
-        match fs::read(&path) {
-            Ok(read) => bytes.extend(read),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-            Err(source) => return Err(CliError::Log { path, source }),
+    let bytes = read_generations(&log)?;
+    Ok(read.log(Some(log)).bytes(bytes).build())
+}
+
+/// Both generations of `log`, the older first, read from one rotation: the
+/// rotated file is opened before the live one, and the read is taken again
+/// when a rotation replaced the rotated file in between, so no line is lost
+/// or shown twice.
+///
+/// # Errors
+/// Returns [`CliError::Log`] when a file cannot be read.
+fn read_generations(log: &Path) -> Result<Vec<u8>, CliError> {
+    let rotated_path = rotated_path(log);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let rotated = open_if_present(&rotated_path)?;
+        let live = open_if_present(log)?;
+        let settled = attempt >= LOG_READ_ATTEMPTS
+            || same_file_at(rotated.as_ref(), &rotated_path)
+                .map_err(|source| log_error(&rotated_path, source))?;
+        if !settled {
+            continue;
         }
+        let mut bytes = Vec::new();
+        for (file, path) in [(rotated, rotated_path.as_path()), (live, log)] {
+            if let Some(mut file) = file {
+                file.read_to_end(&mut bytes)
+                    .map_err(|source| log_error(path, source))?;
+            }
+        }
+        return Ok(bytes);
     }
-    Ok(text
-        .log(Some(log))
-        .text(String::from_utf8_lossy(&bytes).into_owned())
-        .build())
+}
+
+/// `path` opened for reading, or none when it does not exist.
+///
+/// # Errors
+/// Returns [`CliError::Log`] when it exists and cannot be opened.
+fn open_if_present(path: &Path) -> Result<Option<File>, CliError> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(log_error(path, source)),
+    }
+}
+
+/// Whether `path` still names `opened`, or still names nothing when
+/// nothing was opened.
+///
+/// # Errors
+/// Returns the [`io::Error`] of a file that cannot be inspected.
+fn same_file_at(opened: Option<&File>, path: &Path) -> io::Result<bool> {
+    let now = match fs::metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    Ok(match (opened, now) {
+        (None, None) => true,
+        (Some(file), Some(now)) => {
+            let then = file.metadata()?;
+            then.dev() == now.dev() && then.ino() == now.ino()
+        },
+        (None, Some(_)) | (Some(_), None) => false,
+    })
+}
+
+/// The failure of reading the log at `path`.
+fn log_error(path: &Path, source: io::Error) -> CliError {
+    CliError::Log {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// Copies the log of the process `pick` picks into `out`, the older
 /// generation first, then follows it across rotations and restarts until the
 /// command is interrupted, waiting for a process that is not running to
-/// write. With `json`, each log line is written as one JSON [`LogText`] line.
+/// write. With `json`, each log line is written as one JSON line.
 ///
 /// # Errors
 /// Returns a [`CliError`] when `pick` finds no process, or the log cannot be
 /// read or written out.
 pub fn follow_logs(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     json: bool,
     out: &mut dyn Write,
@@ -359,12 +411,12 @@ pub fn follow_logs(
     if !json {
         return follow(&log, out);
     }
-    let template = LogText::builder()
-        .project(project.to_path_buf())
+    let template = LogRead::builder()
         .name(name)
         .log(Some(log.clone()))
-        .text(String::new())
-        .build();
+        .bytes(Vec::new())
+        .build()
+        .text_in(project.root());
     follow(&log, &mut JsonLogLines::new(out, template))
 }
 
@@ -378,21 +430,13 @@ fn follow(log: &Path, out: &mut dyn Write) -> Result<Infallible, CliError> {
     match fs::read(&rotated) {
         Ok(bytes) => out.write_all(&bytes).map_err(CliError::Output)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-        Err(source) => {
-            return Err(CliError::Log {
-                path: rotated,
-                source,
-            });
-        },
+        Err(source) => return Err(log_error(&rotated, source)),
     }
     let mut follower = LogFollower::new(log.to_path_buf());
     loop {
         follower.pump(out).map_err(|source| match source.kind() {
             io::ErrorKind::BrokenPipe => CliError::Output(source),
-            _ => CliError::Log {
-                path: log.to_path_buf(),
-                source,
-            },
+            _ => log_error(log, source),
         })?;
         out.flush().map_err(CliError::Output)?;
         thread::sleep(FOLLOW_POLL);
@@ -406,11 +450,11 @@ fn follow(log: &Path, out: &mut dyn Write) -> Result<Infallible, CliError> {
 /// know the process.
 fn log_path(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     name: &ProcessName,
 ) -> Result<PathBuf, CliError> {
     match client.send(&ServiceRequest::Log {
-        project: project.to_path_buf(),
+        project: project.root().clone(),
         name: name.clone(),
     })? {
         ServiceResponse::Log(log) => Ok(log),
@@ -423,16 +467,21 @@ fn log_path(
 /// # Errors
 /// Returns a [`CliError`] when the service cannot be reached or the project
 /// does not load.
-pub(crate) fn status(client: &ServiceClient, project: &Path) -> Result<ProjectStatus, CliError> {
-    ps(client, Some(project))?
-        .into_iter()
-        .next()
-        .ok_or(CliError::UnexpectedAnswer(EMPTY_STATUS))
+pub fn status(client: &ServiceClient, project: &Project) -> Result<ProjectStatus, CliError> {
+    match client.send(&ServiceRequest::Ps {
+        project: Some(project.root().clone()),
+    })? {
+        ServiceResponse::Status(statuses) => statuses
+            .into_iter()
+            .next()
+            .ok_or(CliError::UnexpectedAnswer(EMPTY_STATUS)),
+        other => Err(unexpected(other, project, None)),
+    }
 }
 
 /// Picks, from a listing of `project`, the process `name` means.
 pub fn named<'a>(
-    project: &'a Path,
+    project: &'a Project,
     name: &'a ProcessRef,
 ) -> impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError> + 'a {
     move |status| resolve(status, project, name)
@@ -442,7 +491,7 @@ pub fn named<'a>(
 /// the person chooses among all of them through `presenter` when the name
 /// was left out.
 pub fn named_or_chosen<'a>(
-    project: &'a Path,
+    project: &'a Project,
     name: Option<&'a ProcessRef>,
     presenter: Presenter,
 ) -> impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError> + 'a {
@@ -450,7 +499,7 @@ pub fn named_or_chosen<'a>(
         Some(name) => resolve(status, project, name),
         None => {
             let candidates: Vec<&ProcessStatus> = status.processes().iter().collect();
-            presenter.choose_process(&candidates, project)
+            presenter.choose_process(&candidates, project.name())
         },
     }
 }
@@ -465,7 +514,7 @@ pub fn named_or_chosen<'a>(
 /// no single process, or no process was chosen.
 pub fn running_named_or_chosen(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     name: Option<&ProcessRef>,
     presenter: Presenter,
 ) -> Result<ProcessName, CliError> {
@@ -484,9 +533,9 @@ pub fn running_named_or_chosen(
         })
         .collect();
     if running.is_empty() {
-        return Err(CliError::NothingRunning(project.to_path_buf()));
+        return Err(CliError::NothingRunning(project.name().clone()));
     }
-    presenter.choose_process(&running, project)
+    presenter.choose_process(&running, project.name())
 }
 
 /// The process of `status` that `name` means.
@@ -494,9 +543,9 @@ pub fn running_named_or_chosen(
 /// # Errors
 /// Returns [`CliError::UnknownProcess`] listing every valid name, or
 /// [`CliError::AmbiguousProcess`].
-pub(crate) fn resolve(
+pub fn resolve(
     status: &ProjectStatus,
-    project: &Path,
+    project: &Project,
     name: &ProcessRef,
 ) -> Result<ProcessName, CliError> {
     let names: Vec<ProcessName> = status
@@ -504,16 +553,29 @@ pub(crate) fn resolve(
         .iter()
         .map(|process| process.name().clone())
         .collect();
+    resolve_among(names, project, name)
+}
+
+/// The one of `names`, the processes of `project`, that `name` means.
+///
+/// # Errors
+/// Returns [`CliError::UnknownProcess`] listing every valid name, or
+/// [`CliError::AmbiguousProcess`].
+pub fn resolve_among(
+    names: Vec<ProcessName>,
+    project: &Project,
+    name: &ProcessRef,
+) -> Result<ProcessName, CliError> {
     match name.resolve(&names) {
         Ok(found) => Ok(found.clone()),
         Err(UnresolvedProcess::Unknown(typed)) => Err(CliError::UnknownProcess {
             name: typed.to_string(),
-            project: project.to_path_buf(),
+            project: project.name().clone(),
             valid: names,
         }),
         Err(UnresolvedProcess::Ambiguous(typed, candidates)) => Err(CliError::AmbiguousProcess {
             name: typed.to_string(),
-            project: project.to_path_buf(),
+            project: project.name().clone(),
             candidates,
         }),
     }
@@ -531,7 +593,7 @@ pub(crate) fn resolve(
 /// [`CliError`] when the service cannot be reached.
 pub(super) fn report(
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
     settling: Settling<'_>,
     watch: &mut dyn SettleWatch,
 ) -> Result<ActionReport, CliError> {
@@ -590,7 +652,7 @@ pub(super) fn report(
         .collect();
     let (notices, other_notices): (Vec<NoticeView>, Vec<NoticeView>) = notices(client, project)?
         .iter()
-        .filter(|notice| *notice.at() >= sent && *notice.level() != NoticeLevel::Attention)
+        .filter(|notice| *notice.at() >= sent)
         .map(NoticeView::from)
         .partition(|notice| {
             notice
@@ -599,7 +661,7 @@ pub(super) fn report(
                 .is_some_and(|process| names.contains(process))
         });
     Ok(ActionReport::builder()
-        .project(project.to_path_buf())
+        .project(ProjectIdentityView::from(project))
         .action(action)
         .processes(processes)
         .notices(notices)
@@ -628,7 +690,7 @@ fn with_refusals(
     report: ActionReport,
     batch: &BatchOutcome,
     client: &ServiceClient,
-    project: &Path,
+    project: &Project,
 ) -> Result<ActionReport, CliError> {
     if batch.refused().is_empty() {
         return Ok(report);
@@ -658,7 +720,7 @@ fn with_refusals(
 ///
 /// # Errors
 /// Returns the [`CliError`] for a refusal or an unexpected answer.
-fn batch(response: ServiceResponse, project: &Path) -> Result<BatchOutcome, CliError> {
+fn batch(response: ServiceResponse, project: &Project) -> Result<BatchOutcome, CliError> {
     match response {
         ServiceResponse::Batch(batch) => Ok(batch),
         other => Err(unexpected(other, project, None)),
@@ -666,7 +728,7 @@ fn batch(response: ServiceResponse, project: &Path) -> Result<BatchOutcome, CliE
 }
 
 /// The process `name` of `status`.
-fn find<'a>(status: &'a ProjectStatus, name: &ProcessName) -> Option<&'a ProcessStatus> {
+pub(super) fn find<'a>(status: &'a ProjectStatus, name: &ProcessName) -> Option<&'a ProcessStatus> {
     status
         .processes()
         .iter()
@@ -678,9 +740,9 @@ fn find<'a>(status: &'a ProjectStatus, name: &ProcessName) -> Option<&'a Process
 ///
 /// # Errors
 /// Returns the [`CliError`] for a refusal or an unexpected answer.
-pub(crate) fn expect_ok(
+pub fn expect_ok(
     response: ServiceResponse,
-    project: &Path,
+    project: &Project,
     name: Option<&ProcessName>,
 ) -> Result<(), CliError> {
     match response {
@@ -691,33 +753,37 @@ pub(crate) fn expect_ok(
 
 /// The failure for `response`, which the command did not expect: the
 /// refusal it carries, or an answer the command cannot use.
-pub(crate) fn unexpected(
+pub fn unexpected(
     response: ServiceResponse,
-    project: &Path,
+    project: &Project,
     name: Option<&ProcessName>,
 ) -> CliError {
     match response {
-        ServiceResponse::Error(body) => refusal(body, project, name),
+        ServiceResponse::Error(body) => refusal(body, Some(project), name),
         other => CliError::UnexpectedAnswer((&other).into()),
     }
 }
 
 /// The failure for the service's refusal `body` of a request about
 /// `project` and the process `name`, with what to do about it.
-fn refusal(body: ServiceErrorBody, project: &Path, name: Option<&ProcessName>) -> CliError {
-    match (body.kind(), name) {
-        (ServiceErrorKind::UnknownProject, _) => CliError::NoProjectConfig(project.to_path_buf()),
-        (ServiceErrorKind::InvalidConfig, _) => CliError::InvalidProjectConfig {
-            path: project.to_path_buf(),
-            message: body.message().clone(),
+fn refusal(
+    body: ServiceErrorBody,
+    project: Option<&Project>,
+    name: Option<&ProcessName>,
+) -> CliError {
+    match (body.kind(), project, name) {
+        (ServiceErrorKind::UnknownProject, Some(project), _) => {
+            CliError::Config(ConfigError::UnknownProject {
+                root: project.root().as_ref().clone(),
+            })
         },
-        (ServiceErrorKind::UnknownProcess, Some(name)) => CliError::UnknownProcess {
+        (ServiceErrorKind::UnknownProcess, Some(project), Some(name)) => CliError::UnknownProcess {
             name: name.to_string(),
-            project: project.to_path_buf(),
+            project: project.name().clone(),
             valid: body.candidates().clone(),
         },
-        (ServiceErrorKind::NotRunning, Some(name)) => CliError::NotRunning(name.clone()),
-        (kind, _) => CliError::Refused {
+        (ServiceErrorKind::NotRunning, _, Some(name)) => CliError::NotRunning(name.clone()),
+        (kind, ..) => CliError::Refused {
             kind: *kind,
             message: body.message().clone(),
         },
@@ -726,6 +792,8 @@ fn refusal(body: ServiceErrorBody, project: &Path, name: Option<&ProcessName>) -
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
@@ -740,5 +808,37 @@ mod tests {
         );
         assert_eq!(wait_end_at_deadline(own, UNBOUNDED), WaitEnd::TimedOut);
         assert_eq!(wait_end_at_deadline(own, own), WaitEnd::TimedOut);
+    }
+
+    /// Both generations are read older first, byte for byte, including
+    /// bytes that are not UTF-8; a missing generation reads as nothing.
+    #[test]
+    fn both_log_generations_are_read_older_first_and_unchanged() {
+        let scratch = TempDir::new().unwrap();
+        let log = scratch.path().join("api.log");
+
+        assert!(read_generations(&log).unwrap().is_empty());
+        fs::write(&log, b"live \xff\n").unwrap();
+        assert_eq!(read_generations(&log).unwrap(), b"live \xff\n");
+        fs::write(rotated_path(&log), b"old\n").unwrap();
+        assert_eq!(read_generations(&log).unwrap(), b"old\nlive \xff\n");
+    }
+
+    /// A file still named by its path is the same file; one replaced by a
+    /// rename, as a rotation does, is not.
+    #[test]
+    fn a_rotation_between_opens_is_noticed() {
+        let scratch = TempDir::new().unwrap();
+        let rotated = scratch.path().join("api.log.1");
+        let live = scratch.path().join("api.log");
+        fs::write(&rotated, b"old").unwrap();
+        fs::write(&live, b"new").unwrap();
+        let opened = File::open(&rotated).unwrap();
+
+        assert!(same_file_at(Some(&opened), &rotated).unwrap());
+        fs::rename(&live, &rotated).unwrap();
+        assert!(!same_file_at(Some(&opened), &rotated).unwrap());
+        assert!(same_file_at(None, &live).unwrap());
+        assert!(!same_file_at(None, &rotated).unwrap());
     }
 }

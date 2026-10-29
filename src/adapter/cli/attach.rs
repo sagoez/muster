@@ -25,7 +25,7 @@ use super::{
     attach_end::AttachEnd, attach_event::AttachEvent, attach_pump::AttachPump,
     detach_scanner::DetachScanner, error::CliError, host_signals::HostSignals,
     host_terminal::HostTerminal, process::unexpected, raw_mode_guard::RawModeGuard,
-    service_client::ServiceClient, session_alarm::SessionAlarm,
+    sanitize::printable, service_client::ServiceClient, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
 };
 use crate::{
@@ -36,7 +36,10 @@ use crate::{
         },
         service::{Located, ServiceRequest, ServiceResponse},
     },
-    domain::value::{DetachKey, ProcessName},
+    domain::{
+        project::Project,
+        value::{DetachKey, ProcessName},
+    },
 };
 
 /// Longest the holder may take to send its screen.
@@ -73,7 +76,7 @@ pub type Announce = Box<dyn FnOnce(&str) -> io::Result<()> + Send>;
 /// session's failure.
 pub fn attach_named(
     client: ServiceClient,
-    project: &Path,
+    project: &Project,
     name: ProcessName,
     terminal: HostTerminal,
     read_only: bool,
@@ -81,7 +84,7 @@ pub fn attach_named(
     announce: Announce,
 ) -> Result<AttachEnd, CliError> {
     let target = match client.send(&ServiceRequest::Locate {
-        project: project.to_path_buf(),
+        project: project.root().clone(),
         name: name.clone(),
     })? {
         ServiceResponse::Located(located) => located,
@@ -94,7 +97,7 @@ pub fn attach_named(
 /// The hint naming the process and the detach key, shown before the
 /// session takes over the terminal and in its window title while attached.
 pub fn attach_hint(name: &ProcessName, detach: &DetachKey) -> String {
-    format!("{name} - {detach} {HINT_DETACH}")
+    printable(&format!("{name} - {detach} {HINT_DETACH}"))
 }
 
 /// A person's terminal attached to one process: its screen drawn, its
@@ -350,7 +353,6 @@ mod tests {
         },
         domain::{
             color_scheme::ColorScheme,
-            process::ProcessKind,
             pty::{ExitCause, ExitOutcome, PtySize, SpawnRequest},
             value::{ByteSize, Cols, CommandLine, Rows},
         },
@@ -589,10 +591,12 @@ mod tests {
             let dir = scratch.path();
             let request = SpawnRequest::builder()
                 .process(name())
-                .kind(ProcessKind::Command)
-                .command(Some(CommandLine::try_new(command).unwrap()))
-                .project(Some(dir.join("muster.yml")))
+                .command(CommandLine::try_new(command).unwrap())
+                .project(Some(dir.to_path_buf()))
                 .size(size(ROWS, COLS))
+                .scrollback(SCROLLBACK)
+                .log_max_size(ByteSize::try_new(RawByteSize::mib(1)).unwrap())
+                .color_scheme(ColorScheme::Dark)
                 .build();
             let config = HolderConfig::builder()
                 .id(HolderId::generate().unwrap())

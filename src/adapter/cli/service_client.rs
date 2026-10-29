@@ -19,15 +19,15 @@ use super::{
 };
 use crate::{
     adapter::{
-        config,
         holder::{detached, reap},
-        private_dir::prepare_state_dir,
+        private_dir::{prepare_state_dir, state_dir},
         service::{
-            ServiceErrorKind, ServiceRequest, ServiceResponse,
+            ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
     },
     constants::APP_VERSION,
+    domain::value::ProjectRoot,
 };
 
 /// Longest to wait for a service this client started to accept requests.
@@ -43,6 +43,9 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(20);
 const START_LOCK_FILE: &str = "service.start.lock";
 /// Mode of the start lock: its owner's alone.
 const START_LOCK_MODE: u32 = 0o600;
+/// Longest a writer waits for a running service to hear that stored state
+/// changed; a service that does not answer in time reads fresh state later.
+const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A client of this user's muster service, which it starts on demand and
 /// replaces when the service runs an older muster version.
@@ -99,7 +102,7 @@ impl ServiceClient {
             Some(_) => match client.exchange(&ServiceRequest::Ps { project: None })? {
                 ServiceResponse::Status(statuses) => statuses
                     .iter()
-                    .map(|status| status.project().as_ref().clone())
+                    .map(|status| status.project().root().as_ref().clone())
                     .collect(),
                 other => return Err(CliError::UnexpectedAnswer((&other).into())),
             },
@@ -124,6 +127,34 @@ impl ServiceClient {
             .build())
     }
 
+    /// The status of `project` when a running service has it loaded, without
+    /// starting the service or loading the project.
+    ///
+    /// # Errors
+    /// Returns a [`CliError`] when a service holds the socket but does not
+    /// answer.
+    pub fn loaded_status(project: &ProjectRoot) -> Result<Option<ProjectStatus>, CliError> {
+        let client = Self::local()?;
+        if !matches!(client.probe()?, Probe::Running(_)) {
+            return Ok(None);
+        }
+        match client.exchange(&ServiceRequest::Ps { project: None })? {
+            ServiceResponse::Status(statuses) => Ok(statuses
+                .into_iter()
+                .find(|status| status.project().root() == project)),
+            other => Err(CliError::UnexpectedAnswer((&other).into())),
+        }
+    }
+
+    /// Sends `request` to a service that is running, best effort: absence,
+    /// a refusal, another version or a slow answer are all ignored, and no
+    /// service is started.
+    pub fn notify_if_running(request: &ServiceRequest) {
+        if let Ok(client) = Self::local() {
+            let _ = protocol::send_within(&client.socket, request, NOTIFY_TIMEOUT);
+        }
+    }
+
     /// The client of the service under this user's state directory, started
     /// from this binary.
     ///
@@ -131,7 +162,7 @@ impl ServiceClient {
     /// Returns a [`CliError`] when there is no state directory or the binary
     /// cannot be found.
     fn local() -> Result<Self, CliError> {
-        let state_dir = config::state_dir().ok_or(CliError::NoStateDir)?;
+        let state_dir = state_dir().ok_or(CliError::NoStateDir)?;
         let socket = protocol::socket_path(&state_dir);
         let binary = env::current_exe().map_err(|error| CliError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),

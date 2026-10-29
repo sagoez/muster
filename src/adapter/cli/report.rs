@@ -4,6 +4,7 @@ use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
+use super::sanitize::{printable, printable_lines};
 use crate::domain::coordination::Author;
 
 /// Columns before an author attribution suffix on a listed line.
@@ -88,17 +89,20 @@ pub struct Row {
 }
 
 impl Row {
-    /// An unlabeled row of the given kind.
+    /// An unlabeled row of the given kind, its detail made [`printable`].
     pub fn unlabeled(kind: RowKind, detail: impl Into<String>) -> Self {
-        Row::builder().kind(kind).detail(detail.into()).build()
+        Row::builder()
+            .kind(kind)
+            .detail(printable(&detail.into()))
+            .build()
     }
 
-    /// A labeled, glyphed row.
+    /// A labeled, glyphed row, its label and detail made [`printable`].
     pub fn labeled(kind: RowKind, label: impl Into<String>, detail: impl Into<String>) -> Self {
         Row::builder()
             .kind(kind)
-            .label(Some(label.into()))
-            .detail(detail.into())
+            .label(Some(printable(&label.into())))
+            .detail(printable(&detail.into()))
             .build()
     }
 
@@ -137,9 +141,12 @@ pub struct Report {
 }
 
 impl Report {
-    /// A report over `rows` titled `title`.
+    /// A report over `rows` titled `title`, made [`printable`].
     pub fn new(title: impl Into<String>, rows: Vec<Row>) -> Self {
-        Report::builder().title(title.into()).rows(rows).build()
+        Report::builder()
+            .title(printable(&title.into()))
+            .rows(rows)
+            .build()
     }
 
     /// Attaches the summary line.
@@ -199,9 +206,13 @@ fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
 }
 
 /// Prints a failure to stderr in the CLI's voice: a red cross, the app
-/// name, and the error. anstream strips styling when stderr is redirected.
+/// name, and the error, made printable line by line. anstream strips styling
+/// when stderr is redirected.
 pub fn print_error(context: &str, error: &dyn Error) {
-    anstream::eprintln!("{FAIL_STYLE}{FAIL_GLYPH}{FAIL_STYLE:#} {context}{PLAIN_SEPARATOR}{error}");
+    let message = printable_lines(&error.to_string());
+    anstream::eprintln!(
+        "{FAIL_STYLE}{FAIL_GLYPH}{FAIL_STYLE:#} {context}{PLAIN_SEPARATOR}{message}"
+    );
 }
 
 /// The plain layout: one unstyled line per row.
@@ -268,5 +279,23 @@ mod tests {
         );
         let unlabeled = Report::new("muster init", vec![Row::unlabeled(RowKind::Ok, "created")]);
         assert_eq!(unlabeled.with_tally().summary(), &None);
+    }
+
+    /// A row or title carrying a process's escape sequence shows it as
+    /// text, in either layout.
+    #[test]
+    fn rows_and_titles_never_carry_control_characters() {
+        let report = Report::new("muster up \u{b7} \u{1b}[2J", vec![
+            Row::labeled(RowKind::Fail, "a\u{1b}]0;x\u{7}", "crashed\r"),
+            Row::unlabeled(RowKind::Dim, "\u{1b}[31m"),
+        ]);
+
+        assert!(!report.title().chars().any(char::is_control));
+        assert!(
+            !plain(&report)
+                .replace('\n', "")
+                .chars()
+                .any(char::is_control)
+        );
     }
 }

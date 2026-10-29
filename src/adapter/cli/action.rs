@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use strum::{Display, EnumMessage};
+use strum::{Display, EnumIter, EnumMessage};
 
 use crate::{adapter::service::ProcessAction, domain::process::ProcessState};
 
@@ -19,7 +19,7 @@ const SUSPEND_SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What a command asked the service to do, as its report names it. Each
 /// variant's message is the word for it while it is under way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumMessage, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumIter, EnumMessage, Serialize)]
 #[strum(serialize_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
@@ -47,18 +47,12 @@ pub enum Action {
     /// Kill one process at once.
     #[strum(message = "killing")]
     Kill,
-    /// Register a command and start it.
+    /// Add a command and start it.
     #[strum(message = "starting")]
     Run,
-    /// Open a new agent session.
-    #[strum(message = "starting")]
-    AgentNew,
-    /// Close an agent session.
+    /// Remove processes from the project, stopping those that run.
     #[strum(message = "stopping")]
-    AgentClose,
-    /// Reopen the most recently closed agent session.
-    #[strum(message = "starting")]
-    AgentReopen,
+    Remove,
 }
 
 impl From<ProcessAction> for Action {
@@ -77,27 +71,37 @@ impl From<ProcessAction> for Action {
 impl Action {
     /// Whether the action launches processes.
     pub fn launches(self) -> bool {
-        matches!(
-            self,
-            Self::Up | Self::Start | Self::Restart | Self::Run | Self::AgentNew | Self::AgentReopen
-        )
+        match self {
+            Self::Up | Self::Start | Self::Restart | Self::Run => true,
+            Self::Down | Self::Stop | Self::Pause | Self::Resume | Self::Kill | Self::Remove => {
+                false
+            },
+        }
     }
 
     /// Whether the action ends processes.
     pub fn halts(self) -> bool {
-        matches!(
-            self,
-            Self::Down | Self::Stop | Self::Kill | Self::AgentClose
-        )
+        match self {
+            Self::Down | Self::Stop | Self::Kill | Self::Remove => true,
+            Self::Up | Self::Start | Self::Restart | Self::Pause | Self::Resume | Self::Run => {
+                false
+            },
+        }
     }
 
     /// Whether a process in `state` is still on its way to what this action
-    /// asked for, so the command keeps waiting before it reports.
+    /// asked for, so the command keeps waiting before it reports. A removed
+    /// process is on its way for as long as it may still run, since the
+    /// service stops it once it hears of the removal.
     pub fn in_transition(self, state: ProcessState) -> bool {
         match state {
             ProcessState::Starting => true,
             ProcessState::Stopping => self.halts() || self == Self::Restart,
-            _ => false,
+            ProcessState::Running
+            | ProcessState::Paused
+            | ProcessState::Restarting
+            | ProcessState::Unsupervised => self == Self::Remove,
+            ProcessState::Pending | ProcessState::Exited | ProcessState::Crashed => false,
         }
     }
 
@@ -108,15 +112,17 @@ impl Action {
         let stop = stop_grace + STOP_SETTLE_MARGIN;
         match self {
             Self::Restart => stop + LAUNCH_SETTLE_TIMEOUT,
-            action if action.halts() => stop,
-            action if action.launches() => LAUNCH_SETTLE_TIMEOUT,
-            _ => SUSPEND_SETTLE_TIMEOUT,
+            Self::Down | Self::Stop | Self::Kill | Self::Remove => stop,
+            Self::Up | Self::Start | Self::Run => LAUNCH_SETTLE_TIMEOUT,
+            Self::Pause | Self::Resume => SUSPEND_SETTLE_TIMEOUT,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use strum::IntoEnumIterator;
+
     use super::*;
 
     #[test]
@@ -126,6 +132,10 @@ mod tests {
         assert!(!Action::Start.in_transition(ProcessState::Crashed));
         assert!(Action::Restart.in_transition(ProcessState::Stopping));
         assert!(Action::Stop.in_transition(ProcessState::Stopping));
+        assert!(Action::Remove.in_transition(ProcessState::Stopping));
+        assert!(Action::Remove.in_transition(ProcessState::Running));
+        assert!(!Action::Remove.in_transition(ProcessState::Exited));
+        assert!(!Action::Stop.in_transition(ProcessState::Running));
         assert!(Action::Stop.in_transition(ProcessState::Starting));
         assert!(!Action::Pause.in_transition(ProcessState::Stopping));
     }
@@ -141,15 +151,24 @@ mod tests {
             grace + STOP_SETTLE_MARGIN
         );
         assert_eq!(
+            Action::Remove.settle_timeout(grace),
+            grace + STOP_SETTLE_MARGIN
+        );
+        assert_eq!(
             Action::Restart.settle_timeout(grace),
             grace + STOP_SETTLE_MARGIN + LAUNCH_SETTLE_TIMEOUT
         );
         assert_eq!(Action::Start.settle_timeout(grace), LAUNCH_SETTLE_TIMEOUT);
     }
 
-    /// Each action has the one word a spinner shows while it is under way.
+    /// No action both launches and halts, and every action has the one word
+    /// a spinner shows while it is under way.
     #[test]
-    fn each_action_has_a_word_while_under_way() {
+    fn each_action_has_a_word_and_one_direction() {
+        for action in Action::iter() {
+            assert!(!(action.launches() && action.halts()), "{action}");
+            assert!(action.get_message().is_some(), "{action}");
+        }
         assert_eq!(Action::Up.get_message(), Some("starting"));
         assert_eq!(Action::Down.get_message(), Some("stopping"));
         assert_eq!(Action::Restart.get_message(), Some("restarting"));
@@ -157,10 +176,7 @@ mod tests {
 
     #[test]
     fn actions_are_named_in_kebab_case() {
-        assert_eq!(Action::AgentReopen.to_string(), "agent-reopen");
-        assert_eq!(
-            serde_json::to_string(&Action::AgentNew).unwrap(),
-            "\"agent-new\""
-        );
+        assert_eq!(Action::Remove.to_string(), "remove");
+        assert_eq!(serde_json::to_string(&Action::Run).unwrap(), "\"run\"");
     }
 }

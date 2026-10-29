@@ -1,11 +1,10 @@
-use std::path::PathBuf;
-
 use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
-    action::Action, notice_view::NoticeView, process_outcome::ProcessOutcome, wait_end::WaitEnd,
+    action::Action, notice_view::NoticeView, process_outcome::ProcessOutcome,
+    project_identity_view::ProjectIdentityView, wait_end::WaitEnd,
 };
 use crate::{adapter::service::NoticeLevel, domain::value::ProcessName};
 
@@ -13,9 +12,9 @@ use crate::{adapter::service::NoticeLevel, domain::value::ProcessName};
 /// `--json` output of `up`, `down`, `start` and their siblings.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct ActionReport {
-    /// The project's config path.
+    /// The project.
     #[getset(get = "pub")]
-    project: PathBuf,
+    project: ProjectIdentityView,
     /// What was asked.
     #[getset(get_copy = "pub")]
     action: Action,

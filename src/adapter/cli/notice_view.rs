@@ -15,7 +15,7 @@ use crate::{
 pub struct NoticeView {
     /// When it was raised, as RFC 3339 UTC to the second.
     at: String,
-    /// The config path of the project it concerns, or none for the service.
+    /// The folder of the project it concerns, or none for the service.
     project: Option<PathBuf>,
     /// The process it concerns.
     process: Option<ProcessName>,

@@ -1,7 +1,6 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 650
-expression: "plain(&notices_rows(Path::new(PROJECT), &[], now))"
+expression: "plain(&notices_rows(&shop_project(), &[], now))"
 ---
-/home/me/shop/muster.yml
+/home/me/shop
 no notices

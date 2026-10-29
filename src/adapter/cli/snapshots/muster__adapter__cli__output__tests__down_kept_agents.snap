@@ -1,8 +1,0 @@
----
-source: src/adapter/cli/output.rs
-assertion_line: 636
-expression: plain(&action_rows(&report))
----
-/home/me/shop/muster.yml
-● dev server: stopped
-agents keep running; `muster down --agents` stops them too

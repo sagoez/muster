@@ -11,7 +11,7 @@ use crate::domain::value::ProcessName;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct LogText {
-    /// The project's config path.
+    /// The project's folder.
     project: PathBuf,
     /// The process.
     name: ProcessName,

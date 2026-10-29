@@ -1,31 +1,17 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 681
 expression: json(&views).unwrap()
 ---
 [
   {
-    "project": "/home/me/shop/muster.yml",
+    "project": {
+      "name": "shop",
+      "root": "/home/me/shop"
+    },
     "processes": [
       {
-        "name": "claude",
-        "kind": "agent",
-        "state": "running",
-        "activity": "idle",
-        "pid": 4100,
-        "uptime": 3723,
-        "restarts": 0,
-        "cpu_percent": 2.25,
-        "memory_bytes": 134217728,
-        "attached": 0,
-        "last_exit": null,
-        "stop_grace": null
-      },
-      {
         "name": "dev server",
-        "kind": "command",
         "state": "running",
-        "activity": "working",
         "pid": 4123,
         "uptime": 3723,
         "restarts": 2,
@@ -33,13 +19,11 @@ expression: json(&views).unwrap()
         "memory_bytes": 134217728,
         "attached": 1,
         "last_exit": null,
-        "stop_grace": 5
+        "stop_grace": 1
       },
       {
         "name": "café",
-        "kind": "terminal",
         "state": "crashed",
-        "activity": "idle",
         "pid": null,
         "uptime": null,
         "restarts": 0,
@@ -50,13 +34,11 @@ expression: json(&views).unwrap()
           "status": 127,
           "signal": null
         },
-        "stop_grace": null
+        "stop_grace": 5
       },
       {
         "name": "worker",
-        "kind": "command",
         "state": "starting",
-        "activity": "idle",
         "pid": null,
         "uptime": null,
         "restarts": 0,
@@ -68,9 +50,7 @@ expression: json(&views).unwrap()
       },
       {
         "name": "cron",
-        "kind": "command",
         "state": "crashed",
-        "activity": "idle",
         "pid": null,
         "uptime": null,
         "restarts": 0,

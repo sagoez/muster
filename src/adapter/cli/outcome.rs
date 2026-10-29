@@ -59,15 +59,9 @@ pub enum Outcome {
     /// The action did not apply to it in its state.
     #[strum(message = "nothing to do while it is")]
     Unchanged,
-    /// It reopens once its previous run has exited.
-    #[strum(message = "queued: it reopens once its previous run has exited")]
-    Queued,
     /// The service left it alone, for the reason the report carries.
     #[strum(message = "left alone")]
     Refused,
-    /// An agent `down` leaves running because `--agents` was not given.
-    #[strum(message = "kept running")]
-    KeptRunning,
     /// It is no longer listed.
     #[strum(message = "no longer listed")]
     Gone,
@@ -84,86 +78,138 @@ impl Outcome {
         saw_transition: bool,
     ) -> Self {
         let was = before.map(|status| *status.state());
+        if action.halts() {
+            return halted(was, after.map(|status| *status.state()));
+        }
         let Some(after) = after else {
-            return if action.halts() {
-                Self::Stopped
-            } else {
-                Self::Gone
-            };
+            return Self::Gone;
         };
         let state = *after.state();
-        if action.halts() {
-            return halted(was, state);
-        }
         if action.in_transition(state) {
-            return match state {
-                ProcessState::Stopping => Self::StillStopping,
-                _ => Self::StillStarting,
-            };
+            return unsettled(state);
         }
         match action {
             Action::Pause => paused(was, state),
             Action::Resume => resumed(was, state),
-            _ => launched(action, before, after, saw_transition),
+            Action::Up | Action::Start | Action::Restart | Action::Run => {
+                launched(action, before, after, saw_transition)
+            },
+            Action::Down | Action::Stop | Action::Kill | Action::Remove => halted(was, Some(state)),
         }
     }
 
     /// Whether the process did not end up as the action asked, which makes
     /// the command fail.
     pub fn is_failure(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Crashed
-                | Self::Unsupervised
-                | Self::StillStarting
-                | Self::NotStarted
-                | Self::StillStopping
-                | Self::StillRunning
-                | Self::Unchanged
-                | Self::Refused
-                | Self::Gone
-        )
-    }
-
-    /// Whether the outcome is worth a second look without being a failure.
-    pub fn is_pending(self) -> bool {
-        matches!(self, Self::Queued)
+            | Self::Unsupervised
+            | Self::StillStarting
+            | Self::NotStarted
+            | Self::StillStopping
+            | Self::StillRunning
+            | Self::Unchanged
+            | Self::Refused
+            | Self::Gone => true,
+            Self::Started
+            | Self::Restarted
+            | Self::AlreadyRunning
+            | Self::Exited
+            | Self::Stopped
+            | Self::WasNotRunning
+            | Self::Paused
+            | Self::AlreadyPaused
+            | Self::Resumed => false,
+        }
     }
 
     /// Whether the process was still on its way when the wait ended.
     pub fn is_unsettled(self) -> bool {
-        matches!(self, Self::StillStarting | Self::StillStopping)
+        match self {
+            Self::StillStarting | Self::StillStopping => true,
+            Self::Started
+            | Self::Restarted
+            | Self::AlreadyRunning
+            | Self::Exited
+            | Self::Crashed
+            | Self::Unsupervised
+            | Self::NotStarted
+            | Self::Stopped
+            | Self::WasNotRunning
+            | Self::StillRunning
+            | Self::Paused
+            | Self::AlreadyPaused
+            | Self::Resumed
+            | Self::Unchanged
+            | Self::Refused
+            | Self::Gone => false,
+        }
     }
 }
 
-/// The outcome of a stop, kill, close or down for a process that was `was`
-/// and is now `state`.
-fn halted(was: Option<ProcessState>, state: ProcessState) -> Outcome {
+/// The outcome of a process still on its way in `state` when the wait ended.
+fn unsettled(state: ProcessState) -> Outcome {
+    match state {
+        ProcessState::Stopping => Outcome::StillStopping,
+        ProcessState::Pending
+        | ProcessState::Starting
+        | ProcessState::Running
+        | ProcessState::Paused
+        | ProcessState::Exited
+        | ProcessState::Crashed
+        | ProcessState::Restarting
+        | ProcessState::Unsupervised => Outcome::StillStarting,
+    }
+}
+
+/// The outcome of a stop, kill, removal or down for a process that was
+/// `was` and is now `now`, or no longer listed.
+fn halted(was: Option<ProcessState>, now: Option<ProcessState>) -> Outcome {
     if !was.is_some_and(ProcessState::may_be_running) {
         return Outcome::WasNotRunning;
     }
+    let Some(state) = now else {
+        return Outcome::Stopped;
+    };
     match state {
         ProcessState::Starting | ProcessState::Stopping => Outcome::StillStopping,
-        state if state.may_be_running() => Outcome::StillRunning,
-        _ => Outcome::Stopped,
+        ProcessState::Running
+        | ProcessState::Paused
+        | ProcessState::Restarting
+        | ProcessState::Unsupervised => Outcome::StillRunning,
+        ProcessState::Pending | ProcessState::Exited | ProcessState::Crashed => Outcome::Stopped,
     }
 }
 
 /// The outcome of a pause for a process that was `was` and is now `state`.
 fn paused(was: Option<ProcessState>, state: ProcessState) -> Outcome {
-    match (was, state) {
-        (Some(ProcessState::Paused), ProcessState::Paused) => Outcome::AlreadyPaused,
-        (_, ProcessState::Paused) => Outcome::Paused,
-        _ => Outcome::Unchanged,
+    match state {
+        ProcessState::Paused if was == Some(ProcessState::Paused) => Outcome::AlreadyPaused,
+        ProcessState::Paused => Outcome::Paused,
+        ProcessState::Pending
+        | ProcessState::Starting
+        | ProcessState::Running
+        | ProcessState::Stopping
+        | ProcessState::Exited
+        | ProcessState::Crashed
+        | ProcessState::Restarting
+        | ProcessState::Unsupervised => Outcome::Unchanged,
     }
 }
 
 /// The outcome of a resume for a process that was `was` and is now `state`.
 fn resumed(was: Option<ProcessState>, state: ProcessState) -> Outcome {
-    match (was, state) {
-        (Some(ProcessState::Running), ProcessState::Running) => Outcome::AlreadyRunning,
-        (_, ProcessState::Running) => Outcome::Resumed,
-        _ => Outcome::Unchanged,
+    match state {
+        ProcessState::Running if was == Some(ProcessState::Running) => Outcome::AlreadyRunning,
+        ProcessState::Running => Outcome::Resumed,
+        ProcessState::Pending
+        | ProcessState::Starting
+        | ProcessState::Paused
+        | ProcessState::Stopping
+        | ProcessState::Exited
+        | ProcessState::Crashed
+        | ProcessState::Restarting
+        | ProcessState::Unsupervised => Outcome::Unchanged,
     }
 }
 
@@ -183,20 +229,30 @@ fn launched(
                 || before.pid() != after.pid()
                 || before.restarts() != after.restarts()
         });
+    let restart = action == Action::Restart;
     match after.state() {
-        ProcessState::Running | ProcessState::Paused if same_child => match action {
-            Action::Restart => Outcome::StillRunning,
-            _ => Outcome::AlreadyRunning,
+        ProcessState::Running | ProcessState::Paused if same_child && restart => {
+            Outcome::StillRunning
         },
-        ProcessState::Running | ProcessState::Paused => match action {
-            Action::Restart => Outcome::Restarted,
-            _ => Outcome::Started,
-        },
+        ProcessState::Running | ProcessState::Paused if same_child => Outcome::AlreadyRunning,
+        ProcessState::Running | ProcessState::Paused if restart => Outcome::Restarted,
+        ProcessState::Running | ProcessState::Paused => Outcome::Started,
         ProcessState::Unsupervised => Outcome::Unsupervised,
-        _ if !changed => Outcome::NotStarted,
+        ProcessState::Pending
+        | ProcessState::Starting
+        | ProcessState::Stopping
+        | ProcessState::Exited
+        | ProcessState::Crashed
+        | ProcessState::Restarting
+            if !changed =>
+        {
+            Outcome::NotStarted
+        },
         ProcessState::Exited => Outcome::Exited,
         ProcessState::Crashed | ProcessState::Restarting => Outcome::Crashed,
-        _ => Outcome::NotStarted,
+        ProcessState::Pending | ProcessState::Starting | ProcessState::Stopping => {
+            Outcome::NotStarted
+        },
     }
 }
 
@@ -205,18 +261,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{
-        process::{ActivityState, ProcessKind},
-        value::ProcessName,
-    };
+    use crate::domain::value::ProcessName;
 
     /// `api` listed in `state` with `pid` after `restarts` restarts.
     fn status(state: ProcessState, pid: Option<u32>, restarts: u32) -> ProcessStatus {
         ProcessStatus::builder()
             .name(ProcessName::try_new("api").unwrap())
-            .kind(ProcessKind::Command)
             .state(state)
-            .activity(ActivityState::Idle)
             .pid(pid)
             .uptime(pid.map(|_| Duration::from_secs(1)))
             .restarts(restarts)
@@ -262,6 +313,10 @@ mod tests {
         assert_eq!(
             settle(status(ProcessState::Starting, None, 0), true),
             Outcome::StillStarting
+        );
+        assert_eq!(
+            Outcome::settle(Action::Start, Some(&stopped), None, true),
+            Outcome::Gone
         );
     }
 
@@ -311,15 +366,29 @@ mod tests {
             Outcome::StillStopping
         );
         assert_eq!(
-            Outcome::settle(Action::AgentClose, Some(&running), None, true),
+            Outcome::settle(Action::Remove, Some(&running), None, true),
             Outcome::Stopped,
-            "a closed session's row retires"
+            "a removed process's row retires once it stopped"
         );
-        assert!(
-            Outcome::StillStopping.is_failure(),
-            "a stop that has not finished when the wait ends fails"
+        assert_eq!(
+            Outcome::settle(Action::Remove, Some(&exited), None, false),
+            Outcome::WasNotRunning
         );
+        assert!(Outcome::StillStopping.is_failure());
         assert!(Outcome::StillRunning.is_failure());
+    }
+
+    /// Stopping or killing a crashed process stops nothing and fails
+    /// nothing: it was not running.
+    #[test]
+    fn a_crashed_process_was_not_running() {
+        let crashed = status(ProcessState::Crashed, None, 0);
+
+        for action in [Action::Stop, Action::Kill] {
+            let outcome = Outcome::settle(action, Some(&crashed), Some(&crashed), false);
+            assert_eq!(outcome, Outcome::WasNotRunning, "{action}");
+            assert!(!outcome.is_failure());
+        }
     }
 
     /// A restart whose old process has not stopped by the end of the wait
@@ -348,6 +417,10 @@ mod tests {
         assert_eq!(
             Outcome::settle(Action::Pause, Some(&running), Some(&paused), false),
             Outcome::Paused
+        );
+        assert_eq!(
+            Outcome::settle(Action::Pause, Some(&paused), Some(&paused), false),
+            Outcome::AlreadyPaused
         );
         assert_eq!(
             Outcome::settle(Action::Pause, Some(&exited), Some(&exited), false),

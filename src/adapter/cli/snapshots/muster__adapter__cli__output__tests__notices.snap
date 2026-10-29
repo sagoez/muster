@@ -1,8 +1,7 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 845
-expression: "plain(&notices_rows(Path::new(PROJECT), &notices, now))"
+expression: "plain(&notices_rows(&shop_project(), &notices, now))"
 ---
-/home/me/shop/muster.yml
+/home/me/shop
 ✗ api: 1m 15s ago: crashed: exited with status 1
-! project: 1m 15s ago: the config was reloaded
+! project: 1m 15s ago: stopped worker: removed from the project

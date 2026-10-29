@@ -6,10 +6,9 @@
 use std::{
     error::Error,
     io::{self, Write},
-    path::Path,
 };
 
-use cliclack::{confirm, intro, log, outro, outro_cancel, select, set_theme};
+use cliclack::{confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme};
 use console::{Term, style};
 use unicode_width::UnicodeWidthStr;
 
@@ -18,14 +17,14 @@ use super::{
     interrupt_guard::InterruptGuard,
     presenter_theme::MusterTheme,
     report::{Report, Row, RowKind, plain, print_error},
+    sanitize::{printable, printable_lines},
     spinners::Spinners,
     surroundings::Surroundings,
-    workspace_questions::ask_workspace,
 };
 use crate::{
-    adapter::{config::starter_workspace, service::ProcessStatus},
+    adapter::{detect::Candidate, service::ProcessStatus},
     constants::APP_NAME,
-    domain::{config::WorkspaceConfig, value::ProcessName},
+    domain::value::{ProcessName, ProjectName},
 };
 
 /// The question that picks a process.
@@ -34,7 +33,13 @@ const CHOOSE_PROCESS: &str = "Which process?";
 const CHOOSE_PROCESS_ASKED: &str = "which process";
 /// The argument that answers it up front.
 const CHOOSE_PROCESS_ARGUMENT: &str = "its name, as `muster ps` lists it";
-/// Between a process's kind and state in the choice.
+/// The question that picks what `muster init` adds.
+const CHOOSE_CANDIDATES: &str = "Which processes should muster run?";
+/// What the plain fallback says it could not ask, choosing candidates.
+const CHOOSE_CANDIDATES_ASKED: &str = "which processes to add";
+/// The argument that answers it up front.
+const CHOOSE_CANDIDATES_ARGUMENT: &str = "--yes to add the suggested ones";
+/// Between the parts of a choice's hint.
 const HINT_SEPARATOR: &str = " · ";
 /// Between a padded label and its detail in a framed line.
 const LABEL_GAP: &str = "  ";
@@ -145,7 +150,7 @@ impl Presenter {
         match self {
             Self::Interactive => {
                 Term::stderr().show_cursor()?;
-                outro_cancel(error)
+                outro_cancel(printable_lines(&error.to_string()))
             },
             Self::Plain => {
                 print_error(APP_NAME, error);
@@ -159,9 +164,10 @@ impl Presenter {
     /// # Errors
     /// Returns the [`io::Error`] of a failed write.
     pub fn step(self, line: &str) -> io::Result<()> {
+        let line = printable(line);
         match self {
             Self::Interactive => log::step(line),
-            Self::Plain => print_line(line),
+            Self::Plain => print_line(&line),
         }
     }
 
@@ -170,9 +176,10 @@ impl Presenter {
     /// # Errors
     /// Returns the [`io::Error`] of a failed write.
     pub fn conclude(self, line: &str) -> io::Result<()> {
+        let line = printable(line);
         match self {
             Self::Interactive => outro(line),
-            Self::Plain => print_line(line),
+            Self::Plain => print_line(&line),
         }
     }
 
@@ -199,7 +206,7 @@ impl Presenter {
     }
 
     /// Asks which of `candidates`, processes of `project`, the command is
-    /// for, showing each one's kind and state.
+    /// for, showing each one's state.
     ///
     /// # Errors
     /// Returns [`CliError::CannotAsk`] in the plain layout,
@@ -208,27 +215,63 @@ impl Presenter {
     pub fn choose_process(
         self,
         candidates: &[&ProcessStatus],
-        project: &Path,
+        project: &ProjectName,
     ) -> Result<ProcessName, CliError> {
         self.can_choose_process()?;
         if candidates.is_empty() {
-            return Err(CliError::NothingToChoose(project.to_path_buf()));
+            return Err(CliError::NothingToChoose(project.clone()));
         }
         let items: Vec<(ProcessName, String, String)> = candidates
             .iter()
             .map(|process| {
                 (
                     process.name().clone(),
-                    process.name().to_string(),
-                    format!("{}{HINT_SEPARATOR}{}", process.kind(), process.state()),
+                    printable(process.name().as_ref()),
+                    process.state().to_string(),
                 )
             })
             .collect();
         asked(|| select(CHOOSE_PROCESS).items(&items).interact())
     }
 
-    /// Asks `question`, which `argument` answers up front, and answers
-    /// whether the person agreed.
+    /// Asks which of `candidates` `muster init` adds, the suggested ones
+    /// chosen to begin with, showing each one's command and source.
+    ///
+    /// # Errors
+    /// Returns [`CliError::CannotAsk`] in the plain layout, or
+    /// [`CliError::Cancelled`] when the person cancels.
+    pub fn choose_candidates(self, candidates: &[Candidate]) -> Result<Vec<Candidate>, CliError> {
+        self.can_confirm(CHOOSE_CANDIDATES_ASKED, CHOOSE_CANDIDATES_ARGUMENT)?;
+        let items: Vec<(Candidate, String, String)> = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.clone(),
+                    printable(candidate.name().as_ref()),
+                    printable(&format!(
+                        "{}{HINT_SEPARATOR}{}",
+                        candidate.command(),
+                        candidate.source()
+                    )),
+                )
+            })
+            .collect();
+        let suggested: Vec<Candidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.suggested())
+            .cloned()
+            .collect();
+        asked(|| {
+            multiselect(CHOOSE_CANDIDATES)
+                .items(&items)
+                .initial_values(suggested)
+                .required(false)
+                .interact()
+        })
+    }
+
+    /// Asks `question`, which `argument` answers up front, offering
+    /// `initial`, and answers whether the person agreed.
     ///
     /// # Errors
     /// Returns [`CliError::CannotAsk`] naming `asked` and `argument` in the
@@ -236,11 +279,12 @@ impl Presenter {
     pub fn confirm(
         self,
         question: &str,
+        initial: bool,
         asked_for: &'static str,
         argument: &'static str,
     ) -> Result<bool, CliError> {
         self.can_confirm(asked_for, argument)?;
-        asked(|| confirm(question).interact())
+        asked(|| confirm(question).initial_value(initial).interact())
     }
 
     /// Checks that a yes-or-no question about `asked_for`, which `argument`
@@ -259,26 +303,6 @@ impl Presenter {
                 question: asked_for,
                 argument,
             }),
-        }
-    }
-
-    /// The workspace a new project starts with: its processes asked for one
-    /// after another at a terminal, the starter workspace otherwise.
-    ///
-    /// # Errors
-    /// Returns [`CliError::Cancelled`] when the person cancels, or the
-    /// [`CliError::Config`] of a workspace that does not validate.
-    pub fn new_workspace(self) -> Result<WorkspaceConfig, CliError> {
-        match self {
-            Self::Interactive => {
-                let guard = InterruptGuard::arm();
-                let workspace = ask_workspace();
-                if guard.interrupted() {
-                    return Err(CliError::Cancelled);
-                }
-                workspace
-            },
-            Self::Plain => Ok(starter_workspace()),
         }
     }
 }
@@ -384,14 +408,15 @@ mod tests {
     fn the_plain_layout_never_asks() {
         let error = Presenter::Plain
             .confirm(
-                "Stop the agents too?",
-                "whether to stop the agents",
+                "Remove the project?",
+                false,
+                "whether to remove the project",
                 "--yes",
             )
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "cannot ask whether to stop the agents without an interactive terminal; pass --yes"
+            "cannot ask whether to remove the project without an interactive terminal; pass --yes"
         );
         assert_eq!(error.kind(), FailureKind::InvalidInput);
         assert!(matches!(
@@ -402,29 +427,31 @@ mod tests {
             })
         ));
         assert!(matches!(
-            Presenter::Plain.choose_process(&[], Path::new("/p/muster.yml")),
+            Presenter::Plain.choose_process(&[], &shop()),
             Err(CliError::CannotAsk { .. })
         ));
+        assert!(matches!(
+            Presenter::Plain.choose_candidates(&[]),
+            Err(CliError::CannotAsk {
+                argument: CHOOSE_CANDIDATES_ARGUMENT,
+                ..
+            })
+        ));
         assert!(Presenter::Interactive.can_choose_process().is_ok());
+    }
+
+    /// The project every fixture belongs to.
+    fn shop() -> ProjectName {
+        ProjectName::try_new("shop").unwrap()
     }
 
     /// With nothing to choose from, the question is never put.
     #[test]
     fn nothing_to_choose_is_said_before_asking() {
         assert!(matches!(
-            Presenter::Interactive.choose_process(&[], Path::new("/p/muster.yml")),
+            Presenter::Interactive.choose_process(&[], &shop()),
             Err(CliError::NothingToChoose(_))
         ));
-    }
-
-    /// Without a terminal, `muster init` writes the starter workspace.
-    #[test]
-    fn the_plain_layout_starts_from_the_starter() {
-        let workspace = Presenter::Plain.new_workspace().unwrap();
-        assert_eq!(
-            serde_yaml_ng::to_string(&workspace).unwrap(),
-            serde_yaml_ng::to_string(&starter_workspace()).unwrap()
-        );
     }
 
     /// A prompt cancelled with Esc or Ctrl-C is a cancellation, which exits

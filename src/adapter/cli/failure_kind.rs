@@ -11,9 +11,10 @@ pub enum FailureKind {
     ServiceUnavailable,
     /// The service speaks another version of the protocol.
     VersionMismatch,
-    /// No project config exists where the command looked.
+    /// No registered project matched the name or folder the command used.
     UnknownProject,
-    /// The project's config does not load.
+    /// muster's stored state was written by a newer muster, or the service
+    /// could not load a project's stack.
     InvalidConfig,
     /// No process has the name typed; `candidates` lists the valid ones.
     UnknownProcess,

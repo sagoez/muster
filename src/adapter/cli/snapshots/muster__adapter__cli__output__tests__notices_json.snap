@@ -1,21 +1,20 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 854
 expression: json(&views).unwrap()
 ---
 [
   {
     "at": "2027-01-15T08:00:00Z",
-    "project": "/home/me/shop/muster.yml",
+    "project": "/home/me/shop",
     "process": "api",
     "level": "error",
     "message": "crashed: exited with status 1"
   },
   {
     "at": "2027-01-15T08:00:00Z",
-    "project": "/home/me/shop/muster.yml",
+    "project": "/home/me/shop",
     "process": null,
     "level": "warning",
-    "message": "the config was reloaded"
+    "message": "stopped worker: removed from the project"
   }
 ]

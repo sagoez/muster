@@ -6,14 +6,13 @@ use super::{
     args::CoordinationCommand,
     error::CliError,
     report::{Row, RowKind},
+    text_file::write_atomically,
 };
-use crate::{
-    adapter::config::write_config,
-    domain::{
-        config::ConfigError,
-        coordination::{KeyValue, Scratchpad, Todo},
-        port::CoordinationStore,
-    },
+use crate::domain::{
+    config::ConfigError,
+    coordination::{KeyValue, Scratchpad, Todo},
+    port::CoordinationStore,
+    value::ProjectRoot,
 };
 
 /// Current snapshot schema version, checked on import so a file from a newer
@@ -40,7 +39,7 @@ struct CoordinationSnapshot {
 pub fn coordination(
     command: CoordinationCommand,
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
 ) -> Result<Vec<Row>, CliError> {
     match command {
         CoordinationCommand::Export { file } => export(store, project, &file),
@@ -54,7 +53,7 @@ pub fn coordination(
 /// Returns [`CliError`] when the store cannot be read or the file written.
 fn export(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     file: &Path,
 ) -> Result<Vec<Row>, CliError> {
     let snapshot = CoordinationSnapshot {
@@ -70,7 +69,14 @@ fn export(
         snapshot.values.len(),
         file.display(),
     );
-    write_config(file, &snapshot)?;
+    let text = serde_yaml_ng::to_string(&snapshot).map_err(|error| CliError::SnapshotFile {
+        path: file.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    write_atomically(file, &text).map_err(|source| ConfigError::Write {
+        path: file.to_path_buf(),
+        source,
+    })?;
     Ok(vec![Row::unlabeled(RowKind::Ok, summary)])
 }
 
@@ -83,17 +89,24 @@ fn export(
 /// carries an unsupported version, or the store cannot be written.
 fn import(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     file: &Path,
 ) -> Result<Vec<Row>, CliError> {
-    let raw = fs::read_to_string(file).map_err(|source| ConfigError::Read {
+    let raw = fs::read_to_string(file).map_err(|source| CliError::ReadFile {
         path: file.to_path_buf(),
         source,
     })?;
+    let invalid = |reason: String| CliError::SnapshotFile {
+        path: file.to_path_buf(),
+        reason,
+    };
     let snapshot: CoordinationSnapshot =
-        serde_yaml_ng::from_str(&raw).map_err(ConfigError::from)?;
+        serde_yaml_ng::from_str(&raw).map_err(|error| invalid(error.to_string()))?;
     if snapshot.version != SNAPSHOT_VERSION {
-        return Err(ConfigError::UnsupportedCoordinationVersion(snapshot.version).into());
+        return Err(invalid(format!(
+            "version {} is not the version {SNAPSHOT_VERSION} this muster reads",
+            snapshot.version
+        )));
     }
     store.import(
         project,

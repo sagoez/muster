@@ -1,11 +1,10 @@
 ---
 source: src/adapter/cli/output.rs
-assertion_line: 749
-expression: plain(&action_rows(&report))
+expression: plain(&rows)
 ---
-/home/me/shop/muster.yml
+/home/me/shop
 ● dev server: running (pid 4123)
 ✗ café: crashed: exited with status 127
-✗ claude: left stopped: its agent session cannot be resumed
+✗ api: cannot start: the pid 4242 may still run unsupervised
 other notices, about processes this command did not touch:
 ! cron: crashed: ended by signal: Killed

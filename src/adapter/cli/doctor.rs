@@ -8,30 +8,51 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{
-    check::{CheckOutcome, VALID_SUFFIX, check, error_chain},
     completions::{CompletionShell, registration_line},
+    error::CliError,
+    project_target::ProjectTarget,
     report::{Report, Row, RowKind},
 };
 use crate::{
-    adapter::{
-        hooks::{HookState, HookStatus},
-        path::absolutize,
+    adapter::store::SqliteStore,
+    domain::{
+        config::ConfigError,
+        port::{ProjectStore, SettingsStore},
     },
-    domain::port::{AgentSessionStore, ProjectRegistry},
 };
 
 /// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
 /// Probe labels.
-const CONFIG_LABEL: &str = "config";
-const REGISTRY_LABEL: &str = "projects";
-const SESSIONS_LABEL: &str = "sessions";
-const HOOKS_LABEL: &str = "agent hooks";
+const DATABASE_LABEL: &str = "database";
+const PROJECTS_LABEL: &str = "projects";
+const PROJECT_LABEL: &str = "this folder";
+const LEGACY_LABEL: &str = "old files";
 const COMPLETIONS_LABEL: &str = "completions";
+/// The database probe when the database opens and its settings read.
+const DATABASE_OK: &str = "opens at the current schema, settings valid";
+/// The current-folder probe outside every project.
+const NO_PROJECT_HERE: &str = "not inside a project; `muster add` starts one";
+/// The legacy probe with nothing left over.
+const NO_LEGACY_FILES: &str = "none left over";
+/// What to do about registered folders that are gone.
+const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
+/// What to do about legacy files.
+const LEGACY_HINT: &str = "muster no longer reads them; delete them";
+/// Between the parts of a probe's detail.
+const DETAIL_SEPARATOR: &str = "; ";
+/// Between the items a probe lists.
+const LIST_SEPARATOR: &str = ", ";
+/// Between a project's name and folder.
+const COLUMN_GAP: &str = "  ";
+/// Between the messages of an error and its sources.
+const CHAIN_SEPARATOR: &str = ": ";
+/// Files an older muster kept in the state directory.
+const LEGACY_STATE_FILES: &[&str] = &["coordination.db", "agent-sessions.yml"];
+/// Files an older muster kept in the config directory.
+const LEGACY_CONFIG_FILES: &[&str] = &["settings.yml", "projects.yml"];
 /// Prefix of a commented-out rc line, ignored by every probed shell.
 const COMMENT_PREFIX: &str = "#";
-/// Hint shown when providers need (re)installation.
-const HOOKS_HINT: &str = "run `muster hooks setup`";
 /// Bash shell rc file for sourcing completions.
 const BASH_RC: &str = ".bashrc";
 /// Zsh shell rc file for sourcing completions.
@@ -81,91 +102,103 @@ fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
         .build()
 }
 
-/// Validates the workspace config.
-pub fn config_probe(config_path: PathBuf) -> Probe {
-    let display = config_path.display().to_string();
-    match check(config_path) {
-        Ok(CheckOutcome::Valid) => probe(
-            CONFIG_LABEL,
-            ProbeOutcome::Ok,
-            format!("{display} {VALID_SUFFIX}"),
-        ),
-        Ok(CheckOutcome::Invalid(report)) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
-        // The doctor is a reporter: even an unreadable config becomes a
-        // failing probe rather than aborting the other probes.
-        Err(error) => probe(CONFIG_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+/// `error` and each source it does not already show, joined.
+fn error_chain(error: &dyn Error) -> String {
+    let mut report = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !report.contains(&text) {
+            report.push_str(CHAIN_SEPARATOR);
+            report.push_str(&text);
+        }
+        source = cause.source();
+    }
+    report
+}
+
+/// Whether the database `opened` and its settings row reads.
+pub fn database_probe(opened: &Result<SqliteStore, ConfigError>) -> Probe {
+    match opened.as_ref().map(SettingsStore::load) {
+        Ok(Ok(_)) => probe(DATABASE_LABEL, ProbeOutcome::Ok, DATABASE_OK.to_string()),
+        Ok(Err(error)) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Err(error) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(error)),
     }
 }
 
-/// Reads the registry and flags projects whose config file is not a reachable
-/// regular file - missing, a directory, or a dangling symlink all fail.
-pub fn registry_probe(registry: &dyn ProjectRegistry) -> Probe {
-    match registry.projects() {
+/// How many projects are registered, warning of any whose folder is gone.
+pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
+    match projects.projects() {
         Ok(projects) => {
-            let dangling: Vec<String> = projects
+            let gone: Vec<String> = projects
                 .iter()
-                .filter(|project| {
-                    !fs::metadata(absolutize(project.config()))
-                        .map(|meta| meta.is_file())
-                        .unwrap_or(false)
-                })
-                .map(|project| project.name().as_ref().to_string())
+                .filter(|project| !project.root().as_ref().is_dir())
+                .map(|project| project.name().to_string())
                 .collect();
-            if dangling.is_empty() {
+            if gone.is_empty() {
                 probe(
-                    REGISTRY_LABEL,
+                    PROJECTS_LABEL,
                     ProbeOutcome::Ok,
                     format!("{} registered", projects.len()),
                 )
             } else {
                 probe(
-                    REGISTRY_LABEL,
-                    ProbeOutcome::Fail,
-                    format!("missing config for: {}", dangling.join(", ")),
+                    PROJECTS_LABEL,
+                    ProbeOutcome::Warn,
+                    format!(
+                        "folder gone for: {}{DETAIL_SEPARATOR}{GONE_HINT}",
+                        gone.join(LIST_SEPARATOR)
+                    ),
                 )
             }
         },
-        Err(error) => probe(REGISTRY_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Err(error) => probe(PROJECTS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
     }
 }
 
-/// Confirms the agent-session store is readable.
-pub fn sessions_probe(store: &dyn AgentSessionStore) -> Probe {
-    match store.sessions() {
-        Ok(sessions) => probe(
-            SESSIONS_LABEL,
+/// Which project the current folder belongs to, as every command finds it.
+pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
+    match target {
+        Ok(ProjectTarget::Registered(project)) => probe(
+            PROJECT_LABEL,
             ProbeOutcome::Ok,
-            format!("{} stored", sessions.len()),
+            format!(
+                "{}{COLUMN_GAP}{}",
+                project.name(),
+                project.root().as_ref().display()
+            ),
         ),
-        Err(error) => probe(SESSIONS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Ok(ProjectTarget::Unregistered(_)) => {
+            probe(PROJECT_LABEL, ProbeOutcome::Ok, NO_PROJECT_HERE.to_string())
+        },
+        Err(error) => probe(PROJECT_LABEL, ProbeOutcome::Fail, error_chain(error)),
     }
 }
 
-/// Aggregates provider hook states into one line.
-pub fn hooks_probe(statuses: &[HookStatus]) -> Probe {
-    let broken: Vec<String> = statuses
-        .iter()
-        .filter(|status| status.state() != HookState::Installed)
-        .map(|status| format!("{} ({})", status.provider(), status.state()))
-        .collect();
-    if broken.is_empty() {
-        probe(
-            HOOKS_LABEL,
-            ProbeOutcome::Ok,
-            format!("{} providers installed", statuses.len()),
-        )
-    } else {
-        probe(
-            HOOKS_LABEL,
-            ProbeOutcome::Fail,
-            format!("{}; {HOOKS_HINT}", broken.join(", ")),
-        )
+/// Files an older muster left in `state_dir` and `config_dir`, which this
+/// one never reads.
+pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
+    let left: Vec<PathBuf> = [
+        (state_dir, LEGACY_STATE_FILES),
+        (config_dir, LEGACY_CONFIG_FILES),
+    ]
+    .into_iter()
+    .filter_map(|(dir, files)| dir.map(|dir| (dir, files)))
+    .flat_map(|(dir, files)| files.iter().map(move |file| dir.join(file)))
+    .filter(|path| fs::symlink_metadata(path).is_ok())
+    .collect();
+    if left.is_empty() {
+        return probe(LEGACY_LABEL, ProbeOutcome::Ok, NO_LEGACY_FILES.to_string());
     }
-}
-
-/// A hooks probe for when the status scan itself failed.
-pub fn hooks_probe_error(error: &dyn Error) -> Probe {
-    probe(HOOKS_LABEL, ProbeOutcome::Fail, error_chain(error))
+    let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+    probe(
+        LEGACY_LABEL,
+        ProbeOutcome::Warn,
+        format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
+            listed.join(LIST_SEPARATOR)
+        ),
+    )
 }
 
 /// Best-effort check that the shell's rc file registers completions; warns
@@ -260,182 +293,190 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::Path};
+    use std::fmt;
+
+    use tempfile::TempDir;
 
     use super::*;
     use crate::domain::{
-        config::ConfigError, process::AgentTool, project::Project, value::ProjectName,
+        project::Project,
+        value::{ProjectName, ProjectRoot},
     };
 
-    /// A registry recording saves of projects and workspaces.
-    #[derive(Default)]
-    struct RecordingRegistry {
-        projects: Vec<Project>,
-        saved_projects: RefCell<Option<Vec<Project>>>,
-    }
+    /// A store holding a fixed set of projects.
+    struct Projects(Vec<Project>);
 
-    impl crate::domain::port::ProjectRegistry for RecordingRegistry {
+    impl ProjectStore for Projects {
         fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.projects.clone())
+            Ok(self.0.clone())
         }
 
-        fn workspace(
-            &self,
-            _config_path: &Path,
-        ) -> Result<crate::domain::config::WorkspaceConfig, ConfigError> {
-            unreachable!("doctor never loads a workspace")
+        fn project_at(&self, _root: &ProjectRoot) -> Result<Option<Project>, ConfigError> {
+            Ok(None)
         }
 
-        fn workspace_exists(&self, _config_path: &Path) -> bool {
-            false
+        fn project_named(&self, _name: &ProjectName) -> Result<Option<Project>, ConfigError> {
+            Ok(None)
         }
 
-        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-            *self.saved_projects.borrow_mut() = Some(projects.to_vec());
-            Ok(())
+        fn project_containing(&self, _dir: &Path) -> Result<Option<Project>, ConfigError> {
+            Ok(None)
         }
 
-        fn save_workspace(
-            &self,
-            _config_path: &Path,
-            _config: &crate::domain::config::WorkspaceConfig,
-        ) -> Result<(), ConfigError> {
-            unreachable!("doctor never saves a workspace")
+        fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {
+            Ok(false)
         }
     }
 
-    fn project(name: &str, config: &str) -> Project {
+    /// A project called `name` at `root`.
+    fn project(name: &str, root: &Path) -> Project {
         Project::builder()
+            .root(ProjectRoot::try_new(root.to_path_buf()).unwrap())
             .name(ProjectName::try_new(name).unwrap())
-            .config(PathBuf::from(config))
             .build()
     }
 
-    fn hook_status(provider: AgentTool, state: HookState) -> HookStatus {
-        HookStatus::builder()
-            .provider(provider)
-            .path(PathBuf::from("/dummy/path"))
-            .state(state)
-            .build()
+    /// A registered project whose folder was deleted is named as a warning,
+    /// never a failure.
+    #[test]
+    fn a_registered_folder_that_is_gone_is_a_warning() {
+        let scratch = TempDir::new().unwrap();
+        let here = scratch.path().canonicalize().unwrap();
+        let probe = projects_probe(&Projects(vec![
+            project("here", &here),
+            project("gone", &here.join("gone")),
+        ]));
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(probe.detail().contains("gone"), "{}", probe.detail());
+        let fine = projects_probe(&Projects(vec![project("here", &here)]));
+        assert_eq!(fine.outcome(), ProbeOutcome::Ok);
+        assert_eq!(fine.detail(), "1 registered");
     }
 
-    /// A missing config fails the config probe.
+    /// A database that does not open fails the doctor, naming why.
     #[test]
-    fn config_probe_fails_on_a_missing_file() {
-        let probe = config_probe(std::path::PathBuf::from("/definitely/missing/muster.yml"));
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-    }
-
-    /// Registry entries whose config is gone are flagged.
-    #[test]
-    fn registry_probe_flags_dangling_projects() {
-        let registry = RecordingRegistry {
-            projects: vec![project("gone", "/definitely/missing/muster.yml")],
-            ..RecordingRegistry::default()
-        };
-        let probe = registry_probe(&registry);
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("gone"));
-    }
-
-    /// A project whose config path is a dangling symlink is flagged as missing.
-    #[test]
-    fn registry_probe_flags_dangling_symlink_project() {
-        use std::os::unix::fs::symlink;
-
-        let dir =
-            std::env::temp_dir().join(format!("muster-probe-dangling-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let config_path = dir.join("muster.yml");
-        symlink(dir.join("nonexistent.yml"), &config_path).unwrap();
-
-        let registry = RecordingRegistry {
-            projects: vec![project("dangling", config_path.to_str().unwrap())],
-            ..RecordingRegistry::default()
-        };
-        let probe = registry_probe(&registry);
+    fn a_database_that_does_not_open_fails() {
+        let probe = database_probe(&Err(ConfigError::UnsupportedSchema {
+            found: 9,
+            supported: 1,
+        }));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Fail);
         assert!(
-            probe.detail().contains("dangling"),
-            "dangling project named in detail"
-        );
-
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Hook statuses aggregate: any missing or stale provider fails the probe.
-    #[test]
-    fn hooks_probe_fails_when_any_provider_is_missing() {
-        let statuses = vec![
-            hook_status(AgentTool::Claude, HookState::Installed),
-            hook_status(AgentTool::Codex, HookState::Missing),
-        ];
-        let probe = hooks_probe(&statuses);
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("Codex"));
-    }
-
-    /// A stale install, as one an older muster wrote, fails the probe and
-    /// names the fix.
-    #[test]
-    fn hooks_probe_asks_for_setup_on_a_stale_install() {
-        let statuses = vec![hook_status(AgentTool::Amp, HookState::Stale)];
-        let probe = hooks_probe(&statuses);
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("stale"), "{}", probe.detail());
-        assert!(
-            probe.detail().contains("muster hooks setup"),
+            probe.detail().contains("upgrade muster"),
             "{}",
             probe.detail()
         );
     }
 
-    /// All-installed hooks pass.
+    /// Files an older muster left are named for deletion.
     #[test]
-    fn hooks_probe_passes_when_everything_is_installed() {
-        let statuses = vec![hook_status(AgentTool::Claude, HookState::Installed)];
-        assert_eq!(hooks_probe(&statuses).outcome(), ProbeOutcome::Ok);
+    fn leftover_files_are_named() {
+        let state = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        assert_eq!(
+            legacy_probe(Some(state.path()), Some(config.path())).outcome(),
+            ProbeOutcome::Ok
+        );
+        fs::write(state.path().join("coordination.db"), "").unwrap();
+        fs::write(config.path().join("settings.yml"), "").unwrap();
+
+        let probe = legacy_probe(Some(state.path()), Some(config.path()));
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(probe.detail().contains("coordination.db"));
+        assert!(probe.detail().contains("settings.yml"));
+    }
+
+    /// The current folder's project is named; outside one it is not a
+    /// failure.
+    #[test]
+    fn the_current_project_is_named() {
+        let root = ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap();
+        let shop = project("shop", root.as_ref());
+
+        assert_eq!(
+            project_probe(&Ok(ProjectTarget::Registered(shop))).detail(),
+            "shop  /home/me/shop"
+        );
+        assert_eq!(
+            project_probe(&Ok(ProjectTarget::Unregistered(root))).outcome(),
+            ProbeOutcome::Ok
+        );
+    }
+
+    /// An error whose display already embeds its source.
+    #[derive(Debug)]
+    struct Embedding(Wrapped);
+    /// A source error.
+    #[derive(Debug)]
+    struct Wrapped;
+
+    impl fmt::Display for Wrapped {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("locked")
+        }
+    }
+
+    impl Error for Wrapped {}
+
+    impl fmt::Display for Embedding {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "could not open: {}", self.0)
+        }
+    }
+
+    impl Error for Embedding {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// A source the message already shows is not repeated.
+    #[test]
+    fn the_error_chain_skips_sources_already_shown() {
+        assert_eq!(error_chain(&Embedding(Wrapped)), "could not open: locked");
     }
 
     /// The completions probe warns with the exact line when unregistered.
     #[test]
     fn completions_probe_warns_with_the_hook_line() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".zshrc"), "# nothing here\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".zshrc"), "# nothing here\n").unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// An rc file that mentions COMPLETE and muster in unrelated contexts must
     /// NOT be reported as registered.
     #[test]
     fn completions_probe_ignores_unrelated_complete_mention() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-needle-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Contains both words but not the actual hook line.
-        std::fs::write(dir.join(".zshrc"), "# COMPLETE list for muster tasks\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(".zshrc"),
+            "# COMPLETE list for muster tasks\n",
+        )
+        .unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// When the hook line is in the second fish location (completions file),
     /// the probe reports Ok and names that file.
     #[test]
     fn completions_probe_detects_fish_completions_file() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-fish-{}", uuid::Uuid::new_v4()));
-        let completions_path = dir.join(".config").join(FISH_COMPLETIONS);
-        std::fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
-        // Write only to the completions drop-in, not config.fish.
-        std::fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
-        let probe = completions_probe(Some("/usr/bin/fish"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        let completions_path = dir.path().join(".config").join(FISH_COMPLETIONS);
+        fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
+        fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
+        let probe = completions_probe(
+            Some("/usr/bin/fish"),
+            dir.path(),
+            &dir.path().join(".config"),
+        );
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
         assert!(probe.detail().contains("completions/muster.fish"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The completions probe detects a PowerShell profile containing the exact
@@ -443,48 +484,43 @@ mod tests {
     /// `COMPLETE=` needle.
     #[test]
     fn completions_probe_detects_powershell_registration() {
-        let dir = std::env::temp_dir().join(format!("muster-pwsh-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rc_path = dir.join(".config").join(POWERSHELL_RC);
-        std::fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
-        std::fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
+        let dir = TempDir::new().unwrap();
+        let rc_path = dir.path().join(".config").join(POWERSHELL_RC);
+        fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
+        fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
 
-        let probe = completions_probe(Some("/usr/bin/pwsh"), &dir, &dir.join(".config"));
+        let probe = completions_probe(
+            Some("/usr/bin/pwsh"),
+            dir.path(),
+            &dir.path().join(".config"),
+        );
 
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// PowerShell paths map to the powershell completion shell.
-    #[test]
-    fn shell_from_path_recognizes_powershell() {
-        assert_eq!(
-            shell_from_path("/usr/bin/pwsh"),
-            Some(CompletionShell::Powershell)
-        );
     }
 
     /// A commented-out registration line does not count as registered.
     #[test]
     fn completions_probe_ignores_commented_registrations() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-comment-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(".zshrc"),
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(".zshrc"),
             format!("# {}\n", registration_line(CompletionShell::Zsh)),
         )
         .unwrap();
 
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A `$SHELL` path maps to a completion shell only when muster knows it.
     #[test]
     fn shell_from_path_names_known_shells_only() {
         assert_eq!(shell_from_path("/bin/zsh"), Some(CompletionShell::Zsh));
+        assert_eq!(
+            shell_from_path("/usr/bin/pwsh"),
+            Some(CompletionShell::Powershell)
+        );
         assert_eq!(shell_from_path("/bin/tcsh"), None);
     }
 
@@ -492,23 +528,19 @@ mod tests {
     #[test]
     fn doctor_report_maps_probes_and_summarizes() {
         let probes = vec![
-            Probe::builder()
-                .label("config".to_string())
-                .outcome(ProbeOutcome::Ok)
-                .detail("fine".to_string())
-                .build(),
-            Probe::builder()
-                .label("completions".to_string())
-                .outcome(ProbeOutcome::Warn)
-                .detail("not registered".to_string())
-                .build(),
+            probe(DATABASE_LABEL, ProbeOutcome::Ok, "fine".to_string()),
+            probe(
+                COMPLETIONS_LABEL,
+                ProbeOutcome::Warn,
+                "not registered".to_string(),
+            ),
         ];
 
         let report = doctor_report(&probes);
 
         assert_eq!(report.rows().len(), 2);
         assert_eq!(report.rows()[0].kind(), RowKind::Ok);
-        assert_eq!(report.rows()[0].label().as_deref(), Some("config"));
+        assert_eq!(report.rows()[0].label().as_deref(), Some(DATABASE_LABEL));
         assert_eq!(report.rows()[1].kind(), RowKind::Hint);
         assert_eq!(report.summary().as_deref(), Some("1 ok · 1 hint"));
     }

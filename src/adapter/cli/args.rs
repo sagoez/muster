@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{error::Error, fmt::Display, path::PathBuf, str::FromStr, sync::LazyLock};
 
 use clap::{
     Parser, Subcommand,
@@ -7,15 +7,21 @@ use clap::{
         styling::{AnsiColor, Styles},
     },
 };
+use clap_complete::{ArgValueCandidates, CompletionCandidate};
+use strum::IntoEnumIterator;
 
-use super::{completions::CompletionShell, run::RunArgs};
+use super::{completions::CompletionShell, process_flags::ProcessFlags};
 use crate::{
-    adapter::{holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND},
+    adapter::{
+        holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND, store::SqliteStore,
+    },
     constants::APP_NAME,
     domain::{
+        config::SettingKey,
         coordination::TodoStatus,
-        process::AgentTool,
-        value::{CommandLine, CommandLineError, ProcessRef},
+        port::ProjectStore,
+        process::{RestartPolicy, StopSignal},
+        value::{CommandLine, CommandLineError, PositiveDuration, ProcessRef},
     },
 };
 
@@ -28,7 +34,7 @@ const HELP_STYLES: Styles = Styles::styled()
     .placeholder(AnsiColor::Yellow.on_default());
 
 /// What the main help says after the commands: the exit codes and the JSON
-/// conventions every process command keeps. A test pins the codes to
+/// conventions every command keeps. A test pins the codes to
 /// [`CliExit`](super::CliExit).
 const AFTER_HELP: &str = "\
 Exit codes:
@@ -36,51 +42,102 @@ Exit codes:
     1  a process did not end up as asked, or the action failed
     2  the command line could not be parsed, or a question was cancelled
     3  the muster service is unavailable or runs a newer version
-    4  an unknown project or process name, or an invalid config
+    4  not a project, an unknown project or process, or an invalid value or file
   130  interrupted with Ctrl-C while it waited at a terminal
 
 With --json, results and failures print as JSON on stdout. Object keys are
-snake_case, enum values are kebab-case, durations are whole seconds, and times
-are RFC 3339 in UTC.";
+snake_case, enum values are kebab-case, durations are seconds, and times are
+RFC 3339 in UTC.";
 
-/// Parses the agent `muster agent new` opens, offering every preset and
-/// `custom` in help and naming them all on a typo.
-fn agent_tool_parser() -> impl TypedValueParser<Value = AgentTool> {
-    PossibleValuesParser::new(AgentTool::options().map(AgentTool::protocol_token))
-        .try_map(|token| token.parse::<AgentTool>())
+/// The names `config` accepts for a setting.
+static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
+/// The names `--restart` accepts.
+static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<RestartPolicy>);
+/// The names `--stop-signal` accepts.
+static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopSignal>);
+
+/// The kebab-case name of each variant of `T`.
+fn variant_names<T: IntoEnumIterator + Display>() -> Vec<String> {
+    T::iter().map(|variant| variant.to_string()).collect()
+}
+
+/// Parses one of `names` into `T`, listing them all in help and on a typo.
+pub(super) fn one_of<T>(names: &'static [String]) -> impl TypedValueParser<Value = T>
+where
+    T: FromStr + Clone + Send + Sync + 'static,
+    T::Err: Error + Send + Sync + 'static,
+{
+    PossibleValuesParser::new(names.iter().map(String::as_str)).try_map(|raw| raw.parse::<T>())
+}
+
+/// Parses a `--restart` policy.
+pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
+    one_of(&RESTART_POLICIES)
+}
+
+/// Parses a `--stop-signal`.
+pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> {
+    one_of(&STOP_SIGNALS)
 }
 
 /// Parses a shell command, refusing a blank one.
 ///
 /// # Errors
 /// Returns the [`CommandLineError`] of a blank command.
-fn command_line(raw: &str) -> Result<CommandLine, CommandLineError> {
+pub(super) fn command_line(raw: &str) -> Result<CommandLine, CommandLineError> {
     CommandLine::try_new(raw)
 }
 
+/// Parses a positive duration such as `5s` or `1m 30s`.
+///
+/// # Errors
+/// Returns the parse failure of anything else.
+pub(super) fn positive_duration(raw: &str) -> Result<PositiveDuration, String> {
+    raw.parse::<PositiveDuration>()
+        .map_err(|error| error.to_string())
+}
+
+/// Shell-completion candidates for `--project`: the registered projects'
+/// names, read fresh each time so a new project completes at once.
+fn project_candidates() -> Vec<CompletionCandidate> {
+    SqliteStore::open_default()
+        .and_then(|store| store.projects())
+        .unwrap_or_default()
+        .iter()
+        .map(|project| CompletionCandidate::new(project.name().as_ref()))
+        .collect()
+}
+
 /// Command-line arguments. With no subcommand, muster prints `ps` for the
-/// current project.
+/// current project, or every loaded project outside one.
 #[derive(Parser)]
 #[command(
     name = APP_NAME,
     bin_name = APP_NAME,
     version,
-    about = "Run a project's agents and dev processes in the background, and control them from any shell",
+    about = "Run a project's dev processes in the background, and control them from any shell",
     after_help = AFTER_HELP,
     styles = HELP_STYLES
 )]
 pub struct Args {
-    /// The project's muster.yml. Process commands default to $MUSTER_PROJECT,
-    /// then ./muster.yml, then the first registered project.
+    /// The project: a registered project's name, or a folder (a value with
+    /// `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then
+    /// the registered project containing the current folder.
     // Global, so it is recognized before or after a subcommand rather than
-    // being swallowed by `run`'s command args.
-    #[arg(short, long, global = true)]
-    pub config: Option<PathBuf>,
+    // being swallowed by `run`'s command words.
+    #[arg(
+        short,
+        long,
+        global = true,
+        value_name = "PROJECT",
+        add = ArgValueCandidates::new(project_candidates)
+    )]
+    pub project: Option<String>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-/// Subcommands. Absent, muster prints `ps` for the current project.
+/// Subcommands. Absent, muster prints `ps`.
 #[derive(Subcommand)]
 pub enum Command {
     /// List this project's processes: state, pid, uptime, restarts and usage.
@@ -92,21 +149,14 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start this project's processes set to `autostart: true`.
+    /// Start this project's processes that autostart.
     Up {
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Stop this project's commands and terminals.
+    /// Stop every process of this project.
     Down {
-        /// Stop the project's agents too, after asking at a terminal.
-        #[arg(long)]
-        agents: bool,
-        /// Stop the agents without asking; required with --agents where
-        /// nobody can be asked.
-        #[arg(short, long, requires = "agents")]
-        yes: bool,
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,
@@ -142,8 +192,8 @@ pub enum Command {
     },
     /// Show a running process in this terminal and type into it.
     ///
-    /// The detach key, set in settings.yml, returns to the shell and leaves
-    /// the process running.
+    /// The detach key (`muster config get detach-key`) returns to the shell
+    /// and leaves the process running.
     Attach {
         /// The process, as `muster ps` lists it; quote a name with spaces.
         /// Chosen from a list at a terminal when absent.
@@ -154,11 +204,6 @@ pub enum Command {
         /// Print a refusal or failure as JSON; an attach prints nothing else.
         #[arg(long)]
         json: bool,
-    },
-    /// Open, close or reopen agent sessions.
-    Agent {
-        #[command(subcommand)]
-        command: AgentCommand,
     },
     /// Show what the muster service reported about this project: failed
     /// starts, forced stops, crashes.
@@ -172,21 +217,89 @@ pub enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Create a muster.yml here and register this folder as a project.
+    /// Add a process to this project, registering the folder as a project
+    /// when it is not one yet. Nothing is started.
+    Add(AddArgs),
+    /// Change a process's definition; a running process takes it at its next
+    /// start.
+    Set(SetArgs),
+    /// Remove processes from this project, stopping those that run.
+    Rm {
+        /// The processes, as `muster ps` lists them.
+        #[arg(required = true)]
+        names: Vec<ProcessRef>,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show or change muster's settings.
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Write this project's processes to a stack file.
+    Export {
+        /// The file to write; `-` prints it. Defaults to muster.yml in the
+        /// project's folder.
+        file: Option<String>,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+        /// Write environment values too; without it each variable is
+        /// written with no value, to be filled in before importing.
+        #[arg(long)]
+        with_env: bool,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Load processes from a stack file into this project, registering the
+    /// folder when it is not a project yet.
+    Import {
+        /// The file to read; `-` reads stdin. Defaults to muster.yml in the
+        /// project's folder.
+        file: Option<String>,
+        /// Replace same-named processes and keep the others.
+        #[arg(long, conflicts_with = "replace")]
+        merge: bool,
+        /// Make the project's processes exactly the file's, stopping and
+        /// removing the others.
+        #[arg(long)]
+        replace: bool,
+        /// Print what would change and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find processes in this folder's package.json, Procfile, justfile,
+    /// Makefile or Compose file and add the ones chosen.
     ///
-    /// At a terminal it asks for each process; elsewhere it writes a starter
-    /// with one terminal.
-    Init,
-    /// Validate the workspace config and exit non-zero on problems.
-    Check,
-    /// Register a command in a project, start it and attach to it.
+    /// At a terminal it asks which to add; elsewhere it lists them and adds
+    /// the suggested ones with --yes.
+    Init {
+        /// Add the suggested processes without asking.
+        #[arg(short, long)]
+        yes: bool,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a command to this project, start it and attach to it.
     ///
     /// Without a terminal, or with --json, the start is reported instead.
     Run(RunArgs),
-    /// List registered projects, or add and remove them.
+    /// List registered projects, or remove one.
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Read or write shared scratchpad notes for the current project.
     Note {
@@ -208,12 +321,12 @@ pub enum Command {
         #[command(subcommand)]
         command: CoordinationCommand,
     },
-    /// Serve this project to agents as an MCP server over stdio: its processes,
-    /// agent sessions and shared coordination state (spawned as a child
-    /// process by a connecting agent).
+    /// Serve this project to agents as an MCP server over stdio: its
+    /// processes and shared coordination state (spawned as a child process
+    /// by a connecting agent).
     Mcp {
-        /// Print the JSON config snippet to add muster to an agent's MCP servers,
-        /// then exit instead of serving.
+        /// Print the JSON config snippet to add muster to an agent's MCP
+        /// servers, then exit instead of serving.
         #[arg(long)]
         print_config: bool,
         /// Identity this server stamps on coordination writes (the connecting
@@ -222,24 +335,13 @@ pub enum Command {
         #[arg(long = "as", value_name = "NAME")]
         author: Option<String>,
     },
-    /// Install provider integrations used to preserve native agent sessions.
-    Hooks {
-        #[command(subcommand)]
-        command: HooksCommand,
-    },
-    /// Diagnose config, projects, sessions, hooks, and completions.
+    /// Diagnose muster's database, projects and completions.
     Doctor,
     /// Print the shell hook that enables completions.
     Completions {
         /// Shell to print the hook for.
         #[arg(value_enum)]
         shell: CompletionShell,
-    },
-    /// Internal provider-hook receiver.
-    #[command(hide = true)]
-    Hook {
-        #[command(subcommand)]
-        command: InternalHookCommand,
     },
     /// Internal: runs one process holder from the spec file it is handed.
     #[command(name = HOLDER_SUBCOMMAND, hide = true)]
@@ -265,43 +367,95 @@ pub struct ProcessArgs {
     pub json: bool,
 }
 
-/// Agent session actions under `muster agent`.
+/// `muster add`: a new process's definition.
+#[derive(clap::Args)]
+pub struct AddArgs {
+    /// Its name, unique in the project.
+    pub name: String,
+    /// Its working directory, read from the current folder; stored relative
+    /// to the project when inside it. Defaults to the project's folder.
+    #[arg(long, value_name = "DIR")]
+    pub cwd: Option<PathBuf>,
+    /// A one-line description.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    #[command(flatten)]
+    pub flags: ProcessFlags,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// The command, after `--`: one argument is a shell expression, several
+    /// are joined as the shell split them.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
+}
+
+/// `muster set`: the changes to a process's definition.
+#[derive(clap::Args)]
+pub struct SetArgs {
+    /// The process, as `muster ps` lists it.
+    pub name: ProcessRef,
+    /// A new command, as one shell expression.
+    #[arg(long, value_name = "CMD", value_parser = command_line, conflicts_with = "words")]
+    pub command: Option<CommandLine>,
+    /// A new working directory, read from the current folder.
+    #[arg(long, value_name = "DIR", conflicts_with = "no_cwd")]
+    pub cwd: Option<PathBuf>,
+    /// Run in the project's folder again.
+    #[arg(long)]
+    pub no_cwd: bool,
+    /// A new one-line description.
+    #[arg(long, value_name = "TEXT", conflicts_with = "no_description")]
+    pub description: Option<String>,
+    /// Remove the description.
+    #[arg(long)]
+    pub no_description: bool,
+    /// Remove an environment variable (repeatable); one that is not set is
+    /// left alone.
+    #[arg(long = "unset-env", value_name = "KEY")]
+    pub unset_env: Vec<String>,
+    #[command(flatten)]
+    pub flags: ProcessFlags,
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// A new command, after `--`, joined as `muster add` joins it.
+    #[arg(last = true, value_name = "COMMAND")]
+    pub words: Vec<String>,
+}
+
+/// `muster run`: a command to add, start and attach to.
+#[derive(clap::Args)]
+pub struct RunArgs {
+    /// Its name. Defaults to the command's first word.
+    #[arg(short, long)]
+    pub name: Option<String>,
+    /// Print the report as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// The command, e.g. `-- npm run dev`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    pub command: Vec<String>,
+}
+
+/// Settings actions under `muster config`. Absent, every setting is listed.
 #[derive(Subcommand)]
-pub enum AgentCommand {
-    /// Open and start a new agent session.
-    New {
-        /// The agent to run; `custom` runs the agent --command names.
-        #[arg(value_parser = agent_tool_parser(), ignore_case = true)]
-        tool: AgentTool,
-        /// Its name; generated from the agent when absent.
-        #[arg(long)]
-        name: Option<String>,
-        /// The command that starts the agent. Required for `custom`; for a
-        /// preset it replaces the default command.
-        #[arg(long, value_parser = command_line)]
-        command: Option<CommandLine>,
-        /// The command that resumes a closed conversation. Put `{session_id}`
-        /// where the agent's conversation id belongs, as a whole unquoted
-        /// word; without it the id is appended.
-        #[arg(long, value_name = "TEMPLATE", value_parser = command_line)]
-        resume: Option<CommandLine>,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
+pub enum ConfigCommand {
+    /// List every setting and its value.
+    List,
+    /// Print one setting's value.
+    Get {
+        /// The setting.
+        #[arg(value_parser = one_of::<SettingKey>(&SETTING_KEYS))]
+        key: SettingKey,
     },
-    /// Close an agent session, stopping its process.
-    Close {
-        /// The session, as `muster ps` lists it; quote a name with spaces.
-        name: ProcessRef,
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Reopen the most recently closed agent session.
-    Reopen {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
+    /// Change one setting.
+    Set {
+        /// The setting.
+        #[arg(value_parser = one_of::<SettingKey>(&SETTING_KEYS))]
+        key: SettingKey,
+        /// Its new value, in the form `muster config get` prints.
+        value: String,
     },
 }
 
@@ -324,18 +478,17 @@ pub enum ServiceCommand {
     },
 }
 
-/// Registry management actions under `muster projects`.
+/// Project actions under `muster projects`. Absent, projects are listed.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
-    /// Register an existing folder containing a muster.yml.
-    Add {
-        /// Folder to register (defaults to the current directory).
-        path: Option<PathBuf>,
-    },
-    /// Unregister a project by name; files on disk are untouched.
-    Remove {
-        /// Registered project name.
-        name: String,
+    /// Stop a project's processes and forget it with its processes and
+    /// coordination state; its folder is untouched.
+    Rm {
+        /// The project's name, or its folder.
+        project: String,
+        /// Remove without asking; required where nobody can be asked.
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -424,42 +577,9 @@ pub enum CoordinationCommand {
     },
 }
 
-/// User-facing lifecycle-integration commands.
-#[derive(Subcommand)]
-pub enum HooksCommand {
-    /// Install idempotent session-ID hooks/plugins for supported agents.
-    Setup,
-}
-
-/// Commands invoked by installed provider integrations.
-#[derive(Subcommand)]
-pub enum InternalHookCommand {
-    /// Capture a provider session ID from JSON on standard input.
-    Capture {
-        /// Provider integration that emitted this lifecycle event.
-        #[arg(long)]
-        provider: AgentTool,
-        /// Parent provider process that invoked the capture hook.
-        #[arg(long)]
-        process_id: u32,
-        /// Parent of the provider process, when the provider was launched by a shell wrapper.
-        #[arg(long)]
-        parent_process_id: Option<u32>,
-    },
-    /// Bind a durable session to this process, then start its provider command.
-    Launch {
-        /// Stable Muster identity of the session being launched.
-        #[arg(long)]
-        session: String,
-        /// Original provider command, preserved as one shell expression.
-        #[arg(last = true, allow_hyphen_values = true)]
-        command: String,
-    },
-}
-
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
 
@@ -467,8 +587,6 @@ mod tests {
     /// name muster-workspace, or every emitted shell hook is inert.
     #[test]
     fn the_command_is_named_after_the_binary() {
-        use clap::CommandFactory;
-
         assert_eq!(Args::command().get_name(), APP_NAME);
         assert_eq!(Args::command().get_bin_name(), Some(APP_NAME));
         assert_eq!(
@@ -495,14 +613,18 @@ mod tests {
     /// shows up in review.
     #[test]
     fn cli_args_snapshot() {
-        use clap::CommandFactory;
-
         let mut command = Args::command();
         command.build();
         let mut helps = Vec::new();
         collect_help(&mut command, APP_NAME, &mut helps);
 
         insta::assert_snapshot!(helps.join("\n\n"));
+    }
+
+    /// clap's own consistency checks pass for every command.
+    #[test]
+    fn the_command_line_is_consistent() {
+        Args::command().debug_assert();
     }
 
     /// A name with spaces or an accent reaches a lifecycle command whole and
@@ -521,98 +643,91 @@ mod tests {
         ));
         assert!(Args::try_parse_from(["muster", "start", "  "]).is_err());
         assert!(Args::try_parse_from(["muster", "logs", "api", "-f", "--screen"]).is_err());
-        let args = Args::try_parse_from(["muster", "attach", "dev server", "--read-only"]).unwrap();
-        assert!(matches!(
-            args.command,
-            Some(Command::Attach { name: Some(name), read_only: true, json: false }) if name.as_ref() == "dev server"
-        ));
     }
 
     /// A lifecycle, log or attach command may leave its name out, to be
-    /// chosen from a list; `--yes` only answers `down --agents`.
+    /// chosen from a list; `down` takes no agent flags any more.
     #[test]
-    fn a_name_may_be_left_to_choose_and_yes_belongs_to_agents() {
+    fn a_name_may_be_left_to_choose() {
         for command in ["start", "stop", "restart", "logs", "attach"] {
             assert!(
                 Args::try_parse_from(["muster", command]).is_ok(),
                 "{command}"
             );
         }
-        let args = Args::try_parse_from(["muster", "down", "--agents", "--yes"]).unwrap();
-        assert!(matches!(
-            args.command,
-            Some(Command::Down {
-                agents: true,
-                yes: true,
-                json: false
-            })
-        ));
-        assert!(Args::try_parse_from(["muster", "down", "--yes"]).is_err());
+        assert!(Args::try_parse_from(["muster", "down", "--agents"]).is_err());
+        assert!(Args::try_parse_from(["muster", "rm"]).is_err());
     }
 
-    /// A typo in the agent's name names every agent `agent new` can open,
-    /// and any case of a valid name is accepted.
+    /// `add` takes its command after `--` and the shared process flags;
+    /// `set` takes the command as a flag or after `--`, never both.
     #[test]
-    fn an_unknown_agent_lists_every_valid_one() {
-        let error = match Args::try_parse_from(["muster", "agent", "new", "cluade"]) {
+    fn add_and_set_parse_their_definitions() {
+        let args = Args::try_parse_from([
+            "muster",
+            "add",
+            "web",
+            "--env",
+            "PORT=5173",
+            "--restart",
+            "on-failure",
+            "--stop-grace",
+            "10s",
+            "--no-autostart",
+            "--",
+            "npm",
+            "run",
+            "dev",
+        ])
+        .unwrap();
+        let Some(Command::Add(add)) = args.command else {
+            panic!("add parses");
+        };
+        assert_eq!(add.name, "web");
+        assert_eq!(add.command, ["npm", "run", "dev"]);
+        assert_eq!(add.flags.restart, Some(RestartPolicy::OnFailure));
+        assert_eq!(add.flags.autostart(), Some(false));
+        assert!(Args::try_parse_from(["muster", "add", "web"]).is_err());
+        assert!(
+            Args::try_parse_from(["muster", "add", "web", "--restart", "sometimes", "--", "x"])
+                .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["muster", "set", "web", "--command", "a", "--", "b"]).is_err()
+        );
+        assert!(Args::try_parse_from(["muster", "set", "web", "--cwd", "x", "--no-cwd"]).is_err());
+    }
+
+    /// A misspelt setting lists every valid key; `config` alone lists them.
+    #[test]
+    fn config_keys_are_listed_on_a_typo() {
+        let error = match Args::try_parse_from(["muster", "config", "get", "detach_key"]) {
             Err(error) => error.render().to_string(),
             Ok(_) => panic!("a typo parses"),
         };
-        for tool in AgentTool::options() {
-            assert!(error.contains(tool.protocol_token()), "{error}");
+        for key in SettingKey::iter() {
+            assert!(error.contains(&key.to_string()), "{error}");
         }
+        let args = Args::try_parse_from(["muster", "config", "--json"]).unwrap();
         assert!(matches!(
-            Args::try_parse_from(["muster", "agent", "new", "Claude"]).map(|args| args.command),
-            Ok(Some(Command::Agent {
-                command: AgentCommand::New {
-                    tool: AgentTool::Claude,
-                    ..
-                }
-            }))
+            args.command,
+            Some(Command::Config {
+                command: None,
+                json: true
+            })
         ));
     }
 
-    /// A custom agent takes its command and an optional resume template; an
-    /// empty command is refused at parse time.
+    /// `import` takes one of `--merge` and `--replace`, not both.
     #[test]
-    fn a_custom_agent_takes_a_command_and_a_resume_template() {
-        let parsed = Args::try_parse_from([
-            "muster",
-            "agent",
-            "new",
-            "custom",
-            "--command",
-            "mycodex",
-            "--resume",
-            "mycodex resume {session_id}",
-        ])
-        .map(|args| args.command);
-
-        let Ok(Some(Command::Agent {
-            command:
-                AgentCommand::New {
-                    tool,
-                    command,
-                    resume,
-                    ..
-                },
-        })) = parsed
-        else {
-            panic!("a custom agent parses");
-        };
-        assert_eq!(tool, AgentTool::Custom);
-        assert_eq!(command.unwrap().as_ref(), "mycodex");
-        assert_eq!(resume.unwrap().as_ref(), "mycodex resume {session_id}");
-        assert!(
-            Args::try_parse_from(["muster", "agent", "new", "custom", "--command", " "]).is_err()
-        );
+    fn import_modes_exclude_each_other() {
+        assert!(Args::try_parse_from(["muster", "import", "--merge", "--replace"]).is_err());
+        assert!(Args::try_parse_from(["muster", "import", "-", "--replace", "--dry-run"]).is_ok());
     }
 
     /// The exit codes the help documents are the ones commands exit with.
     #[test]
     fn the_documented_exit_codes_match() {
-        use strum::IntoEnumIterator;
-
         use crate::adapter::cli::CliExit;
 
         for exit in CliExit::iter() {
@@ -628,15 +743,33 @@ mod tests {
         );
     }
 
-    /// The global config flag parses before and after a subcommand.
+    /// The global project flag parses before and after a subcommand, and is
+    /// not swallowed by `run`'s command words.
     #[test]
-    fn global_config_flag_parses_anywhere() {
-        let before = Args::try_parse_from(["muster", "-c", "x.yml", "run", "--", "ls"]).unwrap();
-        assert_eq!(
-            before.config.as_deref(),
-            Some(std::path::Path::new("x.yml"))
-        );
+    fn the_project_flag_parses_anywhere() {
+        let before = Args::try_parse_from(["muster", "-p", "shop", "run", "--", "ls"]).unwrap();
+        assert_eq!(before.project.as_deref(), Some("shop"));
+        let after = Args::try_parse_from(["muster", "ps", "--project", "./web"]).unwrap();
+        assert_eq!(after.project.as_deref(), Some("./web"));
         let bare = Args::try_parse_from(["muster"]).unwrap();
         assert!(bare.command.is_none());
+    }
+
+    /// The hidden holder entry point takes its spec from its own `--spec`.
+    #[test]
+    fn the_holder_command_reads_its_spec_path() {
+        let args =
+            Args::try_parse_from(["muster", HOLDER_SUBCOMMAND, "--spec", "/run/holder.json"])
+                .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Some(Command::Holder { spec }) if spec.as_os_str() == "/run/holder.json"
+        ));
+        assert_eq!(args.project, None);
+        assert!(matches!(
+            Args::try_parse_from(["muster", SERVICE_SUBCOMMAND]).map(|args| args.command),
+            Ok(Some(Command::RunService))
+        ));
     }
 }

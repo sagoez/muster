@@ -1,11 +1,13 @@
 //! The CLI end to end: the built `muster` binary run as a user would, over
-//! isolated XDG roots with desktop notifications off, starting its own
-//! service on demand, replacing an older service, refusing a newer one, and
-//! reporting what happened to processes.
+//! isolated XDG roots with desktop notifications off, its projects added to
+//! the database through the CLI itself, starting its own service on demand,
+//! replacing an older service, refusing a newer one, and reporting what
+//! happened to processes.
 
 #![cfg(target_os = "linux")]
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::{
@@ -23,30 +25,27 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use muster::{
     adapter::{
-        config::YamlProjectRegistry,
         holder::{
             ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderConfig, HolderDirs,
             HolderLauncher, HolderRunner, client::greet,
         },
         service::{
-            BatchOutcome, Notice, NoticeLevel, ProcessAction, ProcessStatus, ProjectKey,
-            ProjectPorts, ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceEvent,
-            ServiceRequest, ServiceResponse, ServiceRuntime, Singleton,
+            BatchOutcome, Notice, NoticeLevel, ProcessAction, ProcessStatus, ProjectPorts,
+            ProjectStatus, Refusal, ServiceDeps, ServiceError, ServiceRequest, ServiceResponse,
+            ServiceRuntime, Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
+        store::SqliteStore,
     },
     domain::{
-        color_scheme::ColorScheme,
-        config::{ConfigError, WorkspaceConfig},
-        port::{AgentSessionStore, ConfigWatcher, Notifier, ProcessMetrics, ProjectRegistry},
-        process::{ActivityState, ProcessKind, ProcessState},
+        port::{Notifier, ProcessMetrics},
+        process::ProcessState,
         project::Project,
         pty::{PtyError, PtySize},
-        settings::Settings,
-        value::{ByteSize, Cols, DetachKey, ProcessName, Rows},
+        value::{Cols, ProcessName, ProjectName, ProjectRoot, Rows},
     },
 };
 use rustix::{
@@ -58,11 +57,6 @@ use tempfile::TempDir;
 
 /// The muster binary cargo built for this test.
 const BINARY: &str = env!("CARGO_BIN_EXE_muster");
-/// The settings muster ships, which every scratch starts from.
-const SHIPPED_SETTINGS: &str = include_str!("../src/adapter/config/default_settings.yml");
-/// The shipped desktop notification setting, and what scratches use instead.
-const DESKTOP_ON: &str = "desktop_notifications: true";
-const DESKTOP_OFF: &str = "desktop_notifications: false";
 /// Bound on every wait; reaching it fails the test.
 const WAIT: Duration = Duration::from_secs(30);
 /// Interval between checks of a polled condition.
@@ -71,10 +65,12 @@ const POLL: Duration = Duration::from_millis(20);
 const SHORT_TEMP_ROOT: &str = "/tmp";
 /// Prefix of the scratch directory.
 const SCRATCH_PREFIX: &str = "mc-";
-/// Directory muster keeps its state and config under, inside the XDG roots.
+/// Directory muster keeps its state under, inside the XDG state root.
 const APP_DIR: &str = "muster";
-/// The settings file name inside muster's config directory.
-const SETTINGS_FILE: &str = "settings.yml";
+/// muster's database inside its state directory.
+const DATABASE_FILE: &str = "muster.db";
+/// The stack file `export` and `import` use by default.
+const STACK_FILE: &str = "muster.yml";
 /// Exit code of an action that failed.
 const ACTION_FAILED: i32 = 1;
 /// Exit code of a command line that does not parse.
@@ -99,22 +95,113 @@ const IN_PROCESS_BINARY: &str = "/opt/other/muster";
 const GATE_HOLD: Duration = Duration::from_millis(1500);
 /// What a service that lost the start race writes to its log.
 const LOST_RACE_LINE: &str = "another muster service already runs";
-/// A project of two long runners with a space and an accent in their names,
-/// and a third that does not autostart.
-const PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: dev server\n    command: echo dev-ready; sleep 600\n    autostart: true\n  - name: café\n    command: sleep 600\n    autostart: true\n  - name: api\n    command: echo api-ran; sleep 600\n    autostart: false\n";
-/// A project whose second autostart process fails at once with status 3.
-const FAILING_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: web\n    command: sleep 600\n    autostart: true\n  - name: broken\n    command: echo oops; exit 3\n    autostart: true\n";
-/// A project with one long runner.
-const SINGLE_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: sleep 600\n    autostart: true\n";
-/// A project with a runner that takes a second to stop and a neighbour that
-/// crash-loops meanwhile.
-const CRASH_LOOP_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done\n    autostart: true\n  - name: flaky\n    command: sleep 0.1; exit 1\n    autostart: true\n    restart: always\n";
-/// A project with a process that ignores the stop signal for its grace.
-const SLOW_STOP_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: slow\n    command: trap '' TERM; while :; do sleep 0.1; done\n    autostart: true\n    stop:\n      signal: terminate\n      grace_period: 1s\n";
+/// The default stop grace every test process has unless it says otherwise.
+const GRACE: &str = "5s";
 /// Why the scripted service leaves `api` alone on `up`.
 const REFUSAL_REASON: &str = "cannot start: an earlier run may still be running as pid 4242";
-/// A project with a process that writes a line every tenth of a second.
-const TICKING_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: ticker\n    command: while :; do echo tick; sleep 0.1; done\n    autostart: true\n";
+/// The variable a started process reads from the command that started it.
+const CALLER_VARIABLE: &str = "CLI_EXEC_CALLER_MARK";
+/// The schema version a newer muster would have written.
+const FUTURE_SCHEMA: u32 = 999;
+
+/// One process of a stack file.
+struct Entry<'a> {
+    /// Its name.
+    name: &'a str,
+    /// The shell command it runs.
+    command: &'a str,
+    /// Whether `muster up` starts it.
+    autostart: bool,
+    /// Its restart policy, as the file spells it.
+    restart: &'a str,
+    /// Its stop grace, as the file spells it.
+    grace: &'a str,
+}
+
+/// A process that autostarts unless `autostart` says otherwise, never
+/// restarts, and stops with the default grace.
+const fn entry<'a>(name: &'a str, command: &'a str, autostart: bool) -> Entry<'a> {
+    Entry {
+        name,
+        command,
+        autostart,
+        restart: "never",
+        grace: GRACE,
+    }
+}
+
+/// The stack file holding `entries`, every value quoted so commands with
+/// shell punctuation read back as they are.
+fn stack(entries: &[Entry<'_>]) -> String {
+    let quoted = |text: &str| serde_json::to_string(text).unwrap();
+    let mut file = String::from("version: 1\nprocesses:\n");
+    for entry in entries {
+        file.push_str(&format!(
+            "  - name: {}\n    command: {}\n    autostart: {}\n    restart: {}\n    stop:\n      signal: terminate\n      grace_period: {}\n",
+            quoted(entry.name),
+            quoted(entry.command),
+            entry.autostart,
+            entry.restart,
+            entry.grace,
+        ));
+    }
+    file
+}
+
+/// Two long runners with a space and an accent in their names, and a third
+/// that does not autostart.
+fn shop() -> String {
+    stack(&[
+        entry("dev server", "echo dev-ready; sleep 600", true),
+        entry("café", "sleep 600", true),
+        entry("api", "echo api-ran; sleep 600", false),
+    ])
+}
+
+/// A project whose second autostart process fails at once with status 3.
+fn failing() -> String {
+    stack(&[
+        entry("web", "sleep 600", true),
+        entry("broken", "echo oops; exit 3", true),
+    ])
+}
+
+/// One long runner.
+fn single() -> String {
+    stack(&[entry("api", "sleep 600", true)])
+}
+
+/// A runner that takes a second to stop and a neighbour that crash-loops.
+fn crash_loop() -> String {
+    stack(&[
+        entry(
+            "api",
+            "trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done",
+            true,
+        ),
+        Entry {
+            restart: "always",
+            ..entry("flaky", "sleep 0.1; exit 1", true)
+        },
+    ])
+}
+
+/// A process that ignores the stop signal for its one-second grace.
+fn slow_stop() -> String {
+    stack(&[Entry {
+        grace: "1s",
+        ..entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true)
+    }])
+}
+
+/// A process that writes a line every tenth of a second.
+fn ticking() -> String {
+    stack(&[entry(
+        "ticker",
+        "while :; do echo tick; sleep 0.1; done",
+        true,
+    )])
+}
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -163,8 +250,8 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// A fresh scratch directory short enough to bind sockets in, with the
-    /// shipped settings but desktop notifications off.
+    /// A fresh scratch directory short enough to bind sockets in, with
+    /// desktop notifications turned off in its database.
     fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix(SCRATCH_PREFIX)
@@ -174,24 +261,14 @@ impl Scratch {
             root,
             children: Vec::new(),
         };
-        scratch.write_settings(&SHIPPED_SETTINGS.replace(DESKTOP_ON, DESKTOP_OFF));
+        let quiet = scratch.muster(&["config", "set", "desktop-notifications", "false"]);
+        assert!(quiet.status.success(), "{}", shown(&quiet));
         scratch
     }
 
-    /// Replaces the settings file with `settings`.
-    fn write_settings(&self, settings: &str) {
-        let path = self.settings_path();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, settings).unwrap();
-    }
-
-    /// The settings file every service over this scratch reads.
-    fn settings_path(&self) -> PathBuf {
-        self.root
-            .path()
-            .join("config")
-            .join(APP_DIR)
-            .join(SETTINGS_FILE)
+    /// The scratch directory, which is no project.
+    fn path(&self) -> PathBuf {
+        self.root.path().canonicalize().unwrap()
     }
 
     /// The state directory every service over this scratch owns.
@@ -199,13 +276,20 @@ impl Scratch {
         self.root.path().join("state").join(APP_DIR)
     }
 
-    /// Writes `config` as the `muster.yml` of the project in `folder`.
-    fn project(&self, folder: &str, config: &str) -> PathBuf {
-        let dir = self.root.path().join(folder);
+    /// The database every command over this scratch reads and writes.
+    fn database(&self) -> PathBuf {
+        self.state_dir().join(DATABASE_FILE)
+    }
+
+    /// The project in `folder`, registered with the processes of the stack
+    /// file `stack` through `muster import`; returns its folder.
+    fn project(&self, folder: &str, stack: &str) -> PathBuf {
+        let dir = self.path().join(folder);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("muster.yml");
-        fs::write(&path, config).unwrap();
-        path
+        fs::write(dir.join(STACK_FILE), stack).unwrap();
+        let import = self.muster(&["-p", dir.to_str().unwrap(), "import"]);
+        assert!(import.status.success(), "{}", shown(&import));
+        dir
     }
 
     /// `muster <args>` over this scratch's XDG roots, run from its root.
@@ -226,6 +310,13 @@ impl Scratch {
         self.command(args).output().unwrap()
     }
 
+    /// Runs `muster <args>` on the project in `project`.
+    fn on(&self, project: &Path, args: &[&str]) -> Output {
+        let mut all = vec!["-p", project.to_str().unwrap()];
+        all.extend_from_slice(args);
+        self.muster(&all)
+    }
+
     /// Runs `muster <args>`, with `--json` appended, and parses what it
     /// printed.
     fn json(&self, args: &[&str]) -> (Output, Value) {
@@ -235,9 +326,16 @@ impl Scratch {
         (output.clone(), parsed(&output))
     }
 
+    /// Runs `muster <args> --json` on the project in `project`.
+    fn json_on(&self, project: &Path, args: &[&str]) -> (Output, Value) {
+        let mut all = vec!["-p", project.to_str().unwrap()];
+        all.extend_from_slice(args);
+        self.json(&all)
+    }
+
     /// The `ps` row of process `name` in `project`.
     fn row(&self, project: &Path, name: &str) -> Value {
-        let (_, statuses) = self.json(&["-c", project.to_str().unwrap(), "ps"]);
+        let (_, statuses) = self.json_on(project, &["ps"]);
         statuses[0]["processes"]
             .as_array()
             .unwrap()
@@ -245,6 +343,13 @@ impl Scratch {
             .find(|process| process["name"] == name)
             .cloned()
             .unwrap_or_else(|| panic!("no row {name}: {statuses}"))
+    }
+
+    /// The stack file of `project`, as `export -` prints it.
+    fn exported(&self, project: &Path) -> String {
+        let export = self.on(project, &["export", "-"]);
+        assert!(export.status.success(), "{}", shown(&export));
+        String::from_utf8(export.stdout).unwrap()
     }
 
     /// Sends `request` straight to the service socket, as an in-process
@@ -257,7 +362,7 @@ impl Scratch {
     /// lists it.
     fn first_row_raw(&self, project: &Path) -> (String, Option<u64>) {
         let response = self.send(&ServiceRequest::Ps {
-            project: Some(project.to_path_buf()),
+            project: Some(root(project)),
         });
         let value = serde_json::to_value(response).unwrap();
         let row = &value["status"][0]["processes"][0];
@@ -292,6 +397,11 @@ impl Drop for Scratch {
     }
 }
 
+/// The project root of the folder `project`.
+fn root(project: &Path) -> ProjectRoot {
+    ProjectRoot::try_new(project.to_path_buf()).unwrap()
+}
+
 /// What `output` printed on stdout, parsed as JSON.
 fn parsed(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -309,54 +419,26 @@ fn shown(output: &Output) -> String {
     )
 }
 
-/// Every test port of a service run in the test process, reading project
-/// configs straight from their files and nothing of the user's.
-struct FileOnlyPorts;
-
-/// A registry that reads a project's config from its own path and knows no
-/// registered projects.
-struct FileRegistry;
-
-impl ProjectRegistry for FileRegistry {
-    fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-        Ok(Vec::new())
-    }
-
-    fn workspace(&self, config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-        YamlProjectRegistry.workspace(config_path)
-    }
-
-    fn workspace_exists(&self, config_path: &Path) -> bool {
-        config_path.exists()
-    }
-
-    fn save(&self, _projects: &[Project]) -> Result<(), ConfigError> {
-        Ok(())
-    }
-
-    fn save_workspace(&self, _path: &Path, _config: &WorkspaceConfig) -> Result<(), ConfigError> {
-        Ok(())
-    }
+/// What `output` printed on stdout.
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-impl ProjectPorts for FileOnlyPorts {
-    fn registry(&self) -> Box<dyn ProjectRegistry> {
-        Box::new(FileRegistry)
-    }
+/// What `output` printed on stderr.
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
 
-    fn agent_session_store(&self) -> Option<Box<dyn AgentSessionStore>> {
-        None
-    }
+/// The ports of a service run in the test process: nothing of the user's
+/// desktop or process table.
+struct QuietPorts;
 
+impl ProjectPorts for QuietPorts {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
         None
     }
 
     fn process_metrics(&self) -> Option<Box<dyn ProcessMetrics>> {
-        None
-    }
-
-    fn config_watcher(&self, _events: Sender<ServiceEvent>) -> Option<Box<dyn ConfigWatcher>> {
         None
     }
 }
@@ -373,31 +455,16 @@ impl HolderLauncher for HeldLauncher {
     }
 }
 
-/// Settings with every value explicit and desktop notifications off.
-fn settings() -> Settings {
-    Settings::builder()
-        .desktop_notifications(false)
-        .default_size(
-            PtySize::builder()
-                .rows(Rows::new(24))
-                .cols(Cols::new(80))
-                .build(),
-        )
-        .detach_key(DetachKey::try_new("ctrl-\\").unwrap())
-        .log_max_size(ByteSize::try_new(bytesize::ByteSize::mib(4)).unwrap())
-        .scrollback(1000)
-        .color_scheme(ColorScheme::Dark)
-        .build()
-}
-
-/// Runs a service reporting `version` in this process over `state_dir`,
-/// launching real holders from the built binary, held by [`GATE_HOLD`] when
-/// `held` is set.
+/// Runs a service reporting `version` in this process over `scratch`'s state
+/// directory and database, launching real holders from the built binary,
+/// held by [`GATE_HOLD`] when `held` is set.
 fn in_process_service(
-    state_dir: PathBuf,
+    scratch: &Scratch,
     version: &str,
     held: bool,
 ) -> JoinHandle<Result<(), ServiceError>> {
+    let state_dir = scratch.state_dir();
+    let database = scratch.database();
     let started = state_dir.clone();
     let version = version.to_string();
     let service = thread::spawn(move || {
@@ -410,20 +477,17 @@ fn in_process_service(
         } else {
             Box::new(exec)
         };
-        let settings = settings();
-        let runner = HolderRunner::new(
-            launcher,
-            HolderDirs::under(&state_dir),
-            *settings.log_max_size(),
-            *settings.scrollback(),
-            *settings.color_scheme(),
-        );
+        let store = SqliteStore::open(&database).expect("the scratch database opens");
         let deps = ServiceDeps::builder()
             .version(version)
             .binary(PathBuf::from(IN_PROCESS_BINARY))
-            .holders(Arc::new(runner))
-            .ports(Box::new(FileOnlyPorts))
-            .settings(settings)
+            .holders(Arc::new(HolderRunner::new(
+                launcher,
+                HolderDirs::under(&state_dir),
+            )))
+            .ports(Box::new(QuietPorts))
+            .stacks(Box::new(store.clone()))
+            .settings(Box::new(store))
             .build();
         ServiceRuntime::run(singleton, deps)
     });
@@ -438,15 +502,13 @@ fn in_process_service(
 #[test]
 fn concurrent_connects_start_exactly_one_service() {
     let scratch = Arc::new(Scratch::new());
-    let project = scratch.project("shop", SINGLE_PROJECT);
+    let project = scratch.project("shop", &single());
 
     let racers: Vec<JoinHandle<Output>> = (0..RACERS)
         .map(|_| {
             let scratch = Arc::clone(&scratch);
             let project = project.clone();
-            thread::spawn(move || {
-                scratch.muster(&["-c", project.to_str().unwrap(), "ps", "--json"])
-            })
+            thread::spawn(move || scratch.on(&project, &["ps", "--json"]))
         })
         .collect();
     for racer in racers {
@@ -471,12 +533,12 @@ fn concurrent_connects_start_exactly_one_service() {
 #[test]
 fn version_mismatch_replaces_the_service_and_keeps_holders() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap().to_string();
-    let old = in_process_service(scratch.state_dir(), OLD_VERSION, false);
+    let project = scratch.project("shop", &single());
+    let old = in_process_service(&scratch, OLD_VERSION, false);
     assert!(matches!(
         scratch.send(&ServiceRequest::Up {
-            project: project.clone(),
+            project: root(&project),
+            environment: BTreeMap::new(),
         }),
         ServiceResponse::Batch(_)
     ));
@@ -493,7 +555,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
     assert!(output.status.success(), "{}", shown(&output));
     assert_eq!(status["version"], OLD_VERSION, "status never replaces");
 
-    let ps = scratch.muster(&["-c", &config, "ps"]);
+    let ps = scratch.on(&project, &["ps"]);
     assert!(ps.status.success(), "{}", shown(&ps));
     wait_until("the old service to make way", || old.is_finished());
     assert!(
@@ -524,12 +586,12 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
 #[test]
 fn a_command_during_a_slow_replacement_reaches_the_new_service() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap().to_string();
-    let old = in_process_service(scratch.state_dir(), OLD_VERSION, true);
+    let project = scratch.project("shop", &single());
+    let old = in_process_service(&scratch, OLD_VERSION, true);
     let mut pid = None;
     scratch.send(&ServiceRequest::Up {
-        project: project.clone(),
+        project: root(&project),
+        environment: BTreeMap::new(),
     });
     wait_until("the held launch to run api", || {
         let (state, running) = scratch.first_row_raw(&project);
@@ -538,16 +600,17 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
     });
     scratch.children.push(pid.unwrap() as u32);
     scratch.send(&ServiceRequest::Control {
-        project: project.clone(),
+        project: root(&project),
         name: ProcessName::try_new("api").unwrap(),
         action: ProcessAction::Restart,
+        environment: BTreeMap::new(),
     });
     wait_until("the restart's launch to be held", || {
         scratch.first_row_raw(&project).0 == "starting"
     });
 
     let mut replacing: Child = scratch
-        .command(&["-c", &config, "ps"])
+        .command(&["-p", project.to_str().unwrap(), "ps"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -556,7 +619,7 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
         !protocol::socket_path(&scratch.state_dir()).exists()
             || replacing.try_wait().unwrap().is_some()
     });
-    let second = scratch.muster(&["-c", &config, "ps", "--json"]);
+    let second = scratch.on(&project, &["ps", "--json"]);
 
     assert!(second.status.success(), "{}", shown(&second));
     let replacing = replacing.wait_with_output().unwrap();
@@ -578,10 +641,10 @@ fn a_command_during_a_slow_replacement_reaches_the_new_service() {
 #[test]
 fn an_older_client_refuses_a_newer_service() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let newer = in_process_service(scratch.state_dir(), NEWER_VERSION, false);
+    let project = scratch.project("shop", &single());
+    let newer = in_process_service(&scratch, NEWER_VERSION, false);
 
-    let ps = scratch.muster(&["-c", project.to_str().unwrap(), "ps"]);
+    let ps = scratch.on(&project, &["ps"]);
 
     assert_eq!(
         ps.status.code(),
@@ -589,7 +652,7 @@ fn an_older_client_refuses_a_newer_service() {
         "{}",
         shown(&ps)
     );
-    let stderr = String::from_utf8_lossy(&ps.stderr);
+    let stderr = stderr(&ps);
     assert!(
         stderr.contains(NEWER_VERSION)
             && stderr.contains(env!("CARGO_PKG_VERSION"))
@@ -607,28 +670,27 @@ fn an_older_client_refuses_a_newer_service() {
 #[test]
 fn names_with_spaces_and_unicode_resolve_from_the_command_line() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", PROJECT);
-    let config = project.to_str().unwrap();
+    let project = scratch.project("shop", &shop());
 
-    let (output, report) = scratch.json(&["-c", config, "start", "dev server"]);
+    let (output, report) = scratch.json_on(&project, &["start", "dev server"]);
     assert!(output.status.success(), "{}", shown(&output));
     assert_eq!(report["processes"][0]["name"], "dev server");
     assert_eq!(report["processes"][0]["outcome"], "started");
 
-    let (output, report) = scratch.json(&["-c", config, "start", "cafe\u{301}"]);
+    let (output, report) = scratch.json_on(&project, &["start", "cafe\u{301}"]);
     assert!(output.status.success(), "{}", shown(&output));
     assert_eq!(report["processes"][0]["name"], "caf\u{e9}");
 
-    let unknown = scratch.muster(&["-c", config, "stop", "dev"]);
+    let unknown = scratch.on(&project, &["stop", "dev"]);
     assert_eq!(unknown.status.code(), Some(INVALID_INPUT));
-    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    let text = stderr(&unknown);
     assert!(
-        stderr.contains("no process 'dev' in")
-            && stderr.contains("valid names: 'dev server', ")
-            && stderr.contains("api"),
-        "{stderr}"
+        text.contains("no process 'dev' in shop")
+            && text.contains("valid names: 'dev server', ")
+            && text.contains("api"),
+        "{text}"
     );
-    let (unknown, failure) = scratch.json(&["-c", config, "stop", "dev"]);
+    let (unknown, failure) = scratch.json_on(&project, &["stop", "dev"]);
     assert_eq!(unknown.status.code(), Some(INVALID_INPUT));
     assert_eq!(failure["error"]["kind"], "unknown-process");
     assert_eq!(
@@ -636,62 +698,70 @@ fn names_with_spaces_and_unicode_resolve_from_the_command_line() {
         serde_json::json!(["dev server", "café", "api"])
     );
 
-    let (output, report) = scratch.json(&["-c", config, "stop", "dev server"]);
+    let (output, report) = scratch.json_on(&project, &["stop", "dev server"]);
     assert!(output.status.success(), "{}", shown(&output));
     assert_eq!(report["processes"][0]["outcome"], "stopped");
 }
 
-/// `up` reports what the service started, `ps` lists them, `logs` prints
-/// what they wrote, `down` stops them; a crash is reported with its exit,
-/// fails the command, and its log stays readable after it exited.
+/// `up` reports what the service started, `ps` lists them under the
+/// project's name, `logs` prints what they wrote, `down` stops them; a crash
+/// is reported with its exit, fails the command, and its log stays readable
+/// after it exited. Stopping the crashed process leaves it crashed.
 #[test]
 fn up_ps_logs_and_down_report_what_happened() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", PROJECT);
-    let config = project.to_str().unwrap();
+    let project = scratch.project("shop", &shop());
 
-    let up = scratch.muster(&["-c", config, "up"]);
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
-    let text = String::from_utf8_lossy(&up.stdout);
+    let text = stdout(&up);
     assert!(
         text.contains("dev server") && text.contains("running (pid"),
         "{text}"
     );
     assert!(!text.contains("api"), "api does not autostart: {text}");
 
-    let again = scratch.muster(&["-c", config, "up"]);
+    let again = scratch.on(&project, &["up"]);
     assert!(
-        String::from_utf8_lossy(&again.stdout).contains("nothing to start"),
+        stdout(&again).contains("nothing to start"),
         "{}",
         shown(&again)
     );
 
     let stable = |output: &Output| -> Vec<String> {
-        let text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let header = text.lines().next().unwrap_or_default().to_string();
+        let text = stdout(output);
+        let header = text.lines().nth(1).unwrap_or_default().to_string();
         let width = header.find("UPTIME").unwrap_or(header.len());
         text.lines()
             .map(|line| line.chars().take(width).collect::<String>())
             .collect()
     };
-    let ps = scratch.muster(&["-c", config, "ps"]);
+    let ps = scratch.on(&project, &["ps"]);
+    let listing = stdout(&ps);
     assert!(
-        String::from_utf8_lossy(&ps.stdout).starts_with("NAME"),
-        "{}",
+        listing.starts_with(&format!("shop  {}", project.display())),
+        "plain ps names its project: {}",
         shown(&ps)
+    );
+    assert!(
+        listing
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .starts_with("NAME"),
+        "{listing}"
     );
     assert_eq!(
         stable(&ps),
-        stable(&scratch.muster(&["-c", config])),
+        stable(&scratch.on(&project, &[])),
         "bare muster prints ps"
     );
 
     wait_until("the dev server to write", || {
-        String::from_utf8_lossy(&scratch.muster(&["-c", config, "logs", "dev server"]).stdout)
-            .contains("dev-ready")
+        stdout(&scratch.on(&project, &["logs", "dev server"])).contains("dev-ready")
     });
 
-    let (down, report) = scratch.json(&["-c", config, "down"]);
+    let (down, report) = scratch.json_on(&project, &["down"]);
     assert!(down.status.success(), "{}", shown(&down));
     let outcomes: Vec<&str> = report["processes"]
         .as_array()
@@ -701,36 +771,44 @@ fn up_ps_logs_and_down_report_what_happened() {
         .collect();
     assert_eq!(outcomes, vec!["stopped", "stopped"], "{report}");
     assert!(
-        String::from_utf8_lossy(&scratch.muster(&["-c", config, "logs", "dev server"]).stdout)
-            .contains("dev-ready"),
+        stdout(&scratch.on(&project, &["logs", "dev server"])).contains("dev-ready"),
         "a stopped process's log is still read"
     );
 
-    let failing = scratch.project("broken", FAILING_PROJECT);
-    let failing = failing.to_str().unwrap();
-    let up = scratch.muster(&["-c", failing, "up"]);
+    let broken = scratch.project("broken", &failing());
+    let up = scratch.on(&broken, &["up"]);
     assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
-    let text = String::from_utf8_lossy(&up.stdout);
+    let text = stdout(&up);
     assert!(
         text.contains("broken") && text.contains("crashed: exited with status 3"),
         "{text}"
     );
     assert!(text.contains("web") && text.contains("running"), "{text}");
-    let broken = scratch.row(Path::new(failing), "broken");
-    assert_eq!(broken["state"], "crashed");
-    assert_eq!(broken["last_exit"]["status"], 3);
+    let row = scratch.row(&broken, "broken");
+    assert_eq!(row["state"], "crashed");
+    assert_eq!(row["last_exit"]["status"], 3);
     assert!(
-        String::from_utf8_lossy(&scratch.muster(&["-c", failing, "logs", "broken"]).stdout)
-            .contains("oops"),
+        stdout(&scratch.on(&broken, &["logs", "broken"])).contains("oops"),
         "a crashed process's log is read after the fact"
     );
-    let (_, notices) = scratch.json(&["-c", failing, "notices"]);
+    let (_, notices) = scratch.json_on(&broken, &["notices"]);
     assert!(
         notices.as_array().unwrap().iter().any(|notice| {
             notice["process"] == "broken" && notice["message"] == "crashed: exited with status 3"
         }),
         "{notices}"
     );
+
+    for action in ["stop", "kill"] {
+        let (output, report) = scratch.json_on(&broken, &[action, "broken"]);
+        assert!(output.status.success(), "{action}: {}", shown(&output));
+        assert_eq!(report["processes"][0]["outcome"], "was-not-running");
+        assert_eq!(
+            scratch.row(&broken, "broken")["state"],
+            "crashed",
+            "{action} keeps a crashed process crashed"
+        );
+    }
 }
 
 /// A neighbour crash-looping while the command runs is context, not a
@@ -738,14 +816,13 @@ fn up_ps_logs_and_down_report_what_happened() {
 #[test]
 fn a_crash_looping_neighbour_does_not_fail_a_stop() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", CRASH_LOOP_PROJECT);
-    let config = project.to_str().unwrap();
-    scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &crash_loop());
+    scratch.on(&project, &["up"]);
     wait_until("api to run", || {
         scratch.row(&project, "api")["state"] == "running"
     });
 
-    let (stop, report) = scratch.json(&["-c", config, "stop", "api"]);
+    let (stop, report) = scratch.json_on(&project, &["stop", "api"]);
 
     assert!(stop.status.success(), "{}", shown(&stop));
     assert_eq!(report["processes"][0]["outcome"], "stopped");
@@ -758,7 +835,7 @@ fn a_crash_looping_neighbour_does_not_fail_a_stop() {
             .any(|notice| notice["process"] == "flaky" && notice["level"] == "error"),
         "the neighbour crashed during the stop and is shown as context: {report}"
     );
-    scratch.muster(&["-c", config, "stop", "flaky"]);
+    scratch.on(&project, &["stop", "flaky"]);
 }
 
 /// A stop waits out the process's configured grace and the kill after it,
@@ -766,59 +843,63 @@ fn a_crash_looping_neighbour_does_not_fail_a_stop() {
 #[test]
 fn a_stop_waits_for_a_slow_process() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SLOW_STOP_PROJECT);
-    let config = project.to_str().unwrap();
-    scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &slow_stop());
+    scratch.on(&project, &["up"]);
     wait_until("slow to run", || {
         scratch.row(&project, "slow")["state"] == "running"
     });
 
-    let stop = scratch.muster(&["-c", config, "stop", "slow"]);
+    let stop = scratch.on(&project, &["stop", "slow"]);
 
     assert!(stop.status.success(), "{}", shown(&stop));
-    assert!(
-        String::from_utf8_lossy(&stop.stdout).contains("slow: stopped"),
-        "{}",
-        shown(&stop)
-    );
+    assert!(stdout(&stop).contains("slow: stopped"), "{}", shown(&stop));
     assert_eq!(scratch.row(&project, "slow")["stop_grace"], 1);
 }
 
 /// `logs -f` of a stopped process shows its log and then follows it when it
-/// starts again; a reader that goes away ends it quietly.
+/// starts again; a reader that goes away ends it quietly. Plain `logs` into
+/// a pipe writes the log byte for byte.
 #[test]
 fn logs_follow_waits_for_a_stopped_process_and_a_closed_pipe_ends_it() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", PROJECT);
-    let config = project.to_str().unwrap();
+    let project = scratch.project("shop", &shop());
 
     let mut follow = scratch
-        .command(&["-c", config, "logs", "-f", "api"])
+        .command(&["-p", project.to_str().unwrap(), "logs", "-f", "api"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let (lines, received) = unbounded();
-    let mut stdout = BufReader::new(follow.stdout.take().unwrap());
+    let mut out = BufReader::new(follow.stdout.take().unwrap());
     let reader = thread::spawn(move || {
         let mut line = String::new();
-        while stdout.read_line(&mut line).is_ok_and(|read| read > 0) {
+        while out.read_line(&mut line).is_ok_and(|read| read > 0) {
             let _ = lines.send(line.clone());
             line.clear();
         }
     });
-    let start = scratch.muster(&["-c", config, "start", "api"]);
+    let start = scratch.on(&project, &["start", "api"]);
     assert!(start.status.success(), "{}", shown(&start));
     let got = received.recv_timeout(WAIT).unwrap();
     assert!(got.contains("api-ran"), "{got}");
     let _ = follow.kill();
     let _ = follow.wait();
     reader.join().unwrap();
+    let piped = scratch.on(&project, &["logs", "api"]);
+    assert!(
+        piped
+            .stdout
+            .windows(b"api-ran".len())
+            .any(|window| window == b"api-ran"),
+        "{}",
+        shown(&piped)
+    );
 
-    let ticking = scratch.project("tick", TICKING_PROJECT);
-    scratch.muster(&["-c", ticking.to_str().unwrap(), "up"]);
+    let ticker = scratch.project("tick", &ticking());
+    scratch.on(&ticker, &["up"]);
     let mut follow = scratch
-        .command(&["-c", ticking.to_str().unwrap(), "logs", "-f", "ticker"])
+        .command(&["-p", ticker.to_str().unwrap(), "logs", "-f", "ticker"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -836,26 +917,26 @@ fn logs_follow_waits_for_a_stopped_process_and_a_closed_pipe_ends_it() {
         ended = follow.try_wait().unwrap();
         ended.is_some()
     });
-    let mut stderr = String::new();
+    let mut errors = String::new();
     follow
         .stderr
         .take()
         .unwrap()
-        .read_to_string(&mut stderr)
+        .read_to_string(&mut errors)
         .unwrap();
-    assert_eq!(ended.unwrap().code(), Some(0), "{stderr}");
-    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(ended.unwrap().code(), Some(0), "{errors}");
+    assert!(errors.is_empty(), "{errors}");
 }
 
 /// `muster run` adds the command to the project and starts it under the
-/// service; bad arguments fail before anything is written or started.
+/// service with the environment it was run in; bad arguments and a taken
+/// name fail before anything is written or started.
 #[test]
-fn run_registers_the_command_and_starts_it_under_the_service() {
+fn run_adds_the_command_and_starts_it_under_the_service() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap();
+    let project = scratch.project("shop", &single());
 
-    let blank = scratch.muster(&["-c", config, "run", "--name", " ", "--", " "]);
+    let blank = scratch.on(&project, &["run", "--name", " ", "--", " "]);
     assert_eq!(
         blank.status.code(),
         Some(INVALID_INPUT),
@@ -867,58 +948,388 @@ fn run_registers_the_command_and_starts_it_under_the_service() {
         "a bad command line starts no service"
     );
 
-    let output = scratch.muster(&[
-        "-c", config, "run", "--json", "--name", "tail job", "--", "sleep", "600",
-    ]);
+    let output = scratch
+        .command(&[
+            "-p",
+            project.to_str().unwrap(),
+            "run",
+            "--json",
+            "--name",
+            "tail job",
+            "--",
+            &format!("echo caller-${CALLER_VARIABLE}; sleep 600"),
+        ])
+        .env(CALLER_VARIABLE, "seen")
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", shown(&output));
     let report = parsed(&output);
     assert_eq!(report["action"], "run");
     assert_eq!(report["processes"][0]["outcome"], "started");
-    assert!(fs::read_to_string(&project).unwrap().contains("tail job"));
+    assert!(scratch.exported(&project).contains("tail job"));
     assert_eq!(scratch.row(&project, "tail job")["state"], "running");
+    wait_until("the run to see its caller's environment", || {
+        stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen")
+    });
 
-    let first = scratch.muster(&["-c", config, "run", "--", "sleep", "600"]);
+    let first = scratch.on(&project, &["run", "--", "sleep", "600"]);
     assert!(first.status.success(), "{}", shown(&first));
-    let before = fs::read_to_string(&project).unwrap();
-    let second = scratch.muster(&["-c", config, "run", "--", "sleep", "601"]);
+    let before = scratch.exported(&project);
+    let second = scratch.on(&project, &["run", "--", "sleep", "601"]);
     assert_eq!(
         second.status.code(),
         Some(INVALID_INPUT),
         "{}",
         shown(&second)
     );
-    let stderr = String::from_utf8_lossy(&second.stderr);
+    let text = stderr(&second);
     assert!(
-        stderr.contains("a process named 'sleep' already exists in")
-            && stderr.contains("pass --name to choose another"),
-        "the default name is refused with a hint: {stderr}"
+        text.contains("a process named 'sleep' already exists in shop")
+            && text.contains("pass --name to choose another"),
+        "the default name is refused with a hint: {text}"
     );
+    assert_eq!(scratch.exported(&project), before, "nothing was written");
+}
+
+/// The life of a process from the command line: `add` registers the folder
+/// and stores it, `up` starts it, `set` changes it while it keeps running,
+/// `rm` stops and removes it, and the project stays registered.
+#[test]
+fn add_up_set_rm_against_a_real_service() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(folder.join("frontend")).unwrap();
+    let dir = folder.to_str().unwrap();
+
+    let (add, added) = scratch.json(&[
+        "-p",
+        dir,
+        "add",
+        "web",
+        "--autostart",
+        "--cwd",
+        folder.join("frontend").to_str().unwrap(),
+        "--env",
+        "PORT=5173",
+        "--",
+        "echo port-$PORT; sleep 600",
+    ]);
+    assert!(add.status.success(), "{}", shown(&add));
+    assert_eq!(added["registered"], true);
+    assert_eq!(added["project"]["name"], "shop");
+    assert_eq!(added["project"]["root"], dir);
+    assert_eq!(added["process"]["working_dir"], "frontend");
+    assert_eq!(added["process"]["environment"]["PORT"], "5173");
+    assert_eq!(added["process"]["autostart"], true);
+    assert_eq!(added["process"]["restart"], "never", "the default setting");
+    assert!(
+        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
+        "add starts nothing"
+    );
+    let taken = scratch.muster(&["-p", dir, "add", "web", "--", "true"]);
     assert_eq!(
-        fs::read_to_string(&project).unwrap(),
-        before,
-        "nothing was written"
+        taken.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&taken)
+    );
+    for refused in ["we\u{1b}]0;x\u{7}b", "line\nbreak"] {
+        let added = scratch.muster(&["-p", dir, "add", refused, "--", "true"]);
+        assert_eq!(
+            added.status.code(),
+            Some(INVALID_INPUT),
+            "a name with a control character is refused: {}",
+            shown(&added)
+        );
+    }
+    let env = scratch.muster(&["-p", dir, "add", "x", "--env", "NOEQUALS", "--", "true"]);
+    assert_eq!(env.status.code(), Some(INVALID_INPUT), "{}", shown(&env));
+
+    let up = scratch.on(&folder, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    wait_until("web to run in its folder with its variable", || {
+        stdout(&scratch.on(&folder, &["logs", "web"])).contains("port-5173")
+    });
+    let pid = scratch.row(&folder, "web")["pid"].clone();
+
+    let nothing = scratch.on(&folder, &["set", "web"]);
+    assert_eq!(nothing.status.code(), Some(USAGE), "{}", shown(&nothing));
+    let (set, changed) = scratch.json_on(&folder, &["set", "web", "--restart", "on-failure"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(changed["process"]["restart"], "on-failure");
+    assert_eq!(changed["running"], true);
+    assert_eq!(
+        scratch.row(&folder, "web")["pid"],
+        pid,
+        "a change waits for the next start"
+    );
+    let human = scratch.on(&folder, &["set", "web", "--description", "the site"]);
+    assert!(
+        stdout(&human).contains("`muster restart 'web'` applies the change"),
+        "{}",
+        shown(&human)
+    );
+
+    let (rm, removed) = scratch.json_on(&folder, &["rm", "web"]);
+    assert!(rm.status.success(), "{}", shown(&rm));
+    assert_eq!(
+        removed["removed"],
+        serde_json::json!([{ "name": "web", "stopped": true }])
+    );
+    let (_, statuses) = scratch.json_on(&folder, &["ps"]);
+    assert_eq!(statuses[0]["processes"], serde_json::json!([]));
+    let (_, projects) = scratch.json(&["projects"]);
+    assert!(
+        projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|listed| listed["name"] == "shop" && listed["processes"] == 0),
+        "the project stays registered: {projects}"
+    );
+    let unknown = scratch.on(&folder, &["rm", "web"]);
+    assert_eq!(
+        unknown.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&unknown)
     );
 }
 
-/// `muster run` refuses a name an open agent session holds though the config
-/// does not list it, and writes nothing.
+/// `config` lists, reads and changes the settings; a bad value is invalid
+/// input naming the key, and a misspelt key lists the valid ones.
 #[test]
-fn run_refuses_a_name_a_session_holds() {
+fn config_lists_reads_and_changes_settings() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", "agents: []\nterminals: []\ncommands: []\n");
-    let config = project.to_str().unwrap();
-    let before = fs::read_to_string(&project).unwrap();
-    scripted_service(&scratch, project.clone());
 
-    let run = scratch.muster(&["-c", config, "run", "--name", "api", "--", "sleep", "600"]);
+    let get = scratch.muster(&["config", "get", "default-stop-grace"]);
+    assert!(get.status.success(), "{}", shown(&get));
+    assert_eq!(stdout(&get), "5s\n");
+    let (_, listed) = scratch.json(&["config"]);
+    assert_eq!(listed["desktop_notifications"], false);
+    assert_eq!(listed["default_stop_grace"], 5.0);
 
-    assert_eq!(run.status.code(), Some(INVALID_INPUT), "{}", shown(&run));
-    assert!(
-        String::from_utf8_lossy(&run.stderr).contains("a process named 'api' already exists in"),
-        "{}",
-        shown(&run)
+    let (set, changed) = scratch.json(&["config", "set", "detach-key", "ctrl-]"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(
+        changed,
+        serde_json::json!({ "key": "detach-key", "value": "ctrl-]" })
     );
-    assert_eq!(fs::read_to_string(&project).unwrap(), before);
+    let (_, value) = scratch.json(&["config", "get", "detach-key"]);
+    assert_eq!(value["value"], "ctrl-]");
+
+    let bad = scratch.muster(&["config", "set", "default-size", "0x80"]);
+    assert_eq!(bad.status.code(), Some(INVALID_INPUT), "{}", shown(&bad));
+    for typed_by_terminals in ["ctrl-m", "ctrl-j", "ctrl-i", "ctrl-h", "ctrl-c"] {
+        let refused = scratch.muster(&["config", "set", "detach-key", typed_by_terminals]);
+        assert_eq!(
+            refused.status.code(),
+            Some(INVALID_INPUT),
+            "{typed_by_terminals} is a key terminals send for Enter, Tab, Backspace or interrupt: {}",
+            shown(&refused)
+        );
+    }
+    let typo = scratch.muster(&["config", "get", "detach_key"]);
+    assert_eq!(typo.status.code(), Some(USAGE), "{}", shown(&typo));
+    assert!(
+        stderr(&typo).contains("default-stop-grace"),
+        "{}",
+        shown(&typo)
+    );
+}
+
+/// A stack exported from one project imports into another folder,
+/// registering it; a strict import of names already there refuses and
+/// writes nothing, `--merge` updates them and `--replace` removes the rest.
+#[test]
+fn export_and_import_move_a_stack_between_projects() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &shop());
+    let file = scratch.path().join("stack.yml");
+
+    let (export, written) = scratch.json_on(&shop, &["export", file.to_str().unwrap()]);
+    assert!(export.status.success(), "{}", shown(&export));
+    assert_eq!(written["processes"], 3);
+    let again = scratch.on(&shop, &["export", file.to_str().unwrap()]);
+    assert_eq!(
+        again.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&again)
+    );
+
+    let copy = scratch.path().join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    let (import, imported) = scratch.json_on(&copy, &["import", file.to_str().unwrap()]);
+    assert!(import.status.success(), "{}", shown(&import));
+    assert_eq!(imported["registered"], true);
+    assert_eq!(
+        imported["added"],
+        serde_json::json!(["dev server", "café", "api"])
+    );
+    let before = scratch.exported(&copy);
+
+    let conflict = scratch.on(&copy, &["import", file.to_str().unwrap()]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&conflict)
+    );
+    assert!(
+        stderr(&conflict).contains("--merge"),
+        "{}",
+        shown(&conflict)
+    );
+    assert_eq!(
+        scratch.exported(&copy),
+        before,
+        "a refused import writes nothing"
+    );
+
+    let smaller = scratch.path().join("smaller.yml");
+    fs::write(
+        &smaller,
+        stack(&[entry("api", "echo changed; sleep 600", false)]),
+    )
+    .unwrap();
+    let (merge, merged) = scratch.json_on(&copy, &["import", smaller.to_str().unwrap(), "--merge"]);
+    assert!(merge.status.success(), "{}", shown(&merge));
+    assert_eq!(merged["updated"], serde_json::json!(["api"]));
+    let merged_stack = scratch.exported(&copy);
+    let (dry, planned) = scratch.json_on(&copy, &[
+        "import",
+        smaller.to_str().unwrap(),
+        "--replace",
+        "--dry-run",
+    ]);
+    assert!(dry.status.success(), "{}", shown(&dry));
+    assert_eq!(planned["dry_run"], true);
+    assert_eq!(planned["removed"].as_array().unwrap().len(), 2, "{planned}");
+    assert_eq!(
+        scratch.exported(&copy),
+        merged_stack,
+        "a dry run writes nothing"
+    );
+    let (replace, replaced) =
+        scratch.json_on(&copy, &["import", smaller.to_str().unwrap(), "--replace"]);
+    assert!(replace.status.success(), "{}", shown(&replace));
+    let removed: Vec<&str> = replaced["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|removed| removed["name"].as_str())
+        .collect();
+    assert_eq!(removed, ["dev server", "café"]);
+    assert!(!scratch.exported(&copy).contains("dev server"));
+}
+
+/// `init` reads what the folder offers: listed without a terminal and
+/// nothing written, the suggested ones added with `--yes`.
+#[test]
+fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("site");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("package.json"),
+        r#"{"scripts": {"dev": "vite", "build": "vite build"}}"#,
+    )
+    .unwrap();
+    fs::write(folder.join("Procfile"), "worker: bin/worker\n").unwrap();
+    let dir = folder.to_str().unwrap();
+
+    let plain = scratch.muster(&["-p", dir, "init"]);
+    assert!(plain.status.success(), "{}", shown(&plain));
+    let listed = stdout(&plain);
+    assert!(
+        listed.contains("[x] dev  npm run dev  package-json"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("[ ] build  npm run build  package-json"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("[x] worker  bin/worker  procfile"),
+        "{listed}"
+    );
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(
+        projects,
+        serde_json::json!([]),
+        "a plain init writes nothing"
+    );
+
+    let (yes, added) = scratch.json(&["-p", dir, "init", "--yes"]);
+    assert!(yes.status.success(), "{}", shown(&yes));
+    assert_eq!(added["added"], serde_json::json!(["dev", "worker"]));
+    let (_, again) = scratch.json(&["-p", dir, "init"]);
+    let offered: Vec<&str> = again["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|candidate| candidate["name"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        ["build"],
+        "names already added are not offered again"
+    );
+}
+
+/// A command run in a subfolder acts on the deepest project containing it,
+/// never on some other registered project; outside every project it is
+/// refused before a service starts.
+#[test]
+fn the_project_is_the_folder_the_command_runs_in() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let nested = shop.join("frontend");
+    fs::create_dir_all(nested.join("src")).unwrap();
+    let add = scratch
+        .command(&["-p", ".", "add", "vite", "--", "sleep", "600"])
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{}", shown(&add));
+
+    let names = |cwd: &Path| -> Value {
+        let output = scratch
+            .command(&["ps", "--json"])
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        parsed(&output)[0]["project"]["name"].clone()
+    };
+    assert_eq!(names(&shop), "shop");
+    assert_eq!(names(&nested.join("src")), "frontend");
+
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let outside = scratch
+        .command(&["stop", "api"])
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    assert_eq!(
+        outside.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&outside)
+    );
+    assert!(
+        stderr(&outside).contains("no muster project in"),
+        "{}",
+        shown(&outside)
+    );
+    let unknown = scratch.muster(&["-p", "nosuch", "ps"]);
+    assert_eq!(
+        unknown.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&unknown)
+    );
 }
 
 /// `service stop` leaves every process running; the next command brings a
@@ -926,9 +1337,8 @@ fn run_refuses_a_name_a_session_holds() {
 #[test]
 fn service_stop_keeps_processes_and_the_next_command_restarts_it() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap();
-    scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &single());
+    scratch.on(&project, &["up"]);
     let pid = scratch.row(&project, "api")["pid"].as_u64().unwrap() as u32;
 
     let (stop, stopped) = scratch.json(&["service", "stop"]);
@@ -952,48 +1362,54 @@ fn service_stop_keeps_processes_and_the_next_command_restarts_it() {
     );
 }
 
-/// A service that cannot start, here for a settings file missing a key,
+/// A service that cannot start, here for a database a newer muster wrote,
 /// makes the command fail with the reason from this start's log lines only.
 #[test]
 fn a_service_that_cannot_start_shows_why() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    fs::create_dir_all(scratch.state_dir()).unwrap();
     fs::write(
         protocol::log_path(&scratch.state_dir()),
         "an older failure from another day\n",
     )
     .unwrap();
-    scratch.write_settings(&format!("{DESKTOP_OFF}\n"));
+    rusqlite::Connection::open(scratch.database())
+        .unwrap()
+        .pragma_update(None, "user_version", FUTURE_SCHEMA)
+        .unwrap();
 
-    let ps = scratch.muster(&["-c", project.to_str().unwrap(), "ps"]);
+    let ps = scratch.muster(&["ps", "--all"]);
 
-    assert_eq!(ps.status.code(), Some(SERVICE_UNAVAILABLE));
-    let stderr = String::from_utf8_lossy(&ps.stderr);
-    assert!(
-        stderr.contains("the muster service is not available"),
-        "{stderr}"
+    assert_eq!(
+        ps.status.code(),
+        Some(SERVICE_UNAVAILABLE),
+        "{}",
+        shown(&ps)
     );
+    let text = stderr(&ps);
     assert!(
-        stderr.contains(&scratch.settings_path().display().to_string()),
-        "{stderr}"
+        text.contains("the muster service is not available"),
+        "{text}"
     );
+    assert!(text.contains("upgrade muster"), "{text}");
     assert!(
-        !stderr.contains("older failure"),
-        "only this start's lines: {stderr}"
+        !text.contains("older failure"),
+        "only this start's lines: {text}"
     );
 }
 
 /// `project` listing one process, `api`, that has not started.
 fn pending_api_status(project: &Path) -> ProjectStatus {
     ProjectStatus::builder()
-        .project(ProjectKey::new(project.to_path_buf()))
+        .project(
+            Project::builder()
+                .root(root(project))
+                .name(ProjectName::try_new("shop").unwrap())
+                .build(),
+        )
         .processes(vec![
             ProcessStatus::builder()
                 .name(ProcessName::try_new("api").unwrap())
-                .kind(ProcessKind::Command)
                 .state(ProcessState::Pending)
-                .activity(ActivityState::Idle)
                 .pid(None)
                 .uptime(None)
                 .restarts(0)
@@ -1101,7 +1517,7 @@ fn scripted_service(scratch: &Scratch, project: PathBuf) {
                 ServiceRequest::Notices { .. } => ServiceResponse::Notices(vec![
                     Notice::builder()
                         .at(SystemTime::now())
-                        .project(Some(ProjectKey::new(project.clone())))
+                        .project(Some(root(&project)))
                         .process(Some(api.clone()))
                         .level(NoticeLevel::Error)
                         .message(REFUSAL_REASON.to_string())
@@ -1121,13 +1537,12 @@ fn scripted_service(scratch: &Scratch, project: PathBuf) {
 #[test]
 fn an_up_refusal_is_reported_once_with_its_reason() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap();
+    let project = scratch.project("shop", &single());
     let reason = REFUSAL_REASON.to_string();
     scripted_service(&scratch, project.clone());
 
-    let (up, report) = scratch.json(&["-c", config, "up"]);
-    let human = scratch.muster(&["-c", config, "up"]);
+    let (up, report) = scratch.json_on(&project, &["up"]);
+    let human = scratch.on(&project, &["up"]);
 
     assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
     let refused = &report["processes"][0];
@@ -1149,8 +1564,12 @@ fn an_up_refusal_is_reported_once_with_its_reason() {
             .any(|notice| notice["message"] == reason.as_str()),
         "{report}"
     );
-    let text = String::from_utf8_lossy(&human.stdout);
-    assert_eq!(text.matches(reason.as_str()).count(), 1, "{text}");
+    assert_eq!(
+        stdout(&human).matches(reason.as_str()).count(),
+        1,
+        "{}",
+        shown(&human)
+    );
 }
 
 /// `service stop` sends `Stop` straight away, so it stops a service whose
@@ -1180,58 +1599,58 @@ fn service_stop_needs_no_hello() {
     assert_eq!(service.join().unwrap().trim(), "\"stop\"");
 }
 
-/// Commands outside the service exit with the codes the help documents:
-/// an invalid config and an unknown project are invalid input.
+/// Commands that need a project, an existing name or a confirmation exit
+/// with the codes the help documents, before any service starts.
 #[test]
-fn check_and_projects_exit_with_the_documented_codes() {
+fn input_errors_fail_before_the_service_starts() {
     let scratch = Scratch::new();
-    let duplicate = scratch.project(
-        "dup",
-        "agents: []\nterminals: []\ncommands:\n  - name: api\n    command: sleep 1\n    autostart: false\n  - name: api\n    command: sleep 2\n    autostart: false\n",
-    );
 
-    let check = scratch.muster(&["-c", duplicate.to_str().unwrap(), "check"]);
+    let outside = scratch.muster(&["ps"]);
     assert_eq!(
-        check.status.code(),
+        outside.status.code(),
         Some(INVALID_INPUT),
         "{}",
-        shown(&check)
+        shown(&outside)
     );
     assert!(
-        String::from_utf8_lossy(&check.stdout).contains("command #1 and command #2"),
+        stderr(&outside).contains("no muster project in"),
         "{}",
-        shown(&check)
+        shown(&outside)
     );
-
-    let remove = scratch.muster(&["projects", "remove", "nosuch"]);
+    let remove = scratch.muster(&["projects", "rm", "nosuch", "--yes"]);
     assert_eq!(
         remove.status.code(),
         Some(INVALID_INPUT),
         "{}",
         shown(&remove)
     );
-
-    let ps = scratch.muster(&["-c", duplicate.to_str().unwrap(), "ps"]);
+    let project = scratch.project("shop", &single());
+    let unconfirmed = scratch.muster(&["projects", "rm", "shop"]);
     assert_eq!(
-        ps.status.code(),
-        Some(INVALID_INPUT),
-        "a project with a duplicated name does not load: {}",
-        shown(&ps)
+        unconfirmed.status.code(),
+        Some(USAGE),
+        "without a terminal --yes is needed: {}",
+        shown(&unconfirmed)
     );
-}
-
-/// A command outside any project fails before it starts a service, and a
-/// usage error with `--json` is still JSON.
-#[test]
-fn input_errors_fail_before_the_service_starts() {
-    let scratch = Scratch::new();
-
-    let bare = scratch.muster(&[]);
-    assert_eq!(bare.status.code(), Some(INVALID_INPUT), "{}", shown(&bare));
-    assert!(
-        String::from_utf8_lossy(&bare.stderr).contains("no muster config at"),
+    let duplicate = scratch.path().join("dup.yml");
+    fs::write(
+        &duplicate,
+        stack(&[
+            entry("api", "sleep 1", false),
+            entry("api", "sleep 2", false),
+        ]),
+    )
+    .unwrap();
+    let import = scratch.on(&project, &[
+        "import",
+        duplicate.to_str().unwrap(),
+        "--merge",
+    ]);
+    assert_eq!(
+        import.status.code(),
+        Some(INVALID_INPUT),
         "{}",
-        shown(&bare)
+        shown(&import)
     );
     assert!(
         processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
@@ -1243,13 +1662,28 @@ fn input_errors_fail_before_the_service_starts() {
     assert_eq!(parsed(&usage)["error"]["kind"], "usage");
 }
 
+/// `projects rm` stops the project's processes and forgets it with them.
+#[test]
+fn projects_rm_stops_and_forgets_the_project() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    scratch.on(&project, &["up"]);
+    let pid = scratch.row(&project, "api")["pid"].as_u64().unwrap() as u32;
+
+    let (rm, removal) = scratch.json(&["projects", "rm", "shop", "--yes"]);
+
+    assert!(rm.status.success(), "{}", shown(&rm));
+    assert_eq!(removal["removed"], true);
+    assert_eq!(removal["stopped"]["processes"][0]["outcome"], "stopped");
+    wait_until("the process to end", || !alive(pid));
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects, serde_json::json!([]));
+}
+
 /// The MCP protocol version the test client speaks.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// The JSON-RPC version every MCP message carries.
 const JSON_RPC_VERSION: &str = "2.0";
-/// A project for the MCP tools: a `cat` that echoes what it is sent, and a
-/// runner with an accent in its name. Neither autostarts.
-const MCP_PROJECT: &str = "agents: []\nterminals: []\ncommands:\n  - name: echo box\n    command: cat\n    autostart: false\n  - name: café\n    command: echo café-ready; sleep 600\n    autostart: false\n";
 /// The tools that act on one process, each of which takes its `name`.
 const PROCESS_TOOLS: [&str; 5] = [
     "process_output",
@@ -1258,6 +1692,15 @@ const PROCESS_TOOLS: [&str; 5] = [
     "process_stop",
     "process_restart",
 ];
+
+/// A project for the MCP tools: a `cat` that echoes what it is sent, and a
+/// runner with an accent in its name. Neither autostarts.
+fn mcp_project() -> String {
+    stack(&[
+        entry("echo box", "cat", false),
+        entry("café", "echo café-ready; sleep 600", false),
+    ])
+}
 
 /// A `muster mcp` server run over stdio, spoken to as an agent would. Each
 /// line it prints is a JSON message, or the raw line when it is not one.
@@ -1271,17 +1714,17 @@ impl McpSession {
     /// Starts `muster mcp` for `project` over `scratch` and initializes it.
     fn start(scratch: &mut Scratch, project: &Path) -> Self {
         let mut child = scratch
-            .command(&["mcp", "--config", project.to_str().unwrap()])
+            .command(&["-p", project.to_str().unwrap(), "mcp"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         scratch.children.push(child.id());
-        let stdout = child.stdout.take().unwrap();
+        let out = child.stdout.take().unwrap();
         let (sender, lines) = unbounded();
         thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
+            for line in BufReader::new(out).lines() {
                 let Ok(line) = line else { return };
                 let message = serde_json::from_str::<Value>(&line).map_err(|_| line);
                 if sender.send(message).is_err() {
@@ -1412,9 +1855,9 @@ impl Drop for McpSession {
 /// starts, types into, reads, restarts and stops them, and an unknown name
 /// is refused with the valid ones.
 #[test]
-fn mcp_tools_work_with_no_tui_and_the_service_autostarted() {
+fn mcp_tools_work_with_the_service_autostarted() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", MCP_PROJECT);
+    let project = scratch.project("shop", &mcp_project());
     assert!(processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty());
     let mut mcp = McpSession::start(&mut scratch, &project);
 
@@ -1431,7 +1874,6 @@ fn mcp_tools_work_with_no_tui_and_the_service_autostarted() {
     }
 
     let listed = mcp.result("process_list", serde_json::json!({}))["structuredContent"].clone();
-    assert_eq!(listed["project"], project.to_str().unwrap());
     let names: Vec<&str> = listed["processes"]
         .as_array()
         .unwrap()
@@ -1491,10 +1933,6 @@ fn mcp_tools_work_with_no_tui_and_the_service_autostarted() {
         restarted["structuredContent"]["processes"][0]["outcome"],
         "restarted"
     );
-    assert_eq!(
-        mcp.result("session_list", serde_json::json!({}))["structuredContent"],
-        serde_json::json!({ "sessions": [] })
-    );
     for name in ["echo box", "café"] {
         let stopped = mcp.result("process_stop", serde_json::json!({ "name": name }));
         assert_eq!(
@@ -1535,6 +1973,30 @@ fn mcp_tools_work_with_no_tui_and_the_service_autostarted() {
     });
 }
 
+/// `mcp --print-config` prints the snippet alone, and a reader that closes
+/// early ends it quietly.
+#[test]
+fn mcp_print_config_is_plain_data() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+
+    let printed = scratch.on(&project, &["mcp", "--print-config"]);
+    assert!(printed.status.success(), "{}", shown(&printed));
+    let snippet = parsed(&printed);
+    assert!(snippet["mcpServers"].is_object(), "{snippet}");
+
+    let mut closed = scratch
+        .command(&["-p", project.to_str().unwrap(), "mcp", "--print-config"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(closed.stdout.take());
+    let output = closed.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+    assert!(output.stderr.is_empty(), "{}", shown(&output));
+}
+
 /// Rows of the pseudo-terminal a prompting command runs on.
 const PTY_ROWS: u16 = 40;
 /// Columns of that pseudo-terminal.
@@ -1547,7 +2009,7 @@ const COLOR_TERM: &str = "xterm-256color";
 const ENTER: &[u8] = b"\r";
 const ARROW_DOWN: &[u8] = b"\x1b[B";
 const CTRL_C: &[u8] = b"\x03";
-/// The shipped detach key, `ctrl-\`.
+/// The default detach key, `ctrl-\`.
 const DETACH: &[u8] = b"\x1c";
 
 /// A pseudo-terminal a command runs on as a person's terminal: the test
@@ -1735,19 +2197,14 @@ fn unstyled(text: &str) -> String {
     plain
 }
 
-/// A project with an agent and a command, both autostarting.
-const AGENT_PROJECT: &str = "agents:\n  - name: bot\n    command: sleep 600\n    autostart: true\nterminals: []\ncommands:\n  - name: api\n    command: sleep 600\n    autostart: true\n";
-
-/// Without a terminal to ask on, a command that needs a name or an answer
-/// fails as invalid input naming what to pass, also in JSON, and changes
-/// nothing; a missing name is refused before the service is reached, and
-/// `down --agents` asks nothing when no agent runs.
+/// Without a terminal to ask on, a command that needs a name fails as
+/// invalid input naming what to pass, also in JSON, and changes nothing; a
+/// missing name is refused before the service is reached.
 #[test]
 fn a_question_nobody_can_answer_names_the_argument_to_pass() {
     let scratch = Scratch::new();
-    let project = scratch.project("shop", AGENT_PROJECT);
-    let config = project.to_str().unwrap();
-    let unnamed = scratch.muster(&["-c", config, "stop"]);
+    let project = scratch.project("shop", &single());
+    let unnamed = scratch.on(&project, &["stop"]);
     assert_eq!(
         unnamed.status.code(),
         Some(INVALID_INPUT),
@@ -1758,11 +2215,11 @@ fn a_question_nobody_can_answer_names_the_argument_to_pass() {
         processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
         "a missing name is refused before the service starts"
     );
-    let up = scratch.muster(&["-c", config, "up"]);
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
 
     for command in ["start", "stop", "restart", "logs"] {
-        let output = scratch.muster(&["-c", config, command]);
+        let output = scratch.on(&project, &[command]);
         assert_eq!(
             output.status.code(),
             Some(INVALID_INPUT),
@@ -1770,115 +2227,54 @@ fn a_question_nobody_can_answer_names_the_argument_to_pass() {
             shown(&output)
         );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("pass its name"),
+            stderr(&output).contains("pass its name"),
             "{command}: {}",
             shown(&output)
         );
     }
-    let (output, failure) = scratch.json(&["-c", config, "stop"]);
+    let (output, failure) = scratch.json_on(&project, &["stop"]);
     assert_eq!(output.status.code(), Some(INVALID_INPUT));
     assert_eq!(failure["error"]["kind"], "invalid-input", "{failure}");
-
-    let down = scratch.muster(&["-c", config, "down", "--agents"]);
-    assert_eq!(down.status.code(), Some(INVALID_INPUT), "{}", shown(&down));
-    assert!(
-        String::from_utf8_lossy(&down.stderr).contains("pass --yes"),
-        "{}",
-        shown(&down)
-    );
-    assert_eq!(scratch.row(&project, "bot")["state"], "running");
     assert_eq!(scratch.row(&project, "api")["state"], "running");
-
-    let (down, report) = scratch.json(&["-c", config, "down", "--agents", "--yes"]);
-    assert!(down.status.success(), "{}", shown(&down));
-    assert!(
-        report["processes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|process| process["outcome"] == "stopped"),
-        "{report}"
-    );
-
-    let commands_only = scratch.project("plain", SINGLE_PROJECT);
-    let commands_only = commands_only.to_str().unwrap();
-    let up = scratch.muster(&["-c", commands_only, "up"]);
-    assert!(up.status.success(), "{}", shown(&up));
-    let down = scratch.muster(&["-c", commands_only, "down", "--agents"]);
-    assert_eq!(
-        down.status.code(),
-        Some(INVALID_INPUT),
-        "without a terminal --yes is always needed: {}",
-        shown(&down)
-    );
 }
 
-/// Without a terminal, `down --agents` without `--yes` is refused before
-/// the service is reached.
-#[test]
-fn down_agents_without_yes_is_refused_before_the_service_starts() {
-    let scratch = Scratch::new();
-    let project = scratch.project("shop", AGENT_PROJECT);
-    let config = project.to_str().unwrap();
-
-    let down = scratch.muster(&["-c", config, "down", "--agents"]);
-
-    assert_eq!(down.status.code(), Some(INVALID_INPUT), "{}", shown(&down));
-    assert!(
-        String::from_utf8_lossy(&down.stderr).contains("pass --yes"),
-        "{}",
-        shown(&down)
-    );
-    assert!(
-        processes_under(SERVICE_SUBCOMMAND, scratch.root.path()).is_empty(),
-        "no service was started"
-    );
-}
-
-/// Ctrl-C under the spinner still closes the frame after a question was
-/// asked in it: after the process chooser, and after the `down --agents`
-/// confirmation.
+/// Ctrl-C under the spinner still closes the frame after the process
+/// chooser asked its question in it.
 #[test]
 fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
     let mut scratch = Scratch::new();
-    let slow_agents = format!(
-        "agents:\n  - name: bot\n    command: sleep 600\n    autostart: true\n{}",
-        SLOW_STOP_PROJECT.trim_start_matches("agents: []\n")
+    let project = scratch.project(
+        "shop",
+        &stack(&[entry("api", "sleep 600", true), Entry {
+            grace: "1s",
+            ..entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true)
+        }]),
     );
-    let project = scratch.project("shop", &slow_agents);
-    let config = project.to_str().unwrap();
-    let folder = project.parent().unwrap().to_path_buf();
-    let interrupted = |pty: &Pty, child: &mut Child| {
-        pty.wait_for("stopping", 1);
-        pty.interrupt();
-        assert_eq!(Pty::exit_code(child), Some(INTERRUPTED), "{}", pty.drawn());
-        assert!(pty.drawn().contains("└  interrupted"), "{}", pty.drawn());
-        let raw = pty.raw();
-        assert!(
-            raw.rfind("\x1b[?25h") >= raw.rfind("\x1b[?25l"),
-            "the cursor is shown again: {raw:?}"
-        );
-    };
-
-    let up = scratch.muster(&["-c", config, "up"]);
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
+
     let pty = Pty::open();
-    let mut stop = pty.spawn_controlling(&mut scratch, &folder, &["stop"]);
+    let mut stop = pty.spawn_controlling(&mut scratch, &project, &["stop"]);
     pty.wait_for("Which process?", 1);
     pty.type_keys(ARROW_DOWN);
     pty.type_keys(ENTER);
-    interrupted(&pty, &mut stop);
+    pty.wait_for("stopping", 1);
+    pty.interrupt();
+    assert_eq!(
+        Pty::exit_code(&mut stop),
+        Some(INTERRUPTED),
+        "{}",
+        pty.drawn()
+    );
+    assert!(pty.drawn().contains("└  interrupted"), "{}", pty.drawn());
+    let raw = pty.raw();
+    assert!(
+        raw.rfind("\x1b[?25h") >= raw.rfind("\x1b[?25l"),
+        "the cursor is shown again: {raw:?}"
+    );
     wait_until("slow to stop", || {
         scratch.row(&project, "slow")["state"] != "running"
     });
-
-    let up = scratch.muster(&["-c", config, "up"]);
-    assert!(up.status.success(), "{}", shown(&up));
-    let pty = Pty::open();
-    let mut down = pty.spawn_controlling(&mut scratch, &folder, &["down", "--agents"]);
-    pty.wait_for("Stop this project's agents too?", 1);
-    pty.type_keys(b"y");
-    interrupted(&pty, &mut down);
 }
 
 /// Ctrl-C before the command sent its request cancels it: nothing is sent,
@@ -1886,12 +2282,11 @@ fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
 #[test]
 fn ctrl_c_before_the_request_is_sent_cancels_it() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let folder = project.parent().unwrap().to_path_buf();
-    let asked = slow_status_service(&scratch, project);
+    let project = scratch.project("shop", &single());
+    let asked = slow_status_service(&scratch, project.clone());
 
     let pty = Pty::open();
-    let mut up = pty.spawn_controlling(&mut scratch, &folder, &["up"]);
+    let mut up = pty.spawn_controlling(&mut scratch, &project, &["up"]);
     wait_until("the status to be asked for", || {
         asked
             .lock()
@@ -1925,12 +2320,11 @@ fn ctrl_c_before_the_request_is_sent_cancels_it() {
 #[test]
 fn a_logs_failure_after_the_question_closes_no_frame_twice() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let folder = project.parent().unwrap().to_path_buf();
-    scripted_service(&scratch, project);
+    let project = scratch.project("shop", &single());
+    scripted_service(&scratch, project.clone());
 
     let pty = Pty::open();
-    let mut logs = pty.spawn(&mut scratch, &folder, &["logs"]);
+    let mut logs = pty.spawn(&mut scratch, &project, &["logs"]);
     pty.wait_for("Which process?", 1);
     pty.type_keys(ENTER);
 
@@ -1947,17 +2341,21 @@ fn a_logs_failure_after_the_question_closes_no_frame_twice() {
 }
 
 /// At a terminal, `up` is framed with the project's name and closed with a
-/// summary, and `down --agents` asks first while an agent runs: Ctrl-C
-/// cancels it as a usage error, a no stops nothing and succeeds, and a yes
-/// stops the project.
+/// summary, and `projects rm` asks first: a no removes nothing and
+/// succeeds, a yes stops and forgets the project.
 #[test]
-fn up_is_framed_and_down_agents_asks_first() {
+fn up_is_framed_and_projects_rm_asks_first() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", AGENT_PROJECT);
-    let folder = project.parent().unwrap().to_path_buf();
+    let project = scratch.project(
+        "shop",
+        &stack(&[
+            entry("api", "sleep 600", true),
+            entry("web", "sleep 600", true),
+        ]),
+    );
 
     let pty = Pty::open();
-    let mut up = pty.spawn(&mut scratch, &folder, &["up"]);
+    let mut up = pty.spawn(&mut scratch, &project, &["up"]);
     assert_eq!(Pty::exit_code(&mut up), Some(0), "{}", pty.drawn());
     let drawn = pty.drawn();
     assert!(drawn.contains("muster up · shop"), "{drawn}");
@@ -1965,37 +2363,25 @@ fn up_is_framed_and_down_agents_asks_first() {
     assert!(drawn.contains("2 ok"), "{drawn}");
 
     let pty = Pty::open();
-    let mut down = pty.spawn(&mut scratch, &folder, &["down", "--agents"]);
-    pty.wait_for("Stop this project's agents too?", 1);
-    pty.type_keys(CTRL_C);
-    assert_eq!(Pty::exit_code(&mut down), Some(USAGE), "{}", pty.drawn());
-    let drawn = pty.drawn();
-    assert_eq!(
-        drawn.matches("cancelled").count(),
-        1,
-        "closed once: {drawn}"
-    );
-    assert!(drawn.contains("nothing was changed"), "{drawn}");
-    assert_eq!(scratch.row(&project, "bot")["state"], "running");
-    assert_eq!(scratch.row(&project, "api")["state"], "running");
-
-    let pty = Pty::open();
-    let mut down = pty.spawn(&mut scratch, &folder, &["down", "--agents"]);
-    pty.wait_for("Stop this project's agents too?", 1);
+    let mut rm = pty.spawn(&mut scratch, &project, &["projects", "rm", "shop"]);
+    pty.wait_for("Remove this project", 1);
     pty.type_keys(b"n");
-    assert_eq!(Pty::exit_code(&mut down), Some(0), "{}", pty.drawn());
-    assert!(pty.drawn().contains("nothing stopped"), "{}", pty.drawn());
-    assert_eq!(scratch.row(&project, "bot")["state"], "running");
+    assert_eq!(Pty::exit_code(&mut rm), Some(0), "{}", pty.drawn());
+    assert!(pty.drawn().contains("nothing removed"), "{}", pty.drawn());
     assert_eq!(scratch.row(&project, "api")["state"], "running");
 
     let pty = Pty::open();
-    let mut down = pty.spawn(&mut scratch, &folder, &["down", "--agents"]);
-    pty.wait_for("Stop this project's agents too?", 1);
+    let mut rm = pty.spawn(&mut scratch, &project, &["projects", "rm", "shop"]);
+    pty.wait_for("Remove this project", 1);
     pty.type_keys(b"y");
-    assert_eq!(Pty::exit_code(&mut down), Some(0), "{}", pty.drawn());
-    assert!(pty.drawn().contains("stopped"), "{}", pty.drawn());
-    assert_ne!(scratch.row(&project, "bot")["state"], "running");
-    assert_ne!(scratch.row(&project, "api")["state"], "running");
+    assert_eq!(Pty::exit_code(&mut rm), Some(0), "{}", pty.drawn());
+    assert!(
+        pty.drawn().contains("removed project shop"),
+        "{}",
+        pty.drawn()
+    );
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects, serde_json::json!([]));
 }
 
 /// Ctrl-C while `down` waits under its spinner ends the command at once
@@ -2004,14 +2390,12 @@ fn up_is_framed_and_down_agents_asks_first() {
 #[test]
 fn ctrl_c_under_the_spinner_closes_the_frame() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SLOW_STOP_PROJECT);
-    let config = project.to_str().unwrap();
-    let folder = project.parent().unwrap().to_path_buf();
-    let up = scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &slow_stop());
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
 
     let pty = Pty::open();
-    let mut down = pty.spawn_controlling(&mut scratch, &folder, &["down"]);
+    let mut down = pty.spawn_controlling(&mut scratch, &project, &["down"]);
     pty.wait_for("stopping slow", 1);
     pty.interrupt();
     assert_eq!(
@@ -2042,12 +2426,10 @@ fn ctrl_c_under_the_spinner_closes_the_frame() {
 #[test]
 fn attach_without_a_name_offers_the_running_processes() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", PROJECT);
-    let config = project.to_str().unwrap();
-    let folder = project.parent().unwrap().to_path_buf();
+    let project = scratch.project("shop", &shop());
 
     let pty = Pty::open();
-    let mut attach = pty.spawn(&mut scratch, &folder, &["attach"]);
+    let mut attach = pty.spawn(&mut scratch, &project, &["attach"]);
     assert_eq!(
         Pty::exit_code(&mut attach),
         Some(ACTION_FAILED),
@@ -2056,13 +2438,13 @@ fn attach_without_a_name_offers_the_running_processes() {
     );
     assert!(pty.drawn().contains("no process"), "{}", pty.drawn());
 
-    let up = scratch.muster(&["-c", config, "up"]);
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
     let pty = Pty::open();
-    let mut attach = pty.spawn(&mut scratch, &folder, &["attach"]);
+    let mut attach = pty.spawn(&mut scratch, &project, &["attach"]);
     pty.wait_for("Which process?", 1);
     let drawn = pty.drawn();
-    assert!(drawn.contains("command · running"), "{drawn}");
+    assert!(drawn.contains("running"), "{drawn}");
     assert!(
         !drawn.contains("○ api") && !drawn.contains("● api"),
         "{drawn}"
@@ -2088,7 +2470,7 @@ const ATTACH_COLS: u16 = 200;
 /// told it.
 fn holder_size(scratch: &Scratch, project: &Path, name: &str) -> PtySize {
     let ServiceResponse::Located(located) = scratch.send(&ServiceRequest::Locate {
-        project: project.to_path_buf(),
+        project: root(project),
         name: ProcessName::try_new(name).unwrap(),
     }) else {
         panic!("a running process is located");
@@ -2111,10 +2493,8 @@ fn holder_size(scratch: &Scratch, project: &Path, name: &str) -> PtySize {
 #[test]
 fn an_attach_survives_a_service_restart_and_a_killed_attach_is_uncounted() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let config = project.to_str().unwrap();
-    let folder = project.parent().unwrap().to_path_buf();
-    let up = scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
     let attached_size = PtySize::builder()
         .rows(Rows::new(ATTACH_ROWS))
@@ -2122,7 +2502,7 @@ fn an_attach_survives_a_service_restart_and_a_killed_attach_is_uncounted() {
         .build();
 
     let pty = Pty::open_sized(ATTACH_ROWS, ATTACH_COLS);
-    let mut attach = pty.spawn(&mut scratch, &folder, &["attach", "api"]);
+    let mut attach = pty.spawn(&mut scratch, &project, &["attach", "api"]);
     pty.wait_for("attached to api", 1);
     wait_until("the attach to be counted", || {
         scratch.row(&project, "api")["attached"] == 1
@@ -2151,18 +2531,15 @@ fn an_attach_survives_a_service_restart_and_a_killed_attach_is_uncounted() {
 #[test]
 fn logs_without_a_name_closes_its_frame_before_the_log() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", PROJECT);
-    let config = project.to_str().unwrap();
-    let folder = project.parent().unwrap().to_path_buf();
-    let up = scratch.muster(&["-c", config, "up"]);
+    let project = scratch.project("shop", &shop());
+    let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
     wait_until("the dev server to write", || {
-        String::from_utf8_lossy(&scratch.muster(&["-c", config, "logs", "dev server"]).stdout)
-            .contains("dev-ready")
+        stdout(&scratch.on(&project, &["logs", "dev server"])).contains("dev-ready")
     });
 
     let pty = Pty::open();
-    let mut logs = pty.spawn(&mut scratch, &folder, &["logs"]);
+    let mut logs = pty.spawn(&mut scratch, &project, &["logs"]);
     pty.wait_for("Which process?", 1);
     pty.type_keys(ENTER);
     assert_eq!(Pty::exit_code(&mut logs), Some(0), "{}", pty.drawn());
@@ -2173,15 +2550,14 @@ fn logs_without_a_name_closes_its_frame_before_the_log() {
 }
 
 /// Data a command prints is never framed, even at a terminal: a note's
-/// body, a listing and the completions line come out raw.
+/// body, a listing, a setting and the completions line come out raw.
 #[test]
 fn data_output_is_never_framed() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", SINGLE_PROJECT);
-    let folder = project.parent().unwrap().to_path_buf();
+    let project = scratch.project("shop", &single());
     let set = scratch
         .command(&["note", "set", "plan", "ship it"])
-        .current_dir(&folder)
+        .current_dir(&project)
         .output()
         .unwrap();
     assert!(set.status.success(), "{}", shown(&set));
@@ -2189,10 +2565,12 @@ fn data_output_is_never_framed() {
     for args in [
         &["note", "get", "plan"][..],
         &["note"][..],
+        &["config", "get", "detach-key"][..],
+        &["projects"][..],
         &["completions", "bash"][..],
     ] {
         let pty = Pty::open();
-        let mut child = pty.spawn(&mut scratch, &folder, args);
+        let mut child = pty.spawn(&mut scratch, &project, args);
         assert_eq!(
             Pty::exit_code(&mut child),
             Some(0),
@@ -2207,65 +2585,36 @@ fn data_output_is_never_framed() {
     }
 }
 
-/// At a terminal, `init` asks for each process and writes them, explicit,
-/// into the new muster.yml.
+/// At a terminal, `init` offers what the folder's files define with the
+/// suggested ones chosen, asks whether `muster up` starts them, and adds
+/// the choice, registering the folder.
 #[test]
-fn init_asks_for_each_process() {
+fn init_offers_what_the_folder_defines() {
     let mut scratch = Scratch::new();
-    let folder = scratch.root.path().join("fresh");
+    let folder = scratch.path().join("fresh");
     fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("package.json"),
+        r#"{"scripts": {"dev": "vite", "build": "vite build"}}"#,
+    )
+    .unwrap();
 
     let pty = Pty::open();
-    let mut init = pty.spawn(&mut scratch, &folder, &["init"]);
-    let answers: [(&str, &[&[u8]]); 12] = [
-        ("Process name", &[b"web\r"]),
-        ("Kind", &[ARROW_DOWN, ENTER]),
-        ("Command", &[b"npm run dev\r"]),
-        ("Start it with `muster up`?", &[b"n"]),
-        ("Restart it", &[ARROW_DOWN, ENTER]),
-        ("Add another process?", &[b"y"]),
-        ("Process name", &[b"shell\r"]),
-        ("Kind", &[ENTER]),
-        ("Command", &[ENTER]),
-        ("Start it with `muster up`?", &[b"y"]),
-        ("Restart it", &[ENTER]),
-        ("Add another process?", &[b"n"]),
-    ];
-    for (asked, (prompt, keys)) in answers.iter().enumerate() {
-        let times = answers[..=asked]
-            .iter()
-            .filter(|(other, _)| other == prompt)
-            .count();
-        pty.wait_for(&format!("◆  {prompt}"), times);
-        for key in *keys {
-            pty.type_keys(key);
-        }
-        pty.wait_for(&format!("◇  {prompt}"), times);
-    }
+    let mut init = pty.spawn(&mut scratch, &folder, &["-p", ".", "init"]);
+    pty.wait_for("Which processes should muster run?", 1);
+    pty.type_keys(ENTER);
+    pty.wait_for("Start them with `muster up`?", 1);
+    pty.type_keys(b"y");
     assert_eq!(Pty::exit_code(&mut init), Some(0), "{}", pty.drawn());
     assert!(
-        pty.drawn().contains("created muster.yml"),
+        pty.drawn()
+            .contains("added 1 process; `muster up` starts them"),
         "{}",
         pty.drawn()
     );
 
-    let written: Value =
-        serde_yaml_ng::from_str(&fs::read_to_string(folder.join("muster.yml")).unwrap()).unwrap();
-    assert_eq!(written["agents"], serde_json::json!([]));
-    assert_eq!(
-        written["commands"],
-        serde_json::json!([{
-            "name": "web",
-            "command": "npm run dev",
-            "working_dir": null,
-            "description": null,
-            "restart": "on-failure",
-            "stop": null,
-            "autostart": false,
-        }])
-    );
-    assert_eq!(written["terminals"][0]["name"], "shell");
-    assert_eq!(written["terminals"][0]["command"], Value::Null);
-    assert_eq!(written["terminals"][0]["autostart"], true);
-    assert_eq!(written["terminals"][0]["restart"], "never");
+    let exported = scratch.exported(&folder);
+    assert!(exported.contains("npm run dev"), "{exported}");
+    assert!(!exported.contains("npm run build"), "{exported}");
+    assert!(exported.contains("autostart: true"), "{exported}");
 }

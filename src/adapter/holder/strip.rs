@@ -2,7 +2,7 @@
 //! escape sequences removed and carriage returns applied as overwrites, so a
 //! progress bar collapses to its last state.
 
-use vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 /// Returns the cursor to the start of the line.
 const CARRIAGE_RETURN: u8 = b'\r';

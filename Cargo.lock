@@ -1306,7 +1306,6 @@ dependencies = [
  "unicode-width",
  "ureq",
  "uuid",
- "vte",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 
 use std::io::{self, Write};
 
-use vte::{Params, Parser, Perform};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 use crate::adapter::terminal::escape::CSI;
 

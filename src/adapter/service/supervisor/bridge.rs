@@ -29,7 +29,10 @@ impl Supervisor {
             return ScreenReply::Ready(String::new());
         };
         let fallback = target.screen().clone();
-        let source = target.handle().as_ref().map(|handle| handle.screen_source());
+        let source = target
+            .handle()
+            .as_ref()
+            .map(|handle| handle.screen_source());
         match (source, self.generations.get(&pane)) {
             (Some(ScreenSource::Served(socket)), Some(generation)) => ScreenReply::ReadHolder(
                 HolderScreen::builder()

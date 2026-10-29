@@ -2,7 +2,8 @@ use std::{cell::RefCell, collections::HashSet, sync::PoisonError, time::SystemTi
 
 use crate::{
     adapter::service::{
-        EventDraft, EventKind, Notice, NoticeLevel, Refusal, SharedEventLog, SharedNotices,
+        EventDraft, EventKind, Notice, NoticeLevel, PortBlock, Refusal, SharedEventLog,
+        SharedNotices,
     },
     domain::{
         notification::Notification,
@@ -61,6 +62,37 @@ impl Attention {
         process: Option<ProcessName>,
         message: String,
     ) {
+        self.raise(project, level, process, message, None);
+    }
+
+    /// Records that `name` of `project` was not started because of `block`,
+    /// as an error [`Self::notify`] records, its refusal carrying the block.
+    pub(super) fn notify_blocked(
+        &self,
+        project: &ProjectRoot,
+        name: ProcessName,
+        block: PortBlock,
+    ) {
+        let message = block.to_string();
+        self.raise(
+            project,
+            NoticeLevel::Error,
+            Some(name),
+            message,
+            Some(block),
+        );
+    }
+
+    /// Records the notice [`Self::notify`] describes, a refusal of the
+    /// running batch carrying `block`.
+    fn raise(
+        &self,
+        project: &ProjectRoot,
+        level: NoticeLevel,
+        process: Option<ProcessName>,
+        message: String,
+        block: Option<PortBlock>,
+    ) {
         if level == NoticeLevel::Error
             && let (Some(name), Some(refusals)) =
                 (process.as_ref(), self.batch_refusals.borrow_mut().as_mut())
@@ -69,6 +101,7 @@ impl Attention {
                 Refusal::builder()
                     .name(name.clone())
                     .reason(message.clone())
+                    .block(block)
                     .build(),
             );
         }

@@ -13,7 +13,8 @@ const BLOCKED_REASON: &str = "did not start: port";
 const HELD_BY: &str = "is held by";
 
 /// Why a process was not started: another process, supervised or not,
-/// listens on the port its readiness check names.
+/// listens on the first port it needs that was found taken, declared or
+/// probed for readiness.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder,
 )]

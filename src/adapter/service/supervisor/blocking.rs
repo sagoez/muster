@@ -9,7 +9,7 @@ use crate::{
     adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner, WaitStatus},
     domain::{
         port::PortOccupant,
-        process::ProcessState,
+        process::{Process, ProcessState},
         value::{LocalPort, PaneId, Pid},
     },
 };
@@ -37,16 +37,16 @@ impl Supervisor {
     }
 
     /// Takes `held`, every port a supervised process of any project listens
-    /// on, which a start checks its own port against.
+    /// on, which a start checks the ports it needs against.
     pub fn set_held_ports(&mut self, held: HashMap<u16, PortHolder>) {
         self.metrics.set_held_ports(held);
     }
 
     /// Refuses to launch `pane` when a supervised process of any project was
-    /// last sampled on the port its readiness check names, as
-    /// [`Self::block_launch`] does. A port held by a process muster does not
-    /// run is found by the launch worker instead, since that lookup scans
-    /// the whole socket table. Returns whether it refused.
+    /// last sampled on a port it needs, as [`Self::block_launch`] does. A
+    /// port held by a process muster does not run is found by the launch
+    /// worker instead, since that lookup scans the whole socket table.
+    /// Returns whether it refused.
     pub(super) fn refuse_blocked_launch(&mut self, pane: PaneId) -> bool {
         let Some(block) = self.sampled_block(pane) else {
             self.metrics.clear_block(pane);
@@ -56,30 +56,48 @@ impl Supervisor {
         true
     }
 
-    /// Refuses `pane`'s launch for `block`: an error notice, a `blocked`
-    /// event, the pane's `blocked_on` and its `blocked` state.
+    /// Refuses `pane`'s launch for `block`: an error notice, a refusal
+    /// carrying the block, a `blocked` event, the pane's `blocked_on` and its
+    /// `blocked` state.
     fn block_launch(&mut self, pane: PaneId, block: PortBlock) {
         let message = block.to_string();
-        self.notify(NoticeLevel::Error, Some(pane), message.clone());
+        match self.workspace.process(pane) {
+            Some(process) => {
+                self.attention
+                    .notify_blocked(self.root(), process.name().clone(), block.clone());
+            },
+            None => self.notify(NoticeLevel::Error, None, message.clone()),
+        }
         self.record_event(Some(pane), EventKind::Blocked, message);
         self.metrics.set_block(pane, block);
         self.workspace.set_state(pane, ProcessState::Blocked);
     }
 
-    /// What blocks `pane`'s launch as last sampled: the port its readiness
-    /// check names, held by another supervised process. A port its own
-    /// process was last seen on is free to it.
+    /// What blocks `pane`'s launch as last sampled: the first port it needs
+    /// that another supervised process holds. A port its own process was last
+    /// seen on is free to it. When a lower port it needs could still be held
+    /// by a program muster does not run, the launch worker's scan decides
+    /// instead, so the first held port is the one named.
     fn sampled_block(&self, pane: PaneId) -> Option<PortBlock> {
         let process = self.workspace.process(pane)?;
-        let port = self.launch_port(pane)?;
         let me = PortHolder::builder()
             .project(self.project.name().clone())
             .process(process.name().clone())
             .build();
-        let holder = self
-            .metrics
-            .holder_of(port.into_inner())
-            .filter(|holder| **holder != me)?;
+        let (lower, port, holder) =
+            self.launch_ports(pane)
+                .into_iter()
+                .enumerate()
+                .find_map(|(lower, port)| {
+                    let holder = self
+                        .metrics
+                        .holder_of(port.into_inner())
+                        .filter(|holder| **holder != me)?;
+                    Some((lower, port, holder))
+                })?;
+        if lower > 0 && self.metrics.port_occupants().is_some() {
+            return None;
+        }
         Some(
             PortBlock::builder()
                 .port(port)
@@ -88,14 +106,13 @@ impl Supervisor {
         )
     }
 
-    /// The port `pane`'s readiness check names, which its launch needs free.
-    pub(super) fn launch_port(&self, pane: PaneId) -> Option<LocalPort> {
+    /// The ports `pane`'s launch needs free, ascending: those its process
+    /// declares and the one its readiness check probes, each once.
+    pub(super) fn launch_ports(&self, pane: PaneId) -> Vec<LocalPort> {
         self.workspace
-            .process(pane)?
-            .ready()
-            .as_ref()?
-            .probe()
-            .port()
+            .process(pane)
+            .map(Process::launch_ports)
+            .unwrap_or_default()
     }
 
     /// Who runs a live process of this project whose pid is among `pids`,
@@ -150,14 +167,14 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{collections::BTreeSet, net::Ipv4Addr, sync::PoisonError, time::Duration};
 
     use super::*;
     use crate::{
         adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*},
         domain::{
             config::ProcessSpec,
-            port::{ListeningSocket, PortOccupant},
+            port::{ListeningSocket, PortOccupant, ProcessRunner},
             process::{ReadyCheck, ReadyProbe, RestartPolicy},
             pty::{ExitOutcome, ProcessOutput},
             value::{LocalPort, Pid, PositiveDuration, ProjectName},
@@ -166,15 +183,54 @@ mod tests {
 
     /// The port every process here declares.
     const PORT: u16 = 3000;
+    /// A port between [`PORT`] and [`SECOND_PORT`].
+    const BETWEEN_PORT: u16 = 4000;
+    /// A second declared port, above [`PORT`].
+    const SECOND_PORT: u16 = 5173;
+
+    /// `raw` as a port.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
 
     /// `raw`, checking port [`PORT`] for readiness.
     fn on_port(raw: &str) -> ProcessSpec {
         spec(raw, "true", RestartPolicy::Never).with_ready(Some(
             ReadyCheck::builder()
-                .probe(ReadyProbe::Port(LocalPort::try_new(PORT).unwrap()))
+                .probe(ReadyProbe::Port(port(PORT)))
                 .timeout(PositiveDuration::try_new(Duration::from_secs(30)).unwrap())
                 .build(),
         ))
+    }
+
+    /// `raw`, declaring `ports` and no readiness check.
+    fn declaring(raw: &str, ports: &[u16]) -> ProcessSpec {
+        spec(raw, "true", RestartPolicy::Never)
+            .with_ports(ports.iter().copied().map(port).collect::<BTreeSet<_>>())
+    }
+
+    /// `port` held by `holder`, as a refusal carries it.
+    fn supervised_block(at: u16, holder: PortHolder) -> PortBlock {
+        PortBlock::builder()
+            .port(port(at))
+            .holder(PortOwner::Supervised(holder))
+            .build()
+    }
+
+    /// The ports of every scan `asked` records.
+    fn scans(asked: &AskedScans) -> Vec<Vec<LocalPort>> {
+        asked.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// How many `blocked` events `harness` recorded.
+    fn blocked_events(harness: &Harness) -> usize {
+        harness
+            .event_log()
+            .lock()
+            .unwrap()
+            .page(harness.supervisor().root(), None, &[EventKind::Blocked])
+            .events()
+            .len()
     }
 
     /// The pid of the program muster does not run.
@@ -425,5 +481,246 @@ mod tests {
                     .build()
             ))
         );
+    }
+
+    /// Every declared port is checked, not only the readiness one: a held
+    /// second port refuses the start, and of two held the lowest is named.
+    #[test]
+    fn every_declared_port_is_checked_and_the_first_held_blocks() {
+        let mut harness = Harness::over(Box::new(PidRunner), &[declaring("web", &[
+            PORT,
+            SECOND_PORT,
+        ])]);
+        harness
+            .supervisor_mut()
+            .set_held_ports(HashMap::from([(SECOND_PORT, holder("admin", "web"))]));
+
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert!(batch.acted().is_empty());
+        assert_eq!(
+            batch.refused()[0].block().as_ref(),
+            Some(&supervised_block(SECOND_PORT, holder("admin", "web")))
+        );
+
+        harness.supervisor_mut().set_held_ports(HashMap::from([
+            (PORT, holder("admin", "api")),
+            (SECOND_PORT, holder("admin", "web")),
+        ]));
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert_eq!(
+            batch.refused()[0].block().as_ref(),
+            Some(&supervised_block(PORT, holder("admin", "api")))
+        );
+        assert_eq!(
+            batch.refused()[0].reason(),
+            "did not start: port 3000 is held by project 'admin', process 'api'"
+        );
+    }
+
+    /// A port both declared and probed for readiness is asked about once, in
+    /// one scan with the other declared ports, ascending.
+    #[test]
+    fn a_declared_port_and_the_readiness_port_are_checked_once() {
+        let web = on_port("web").with_ports(BTreeSet::from([port(SECOND_PORT), port(PORT)]));
+        let mut harness = Harness::over(Box::new(PidRunner), &[web]);
+        let occupied = Occupied::by(None);
+        let asked = occupied.asked();
+        harness
+            .supervisor_mut()
+            .metrics
+            .set_port_occupants(Box::new(occupied));
+
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert_eq!(batch.acted(), &[name("web")]);
+        assert_eq!(scans(&asked), [vec![port(PORT), port(SECOND_PORT)]]);
+    }
+
+    /// A launch on a worker asks about every port it needs in one scan, and
+    /// the first one held settles it blocked, naming that port.
+    #[test]
+    fn a_worker_launch_scans_the_socket_table_once_for_all_ports() {
+        let web =
+            on_port("web").with_ports(BTreeSet::from([port(SECOND_PORT), port(BETWEEN_PORT)]));
+        let mut harness = Harness::over(Box::new(WorkerRunner::default()), &[web]);
+        let occupied = Occupied::on(&[port(BETWEEN_PORT), port(SECOND_PORT)], outsider());
+        let asked = occupied.asked();
+        harness
+            .supervisor_mut()
+            .metrics
+            .set_port_occupants(Box::new(occupied));
+
+        harness
+            .supervisor_mut()
+            .start(&name("web"), &LaunchEnvironment::default());
+        let Ok(ServiceEvent::LaunchBlocked {
+            pane,
+            generation,
+            port: held,
+            occupant,
+            ..
+        }) = harness.events().recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("the worker reports the held port");
+        };
+
+        assert_eq!(held, port(BETWEEN_PORT));
+        assert_eq!(occupant, outsider());
+        assert_eq!(scans(&asked), [vec![
+            port(PORT),
+            port(BETWEEN_PORT),
+            port(SECOND_PORT)
+        ]]);
+        let block = PortBlock::builder()
+            .port(held)
+            .holder(harness.supervisor_mut().owner_of(occupant))
+            .build();
+        harness
+            .supervisor_mut()
+            .handle_launch_blocked(pane, generation, block);
+        assert_eq!(
+            harness.supervisor_mut().snapshot().processes()[0]
+                .blocked_on()
+                .as_ref()
+                .map(PortBlock::port),
+            Some(port(BETWEEN_PORT))
+        );
+    }
+
+    /// A refusal of `up` for a held port carries the block, whether a
+    /// supervised process or another program holds it.
+    #[test]
+    fn an_up_refusal_carries_its_block() {
+        let mut harness = Harness::over(Box::new(PidRunner), &[on_port("web")]);
+        harness
+            .supervisor_mut()
+            .set_held_ports(HashMap::from([(PORT, holder("admin", "web"))]));
+
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert_eq!(
+            batch.refused()[0].block().as_ref(),
+            Some(&supervised_block(PORT, holder("admin", "web")))
+        );
+
+        harness.supervisor_mut().set_held_ports(HashMap::new());
+        harness
+            .supervisor_mut()
+            .metrics
+            .set_port_occupants(Box::new(Occupied::by(Some(outsider()))));
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert_eq!(
+            batch.refused()[0].block().as_ref(),
+            Some(
+                &PortBlock::builder()
+                    .port(port(PORT))
+                    .holder(PortOwner::Other(outsider()))
+                    .build()
+            )
+        );
+    }
+
+    /// A process that declares no port and probes none starts without any
+    /// scan of the socket table, even with every port held.
+    #[test]
+    fn a_process_with_no_ports_is_never_scanned() {
+        for runner in [
+            Box::new(PidRunner) as Box<dyn ProcessRunner>,
+            Box::new(WorkerRunner::default()),
+        ] {
+            let mut harness = Harness::over(runner, &[spec("api", "true", RestartPolicy::Never)]);
+            let occupied = Occupied::by(Some(outsider()));
+            let asked = occupied.asked();
+            harness
+                .supervisor_mut()
+                .metrics
+                .set_port_occupants(Box::new(occupied));
+
+            let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+            assert_eq!(batch.acted(), &[name("api")]);
+            assert!(scans(&asked).is_empty());
+        }
+    }
+
+    /// A supervised process sampled on a higher port does not hide a program
+    /// muster does not run on a lower one: the launch goes to the scan, which
+    /// names the lower port, and the start is refused once.
+    #[test]
+    fn an_outsider_on_a_lower_port_is_named_before_a_sampled_holder_of_a_higher_one() {
+        let mut harness = Harness::over(Box::new(WorkerRunner::default()), &[declaring("web", &[
+            PORT,
+            SECOND_PORT,
+        ])]);
+        harness
+            .supervisor_mut()
+            .set_held_ports(HashMap::from([(SECOND_PORT, holder("admin", "web"))]));
+        harness
+            .supervisor_mut()
+            .metrics
+            .set_port_occupants(Box::new(Occupied::on(&[port(PORT)], outsider())));
+
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+        assert!(batch.refused().is_empty());
+        let Ok(ServiceEvent::LaunchBlocked {
+            pane,
+            generation,
+            port: held,
+            occupant,
+            ..
+        }) = harness.events().recv_timeout(Duration::from_secs(5))
+        else {
+            panic!("the worker reports the held port");
+        };
+        let block = PortBlock::builder()
+            .port(held)
+            .holder(harness.supervisor_mut().owner_of(occupant))
+            .build();
+        harness
+            .supervisor_mut()
+            .handle_launch_blocked(pane, generation, block);
+
+        let status = harness.supervisor_mut().snapshot();
+        assert_eq!(
+            status.processes()[0].blocked_on().as_ref(),
+            Some(
+                &PortBlock::builder()
+                    .port(port(PORT))
+                    .holder(PortOwner::Other(outsider()))
+                    .build()
+            )
+        );
+        assert_eq!(blocked_events(&harness), 1);
+    }
+
+    /// A supervised process sampled on the lowest port a launch needs refuses
+    /// it at once, without scanning the socket table.
+    #[test]
+    fn a_sampled_holder_of_the_lowest_port_refuses_without_a_scan() {
+        let mut harness = Harness::over(Box::new(PidRunner), &[declaring("web", &[
+            PORT,
+            SECOND_PORT,
+        ])]);
+        harness
+            .supervisor_mut()
+            .set_held_ports(HashMap::from([(PORT, holder("admin", "web"))]));
+        let occupied = Occupied::by(Some(outsider()));
+        let asked = occupied.asked();
+        harness
+            .supervisor_mut()
+            .metrics
+            .set_port_occupants(Box::new(occupied));
+
+        let batch = harness.supervisor_mut().up(&LaunchEnvironment::default());
+
+        assert_eq!(
+            batch.refused()[0].block().as_ref(),
+            Some(&supervised_block(PORT, holder("admin", "web")))
+        );
+        assert!(scans(&asked).is_empty());
+        assert_eq!(blocked_events(&harness), 1);
     }
 }

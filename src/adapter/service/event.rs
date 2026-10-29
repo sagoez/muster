@@ -66,9 +66,9 @@ pub enum ServiceEvent {
         /// The running process, or why it could not be launched.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     },
-    /// A launch handed to a worker found the port its readiness check names
-    /// taken, so nothing was launched; settle it as blocked, unless a later
-    /// action superseded it.
+    /// A launch handed to a worker found a port it needs taken, so nothing
+    /// was launched; settle it as blocked, unless a later action superseded
+    /// it.
     LaunchBlocked {
         /// Project the process belongs to.
         project: ProjectRoot,
@@ -76,7 +76,7 @@ pub enum ServiceEvent {
         pane: PaneId,
         /// Spawn generation the launch belongs to.
         generation: SpawnGeneration,
-        /// The port it needs.
+        /// The first port it needs that was found taken.
         port: LocalPort,
         /// Who listens on it.
         occupant: PortOccupant,

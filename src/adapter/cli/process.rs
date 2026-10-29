@@ -3,7 +3,6 @@
 
 use std::{
     convert::Infallible,
-    fs,
     io::{self, Write},
     path::Path,
     thread,
@@ -11,21 +10,22 @@ use std::{
 };
 
 use super::{
-    error::CliError, json_log_lines::JsonLogLines, log_follower::LogFollower, presenter::Presenter,
+    error::CliError, followed_output::FollowedOutput, gap_marked::GapMarked,
+    json_log_lines::JsonLogLines, log_follower::LogFollower, presenter::Presenter,
 };
 use crate::{
     adapter::{
         client::{
             LogRead, ServiceClient,
-            process::{log_error, log_path, resolve, status},
+            process::{log_error, log_path, log_read_error, resolve, status},
         },
-        holder::rotated_path,
+        holder::read_log_stream,
         service::{ProcessStatus, ProjectStatus},
     },
     domain::{
         process::ProcessState,
         project::Project,
-        value::{ProcessName, ProcessRef},
+        value::{OutputCursor, ProcessName, ProcessRef},
     },
 };
 
@@ -49,8 +49,9 @@ pub fn follow_logs(
 ) -> Result<Infallible, CliError> {
     let name = pick(&status(client, project)?)?;
     let log = log_path(client, project, &name)?;
+    let (start, kept) = read_log_stream(&log).map_err(|error| log_read_error(&log, error))?;
     if !json {
-        return follow(&log, out);
+        return follow(&log, start, &kept, &mut GapMarked::new(out));
     }
     let template = LogRead::builder()
         .name(name)
@@ -58,22 +59,27 @@ pub fn follow_logs(
         .bytes(Vec::new())
         .build()
         .text_in(project);
-    follow(&log, &mut JsonLogLines::new(out, template))
+    follow(
+        &log,
+        start,
+        &kept,
+        &mut JsonLogLines::new(out, template, start),
+    )
 }
 
-/// Copies `log`'s older generation and then the live log into `out`,
-/// following the live one until the command is interrupted.
+/// Writes `kept`, the log's output from `start` on, into `out`, then follows
+/// the live log from where it ends until the command is interrupted.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the log cannot be read or written out.
-fn follow(log: &Path, out: &mut dyn Write) -> Result<Infallible, CliError> {
-    let rotated = rotated_path(log);
-    match fs::read(&rotated) {
-        Ok(bytes) => out.write_all(&bytes).map_err(CliError::Output)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-        Err(source) => return Err(log_error(&rotated, source).into()),
-    }
-    let mut follower = LogFollower::new(log.to_path_buf());
+fn follow(
+    log: &Path,
+    start: OutputCursor,
+    kept: &[u8],
+    out: &mut dyn FollowedOutput,
+) -> Result<Infallible, CliError> {
+    out.write_all(kept).map_err(CliError::Output)?;
+    let mut follower = LogFollower::new(log.to_path_buf(), start.advanced(kept.len() as u64));
     loop {
         follower.pump(out).map_err(|source| match source.kind() {
             io::ErrorKind::BrokenPipe => CliError::Output(source),

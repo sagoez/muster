@@ -4,8 +4,8 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::coordination::{Author, Scratchpad};
 
-/// A note without its body: the index `note_read` lists, so a project full
-/// of long notes cannot flood the caller in one call.
+/// A note without its body: the index `note_read` and `muster note --json`
+/// list, so a project full of long notes cannot flood the caller in one call.
 #[derive(Debug, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct NoteEntry {

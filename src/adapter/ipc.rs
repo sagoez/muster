@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, BufRead, BufReader, Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::{SocketAddr, UnixListener, UnixStream},
     path::Path,
     thread,
     time::Duration,
@@ -17,6 +17,12 @@ const PEER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest request accepted, in bytes. Caps server-side allocation so one peer
 /// cannot force unbounded memory with an endless line.
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
+
+/// Whether `path` fits in a Unix socket address, whose `sun_path` holds
+/// only about a hundred bytes.
+pub fn fits_a_socket(path: &Path) -> bool {
+    SocketAddr::from_pathname(path).is_ok()
+}
 
 /// Binds a listener at `path`, creating its parent directory.
 ///

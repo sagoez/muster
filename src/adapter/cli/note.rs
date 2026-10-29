@@ -1,16 +1,30 @@
+use serde_json::json;
+
 use super::{
-    error::CliError, note_command::NoteCommand, report::attribution, row::Row, row_kind::RowKind,
+    answer::Answer, error::CliError, note_command::NoteCommand, report::attribution, row::Row,
+    row_kind::RowKind,
 };
-use crate::domain::{
-    coordination::{Author, ScratchpadKey},
-    port::CoordinationStore,
-    value::ProjectRoot,
+use crate::{
+    adapter::{client::NoteEntry, wire::WireForm},
+    domain::{
+        coordination::{Author, ScratchpadKey},
+        port::CoordinationStore,
+        value::ProjectRoot,
+    },
 };
 
 /// Line printed when the project has no notes yet.
 const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>`";
+/// The JSON key of the listed notes.
+const NOTES: &str = "notes";
+/// The JSON key of the key a write saved.
+const SAVED: &str = "saved";
+/// The JSON key of the key a delete named.
+const KEY: &str = "key";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
 
-/// Runs a `muster note` action against `store` for `project`, returning the rows
+/// Runs a `muster note` action against `store` for `project`, returning what
 /// to print. Absent a subcommand, lists the project's notes.
 ///
 /// # Errors
@@ -21,7 +35,7 @@ pub fn note(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
         None => list(store, project),
         Some(NoteCommand::Get { key }) => get(store, project, &key),
@@ -38,24 +52,28 @@ fn parse_key(key: &str) -> Result<ScratchpadKey, CliError> {
     ScratchpadKey::try_new(key).map_err(|_| CliError::InvalidNoteKey(key.to_string()))
 }
 
-/// Lists the keys of every note stored for `project`, one per line.
+/// Lists the keys of every note stored for `project`, one per line, without
+/// their bodies.
 ///
 /// # Errors
 /// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Vec<Row>, CliError> {
+fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Answer, CliError> {
     let notes = store.scratchpads(project)?;
-    if notes.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(notes
-        .iter()
-        .map(|note| {
-            Row::unlabeled(
-                RowKind::Plain,
-                format!("{}{}", note.key().as_ref(), attribution(note.author())),
-            )
-        })
-        .collect())
+    let entries: Vec<NoteEntry> = notes.iter().map(NoteEntry::from).collect();
+    let rows = if notes.is_empty() {
+        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
+    } else {
+        notes
+            .iter()
+            .map(|note| {
+                Row::unlabeled(
+                    RowKind::Plain,
+                    format!("{}{}", note.key().as_ref(), attribution(note.author())),
+                )
+            })
+            .collect()
+    };
+    Answer::of(rows, &json!({ NOTES: entries }))
 }
 
 /// Prints the body of the note under `key`, one row per line so the framed
@@ -68,16 +86,17 @@ fn get(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     key: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
     let note = store
         .scratchpad(project, &parsed)?
         .ok_or_else(|| CliError::UnknownNote(key.to_string()))?;
-    Ok(note
+    let rows = note
         .body()
         .lines()
         .map(|line| Row::unlabeled(RowKind::Plain, line.to_string()))
-        .collect())
+        .collect();
+    Answer::of(rows, &note.to_wire())
 }
 
 /// Creates or replaces the note under `key` with `body`.
@@ -90,13 +109,16 @@ fn set(
     author: &Author,
     key: &str,
     body: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
     store.set_scratchpad(project, author, &parsed, body)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        format!("saved '{}'", parsed.as_ref()),
-    )])
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("saved '{}'", parsed.as_ref()),
+        )],
+        &json!({ SAVED: parsed.as_ref() }),
+    )
 }
 
 /// Deletes the note under `key`. Deleting an absent note is not an error.
@@ -107,19 +129,21 @@ fn remove(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     key: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    if store.delete_scratchpad(project, &parsed)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{}'", parsed.as_ref()),
-        )])
+    let deleted = store.delete_scratchpad(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{}'", parsed.as_ref()))
     } else {
-        Ok(vec![Row::unlabeled(
+        Row::unlabeled(
             RowKind::Hint,
             format!("no note '{}' to remove", parsed.as_ref()),
-        )])
-    }
+        )
+    };
+    Answer::of(
+        vec![row],
+        &json!({ KEY: parsed.as_ref(), DELETED: deleted }),
+    )
 }
 
 #[cfg(test)]
@@ -322,22 +346,26 @@ mod tests {
         .unwrap();
 
         let listed = list(&store, &project()).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].detail(), "plan");
+        assert_eq!(listed.rows().len(), 1);
+        assert_eq!(listed.rows()[0].detail(), "plan");
+        assert_eq!(listed.json()["notes"][0]["key"], "plan");
+        assert!(listed.json()["notes"][0].get("body").is_none());
 
         let body = get(&store, &project(), "plan").unwrap();
-        assert_eq!(body.len(), 2);
-        assert_eq!(body[0].detail(), "line one");
-        assert_eq!(body[1].detail(), "line two");
+        assert_eq!(body.rows().len(), 2);
+        assert_eq!(body.rows()[0].detail(), "line one");
+        assert_eq!(body.rows()[1].detail(), "line two");
+        assert_eq!(body.json()["body"], "line one\nline two");
     }
 
     /// An empty store lists a hint rather than nothing.
     #[test]
     fn list_reports_empty() {
         let store = FakeStore::default();
-        let rows = list(&store, &project()).unwrap();
-        assert_eq!(rows[0].detail(), EMPTY_NOTE);
-        assert_eq!(rows[0].kind(), RowKind::Hint);
+        let listed = list(&store, &project()).unwrap();
+        assert_eq!(listed.rows()[0].detail(), EMPTY_NOTE);
+        assert_eq!(listed.rows()[0].kind(), RowKind::Hint);
+        assert_eq!(listed.json()["notes"], json!([]));
     }
 
     /// A note an agent wrote is attributed in the list; the human's is not.
@@ -354,8 +382,12 @@ mod tests {
                 .build(),
         );
 
-        let rows = list(&store, &project()).unwrap();
-        let details: Vec<&str> = rows.iter().map(|row| row.detail().as_str()).collect();
+        let listed = list(&store, &project()).unwrap();
+        let details: Vec<&str> = listed
+            .rows()
+            .iter()
+            .map(|row| row.detail().as_str())
+            .collect();
         assert!(details.contains(&"mine"), "human note is unadorned");
         assert!(
             details.contains(&"theirs  (by claude)"),
@@ -380,9 +412,11 @@ mod tests {
         set(&store, &project(), &Author::human(), "plan", "body").unwrap();
 
         let first = remove(&store, &project(), "plan").unwrap();
-        assert_eq!(first[0].kind(), RowKind::Ok);
+        assert_eq!(first.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(first.json(), &json!({"key": "plan", "deleted": true}));
         let second = remove(&store, &project(), "plan").unwrap();
-        assert_eq!(second[0].kind(), RowKind::Hint);
+        assert_eq!(second.rows()[0].kind(), RowKind::Hint);
+        assert_eq!(second.json()["deleted"], false);
     }
 
     /// A blank key is rejected before the store is touched.

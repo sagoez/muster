@@ -3,14 +3,17 @@
 //! log, stripping and filtering them, and capping what is returned.
 
 use std::{
+    fs::File,
     io::{self, BufRead, BufReader, Read},
     path::Path,
 };
 
 use super::{
-    error::HolderError, filter_state::FilterState, kept::Kept, log_query::LogQuery,
-    log_slice::LogSlice, span::Span, span_reader::SpanReader, strip::strip_line,
+    error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
+    log::rotated_path, log_base::LogBase, log_query::LogQuery, log_slice::LogSlice, span::Span,
+    span_reader::SpanReader, strip::strip_line,
 };
+use crate::domain::value::OutputCursor;
 
 /// The longest line a read returns, in characters; the rest is cut.
 pub const LINE_MAX_CHARS: usize = 2000;
@@ -76,6 +79,15 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be read.
 pub fn read_log_bytes(log: &Path) -> Result<Vec<u8>, HolderError> {
+    Ok(read_log_stream(log)?.1)
+}
+
+/// What [`read_log_bytes`] reads, with the cursor of its first byte, so a
+/// follower knows where in the output it stands.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the files cannot be read.
+pub fn read_log_stream(log: &Path) -> Result<(OutputCursor, Vec<u8>), HolderError> {
     let span = Span::open(log)?;
     let mut bytes = Vec::new();
     SpanReader {
@@ -83,7 +95,23 @@ pub fn read_log_bytes(log: &Path) -> Result<Vec<u8>, HolderError> {
         at: span.oldest,
     }
     .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok((span.oldest, bytes))
+}
+
+/// Where `live`, a file opened from the live path of the log at `log`,
+/// starts in the process's output: what the sidecar records for it, or
+/// where the rotated file ends when the sidecar predates the rotation.
+///
+/// # Errors
+/// Returns an [`io::Error`] when a file cannot be inspected.
+pub fn live_start(log: &Path, live: &File) -> io::Result<OutputCursor> {
+    let rotated = match File::open(rotated_path(log)) {
+        Ok(file) => Some(Generation::of(&file)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let resolved = LogBase::resolve(LogBase::read(log), Some(Generation::of(live)?), rotated);
+    Ok(OutputCursor::new(resolved.offset()))
 }
 
 /// Reads the next line from `reader`, stripped, keeping at most

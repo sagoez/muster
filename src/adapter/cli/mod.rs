@@ -1,6 +1,7 @@
 mod add;
 mod add_args;
 mod announce;
+mod answer;
 mod args;
 mod attach;
 mod attach_end;
@@ -20,6 +21,7 @@ mod coordination_command;
 mod detach_scanner;
 mod dispatch;
 mod doctor;
+mod doctor_check;
 #[cfg(test)]
 mod embedding;
 mod emit;
@@ -32,6 +34,8 @@ mod fake_holder;
 mod file_identity;
 #[cfg(test)]
 mod fixed_projects;
+mod followed_output;
+mod gap_marked;
 mod held_sequence;
 mod held_terminal;
 mod host_signals;

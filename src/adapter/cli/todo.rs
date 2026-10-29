@@ -1,8 +1,11 @@
+use serde_json::json;
+
 use super::{
-    error::CliError, report::attribution, row::Row, row_kind::RowKind, todo_command::TodoCommand,
+    answer::Answer, error::CliError, report::attribution, row::Row, row_kind::RowKind,
+    todo_command::TodoCommand,
 };
 use crate::{
-    adapter::store::now_epoch_secs,
+    adapter::{client::TodoView, store::now_epoch_secs},
     domain::{
         coordination::{
             Author, ClaimState, Todo, TodoChange, TodoId, TodoStatus, TodoTitle, TodoUpdate,
@@ -16,8 +19,14 @@ use crate::{
 const EMPTY_NOTE: &str = "no todos; add one with `muster todo add <title>`";
 /// Columns between the fields of a listed todo line.
 const FIELD_GAP: &str = "  ";
+/// The JSON key of the listed todos.
+const TODOS: &str = "todos";
+/// The JSON key of the id a delete named.
+const ID: &str = "id";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
 
-/// Runs a `muster todo` action against `store` for `project`, returning the rows
+/// Runs a `muster todo` action against `store` for `project`, returning what
 /// to print. Absent a subcommand, lists the project's todos.
 ///
 /// # Errors
@@ -28,7 +37,7 @@ pub fn todo(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
         None => list(store, project, now_epoch_secs() as u64),
         Some(TodoCommand::Add { title, deps }) => add(store, project, author, &title, &deps),
@@ -56,27 +65,30 @@ fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     now: u64,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let todos = store.todos(project)?;
-    if todos.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(todos
-        .iter()
-        .map(|todo| {
-            Row::unlabeled(
-                RowKind::Plain,
-                format!(
-                    "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
-                    id = todo.id().as_ref(),
-                    status = todo.effective_status(now),
-                    title = todo.title().as_ref(),
-                    claim = claim_note(todo, now),
-                    attribution = attribution(todo.author()),
-                ),
-            )
-        })
-        .collect())
+    let views: Vec<TodoView> = todos.iter().map(|todo| TodoView::at(todo, now)).collect();
+    let rows = if todos.is_empty() {
+        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
+    } else {
+        todos
+            .iter()
+            .map(|todo| {
+                Row::unlabeled(
+                    RowKind::Plain,
+                    format!(
+                        "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
+                        id = todo.id().as_ref(),
+                        status = todo.effective_status(now),
+                        title = todo.title().as_ref(),
+                        claim = claim_note(todo, now),
+                        attribution = attribution(todo.author()),
+                    ),
+                )
+            })
+            .collect()
+    };
+    Answer::of(rows, &json!({ TODOS: views }))
 }
 
 /// Who holds `todo` at `now`, as a suffix for its listed line: the holder and
@@ -103,7 +115,7 @@ fn add(
     author: &Author,
     title: &str,
     deps: &[String],
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let title =
         TodoTitle::try_new(title).map_err(|_| CliError::InvalidTodoTitle(title.to_string()))?;
     let deps = deps
@@ -111,10 +123,13 @@ fn add(
         .map(|dep| parse_id(dep))
         .collect::<Result<Vec<_>, _>>()?;
     let created = store.add_todo(project, author, &title, &deps)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        created.id().as_ref().to_string(),
-    )])
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            created.id().as_ref().to_string(),
+        )],
+        &TodoView::at(&created, now_epoch_secs() as u64),
+    )
 }
 
 /// Sets the status of the todo identified by `id`; `force` overrides an
@@ -131,7 +146,7 @@ fn set_status(
     id: &str,
     status: TodoStatus,
     force: bool,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_id(id)?;
     let change = TodoChange::builder()
         .title(None)
@@ -139,10 +154,10 @@ fn set_status(
         .force(force)
         .build();
     match store.update_todo(project, author, &parsed, &change)? {
-        TodoUpdate::Updated(_) => Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("{parsed} is {status}"),
-        )]),
+        TodoUpdate::Updated(updated) => Answer::of(
+            vec![Row::unlabeled(RowKind::Ok, format!("{parsed} is {status}"))],
+            &TodoView::at(&updated, now_epoch_secs() as u64),
+        ),
         TodoUpdate::HeldBy { owner, expires_in } => Err(CliError::HeldByOther {
             what: format!("todo '{parsed}'"),
             owner,
@@ -160,19 +175,15 @@ fn remove(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     id: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_id(id)?;
-    if store.delete_todo(project, &parsed)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{parsed}'"),
-        )])
+    let deleted = store.delete_todo(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{parsed}'"))
     } else {
-        Ok(vec![Row::unlabeled(
-            RowKind::Hint,
-            format!("no todo '{parsed}' to remove"),
-        )])
-    }
+        Row::unlabeled(RowKind::Hint, format!("no todo '{parsed}' to remove"))
+    };
+    Answer::of(vec![row], &json!({ ID: parsed.as_ref(), DELETED: deleted }))
 }
 
 #[cfg(test)]
@@ -208,7 +219,9 @@ mod tests {
 
     /// The added id is the row detail, so a script can capture it directly.
     fn added_id(store: &SqliteStore, root: &ProjectRoot, title: &str) -> String {
-        add(store, root, &Author::human(), title, &[]).unwrap()[0]
+        add(store, root, &Author::human(), title, &[])
+            .unwrap()
+            .rows()[0]
             .detail()
             .clone()
     }
@@ -240,11 +253,13 @@ mod tests {
         let id = added_id(&store, &root, "wire the store");
 
         let listed = list(&store, &root, now()).unwrap();
-        assert_eq!(listed.len(), 1);
+        assert_eq!(listed.rows().len(), 1);
         assert_eq!(
-            listed[0].detail(),
+            listed.rows()[0].detail(),
             &format!("{id}  pending  wire the store")
         );
+        assert_eq!(listed.json()["todos"][0]["id"], id.as_str());
+        assert_eq!(listed.json()["todos"][0]["status"], "pending");
     }
 
     /// A claimed todo lists its holder and lease; once the lease lapses it
@@ -258,7 +273,7 @@ mod tests {
 
         let held = list(&store, &root, until - 90).unwrap();
         assert_eq!(
-            held[0].detail(),
+            held.rows()[0].detail(),
             &format!(
                 "{id}  in-progress  task  [claimed by claude, {} left]  (by claude)",
                 humantime::format_duration(Duration::from_secs(90))
@@ -266,7 +281,7 @@ mod tests {
         );
         let lapsed = list(&store, &root, until + 1).unwrap();
         assert_eq!(
-            lapsed[0].detail(),
+            lapsed.rows()[0].detail(),
             &format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
         );
     }
@@ -286,9 +301,10 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(ok[0].kind(), RowKind::Ok);
+        assert_eq!(ok.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(ok.json()["status"], "done");
         assert!(
-            list(&store, &root, now()).unwrap()[0]
+            list(&store, &root, now()).unwrap().rows()[0]
                 .detail()
                 .contains("done")
         );
@@ -331,7 +347,7 @@ mod tests {
 
         set_status(&store, &root, &Author::human(), &id, TodoStatus::Done, true).unwrap();
         assert!(
-            list(&store, &root, now()).unwrap()[0]
+            list(&store, &root, now()).unwrap().rows()[0]
                 .detail()
                 .contains("done")
         );
@@ -343,8 +359,13 @@ mod tests {
         let (store, root, _scratch) = fixture();
         let id = added_id(&store, &root, "task");
 
-        assert_eq!(remove(&store, &root, &id).unwrap()[0].kind(), RowKind::Ok);
-        assert_eq!(remove(&store, &root, &id).unwrap()[0].kind(), RowKind::Hint);
+        let first = remove(&store, &root, &id).unwrap();
+        assert_eq!(first.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(first.json()["deleted"], true);
+        assert_eq!(
+            remove(&store, &root, &id).unwrap().rows()[0].kind(),
+            RowKind::Hint
+        );
     }
 
     /// A blank id or title is rejected before the store is touched.
@@ -369,6 +390,9 @@ mod tests {
     #[test]
     fn list_reports_empty() {
         let (store, root, _scratch) = fixture();
-        assert_eq!(list(&store, &root, now()).unwrap()[0].detail(), EMPTY_NOTE);
+        assert_eq!(
+            list(&store, &root, now()).unwrap().rows()[0].detail(),
+            EMPTY_NOTE
+        );
     }
 }

@@ -7,12 +7,12 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    fs,
+    fs::{self, Permissions},
     io::{BufRead, BufReader, Read, Write},
     os::{
         fd::OwnedFd,
         unix::{
-            fs::OpenOptionsExt,
+            fs::{OpenOptionsExt, PermissionsExt, symlink},
             net::{UnixListener, UnixStream},
             process::CommandExt,
         },
@@ -808,6 +808,16 @@ fn up_ps_logs_and_down_report_what_happened() {
     );
     let (_, unfiltered) = scratch.json_on(&project, &["logs", "dev server"]);
     assert_eq!(unfiltered["project"], slice["project"], "{unfiltered}");
+    assert_eq!(unfiltered["process"], slice["process"], "{unfiltered}");
+    let (_, screen) = scratch.json_on(&project, &["logs", "dev server", "--screen"]);
+    assert_eq!(screen["process"], "dev server", "{screen}");
+    let screen_text = screen["text"].as_str().unwrap();
+    assert!(screen_text.contains("dev-ready"), "{screen}");
+    assert_eq!(
+        screen_text,
+        screen_text.trim_end(),
+        "no blank rows below the text: {screen}"
+    );
     let cursor = slice["cursor"].as_str().unwrap();
     let (_, after) = scratch.json_on(&project, &["logs", "dev server", "--since", cursor]);
     assert_eq!(after["lines_returned"], 0, "{after}");
@@ -3305,7 +3315,30 @@ fn import_shows_what_it_runs_and_refuses_a_hostile_file() {
         );
     }
 
+    let outside = scratch.path().join("outside");
+    fs::create_dir_all(folder.join("sub")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, folder.join("sub/link")).unwrap();
+    fs::write(&file, entry("sub/link")).unwrap();
+    let refused = import(&file, &[]);
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("outside the project root"),
+        "{}",
+        shown(&refused)
+    );
+
     fs::write(&file, entry("frontend")).unwrap();
+    let (dry_json, planned) =
+        scratch.json_on(&folder, &["import", file.to_str().unwrap(), "--dry-run"]);
+    assert!(dry_json.status.success(), "{}", shown(&dry_json));
+    assert_eq!(planned["registered"], false, "{planned}");
+    assert_eq!(planned["would_register"], true, "{planned}");
     let dry = import(&file, &["--dry-run"]);
     assert!(dry.status.success(), "{}", shown(&dry));
     let shown_dry = stdout(&dry);
@@ -3363,4 +3396,273 @@ fn an_overriding_muster_project_is_noted() {
         "{}",
         shown(&quiet)
     );
+}
+
+/// The escape character no terminal-safe text may carry.
+const ESCAPE: char = '\u{1b}';
+/// Mode bits a permission check compares.
+const PERMISSION_BITS: u32 = 0o777;
+/// A file mode other users can read.
+const SHARED_FILE_MODE: u32 = 0o644;
+/// The mode of a file only its owner can read.
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Characters in a state folder name that leave no room for a socket path.
+const DEEP_STATE_DIR_CHARS: usize = 120;
+
+/// A folder whose name carries an OSC title sequence registers under that
+/// name escaped, so neither `projects` nor shell completion sends the
+/// sequence to a terminal.
+#[test]
+fn a_folder_named_with_terminal_sequences_registers_an_escaped_name() {
+    let scratch = Scratch::new();
+    let hostile = scratch.project("x\u{1b}]0;pwned\u{7}", &single());
+
+    let (listed, projects) = scratch.json(&["projects"]);
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let name = projects
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["root"] == hostile.to_str().unwrap())
+        .map(|project| project["name"].as_str().unwrap().to_string())
+        .unwrap();
+    assert_eq!(name, "x\\u{1b}]0;pwned\\u{7}");
+
+    let completed = scratch
+        .command(&["--", "muster", "--project", ""])
+        .env("COMPLETE", "fish")
+        .output()
+        .unwrap();
+    assert!(completed.status.success(), "{}", shown(&completed));
+    assert!(stdout(&completed).contains(&name), "{}", shown(&completed));
+    assert!(
+        !stdout(&completed).contains(ESCAPE),
+        "{}",
+        shown(&completed)
+    );
+}
+
+/// `add` names why a name is refused and shows it escaped.
+#[test]
+fn add_explains_an_invalid_name_and_escapes_it() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+
+    let refused = scratch.on(&shop, &["add", "web\u{1b}[2J", "--", "true"]);
+
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("'web\\u{1b}[2J' is not a valid process name")
+            && stderr(&refused).contains("control characters"),
+        "{}",
+        shown(&refused)
+    );
+    assert!(!stderr(&refused).contains(ESCAPE), "{}", shown(&refused));
+}
+
+/// `export --with-env` writes environment values its owner alone can read,
+/// even over a file others could.
+#[test]
+fn an_export_with_env_values_is_private() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let file = scratch.path().join("secrets.yml");
+    fs::write(&file, "old").unwrap();
+    fs::set_permissions(&file, Permissions::from_mode(SHARED_FILE_MODE)).unwrap();
+
+    let exported = scratch.on(&shop, &[
+        "export",
+        file.to_str().unwrap(),
+        "--with-env",
+        "--force",
+    ]);
+
+    assert!(exported.status.success(), "{}", shown(&exported));
+    let mode = fs::metadata(&file).unwrap().permissions().mode() & PERMISSION_BITS;
+    assert_eq!(mode, PRIVATE_FILE_MODE);
+}
+
+/// A state directory too deep for a Unix socket is refused before a service
+/// is started, naming the path and what to change.
+#[test]
+fn a_state_dir_too_deep_for_a_socket_is_reported() {
+    let scratch = Scratch::new();
+    let shop = scratch.path().join("shop");
+    fs::create_dir_all(&shop).unwrap();
+    fs::write(shop.join(STACK_FILE), single()).unwrap();
+    let deep = scratch.path().join("d".repeat(DEEP_STATE_DIR_CHARS));
+    fs::create_dir_all(&deep).unwrap();
+    let in_deep = |args: &[&str]| {
+        let mut all = vec!["-p", shop.to_str().unwrap()];
+        all.extend_from_slice(args);
+        scratch
+            .command(&all)
+            .env("XDG_STATE_HOME", &deep)
+            .output()
+            .unwrap()
+    };
+    let imported = in_deep(&["import"]);
+    assert!(imported.status.success(), "{}", shown(&imported));
+
+    let up = in_deep(&["up"]);
+
+    assert_eq!(
+        up.status.code(),
+        Some(SERVICE_UNAVAILABLE),
+        "{}",
+        shown(&up)
+    );
+    assert!(
+        stderr(&up).contains("too long for a Unix socket")
+            && stderr(&up).contains("XDG_STATE_HOME")
+            && stderr(&up).contains(deep.to_str().unwrap()),
+        "{}",
+        shown(&up)
+    );
+}
+
+/// `-p` naming a folder inside a project acts on that project, and
+/// `MUSTER_PROJECT` takes a registered project's name as well as a folder.
+#[test]
+fn a_subfolder_and_a_project_name_resolve_to_the_project() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let nested = shop.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+
+    let (noted, _) = scratch.json_on(&nested, &["note", "set", "plan", "ship it"]);
+    assert!(noted.status.success(), "{}", shown(&noted));
+    let (read, note) = scratch.json_on(&shop, &["note", "get", "plan"]);
+    assert!(read.status.success(), "{}", shown(&read));
+    assert_eq!(note["body"], "ship it");
+
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let named = scratch
+        .command(&["note", "get", "plan", "--json"])
+        .current_dir(&elsewhere)
+        .env("MUSTER_PROJECT", "shop")
+        .output()
+        .unwrap();
+    assert!(named.status.success(), "{}", shown(&named));
+    assert_eq!(parsed(&named)["body"], "ship it");
+}
+
+/// The coordination commands and `doctor` answer `--json` with snake_case
+/// keys and kebab-case values, and `doctor` exits non-zero on a failed check
+/// either way.
+#[test]
+fn coordination_and_doctor_answer_json() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let json = |args: &[&str]| {
+        let (output, value) = scratch.json_on(&shop, args);
+        assert!(output.status.success(), "{args:?}: {}", shown(&output));
+        value
+    };
+
+    assert_eq!(json(&["note", "set", "plan", "body"])["saved"], "plan");
+    assert_eq!(json(&["note"])["notes"][0]["key"], "plan");
+    assert_eq!(
+        json(&["note", "rm", "plan"]),
+        serde_json::json!({"key": "plan", "deleted": true})
+    );
+    let added = json(&["todo", "add", "ship"]);
+    assert_eq!(added["status"], "pending");
+    let id = added["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        json(&["todo", "status", &id, "in-progress"])["status"],
+        "in-progress"
+    );
+    assert_eq!(json(&["todo"])["todos"][0]["id"], id.as_str());
+    assert_eq!(json(&["kv", "set", "port", "3000"])["saved"], "port");
+    assert_eq!(json(&["kv", "get", "port"])["value"], "3000");
+    assert_eq!(json(&["kv"])["entries"][0]["key"], "port");
+    assert_eq!(json(&["lock"])["locks"], serde_json::json!([]));
+    assert_eq!(json(&["lock", "release", "db"])["released"], false);
+    let snapshot = scratch.path().join("coordination.yml");
+    let exported = json(&["coordination", "export", snapshot.to_str().unwrap()]);
+    assert_eq!(exported["todos"], 1);
+    assert_eq!(exported["values"], 1);
+
+    let unknown = scratch.on(&shop, &["note", "get", "ghost", "--json"]);
+    assert_eq!(
+        unknown.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&unknown)
+    );
+    assert_eq!(
+        parsed(&unknown)["error"]["kind"],
+        "unknown-note",
+        "{}",
+        shown(&unknown)
+    );
+
+    let (healthy, report) = scratch.json(&["doctor"]);
+    assert!(healthy.status.success(), "{}", shown(&healthy));
+    assert_eq!(report["failed"], false, "{report}");
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["check"] == "this-folder"),
+        "{report}"
+    );
+
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute("UPDATE processes SET stop_grace_ms = 7200000", [])
+        .unwrap();
+    let (broken, report) = scratch.json(&["doctor"]);
+    assert_eq!(
+        broken.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&broken)
+    );
+    assert_eq!(report["failed"], true, "{report}");
+}
+
+/// `logs -f --json` prints one object per line, each naming its process
+/// and carrying the cursor just past it.
+#[test]
+fn a_followed_log_in_json_carries_cursors() {
+    let scratch = Scratch::new();
+    let ticker = scratch.project("tick", &ticking());
+    let up = scratch.on(&ticker, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let mut follow = scratch
+        .command(&[
+            "-p",
+            ticker.to_str().unwrap(),
+            "logs",
+            "-f",
+            "ticker",
+            "--json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(follow.stdout.take().unwrap()).lines();
+    let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    let second: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    let _ = follow.kill();
+    let _ = follow.wait();
+
+    assert_eq!(first["process"], "ticker", "{first}");
+    assert_eq!(first["text"], "tick", "{first}");
+    let offset = |line: &Value| {
+        line["cursor"].as_str().unwrap()["o:".len()..]
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert!(offset(&second) > offset(&first), "{first} {second}");
 }

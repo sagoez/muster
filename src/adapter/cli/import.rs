@@ -18,13 +18,14 @@ use crate::{
             ProjectIdentityView, ProjectTarget, RemovedView, ServiceClient, SettleWatch, UNBOUNDED,
             process::{settle_removed, status},
         },
-        exchange::read_stack_file,
+        exchange::{EntryError, ExchangeError, read_stack_file},
+        path::resolved,
     },
     application::StackEditor,
     domain::{
-        config::{ImportMode, ImportPlan, Stack},
+        config::{ImportMode, ImportPlan, ProcessSpec, Stack},
         port::{LocalState, StackStore},
-        value::ProcessName,
+        value::{ProcessName, ProjectRoot},
     },
 };
 
@@ -63,10 +64,13 @@ pub struct ImportView {
     /// The project, or the one the folder would become.
     #[getset(get = "pub")]
     project: Option<ProjectIdentityView>,
-    /// Whether this import registered the folder as a project, or with
-    /// `dry_run`, would register it.
+    /// Whether this import registered the folder as a project; never with
+    /// `dry_run`, which writes nothing.
     #[getset(get_copy = "pub")]
     registered: bool,
+    /// Whether the import without `dry_run` would register the folder.
+    #[getset(get_copy = "pub")]
+    would_register: bool,
     /// The processes added.
     #[getset(get = "pub")]
     added: Vec<ProcessName>,
@@ -126,12 +130,41 @@ pub fn read(
         path: path.clone(),
         source,
     })?;
-    let processes =
-        read_stack_file(&text).map_err(|source| CliError::StackFile { path, source })?;
+    let processes = read_stack_file(&text)
+        .and_then(|processes| stay_inside(target.root(), processes))
+        .map_err(|source| CliError::StackFile { path, source })?;
     Ok(StackRead::builder()
         .target(target)
         .processes(processes)
         .build())
+}
+
+/// `processes`, refusing the first whose working directory, followed through
+/// its symlinks, leads outside `root`: a file that passes as relative must
+/// not run a process in `/etc` through `sub/link`.
+///
+/// # Errors
+/// Returns [`ExchangeError::Entry`] naming that process.
+fn stay_inside(
+    root: &ProjectRoot,
+    processes: Vec<ProcessSpec>,
+) -> Result<Vec<ProcessSpec>, ExchangeError> {
+    let escaping = processes.iter().enumerate().find_map(|(index, spec)| {
+        let dir = spec.working_dir().as_ref()?;
+        let resolved = resolved(&root.as_ref().join(dir));
+        (!root.contains(&resolved)).then(|| ExchangeError::Entry {
+            index,
+            name: Some(spec.name().to_string()),
+            source: EntryError::WorkingDirLeavesRoot {
+                dir: dir.clone(),
+                resolved,
+            },
+        })
+    });
+    match escaping {
+        Some(error) => Err(error),
+        None => Ok(processes),
+    }
 }
 
 /// What importing `read` under `mode` would change against the project's
@@ -225,7 +258,8 @@ pub fn dry_run_view(
     let current = store.stack(read.target().root())?;
     Ok(ImportView::builder()
         .project(identity(read.target()))
-        .registered(matches!(read.target(), ProjectTarget::Unregistered(_)))
+        .registered(false)
+        .would_register(matches!(read.target(), ProjectTarget::Unregistered(_)))
         .added(plan.added().clone())
         .updated(plan.updated().clone())
         .removed(unstopped(plan.removed()))
@@ -278,6 +312,7 @@ pub fn apply(
     Ok(ImportView::builder()
         .project(Some(ProjectIdentityView::from(project)))
         .registered(*registration.newly_registered())
+        .would_register(*registration.newly_registered())
         .added(plan.added().clone())
         .updated(plan.updated().clone())
         .removed(removed)
@@ -292,7 +327,7 @@ pub fn apply(
 /// and `-` for each removed.
 pub fn import_rows(view: &ImportView) -> Report {
     let mut rows: Vec<Row> = Vec::new();
-    if view.registered()
+    if view.would_register()
         && let Some(project) = view.project()
     {
         let opening = if view.dry_run() {
@@ -343,7 +378,9 @@ pub fn import_rows(view: &ImportView) -> Report {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::{fs, os::unix::fs::symlink, path::PathBuf, time::Duration};
+
+    use tempfile::TempDir;
 
     use super::*;
     use crate::{
@@ -378,8 +415,9 @@ mod tests {
             .build()
     }
 
-    /// An import of `runs` into `shop`, registered by it or not.
-    fn view(runs: Vec<ImportedRun>, registered: bool, dry_run: bool) -> ImportView {
+    /// An import of `runs` into `shop`, registering it or not; a dry run
+    /// registers nothing.
+    fn view(runs: Vec<ImportedRun>, registers: bool, dry_run: bool) -> ImportView {
         ImportView::builder()
             .project(Some(
                 ProjectIdentityView::builder()
@@ -387,7 +425,8 @@ mod tests {
                     .root(PathBuf::from("/p/shop"))
                     .build(),
             ))
-            .registered(registered)
+            .registered(registers && !dry_run)
+            .would_register(registers)
             .added(Vec::new())
             .updated(Vec::new())
             .removed(Vec::new())
@@ -453,6 +492,40 @@ mod tests {
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), false, false))),
             NOTHING_CHANGES
+        );
+    }
+
+    /// A working directory that is relative as written but leads out of the
+    /// root through a symlink is refused; one that stays inside, or does not
+    /// exist yet, is kept.
+    #[test]
+    fn a_working_dir_through_a_symlink_out_of_the_root_is_refused() {
+        let scratch = TempDir::new().unwrap();
+        let base = scratch.path().canonicalize().unwrap();
+        let root_dir = base.join("shop");
+        fs::create_dir_all(root_dir.join("sub/inside")).unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        symlink(base.join("outside"), root_dir.join("sub/link")).unwrap();
+        let root = ProjectRoot::try_new(root_dir).unwrap();
+
+        let refused = stay_inside(&root, vec![
+            spec("ok", "true", Some("sub/inside")),
+            spec("evil", "true", Some("sub/link/deeper")),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            refused,
+            ExchangeError::Entry {
+                index: 1,
+                source: EntryError::WorkingDirLeavesRoot { ref resolved, .. },
+                ..
+            } if *resolved == base.join("outside/deeper")
+        ));
+        assert_eq!(
+            stay_inside(&root, vec![spec("new", "true", Some("not/yet"))])
+                .unwrap()
+                .len(),
+            1
         );
     }
 

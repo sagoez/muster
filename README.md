@@ -39,13 +39,19 @@ state directory (`~/.local/state/muster` on Linux,
 every project's stack, the machine's settings and the shared notes, todos and
 key-values. The CLI and the MCP server write it directly and tell a running
 service what changed, so an edit reaches the service at once and works without
-it.
+it. The service and each process listen on Unix sockets in that directory, so
+a state directory too deep for a socket path is refused with a hint to set a
+shorter `XDG_STATE_HOME`.
 
 Commands act on the project given by `--project` (a registered name, or a
 folder when the value contains `/` or starts with `.` or `~`; such a value
 names a registered project when no such folder exists), then
-`$MUSTER_PROJECT` (set inside every process muster runs), then the deepest
-registered folder containing the current directory. When `$MUSTER_PROJECT`
+`$MUSTER_PROJECT` (set inside every process muster runs; a folder, or a
+registered project's name when no such folder exists), then the deepest
+registered folder containing the current directory. A folder named inside a
+project is that project, except for `add`, `run`, `init` and `import`, which
+register it as a project of its own. A project takes its folder's name with
+any control or format character escaped. When `$MUSTER_PROJECT`
 points `add`, `set`, `rm`, `init` or `import` away from the project the current
 directory is in, the command says which project it acts on. Bare `muster` is
 `muster ps` inside a project and `muster ps --all` outside one.
@@ -103,14 +109,17 @@ folder, or to `FILE` (`-` for stdout), and refuses to overwrite a file without
 `--force`. Each working directory is written relative to the project, and a
 process working outside the project is refused until `muster set <name> --cwd`
 moves it under it, so every exported file imports. Environment variables are
-written by name with a null placeholder; `--with-env` writes their values too. `muster import [FILE]` loads such a file
+written by name with a null placeholder; `--with-env` writes their values too,
+to a file only its owner can read. `muster import [FILE]` loads such a file
 into the current folder, registering it when needed. By default it refuses
 names the project already defines; `--merge` replaces those, `--replace` makes
 the stack exactly the file and stops what it removes, and `--dry-run` prints
-the plan. Both the plan and the report show the command and working directory
-of each process added or changed. An import reads only a regular file of at
-most 1 MiB, and refuses a file whose environment still holds a placeholder or
-whose `working_dir` is empty, absolute or climbs out of the project with `..`.
+the plan, with `--json` reporting `registered: false` and whether the import
+`would_register` the folder. Both the plan and the report show the command and
+working directory of each process added or changed. An import reads only a
+regular file of at most 1 MiB, and refuses a file whose environment still
+holds a placeholder or whose `working_dir` is empty, absolute, climbs out of
+the project with `..`, or leads out of it through a symlink.
 
 ```yaml
 # muster stack: `muster import` loads it into a project.
@@ -257,7 +266,12 @@ that answers it, before it reaches the service, and `muster projects rm` needs
 
 ### JSON
 
-The commands take `--json` and print results and failures as JSON on stdout.
+Every command but `mcp` and `completions` takes `--json`, the coordination
+commands and `doctor` included, and prints results
+and failures as JSON on stdout. `muster note`, `todo`, `kv` and `lock` answer
+in the shapes the matching MCP tools do (`{"notes": [...]}`, a todo, `{"key",
+"deleted"}`); `muster doctor --json` lists each `check` with its `outcome` and
+says whether one `failed`, exiting 1 when one did.
 Keys are snake_case, enum values are kebab-case (`on-failure`, `in-progress`),
 durations are seconds and times are RFC 3339 in UTC. A process definition
 reads:
@@ -269,8 +283,10 @@ reads:
 ```
 
 A project is named as `{"name": "shop", "root": "/home/me/shop"}`, in the
-output of every command and in each notice. `muster logs -f --json` prints one
-object per line.
+output of every command and in each notice. `muster logs --json` names its
+process under `process`, and `--screen` drops the blank rows below the text.
+`muster logs -f --json` prints one object per line, each with the `cursor`
+just past it.
 
 ## Attach
 
@@ -289,8 +305,10 @@ file. `muster logs` and `muster logs -f` write it byte for byte to a pipe or
 file; on a terminal they keep text, line breaks, colours, cursor moves and
 erases, so a progress bar redraws, and drop every query, terminal string and
 other control, so a log cannot retitle the terminal, write its clipboard or
-query it. `muster logs --screen` prints what
-the terminal shows now.
+query it. When output rotates away twice before `muster logs -f` reads it,
+the follow prints a line naming how many bytes were lost and carries on (with
+`--json`, an object whose `skipped_bytes` counts them). `muster logs --screen`
+prints what the terminal shows now.
 
 Every byte of a process's output has an offset that runs on across restarts
 and rotations, written as a cursor such as `o:18234`. `-n N`, `--since CURSOR`,

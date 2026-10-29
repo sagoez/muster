@@ -152,6 +152,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::Config(config) => config_message(config),
         ClientError::CursorAhead { .. } => format!("invalid since: {error}; {PASS_CURSOR}"),
         ClientError::NoStateDir(_)
+        | ClientError::SocketPathTooLong { .. }
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }
         | ClientError::UnknownProcess { .. }

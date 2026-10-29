@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     env,
     fs::{File, OpenOptions, TryLockError},
-    io,
+    io, iter,
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, Command},
@@ -17,7 +17,8 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::{detached, reap},
+        holder::{HolderDirs, HolderId, detached, reap},
+        ipc::fits_a_socket,
         private_dir::{prepare_state_dir, state_dir},
         service::{
             Notice, ProjectStatus, ServiceErrorKind, ServiceRequest, ServiceResponse,
@@ -68,6 +69,7 @@ impl ServiceClient {
     /// being replaced.
     pub fn connect() -> Result<Self, ClientError> {
         let client = Self::local()?;
+        client.check_socket_room()?;
         let ours = ServiceVersion::current();
         let running = client.reach()?;
         match running.compared_with(&ours) {
@@ -196,6 +198,26 @@ impl ServiceClient {
             socket,
             binary,
         })
+    }
+
+    /// Refuses a state directory too deep for the service's socket or a
+    /// holder's to fit in a Unix socket address, before a service is started
+    /// that could never listen.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
+    /// not fit.
+    fn check_socket_room(&self) -> Result<(), ClientError> {
+        let holder = HolderId::generate()
+            .ok()
+            .map(|id| HolderDirs::under(&self.state_dir).socket_path(&id));
+        match iter::once(self.socket.clone())
+            .chain(holder)
+            .find(|socket| !fits_a_socket(socket))
+        {
+            Some(socket) => Err(ClientError::SocketPathTooLong { socket }),
+            None => Ok(()),
+        }
     }
 
     /// The service log.

@@ -80,7 +80,9 @@ impl ProjectTarget {
 /// A `--project` naming a folder (it contains `/` or starts with `.` or `~`)
 /// is read against `cwd`, unless no such folder exists and a registered
 /// project has that name, as `.dotfiles` may; anything else is a registered
-/// project's name. There is no fallback to some other registered project.
+/// project's name. `MUSTER_PROJECT` is a folder, or when no such folder
+/// exists, a registered project's name. There is no fallback to some other
+/// registered project.
 ///
 /// # Errors
 /// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
@@ -104,8 +106,15 @@ pub fn resolve_project(
         }
         return folder(&path, projects);
     }
-    if let Some(root) = env_project {
-        return folder(&cwd.join(root), projects);
+    if let Some(value) = env_project {
+        let path = cwd.join(value);
+        if !path.is_dir()
+            && let Some(name) = value.to_str()
+            && let Some(project) = registered_named(name, projects)?
+        {
+            return Ok(ProjectTarget::Registered(project));
+        }
+        return folder(&path, projects);
     }
     if let Some(project) = projects.project_containing(cwd)? {
         return Ok(ProjectTarget::Registered(project));
@@ -312,6 +321,32 @@ mod tests {
             resolve_project(Some(".."), None, &cwd, &projects).unwrap(),
             ProjectTarget::Registered(shop)
         );
+    }
+
+    /// `MUSTER_PROJECT` holding a registered project's name, which is no
+    /// folder, resolves to that project; a folder of that name wins.
+    #[test]
+    fn the_environment_accepts_a_project_name() {
+        let (_scratch, base) = tree();
+        let shop = project("shop", &base.join("shop"));
+        let elsewhere = project("elsewhere", &base.join("elsewhere"));
+        let projects = Projects(vec![shop.clone(), elsewhere.clone()]);
+
+        assert_eq!(
+            resolve_project(
+                None,
+                Some(Path::new("elsewhere")),
+                &base.join("shop"),
+                &projects
+            )
+            .unwrap(),
+            ProjectTarget::Registered(elsewhere)
+        );
+        assert_eq!(
+            resolve_project(None, Some(Path::new("shop")), &base, &projects).unwrap(),
+            ProjectTarget::Registered(shop)
+        );
+        assert!(resolve_project(None, Some(Path::new("nosuch")), &base, &projects).is_err());
     }
 
     /// `--project .` inside a project makes the nested folder its own,

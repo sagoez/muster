@@ -2,8 +2,8 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{lock_view::LockView, stack_process_view::StackProcessView};
-use crate::adapter::client::{NoticeView, ProjectIdentityView};
+use super::stack_process_view::StackProcessView;
+use crate::adapter::client::{LockView, NoticeView, ProjectIdentityView};
 
 /// The whole picture of one project's stack, as `stack_status` answers.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, TypedBuilder)]

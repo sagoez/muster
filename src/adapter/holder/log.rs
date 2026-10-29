@@ -14,8 +14,8 @@ use crate::{
 
 /// Suffix of the single retained older log generation.
 const ROTATED_SUFFIX: &str = ".1";
-/// Mode of a log: its owner's alone.
-const PRIVATE_LOG_MODE: u32 = 0o600;
+/// Mode of a log and its sidecar: its owner's alone.
+pub(super) const PRIVATE_LOG_MODE: u32 = 0o600;
 
 /// An append-only log that keeps one older generation: once the next write
 /// would pass the cap, `name.log` becomes `name.log.1` and a fresh file starts.

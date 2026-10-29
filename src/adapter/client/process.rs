@@ -534,7 +534,7 @@ pub fn log_error(path: &Path, source: io::Error) -> ClientError {
 
 /// The failure the log reader met reading the log at `path`: a cursor past
 /// its end is the caller's, anything else a failure reading it.
-fn log_read_error(path: &Path, error: HolderError) -> ClientError {
+pub fn log_read_error(path: &Path, error: HolderError) -> ClientError {
     match error {
         HolderError::CursorAhead { cursor, end } => ClientError::CursorAhead { cursor, end },
         HolderError::Io(source) => log_error(path, source),

@@ -7,12 +7,13 @@ use crate::{
         client::{ClientError, FailureKind, ResolveError},
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
+        sanitize::printable,
         service::ServiceErrorKind,
     },
     domain::{
         config::ConfigError,
         coordination::Author,
-        value::{ProcessName, ProjectName},
+        value::{ProcessName, ProcessNameError, ProcessNameFault, ProjectName},
     },
 };
 
@@ -84,10 +85,15 @@ pub enum CliError {
     /// No value is stored under the requested key.
     #[error("no value '{0}'")]
     UnknownValue(String),
-    /// The derived or given process name was empty or held a control
-    /// character.
-    #[error("'{0}' is not a valid process name")]
-    InvalidName(String),
+    /// The derived or given process name, escaped, was empty or held a
+    /// control character.
+    #[error("'{name}' is not a valid process name: {fault}")]
+    InvalidName {
+        /// The name as given, made printable.
+        name: String,
+        /// Why it was refused.
+        fault: ProcessNameFault,
+    },
     /// The command was blank.
     #[error("the command is empty")]
     EmptyCommand,
@@ -249,6 +255,14 @@ impl From<ResolveError> for CliError {
 }
 
 impl CliError {
+    /// The refusal of `raw` as a process name, escaped so it prints as text.
+    pub fn invalid_name(raw: &str, error: ProcessNameError) -> Self {
+        Self::InvalidName {
+            name: printable(raw),
+            fault: error.into(),
+        }
+    }
+
     /// The kind of failure, for `--json` output and the exit code.
     pub fn kind(&self) -> FailureKind {
         match self {
@@ -277,7 +291,7 @@ impl CliError {
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
-            | Self::InvalidName(_)
+            | Self::InvalidName { .. }
             | Self::EmptyCommand
             | Self::InvalidCommand
             | Self::InvalidEnv(_)
@@ -324,7 +338,7 @@ impl CliError {
             | Self::HeldByOther { .. }
             | Self::InvalidLockName(_)
             | Self::InvalidKvKey(_)
-            | Self::InvalidName(_)
+            | Self::InvalidName { .. }
             | Self::EmptyCommand
             | Self::InvalidCommand
             | Self::InvalidEnv(_)
@@ -369,6 +383,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::Interrupted => format!("{error}, {INTERRUPTED_HINT}"),
         ClientError::CursorAhead { .. } => format!("{error}; {CURSOR_HINT}"),
         ClientError::NoStateDir(_)
+        | ClientError::SocketPathTooLong { .. }
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }
         | ClientError::UnknownProcess { .. }

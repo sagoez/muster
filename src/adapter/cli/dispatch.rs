@@ -19,6 +19,7 @@ use directories::{BaseDirs, ProjectDirs};
 use super::{
     add::{add, add_rows},
     announce::Announce,
+    answer::Answer,
     args::{Args, completing_command},
     attach::attach_named,
     attach_end::AttachEnd,
@@ -31,7 +32,7 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
+        DoctorView, any_failed, completions_probe, database_probe, doctor_report, legacy_probe,
         processes_probe, project_probe, projects_probe,
     },
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
@@ -243,24 +244,32 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Init { yes, json }) => init(invocation, yes, json),
         Some(Command::Run(args)) => run_command(invocation, &args),
         Some(Command::Projects { command, json }) => projects(invocation, command, json),
-        Some(Command::Note { command }) => with_root(invocation, |store, root| {
-            note(command, store, root, &Author::human()).map(|rows| Report::new(NOTE_TITLE, rows))
-        }),
-        Some(Command::Todo { command }) => with_root(invocation, |store, root| {
-            todo(command, store, root, &Author::human()).map(|rows| Report::new(TODO_TITLE, rows))
-        }),
-        Some(Command::Kv { command }) => with_root(invocation, |store, root| {
-            kv(command, store, root, &Author::human()).map(|rows| Report::new(KV_TITLE, rows))
-        }),
-        Some(Command::Lock { command }) => with_root(invocation, |store, root| {
-            lock(command, store, root).map(|rows| Report::new(LOCK_TITLE, rows))
-        }),
-        Some(Command::Coordination { command }) => coordinate(invocation, command),
+        Some(Command::Note { command, json }) => {
+            with_root(invocation, json, NOTE_TITLE, |store, root| {
+                note(command, store, root, &Author::human())
+            })
+        },
+        Some(Command::Todo { command, json }) => {
+            with_root(invocation, json, TODO_TITLE, |store, root| {
+                todo(command, store, root, &Author::human())
+            })
+        },
+        Some(Command::Kv { command, json }) => {
+            with_root(invocation, json, KV_TITLE, |store, root| {
+                kv(command, store, root, &Author::human())
+            })
+        },
+        Some(Command::Lock { command, json }) => {
+            with_root(invocation, json, LOCK_TITLE, |store, root| {
+                lock(command, store, root)
+            })
+        },
+        Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
             print_config,
             agent,
         }) => serve_mcp(invocation, print_config, agent),
-        Some(Command::Doctor) => doctor(invocation),
+        Some(Command::Doctor { json }) => doctor(invocation, json),
         Some(Command::Completions { shell }) => completions(shell),
         Some(Command::Holder { spec }) => internal(ports.run_holder(&spec)),
         Some(Command::RunService) => internal(ports.run_service()),
@@ -1119,41 +1128,46 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
 }
 
 /// Runs a coordination command on the invocation's project, printing its
-/// rows as data.
+/// rows titled `title` as data, or its JSON with `json`.
 fn with_root(
     invocation: &Invocation<'_>,
-    command: impl FnOnce(&dyn LocalState, &ProjectRoot) -> Result<Report, CliError>,
+    json: bool,
+    title: &str,
+    command: impl FnOnce(&dyn LocalState, &ProjectRoot) -> Result<Answer, CliError>,
 ) {
     let result = invocation.store().and_then(|store| {
         let project = invocation.project(store.as_ref())?;
         command(store.as_ref(), project.root())
     });
     match result {
-        Ok(report) => show(&report),
-        Err(error) => fail_command(false, &error),
+        Ok(answer) => print_result(json, answer.json(), |_| {
+            show(&Report::new(title, answer.rows().clone()));
+        }),
+        Err(error) => fail_command(json, &error),
     }
 }
 
 /// `muster coordination`: export or restore the project's shared state.
-fn coordinate(invocation: &Invocation<'_>, command: CoordinationCommand) {
+fn coordinate(invocation: &Invocation<'_>, command: CoordinationCommand, json: bool) {
     let command = match command {
         CoordinationCommand::Export { file } => CoordinationCommand::Export {
-            file: in_cwd_or_fail(invocation, &file),
+            file: in_cwd_or_fail(invocation, &file, json),
         },
         CoordinationCommand::Import { file } => CoordinationCommand::Import {
-            file: in_cwd_or_fail(invocation, &file),
+            file: in_cwd_or_fail(invocation, &file, json),
         },
     };
-    with_root(invocation, |store, root| {
-        coordination(command, store, root).map(|rows| Report::new(COORDINATION_TITLE, rows))
+    with_root(invocation, json, COORDINATION_TITLE, |store, root| {
+        coordination(command, store, root)
     });
 }
 
-/// `path` read against the current directory, or the command fails.
-fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path) -> PathBuf {
+/// `path` read against the current directory, or the command fails, as JSON
+/// with `json`.
+fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathBuf {
     invocation
         .in_cwd(path)
-        .unwrap_or_else(|error| fail_command(false, &error))
+        .unwrap_or_else(|error| fail_command(json, &error))
 }
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the
@@ -1189,9 +1203,9 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
     }
 }
 
-/// Runs every doctor probe, prints each line, and exits non-zero if any
-/// failed.
-fn doctor(invocation: &Invocation<'_>) {
+/// Runs every doctor probe, prints each line or, with `json`, every probe as
+/// JSON, and exits non-zero if any failed.
+fn doctor(invocation: &Invocation<'_>, json: bool) {
     let opened = invocation.ports().open_state();
     let mut probes = vec![database_probe(&opened)];
     if let Ok(store) = &opened {
@@ -1217,8 +1231,14 @@ fn doctor(invocation: &Invocation<'_>) {
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
-    written(Presenter::detect(false).show(&doctor_report(&probes)));
-    if any_failed(&probes) {
+    let view = DoctorView::builder()
+        .checks(&probes)
+        .failed(any_failed(&probes))
+        .build();
+    print_result(json, &view, |view| {
+        written(Presenter::detect(false).show(&doctor_report(view.checks())));
+    });
+    if view.failed() {
         exit(CliExit::ActionFailed.code());
     }
 }

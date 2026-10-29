@@ -2,14 +2,15 @@ use std::{
     ffi::OsString,
     fs,
     io::{self, Write},
+    os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
 };
 
-use atomic_write_file::AtomicWriteFile;
+use atomic_write_file::{OpenOptions, unix::OpenOptionsExt as _};
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
 
-use super::{generation::Generation, resolved::Resolved};
+use super::{generation::Generation, log::PRIVATE_LOG_MODE, resolved::Resolved};
 
 /// Suffix of the sidecar that records where the live log starts.
 const BASE_SUFFIX: &str = ".base";
@@ -49,12 +50,16 @@ impl LogBase {
         })
     }
 
-    /// Replaces the sidecar of the log at `log` atomically.
+    /// Replaces the sidecar of the log at `log` atomically, its owner's
+    /// alone like the log.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when the sidecar cannot be written.
     pub(super) fn write(&self, log: &Path) -> io::Result<()> {
-        let mut file = AtomicWriteFile::open(base_path(log))?;
+        let mut file = OpenOptions::new()
+            .preserve_mode(false)
+            .mode(PRIVATE_LOG_MODE)
+            .open(base_path(log))?;
         writeln!(file, "{}{FIELD_SEPARATOR}{}", self.offset, self.inode)?;
         file.commit()
     }
@@ -86,9 +91,14 @@ impl LogBase {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Mode bits a permission check compares.
+    const PERMISSION_BITS: u32 = 0o777;
 
     fn generation(inode: u64, len: u64) -> Option<Generation> {
         Some(Generation::builder().inode(inode).len(len).build())
@@ -106,6 +116,8 @@ mod tests {
         };
         base.write(&log).unwrap();
         assert_eq!(LogBase::read(&log), Some(base));
+        let mode = fs::metadata(base_path(&log)).unwrap().permissions().mode() & PERMISSION_BITS;
+        assert_eq!(mode, PRIVATE_LOG_MODE, "the sidecar is its owner's alone");
 
         fs::write(base_path(&log), "not a base").unwrap();
         assert_eq!(LogBase::read(&log), None);

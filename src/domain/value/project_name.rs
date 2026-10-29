@@ -2,17 +2,23 @@ use std::iter;
 
 use nutype::nutype;
 
-use super::ProjectRoot;
+use super::{ProjectRoot, printable, steers_the_terminal};
 
 /// The name a project takes when its folder has none: the filesystem root.
 const ROOT_FOLDER_NAME: &str = "root";
 /// The first suffix tried when a project's folder name is already taken.
 const FIRST_COLLISION_SUFFIX: u64 = 2;
 
-/// A registered project's display name: trimmed and non-empty.
+/// Whether `name` holds nothing that could steer a terminal it is shown on.
+fn is_terminal_safe(name: &str) -> bool {
+    !name.chars().any(steers_the_terminal)
+}
+
+/// A registered project's display name: trimmed, non-empty and free of
+/// control and format characters.
 #[nutype(
     sanitize(trim),
-    validate(not_empty),
+    validate(not_empty, predicate = is_terminal_safe),
     derive(
         Debug,
         Clone,
@@ -28,12 +34,13 @@ const FIRST_COLLISION_SUFFIX: u64 = 2;
 pub struct ProjectName(String);
 
 impl ProjectName {
-    /// The folder name of `root`, then `<name>-2`, `<name>-3`, ... for collisions.
+    /// The folder name of `root` with anything terminal-steering escaped,
+    /// then `<name>-2`, `<name>-3`, ... for collisions.
     pub fn candidates(root: &ProjectRoot) -> impl Iterator<Item = ProjectName> {
         let base = root
             .as_ref()
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| printable(&name.to_string_lossy()))
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| ROOT_FOLDER_NAME.to_string());
         let suffixed = (FIRST_COLLISION_SUFFIX..).map({
@@ -74,6 +81,24 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["shop", "shop-2", "shop-3"]);
+    }
+
+    /// A name carrying an OSC title sequence or a bidi override is refused.
+    #[test]
+    fn control_and_format_characters_are_refused() {
+        assert!(ProjectName::try_new("shop\u{1b}]0;pwned\u{7}").is_err());
+        assert!(ProjectName::try_new("shop\u{202e}").is_err());
+        assert!(ProjectName::try_new("caf\u{e9} shop").is_ok());
+    }
+
+    /// A folder whose name carries OSC sequences yields an escaped, valid name.
+    #[test]
+    fn a_hostile_folder_name_is_escaped() {
+        let first = ProjectName::candidates(&root("/home/me/x\u{1b}]0;pwned\u{7}"))
+            .next()
+            .unwrap();
+
+        assert_eq!(first.as_ref(), "x\\u{1b}]0;pwned\\u{7}");
     }
 
     #[test]

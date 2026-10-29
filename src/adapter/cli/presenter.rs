@@ -86,13 +86,13 @@ impl Presenter {
         self == Self::Interactive
     }
 
-    /// Opens a frame titled `title`.
+    /// Opens a frame titled `title`, made [`printable`] whatever built it.
     ///
     /// # Errors
     /// Returns the [`io::Error`] of a failed write.
     pub fn open(self, title: &str) -> io::Result<()> {
         match self {
-            Self::Interactive => intro(style(title).bold()),
+            Self::Interactive => intro(style(printable(title)).bold()),
             Self::Plain => Ok(()),
         }
     }

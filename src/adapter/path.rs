@@ -54,6 +54,17 @@ pub fn project_root(dir: &Path) -> Result<ProjectRoot, ConfigError> {
     ProjectRoot::try_new(canonical).map_err(|_| refused())
 }
 
+/// Where absolute `path` leads with every symlink followed: its deepest
+/// existing ancestor canonicalized, with the missing rest appended as written.
+pub fn resolved(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|ancestor| {
+            let rest = path.strip_prefix(ancestor).ok()?;
+            ancestor.canonicalize().ok().map(|real| real.join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Expands `~` and makes a path absolute, preserving the user-selected
 /// filesystem location. `.` and `..` components are normalized so equivalent
 /// addressings of one location compare and store identically; a `..` whose

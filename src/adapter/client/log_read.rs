@@ -21,13 +21,18 @@ pub struct LogRead {
 
 impl LogRead {
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
-    /// replaced.
+    /// replaced; a screen loses the blank rows below its last text.
     pub fn text_in(&self, project: &Project) -> LogText {
+        let text = String::from_utf8_lossy(&self.bytes);
+        let text = match self.log {
+            Some(_) => text.as_ref(),
+            None => text.trim_end(),
+        };
         LogText::builder()
             .project(ProjectIdentityView::from(project))
-            .name(self.name.clone())
+            .process(self.name.clone())
             .log(self.log.clone())
-            .text(String::from_utf8_lossy(&self.bytes).into_owned())
+            .text(text.to_string())
             .build()
     }
 }
@@ -46,7 +51,7 @@ mod tests {
             .build();
         let read = LogRead::builder()
             .name(ProcessName::try_new("api").unwrap())
-            .log(None)
+            .log(Some(PathBuf::from("/p/shop/api.log")))
             .bytes(b"ready\n".to_vec())
             .build();
 
@@ -54,10 +59,26 @@ mod tests {
             serde_json::to_value(read.text_in(&project)).unwrap(),
             serde_json::json!({
                 "project": {"name": "shop", "root": "/p/shop"},
-                "name": "api",
-                "log": null,
+                "process": "api",
+                "log": "/p/shop/api.log",
                 "text": "ready\n"
             })
         );
+    }
+
+    /// A screen read keeps its rows but not the blank ones below them.
+    #[test]
+    fn a_screen_loses_its_trailing_blank_rows() {
+        let project = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/p/shop")).unwrap())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let screen = LogRead::builder()
+            .name(ProcessName::try_new("api").unwrap())
+            .log(None)
+            .bytes(b"$ ready\n  indented\n\n   \n\n".to_vec())
+            .build();
+
+        assert_eq!(screen.text_in(&project).text(), "$ ready\n  indented");
     }
 }

@@ -25,6 +25,16 @@ pub enum ClientError {
     /// muster has no state directory to find the service in.
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
+    /// A socket under the state directory would not fit in a Unix socket
+    /// address, so no service could listen there.
+    #[error(
+        "the socket path {} is too long for a Unix socket; set XDG_STATE_HOME to a shorter folder",
+        socket.display()
+    )]
+    SocketPathTooLong {
+        /// The longest socket path muster would bind.
+        socket: PathBuf,
+    },
     /// The service could not be started, or did not answer.
     #[error("{}", unavailable(reason, log, tail))]
     ServiceUnavailable {
@@ -139,9 +149,10 @@ impl ClientError {
     /// caller is at fault.
     pub fn kind(&self) -> FailureKind {
         match self {
-            Self::NoStateDir(_) | Self::ServiceUnavailable { .. } | Self::ServiceIo { .. } => {
-                FailureKind::ServiceUnavailable
-            },
+            Self::NoStateDir(_)
+            | Self::SocketPathTooLong { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::ServiceIo { .. } => FailureKind::ServiceUnavailable,
             Self::UnexpectedAnswer(_)
             | Self::VersionMismatch { .. }
             | Self::ServiceNewer { .. } => FailureKind::VersionMismatch,
@@ -163,6 +174,7 @@ impl ClientError {
             | Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
             Self::AmbiguousProcess { candidates, .. } => candidates,
             Self::NoStateDir(_)
+            | Self::SocketPathTooLong { .. }
             | Self::ServiceUnavailable { .. }
             | Self::ServiceIo { .. }
             | Self::UnexpectedAnswer(_)

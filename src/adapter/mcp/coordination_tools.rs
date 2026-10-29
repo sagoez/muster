@@ -15,7 +15,6 @@ use super::{
     kv_write_arg::KvWriteArg,
     lock_acquire_arg::LockAcquireArg,
     lock_name_arg::LockNameArg,
-    note_entry::NoteEntry,
     note_write_arg::NoteWriteArg,
     process_fields::invalid,
     progress::with_progress,
@@ -26,12 +25,14 @@ use super::{
     todo_id_arg::TodoIdArg,
     todo_list_arg::TodoListArg,
     todo_update_arg::TodoUpdateArg,
-    todo_view::TodoView,
     tool_error::ToolError,
     tool_result::ToolResult,
 };
 use crate::{
-    adapter::wire::WireForm,
+    adapter::{
+        client::{NoteEntry, TodoView},
+        wire::WireForm,
+    },
     domain::{
         coordination::{
             Claim, KvKey, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,

@@ -7,10 +7,12 @@ use std::{
 
 use clap::ValueEnum;
 use getset::{CopyGetters, Getters};
+use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
     completions::{CompletionShell, registration_line},
+    doctor_check::DoctorCheck,
     error::CliError,
     output::COLUMN_GAP,
     probe_outcome::ProbeOutcome,
@@ -28,13 +30,6 @@ use crate::{
 
 /// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
-/// Probe labels.
-const DATABASE_LABEL: &str = "database";
-const PROJECTS_LABEL: &str = "projects";
-const PROCESSES_LABEL: &str = "processes";
-const PROJECT_LABEL: &str = "this folder";
-const LEGACY_LABEL: &str = "old files";
-const COMPLETIONS_LABEL: &str = "completions";
 /// The database probe when the database opens and its settings read.
 const DATABASE_OK: &str = "opens at the current schema, settings valid";
 /// The current-folder probe outside every project.
@@ -77,11 +72,11 @@ const ELVISH_XDG_RC: &str = "elvish/rc.elv";
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
 
 /// One diagnostic line: what was probed, how it went, and the detail text.
-#[derive(Debug, Getters, CopyGetters, TypedBuilder)]
+#[derive(Debug, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct Probe {
     /// What was probed.
-    #[getset(get = "pub")]
-    label: String,
+    #[getset(get_copy = "pub")]
+    check: DoctorCheck,
     /// Severity of the result.
     #[getset(get_copy = "pub")]
     outcome: ProbeOutcome,
@@ -90,10 +85,21 @@ pub struct Probe {
     detail: String,
 }
 
+/// What `muster doctor --json` prints: every probe, and whether one failed.
+#[derive(Debug, Serialize, Getters, CopyGetters, TypedBuilder)]
+pub struct DoctorView<'a> {
+    /// The probes, in the order they ran.
+    #[getset(get = "pub")]
+    checks: &'a [Probe],
+    /// Whether any failed, which makes the command exit non-zero.
+    #[getset(get_copy = "pub")]
+    failed: bool,
+}
+
 /// Builds one probe.
-fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
+fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
     Probe::builder()
-        .label(label.to_string())
+        .check(check)
         .outcome(outcome)
         .detail(detail)
         .build()
@@ -117,9 +123,21 @@ fn error_chain(error: &dyn Error) -> String {
 /// Whether the database `opened` and its settings row reads.
 pub fn database_probe(opened: &Result<Arc<dyn LocalState>, ConfigError>) -> Probe {
     match opened.as_ref().map(|state| state.load()) {
-        Ok(Ok(_)) => probe(DATABASE_LABEL, ProbeOutcome::Ok, DATABASE_OK.to_string()),
-        Ok(Err(error)) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(&error)),
-        Err(error) => probe(DATABASE_LABEL, ProbeOutcome::Fail, error_chain(error)),
+        Ok(Ok(_)) => probe(
+            DoctorCheck::Database,
+            ProbeOutcome::Ok,
+            DATABASE_OK.to_string(),
+        ),
+        Ok(Err(error)) => probe(
+            DoctorCheck::Database,
+            ProbeOutcome::Fail,
+            error_chain(&error),
+        ),
+        Err(error) => probe(
+            DoctorCheck::Database,
+            ProbeOutcome::Fail,
+            error_chain(error),
+        ),
     }
 }
 
@@ -134,13 +152,13 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
                 .collect();
             if gone.is_empty() {
                 probe(
-                    PROJECTS_LABEL,
+                    DoctorCheck::Projects,
                     ProbeOutcome::Ok,
                     format!("{} registered", projects.len()),
                 )
             } else {
                 probe(
-                    PROJECTS_LABEL,
+                    DoctorCheck::Projects,
                     ProbeOutcome::Warn,
                     format!(
                         "folder gone for: {}{DETAIL_SEPARATOR}{GONE_HINT}",
@@ -149,7 +167,11 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
                 )
             }
         },
-        Err(error) => probe(PROJECTS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Err(error) => probe(
+            DoctorCheck::Projects,
+            ProbeOutcome::Fail,
+            error_chain(&error),
+        ),
     }
 }
 
@@ -158,7 +180,13 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
 pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> Probe {
     let projects = match projects.projects() {
         Ok(projects) => projects,
-        Err(error) => return probe(PROCESSES_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Err(error) => {
+            return probe(
+                DoctorCheck::Processes,
+                ProbeOutcome::Fail,
+                error_chain(&error),
+            );
+        },
     };
     let invalid: Vec<String> = projects
         .iter()
@@ -170,10 +198,14 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
         })
         .collect();
     if invalid.is_empty() {
-        probe(PROCESSES_LABEL, ProbeOutcome::Ok, PROCESSES_OK.to_string())
+        probe(
+            DoctorCheck::Processes,
+            ProbeOutcome::Ok,
+            PROCESSES_OK.to_string(),
+        )
     } else {
         probe(
-            PROCESSES_LABEL,
+            DoctorCheck::Processes,
             ProbeOutcome::Fail,
             format!(
                 "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
@@ -187,7 +219,7 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
 pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
     match target {
         Ok(ProjectTarget::Registered(project)) => probe(
-            PROJECT_LABEL,
+            DoctorCheck::ThisFolder,
             ProbeOutcome::Ok,
             format!(
                 "{}{COLUMN_GAP}{}",
@@ -195,10 +227,16 @@ pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
                 project.root().as_ref().display()
             ),
         ),
-        Ok(ProjectTarget::Unregistered(_)) => {
-            probe(PROJECT_LABEL, ProbeOutcome::Ok, NO_PROJECT_HERE.to_string())
-        },
-        Err(error) => probe(PROJECT_LABEL, ProbeOutcome::Fail, error_chain(error)),
+        Ok(ProjectTarget::Unregistered(_)) => probe(
+            DoctorCheck::ThisFolder,
+            ProbeOutcome::Ok,
+            NO_PROJECT_HERE.to_string(),
+        ),
+        Err(error) => probe(
+            DoctorCheck::ThisFolder,
+            ProbeOutcome::Fail,
+            error_chain(error),
+        ),
     }
 }
 
@@ -215,11 +253,15 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .filter(|path| fs::symlink_metadata(path).is_ok())
     .collect();
     if left.is_empty() {
-        return probe(LEGACY_LABEL, ProbeOutcome::Ok, NO_LEGACY_FILES.to_string());
+        return probe(
+            DoctorCheck::OldFiles,
+            ProbeOutcome::Ok,
+            NO_LEGACY_FILES.to_string(),
+        );
     }
     let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
     probe(
-        LEGACY_LABEL,
+        DoctorCheck::OldFiles,
         ProbeOutcome::Warn,
         format!(
             "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
@@ -233,7 +275,7 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
 pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Path) -> Probe {
     let Some(shell) = shell_path.and_then(shell_from_path) else {
         return probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Warn,
             "unknown shell; see `muster completions --help`".to_string(),
         );
@@ -243,13 +285,13 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
     });
     if let Some(matched) = matched {
         probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Ok,
             format!("registered in {}", matched.display()),
         )
     } else {
         probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Warn,
             format!("not registered; add: {}", registration_line(shell)),
         )
@@ -301,7 +343,7 @@ fn probe_row(probe: &Probe) -> Row {
         ProbeOutcome::Warn => RowKind::Hint,
         ProbeOutcome::Fail => RowKind::Fail,
     };
-    Row::labeled(kind, probe.label().clone(), probe.detail().clone())
+    Row::labeled(kind, probe.check().label(), probe.detail().clone())
 }
 
 /// Whether any probe failed (warnings do not fail the run).
@@ -497,9 +539,9 @@ mod tests {
     #[test]
     fn doctor_report_maps_probes_and_summarizes() {
         let probes = vec![
-            probe(DATABASE_LABEL, ProbeOutcome::Ok, "fine".to_string()),
+            probe(DoctorCheck::Database, ProbeOutcome::Ok, "fine".to_string()),
             probe(
-                COMPLETIONS_LABEL,
+                DoctorCheck::Completions,
                 ProbeOutcome::Warn,
                 "not registered".to_string(),
             ),
@@ -509,8 +551,37 @@ mod tests {
 
         assert_eq!(report.rows().len(), 2);
         assert_eq!(report.rows()[0].kind(), RowKind::Ok);
-        assert_eq!(report.rows()[0].label().as_deref(), Some(DATABASE_LABEL));
+        assert_eq!(report.rows()[0].label().as_deref(), Some("database"));
         assert_eq!(report.rows()[1].kind(), RowKind::Hint);
         assert_eq!(report.summary().as_deref(), Some("1 ok · 1 hint"));
+    }
+
+    /// `--json` names each check and outcome in kebab case and says whether
+    /// one failed.
+    #[test]
+    fn the_json_names_checks_and_outcomes() {
+        let probes = vec![
+            probe(
+                DoctorCheck::ThisFolder,
+                ProbeOutcome::Ok,
+                "here".to_string(),
+            ),
+            probe(DoctorCheck::OldFiles, ProbeOutcome::Fail, "bad".to_string()),
+        ];
+        let view = DoctorView::builder()
+            .checks(&probes)
+            .failed(any_failed(&probes))
+            .build();
+
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({
+                "checks": [
+                    {"check": "this-folder", "outcome": "ok", "detail": "here"},
+                    {"check": "old-files", "outcome": "fail", "detail": "bad"},
+                ],
+                "failed": true,
+            })
+        );
     }
 }

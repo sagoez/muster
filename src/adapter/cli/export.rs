@@ -3,9 +3,15 @@
 use std::{fs, io};
 
 use super::{
-    error::CliError, export_view::ExportView, invocation::Invocation, output::project_title,
-    report::Report, row::Row, row_kind::RowKind, stack_path::StackPath,
-    text_file::write_atomically,
+    error::CliError,
+    export_view::ExportView,
+    invocation::Invocation,
+    output::project_title,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
+    stack_path::StackPath,
+    text_file::{write_atomically, write_privately},
 };
 use crate::{
     adapter::exchange::{EnvExport, ExchangeError, write_stack_file},
@@ -71,7 +77,12 @@ pub fn export(
     if !force && fs::symlink_metadata(&path).is_ok() {
         return Err(CliError::FileExists(path));
     }
-    write_atomically(&path, &text).map_err(|source| CliError::WriteFile {
+    let written = if with_env {
+        write_privately(&path, &text)
+    } else {
+        write_atomically(&path, &text)
+    };
+    written.map_err(|source| CliError::WriteFile {
         path: path.clone(),
         source,
     })?;

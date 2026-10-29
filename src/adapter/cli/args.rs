@@ -14,6 +14,7 @@ use super::{cli_ports::CliPorts, command::Command};
 use crate::{
     adapter::{
         holder::{LineLimit, MAX_LOG_LINES},
+        sanitize::printable,
         service::StateGoal,
     },
     constants::APP_NAME,
@@ -141,7 +142,8 @@ pub(super) fn completing_command(ports: &'static dyn CliPorts) -> ClapCommand {
 }
 
 /// Shell-completion candidates for `--project`: the registered projects'
-/// names, read fresh each time so a new project completes at once. Reads an
+/// names, read fresh each time so a new project completes at once, each made
+/// [`printable`] so the shell never echoes a terminal sequence. Reads an
 /// existing database read-only and never creates one.
 fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
     ports
@@ -151,7 +153,7 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
         .and_then(|state| state.projects().ok())
         .unwrap_or_default()
         .iter()
-        .map(|project| CompletionCandidate::new(project.name().as_ref()))
+        .map(|project| CompletionCandidate::new(printable(project.name().as_ref())))
         .collect()
 }
 

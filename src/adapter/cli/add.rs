@@ -59,8 +59,8 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
     let store = invocation.store()?;
     let target = invocation.editing_target(store.as_ref())?;
     let root = target.root().clone();
-    let name =
-        ProcessName::try_new(args.name.clone()).map_err(|_| CliError::InvalidName(args.name))?;
+    let name = ProcessName::try_new(args.name.clone())
+        .map_err(|error| CliError::invalid_name(&args.name, error))?;
     let command = command_string(&args.command)?;
     let working_dir = match args.cwd {
         Some(dir) => stored_working_dir(&root, &invocation.in_cwd(&dir)?)?,

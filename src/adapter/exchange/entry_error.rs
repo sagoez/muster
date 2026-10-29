@@ -30,6 +30,19 @@ pub enum EntryError {
         /// The directory refused.
         dir: PathBuf,
     },
+    /// `working_dir` lies under the project root as written, but a symlink
+    /// on the way leads outside it.
+    #[error(
+        "working_dir {} resolves to {}, outside the project root",
+        dir.display(),
+        resolved.display()
+    )]
+    WorkingDirLeavesRoot {
+        /// The directory as written.
+        dir: PathBuf,
+        /// Where it leads once symlinks are followed.
+        resolved: PathBuf,
+    },
     /// `description` is present but blank.
     #[error("description must not be empty; leave the key out instead")]
     EmptyDescription,

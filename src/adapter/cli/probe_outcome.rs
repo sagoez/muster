@@ -1,5 +1,8 @@
+use serde::Serialize;
+
 /// Severity of a probe result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProbeOutcome {
     /// Healthy.
     Ok,

@@ -194,26 +194,41 @@ pub enum Command {
     Note {
         #[command(subcommand)]
         command: Option<NoteCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// List or manage the current project's shared todos.
     Todo {
         #[command(subcommand)]
         command: Option<TodoCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Read or write the current project's shared key-value state.
     Kv {
         #[command(subcommand)]
         command: Option<KvCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// List the locks agents hold on the current project, or release one.
     Lock {
         #[command(subcommand)]
         command: Option<LockCommand>,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Export or restore this project's coordination state as portable YAML.
     Coordination {
         #[command(subcommand)]
         command: CoordinationCommand,
+        /// Print the result as JSON.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Serve muster to agents as an MCP server over stdio (spawned as a
     /// child process by a connecting agent). Each call acts on the project
@@ -230,7 +245,11 @@ pub enum Command {
         agent: Option<String>,
     },
     /// Diagnose muster's database, projects and completions.
-    Doctor,
+    Doctor {
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the shell hook that enables completions.
     Completions {
         /// Shell to print the hook for.

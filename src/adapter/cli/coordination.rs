@@ -1,16 +1,27 @@
 use std::{fs, path::Path};
 
+use serde_json::json;
+
 use super::{
-    coordination_command::CoordinationCommand, error::CliError, row::Row, row_kind::RowKind,
-    text_file::write_atomically,
+    answer::Answer, coordination_command::CoordinationCommand, error::CliError, row::Row,
+    row_kind::RowKind, text_file::write_atomically,
 };
 use crate::{
     adapter::exchange::{CoordinationSnapshot, SNAPSHOT_VERSION},
     domain::{port::CoordinationStore, value::ProjectRoot},
 };
 
+/// The JSON key of the snapshot file.
+const FILE: &str = "file";
+/// The JSON key of how many scratchpads moved.
+const SCRATCHPADS: &str = "scratchpads";
+/// The JSON key of how many todos moved.
+const TODOS: &str = "todos";
+/// The JSON key of how many values moved.
+const VALUES: &str = "values";
+
 /// Runs a `muster coordination` action against `store` for `project`, returning
-/// the rows to print.
+/// what to print.
 ///
 /// # Errors
 /// Returns [`CliError`] when the file cannot be read or written, the snapshot is
@@ -19,11 +30,32 @@ pub fn coordination(
     command: CoordinationCommand,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
         CoordinationCommand::Export { file } => export(store, project, &file),
         CoordinationCommand::Import { file } => import(store, project, &file),
     }
+}
+
+/// What moving `snapshot` through `file` answers: `summary` for a person,
+/// the file and the counts for `--json`.
+///
+/// # Errors
+/// Returns [`CliError::Output`] when the JSON cannot be rendered.
+fn moved(
+    snapshot: &CoordinationSnapshot,
+    file: &Path,
+    summary: String,
+) -> Result<Answer, CliError> {
+    Answer::of(
+        vec![Row::unlabeled(RowKind::Ok, summary)],
+        &json!({
+            FILE: file,
+            SCRATCHPADS: snapshot.scratchpads().len(),
+            TODOS: snapshot.todos().len(),
+            VALUES: snapshot.values().len(),
+        }),
+    )
 }
 
 /// Writes this project's coordination state to `file` as YAML.
@@ -34,7 +66,7 @@ fn export(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     file: &Path,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let snapshot = CoordinationSnapshot::builder()
         .scratchpads(store.scratchpads(project)?)
         .todos(store.todos(project)?)
@@ -55,7 +87,7 @@ fn export(
         path: file.to_path_buf(),
         source,
     })?;
-    Ok(vec![Row::unlabeled(RowKind::Ok, summary)])
+    moved(&snapshot, file, summary)
 }
 
 /// Restores entries from `file` into this project, preserving ids, authors, and
@@ -69,7 +101,7 @@ fn import(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     file: &Path,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let raw = fs::read_to_string(file).map_err(|source| CliError::ReadFile {
         path: file.to_path_buf(),
         source,
@@ -92,14 +124,12 @@ fn import(
         snapshot.todos(),
         snapshot.values(),
     )?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        format!(
-            "imported {} scratchpads, {} todos, {} values from {}",
-            snapshot.scratchpads().len(),
-            snapshot.todos().len(),
-            snapshot.values().len(),
-            file.display(),
-        ),
-    )])
+    let summary = format!(
+        "imported {} scratchpads, {} todos, {} values from {}",
+        snapshot.scratchpads().len(),
+        snapshot.todos().len(),
+        snapshot.values().len(),
+        file.display(),
+    );
+    moved(&snapshot, file, summary)
 }

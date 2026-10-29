@@ -125,12 +125,13 @@ fn process_name(explicit: Option<&str>, command: &[String]) -> Result<ProcessNam
                 .and_then(|first| first.split_whitespace().next())
         })
         .unwrap_or_default();
-    ProcessName::try_new(candidate).map_err(|_| CliError::InvalidName(candidate.to_string()))
+    ProcessName::try_new(candidate).map_err(|error| CliError::invalid_name(candidate, error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::value::ProcessNameFault;
 
     #[test]
     fn the_process_name_defaults_to_the_first_word() {
@@ -151,7 +152,26 @@ mod tests {
         );
         assert!(matches!(
             process_name(None, &["  ".to_string()]),
-            Err(CliError::InvalidName(_))
+            Err(CliError::InvalidName {
+                fault: ProcessNameFault::Empty,
+                ..
+            })
         ));
+    }
+
+    /// A name holding an escape sequence is refused for that reason, and the
+    /// message shows the sequence as text.
+    #[test]
+    fn a_control_character_name_is_explained_and_escaped() {
+        let refused = process_name(Some("web\u{1b}]0;x\u{7}"), &[]).unwrap_err();
+
+        assert!(matches!(refused, CliError::InvalidName {
+            fault: ProcessNameFault::ControlCharacter,
+            ..
+        }));
+        let message = refused.to_string();
+        assert!(!message.chars().any(char::is_control), "{message}");
+        assert!(message.contains("web\\u{1b}]0;x\\u{7}"), "{message}");
+        assert!(message.contains("control characters"), "{message}");
     }
 }

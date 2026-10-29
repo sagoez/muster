@@ -10,7 +10,6 @@ use super::{
     agent_wait_view::AgentWaitView,
     bounds::{CALL_BOUND, wait_bound},
     events_view::EventsView,
-    lock_view::LockView,
     process_fields::invalid,
     progress::with_progress,
     project_arg::ProjectArg,
@@ -24,7 +23,7 @@ use super::{
     up_view::UpView,
 };
 use crate::adapter::{
-    client::{NoticeView, ProjectIdentityView, Unwatched, process},
+    client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
     service::{EventKind, EventSeq, WaitSpec},
 };
 

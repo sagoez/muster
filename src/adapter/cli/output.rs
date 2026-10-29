@@ -686,7 +686,7 @@ mod tests {
         domain::{
             config::{Environment, ProcessSpec},
             process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, Pid, ProjectRoot, StopGrace},
+            value::{CommandLine, Pid, ProjectRoot, StopGrace, steers_the_terminal},
         },
     };
 
@@ -876,18 +876,24 @@ mod tests {
         insta::assert_snapshot!("ps_json", json(&views).unwrap());
     }
 
-    /// A project name carrying control characters is shown as text; a
-    /// process name cannot carry any.
+    /// A process name carrying a bidi override is shown as text; neither
+    /// name can carry a control character, and a project name no format
+    /// character either.
     #[test]
-    fn ps_never_prints_control_characters() {
+    fn ps_never_prints_control_or_format_characters() {
         let hostile = ProjectStatus::builder()
-            .project(project_at("evil\u{1b}]0;x\u{7}", PROJECT))
-            .processes(vec![process("api", ProcessState::Exited, None, None)])
+            .project(shop_project())
+            .processes(vec![process(
+                "api\u{202e}gpj",
+                ProcessState::Exited,
+                None,
+                None,
+            )])
             .build();
         let rendered = render_status(&[hostile], true, None);
 
         assert!(
-            !rendered.replace('\n', "").chars().any(char::is_control),
+            !rendered.replace('\n', "").chars().any(steers_the_terminal),
             "{rendered:?}"
         );
     }

@@ -132,13 +132,14 @@ impl<'a> Invocation<'a> {
         )?)
     }
 
-    /// The registered project the command acts on.
+    /// The registered project the command acts on: a folder named inside a
+    /// project is that project.
     ///
     /// # Errors
     /// Returns [`CliError::NotAProject`] outside every project, or the
     /// [`CliError`] of a project that cannot be resolved.
     pub fn project(&self, store: &dyn LocalState) -> Result<Project, CliError> {
-        Ok(self.target(store)?.registered()?)
+        Ok(self.target(store)?.within(store)?)
     }
 
     /// The project a command that edits a stack acts on, as [`Self::target`]
@@ -149,20 +150,37 @@ impl<'a> Invocation<'a> {
     /// Returns the [`CliError`] of a project that cannot be resolved.
     pub fn editing_target(&self, store: &dyn LocalState) -> Result<ProjectTarget, CliError> {
         let target = self.target(store)?;
-        if let Some(here) = self.overridden(store, &target)? {
-            print_note(APP_NAME, &override_note(&target, &here));
-        }
+        self.note_override(store, &target)?;
         Ok(target)
     }
 
     /// The registered project a command that edits a stack acts on, noted as
-    /// [`Self::editing_target`] notes it.
+    /// [`Self::editing_target`] notes it; a folder named inside a project is
+    /// that project.
     ///
     /// # Errors
     /// Returns [`CliError::NotAProject`] outside every project, or the
     /// [`CliError`] of a project that cannot be resolved.
     pub fn editing_project(&self, store: &dyn LocalState) -> Result<Project, CliError> {
-        Ok(self.editing_target(store)?.registered()?)
+        let project = self.target(store)?.within(store)?;
+        self.note_override(store, &ProjectTarget::Registered(project.clone()))?;
+        Ok(project)
+    }
+
+    /// Notes on stderr when `MUSTER_PROJECT` made `target` the project acted
+    /// on rather than the one the current folder is in.
+    ///
+    /// # Errors
+    /// Returns the [`CliError`] of a folder or store that cannot be read.
+    fn note_override(
+        &self,
+        store: &dyn LocalState,
+        target: &ProjectTarget,
+    ) -> Result<(), CliError> {
+        if let Some(here) = self.overridden(store, target)? {
+            print_note(APP_NAME, &override_note(target, &here));
+        }
+        Ok(())
     }
 
     /// The registered project the current folder lies in, when

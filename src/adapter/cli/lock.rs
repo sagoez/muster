@@ -1,6 +1,10 @@
-use super::{error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind};
+use serde_json::json;
+
+use super::{
+    answer::Answer, error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind,
+};
 use crate::{
-    adapter::store::now_epoch_secs,
+    adapter::{client::LockView, store::now_epoch_secs, wire::WireForm},
     domain::{
         coordination::{Lock, LockName},
         port::CoordinationStore,
@@ -12,9 +16,17 @@ use crate::{
 const EMPTY_NOTE: &str = "no locks held";
 /// Columns between the fields of a listed lock line.
 const FIELD_GAP: &str = "  ";
+/// The JSON key of the listed locks.
+const LOCKS: &str = "locks";
+/// The JSON key of the lock a release named.
+const NAME: &str = "name";
+/// The JSON key of whether a release found the lock held.
+const RELEASED: &str = "released";
+/// The JSON key of who held the lock a release cleared.
+const HELD_BY: &str = "held_by";
 
-/// Runs a `muster lock` action against `store` for `project`, returning the
-/// rows to print. Absent a subcommand, lists the locks held.
+/// Runs a `muster lock` action against `store` for `project`, returning what
+/// to print. Absent a subcommand, lists the locks held.
 ///
 /// # Errors
 /// Returns [`CliError`] when a name is invalid or the store cannot be read or
@@ -23,7 +35,7 @@ pub fn lock(
     command: Option<LockCommand>,
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
         None => list(store, project, now_epoch_secs() as u64),
         Some(LockCommand::Release { name }) => release(store, project, &name),
@@ -39,15 +51,18 @@ fn list(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     now: u64,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let locks = store.locks(project)?;
-    if locks.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(locks
-        .iter()
-        .map(|lock| Row::unlabeled(RowKind::Plain, line(lock, now)))
-        .collect())
+    let views: Vec<LockView> = locks.iter().map(|lock| LockView::at(lock, now)).collect();
+    let rows = if locks.is_empty() {
+        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
+    } else {
+        locks
+            .iter()
+            .map(|lock| Row::unlabeled(RowKind::Plain, line(lock, now)))
+            .collect()
+    };
+    Answer::of(rows, &json!({ LOCKS: views }))
 }
 
 /// One listed lock at `now`.
@@ -75,16 +90,22 @@ fn release(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     name: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed =
         LockName::try_new(name).map_err(|_| CliError::InvalidLockName(name.to_string()))?;
-    Ok(vec![match store.break_lock(project, &parsed)? {
+    let broken = store.break_lock(project, &parsed)?;
+    let row = match &broken {
         Some(lock) => Row::unlabeled(
             RowKind::Ok,
             format!("released '{parsed}' (held by {})", lock.owner()),
         ),
         None => Row::unlabeled(RowKind::Hint, format!("no lock '{parsed}' to release")),
-    }])
+    };
+    let held_by = broken.as_ref().map(|lock| lock.owner().to_wire());
+    Answer::of(
+        vec![row],
+        &json!({ NAME: parsed.to_string(), RELEASED: broken.is_some(), HELD_BY: held_by }),
+    )
 }
 
 #[cfg(test)]
@@ -123,7 +144,7 @@ mod tests {
     fn list_shows_holder_lease_and_note() {
         let (store, root, _scratch) = fixture();
         assert_eq!(
-            list(&store, &root, now_epoch_secs() as u64).unwrap()[0].detail(),
+            list(&store, &root, now_epoch_secs() as u64).unwrap().rows()[0].detail(),
             EMPTY_NOTE
         );
         store
@@ -137,15 +158,17 @@ mod tests {
             .unwrap();
         let lock = store.locks(&root).unwrap().remove(0);
 
-        let rows = list(&store, &root, lock.expires_at() - 90).unwrap();
+        let listed = list(&store, &root, lock.expires_at() - 90).unwrap();
 
         assert_eq!(
-            rows[0].detail(),
+            listed.rows()[0].detail(),
             &format!(
                 "migrations  claude  {} left  running 0042",
                 humantime::format_duration(Duration::from_secs(90))
             )
         );
+        assert_eq!(listed.json()["locks"][0]["name"], "migrations");
+        assert_eq!(listed.json()["locks"][0]["expires_in_s"], 90);
     }
 
     /// The human releases an agent's lock; a second release says none is held.
@@ -164,13 +187,14 @@ mod tests {
             .unwrap();
 
         let first = release(&store, &root, "db-reset").unwrap();
-        assert_eq!(first[0].kind(), RowKind::Ok);
-        assert!(first[0].detail().contains("held by claude"));
+        assert_eq!(first.rows()[0].kind(), RowKind::Ok);
+        assert!(first.rows()[0].detail().contains("held by claude"));
+        assert_eq!(first.json()["released"], true);
         assert!(store.locks(&root).unwrap().is_empty());
-        assert_eq!(
-            release(&store, &root, "db-reset").unwrap()[0].kind(),
-            RowKind::Hint
-        );
+        let second = release(&store, &root, "db-reset").unwrap();
+        assert_eq!(second.rows()[0].kind(), RowKind::Hint);
+        assert_eq!(second.json()["released"], false);
+        assert!(second.json()["held_by"].is_null());
     }
 
     /// A malformed name is refused before the store is touched.

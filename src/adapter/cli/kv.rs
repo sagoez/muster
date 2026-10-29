@@ -1,18 +1,32 @@
+use serde_json::json;
+
 use super::{
-    error::CliError, kv_command::KvCommand, report::attribution, row::Row, row_kind::RowKind,
+    answer::Answer, error::CliError, kv_command::KvCommand, report::attribution, row::Row,
+    row_kind::RowKind,
 };
-use crate::domain::{
-    coordination::{Author, KvKey},
-    port::CoordinationStore,
-    value::ProjectRoot,
+use crate::{
+    adapter::wire::WireForm,
+    domain::{
+        coordination::{Author, KvKey},
+        port::CoordinationStore,
+        value::ProjectRoot,
+    },
 };
 
 /// Line printed when the project has no key-value entries yet.
 const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>`";
 /// Columns between a listed entry's key and value.
 const FIELD_GAP: &str = "  ";
+/// The JSON key of the listed entries.
+const ENTRIES: &str = "entries";
+/// The JSON key of the key a write saved.
+const SAVED: &str = "saved";
+/// The JSON key of the key a delete named.
+const KEY: &str = "key";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
 
-/// Runs a `muster kv` action against `store` for `project`, returning the rows to
+/// Runs a `muster kv` action against `store` for `project`, returning what to
 /// print. Absent a subcommand, lists the project's entries.
 ///
 /// # Errors
@@ -23,7 +37,7 @@ pub fn kv(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     author: &Author,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
         None => list(store, project),
         Some(KvCommand::Get { key }) => get(store, project, &key),
@@ -44,25 +58,28 @@ fn parse_key(key: &str) -> Result<KvKey, CliError> {
 ///
 /// # Errors
 /// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Vec<Row>, CliError> {
+fn list(store: &dyn CoordinationStore, project: &ProjectRoot) -> Result<Answer, CliError> {
     let entries = store.values(project)?;
-    if entries.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(entries
-        .iter()
-        .map(|entry| {
-            Row::unlabeled(
-                RowKind::Plain,
-                format!(
-                    "{key}{FIELD_GAP}{value}{attribution}",
-                    key = entry.key().as_ref(),
-                    value = entry.value(),
-                    attribution = attribution(entry.author()),
-                ),
-            )
-        })
-        .collect())
+    let wire: Vec<_> = entries.iter().map(WireForm::to_wire).collect();
+    let rows = if entries.is_empty() {
+        vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
+    } else {
+        entries
+            .iter()
+            .map(|entry| {
+                Row::unlabeled(
+                    RowKind::Plain,
+                    format!(
+                        "{key}{FIELD_GAP}{value}{attribution}",
+                        key = entry.key().as_ref(),
+                        value = entry.value(),
+                        attribution = attribution(entry.author()),
+                    ),
+                )
+            })
+            .collect()
+    };
+    Answer::of(rows, &json!({ ENTRIES: wire }))
 }
 
 /// Prints the value under `key`, one row per line so the framed layout stays
@@ -75,16 +92,17 @@ fn get(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     key: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
     let entry = store
         .value(project, &parsed)?
         .ok_or_else(|| CliError::UnknownValue(key.to_string()))?;
-    Ok(entry
+    let rows = entry
         .value()
         .lines()
         .map(|line| Row::unlabeled(RowKind::Plain, line.to_string()))
-        .collect())
+        .collect();
+    Answer::of(rows, &entry.to_wire())
 }
 
 /// Creates or replaces the entry under `key` with `value`.
@@ -97,13 +115,16 @@ fn set(
     author: &Author,
     key: &str,
     value: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
     store.set_value(project, author, &parsed, value)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        format!("saved '{}'", parsed.as_ref()),
-    )])
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("saved '{}'", parsed.as_ref()),
+        )],
+        &json!({ SAVED: parsed.as_ref() }),
+    )
 }
 
 /// Deletes the entry under `key`. Deleting an absent entry is not an error.
@@ -114,19 +135,21 @@ fn remove(
     store: &dyn CoordinationStore,
     project: &ProjectRoot,
     key: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    if store.delete_value(project, &parsed)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{}'", parsed.as_ref()),
-        )])
+    let deleted = store.delete_value(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{}'", parsed.as_ref()))
     } else {
-        Ok(vec![Row::unlabeled(
+        Row::unlabeled(
             RowKind::Hint,
             format!("no value '{}' to remove", parsed.as_ref()),
-        )])
-    }
+        )
+    };
+    Answer::of(
+        vec![row],
+        &json!({ KEY: parsed.as_ref(), DELETED: deleted }),
+    )
 }
 
 #[cfg(test)]
@@ -323,11 +346,17 @@ mod tests {
         set(&store, &project(), &Author::human(), "port", "4000").unwrap();
 
         let listed = list(&store, &project()).unwrap();
-        assert_eq!(listed.len(), 1, "the same key replaces, not duplicates");
-        assert_eq!(listed[0].detail(), "port  4000");
+        assert_eq!(
+            listed.rows().len(),
+            1,
+            "the same key replaces, not duplicates"
+        );
+        assert_eq!(listed.rows()[0].detail(), "port  4000");
+        assert_eq!(listed.json()["entries"][0]["value"], "4000");
 
         let value = get(&store, &project(), "port").unwrap();
-        assert_eq!(value[0].detail(), "4000");
+        assert_eq!(value.rows()[0].detail(), "4000");
+        assert_eq!(value.json()["key"], "port");
     }
 
     /// Getting an absent value errors so scripts see a non-zero exit.
@@ -346,11 +375,11 @@ mod tests {
         let store = FakeStore::default();
         set(&store, &project(), &Author::human(), "flag", "on").unwrap();
         assert_eq!(
-            remove(&store, &project(), "flag").unwrap()[0].kind(),
+            remove(&store, &project(), "flag").unwrap().rows()[0].kind(),
             RowKind::Ok
         );
         assert_eq!(
-            remove(&store, &project(), "flag").unwrap()[0].kind(),
+            remove(&store, &project(), "flag").unwrap().rows()[0].kind(),
             RowKind::Hint
         );
     }
@@ -369,6 +398,9 @@ mod tests {
     #[test]
     fn list_reports_empty() {
         let store = FakeStore::default();
-        assert_eq!(list(&store, &project()).unwrap()[0].detail(), EMPTY_NOTE);
+        assert_eq!(
+            list(&store, &project()).unwrap().rows()[0].detail(),
+            EMPTY_NOTE
+        );
     }
 }

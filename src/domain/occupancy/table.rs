@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{OccupancyChange, ReportSeq, ShellId, ShellRecord};
+use super::{OccupancyChange, ReportStamp, ShellId, ShellRecord};
 use crate::domain::value::ProjectRoot;
 
 /// What the table knows of one shell: its newest report and the project that
@@ -8,9 +8,19 @@ use crate::domain::value::ProjectRoot;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
     /// The newest report applied.
-    seq: ReportSeq,
+    stamp: ReportStamp,
     /// The project it is in, or `None` outside every project.
     project: Option<ProjectRoot>,
+}
+
+impl Seen {
+    /// What `record` says of its shell.
+    fn of(record: &ShellRecord) -> Self {
+        Self {
+            stamp: *record.stamp(),
+            project: record.project().clone(),
+        }
+    }
 }
 
 /// Which live shell is in which project. A project is occupied while at least
@@ -28,23 +38,17 @@ impl Occupancy {
         Self::default()
     }
 
-    /// Applies a report that `shell` is now in `project`; a seq not newer
-    /// than the shell's last is ignored. Returns a leave before an enter.
-    pub fn report(
-        &mut self,
-        shell: ShellId,
-        seq: ReportSeq,
-        project: Option<ProjectRoot>,
-    ) -> Vec<OccupancyChange> {
-        if !self.is_newer(&shell, seq) {
+    /// Applies `record`, a report that its shell is now in its project; a
+    /// report not newer than the shell's last is ignored. Returns a leave
+    /// before an enter.
+    pub fn report(&mut self, record: &ShellRecord) -> Vec<OccupancyChange> {
+        if !self.is_newer(record) {
             return Vec::new();
         }
+        let project = record.project().clone();
         let before = self
             .shells
-            .insert(shell, Seen {
-                seq,
-                project: project.clone(),
-            })
+            .insert(*record.shell(), Seen::of(record))
             .and_then(|seen| seen.project);
         if before == project {
             return Vec::new();
@@ -61,11 +65,8 @@ impl Occupancy {
     /// Takes a record as known state: never yields a change. A record not
     /// newer than what the table knows of its shell is ignored.
     pub fn restore(&mut self, record: &ShellRecord) {
-        if self.is_newer(record.shell(), *record.seq()) {
-            self.shells.insert(*record.shell(), Seen {
-                seq: *record.seq(),
-                project: record.project().clone(),
-            });
+        if self.is_newer(record) {
+            self.shells.insert(*record.shell(), Seen::of(record));
         }
     }
 
@@ -117,10 +118,12 @@ impl Occupancy {
         self.shells.is_empty()
     }
 
-    /// Whether `seq` is newer than the last report the table took from
-    /// `shell`, or the shell is unknown.
-    fn is_newer(&self, shell: &ShellId, seq: ReportSeq) -> bool {
-        self.shells.get(shell).is_none_or(|seen| seq > seen.seq)
+    /// Whether `record` is newer than the last report the table took from
+    /// its shell, or the shell is unknown.
+    fn is_newer(&self, record: &ShellRecord) -> bool {
+        self.shells
+            .get(record.shell())
+            .is_none_or(|seen| record.stamp().supersedes(&seen.stamp))
     }
 }
 
@@ -129,7 +132,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::value::{Pid, StartToken};
+    use crate::domain::{
+        occupancy::testing::stamp,
+        value::{Pid, StartToken},
+    };
+
+    /// The hook load most tests report from.
+    const LOAD: u64 = 1;
 
     /// The shell running as `pid`, started at `start`.
     fn shell(pid: u32, start: u64) -> ShellId {
@@ -139,25 +148,35 @@ mod tests {
             .build()
     }
 
-    /// The report number `seq`.
-    fn seq(seq: u64) -> ReportSeq {
-        ReportSeq::new(seq)
-    }
-
     /// The project folder `/home/me/<name>`.
     fn root(name: &str) -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/home/me").join(name)).unwrap()
+    }
+
+    /// `shell`'s report at prompt `seq` of hook load `load` that it is in
+    /// the project `project` names.
+    fn loaded(shell: ShellId, load: u64, seq: u64, project: Option<&str>) -> ShellRecord {
+        ShellRecord::builder()
+            .shell(shell)
+            .stamp(stamp(load, seq))
+            .project(project.map(root))
+            .build()
+    }
+
+    /// `shell`'s report at prompt `seq` of [`LOAD`].
+    fn at(shell: ShellId, seq: u64, project: Option<&str>) -> ShellRecord {
+        loaded(shell, LOAD, seq, project)
     }
 
     #[test]
     fn the_first_shell_in_a_project_enters_it_and_the_last_out_leaves_it() {
         let mut table = Occupancy::new();
 
-        assert_eq!(table.report(shell(100, 1), seq(1), Some(root("shop"))), [
+        assert_eq!(table.report(&at(shell(100, 1), 1, Some("shop"))), [
             OccupancyChange::Entered(root("shop"))
         ]);
         assert_eq!(table.occupants(&root("shop")), 1);
-        assert_eq!(table.report(shell(100, 1), seq(2), None), [
+        assert_eq!(table.report(&at(shell(100, 1), 2, None)), [
             OccupancyChange::Left(root("shop"))
         ]);
         assert_eq!(table.occupants(&root("shop")), 0);
@@ -168,18 +187,16 @@ mod tests {
     #[test]
     fn a_move_between_projects_is_left_then_entered() {
         let mut table = Occupancy::new();
-        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        table.report(&at(shell(100, 1), 1, Some("shop")));
 
-        let changes = table.report(shell(100, 1), seq(2), Some(root("blog")));
+        let changes = table.report(&at(shell(100, 1), 2, Some("blog")));
 
         assert_eq!(changes, [
             OccupancyChange::Left(root("shop")),
             OccupancyChange::Entered(root("blog"))
         ]);
         assert!(
-            table
-                .report(shell(100, 1), seq(3), Some(root("blog")))
-                .is_empty(),
+            table.report(&at(shell(100, 1), 3, Some("blog"))).is_empty(),
             "a prompt in the same project changes nothing"
         );
     }
@@ -189,15 +206,11 @@ mod tests {
     #[test]
     fn a_report_not_newer_than_the_last_changes_nothing() {
         let mut table = Occupancy::new();
-        table.report(shell(100, 1), seq(5), Some(root("blog")));
+        table.report(&at(shell(100, 1), 5, Some("blog")));
 
+        assert!(table.report(&at(shell(100, 1), 4, Some("shop"))).is_empty());
         assert!(
-            table
-                .report(shell(100, 1), seq(4), Some(root("shop")))
-                .is_empty()
-        );
-        assert!(
-            table.report(shell(100, 1), seq(5), None).is_empty(),
+            table.report(&at(shell(100, 1), 5, None)).is_empty(),
             "the same seq again"
         );
 
@@ -205,18 +218,35 @@ mod tests {
         assert_eq!(table.occupants(&root("shop")), 0);
     }
 
+    /// A shell that `exec`s itself loads the hook again and counts its
+    /// prompts from one: its first report under the new load moves it, and
+    /// later prompts of that load follow the usual order.
+    #[test]
+    fn a_report_of_a_new_hook_load_is_newer_whatever_its_seq() {
+        let mut table = Occupancy::new();
+        table.report(&loaded(shell(100, 1), 7, 50, Some("blog")));
+
+        assert_eq!(table.report(&loaded(shell(100, 1), 8, 1, Some("shop"))), [
+            OccupancyChange::Left(root("blog")),
+            OccupancyChange::Entered(root("shop"))
+        ]);
+        assert!(
+            table.report(&loaded(shell(100, 1), 8, 1, None)).is_empty(),
+            "the same prompt of the new load again"
+        );
+        assert_eq!(table.report(&loaded(shell(100, 1), 8, 2, None)), [
+            OccupancyChange::Left(root("shop"))
+        ]);
+    }
+
     #[test]
     fn a_second_shell_in_a_project_changes_nothing_until_both_go() {
         let mut table = Occupancy::new();
-        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        table.report(&at(shell(100, 1), 1, Some("shop")));
 
-        assert!(
-            table
-                .report(shell(200, 1), seq(1), Some(root("shop")))
-                .is_empty()
-        );
+        assert!(table.report(&at(shell(200, 1), 1, Some("shop"))).is_empty());
         assert_eq!(table.occupants(&root("shop")), 2);
-        assert!(table.report(shell(100, 1), seq(2), None).is_empty());
+        assert!(table.report(&at(shell(100, 1), 2, None)).is_empty());
         assert_eq!(table.remove(&shell(200, 1)), [OccupancyChange::Left(root(
             "shop"
         ))]);
@@ -225,33 +255,19 @@ mod tests {
     #[test]
     fn restore_never_yields_a_change() {
         let mut table = Occupancy::new();
-        let record = ShellRecord::builder()
-            .shell(shell(100, 1))
-            .seq(seq(7))
-            .project(Some(root("shop")))
-            .build();
 
-        table.restore(&record);
+        table.restore(&at(shell(100, 1), 7, Some("shop")));
 
         assert_eq!(table.occupants(&root("shop")), 1);
         assert!(
-            table
-                .report(shell(100, 1), seq(7), Some(root("blog")))
-                .is_empty(),
+            table.report(&at(shell(100, 1), 7, Some("blog"))).is_empty(),
             "a report not newer than the record"
         );
         assert!(
-            table
-                .report(shell(200, 1), seq(1), Some(root("shop")))
-                .is_empty(),
+            table.report(&at(shell(200, 1), 1, Some("shop"))).is_empty(),
             "the restored shell already occupies shop"
         );
-        table.restore(
-            &ShellRecord::builder()
-                .shell(shell(100, 1))
-                .seq(seq(6))
-                .build(),
-        );
+        table.restore(&at(shell(100, 1), 6, None));
         assert_eq!(
             table.occupants(&root("shop")),
             2,
@@ -262,8 +278,8 @@ mod tests {
     #[test]
     fn removing_the_last_shell_leaves_its_project() {
         let mut table = Occupancy::new();
-        table.report(shell(100, 1), seq(1), Some(root("shop")));
-        table.report(shell(200, 1), seq(1), None);
+        table.report(&at(shell(100, 1), 1, Some("shop")));
+        table.report(&at(shell(200, 1), 1, None));
 
         assert_eq!(table.remove(&shell(100, 1)), [OccupancyChange::Left(root(
             "shop"
@@ -280,21 +296,15 @@ mod tests {
         let mut table = Occupancy::new();
         assert_eq!(table.project_of(&shell(100, 1)), None, "an unknown shell");
 
-        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        table.report(&at(shell(100, 1), 1, Some("shop")));
         assert_eq!(table.project_of(&shell(100, 1)), Some(&root("shop")));
-        table.report(shell(100, 1), seq(2), Some(root("blog")));
-        table.report(shell(100, 1), seq(1), Some(root("shop")));
+        table.report(&at(shell(100, 1), 2, Some("blog")));
+        table.report(&at(shell(100, 1), 1, Some("shop")));
         assert_eq!(table.project_of(&shell(100, 1)), Some(&root("blog")));
-        table.report(shell(100, 1), seq(3), None);
+        table.report(&at(shell(100, 1), 3, None));
         assert_eq!(table.project_of(&shell(100, 1)), None);
 
-        table.restore(
-            &ShellRecord::builder()
-                .shell(shell(200, 1))
-                .seq(seq(4))
-                .project(Some(root("shop")))
-                .build(),
-        );
+        table.restore(&at(shell(200, 1), 4, Some("shop")));
         assert_eq!(table.project_of(&shell(200, 1)), Some(&root("shop")));
         table.remove(&shell(200, 1));
         assert_eq!(table.project_of(&shell(200, 1)), None);
@@ -303,13 +313,9 @@ mod tests {
     #[test]
     fn the_same_pid_with_another_start_is_another_shell() {
         let mut table = Occupancy::new();
-        table.report(shell(100, 1), seq(9), Some(root("shop")));
+        table.report(&at(shell(100, 1), 9, Some("shop")));
 
-        assert!(
-            table
-                .report(shell(100, 2), seq(1), Some(root("shop")))
-                .is_empty()
-        );
+        assert!(table.report(&at(shell(100, 2), 1, Some("shop"))).is_empty());
 
         assert_eq!(table.occupants(&root("shop")), 2);
         assert_eq!(table.shells(), [shell(100, 1), shell(100, 2)]);

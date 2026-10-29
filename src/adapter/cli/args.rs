@@ -207,7 +207,7 @@ mod tests {
             holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
             shell::SHELL_REPORT_SUBCOMMAND,
         },
-        domain::occupancy::ReportSeq,
+        domain::occupancy::{LoadId, ReportSeq},
     };
 
     /// Completions and usage must register the binary name, not the package
@@ -397,38 +397,36 @@ mod tests {
         assert!(bare.command.is_none());
     }
 
-    /// The hidden shell report takes the `--pid` and `--seq` the hook
-    /// passes, and refuses a pid no shell could have.
+    /// The hidden shell report takes the `--pid`, `--load` and `--seq` the
+    /// hook passes, and refuses a pid no shell could have or a load that is
+    /// no number.
     #[test]
-    fn the_shell_report_reads_the_hook_s_pid_and_seq() {
-        let args = Args::try_parse_from([
-            "muster",
-            SHELL_REPORT_SUBCOMMAND,
-            "--pid",
-            "4242",
-            "--seq",
-            "7",
-        ])
-        .unwrap();
+    fn the_shell_report_reads_the_hook_s_pid_load_and_seq() {
+        let report = |pid: &str, load: &str| {
+            Args::try_parse_from([
+                "muster",
+                SHELL_REPORT_SUBCOMMAND,
+                "--pid",
+                pid,
+                "--load",
+                load,
+                "--seq",
+                "7",
+            ])
+        };
 
         assert!(matches!(
-            args.command,
-            Some(Command::ShellReport { pid, seq })
-                if pid.into_inner() == 4242 && seq == ReportSeq::new(7)
+            report("4242", "1793315867697448").unwrap().command,
+            Some(Command::ShellReport { pid, load, seq })
+                if pid.into_inner() == 4242
+                    && load == LoadId::new(1_793_315_867_697_448)
+                    && seq == ReportSeq::new(7)
         ));
         for refused in ["1", "0", "-3", "shell"] {
-            assert!(
-                Args::try_parse_from([
-                    "muster",
-                    SHELL_REPORT_SUBCOMMAND,
-                    "--pid",
-                    refused,
-                    "--seq",
-                    "1"
-                ])
-                .is_err(),
-                "{refused}"
-            );
+            assert!(report(refused, "1").is_err(), "{refused}");
+        }
+        for refused in ["-1", "", "1.5", "load"] {
+            assert!(report("4242", refused).is_err(), "{refused:?}");
         }
     }
 

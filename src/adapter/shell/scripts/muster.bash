@@ -4,6 +4,9 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
     __muster_hook=1
     __muster_bin=@MUSTER_BIN@
     __muster_notes=@MUSTER_NOTES@
+    __muster_load=${EPOCHREALTIME-}
+    __muster_load=${__muster_load//[!0-9]/}
+    __muster_load=${__muster_load:-$RANDOM$RANDOM$RANDOM}
     __muster_seq=0
     export @MUSTER_SHELL_ENV@=$$
 
@@ -24,8 +27,8 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
         if [[ -n $failglob ]]; then
             shopt -s failglob
         fi
-        (command "$__muster_bin" @MUSTER_REPORT@ --pid "$$" --seq "$__muster_seq" \
-            < /dev/null > /dev/null 2>&1 &)
+        (command "$__muster_bin" @MUSTER_REPORT@ --pid "$$" --load "$__muster_load" \
+            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
         return "$status"
     }
 

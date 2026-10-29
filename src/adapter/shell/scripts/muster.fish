@@ -4,6 +4,7 @@ if status is-interactive; and not set -q __muster_hook
     set -g __muster_hook 1
     set -g __muster_bin @MUSTER_BIN@
     set -g __muster_notes @MUSTER_NOTES@
+    set -g __muster_load (random 1 999999999)(random 0 999999999)
     set -g __muster_seq 0
     set -gx @MUSTER_SHELL_ENV@ $fish_pid
 
@@ -18,8 +19,8 @@ if status is-interactive; and not set -q __muster_hook
             command rm -f -- $note
         end
         if test -x $__muster_bin
-            command $__muster_bin @MUSTER_REPORT@ --pid $fish_pid --seq $__muster_seq \
-                </dev/null >/dev/null 2>&1 &
+            command $__muster_bin @MUSTER_REPORT@ --pid $fish_pid --load $__muster_load \
+                --seq $__muster_seq </dev/null >/dev/null 2>&1 &
             disown 2>/dev/null
         end
         return $status_kept

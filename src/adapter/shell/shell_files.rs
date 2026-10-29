@@ -15,7 +15,7 @@ use crate::{
         wire::{ShellRecordWire, WireForm},
     },
     domain::{
-        occupancy::{ReportSeq, ShellId, ShellRecord, ShellRegistryError},
+        occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
         port::ShellRegistry,
         value::Pid,
     },
@@ -25,12 +25,13 @@ use crate::{
 const SHELLS_DIR: &str = "shells";
 /// What ends a shell's record file, after its pid.
 const RECORD_SUFFIX: &str = ".json";
-/// What ends a note file, after the shell's pid and the report's seq.
+/// What ends a note file, after the shell's pid and the report's stamp.
 const NOTE_SUFFIX: &str = ".note";
-/// Between a note file's pid and its seq.
+/// Between the parts of a note file's name.
 const NOTE_SEPARATOR: char = '-';
-/// Digits a note file's seq is padded to, so the files sort by seq.
-const SEQ_WIDTH: usize = 20;
+/// Digits a note file's load and seq are each padded to, so the files of
+/// one load sort by seq.
+const STAMP_WIDTH: usize = 20;
 /// Most note files one shell may have waiting; a delivery beyond it is
 /// dropped whole, so a hook that stopped printing cannot fill the disk.
 const MAX_NOTE_FILES: usize = 16;
@@ -40,7 +41,7 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// The shells running muster's hook, kept as files under
 /// `<state dir>/shells/`: `<pid>.json` holds a shell's last report, and
-/// `<pid>-<seq>.note` the lines its hook prints at its next prompt.
+/// `<pid>-<load>-<seq>.note` the lines its hook prints at its next prompt.
 #[derive(Debug, Clone)]
 pub struct ShellFiles {
     /// The folder every shell's files live in.
@@ -60,12 +61,14 @@ impl ShellFiles {
         self.dir.join(format!("{pid}{RECORD_SUFFIX}"))
     }
 
-    /// The note file of the shell running as `pid` for the report at `seq`.
-    fn note_path(&self, pid: Pid, seq: ReportSeq) -> PathBuf {
+    /// The note file of the shell running as `pid` for the report stamped
+    /// `stamp`.
+    fn note_path(&self, pid: Pid, stamp: ReportStamp) -> PathBuf {
         self.dir.join(format!(
-            "{pid}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
-            seq.into_inner(),
-            width = SEQ_WIDTH
+            "{pid}{NOTE_SEPARATOR}{:0width$}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
+            stamp.load().into_inner(),
+            stamp.seq().into_inner(),
+            width = STAMP_WIDTH
         ))
     }
 
@@ -156,7 +159,7 @@ impl ShellRegistry for ShellFiles {
         let pid = record.shell().pid();
         if self
             .record(record.shell())
-            .is_some_and(|stored| stored.seq() >= record.seq())
+            .is_some_and(|stored| !record.stamp().supersedes(stored.stamp()))
         {
             return Ok(false);
         }
@@ -174,7 +177,7 @@ impl ShellRegistry for ShellFiles {
     fn deliver(
         &self,
         shell: &ShellId,
-        seq: ReportSeq,
+        stamp: ReportStamp,
         lines: &[String],
     ) -> Result<(), ShellRegistryError> {
         if lines.is_empty() || self.notes_of(shell.pid()).len() >= MAX_NOTE_FILES {
@@ -183,7 +186,7 @@ impl ShellRegistry for ShellFiles {
         let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
         self.write(
             shell.pid(),
-            &self.note_path(shell.pid(), seq),
+            &self.note_path(shell.pid(), stamp),
             text.as_bytes(),
         )
     }
@@ -225,7 +228,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::value::{ProjectRoot, StartToken};
+    use crate::domain::{
+        occupancy::testing::stamp,
+        value::{ProjectRoot, StartToken},
+    };
 
     /// The permission bits of a mode.
     const PERMISSION_BITS: u32 = 0o777;
@@ -237,6 +243,8 @@ mod tests {
     const SLEEP_SECONDS: &str = "30";
     /// A start token no live process has.
     const WRONG_START: u64 = 1;
+    /// The hook load the records are reported from.
+    const LOAD: u64 = 7;
 
     /// Shell files under a fresh scratch state directory.
     fn files() -> (TempDir, ShellFiles) {
@@ -252,13 +260,19 @@ mod tests {
             .unwrap()
     }
 
-    /// The record of `shell` at `seq` in `project`.
-    fn record(shell: ShellId, seq: u64, project: Option<&str>) -> ShellRecord {
+    /// The record of `shell` at prompt `seq` of hook load `load` in
+    /// `project`.
+    fn loaded(shell: ShellId, load: u64, seq: u64, project: Option<&str>) -> ShellRecord {
         ShellRecord::builder()
             .shell(shell)
-            .seq(ReportSeq::new(seq))
+            .stamp(stamp(load, seq))
             .project(project.map(|root| ProjectRoot::try_new(PathBuf::from(root)).unwrap()))
             .build()
+    }
+
+    /// The record of `shell` at prompt `seq` of [`LOAD`] in `project`.
+    fn record(shell: ShellId, seq: u64, project: Option<&str>) -> ShellRecord {
+        loaded(shell, LOAD, seq, project)
     }
 
     /// The permission bits of `path`.
@@ -283,7 +297,7 @@ mod tests {
 
         files.save_if_newer(&record(shell, 1, None)).unwrap();
         files
-            .deliver(&shell, ReportSeq::new(1), &["hello".to_string()])
+            .deliver(&shell, stamp(LOAD, 1), &["hello".to_string()])
             .unwrap();
 
         assert_eq!(mode_of(&files.notes_dir()), PRIVATE_DIR_MODE);
@@ -324,6 +338,28 @@ mod tests {
         assert_eq!(files.record(&shell), Some(record(shell, 6, None)));
     }
 
+    /// A shell that `exec`s itself loads the hook again and counts from one:
+    /// its first report under the new load replaces the record.
+    #[test]
+    fn a_record_of_a_new_hook_load_is_saved_whatever_its_seq() {
+        let (_scratch, files) = files();
+        let shell = this_shell(&files);
+        files
+            .save_if_newer(&loaded(shell, LOAD, 50, Some("/old")))
+            .unwrap();
+
+        assert!(
+            files
+                .save_if_newer(&loaded(shell, LOAD + 1, 1, Some("/new")))
+                .unwrap()
+        );
+
+        assert_eq!(
+            files.record(&shell),
+            Some(loaded(shell, LOAD + 1, 1, Some("/new")))
+        );
+    }
+
     #[test]
     fn records_skip_corrupt_and_unknown_key_files() {
         let (_scratch, files) = files();
@@ -332,7 +368,7 @@ mod tests {
         fs::write(files.notes_dir().join("7.json"), b"{not json").unwrap();
         fs::write(
             files.notes_dir().join("8.json"),
-            br#"{"pid":8,"start":3,"seq":1,"project":null,"extra":true}"#,
+            br#"{"pid":8,"start":3,"load":1,"seq":1,"project":null,"extra":true}"#,
         )
         .unwrap();
 
@@ -386,24 +422,27 @@ mod tests {
         let shell = this_shell(&files);
         let lines = vec!["one".to_string(), "two".to_string()];
 
-        files.deliver(&shell, ReportSeq::new(3), &lines).unwrap();
-        files.deliver(&shell, ReportSeq::new(4), &[]).unwrap();
+        files.deliver(&shell, stamp(LOAD, 3), &lines).unwrap();
+        files.deliver(&shell, stamp(LOAD, 4), &[]).unwrap();
 
-        let first = files.note_path(shell.pid(), ReportSeq::new(3));
+        let first = files.note_path(shell.pid(), stamp(LOAD, 3));
         assert_eq!(fs::read_to_string(&first).unwrap(), "one\ntwo\n");
         assert_eq!(
             first.file_name().unwrap().to_string_lossy(),
-            format!("{}-00000000000000000003.note", shell.pid())
+            format!(
+                "{}-00000000000000000007-00000000000000000003.note",
+                shell.pid()
+            )
         );
         assert_eq!(files.notes_of(shell.pid()).len(), 1, "no lines, no file");
 
         for seq in 10..10 + MAX_NOTE_FILES as u64 {
-            files.deliver(&shell, ReportSeq::new(seq), &lines).unwrap();
+            files.deliver(&shell, stamp(LOAD, seq), &lines).unwrap();
         }
         assert_eq!(files.notes_of(shell.pid()).len(), MAX_NOTE_FILES);
         assert!(
             !files
-                .note_path(shell.pid(), ReportSeq::new(10 + MAX_NOTE_FILES as u64 - 1))
+                .note_path(shell.pid(), stamp(LOAD, 10 + MAX_NOTE_FILES as u64 - 1))
                 .exists(),
             "the batch past the cap is dropped"
         );
@@ -420,7 +459,7 @@ mod tests {
         for each in [shell, other] {
             files.save_if_newer(&record(each, 1, None)).unwrap();
             files
-                .deliver(&each, ReportSeq::new(1), &["note".to_string()])
+                .deliver(&each, stamp(LOAD, 1), &["note".to_string()])
                 .unwrap();
         }
 

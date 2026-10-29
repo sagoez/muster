@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::domain::{
-    occupancy::{ReportSeq, ShellId, ShellRecord, ShellRegistryError},
+    occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
     value::Pid,
 };
 
@@ -21,21 +21,22 @@ pub trait ShellRegistry: Send + Sync {
     /// on that pid.
     fn record(&self, shell: &ShellId) -> Option<ShellRecord>;
 
-    /// Writes `record` unless the stored one is as new or newer. Returns
-    /// whether it wrote.
+    /// Writes `record` unless the stored one of the same shell is as new or
+    /// newer. Returns whether it wrote.
     ///
     /// # Errors
     /// Returns [`ShellRegistryError::Write`] when the record cannot be written.
     fn save_if_newer(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError>;
 
-    /// Leaves `lines` for the shell's hook to print at its next prompt.
+    /// Leaves `lines`, answered to the report stamped `stamp`, for the
+    /// shell's hook to print at its next prompt.
     ///
     /// # Errors
     /// Returns [`ShellRegistryError::Write`] when the note cannot be written.
     fn deliver(
         &self,
         shell: &ShellId,
-        seq: ReportSeq,
+        stamp: ReportStamp,
         lines: &[String],
     ) -> Result<(), ShellRegistryError>;
 

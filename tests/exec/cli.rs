@@ -4687,7 +4687,15 @@ fn shell_report_prints_nothing_and_exits_0_without_a_database() {
     gone.wait().unwrap();
 
     for pid in [process::id().to_string(), gone_pid] {
-        let report = scratch.muster(&[SHELL_REPORT_SUBCOMMAND, "--pid", &pid, "--seq", "1"]);
+        let report = scratch.muster(&[
+            SHELL_REPORT_SUBCOMMAND,
+            "--pid",
+            &pid,
+            "--load",
+            "1",
+            "--seq",
+            "1",
+        ]);
 
         assert_eq!(report.status.code(), Some(0), "{}", shown(&report));
         assert!(

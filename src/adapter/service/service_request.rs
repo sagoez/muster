@@ -9,7 +9,7 @@ use super::{
 use crate::{
     adapter::workspace_request::WorkspaceRequest,
     domain::{
-        occupancy::{ReportSeq, ShellId},
+        occupancy::ShellRecord,
         value::{ProcessName, ProjectRoot},
     },
 };
@@ -126,13 +126,10 @@ pub enum ServiceRequest {
     SettingsChanged,
     /// A shell's hook reports the project its folder is in at a prompt.
     ShellReport {
-        /// The shell that reports.
+        /// The report: which shell, at which hook load and prompt, so an
+        /// older report is dropped, and the project its folder is in.
         #[serde(with = "crate::adapter::wire::form")]
-        shell: ShellId,
-        /// The prompt it reports at, rising, so an older report is dropped.
-        seq: ReportSeq,
-        /// The project its folder is in, or none outside every project.
-        project: Option<ProjectRoot>,
+        record: ShellRecord,
         /// The shell's exported environment, which what entering a project
         /// starts runs with.
         environment: LaunchEnvironment,
@@ -150,24 +147,33 @@ mod tests {
     use super::*;
     use crate::{
         adapter::service::{PortBlock, PortHolder, PortOwner, Refusal, ServiceResponse, ShellNote},
-        domain::value::{LocalPort, Pid, ProjectName, StartToken},
+        domain::{
+            occupancy::{ShellId, testing::stamp},
+            value::{LocalPort, Pid, ProjectName, StartToken},
+        },
     };
 
     #[test]
     fn shell_report_and_notes_round_trip_as_json() {
         let report = ServiceRequest::ShellReport {
-            shell: ShellId::builder()
-                .pid(Pid::try_new(4242).unwrap())
-                .start(StartToken::try_new(77).unwrap())
+            record: ShellRecord::builder()
+                .shell(
+                    ShellId::builder()
+                        .pid(Pid::try_new(4242).unwrap())
+                        .start(StartToken::try_new(77).unwrap())
+                        .build(),
+                )
+                .stamp(stamp(9, 3))
+                .project(Some(
+                    ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap(),
+                ))
                 .build(),
-            seq: ReportSeq::new(3),
-            project: Some(ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()),
             environment: LaunchEnvironment::from_vars([("PATH".into(), "/usr/bin".into())]),
         };
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(
             json,
-            r#"{"shell-report":{"shell":{"pid":4242,"start":77},"seq":3,"project":"/home/me/shop","environment":{"PATH":"/usr/bin"}}}"#
+            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"seq":3,"project":"/home/me/shop"},"environment":{"PATH":"/usr/bin"}}}"#
         );
         assert_eq!(
             serde_json::from_str::<ServiceRequest>(&json).unwrap(),

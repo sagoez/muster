@@ -12,17 +12,18 @@ use crate::{
         service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
     },
     domain::{
-        occupancy::{ReportSeq, ShellRecord},
+        occupancy::{ReportStamp, ShellRecord},
         value::Pid,
     },
 };
 
-/// Reports the shell running as `pid`, at its prompt `seq`, in the folder
-/// `cwd`. A running service is always told; with none running, one is
-/// started only when `cwd` is inside a registered project, and otherwise
-/// only the shell's record is kept. The notes the service answers are left
-/// for the hook, then the record is written; a report that fails writes
-/// neither, so the next prompt reports the same move again. It never prints.
+/// Reports the shell running as `pid`, at the hook load and prompt `stamp`
+/// gives, in the folder `cwd`. A running service is always told; with none
+/// running, one is started only when `cwd` is inside a registered project,
+/// and otherwise only the shell's record is kept. The notes the service
+/// answers are left for the hook, then the record is written; a report that
+/// fails writes neither, so the next prompt reports the same move again. It
+/// never prints.
 ///
 /// # Errors
 /// Returns the [`ShellReportSkip`] saying why nothing was written: the pid
@@ -31,7 +32,7 @@ use crate::{
 pub fn shell_report(
     ports: &dyn CliPorts,
     pid: Pid,
-    seq: ReportSeq,
+    stamp: ReportStamp,
     cwd: &Path,
 ) -> Result<(), ShellReportSkip> {
     let shells = ports.shell_registry()?;
@@ -40,7 +41,7 @@ pub fn shell_report(
         .ok_or(ShellReportSkip::UnknownShell(pid))?;
     if shells
         .record(&shell)
-        .is_some_and(|stored| *stored.seq() >= seq)
+        .is_some_and(|stored| !stamp.supersedes(stored.stamp()))
     {
         return Err(ShellReportSkip::Stale);
     }
@@ -50,16 +51,14 @@ pub fn shell_report(
             .map(|project| project.root().clone()),
         None => None,
     };
+    let entering = project.is_some();
     let record = ShellRecord::builder()
         .shell(shell)
-        .seq(seq)
-        .project(project.clone())
+        .stamp(stamp)
+        .project(project)
         .build();
-    let entering = project.is_some();
     let request = ServiceRequest::ShellReport {
-        shell,
-        seq,
-        project,
+        record: record.clone(),
         environment: LaunchEnvironment::current(),
     };
     let service = ports.service();
@@ -74,7 +73,7 @@ pub fn shell_report(
     let ServiceResponse::ShellNotes(notes) = answer else {
         return Err(ClientError::UnexpectedAnswer((&answer).into()).into());
     };
-    shells.deliver(&shell, seq, &note_lines(&notes))?;
+    shells.deliver(&shell, stamp, &note_lines(&notes))?;
     shells.save_if_newer(&record)?;
     Ok(())
 }
@@ -98,7 +97,7 @@ mod tests {
         },
         domain::{
             config::ImportMode,
-            occupancy::ShellId,
+            occupancy::{ShellId, testing::stamp},
             port::StackStore,
             value::{ProcessName, ProjectName, ProjectRoot},
         },
@@ -106,15 +105,17 @@ mod tests {
 
     /// Suffix of a note file.
     const NOTE_SUFFIX: &str = ".note";
+    /// The hook load the tests report from.
+    const LOAD: u64 = 3;
 
     /// The pid of this test, a live process to report as a shell.
     fn this_shell() -> Pid {
         Pid::try_new(process::id()).unwrap()
     }
 
-    /// The seq `n`.
-    fn seq(n: u64) -> ReportSeq {
-        ReportSeq::new(n)
+    /// The stamp of prompt `n` of [`LOAD`].
+    fn seq(n: u64) -> ReportStamp {
+        stamp(LOAD, n)
     }
 
     /// Ports over a fresh database holding the project `shop` with one
@@ -190,7 +191,7 @@ mod tests {
             Some(
                 ShellRecord::builder()
                     .shell(identified(&ports))
-                    .seq(seq(1))
+                    .stamp(seq(1))
                     .project(None)
                     .build()
             )
@@ -214,9 +215,10 @@ mod tests {
         assert_eq!(ports.fake_service().connects(), 1);
         let told = served.asked();
         assert!(
-            matches!(&told[..], [ServiceRequest::ShellReport {
-                shell, seq: told_seq, project: Some(project), ..
-            }] if *shell == identified(&ports) && *told_seq == seq(4) && *project == root),
+            matches!(&told[..], [ServiceRequest::ShellReport { record, .. }]
+                if *record.shell() == identified(&ports)
+                    && *record.stamp() == seq(4)
+                    && record.project().as_ref() == Some(&root)),
             "{told:?}"
         );
         assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
@@ -237,7 +239,7 @@ mod tests {
         assert_eq!(ports.fake_service().asked().len(), 1);
         assert_eq!(ports.fake_service().connects(), 0);
         assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
-        assert_eq!(record(&ports).map(|record| *record.seq()), Some(seq(2)));
+        assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(2)));
     }
 
     /// A service that cannot be started, or that refuses the report,
@@ -276,7 +278,7 @@ mod tests {
             .save_if_newer(
                 &ShellRecord::builder()
                     .shell(identified(&ports))
-                    .seq(seq(5))
+                    .stamp(seq(5))
                     .build(),
             )
             .unwrap();
@@ -290,7 +292,34 @@ mod tests {
 
         assert!(ports.fake_service().asked().is_empty());
         assert_eq!(ports.fake_service().connects(), 0);
-        assert_eq!(record(&ports).map(|record| *record.seq()), Some(seq(5)));
+        assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(5)));
+    }
+
+    /// A shell that `exec`s itself loads the hook again and counts from
+    /// one: that report is newer than every report of the load before, so
+    /// it is told and recorded.
+    #[test]
+    fn a_report_of_a_new_hook_load_is_told_whatever_its_seq() {
+        let (ports, shop, _scratch) = shop_ports(FakeService::default().answering(started()));
+        ports
+            .shell_registry()
+            .unwrap()
+            .save_if_newer(
+                &ShellRecord::builder()
+                    .shell(identified(&ports))
+                    .stamp(stamp(LOAD, 500))
+                    .build(),
+            )
+            .unwrap();
+
+        shell_report(&ports, this_shell(), stamp(LOAD + 1, 1), &shop).unwrap();
+
+        assert_eq!(ports.fake_service().asked().len(), 1);
+        assert_eq!(
+            record(&ports).map(|record| *record.stamp()),
+            Some(stamp(LOAD + 1, 1))
+        );
+        assert_eq!(notes(&ports), vec!["muster: shop: starting api\n"]);
     }
 
     /// A pid no process runs as is no shell: nothing is asked or written.

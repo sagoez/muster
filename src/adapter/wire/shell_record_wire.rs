@@ -4,11 +4,11 @@ use typed_builder::TypedBuilder;
 
 use super::WireForm;
 use crate::domain::{
-    occupancy::{ReportSeq, ShellId, ShellRecord},
+    occupancy::{LoadId, ReportSeq, ReportStamp, ShellId, ShellRecord},
     value::{Pid, ProjectRoot, StartToken},
 };
 
-/// A shell's last report, as its record file holds it.
+/// A shell's report, as its record file and the service protocol hold it.
 #[derive(
     Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder,
 )]
@@ -20,7 +20,10 @@ pub struct ShellRecordWire {
     /// That process's start token.
     #[getset(get_copy = "pub")]
     start: StartToken,
-    /// The prompt the report was made at.
+    /// The hook load the report was made from.
+    #[getset(get_copy = "pub")]
+    load: LoadId,
+    /// The prompt the report was made at, within that load.
     #[getset(get_copy = "pub")]
     seq: ReportSeq,
     /// The project its folder was in, or `null` outside every project.
@@ -35,7 +38,8 @@ impl WireForm for ShellRecord {
         ShellRecordWire {
             pid: self.shell().pid(),
             start: self.shell().start(),
-            seq: *self.seq(),
+            load: self.stamp().load(),
+            seq: self.stamp().seq(),
             project: self.project().clone(),
         }
     }
@@ -43,7 +47,7 @@ impl WireForm for ShellRecord {
     fn from_wire(wire: ShellRecordWire) -> Result<Self, String> {
         Ok(Self::builder()
             .shell(ShellId::builder().pid(wire.pid).start(wire.start).build())
-            .seq(wire.seq)
+            .stamp(ReportStamp::builder().load(wire.load).seq(wire.seq).build())
             .project(wire.project)
             .build())
     }
@@ -54,6 +58,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::domain::occupancy::testing::stamp;
 
     /// A record is one flat object, its project `null` outside every
     /// project, and refuses a key it does not know.
@@ -67,16 +72,19 @@ mod tests {
                         .start(StartToken::try_new(77).unwrap())
                         .build(),
                 )
-                .seq(ReportSeq::new(3))
+                .stamp(stamp(9, 3))
                 .project(project.map(|root| ProjectRoot::try_new(PathBuf::from(root)).unwrap()))
                 .build()
         };
         for (project, json) in [
             (
                 Some("/home/me/shop"),
-                r#"{"pid":4242,"start":77,"seq":3,"project":"/home/me/shop"}"#,
+                r#"{"pid":4242,"start":77,"load":9,"seq":3,"project":"/home/me/shop"}"#,
             ),
-            (None, r#"{"pid":4242,"start":77,"seq":3,"project":null}"#),
+            (
+                None,
+                r#"{"pid":4242,"start":77,"load":9,"seq":3,"project":null}"#,
+            ),
         ] {
             assert_eq!(
                 serde_json::to_string(&record(project).to_wire()).unwrap(),
@@ -87,7 +95,7 @@ mod tests {
         }
         assert!(
             serde_json::from_str::<ShellRecordWire>(
-                r#"{"pid":4242,"start":77,"seq":3,"project":null,"cwd":"/"}"#
+                r#"{"pid":4242,"start":77,"load":9,"seq":3,"project":null,"cwd":"/"}"#
             )
             .is_err()
         );

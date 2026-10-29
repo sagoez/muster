@@ -79,6 +79,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::domain::occupancy::LoadId;
 
     /// The binary path the snapshots are taken with.
     const SNAPSHOT_BINARY: &str = "/usr/local/bin/muster";
@@ -114,6 +115,8 @@ mod tests {
     const ONE_HOOK: &str = "hooks=1";
     /// What starts the line a driver prints the exported shell pid on.
     const PID_PREFIX: &str = "pid=";
+    /// What starts the line a driver prints the hook's load id on.
+    const LOAD_PREFIX: &str = "load=";
     /// Lines the drivers leave as two note files, in seq order; the second
     /// holds what a shell could expand and an escape sanitizing writes.
     const NOTE_LINES: [&str; 2] = ["first line", "second $line \\x1b"];
@@ -136,6 +139,7 @@ mod tests {
                 "  [[ $hook == __muster_prompt ]] && hooks=$((hooks + 1))\n",
                 "done; echo \"hooks=$hooks\"\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
+                "echo \"load=$__muster_load\"\n",
             ),
             HookShell::Zsh => concat!(
                 ". \"$1\"; . \"$1\"\n",
@@ -146,6 +150,7 @@ mod tests {
                 "echo \"status=$?\"\n",
                 "hooks=(${(M)precmd_functions:#__muster_precmd}); echo \"hooks=${#hooks}\"\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
+                "echo \"load=$__muster_load\"\n",
             ),
             HookShell::Fish => concat!(
                 "source $argv[1]; source $argv[1]\n",
@@ -156,6 +161,7 @@ mod tests {
                 "echo \"status=$status\"\n",
                 "echo hooks=(functions --handlers-type generic | string match -e __muster_prompt | count)\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
+                "echo \"load=$__muster_load\"\n",
             ),
         }
     }
@@ -315,6 +321,11 @@ mod tests {
                 .iter()
                 .find_map(|line| line.strip_prefix(PID_PREFIX))
                 .unwrap_or_else(|| panic!("{shell}: {output:?}"));
+            let load = lines
+                .iter()
+                .find_map(|line| line.strip_prefix(LOAD_PREFIX))
+                .unwrap_or_else(|| panic!("{shell}: {output:?}"));
+            assert!(load.parse::<LoadId>().is_ok(), "{shell}: load {load:?}");
             assert_eq!(
                 lines,
                 [
@@ -322,14 +333,17 @@ mod tests {
                     NOTE_LINES[1],
                     KEPT_STATUS,
                     ONE_HOOK,
-                    &format!("{PID_PREFIX}{pid}")
+                    &format!("{PID_PREFIX}{pid}"),
+                    &format!("{LOAD_PREFIX}{load}")
                 ],
                 "{shell}: {output:?}"
             );
             assert_eq!(fs::read_dir(&notes).unwrap().count(), 0, "{shell}");
             assert_eq!(
                 calls(&calls_file),
-                [format!("{SHELL_REPORT_SUBCOMMAND} --pid {pid} --seq 1")],
+                [format!(
+                    "{SHELL_REPORT_SUBCOMMAND} --pid {pid} --load {load} --seq 1"
+                )],
                 "{shell}"
             );
         }

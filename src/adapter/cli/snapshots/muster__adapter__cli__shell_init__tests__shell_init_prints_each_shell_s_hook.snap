@@ -1,5 +1,6 @@
 ---
 source: src/adapter/cli/shell_init.rs
+assertion_line: 80
 expression: "hooks.join(\"\\n\")"
 ---
 # bash
@@ -9,6 +10,9 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
     __muster_hook=1
     __muster_bin='/opt/muster bin/muster'
     __muster_notes=<notes>
+    __muster_load=${EPOCHREALTIME-}
+    __muster_load=${__muster_load//[!0-9]/}
+    __muster_load=${__muster_load:-$RANDOM$RANDOM$RANDOM}
     __muster_seq=0
     export MUSTER_SHELL_PID=$$
 
@@ -29,8 +33,8 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
         if [[ -n $failglob ]]; then
             shopt -s failglob
         fi
-        (command "$__muster_bin" __shell-report --pid "$$" --seq "$__muster_seq" \
-            < /dev/null > /dev/null 2>&1 &)
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
         return "$status"
     }
 
@@ -48,8 +52,22 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
     typeset -g __muster_hook=1
     typeset -g __muster_bin='/opt/muster bin/muster'
     typeset -g __muster_notes=<notes>
+    typeset -g __muster_load
     typeset -gi __muster_seq=0
     export MUSTER_SHELL_PID=$$
+
+    __muster_load_id() {
+        emulate -L zsh
+        local now
+        zmodload -F zsh/datetime p:EPOCHREALTIME 2>/dev/null && now=$EPOCHREALTIME
+        if [[ $now == <->.<-> ]]; then
+            __muster_load=${now%.*}${${now#*.}[1,6]}
+        else
+            __muster_load=$RANDOM$RANDOM$RANDOM
+        fi
+    }
+    __muster_load_id
+    unfunction __muster_load_id
 
     __muster_precmd() {
         local -i status_kept=$?
@@ -62,8 +80,8 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
             done < "$note"
             command rm -f -- "$note"
         done
-        (command "$__muster_bin" __shell-report --pid "$$" --seq "$__muster_seq" \
-            < /dev/null > /dev/null 2>&1 &!)
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &!)
         return status_kept
     }
 
@@ -78,6 +96,7 @@ if status is-interactive; and not set -q __muster_hook
     set -g __muster_hook 1
     set -g __muster_bin '/opt/muster bin/muster'
     set -g __muster_notes <notes>
+    set -g __muster_load (random 1 999999999)(random 0 999999999)
     set -g __muster_seq 0
     set -gx MUSTER_SHELL_PID $fish_pid
 
@@ -92,8 +111,8 @@ if status is-interactive; and not set -q __muster_hook
             command rm -f -- $note
         end
         if test -x $__muster_bin
-            command $__muster_bin __shell-report --pid $fish_pid --seq $__muster_seq \
-                </dev/null >/dev/null 2>&1 &
+            command $__muster_bin __shell-report --pid $fish_pid --load $__muster_load \
+                --seq $__muster_seq </dev/null >/dev/null 2>&1 &
             disown 2>/dev/null
         end
         return $status_kept

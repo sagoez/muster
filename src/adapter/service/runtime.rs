@@ -66,7 +66,7 @@ use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        occupancy::{Occupancy, OccupancyChange, ReportSeq, ShellId},
+        occupancy::{Occupancy, OccupancyChange, ShellId, ShellRecord},
         port::{
             ProcessHandle, RaisedEdits, RunHistory, SettingsReader, ShellRegistry, StackEditLog,
             StackReader,
@@ -871,20 +871,16 @@ impl ServiceRuntime {
                 ServiceResponse::Ok
             },
             ServiceRequest::ShellReport {
-                shell,
-                seq,
-                project,
+                record,
                 environment,
-            } => {
-                ServiceResponse::ShellNotes(self.shell_report(shell, seq, project, &environment)?)
-            },
+            } => ServiceResponse::ShellNotes(self.shell_report(&record, &environment)?),
         };
         Ok(Reply::Now(response))
     }
 
-    /// Applies a shell's report that its folder is in `project` at prompt
-    /// `seq`: a project it left counts one shell fewer, and a project it is
-    /// the first to enter starts its autostart set with `environment`, the
+    /// Applies `record`, a shell's report that its folder is in its project:
+    /// a project it left counts one shell fewer, and a project it is the
+    /// first to enter starts its autostart set with `environment`, the
     /// shell's own. Returns the notes kept for the shell, then what entering
     /// started or refused. A report older than the shell's last changes
     /// nothing.
@@ -893,11 +889,10 @@ impl ServiceRuntime {
     /// Returns a busy refusal for a new shell while [`MAX_SHELLS`] are known.
     fn shell_report(
         &mut self,
-        shell: ShellId,
-        seq: ReportSeq,
-        project: Option<ProjectRoot>,
+        record: &ShellRecord,
         environment: &LaunchEnvironment,
     ) -> Result<Vec<ShellNote>, ServiceErrorBody> {
+        let shell = *record.shell();
         if !self.occupancy.knows(&shell) && self.occupancy.len() >= MAX_SHELLS {
             return Err(refused(
                 ServiceErrorKind::Busy,
@@ -905,8 +900,11 @@ impl ServiceRuntime {
             ));
         }
         let before = self.occupancy.project_of(&shell).cloned();
-        let changes = self.occupancy.report(shell, seq, project.clone());
-        self.recount_in(before.into_iter().chain(project), Instant::now());
+        let changes = self.occupancy.report(record);
+        self.recount_in(
+            before.into_iter().chain(record.project().clone()),
+            Instant::now(),
+        );
         let mut notes = self.shell_notes.take(&shell);
         for change in changes {
             match change {
@@ -1625,7 +1623,7 @@ mod tests {
         domain::{
             config::SettingChange,
             coordination::Author,
-            occupancy::ShellRecord,
+            occupancy::testing::stamp,
             port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
             process::{
                 LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
@@ -3121,6 +3119,8 @@ mod tests {
     const SHELL_VAR: &str = "SHELL_ONLY_VAR";
     /// Its value.
     const SHELL_VALUE: &str = "from-the-shell";
+    /// The hook load every test shell reports from.
+    const HOOK_LOAD: u64 = 1;
 
     /// Sends `shell`'s report at prompt `seq` that its folder is in
     /// `project`, with no environment, and returns the notes answered.
@@ -3133,6 +3133,16 @@ mod tests {
         report_with(service, shell, seq, project, no_env())
     }
 
+    /// `shell`'s report at prompt `seq` of [`HOOK_LOAD`] that its folder is
+    /// in `project`.
+    fn shell_record(shell: ShellId, seq: u64, project: Option<&ProjectRoot>) -> ShellRecord {
+        ShellRecord::builder()
+            .shell(shell)
+            .stamp(stamp(HOOK_LOAD, seq))
+            .project(project.cloned())
+            .build()
+    }
+
     /// As [`report`], the shell exporting `environment`.
     fn report_with(
         service: &Running,
@@ -3142,9 +3152,7 @@ mod tests {
         environment: LaunchEnvironment,
     ) -> Vec<ShellNote> {
         let response = service.send(ServiceRequest::ShellReport {
-            shell,
-            seq: ReportSeq::new(seq),
-            project: project.cloned(),
+            record: shell_record(shell, seq, project),
             environment,
         });
         let ServiceResponse::ShellNotes(notes) = response else {
@@ -3534,13 +3542,7 @@ mod tests {
         first.control(&project, "worker", ProcessAction::Stop);
         first.wait_for(&project, "worker", ProcessState::Exited);
         first.stop();
-        fixture.shells().put(
-            ShellRecord::builder()
-                .shell(shell)
-                .seq(ReportSeq::new(1))
-                .project(Some(project.clone()))
-                .build(),
-        );
+        fixture.shells().put(shell_record(shell, 1, Some(&project)));
 
         let second = fixture.start(Arc::new(fixture.runner()));
 
@@ -3592,13 +3594,9 @@ mod tests {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("api", true)]));
         let (earlier, now) = (test_shell(500, 1), test_shell(500, 2));
-        fixture.shells().put(
-            ShellRecord::builder()
-                .shell(earlier)
-                .seq(ReportSeq::new(9))
-                .project(Some(project.clone()))
-                .build(),
-        );
+        fixture
+            .shells()
+            .put(shell_record(earlier, 9, Some(&project)));
         fixture.shells().open(now);
 
         let service = fixture.start(Arc::new(fixture.runner()));
@@ -3697,9 +3695,7 @@ mod tests {
         }
 
         let response = service.send(ServiceRequest::ShellReport {
-            shell: shells[MAX_SHELLS],
-            seq: ReportSeq::new(1),
-            project: None,
+            record: shell_record(shells[MAX_SHELLS], 1, None),
             environment: no_env(),
         });
 

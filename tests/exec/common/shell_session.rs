@@ -42,6 +42,8 @@ const QUIET_CHECKS: usize = 3;
 pub struct ShellSession {
     /// Which shell it is.
     shell: HookShell,
+    /// The program it runs.
+    program: PathBuf,
     /// The terminal it runs on.
     pty: Pty,
     /// The shell process.
@@ -68,6 +70,7 @@ impl ShellSession {
         let child = pty.spawn_leading(scratch, command);
         let session = Self {
             shell,
+            program: program.to_path_buf(),
             pty,
             child,
             root: scratch.root().to_path_buf(),
@@ -92,6 +95,18 @@ impl ShellSession {
             HookShell::Fish => format!("{binary} shell-init fish | source"),
         };
         self.run(&line);
+    }
+
+    /// Replaces the shell with a fresh one of the same program on the same
+    /// pid, as `exec $SHELL` does, and loads the hook in it as its rc file
+    /// would.
+    pub fn exec_again(&self) {
+        let program = shlex::try_quote(self.program.to_str().unwrap()).unwrap();
+        self.run(&format!(
+            "exec {program} {}",
+            no_rc_args(self.shell).join(" ")
+        ));
+        self.load_hook();
     }
 
     /// Types `line` at the prompt, then waits until the shell has run it,

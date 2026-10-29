@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::domain::{
-    occupancy::{ReportSeq, ShellId, ShellRecord, ShellRegistryError},
+    occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
     port::ShellRegistry,
     value::Pid,
 };
@@ -77,7 +77,7 @@ impl ShellRegistry for FakeShells {
     fn save_if_newer(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError> {
         if self
             .record(record.shell())
-            .is_some_and(|stored| stored.seq() >= record.seq())
+            .is_some_and(|stored| !record.stamp().supersedes(stored.stamp()))
         {
             return Ok(false);
         }
@@ -88,7 +88,7 @@ impl ShellRegistry for FakeShells {
     fn deliver(
         &self,
         _shell: &ShellId,
-        _seq: ReportSeq,
+        _stamp: ReportStamp,
         _lines: &[String],
     ) -> Result<(), ShellRegistryError> {
         Ok(())

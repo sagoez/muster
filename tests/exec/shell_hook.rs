@@ -175,12 +175,21 @@ fn entering_a_project_starts_autostart_and_the_next_prompt_says_so() {
 /// for the shell `session`: what every prompt would cost a hook that waited.
 fn blocked_report(scratch: &Scratch, session: &ShellSession) -> Duration {
     let pid = session.pid().to_string();
+    let load = session.record().unwrap().stamp().load().to_string();
     let seq = BLOCKED_REPORT_SEQ.to_string();
     let started = Instant::now();
-    scratch.muster(&[SHELL_REPORT_SUBCOMMAND, "--pid", &pid, "--seq", &seq]);
+    scratch.muster(&[
+        SHELL_REPORT_SUBCOMMAND,
+        "--pid",
+        &pid,
+        "--load",
+        &load,
+        "--seq",
+        &seq,
+    ]);
     let blocked = started.elapsed();
     assert_ne!(
-        session.record().map(|record| *record.seq()),
+        session.record().map(|record| record.stamp().seq()),
         Some(ReportSeq::new(BLOCKED_REPORT_SEQ)),
         "a report to a frozen service cannot land"
     );
@@ -278,6 +287,38 @@ fn a_service_restart_keeps_the_shell_s_occupancy() {
     });
 }
 
+/// A shell that `exec`s itself keeps its pid and start token but loads the
+/// hook again, counting its prompts from one: its first move into a
+/// project after the `exec` still enters it and starts it.
+#[test]
+fn a_shell_that_execs_itself_still_enters_a_project() {
+    each_shell("exec", |scratch, shell, program| {
+        let shop = shop(scratch);
+        let session = ShellSession::start(scratch, shell, program);
+        for _ in 0..PROMPTS * 2 {
+            session.settle();
+        }
+        session.wait_reports_done();
+        let before = *session.record().unwrap().stamp();
+
+        session.exec_again();
+
+        wait_until("the reloaded hook to report", || {
+            session
+                .record()
+                .is_some_and(|record| record.stamp().load() != before.load())
+        });
+        let reloaded = *session.record().unwrap().stamp();
+        assert!(
+            reloaded.seq() < before.seq(),
+            "{shell}: the new load counts from one: {before:?} then {reloaded:?}"
+        );
+        enter(scratch, &session, &shop);
+        session.settle();
+        session.wait_drawn("muster: shop: starting api");
+    });
+}
+
 /// The hook hands the last command's exit status on to the next one.
 #[test]
 fn the_exit_status_survives_the_hook() {
@@ -325,14 +366,14 @@ fn loading_the_hook_twice_reports_once_per_prompt() {
         let session = ShellSession::start(scratch, shell, program);
         session.load_hook();
         session.wait_reports_done();
-        let before = session.record().unwrap().seq().into_inner();
+        let before = session.record().unwrap().stamp().seq().into_inner();
 
         for _ in 0..PROMPTS {
             session.settle();
         }
         session.wait_reports_done();
 
-        let after = session.record().unwrap().seq().into_inner();
+        let after = session.record().unwrap().stamp().seq().into_inner();
         let grown = after - before;
         assert!(
             (PROMPTS - UNSEEN_PROMPTS..=PROMPTS + UNSEEN_PROMPTS).contains(&grown),

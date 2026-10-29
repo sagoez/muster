@@ -30,7 +30,7 @@ use crate::{
         shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
     },
     domain::{
-        occupancy::ReportSeq,
+        occupancy::{LoadId, ReportSeq},
         value::{Pid, ProcessRef},
     },
 };
@@ -316,7 +316,10 @@ pub enum Command {
         /// The shell's pid.
         #[arg(long, value_parser = pid)]
         pid: Pid,
-        /// The prompt's number, rising.
+        /// The id the hook drew when it loaded in this shell.
+        #[arg(long)]
+        load: LoadId,
+        /// The prompt's number, rising within that load.
         #[arg(long)]
         seq: ReportSeq,
     },

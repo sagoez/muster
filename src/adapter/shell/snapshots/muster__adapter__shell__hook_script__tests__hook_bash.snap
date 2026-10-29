@@ -1,5 +1,6 @@
 ---
 source: src/adapter/shell/hook_script.rs
+assertion_line: 245
 expression: script
 ---
 # muster's prompt hook for bash. Load it from ~/.bashrc with:
@@ -8,6 +9,9 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
     __muster_hook=1
     __muster_bin=/usr/local/bin/muster
     __muster_notes=/home/user/.local/state/muster/shells
+    __muster_load=${EPOCHREALTIME-}
+    __muster_load=${__muster_load//[!0-9]/}
+    __muster_load=${__muster_load:-$RANDOM$RANDOM$RANDOM}
     __muster_seq=0
     export MUSTER_SHELL_PID=$$
 
@@ -28,8 +32,8 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
         if [[ -n $failglob ]]; then
             shopt -s failglob
         fi
-        (command "$__muster_bin" __shell-report --pid "$$" --seq "$__muster_seq" \
-            < /dev/null > /dev/null 2>&1 &)
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
         return "$status"
     }
 

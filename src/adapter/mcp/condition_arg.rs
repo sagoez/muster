@@ -22,7 +22,7 @@ const REGEX_FORM: &str = "regex only together with log";
 /// What `status` needs beside it.
 const STATUS_FORM: &str = "status only together with http";
 /// The form a port is written in.
-const PORT_FORM: &str = "a port from 1 to 65535";
+pub(super) const PORT_FORM: &str = "a port from 1 to 65535";
 /// The form a URL is written in.
 const URL_FORM: &str = "an http URL on localhost, 127.0.0.1 or [::1]";
 /// The states a state condition takes.

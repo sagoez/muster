@@ -10,7 +10,8 @@ use super::{
     agent_wait_view::AgentWaitView,
     bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, WAIT_S_FIELD, wait_bound},
     events_view::EventsView,
-    process_fields::invalid,
+    occupancy_view::OccupancyView,
+    process_fields::choice,
     progress::with_progress,
     project_arg::ProjectArg,
     server::{MusterMcp, json, structured, with_alerts},
@@ -22,10 +23,13 @@ use super::{
     tool_result::ToolResult,
     up_view::UpView,
 };
-use crate::adapter::{
-    client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
-    clock::epoch_now,
-    service::{EventKind, EventSeq, WaitSpec},
+use crate::{
+    adapter::{
+        client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
+        clock::epoch_now,
+        service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec},
+    },
+    domain::{coordination::Lock, value::EpochSeconds},
 };
 
 /// Most notices `stack_status` returns.
@@ -34,9 +38,6 @@ const STATUS_NOTICES: usize = 10;
 const SINCE_FIELD: &str = "since";
 /// The `kinds` field of `stack_events`.
 const KINDS_FIELD: &str = "kinds";
-/// The kinds `stack_events` takes.
-const KINDS_FORM: &str =
-    "started, ready, ready-timeout, exited, crashed, restarting, stopped, blocked or notice";
 
 #[tool_router(router = stack_router, vis = "pub(super)")]
 impl MusterMcp {
@@ -45,11 +46,15 @@ impl MusterMcp {
         description = "The whole stack of this project in one call: each process's state, \
             readiness, uptime, restarts, listening ports, URLs, CPU and memory, and how it last \
             exited, plus recent warnings, held locks and alerts. Call this first, and whenever \
-            you are unsure what is running. Returns {project, you, processes: [{name, state, \
-            ready, pid, uptime_s, restarts, ports, urls, run_start, cpu_percent, memory_bytes, \
-            last_exit: {status, signal, reason, at}, blocked_on: {port, holder, hint}}], \
-            notices, locks, events_cursor, alerts}; a field with no value is left out. Pass \
-            run_start as since to process_logs to read only the current run."
+            you are unsure what is running. Returns {project, you, occupancy: {shells, \
+            idle_stop, stops_in_s}, processes: [{name, state, ready, pid, uptime_s, restarts, \
+            ports, urls, run_start, cpu_percent, memory_bytes, last_exit: {status, signal, \
+            reason, at}, blocked_on: {port, holder, hint}}], notices, locks, events_cursor, \
+            alerts}; a field with no value is left out. occupancy counts the user's shells in \
+            the project; with none, the project is stopped idle_stop after the last one left, \
+            stops_in_s from now. blocked_on names the first declared or readiness port that \
+            was held when its start was refused. Pass run_start as since to process_logs to \
+            read only the current run."
     )]
     pub(super) async fn stack_status(&self, Parameters(arg): Parameters<ProjectArg>) -> ToolResult {
         let coordination = self.deps.coordination().clone();
@@ -62,31 +67,7 @@ impl MusterMcp {
                 Ok((status, notices, locks))
             })
             .await?;
-        let now = epoch_now();
-        let recent = notices.len().saturating_sub(STATUS_NOTICES);
-        let view = StackStatusView::builder()
-            .project(ProjectIdentityView::from(status.project()))
-            .you(self.identity.author().label().to_string())
-            .processes(
-                status
-                    .processes()
-                    .iter()
-                    .map(StackProcessView::from)
-                    .collect(),
-            )
-            .notices(
-                notices[recent..]
-                    .iter()
-                    .map(|notice| NoticeView::for_project(notice, status.project()))
-                    .collect(),
-            )
-            .locks(locks.iter().map(|lock| LockView::at(lock, now)).collect())
-            .events_cursor(
-                self.alerts
-                    .since(status.project().root())
-                    .map(|cursor| cursor.to_string()),
-            )
-            .build();
+        let view = self.status_view(&status, &notices, &locks, epoch_now());
         structured(with_alerts(json(&view)?, &alerts)?, false)
     }
 
@@ -109,11 +90,11 @@ impl MusterMcp {
 
     /// Lifecycle events of one project.
     #[tool(
-        description = "Lifecycle events of this project after the cursor since: started, ready, \
-            ready-timeout, exited, crashed, restarting, stopped, blocked, notice. Without since, \
-            returns the last <events-without-since>. With wait_s (at most <call-bound-s>), \
-            blocks until at least one new event arrives. Returns {events: [{seq, at, process, \
-            kind, detail}], cursor, gap}; pass cursor as since next time. gap=true means events \
+        description = "Lifecycle events of this project after the cursor since: <event-kinds>. \
+            idle-stopped means the project was stopped because no shell was in it for its idle \
+            stop. Without since, returns the last <events-without-since>. With wait_s (at most \
+            <call-bound-s>), blocks until at least one new event arrives. Returns {events: \
+            [{seq, at, process, kind, detail}], cursor, gap}; pass cursor as since next time. gap=true means events \
             after since were missed, dropped or recorded by an earlier service, and comes back \
             at once with every event held; re-read stack_status then. Reading events never \
             marks alerts heard."
@@ -128,6 +109,42 @@ impl MusterMcp {
 }
 
 impl MusterMcp {
+    /// What `stack_status` answers for `status`, its project's `notices` and
+    /// held `locks`, the locks' expiry read at `now`.
+    fn status_view(
+        &self,
+        status: &ProjectStatus,
+        notices: &[Notice],
+        locks: &[Lock],
+        now: EpochSeconds,
+    ) -> StackStatusView {
+        let recent = notices.len().saturating_sub(STATUS_NOTICES);
+        StackStatusView::builder()
+            .project(ProjectIdentityView::from(status.project()))
+            .you(self.identity.author().label().to_string())
+            .occupancy(OccupancyView::from(status.occupancy()))
+            .processes(
+                status
+                    .processes()
+                    .iter()
+                    .map(StackProcessView::from)
+                    .collect(),
+            )
+            .notices(
+                notices[recent..]
+                    .iter()
+                    .map(|notice| NoticeView::for_project(notice, status.project()))
+                    .collect(),
+            )
+            .locks(locks.iter().map(|lock| LockView::at(lock, now)).collect())
+            .events_cursor(
+                self.alerts
+                    .since(status.project().root())
+                    .map(|cursor| cursor.to_string()),
+            )
+            .build()
+    }
+
     /// What `stack_up` does, without its progress notifications.
     ///
     /// # Errors
@@ -176,11 +193,7 @@ impl MusterMcp {
             .kinds()
             .iter()
             .flatten()
-            .map(|raw| {
-                raw.trim()
-                    .parse::<EventKind>()
-                    .map_err(|_| invalid(KINDS_FIELD, KINDS_FORM, raw))
-            })
+            .map(|raw| choice::<EventKind>(KINDS_FIELD, raw))
             .collect::<Result<Vec<_>, _>>()?;
         let wait = wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
         let project = arg.project().clone();
@@ -198,9 +211,200 @@ impl MusterMcp {
 #[cfg(test)]
 mod tests {
     use rmcp::model::ErrorCode;
+    use serde_json::Value;
+    use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::mcp::test_support::{answered, fixture, refusal, register, runtime};
+    use crate::{
+        adapter::{
+            mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
+            service::{OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus},
+        },
+        domain::{
+            port::{PortOccupant, ProjectStore},
+            process::ProcessState,
+            value::{IdleStop, LocalPort, Pid, PositiveDuration, ProcessName, ProjectName},
+        },
+    };
+
+    /// The fixture's registered project with `processes` in it and
+    /// `occupancy`.
+    fn status_of(
+        fixture: &Fixture,
+        processes: Vec<ProcessStatus>,
+        occupancy: OccupancyStatus,
+    ) -> ProjectStatus {
+        ProjectStatus::builder()
+            .project(
+                fixture
+                    .store()
+                    .project_at(fixture.root())
+                    .unwrap()
+                    .expect("a registered project"),
+            )
+            .processes(processes)
+            .occupancy(occupancy)
+            .build()
+    }
+
+    /// `shells` in a project with a 30 minute idle stop, its stop `stops_in`
+    /// away.
+    fn occupancy(shells: u32, stops_in: Option<Duration>) -> OccupancyStatus {
+        OccupancyStatus::builder()
+            .shells(shells)
+            .idle_stop(IdleStop::After(
+                PositiveDuration::try_new(Duration::from_secs(1_800)).unwrap(),
+            ))
+            .stops_in(stops_in)
+            .build()
+    }
+
+    /// `name`, not running, its last start refused by `block`.
+    fn blocked(name: &str, block: PortBlock) -> ProcessStatus {
+        ProcessStatus::builder()
+            .name(ProcessName::try_new(name).unwrap())
+            .state(ProcessState::Blocked)
+            .pid(None)
+            .uptime(None)
+            .restarts(0)
+            .usage(None)
+            .attached(0)
+            .last_exit(None)
+            .stop_grace(Duration::from_secs(5))
+            .blocked_on(Some(block))
+            .build()
+    }
+
+    /// What `stack_status` answers for `status`, as the agent reads it, with
+    /// the scratch root replaced so a snapshot holds still.
+    fn status_text(fixture: &Fixture, status: &ProjectStatus) -> String {
+        let view = fixture
+            .server()
+            .status_view(status, &[], &[], EpochSeconds::new(0));
+        serde_json::to_string_pretty(&view)
+            .unwrap()
+            .replace(&fixture.root().as_ref().display().to_string(), "<root>")
+    }
+
+    /// [`status_text`] read back as JSON.
+    fn answered_status(fixture: &Fixture, status: &ProjectStatus) -> Value {
+        serde_json::from_str(&status_text(fixture, status)).unwrap()
+    }
+
+    /// `stack_status` reports how many shells are in the project and its
+    /// idle stop; the seconds until a pending stop, rounded up, appear only
+    /// while one is pending.
+    #[test]
+    fn stack_status_reports_occupancy_and_omits_stops_in_without_a_timer() {
+        let fixture = fixture();
+        register(&fixture);
+
+        let occupied = status_text(&fixture, &status_of(&fixture, vec![], occupancy(2, None)));
+        let pending = status_text(
+            &fixture,
+            &status_of(
+                &fixture,
+                vec![],
+                occupancy(0, Some(Duration::from_millis(1_733_200))),
+            ),
+        );
+
+        assert!(!occupied.contains("stops_in_s"), "{occupied}");
+        insta::assert_snapshot!("stack_status_occupied", occupied);
+        insta::assert_snapshot!("stack_status_idle", pending);
+    }
+
+    /// A process declaring two ports, one held by another project's process
+    /// and one by an outside program, shows the first held port the service
+    /// refused it for, its holder and the call that frees it.
+    #[test]
+    fn a_blocked_process_with_two_ports_names_the_first_held() {
+        let fixture = fixture();
+        register(&fixture);
+        let by_admin = PortBlock::builder()
+            .port(LocalPort::try_new(3000).unwrap())
+            .holder(PortOwner::Supervised(
+                PortHolder::builder()
+                    .project(ProjectName::try_new("admin").unwrap())
+                    .process(ProcessName::try_new("web").unwrap())
+                    .build(),
+            ))
+            .build();
+        let by_outsider = PortBlock::builder()
+            .port(LocalPort::try_new(5173).unwrap())
+            .holder(PortOwner::Other(
+                PortOccupant::builder()
+                    .pid(Pid::try_new(4242).unwrap())
+                    .command("python3 -m http.server 5173".to_string())
+                    .build(),
+            ))
+            .build();
+
+        let answer = answered_status(
+            &fixture,
+            &status_of(
+                &fixture,
+                vec![blocked("web", by_admin), blocked("docs", by_outsider)],
+                occupancy(1, None),
+            ),
+        );
+
+        assert_eq!(
+            answer["processes"][0]["blocked_on"],
+            serde_json::json!({
+                "port": 3000,
+                "holder": "project 'admin', process 'web'",
+                "hint": "stop it with process_stop {project: 'admin', name: 'web'}",
+            })
+        );
+        assert_eq!(
+            answer["processes"][1]["blocked_on"],
+            serde_json::json!({
+                "port": 5173,
+                "holder": "pid 4242 (python3 -m http.server 5173)",
+            })
+        );
+        assert_eq!(answer["processes"][0]["state"], "blocked");
+    }
+
+    /// `stack_events` takes `idle-stopped` as a kind, going on to ask the
+    /// service, and its description lists it with every other kind.
+    #[test]
+    fn stack_events_accepts_idle_stopped() {
+        let fixture = fixture();
+        register(&fixture);
+        runtime().block_on(async {
+            let unreachable = answered(
+                fixture
+                    .server()
+                    .events(
+                        StackEventsArg::builder()
+                            .kinds(Some(vec!["idle-stopped".to_string()]))
+                            .build(),
+                    )
+                    .await,
+            )
+            .unwrap_err();
+            assert_eq!(unreachable.code, ErrorCode::INTERNAL_ERROR);
+        });
+        let tool = fixture
+            .server()
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "stack_events")
+            .unwrap();
+        let description = tool.description.unwrap_or_default();
+        for kind in EventKind::iter() {
+            assert!(
+                description.contains(&kind.to_string()),
+                "{kind}: {description}"
+            );
+        }
+        let schema = Value::Object(tool.input_schema.as_ref().clone());
+        let kinds = schema["properties"]["kinds"]["description"].to_string();
+        assert!(kinds.contains("idle-stopped"), "{kinds}");
+    }
 
     /// A malformed cursor or kind is the caller's mistake, refused before
     /// any service is reached.

@@ -15,7 +15,7 @@ const HINT_CLOSE: &str = "'}";
 /// needs, who holds it, and the call that frees it when muster can.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct BlockedView {
-    /// The port its readiness check names.
+    /// The first port it needs that was held.
     #[getset(get_copy = "pub")]
     port: u16,
     /// The process listening on it.

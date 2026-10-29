@@ -2,7 +2,7 @@ use getset::Getters;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::stack_process_view::StackProcessView;
+use super::{occupancy_view::OccupancyView, stack_process_view::StackProcessView};
 use crate::adapter::client::{LockView, NoticeView, ProjectIdentityView};
 
 /// The whole picture of one project's stack, as `stack_status` answers.
@@ -13,6 +13,8 @@ pub struct StackStatusView {
     project: ProjectIdentityView,
     /// The label this connection writes as.
     you: String,
+    /// The shells in it and when it stops for want of one.
+    occupancy: OccupancyView,
     /// Every process, in stack order.
     processes: Vec<StackProcessView>,
     /// The project's recent warnings and errors, oldest first.

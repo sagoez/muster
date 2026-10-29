@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
+use strum::IntoEnumIterator;
 
 use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
 use crate::{
     adapter::{
         client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
         holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
-        service::{EVENTS_WITHOUT_SINCE, supervisor::FAILURE_TAIL_LINES},
+        service::{EVENTS_WITHOUT_SINCE, EventKind, supervisor::FAILURE_TAIL_LINES},
     },
     domain::{
         config::{ENV_VARS_MAX, PROCESSES_MAX},
@@ -32,9 +33,19 @@ use crate::{
 /// Key of a JSON schema node's description.
 const DESCRIPTION_KEY: &str = "description";
 
+/// Separates the names in a listed choice.
+const LIST_SEPARATOR: &str = ", ";
+
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 31] {
+fn placeholders() -> [(&'static str, String); 32] {
     [
+        (
+            "<event-kinds>",
+            EventKind::iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+                .join(LIST_SEPARATOR),
+        ),
         (
             "<process-name-max-chars>",
             PROCESS_NAME_MAX_CHARS.to_string(),

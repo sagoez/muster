@@ -6,15 +6,16 @@ use super::{
     source_file::{candidate, read_each},
 };
 
-/// The Procfiles read, in order.
-const PROCFILES: &[&str] = &["Procfile", "Procfile.dev"];
+/// The Procfiles read, in order: the development one first, so its
+/// definition of a name wins.
+const PROCFILES: &[&str] = &["Procfile.dev", "Procfile"];
 /// Opens a comment line.
 const COMMENT: char = '#';
 /// Separates a process's name from its command.
 const NAME_SEPARATOR: char = ':';
 
-/// One suggested candidate per `name: command` line of `Procfile` and
-/// `Procfile.dev`.
+/// One suggested candidate per `name: command` line of `Procfile.dev` and
+/// `Procfile`.
 pub fn detect(root: &Path) -> Vec<Candidate> {
     read_each(root, PROCFILES)
         .iter()

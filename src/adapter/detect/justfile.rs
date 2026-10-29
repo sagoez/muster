@@ -18,14 +18,47 @@ const QUIET_PREFIX: char = '@';
 const HEADER_END: char = ':';
 /// What follows the colon of an assignment rather than a header.
 const ASSIGNMENT: char = '=';
+/// Opens a line of attributes for the item after it.
+const ATTRIBUTES_OPEN: char = '[';
+/// Closes a line of attributes.
+const ATTRIBUTES_CLOSE: char = ']';
+/// Separates the attributes of one line.
+const ATTRIBUTE_SEPARATOR: char = ',';
+/// Where an attribute's arguments start.
+const ATTRIBUTE_ARGUMENTS: [char; 2] = ['(', ':'];
+/// The attribute that hides a recipe from `just --list`.
+const PRIVATE_ATTRIBUTE: &str = "private";
+/// Starts the name of a recipe that is private by convention.
+const PRIVATE_PREFIX: char = '_';
+/// Opens a comment line.
+const COMMENT: char = '#';
 
-/// One candidate per recipe header at column 0 of the justfile.
+/// One candidate per public recipe header at column 0 of the justfile: none
+/// marked `[private]` or named with a leading `_`.
 pub fn detect(root: &Path) -> Vec<Candidate> {
     let Some(text) = read_first(root, JUSTFILES) else {
         return Vec::new();
     };
-    text.lines()
-        .filter_map(recipe)
+    let mut private = false;
+    let mut recipes = Vec::new();
+    for line in text.lines() {
+        if let Some(attributes) = attributes(line) {
+            private |= attributes.contains(&PRIVATE_ATTRIBUTE);
+            continue;
+        }
+        if line.trim().is_empty() || line.starts_with(COMMENT) {
+            continue;
+        }
+        if let Some(name) = recipe(line)
+            && !private
+            && !name.starts_with(PRIVATE_PREFIX)
+        {
+            recipes.push(name);
+        }
+        private = false;
+    }
+    recipes
+        .into_iter()
         .filter_map(|name| {
             candidate(
                 name,
@@ -35,6 +68,27 @@ pub fn detect(root: &Path) -> Vec<Candidate> {
             )
         })
         .collect()
+}
+
+/// The names of the attributes a `[name, name(argument)]` line gives the
+/// item after it, or none for any other line.
+fn attributes(line: &str) -> Option<Vec<&str>> {
+    let inside = line
+        .strip_prefix(ATTRIBUTES_OPEN)?
+        .trim_end()
+        .strip_suffix(ATTRIBUTES_CLOSE)?;
+    Some(
+        inside
+            .split(ATTRIBUTE_SEPARATOR)
+            .map(|attribute| {
+                attribute
+                    .split(ATTRIBUTE_ARGUMENTS)
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+            })
+            .collect(),
+    )
 }
 
 /// The recipe a line declares: a name at column 0, optionally quiet, then
@@ -88,5 +142,24 @@ mod tests {
             ("dev".to_string(), "just dev".to_string(), true),
             ("build".to_string(), "just build".to_string(), false),
         ]);
+    }
+
+    /// A recipe marked `[private]`, alone or among other attributes and
+    /// past a comment, or named with a leading `_`, is not offered; an
+    /// attribute only marks the item right after it.
+    #[test]
+    fn private_recipes_are_not_offered() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("justfile"),
+            "[private]\nsetup:\n    ./setup\n[no-cd, private]\n# helper\nclean:\n    rm -rf out\n_check:\n    true\n[group('dev')]\ndev: _check\n    cargo run\nserve:\n    ./serve\n",
+        )
+        .unwrap();
+
+        let found: Vec<String> = detect(dir.path())
+            .iter()
+            .map(|candidate| candidate.name().to_string())
+            .collect();
+        assert_eq!(found, vec!["dev".to_string(), "serve".to_string()]);
     }
 }

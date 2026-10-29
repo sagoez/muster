@@ -18,14 +18,39 @@ const RULE_END: char = ':';
 const NOT_A_PLAIN_RULE: [char; 2] = ['=', ':'];
 /// Marks a special target such as `.PHONY`.
 const SPECIAL_PREFIX: char = '.';
+/// Opens a multi-line variable definition.
+const DEFINE: &str = "define";
+/// Closes a multi-line variable definition.
+const ENDEF: &str = "endef";
+/// Modifiers that may come before `define`.
+const DEFINE_MODIFIERS: &[&str] = &["override", "export", "private"];
 
-/// One candidate per plain target at column 0 of the makefile: no special
-/// `.`-target, no pattern, no assignment.
+/// One candidate per plain target at column 0 of the makefile, outside any
+/// `define ... endef` block: no special `.`-target, no pattern, no
+/// assignment.
 pub fn detect(root: &Path) -> Vec<Candidate> {
     let Some(text) = read_first(root, MAKEFILES) else {
         return Vec::new();
     };
+    let mut depth: usize = 0;
     text.lines()
+        .filter(|line| {
+            let words: Vec<&str> = line
+                .split_whitespace()
+                .skip_while(|word| DEFINE_MODIFIERS.contains(word))
+                .collect();
+            match words.first() {
+                Some(&DEFINE) => {
+                    depth += 1;
+                    false
+                },
+                Some(&ENDEF) if depth > 0 => {
+                    depth -= 1;
+                    false
+                },
+                Some(_) | None => depth == 0,
+            }
+        })
         .flat_map(targets)
         .filter_map(|target| {
             candidate(
@@ -89,5 +114,23 @@ mod tests {
             ("make test".to_string(), false),
             ("make lint".to_string(), false),
         ]);
+    }
+
+    /// A rule-shaped line inside a `define ... endef` block, nested or with
+    /// a modifier, is part of a variable and not offered.
+    #[test]
+    fn targets_inside_a_define_block_are_not_offered() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Makefile"),
+            "define RULE\ngenerated: x\ndefine INNER\ninner: y\nendef\nstill: z\nendef\noverride define OTHER =\nother: w\nendef # done\nserve:\n\t./serve\n",
+        )
+        .unwrap();
+
+        let found: Vec<String> = detect(dir.path())
+            .iter()
+            .map(|candidate| candidate.command().to_string())
+            .collect();
+        assert_eq!(found, vec!["make serve".to_string()]);
     }
 }

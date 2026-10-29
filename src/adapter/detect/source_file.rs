@@ -1,11 +1,10 @@
-use std::{
-    fs::{self, File},
-    io::Read,
-    path::Path,
-};
+use std::path::Path;
 
 use super::{candidate::Candidate, detect_source::DetectSource};
-use crate::domain::value::{CommandLine, ProcessName};
+use crate::{
+    adapter::bounded_read::read_bounded,
+    domain::value::{CommandLine, ProcessName},
+};
 
 /// Largest file a detector reads; anything bigger is not a stack definition
 /// worth guessing from.
@@ -14,14 +13,14 @@ const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 /// The text of the first of `names` under `root` that is a regular file no
 /// larger than [`MAX_SOURCE_BYTES`].
 pub fn read_first(root: &Path, names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| read_bounded(&root.join(name)))
+    names.iter().find_map(|name| read_source(&root.join(name)))
 }
 
 /// The text of each of `names` under `root` that can be read, in order.
 pub fn read_each(root: &Path, names: &[&str]) -> Vec<String> {
     names
         .iter()
-        .filter_map(|name| read_bounded(&root.join(name)))
+        .filter_map(|name| read_source(&root.join(name)))
         .collect()
 }
 
@@ -30,17 +29,10 @@ pub fn any_exists(root: &Path, names: &[&str]) -> bool {
     names.iter().any(|name| root.join(name).is_file())
 }
 
-/// The UTF-8 text of `path` when it is a regular file of a bounded size. The
-/// kind is checked before opening, so a FIFO is never opened and waited on.
-fn read_bounded(path: &Path) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_SOURCE_BYTES {
-        return None;
-    }
-    let file = File::open(path).ok()?;
-    let mut text = String::new();
-    file.take(MAX_SOURCE_BYTES).read_to_string(&mut text).ok()?;
-    Some(text)
+/// The text of `path` when it is a regular UTF-8 file no larger than
+/// [`MAX_SOURCE_BYTES`].
+fn read_source(path: &Path) -> Option<String> {
+    read_bounded(path, MAX_SOURCE_BYTES).ok()
 }
 
 /// A candidate named `name` running `command`, or none when either is not

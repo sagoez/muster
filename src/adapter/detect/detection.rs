@@ -89,16 +89,43 @@ mod tests {
         ]);
     }
 
-    /// A process both Procfiles define is offered once, from the first.
+    /// A process both Procfiles define is offered once, as `Procfile.dev`
+    /// defines it.
     #[test]
     fn a_name_repeated_in_one_source_is_offered_once() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("Procfile"), "web: puma\n").unwrap();
+        fs::write(dir.path().join("Procfile"), "web: puma\nworker: sidekiq\n").unwrap();
         fs::write(dir.path().join("Procfile.dev"), "web: rails s\n").unwrap();
+
+        let found: Vec<(String, String)> = detect(&root(&dir))
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.name().to_string(),
+                    candidate.command().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(found, vec![
+            ("web".to_string(), "rails s".to_string()),
+            ("worker".to_string(), "sidekiq".to_string()),
+        ]);
+    }
+
+    /// A `package.json` an editor saved with a byte order mark still offers
+    /// its scripts.
+    #[test]
+    fn a_package_json_with_a_byte_order_mark_is_read() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            "\u{feff}{\"scripts\": {\"dev\": \"vite\"}}",
+        )
+        .unwrap();
 
         let found = detect(&root(&dir));
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].command().as_ref(), "puma");
+        assert_eq!(found[0].command().as_ref(), "npm run dev");
     }
 
     /// An empty folder offers nothing.

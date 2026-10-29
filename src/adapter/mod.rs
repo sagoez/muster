@@ -1,3 +1,4 @@
+pub mod bounded_read;
 pub mod bridge;
 pub mod cli;
 pub mod client;

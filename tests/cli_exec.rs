@@ -177,17 +177,23 @@ fn single() -> String {
     stack(&[entry("api", "sleep 600", true)])
 }
 
-/// A runner that takes a second to stop and a neighbour that crash-loops.
+/// A runner that takes a second to stop, marking that its stop began, and a
+/// neighbour that first crashes once it sees that mark and then crash-loops,
+/// so its first crash always falls inside the stop however slow the machine.
 fn crash_loop() -> String {
     stack(&[
         entry(
             "api",
-            "trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done",
+            "trap 'touch stopping; sleep 1; exit 0' TERM; while :; do sleep 0.1; done",
             true,
         ),
         Entry {
             restart: "always",
-            ..entry("flaky", "sleep 0.1; exit 1", true)
+            ..entry(
+                "flaky",
+                "while [ ! -e stopping ]; do sleep 0.05; done; exit 1",
+                true,
+            )
         },
     ])
 }

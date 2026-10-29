@@ -35,6 +35,8 @@ mod project_identity_view;
 mod project_target;
 mod project_view;
 mod ready_view;
+#[cfg(test)]
+pub(crate) mod recording_notifier;
 mod refused_folder;
 mod removed_view;
 mod resolve_error;

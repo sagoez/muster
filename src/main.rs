@@ -22,7 +22,7 @@ use muster::{
     },
     domain::{
         config::ConfigError,
-        port::{LocalState, Notifier, PortOccupants},
+        port::{LocalState, Notifier, PortOccupants, StateChangeNotifier},
     },
     error::MusterError,
 };
@@ -75,6 +75,10 @@ impl CliPorts for LocalPorts {
 
     fn service(&self) -> Arc<dyn ServiceAccess> {
         Arc::new(UserService)
+    }
+
+    fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
+        Arc::new(RunningServiceNotifier::new(CliPorts::service(self)))
     }
 
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {

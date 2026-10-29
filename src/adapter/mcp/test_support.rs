@@ -14,11 +14,14 @@ use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
 
 use super::{
-    mcp_deps::McpDeps, process_add_arg::ProcessAddArg, recording_notifier::RecordingNotifier,
-    scope::Scope, server::MusterMcp, tool_failure::ToolFailure,
+    mcp_deps::McpDeps, process_add_arg::ProcessAddArg, scope::Scope, server::MusterMcp,
+    tool_failure::ToolFailure,
 };
 use crate::{
-    adapter::{client::fake_service::FakeService, store::SqliteStore},
+    adapter::{
+        client::{fake_service::FakeService, recording_notifier::RecordingNotifier},
+        store::SqliteStore,
+    },
     domain::{port::StackEditLog, value::ProjectRoot},
 };
 

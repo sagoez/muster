@@ -3,7 +3,10 @@ use std::{path::Path, sync::Arc};
 use super::mcp_launch::McpLaunch;
 use crate::{
     adapter::client::ServiceAccess,
-    domain::{config::ConfigError, port::LocalState},
+    domain::{
+        config::ConfigError,
+        port::{LocalState, StateChangeNotifier},
+    },
     error::MusterError,
 };
 
@@ -27,6 +30,9 @@ pub trait CliPorts: Sync {
 
     /// How the CLI reaches this user's service.
     fn service(&self) -> Arc<dyn ServiceAccess>;
+
+    /// What tells a running service of each change the CLI stores.
+    fn change_notifier(&self) -> Arc<dyn StateChangeNotifier>;
 
     /// Serves muster over MCP on stdio as `launch` describes, until the
     /// connecting agent disconnects.

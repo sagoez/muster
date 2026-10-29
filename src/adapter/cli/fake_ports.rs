@@ -3,26 +3,37 @@ use std::{path::Path, sync::Arc};
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
 use crate::{
     adapter::{
-        client::{ServiceAccess, fake_service::FakeService},
+        client::{ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier},
         store::SqliteStore,
     },
-    domain::{config::ConfigError, port::LocalState},
+    domain::{
+        config::ConfigError,
+        port::{LocalState, StateChangeNotifier},
+    },
     error::MusterError,
 };
 
-/// Ports over a scratch database and a [`FakeService`], serving nothing.
+/// Ports over a scratch database, a [`FakeService`] and a
+/// [`RecordingNotifier`], serving nothing.
 pub(super) struct FakePorts {
     store: SqliteStore,
     service: Arc<FakeService>,
+    notifier: Arc<RecordingNotifier>,
 }
 
 impl FakePorts {
-    /// Ports over `store` and a fresh [`FakeService`].
+    /// Ports over `store`, a fresh [`FakeService`] and a fresh notifier.
     pub(super) fn new(store: SqliteStore) -> Self {
         Self {
             store,
             service: Arc::new(FakeService::default()),
+            notifier: Arc::new(RecordingNotifier::default()),
         }
+    }
+
+    /// The notifier these ports hand out, to read what it was told.
+    pub(super) fn notifier(&self) -> &RecordingNotifier {
+        &self.notifier
     }
 
     /// The database every command of these ports reads and writes.
@@ -47,6 +58,10 @@ impl CliPorts for FakePorts {
 
     fn service(&self) -> Arc<dyn ServiceAccess> {
         self.service.clone()
+    }
+
+    fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
+        self.notifier.clone()
     }
 
     fn serve_mcp(&self, _launch: McpLaunch) -> Result<(), MusterError> {

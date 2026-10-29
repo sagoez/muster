@@ -6,12 +6,12 @@ use crate::domain::{port::StateChangeNotifier, value::ProjectRoot};
 
 /// A [`StateChangeNotifier`] that records what it was told.
 #[derive(Default, Getters, MutGetters)]
-pub struct RecordingNotifier {
+pub(crate) struct RecordingNotifier {
     /// Each project whose stack changed, in order.
-    #[getset(get = "pub", get_mut = "pub")]
+    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
     stacks: Mutex<Vec<ProjectRoot>>,
     /// How many times the settings changed.
-    #[getset(get = "pub", get_mut = "pub")]
+    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
     settings: Mutex<usize>,
 }
 

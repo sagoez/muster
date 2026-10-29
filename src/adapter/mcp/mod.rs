@@ -38,8 +38,6 @@ mod progress;
 mod project_arg;
 mod read_arg;
 mod ready_arg;
-#[cfg(test)]
-mod recording_notifier;
 mod rendering;
 mod scope;
 mod seconds_arg;

@@ -7,10 +7,7 @@ use std::{
 use super::{cli_ports::CliPorts, error::CliError, report::print_note};
 use crate::{
     adapter::{
-        client::{
-            ProjectTarget, RunningServiceNotifier, ServiceAccess, ServiceClient, env_project,
-            resolve_project,
-        },
+        client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project},
         path::home_dir,
     },
     application::StackEditor,
@@ -50,18 +47,17 @@ pub struct Invocation<'a> {
     /// How the CLI reaches the service.
     service: Arc<dyn ServiceAccess>,
     /// Tells a running service of each stored change.
-    notifier: RunningServiceNotifier,
+    notifier: Arc<dyn StateChangeNotifier>,
 }
 
 impl<'a> Invocation<'a> {
     /// The invocation with `--project` set to `project`, on `ports`.
     pub fn new(project: Option<String>, ports: &'a dyn CliPorts) -> Self {
-        let service = ports.service();
         Self {
             project,
             ports,
-            notifier: RunningServiceNotifier::new(service.clone()),
-            service,
+            service: ports.service(),
+            notifier: ports.change_notifier(),
         }
     }
 
@@ -85,7 +81,7 @@ impl<'a> Invocation<'a> {
 
     /// What tells a running service of each stored change.
     pub fn notifier(&self) -> &dyn StateChangeNotifier {
-        &self.notifier
+        self.notifier.as_ref()
     }
 
     /// muster's local state.
@@ -102,7 +98,7 @@ impl<'a> Invocation<'a> {
         StackEditor::builder()
             .stacks(store)
             .settings(store)
-            .notifier(&self.notifier)
+            .notifier(self.notifier.as_ref())
             .build()
     }
 
@@ -239,7 +235,6 @@ mod tests {
         adapter::{
             client::ClientError,
             no_state_dir::NoStateDir,
-            service::ServiceRequest,
             store::test_support::{fresh_store, spec},
         },
         domain::{config::ImportMode, port::StackReader, value::ProjectRoot},
@@ -251,8 +246,8 @@ mod tests {
         (FakePorts::new(store), scratch)
     }
 
-    /// An edit goes to the injected state and is told to the injected
-    /// service, and reaching the service goes through the injected port, so
+    /// An edit goes to the injected state and is told through the injected
+    /// notifier, and reaching the service goes through the injected port, so
     /// no CLI path is wired to the user's real service.
     #[test]
     fn an_edit_and_the_service_go_through_the_injected_ports() {
@@ -269,11 +264,8 @@ mod tests {
             .unwrap();
 
         assert!(ports.store().stack(&root).unwrap().is_some());
-        assert_eq!(ports.fake_service().told(), vec![
-            ServiceRequest::StackChanged {
-                project: root.clone()
-            }
-        ]);
+        assert_eq!(*ports.notifier().stacks().lock().unwrap(), vec![root]);
+        assert!(ports.fake_service().told().is_empty());
         assert!(matches!(
             invocation.connect(),
             Err(CliError::Client(ClientError::NoStateDir(NoStateDir)))

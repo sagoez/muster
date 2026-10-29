@@ -85,7 +85,7 @@ pub struct InitView {
 /// Whether `cwd`, a folder other than the scanned `root`, has files that
 /// offer processes of their own.
 pub fn offers_here(cwd: &Path, root: &ProjectRoot) -> bool {
-    project_root(cwd).is_ok_and(|here| here != *root && !detect(&here).is_empty())
+    project_root(cwd).is_ok_and(|here| here != *root && !detect(&here, |_| false).is_empty())
 }
 
 /// The line naming the folder `root` that was scanned.
@@ -104,20 +104,17 @@ fn scan_rows(view: &InitView) -> Vec<Row> {
 }
 
 /// The candidates found under `root`, leaving out names the project
-/// already has.
+/// already has, whether as found or as prefixed by their source.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a stack that cannot be read.
 pub fn offered(store: &dyn StackStore, root: &ProjectRoot) -> Result<Vec<Candidate>, CliError> {
     let stack = store.stack(root)?;
-    Ok(detect(root)
-        .into_iter()
-        .filter(|candidate| {
-            stack
-                .as_ref()
-                .is_none_or(|stack| stack.process(candidate.name()).is_none())
-        })
-        .collect())
+    Ok(detect(root, |name| {
+        stack
+            .as_ref()
+            .is_some_and(|stack| stack.process(name).is_some())
+    }))
 }
 
 /// The suggested ones of `candidates`.

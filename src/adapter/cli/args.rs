@@ -37,15 +37,15 @@ const HELP_STYLES: Styles = Styles::styled()
     .placeholder(AnsiColor::Yellow.on_default());
 
 /// What the main help says after the commands: the exit codes and the JSON
-/// conventions every command keeps. A test pins the codes to
-/// [`CliExit`](super::CliExit).
+/// conventions every command keeps. Tests pin the codes to
+/// [`CliExit`](super::CliExit) and to the README's table.
 const AFTER_HELP: &str = "\
 Exit codes:
     0  success
     1  a process did not end up as asked, or the action failed
-    2  the command line could not be parsed, or a question was cancelled
+    2  the command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled
     3  the muster service is unavailable or runs a newer version
-    4  not a project, an unknown project or process, or an invalid value or file
+    4  an invalid value: not a project, an unknown project or process, a taken name, a refused argument, an import conflict, or an unusable file
   130  interrupted with Ctrl-C while it waited at a terminal
 
 With --json, results and failures print as JSON on stdout. Object keys are
@@ -354,6 +354,20 @@ mod tests {
             CliExit::iter().count(),
             "no undocumented code is listed"
         );
+    }
+
+    /// The README's exit code table says what the help says, code for code.
+    #[test]
+    fn the_readme_documents_the_same_exit_codes() {
+        let readme = include_str!("../../../README.md");
+
+        for line in AFTER_HELP.lines().filter(|line| line.starts_with("  ")) {
+            let (code, meaning) = line.trim_start().split_once("  ").unwrap();
+            let mut letters = meaning.chars();
+            let first = letters.next().unwrap().to_uppercase();
+            let row = format!("| {code} | {first}{} |", letters.as_str());
+            assert!(readme.contains(&row), "the README lacks {row}");
+        }
     }
 
     /// The global project flag parses before and after a subcommand, and is

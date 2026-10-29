@@ -238,10 +238,16 @@ crashed or exited rather than started.
 |---|---|
 | 0 | Success |
 | 1 | A process did not end up as asked, or the action failed |
-| 2 | The command line could not be parsed, `set` changed nothing, a confirmation is missing, or a question was cancelled with Esc or Ctrl-C |
-| 3 | The service is unavailable or runs a newer version |
-| 4 | Not a project, an unknown project or process, a taken name, an invalid value, an import conflict, or an unusable stack file |
+| 2 | The command line could not be parsed, set changed nothing, a confirmation is missing, or a question was cancelled |
+| 3 | The muster service is unavailable or runs a newer version |
+| 4 | An invalid value: not a project, an unknown project or process, a taken name, a refused argument, an import conflict, or an unusable file |
 | 130 | Interrupted with Ctrl-C while it waited at a terminal |
+
+Every invalid value exits 4, whether the command line parser refuses it
+(`--timeout 0s`, an unknown setting key) or the command does (a bad regex, an
+unknown project). Exit 2 is kept for a command line that does not parse at
+all, such as an unknown flag or a missing argument. A question is cancelled
+with Esc or Ctrl-C.
 
 ### At a terminal
 
@@ -286,20 +292,22 @@ in the shapes the matching MCP tools do (`{"notes": [...]}`, a todo, `{"key",
 "deleted"}`); `muster doctor --json` lists each `check` with its `outcome` and
 says whether one `failed`, exiting 1 when one did.
 Keys are snake_case, enum values are kebab-case (`on-failure`, `in-progress`),
-durations are seconds and times are RFC 3339 in UTC. A process definition
-reads:
+durations are numbers of seconds and times are RFC 3339 in UTC to the second
+(`"updated_at": "2026-10-29T15:34:41Z"`). A setting's `value` is the exception:
+it is the text `config set` takes, such as `"5s"`. A process definition reads:
 
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
  "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
- "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": "30s"}}
+ "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": 30.0}}
 ```
 
 A project is named as `{"name": "shop", "root": "/home/me/shop"}`, in the
 output of every command and in each notice. `muster logs --json` names its
-process under `process`, and `--screen` drops the blank rows below the text.
-`muster logs -f --json` prints one object per line, each with the `cursor`
-just past it.
+process under `process` and carries the `cursor` just past the text, to pass
+as `--since`; `--screen` drops the blank rows below the text and has no
+cursor. `muster logs -f --json` prints one object per line, each with the
+`cursor` just past it.
 
 ## Attach
 

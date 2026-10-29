@@ -88,7 +88,7 @@ mod tests {
     };
 
     /// The definition reads as the documented JSON: snake_case keys,
-    /// kebab-case values and the grace in seconds.
+    /// kebab-case values and the grace and readiness timeout in seconds.
     #[test]
     fn a_definition_reads_as_documented() {
         let spec = ProcessSpec::builder()
@@ -126,7 +126,7 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_value(DefinitionView::from(&regex)).unwrap()["ready"],
-            serde_json::json!({"log": r"ready in \d+ms", "regex": true, "timeout": "1m 30s"})
+            serde_json::json!({"log": r"ready in \d+ms", "regex": true, "timeout": 90.0})
         );
         let agent = serde_json::to_value(DefinitionView::for_agent(&regex)).unwrap();
         assert_eq!(agent["environment"], serde_json::json!(["PORT"]));

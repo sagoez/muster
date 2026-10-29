@@ -119,8 +119,8 @@ impl ProjectTarget {
 /// is read against `cwd`, unless no such folder exists and a registered
 /// project has that name, as `.dotfiles` may; anything else is a registered
 /// project's name. `MUSTER_PROJECT` is a folder, or when no such folder
-/// exists, a registered project's name. There is no fallback to some other
-/// registered project.
+/// exists, a registered project's name; a bare word that is neither is an
+/// unknown project. There is no fallback to some other registered project.
 ///
 /// # Errors
 /// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
@@ -148,9 +148,16 @@ pub fn resolve_project(
         let path = cwd.join(value);
         if !path.is_dir()
             && let Some(name) = value.to_str()
-            && let Some(project) = registered_named(name, projects)?
         {
-            return Ok(ProjectTarget::Registered(project));
+            if let Some(project) = registered_named(name, projects)? {
+                return Ok(ProjectTarget::Registered(project));
+            }
+            if !names_a_folder(name) {
+                return match folder(&path, projects) {
+                    Err(ResolveError::Config(_)) => named(name, projects),
+                    found => found,
+                };
+            }
         }
         return folder(&path, projects);
     }
@@ -366,7 +373,8 @@ mod tests {
     }
 
     /// `MUSTER_PROJECT` holding a registered project's name, which is no
-    /// folder, resolves to that project; a folder of that name wins.
+    /// folder, resolves to that project; a folder of that name wins, and a
+    /// name that is neither is reported as an unknown project.
     #[test]
     fn the_environment_accepts_a_project_name() {
         let (_scratch, base) = tree();
@@ -388,7 +396,10 @@ mod tests {
             resolve_project(None, Some(Path::new("shop")), &base, &projects).unwrap(),
             ProjectTarget::Registered(shop)
         );
-        assert!(resolve_project(None, Some(Path::new("nosuch")), &base, &projects).is_err());
+        match resolve_project(None, Some(Path::new("nosuch")), &base, &projects) {
+            Err(ResolveError::UnknownProject { name, .. }) => assert_eq!(name, "nosuch"),
+            other => panic!("expected an unknown project, got {other:?}"),
+        }
     }
 
     /// `--project .` inside a project makes the nested folder its own,

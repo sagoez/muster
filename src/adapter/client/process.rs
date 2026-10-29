@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::{HolderError, LogQuery, read_log, read_log_bytes},
+        holder::{HolderError, LogQuery, read_log, read_log_stream},
         service::{
             BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Notice, ProcessAction,
             ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind, ServiceRequest,
@@ -549,7 +549,7 @@ pub fn logs<E: From<ClientError>>(
             name: name.clone(),
         })? {
             ServiceResponse::Screen(screen) => {
-                Ok(read.log(None).bytes(screen.into_bytes()).build())
+                Ok(read.log(None).end(None).bytes(screen.into_bytes()).build())
             },
             other @ (ServiceResponse::Hello { .. }
             | ServiceResponse::Ok
@@ -564,8 +564,12 @@ pub fn logs<E: From<ClientError>>(
         };
     }
     let log = log_path(client, project, &name)?;
-    let bytes = read_log_bytes(&log).map_err(|error| log_read_error(&log, error))?;
-    Ok(read.log(Some(log)).bytes(bytes).build())
+    let (start, bytes) = read_log_stream(&log).map_err(|error| log_read_error(&log, error))?;
+    Ok(read
+        .log(Some(log))
+        .end(Some(start.advanced(bytes.len() as u64)))
+        .bytes(bytes)
+        .build())
 }
 
 /// The failure of reading the log at `path`.

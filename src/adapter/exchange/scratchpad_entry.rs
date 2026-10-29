@@ -22,7 +22,8 @@ pub struct ScratchpadEntry {
     /// Who last wrote it.
     #[serde(with = "form")]
     author: Author,
-    /// Unix epoch seconds of the last write.
+    /// When it was last written, as RFC 3339 UTC.
+    #[serde(with = "form")]
     updated_at: EpochSeconds,
 }
 

@@ -828,6 +828,16 @@ fn up_ps_logs_and_down_report_what_happened() {
     let (_, unfiltered) = scratch.json_on(&project, &["logs", "dev server"]);
     assert_eq!(unfiltered["project"], slice["project"], "{unfiltered}");
     assert_eq!(unfiltered["process"], slice["process"], "{unfiltered}");
+    let (_, read_on) = scratch.json_on(&project, &[
+        "logs",
+        "dev server",
+        "--since",
+        unfiltered["cursor"].as_str().unwrap(),
+    ]);
+    assert_eq!(
+        read_on["lines_returned"], 0,
+        "the plain read's cursor is its end: {read_on}"
+    );
     let (_, screen) = scratch.json_on(&project, &["logs", "dev server", "--screen"]);
     assert_eq!(screen["process"], "dev server", "{screen}");
     let screen_text = screen["text"].as_str().unwrap();
@@ -1167,7 +1177,7 @@ fn add_up_set_rm_against_a_real_service() {
     assert!(ready.status.success(), "{}", shown(&ready));
     assert_eq!(
         with_ready["process"]["ready"],
-        serde_json::json!({ "log": "ready in \\d+ms", "regex": true, "timeout": "1m 30s" })
+        serde_json::json!({ "log": "ready in \\d+ms", "regex": true, "timeout": 90.0 })
     );
     let exported = stdout(&scratch.on(&folder, &["export", "-"]));
     assert!(
@@ -1261,7 +1271,7 @@ fn config_lists_reads_and_changes_settings() {
         );
     }
     let typo = scratch.muster(&["config", "get", "detach_key"]);
-    assert_eq!(typo.status.code(), Some(USAGE), "{}", shown(&typo));
+    assert_eq!(typo.status.code(), Some(INVALID_INPUT), "{}", shown(&typo));
     assert!(
         stderr(&typo).contains("default-stop-grace"),
         "{}",
@@ -1562,6 +1572,15 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
         offered,
         ["build"],
         "names already added are not offered again"
+    );
+
+    fs::write(folder.join("Procfile"), "worker: bin/worker\ndev: other\n").unwrap();
+    let (more, added) = scratch.json(&["-p", dir, "init", "--yes"]);
+    assert!(more.status.success(), "{}", shown(&more));
+    assert_eq!(
+        added["added"],
+        serde_json::json!([]),
+        "a name the stack has is not re-added under a source prefix"
     );
 }
 
@@ -2011,6 +2030,50 @@ fn input_errors_fail_before_the_service_starts() {
     let usage = scratch.muster(&["start", "--bogus", "--json"]);
     assert_eq!(usage.status.code(), Some(USAGE));
     assert_eq!(parsed(&usage)["error"]["kind"], "usage");
+
+    for (refused, kind) in [
+        (&["wait", "api", "--timeout", "0s"][..], "invalid-input"),
+        (
+            &["wait", "api", "--http", "http://example.com/"][..],
+            "invalid-input",
+        ),
+        (&["config", "get", "detach_key"][..], "invalid-input"),
+        (
+            &["logs", "api", "--grep", "(", "--regex"][..],
+            "invalid-input",
+        ),
+        (&["-p", "nosuch", "ps"][..], "unknown-project"),
+    ] {
+        let plain = scratch.muster(refused);
+        assert_eq!(
+            plain.status.code(),
+            Some(INVALID_INPUT),
+            "{refused:?} is an invalid value: {}",
+            shown(&plain)
+        );
+        let mut json = refused.to_vec();
+        json.push("--json");
+        let answered = scratch.muster(&json);
+        assert_eq!(answered.status.code(), Some(INVALID_INPUT), "{refused:?}");
+        assert_eq!(parsed(&answered)["error"]["kind"], kind, "{refused:?}");
+    }
+
+    let unknown = scratch
+        .command(&["ps", "--json"])
+        .env("MUSTER_PROJECT", "nosuch")
+        .output()
+        .unwrap();
+    assert_eq!(
+        unknown.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&unknown)
+    );
+    let message = parsed(&unknown)["error"]["message"].to_string();
+    assert!(
+        message.contains("nosuch") && !message.contains("not a directory"),
+        "an unknown MUSTER_PROJECT name is an unknown project: {message}"
+    );
 }
 
 /// `projects rm` stops the project's processes and forgets it with them.
@@ -2597,7 +2660,7 @@ fn mcp_waits_reads_logs_and_hears_crashes() {
     );
     assert_eq!(
         set["structuredContent"]["process"]["ready"],
-        serde_json::json!({ "log": "ready on", "timeout": "30s" }),
+        serde_json::json!({ "log": "ready on", "timeout": 30.0 }),
         "{set}"
     );
     let started = mcp.result(
@@ -3656,6 +3719,35 @@ fn logs_on_a_terminal_drop_what_could_drive_it() {
     }
 }
 
+/// `export -` on a terminal escapes the control and bidi characters a
+/// stored field holds, so they cannot reorder or drive what is shown; a
+/// pipe still receives the file exactly.
+#[test]
+fn export_to_a_terminal_escapes_what_a_pipe_keeps() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let added = scratch.on(&project, &[
+        "add",
+        "tricky",
+        "--description",
+        "left\u{202e}right",
+        "--",
+        "sleep 1",
+    ]);
+    assert!(added.status.success(), "{}", shown(&added));
+
+    let piped = scratch.exported(&project);
+    assert!(piped.contains("left\u{202e}right"), "{piped:?}");
+
+    let pty = Pty::open();
+    let mut export = pty.spawn(&mut scratch, &project, &["export", "-"]);
+    assert_eq!(Pty::exit_code(&mut export), Some(0));
+    pty.wait_for("right", 1);
+    let raw = pty.raw();
+    assert!(raw.contains("left\\u{202e}right"), "{raw:?}");
+    assert!(!raw.contains('\u{202e}'), "{raw:?}");
+}
+
 /// `import` reads only a regular file of bounded size, refuses a working
 /// directory outside the project, and shows what each process will run
 /// and where before anything is written.
@@ -4066,14 +4158,24 @@ fn coordination_and_doctor_answer_json() {
         value
     };
 
+    let rfc3339 = |at: &Value| {
+        at.as_str()
+            .is_some_and(|at| humantime::parse_rfc3339(at).is_ok())
+    };
+
     assert_eq!(json(&["note", "set", "plan", "body"])["saved"], "plan");
-    assert_eq!(json(&["note"])["notes"][0]["key"], "plan");
+    let notes = json(&["note"]);
+    assert_eq!(notes["notes"][0]["key"], "plan");
+    assert!(rfc3339(&notes["notes"][0]["updated_at"]), "{notes}");
+    let note = json(&["note", "get", "plan"]);
+    assert!(rfc3339(&note["updated_at"]), "{note}");
     assert_eq!(
         json(&["note", "rm", "plan"]),
         serde_json::json!({"key": "plan", "deleted": true})
     );
     let added = json(&["todo", "add", "ship"]);
     assert_eq!(added["status"], "pending");
+    assert!(rfc3339(&added["updated_at"]), "{added}");
     let id = added["id"].as_str().unwrap().to_string();
     assert_eq!(
         json(&["todo", "status", &id, "in-progress"])["status"],
@@ -4081,8 +4183,12 @@ fn coordination_and_doctor_answer_json() {
     );
     assert_eq!(json(&["todo"])["todos"][0]["id"], id.as_str());
     assert_eq!(json(&["kv", "set", "port", "3000"])["saved"], "port");
-    assert_eq!(json(&["kv", "get", "port"])["value"], "3000");
-    assert_eq!(json(&["kv"])["entries"][0]["key"], "port");
+    let value = json(&["kv", "get", "port"]);
+    assert_eq!(value["value"], "3000");
+    assert!(rfc3339(&value["updated_at"]), "{value}");
+    let entries = json(&["kv"]);
+    assert_eq!(entries["entries"][0]["key"], "port");
+    assert!(rfc3339(&entries["entries"][0]["updated_at"]), "{entries}");
     assert_eq!(json(&["lock"])["locks"], serde_json::json!([]));
     assert_eq!(json(&["lock", "release", "db"])["released"], false);
     let snapshot = scratch.path().join("coordination.yml");

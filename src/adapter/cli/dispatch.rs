@@ -12,7 +12,10 @@ use std::{
     time::SystemTime,
 };
 
-use clap::Parser;
+use clap::{
+    Parser,
+    error::{Error as ParseError, ErrorKind},
+};
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
 
@@ -127,18 +130,33 @@ const LINE_BREAK: &[u8] = b"\n";
 
 /// The command line, parsed. A shell's completion hook is answered here from
 /// `ports` and the process exits; a command line that does not parse exits
-/// as a usage error, in JSON when `--json` was asked for.
+/// as a usage error, and one holding a value its argument refuses as an
+/// invalid value, in JSON when `--json` was asked for.
 pub fn parse_args(ports: &'static dyn CliPorts) -> Args {
     CompleteEnv::with_factory(move || completing_command(ports)).complete();
     match Args::try_parse() {
         Ok(args) => args,
-        Err(error) if error.use_stderr() && json_requested() => {
-            emit_line(&output::failure_json(&CliError::Usage(
-                error.render().to_string(),
-            )));
-            exit(CliExit::Usage.code());
+        Err(error) if !error.use_stderr() => error.exit(),
+        Err(error) => {
+            let failure = parse_failure(&error);
+            if json_requested() {
+                emit_line(&output::failure_json(&failure));
+            } else {
+                // Best effort: the exit code still reports the failure.
+                let _ = error.print();
+            }
+            exit(CliExit::from(failure.kind()).code())
         },
-        Err(error) => error.exit(),
+    }
+}
+
+/// The failure a parse `error` reports: an invalid value when an argument
+/// refused the value given, else a usage error.
+fn parse_failure(error: &ParseError) -> CliError {
+    let message = error.render().to_string();
+    match error.kind() {
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => CliError::InvalidArgument(message),
+        _ => CliError::Usage(message),
     }
 }
 
@@ -222,6 +240,9 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             with_env,
             json,
         }) => match export(invocation, file.as_deref(), force, with_env) {
+            Ok(Exported::Text(text)) if io::stdout().is_terminal() => {
+                emit_bytes(printable_lines(&text).as_bytes());
+            },
             Ok(Exported::Text(text)) => emit_bytes(text.as_bytes()),
             Ok(Exported::Written(view)) => {
                 let presenter = Presenter::detect(json);

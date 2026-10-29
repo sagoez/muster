@@ -74,16 +74,8 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
 
 /// Every byte still kept of the log at `log` and its rotated generation, the
 /// older first, exactly as written: the span [`read_log`] reads, unstripped,
-/// for a reader that wants the raw stream.
-///
-/// # Errors
-/// Returns [`HolderError::Io`] when the files cannot be read.
-pub fn read_log_bytes(log: &Path) -> Result<Vec<u8>, HolderError> {
-    Ok(read_log_stream(log)?.1)
-}
-
-/// What [`read_log_bytes`] reads, with the cursor of its first byte, so a
-/// follower knows where in the output it stands.
+/// for a reader that wants the raw stream. It comes with the cursor of its
+/// first byte, so a reader knows where in the output it stands.
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be read.
@@ -315,12 +307,12 @@ mod tests {
     #[test]
     fn the_raw_stream_is_both_generations_unchanged() {
         let mut fixture = Fixture::with_cap(12);
-        assert!(read_log_bytes(fixture.path()).unwrap().is_empty());
+        assert!(read_log_stream(fixture.path()).unwrap().1.is_empty());
         fixture.write(b"\x1b[31maaaa\n");
         fixture.write(b"live \xff\n");
 
         assert_eq!(
-            read_log_bytes(fixture.path()).unwrap(),
+            read_log_stream(fixture.path()).unwrap().1,
             b"\x1b[31maaaa\nlive \xff\n"
         );
     }

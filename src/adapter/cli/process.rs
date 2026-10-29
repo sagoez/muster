@@ -56,6 +56,7 @@ pub fn follow_logs(
     let template = LogRead::builder()
         .name(name)
         .log(Some(log.clone()))
+        .end(None)
         .bytes(Vec::new())
         .build()
         .text_in(project);

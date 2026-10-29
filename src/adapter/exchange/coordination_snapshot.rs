@@ -48,7 +48,8 @@ mod tests {
         value::EpochSeconds,
     };
 
-    /// A snapshot round-trips through YAML with its authors as labels.
+    /// A snapshot round-trips through YAML with its authors as labels and
+    /// its times as RFC 3339.
     #[test]
     fn a_snapshot_round_trips_through_yaml() {
         let snapshot = CoordinationSnapshot::builder()
@@ -75,6 +76,10 @@ mod tests {
 
         assert!(yaml.contains("author: claude"), "{yaml}");
         assert!(yaml.contains("author: human"), "{yaml}");
+        assert!(
+            yaml.contains("updated_at: 1970-01-01T00:00:07Z"),
+            "times are RFC 3339: {yaml}"
+        );
         assert_eq!(
             serde_yaml_ng::from_str::<CoordinationSnapshot>(&yaml).unwrap(),
             snapshot
@@ -95,7 +100,7 @@ mod tests {
     fn an_oversized_note_or_value_is_refused() {
         let file = |body: usize, value: usize| {
             format!(
-                "version: 1\nscratchpads:\n- key: plan\n  body: {}\n  author: human\n  updated_at: 1\ntodos: []\nvalues:\n- key: blob\n  value: {}\n  author: human\n  updated_at: 1\n",
+                "version: 1\nscratchpads:\n- key: plan\n  body: {}\n  author: human\n  updated_at: 1970-01-01T00:00:01Z\ntodos: []\nvalues:\n- key: blob\n  value: {}\n  author: human\n  updated_at: 1970-01-01T00:00:01Z\n",
                 "x".repeat(body),
                 "y".repeat(value)
             )

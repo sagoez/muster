@@ -234,6 +234,10 @@ pub enum CliError {
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
+    /// The command line parsed, but a value on it is not one its argument
+    /// accepts.
+    #[error("{0}")]
+    InvalidArgument(String),
     /// Writing the command's output failed.
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
@@ -360,6 +364,7 @@ impl CliError {
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
             | Self::Unregistrable { .. }
+            | Self::InvalidArgument(_)
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::TooLong { .. }
@@ -404,6 +409,7 @@ impl CliError {
             | Self::WriteFile { .. }
             | Self::CurrentDir(_)
             | Self::Usage(_)
+            | Self::InvalidArgument(_)
             | Self::Cancelled
             | Self::NothingToChange
             | Self::NeedsYes(_)

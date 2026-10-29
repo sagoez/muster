@@ -17,7 +17,8 @@ pub struct NoteEntry {
     /// Who last wrote it.
     #[serde(with = "crate::adapter::wire::form")]
     author: Author,
-    /// When it was last written, in seconds since the Unix epoch.
+    /// When it was last written, as RFC 3339 UTC.
+    #[serde(with = "crate::adapter::wire::form")]
     updated_at: EpochSeconds,
 }
 

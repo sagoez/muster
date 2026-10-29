@@ -4,19 +4,7 @@ use nutype::nutype;
 
 /// A moment as whole seconds since the Unix epoch: when coordination state was
 /// written, or when a lock or a todo's claim lapses.
-#[nutype(derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Display,
-    Serialize,
-    Deserialize
-))]
+#[nutype(derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display))]
 pub struct EpochSeconds(u64);
 
 impl EpochSeconds {

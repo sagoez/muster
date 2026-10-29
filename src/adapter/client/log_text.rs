@@ -23,8 +23,9 @@ pub struct LogText {
     /// The text, with any invalid UTF-8 replaced.
     #[getset(get = "pub")]
     text: String,
-    /// Just past the text in the process's output, for a line `logs -f`
-    /// prints: the cursor to pass as `--since` to read what follows it.
+    /// Just past the text in the process's output, for a log read or a line
+    /// `logs -f` prints: the cursor to pass as `--since` to read what follows
+    /// it. None for the screen.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     #[getset(get_copy = "pub")]

@@ -18,7 +18,8 @@ pub struct TodoClaimEntry {
     /// The agent working the todo.
     #[serde(with = "form")]
     owner: Author,
-    /// Unix epoch seconds after which the lease has run out.
+    /// When the lease runs out, as RFC 3339 UTC.
+    #[serde(with = "form")]
     claimed_until: EpochSeconds,
 }
 

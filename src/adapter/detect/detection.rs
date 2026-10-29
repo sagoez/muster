@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use super::{candidate::Candidate, compose, justfile, makefile, package_json, procfile};
 use crate::domain::value::{ProcessName, ProjectRoot};
 
-/// Every candidate the files under `root` offer, by source in a fixed order.
-/// A name offered by two sources is offered as `<source>-<name>` from each,
-/// and a name a source repeats is offered once.
-pub fn detect(root: &ProjectRoot) -> Vec<Candidate> {
+/// Every candidate the files under `root` offer, by source in a fixed order,
+/// leaving out each name `taken` says the project already has. A name
+/// offered by two sources is offered as `<source>-<name>` from each, and a
+/// name a source repeats is offered once.
+pub fn detect(root: &ProjectRoot, taken: impl Fn(&ProcessName) -> bool) -> Vec<Candidate> {
     let root = root.as_ref();
     let found: Vec<Candidate> = [
         package_json::detect(root),
@@ -17,6 +18,7 @@ pub fn detect(root: &ProjectRoot) -> Vec<Candidate> {
     ]
     .into_iter()
     .flat_map(first_of_each_name)
+    .filter(|candidate| !taken(candidate.name()))
     .collect();
     let mut sources: HashMap<String, usize> = HashMap::new();
     for candidate in &found {
@@ -36,6 +38,7 @@ pub fn detect(root: &ProjectRoot) -> Vec<Candidate> {
             let renamed = format!("{}-{}", candidate.source(), candidate.name());
             ProcessName::try_new(renamed)
                 .ok()
+                .filter(|name| !taken(name))
                 .map(|name| candidate.with_name(name))
         })
         .collect()
@@ -77,7 +80,7 @@ mod tests {
         fs::write(dir.path().join("justfile"), "dev:\n    cargo run\n").unwrap();
         fs::write(dir.path().join("compose.yaml"), "services: {}\n").unwrap();
 
-        let found: Vec<(String, DetectSource)> = detect(&root(&dir))
+        let found: Vec<(String, DetectSource)> = detect(&root(&dir), |_| false)
             .iter()
             .map(|candidate| (candidate.name().to_string(), candidate.source()))
             .collect();
@@ -89,6 +92,27 @@ mod tests {
         ]);
     }
 
+    /// A name the project already has is left out before collisions are
+    /// counted, so a second source offering it is never re-added under a
+    /// prefixed name, and a prefixed name already taken is left out too.
+    #[test]
+    fn a_taken_name_is_never_offered_under_a_prefix() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"dev": "vite", "lint": "eslint ."}}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("Procfile"), "dev: other\nlint: x\n").unwrap();
+        let taken = ["dev", "procfile-lint"];
+
+        let found: Vec<String> = detect(&root(&dir), |name| taken.contains(&name.as_ref()))
+            .iter()
+            .map(|candidate| candidate.name().to_string())
+            .collect();
+        assert_eq!(found, vec!["package-json-lint".to_string()]);
+    }
+
     /// A process both Procfiles define is offered once, as `Procfile.dev`
     /// defines it.
     #[test]
@@ -97,7 +121,7 @@ mod tests {
         fs::write(dir.path().join("Procfile"), "web: puma\nworker: sidekiq\n").unwrap();
         fs::write(dir.path().join("Procfile.dev"), "web: rails s\n").unwrap();
 
-        let found: Vec<(String, String)> = detect(&root(&dir))
+        let found: Vec<(String, String)> = detect(&root(&dir), |_| false)
             .iter()
             .map(|candidate| {
                 (
@@ -123,7 +147,7 @@ mod tests {
         )
         .unwrap();
 
-        let found = detect(&root(&dir));
+        let found = detect(&root(&dir), |_| false);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].command().as_ref(), "npm run dev");
     }
@@ -131,6 +155,6 @@ mod tests {
     /// An empty folder offers nothing.
     #[test]
     fn an_empty_folder_offers_nothing() {
-        assert!(detect(&root(&TempDir::new().unwrap())).is_empty());
+        assert!(detect(&root(&TempDir::new().unwrap()), |_| false).is_empty());
     }
 }

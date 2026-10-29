@@ -786,11 +786,13 @@ mod tests {
     use std::{
         fs::{self, Permissions},
         os::unix::{fs::PermissionsExt, net::UnixListener},
-        thread::JoinHandle,
     };
 
     use super::*;
-    use crate::adapter::{ipc, private_dir::prepare_socket_dir, test_scratch::short_scratch};
+    use crate::adapter::{
+        client::served_service::ServedService, private_dir::prepare_socket_dir,
+        test_scratch::short_scratch,
+    };
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";
@@ -919,36 +921,6 @@ mod tests {
         assert!(SERVICE_EXIT_BOUND > SERVICE_REPLY_TIMEOUT);
     }
 
-    /// A service at `socket`, in a directory private to this user, that
-    /// answers a hello as `version` and every other request with no notes,
-    /// for `connections` connections.
-    fn serving(
-        socket: &Path,
-        version: &str,
-        connections: usize,
-    ) -> JoinHandle<Vec<ServiceRequest>> {
-        prepare_socket_dir(parent_dir(socket)).unwrap();
-        let listener = ipc::bind(socket).unwrap();
-        let version: ServiceVersion = version.parse().unwrap();
-        thread::spawn(move || {
-            let mut asked = Vec::new();
-            for stream in listener.incoming().take(connections) {
-                ipc::serve_connection(stream.unwrap(), |request: ServiceRequest| {
-                    asked.push(request.clone());
-                    match request {
-                        ServiceRequest::Hello { .. } => ServiceResponse::Hello {
-                            version: version.clone(),
-                            binary: PathBuf::new(),
-                        },
-                        _ => ServiceResponse::ShellNotes(Vec::new()),
-                    }
-                })
-                .unwrap();
-            }
-            asked
-        })
-    }
-
     /// Asking with no service running answers none and starts nothing:
     /// no socket is bound and the state directory stays empty.
     #[test]
@@ -969,24 +941,26 @@ mod tests {
     /// is only greeted, never asked nor replaced.
     #[test]
     fn ask_if_running_asks_only_a_service_of_this_version() {
-        let scratch = short_scratch(SCRATCH_PREFIX);
-        let client = client_in(scratch.path());
-        let ours = serving(&client.own_socket, APP_VERSION, 2);
+        let notes = ServiceResponse::ShellNotes(Vec::new());
+        let ours = ServedService::answering(notes.clone());
 
-        let answer = client.ask(&ServiceRequest::SettingsChanged).unwrap();
+        let answer = ours.connector()()
+            .ask(&ServiceRequest::SettingsChanged)
+            .unwrap();
 
-        assert_eq!(answer, Some(ServiceResponse::ShellNotes(Vec::new())));
-        let asked = ours.join().unwrap();
-        assert!(matches!(asked[..], [
+        assert_eq!(answer, Some(notes.clone()));
+        assert!(matches!(ours.asked()[..], [
             ServiceRequest::Hello { .. },
             ServiceRequest::SettingsChanged
         ]));
 
-        fs::remove_file(&client.own_socket).unwrap();
-        let theirs = serving(&client.own_socket, OTHER_VERSION, 1);
+        let theirs = ServedService::answering_as(OTHER_VERSION.parse().unwrap(), notes);
 
-        assert_eq!(client.ask(&ServiceRequest::SettingsChanged).unwrap(), None);
-        let asked = theirs.join().unwrap();
-        assert!(matches!(asked[..], [ServiceRequest::Hello { .. }]));
+        let answer = theirs.connector()()
+            .ask(&ServiceRequest::SettingsChanged)
+            .unwrap();
+
+        assert_eq!(answer, None);
+        assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 }

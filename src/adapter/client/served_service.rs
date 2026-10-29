@@ -27,9 +27,9 @@ const SOCKET_DIR: &str = "run";
 /// Makes a client of a [`ServedService`].
 pub(crate) type Connector = Box<dyn Fn() -> ServiceClient + Send + Sync>;
 
-/// A service of this version on a scratch socket, answering a hello as one
-/// and every other request with the answer a test scripted, and recording
-/// what it was asked until it is stopped.
+/// A service on a scratch socket, answering a hello with its version and
+/// every other request with the answer a test scripted, and recording what
+/// it was asked until it is stopped.
 pub(crate) struct ServedService {
     /// The scratch directory holding its state and socket directories.
     scratch: TempDir,
@@ -38,8 +38,15 @@ pub(crate) struct ServedService {
 }
 
 impl ServedService {
-    /// A service answering every request but a hello with `answer`.
+    /// A service of this version answering every request but a hello with
+    /// `answer`.
     pub(crate) fn answering(answer: ServiceResponse) -> Self {
+        Self::answering_as(ServiceVersion::current(), answer)
+    }
+
+    /// A service greeting as `version` and answering every request but a
+    /// hello with `answer`.
+    pub(crate) fn answering_as(version: ServiceVersion, answer: ServiceResponse) -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         fs::create_dir(scratch.path().join(STATE_DIR)).unwrap();
         prepare_socket_dir(&scratch.path().join(SOCKET_DIR)).unwrap();
@@ -56,7 +63,7 @@ impl ServedService {
                     ServiceRequest::Hello { .. } => {
                         asked.push(request);
                         ServiceResponse::Hello {
-                            version: ServiceVersion::current(),
+                            version: version.clone(),
                             binary: PathBuf::new(),
                         }
                     },

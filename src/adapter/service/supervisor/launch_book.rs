@@ -21,6 +21,10 @@ pub(crate) struct LaunchBook {
     /// superseded is detached, never stopped, since the service is letting go
     /// of every process.
     detaching: bool,
+    /// The generation of each pane's timed retry adoption a stop or kill
+    /// superseded: its late handle is detached, never killed, so the stop
+    /// keeps its grace.
+    stopped_adoptions: HashMap<PaneId, SpawnGeneration>,
     /// The environment of the command that last started each pane, which its
     /// policy restarts are launched with too.
     environments: HashMap<PaneId, BTreeMap<OsString, OsString>>,
@@ -133,6 +137,28 @@ impl LaunchBook {
         self.pending.remove(&pane);
     }
 
+    /// Drops `pane`'s adoption in flight because a stop or kill superseded
+    /// it, remembering its generation so its late result is told apart.
+    pub(super) fn supersede_by_stop(&mut self, pane: PaneId) {
+        if let Some(launch) = self.pending.remove(&pane) {
+            self.stopped_adoptions.insert(pane, launch.generation());
+        }
+    }
+
+    /// Whether the result of `pane`'s adoption at `generation` is one a stop
+    /// or kill superseded, forgetting it.
+    pub(super) fn take_stopped_adoption(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+    ) -> bool {
+        let stopped = self.stopped_adoptions.get(&pane) == Some(&generation);
+        if stopped {
+            self.stopped_adoptions.remove(&pane);
+        }
+        stopped
+    }
+
     /// From now on, detaches the result of every superseded launch.
     pub(super) fn detach_all(&mut self) {
         self.detaching = true;
@@ -164,9 +190,11 @@ impl LaunchBook {
         self.environments.get(&pane)
     }
 
-    /// Forgets `pane`'s environment, for a pane retired from the workspace.
+    /// Forgets `pane`'s environment and any adoption a stop superseded, for a
+    /// pane retired from the workspace.
     pub(super) fn forget(&mut self, pane: PaneId) {
         self.environments.remove(&pane);
+        self.stopped_adoptions.remove(&pane);
     }
 }
 

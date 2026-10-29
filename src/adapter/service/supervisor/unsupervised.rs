@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use rustix::process::Signal;
 
 use super::{
-    config_membership::ConfigMembership, entity::Supervisor, unsupervised_child::UnsupervisedChild,
+    adopter::collect_without_kill, config_membership::ConfigMembership, entity::Supervisor,
+    unsupervised_child::UnsupervisedChild,
 };
 use crate::{
     adapter::{
@@ -264,8 +265,12 @@ impl Supervisor {
     }
 
     /// Records that `pane`'s unsupervised child is gone: a row removed from
-    /// the project retires, any other settles as exited.
+    /// the project retires, any other settles as exited, and a holder whose
+    /// adoption the stop superseded has its exit collected.
     fn settle_unsupervised_exit(&mut self, pane: PaneId) {
+        if let Some(socket) = self.collect_after_stop.remove(&pane) {
+            collect_without_kill(socket);
+        }
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };

@@ -332,11 +332,24 @@ impl HolderRunner {
 /// [`ABANDON_TIMEOUT`]. A holder still unreachable then stops itself at its
 /// supervisor deadline.
 pub(crate) fn abandon(socket: &Path) {
+    finish(socket, true);
+}
+
+/// Collects the exit of the holder at `socket` once its child ends, never
+/// signalling the child, so a stop already under way keeps its grace; as
+/// [`abandon`] otherwise.
+pub(crate) fn collect(socket: &Path) {
+    finish(socket, false);
+}
+
+/// Reaches the holder at `socket` within [`ABANDON_TIMEOUT`], killing its
+/// child first when `kill` is set, and collects the exit.
+fn finish(socket: &Path, kill: bool) {
     let deadline = Instant::now() + ABANDON_TIMEOUT;
     loop {
         match ipc::connect(socket) {
             Ok(mut stream) => {
-                let _ = kill_and_collect(&mut stream, socket, deadline);
+                let _ = collect_exit(&mut stream, socket, deadline, kill);
                 return;
             },
             Err(_) if Instant::now() >= deadline => return,
@@ -345,16 +358,17 @@ pub(crate) fn abandon(socket: &Path) {
     }
 }
 
-/// Supervises the holder on `stream`, kills its child and collects the exit,
-/// all before `deadline`.
+/// Supervises the holder on `stream`, kills its child when `kill` is set,
+/// and collects the exit, all before `deadline`.
 ///
 /// # Errors
 /// Returns a [`HolderError`] when the exchange fails or the exit does not
 /// arrive before the deadline.
-fn kill_and_collect(
+fn collect_exit(
     stream: &mut UnixStream,
     socket: &Path,
     deadline: Instant,
+    kill: bool,
 ) -> Result<(), HolderError> {
     let remaining = || {
         Some(deadline.saturating_duration_since(Instant::now()))
@@ -366,7 +380,9 @@ fn kill_and_collect(
         role: ClientRole::Supervisor,
     }
     .write_to(stream)?;
-    ClientMessage::Control(HolderControl::Kill).write_to(stream)?;
+    if kill {
+        ClientMessage::Control(HolderControl::Kill).write_to(stream)?;
+    }
     loop {
         stream.set_read_timeout(Some(remaining()?))?;
         if matches!(HolderMessage::read_from(stream)?, HolderMessage::Exited(_)) {
@@ -466,7 +482,7 @@ mod tests {
     };
 
     use crossbeam_channel::{Receiver, bounded, unbounded};
-    use rustix::net::listen;
+    use rustix::{net::listen, process::Signal};
 
     use super::*;
     use crate::{
@@ -1145,6 +1161,39 @@ mod tests {
         wait_until("the child to die", || {
             !SignalTarget::Process(record.child_pid()).is_alive()
         });
+    }
+
+    /// Collecting a holder's exit never signals its child: the holder keeps
+    /// it running until something else ends it, then hands over the exit and
+    /// finishes.
+    #[test]
+    fn collecting_a_holder_leaves_its_child_running_until_it_ends() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let (sink, _watch) = Watch::new();
+        let handle = runner
+            .spawn(fixture.request("while :; do sleep 0.05; done"), sink)
+            .unwrap();
+        let record = runner.locate(handle.process_id().unwrap()).unwrap();
+        drop(handle);
+        let socket = record.socket().clone();
+
+        let collector = thread::spawn(move || collect(&socket));
+        thread::sleep(ABANDON_TIMEOUT / 4);
+        let child = SignalTarget::Process(record.child_pid());
+        assert!(child.is_alive(), "collecting signalled the child");
+        child.send(Signal::KILL).unwrap();
+        collector.join().unwrap();
+
+        wait_until("the holder to finish", || {
+            fixture
+                .holders()
+                .lock()
+                .unwrap()
+                .iter()
+                .all(JoinHandle::is_finished)
+        });
+        assert!(fixture.record_files().is_empty());
     }
 
     /// Abandoning a holder's handle through the port stops its child and lets

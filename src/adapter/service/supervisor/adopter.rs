@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread};
+use std::{path::PathBuf, sync::Arc, thread};
 
 use super::{
     adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::{HolderRecord, HolderRunner, abandon},
+        holder::{HolderRecord, HolderRunner, abandon, collect},
         service::{NoticeLevel, ServiceEvent},
     },
     domain::{
@@ -66,6 +66,12 @@ fn outcome(running: bool) -> &'static str {
 fn collect_exit(record: &HolderRecord) {
     let socket = record.socket().clone();
     thread::spawn(move || abandon(&socket));
+}
+
+/// Collects the exit of the holder at `socket` once its child ends, off the
+/// loop and never signalling the child.
+pub(super) fn collect_without_kill(socket: PathBuf) {
+    thread::spawn(move || collect(&socket));
 }
 
 /// Whether the child `record` names still runs as that same process; when it
@@ -411,10 +417,25 @@ impl Supervisor {
 
     /// Supersedes the timed retry adopting `pane`'s unsupervised child, when
     /// one is in flight, so a stop or kill reaches that child directly; the
-    /// adoption's result then comes back stale and is let go.
+    /// adoption's result then comes back stale and is detached, leaving the
+    /// stop its grace and escalation.
     pub(super) fn supersede_retry_adoption(&mut self, pane: PaneId) {
         if self.is_unsupervised(pane) && self.is_starting(pane) {
-            self.bump_generation(pane);
+            self.launches.supersede_by_stop(pane);
+            self.advance_generation(pane);
+        }
+    }
+
+    /// Lets go of the holder `record` names, whose adoption a stop or kill of
+    /// `pane`'s unsupervised child superseded, never signalling it: its exit
+    /// is collected once that stop has ended the child, at once when the
+    /// child is already gone.
+    fn collect_once_stopped(&mut self, pane: PaneId, record: &HolderRecord) {
+        if self.running_unsupervised_pid(pane) == Some(record.child_pid()) {
+            self.collect_after_stop
+                .insert(pane, record.socket().clone());
+        } else {
+            collect_without_kill(record.socket().clone());
         }
     }
 
@@ -742,6 +763,16 @@ impl Supervisor {
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     ) {
         let Some(launch) = self.take_launch(pane, generation) else {
+            if self.launches.take_stopped_adoption(pane, generation) {
+                match result {
+                    Ok(handle) => {
+                        drop(handle);
+                        self.collect_once_stopped(pane, record);
+                    },
+                    Err(error) => self.report_superseded_failure(record, &error),
+                }
+                return;
+            }
             let release = self.stale_release(pane, generation);
             match result {
                 Ok(handle) => release.release(handle),
@@ -838,6 +869,7 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
+    use crossbeam_channel::Sender;
     use rustix::process::Signal;
 
     use super::*;
@@ -1495,14 +1527,57 @@ mod tests {
     #[test]
     fn a_stop_while_a_retry_greets_goes_the_unsupervised_path() {
         let orphan = Orphan::spawn();
-        let (open, gate) = crossbeam_channel::unbounded();
         let adoptions = Arc::new(AtomicUsize::new(0));
+        let (mut harness, open) = greeting_retry(&orphan, &adoptions, &Arc::default());
+        harness.supervisor_mut().stop(&p());
+        assert_eq!(state(&harness), ProcessState::Stopping);
+
+        let settled = settle_late_adoption(&mut harness, &open);
+        assert_eq!(adoptions.load(Ordering::SeqCst), 1);
+        assert_ne!(settled, ProcessState::Running, "never installed");
+        drive_until_exited(&mut harness);
+        assert!(!orphan.alive(), "the stop ended the child");
+    }
+
+    /// A graceful stop asked while a timed retry greets the holder keeps its
+    /// grace when the late adoption lands: that handle is detached, never
+    /// killed, and the child, which ignores the stop signal, lives until the
+    /// grace runs out and the unsupervised stop kills it.
+    #[test]
+    fn a_graceful_stop_during_a_retry_keeps_its_grace() {
+        let orphan = Orphan::spawn();
+        let kills = Arc::new(AtomicUsize::new(0));
+        let (mut harness, open) = greeting_retry(&orphan, &Arc::default(), &kills);
+        let stopped_at = Instant::now();
+        harness.supervisor_mut().stop(&p());
+
+        settle_late_adoption(&mut harness, &open);
+
+        assert_eq!(kills.load(Ordering::SeqCst), 0, "the handle was killed");
+        assert!(orphan.alive(), "the child died before its grace ran out");
+        drive_until_exited(&mut harness);
+        assert!(!orphan.alive(), "the stop ended the child");
+        assert!(stopped_at.elapsed() >= STOP_GRACE, "ended inside the grace");
+        assert_eq!(kills.load(Ordering::SeqCst), 0, "the handle was killed");
+    }
+
+    /// A harness whose pane `p` runs `orphan` unsupervised, with a timed
+    /// retry already greeting its holder and held at the gate the returned
+    /// sender opens; the adopter counts its adoptions in `adoptions` and the
+    /// kills of the handles it gives in `kills`.
+    fn greeting_retry(
+        orphan: &Orphan,
+        adoptions: &Arc<AtomicUsize>,
+        kills: &Arc<AtomicUsize>,
+    ) -> (Harness, Sender<()>) {
+        let (open, gate) = crossbeam_channel::unbounded();
         let (mut harness, _) = reconnectable_over(
             orphan.pid(),
             GatedAdoptAdopter::builder()
                 .record(record_with_pid("p", orphan.pid()))
                 .gate(gate)
                 .adoptions(adoptions.clone())
+                .kills(kills.clone())
                 .build(),
         );
         let pane = PaneId::new(PANE);
@@ -1511,22 +1586,21 @@ mod tests {
                 .supervisor_mut()
                 .leave_unsupervised(pane, orphan.pid(), None)
         );
-
         assert!(harness.supervisor_mut().retry_adoption_now(pane));
         probed(&mut harness);
         assert_eq!(state(&harness), ProcessState::Unsupervised);
-        harness.supervisor_mut().stop(&p());
-        assert_eq!(state(&harness), ProcessState::Stopping);
+        (harness, open)
+    }
 
+    /// Lets the adoption held at the gate `open` opens through and hands its
+    /// result to the supervisor, returning the state `p` is left in.
+    fn settle_late_adoption(harness: &mut Harness, open: &Sender<()>) -> ProcessState {
         open.send(()).unwrap();
-        let (pane, generation, record, result) = adopted(&harness);
+        let (pane, generation, record, result) = adopted(harness);
         harness
             .supervisor_mut()
             .handle_adopted(pane, generation, &record, result);
-        assert_eq!(adoptions.load(Ordering::SeqCst), 1);
-        assert_ne!(state(&harness), ProcessState::Running, "never installed");
-        drive_until_exited(&mut harness);
-        assert!(!orphan.alive(), "the stop ended the child");
+        state(harness)
     }
 
     /// Hands the supervisor of `harness` what a worker found looking for the

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use crossbeam_channel::Sender;
 use getset::{Getters, MutGetters};
@@ -63,6 +66,10 @@ pub struct Supervisor {
     pub(super) settings: Settings,
     /// Tries port and HTTP probes off the loop.
     pub(super) probes: Option<ProbeWorker>,
+    /// The socket of each holder whose adoption a stop of the pane's
+    /// unsupervised child superseded, whose exit is collected once that
+    /// stop has ended the child.
+    pub(super) collect_after_stop: HashMap<PaneId, PathBuf>,
     /// Each pane's output as lines, across its runs.
     pub(super) taps: HashMap<PaneId, OutputTap>,
     /// Where the log an adopted pane's handle replays ends, so a wait with
@@ -122,6 +129,7 @@ impl Supervisor {
             attach: AttachBook::default(),
             settings,
             probes,
+            collect_after_stop: HashMap::new(),
             taps: HashMap::new(),
             replays: HashMap::new(),
             waiters: Vec::new(),

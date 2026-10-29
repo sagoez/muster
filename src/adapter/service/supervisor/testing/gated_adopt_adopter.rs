@@ -7,7 +7,7 @@ use crossbeam_channel::Receiver;
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::{fixed_pid_handle::FixedPidHandle, gated_locate_adopter::LOCATE_GATE_LIMIT};
+use super::{gated_locate_adopter::LOCATE_GATE_LIMIT, kill_count_handle::KillCountHandle};
 use crate::{
     adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
     domain::{
@@ -20,13 +20,14 @@ use crate::{
 /// An adopter that runs on a worker, as the service's does, whose holder
 /// for `record`'s child serves, and whose every adoption blocks until `gate`
 /// lets it through, as a holder slow to greet does, then succeeds and is
-/// counted.
+/// counted. Every kill or abandon of the handles it gives counts in `kills`.
 #[derive(Clone, Getters, TypedBuilder)]
 #[getset(get = "pub(crate)")]
 pub(crate) struct GatedAdoptAdopter {
     record: HolderRecord,
     gate: Receiver<()>,
     adoptions: Arc<AtomicUsize>,
+    kills: Arc<AtomicUsize>,
 }
 
 impl HolderAdopter for GatedAdoptAdopter {
@@ -40,13 +41,17 @@ impl HolderAdopter for GatedAdoptAdopter {
 
     fn adopt(
         &self,
-        record: &HolderRecord,
+        _record: &HolderRecord,
         _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         let _ = self.gate.recv_timeout(LOCATE_GATE_LIMIT);
         self.adoptions.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FixedPidHandle::new(record.child_pid())))
+        Ok(Box::new(
+            KillCountHandle::builder()
+                .kills(Arc::clone(&self.kills))
+                .build(),
+        ))
     }
 
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {

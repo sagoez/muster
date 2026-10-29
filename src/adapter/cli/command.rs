@@ -3,15 +3,36 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use super::{
-    add_args::AddArgs, completions::CompletionShell, config_subcommand::ConfigCommand,
-    coordination_command::CoordinationCommand, kv_command::KvCommand, lock_command::LockCommand,
-    log_filter_args::LogFilterArgs, note_command::NoteCommand, process_args::ProcessArgs,
-    projects_command::ProjectsCommand, run_args::RunArgs, service_command::ServiceCommand,
-    set_args::SetArgs, start_args::StartArgs, todo_command::TodoCommand, wait_args::WaitArgs,
+    add_args::AddArgs,
+    args::{HOOK_SHELLS, one_of, pid},
+    completions::CompletionShell,
+    config_subcommand::ConfigCommand,
+    coordination_command::CoordinationCommand,
+    kv_command::KvCommand,
+    lock_command::LockCommand,
+    log_filter_args::LogFilterArgs,
+    note_command::NoteCommand,
+    process_args::ProcessArgs,
+    projects_command::ProjectsCommand,
+    run_args::RunArgs,
+    service_command::ServiceCommand,
+    set_args::SetArgs,
+    shell_init::SHELL_INIT_SUBCOMMAND,
+    start_args::StartArgs,
+    todo_command::TodoCommand,
+    wait_args::WaitArgs,
 };
 use crate::{
-    adapter::{client::PageSize, holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND},
-    domain::value::ProcessRef,
+    adapter::{
+        client::PageSize,
+        holder::HOLDER_SUBCOMMAND,
+        service::protocol::SERVICE_SUBCOMMAND,
+        shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
+    },
+    domain::{
+        occupancy::ReportSeq,
+        value::{Pid, ProcessRef},
+    },
 };
 
 /// Subcommands. Absent, muster prints `ps`.
@@ -264,7 +285,7 @@ pub enum Command {
         #[arg(long = "as", value_name = "NAME")]
         agent: Option<String>,
     },
-    /// Diagnose muster's database, projects and completions.
+    /// Diagnose muster's database, projects, completions and shell hook.
     Doctor {
         /// Print the result as JSON.
         #[arg(long)]
@@ -275,6 +296,29 @@ pub enum Command {
         /// Shell to print the hook for.
         #[arg(value_enum)]
         shell: CompletionShell,
+    },
+    /// Print the shell hook that starts a project's processes when a shell
+    /// enters it.
+    ///
+    /// They stop once no shell has been in the project for the idle-stop
+    /// time. Add `eval "$(muster shell-init bash)"` to ~/.bashrc, the same with zsh
+    /// to ~/.zshrc, or `muster shell-init fish | source` to fish's
+    /// config.fish. The prompt never waits on muster.
+    #[command(name = SHELL_INIT_SUBCOMMAND)]
+    ShellInit {
+        /// Shell to print the hook for.
+        #[arg(value_parser = one_of::<HookShell>(&HOOK_SHELLS))]
+        shell: HookShell,
+    },
+    /// Internal: what the shell hook runs at each prompt to report its shell.
+    #[command(name = SHELL_REPORT_SUBCOMMAND, hide = true)]
+    ShellReport {
+        /// The shell's pid.
+        #[arg(long, value_parser = pid)]
+        pid: Pid,
+        /// The prompt's number, rising.
+        #[arg(long)]
+        seq: ReportSeq,
     },
     /// Internal: runs one process holder from the spec file it is handed.
     #[command(name = HOLDER_SUBCOMMAND, hide = true)]

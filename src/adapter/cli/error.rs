@@ -9,6 +9,7 @@ use crate::{
         holder::{HolderError, PatternError},
         sanitize::printable,
         service::ServiceErrorKind,
+        shell::HookScriptError,
     },
     domain::{
         config::ConfigError,
@@ -234,6 +235,10 @@ pub enum CliError {
         #[source]
         source: ExchangeError,
     },
+    /// `muster shell-init` cannot name the muster binary or the notes folder
+    /// in a shell script.
+    #[error(transparent)]
+    Unhookable(#[from] HookScriptError),
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -394,7 +399,8 @@ impl CliError {
             | Self::StackFile { .. }
             | Self::SnapshotFile { .. }
             | Self::FileExists(_)
-            | Self::Unexportable { .. } => FailureKind::InvalidInput,
+            | Self::Unexportable { .. }
+            | Self::Unhookable(_) => FailureKind::InvalidInput,
         }
     }
 
@@ -446,7 +452,8 @@ impl CliError {
             | Self::StackFile { .. }
             | Self::SnapshotFile { .. }
             | Self::FileExists(_)
-            | Self::Unexportable { .. } => &[],
+            | Self::Unexportable { .. }
+            | Self::Unhookable(_) => &[],
         }
     }
 

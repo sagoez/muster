@@ -35,7 +35,7 @@ use muster::{
             Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
-        shell::ShellFiles,
+        shell::{SHELL_REPORT_SUBCOMMAND, ShellFiles},
         store::SqliteStore,
     },
     constants::APP_NAME,
@@ -4648,4 +4648,75 @@ fn the_filesystem_root_and_home_are_never_registered() {
     }
     let (_, projects) = scratch.json(&["projects"]);
     assert_eq!(projects, serde_json::json!([]), "{projects}");
+}
+
+/// The report a shell's hook runs at each prompt prints nothing and exits 0
+/// where muster keeps no database, for a live shell and a gone one alike,
+/// and creates no database and starts no service.
+#[test]
+fn shell_report_prints_nothing_and_exits_0_without_a_database() {
+    let scratch = Scratch::empty();
+    let mut gone = Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id().to_string();
+    gone.wait().unwrap();
+
+    for pid in [process::id().to_string(), gone_pid] {
+        let report = scratch.muster(&[SHELL_REPORT_SUBCOMMAND, "--pid", &pid, "--seq", "1"]);
+
+        assert_eq!(report.status.code(), Some(0), "{}", shown(&report));
+        assert!(
+            report.stdout.is_empty() && report.stderr.is_empty(),
+            "{}",
+            shown(&report)
+        );
+    }
+    assert!(!scratch.database().exists());
+    assert!(!scratch.socket().exists());
+}
+
+/// `projects set` gives a project its own idle stop, named by `--project`
+/// or by name, and back to the setting with `default`; `projects` lists it.
+/// A value it does not take, or a folder that is no project, exits 4.
+#[test]
+fn projects_set_gives_a_project_its_own_idle_stop() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+
+    let (set, own) = scratch.json_on(&shop, &["projects", "set", "--idle-stop", "10m"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(own["idle_stop"], "10m", "{own}");
+    assert_eq!(own["source"], "project", "{own}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], "10m", "{listed}");
+
+    let (_, inherited) = scratch.json(&["projects", "set", "shop", "--idle-stop", "default"]);
+    assert_eq!(inherited["idle_stop"], "30m", "{inherited}");
+    assert_eq!(inherited["source"], "setting", "{inherited}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], Value::Null, "{listed}");
+
+    let invalid = scratch.on(&shop, &["projects", "set", "--idle-stop", "soon"]);
+    assert_eq!(
+        invalid.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&invalid)
+    );
+    assert!(
+        stderr(&invalid).contains("a duration such as 30m, or never"),
+        "{}",
+        shown(&invalid)
+    );
+    let elsewhere = scratch.muster(&["projects", "set", "--idle-stop", "10m"]);
+    assert_eq!(
+        elsewhere.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&elsewhere)
+    );
+    assert!(
+        stderr(&elsewhere).contains("no muster project"),
+        "{}",
+        shown(&elsewhere)
+    );
 }

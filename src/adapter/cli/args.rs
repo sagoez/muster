@@ -17,12 +17,13 @@ use crate::{
         holder::{LineLimit, MAX_LOG_LINES},
         sanitize::printable,
         service::StateGoal,
+        shell::HookShell,
     },
     constants::APP_NAME,
     domain::{
         config::SettingKey,
         process::{RestartPolicy, StopSignal},
-        value::{PositiveDuration, StopGrace},
+        value::{Pid, PositiveDuration, StopGrace},
     },
 };
 
@@ -66,6 +67,10 @@ static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<R
 static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopSignal>);
 /// The names `muster wait --state` accepts.
 static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateGoal>);
+/// The shells `muster shell-init` prints a hook for.
+pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
+/// What a pid argument takes.
+const PID_FORM: &str = "a process id above 1";
 
 /// The kebab-case name of each variant of `T`.
 fn variant_names<T: IntoEnumIterator + Display>() -> Vec<String> {
@@ -124,6 +129,18 @@ pub(super) fn line_limit(raw: &str) -> Result<LineLimit, String> {
         .ok()
         .and_then(|lines| LineLimit::try_new(lines).ok())
         .ok_or_else(|| format!("{LINE_LIMIT_FORM}{MAX_LOG_LINES}"))
+}
+
+/// Parses a process id.
+///
+/// # Errors
+/// Returns the form expected for anything but a whole number above 1.
+pub(super) fn pid(raw: &str) -> Result<Pid, String> {
+    raw.trim()
+        .parse()
+        .ok()
+        .and_then(|pid| Pid::try_new(pid).ok())
+        .ok_or_else(|| PID_FORM.to_string())
 }
 
 /// The command line's definition, with `--project` completing the projects
@@ -185,7 +202,13 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::{holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND};
+    use crate::{
+        adapter::{
+            holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
+            shell::SHELL_REPORT_SUBCOMMAND,
+        },
+        domain::occupancy::ReportSeq,
+    };
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.
@@ -372,6 +395,57 @@ mod tests {
         assert_eq!(after.project.as_deref(), Some("./web"));
         let bare = Args::try_parse_from(["muster"]).unwrap();
         assert!(bare.command.is_none());
+    }
+
+    /// The hidden shell report takes the `--pid` and `--seq` the hook
+    /// passes, and refuses a pid no shell could have.
+    #[test]
+    fn the_shell_report_reads_the_hook_s_pid_and_seq() {
+        let args = Args::try_parse_from([
+            "muster",
+            SHELL_REPORT_SUBCOMMAND,
+            "--pid",
+            "4242",
+            "--seq",
+            "7",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Some(Command::ShellReport { pid, seq })
+                if pid.into_inner() == 4242 && seq == ReportSeq::new(7)
+        ));
+        for refused in ["1", "0", "-3", "shell"] {
+            assert!(
+                Args::try_parse_from([
+                    "muster",
+                    SHELL_REPORT_SUBCOMMAND,
+                    "--pid",
+                    refused,
+                    "--seq",
+                    "1"
+                ])
+                .is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// `shell-init` takes each hooked shell by name and lists them on a typo.
+    #[test]
+    fn shell_init_takes_each_hooked_shell() {
+        for shell in HookShell::iter() {
+            let args = Args::try_parse_from(["muster", "shell-init", &shell.to_string()]).unwrap();
+            assert!(
+                matches!(args.command, Some(Command::ShellInit { shell: parsed }) if parsed == shell)
+            );
+        }
+        let Err(typo) = Args::try_parse_from(["muster", "shell-init", "tcsh"]) else {
+            panic!("tcsh is refused");
+        };
+        let typo = typo.to_string();
+        assert!(typo.contains("bash, zsh, fish"), "{typo}");
     }
 
     /// The hidden holder entry point takes its spec from its own `--spec`.

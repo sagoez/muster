@@ -59,6 +59,10 @@ const START_LOCK_MODE: u32 = 0o600;
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The folder a path with no parent is relative to.
 const CURRENT_DIR: &str = ".";
+/// What a test client names as its binary, in its state directory, so it
+/// never starts a service.
+#[cfg(test)]
+const NO_BINARY: &str = "no-muster";
 
 /// A client of this user's muster service, which it starts on demand and
 /// replaces when the service runs an older muster version.
@@ -286,6 +290,14 @@ impl ServiceClient {
             state_dir,
             binary,
         }
+    }
+
+    /// The client of a test's service of `state_dir`, bound in `socket_dir`,
+    /// that can never start one: its binary does not exist.
+    #[cfg(test)]
+    pub(crate) fn scratch(state_dir: PathBuf, socket_dir: &Path) -> Self {
+        let binary = state_dir.join(NO_BINARY);
+        Self::under(state_dir, socket_dir, binary)
     }
 
     /// The socket to reach the service at: the one the running service

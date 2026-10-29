@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::ValueEnum;
+use strum::IntoEnumIterator;
 
 use super::{
     completions::{CompletionShell, registration_line},
@@ -17,11 +18,13 @@ use super::{
     report::Report,
     row::Row,
     row_kind::RowKind,
+    shell_init::rc_line,
 };
 use crate::{
     adapter::{
         client::{ClientError, ProjectTarget, SocketDirCheck},
         sanitize::printable,
+        shell::HookShell,
     },
     domain::{
         config::{ConfigError, ProcessSpec, Stack},
@@ -79,6 +82,11 @@ const ELVISH_RC: &str = ".elvish/rc.elv";
 const ELVISH_XDG_RC: &str = "elvish/rc.elv";
 /// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
+
+/// The shell-hook probe when the shell doctor runs in loads the hook.
+const HOOK_ACTIVE: &str = "active in this shell";
+/// The shell-hook probe when it does not, before the line that loads it.
+const HOOK_MISSING: &str = "not loaded in this shell; add to its rc file:";
 
 /// Builds one probe.
 fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
@@ -345,6 +353,41 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
     }
 }
 
+/// Whether the shell doctor runs in, `parent`, is the one the hook exported
+/// as `exported`; when it is not, warns with the line that loads the hook
+/// for the shell `shell_path` names, or for every shell when it names none
+/// the hook supports.
+pub fn shell_hook_probe(
+    exported: Option<&str>,
+    parent: Option<u32>,
+    shell_path: Option<&str>,
+) -> Probe {
+    let hooked = exported
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .is_some_and(|pid| Some(pid) == parent);
+    if hooked {
+        return probe(
+            DoctorCheck::ShellHook,
+            ProbeOutcome::Ok,
+            HOOK_ACTIVE.to_string(),
+        );
+    }
+    let lines: Vec<String> = match shell_path.and_then(hook_shell_from_path) {
+        Some(shell) => vec![rc_line(shell)],
+        None => HookShell::iter().map(rc_line).collect(),
+    };
+    probe(
+        DoctorCheck::ShellHook,
+        ProbeOutcome::Warn,
+        format!("{HOOK_MISSING} {}", lines.join(DETAIL_SEPARATOR)),
+    )
+}
+
+/// The hooked shell a `$SHELL` path names, if the hook supports it.
+fn hook_shell_from_path(shell_path: &str) -> Option<HookShell> {
+    Path::new(shell_path).file_name()?.to_str()?.parse().ok()
+}
+
 /// Whether any active (non-comment) line contains the shell's registration
 /// hook; a commented-out line is never evaluated by the shell.
 fn registers_completions(content: &str, shell: CompletionShell) -> bool {
@@ -577,6 +620,55 @@ mod tests {
         let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+    }
+
+    /// The hook is found only when the shell doctor runs in is the one that
+    /// exported its pid; otherwise the probe warns with the line for
+    /// `$SHELL`, or every shell's line when `$SHELL` is none the hook
+    /// supports.
+    #[test]
+    fn doctor_finds_the_hook_only_when_the_parent_is_the_hooked_shell() {
+        let active = shell_hook_probe(Some("4242"), Some(4242), Some("/bin/zsh"));
+        assert_eq!(active.outcome(), ProbeOutcome::Ok);
+        assert_eq!(active.detail(), HOOK_ACTIVE);
+        assert_eq!(active.check(), DoctorCheck::ShellHook);
+
+        for (exported, parent) in [
+            (Some("4242"), Some(4243)),
+            (None, Some(4242)),
+            (Some("4242"), None),
+            (Some("not a pid"), Some(4242)),
+        ] {
+            let probe = shell_hook_probe(exported, parent, Some("/usr/bin/zsh"));
+            assert_eq!(
+                probe.outcome(),
+                ProbeOutcome::Warn,
+                "{exported:?} {parent:?}"
+            );
+            assert_eq!(
+                probe.detail(),
+                &format!("{HOOK_MISSING} {}", rc_line(HookShell::Zsh))
+            );
+        }
+
+        let fish = shell_hook_probe(None, Some(1), Some("/opt/homebrew/bin/fish"));
+        assert!(
+            fish.detail().ends_with("muster shell-init fish | source"),
+            "{}",
+            fish.detail()
+        );
+
+        for shell_path in [Some("/bin/tcsh"), None] {
+            let unknown = shell_hook_probe(None, Some(4242), shell_path);
+            assert_eq!(unknown.outcome(), ProbeOutcome::Warn);
+            for shell in HookShell::iter() {
+                assert!(
+                    unknown.detail().contains(&rc_line(shell)),
+                    "{}",
+                    unknown.detail()
+                );
+            }
+        }
     }
 
     /// A `$SHELL` path maps to a completion shell only when muster knows it.

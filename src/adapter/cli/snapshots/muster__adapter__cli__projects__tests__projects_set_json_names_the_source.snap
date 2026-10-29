@@ -1,0 +1,30 @@
+---
+source: src/adapter/cli/projects.rs
+expression: "serde_json::to_string_pretty(&views).unwrap()"
+---
+[
+  {
+    "idle_stop": "10m",
+    "project": {
+      "name": "shop",
+      "root": "/home/me/shop"
+    },
+    "source": "project"
+  },
+  {
+    "idle_stop": "never",
+    "project": {
+      "name": "shop",
+      "root": "/home/me/shop"
+    },
+    "source": "project"
+  },
+  {
+    "idle_stop": "30m",
+    "project": {
+      "name": "shop",
+      "root": "/home/me/shop"
+    },
+    "source": "setting"
+  }
+]

@@ -8,6 +8,7 @@ const THIS_FOLDER_LABEL: &str = "this folder";
 const OLD_FILES_LABEL: &str = "old files";
 const SOCKET_LABEL: &str = "socket";
 const COMPLETIONS_LABEL: &str = "completions";
+const SHELL_HOOK_LABEL: &str = "shell hook";
 
 /// What one `muster doctor` probe checks, named in kebab case under
 /// `--json`.
@@ -28,6 +29,8 @@ pub enum DoctorCheck {
     Socket,
     /// Whether the shell registers muster's completions.
     Completions,
+    /// Whether the shell doctor runs in loads muster's prompt hook.
+    ShellHook,
 }
 
 impl DoctorCheck {
@@ -41,6 +44,7 @@ impl DoctorCheck {
             Self::OldFiles => OLD_FILES_LABEL,
             Self::Socket => SOCKET_LABEL,
             Self::Completions => COMPLETIONS_LABEL,
+            Self::ShellHook => SHELL_HOOK_LABEL,
         }
     }
 }

@@ -1,4 +1,5 @@
-//! `muster projects`: the registered projects, and removing one.
+//! `muster projects`: the registered projects, changing one's idle stop,
+//! and removing one.
 
 use std::{
     fs,
@@ -11,6 +12,9 @@ use typed_builder::TypedBuilder;
 
 use super::{
     error::CliError,
+    idle_stop_override::IdleStopOverride,
+    idle_stop_source::IdleStopSource,
+    idle_stop_view::IdleStopView,
     output::{COLUMN_GAP, action_rows, table_lines},
     project_removal::ProjectRemoval,
     report::Report,
@@ -19,15 +23,16 @@ use super::{
 };
 use crate::{
     adapter::{
-        client::{ServiceClient, SettleWatch, process::down},
+        client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down},
         path::expand_home,
         sanitize::printable,
     },
+    application::StackEditor,
     domain::{
         config::ConfigError,
         port::{LocalState, StateChangeNotifier},
         project::Project,
-        value::{ProjectName, ProjectRoot},
+        value::{IdleStop, ProjectName, ProjectRoot},
     },
 };
 
@@ -48,6 +53,10 @@ const NO_PROJECTS: &str =
 const INVALID: &str = "unreadable: ";
 /// Stands for the name of a project whose stored row does not read.
 const UNNAMED: &str = "?";
+/// Names a project's idle stop in its rows.
+const IDLE_STOP_LABEL: &str = "idle-stop";
+/// Says a project's idle stop is the setting's, before the setting's value.
+const FOLLOWS_SETTING: &str = "follows the setting";
 /// Said when a removed project's processes could not be stopped first.
 const NOTHING_STOPPED: &str = "its stored processes did not read, so none were stopped first";
 /// Opens the line saying a project was removed.
@@ -79,6 +88,11 @@ pub struct ProjectListing {
     /// Whether it contains the current folder.
     #[getset(get_copy = "pub")]
     current: bool,
+    /// Its own idle stop, or none when it follows the setting.
+    #[serde(with = "crate::adapter::wire::optional_form")]
+    #[builder(default)]
+    #[getset(get_copy = "pub")]
+    idle_stop: Option<IdleStop>,
 }
 
 /// Every registered project, the one containing `cwd` marked current, then
@@ -106,6 +120,7 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
             .root(project.root().as_ref().clone())
             .processes(processes)
             .invalid(invalid)
+            .idle_stop(*project.idle_stop())
             .build())
     });
     let unreadable = store.unreadable_projects()?.into_iter().map(|project| {
@@ -120,8 +135,9 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
     readable.chain(unreadable).collect()
 }
 
-/// The human list of `listings`: `name  folder  N processes`, aligned,
-/// the current project marked.
+/// The human list of `listings`: `name  folder  N processes`, then the
+/// project's own idle stop when it has one, aligned, the current project
+/// marked.
 pub fn list_rows(listings: &[ProjectListing]) -> Report {
     if listings.is_empty() {
         return Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
@@ -144,6 +160,10 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
                     .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
                 printable(&listing.root().to_string_lossy()),
                 contents,
+                listing
+                    .idle_stop()
+                    .map(|idle_stop| format!("{IDLE_STOP_LABEL} {idle_stop}"))
+                    .unwrap_or_default(),
             ]
         })
         .collect();
@@ -160,6 +180,43 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
         })
         .collect();
     Report::new(PROJECTS_TITLE, rows)
+}
+
+/// Gives `project` the idle stop `choice` names through `editor`, which
+/// tells a running service, and returns the idle stop now in effect, read
+/// from the setting in `store` when the project follows it.
+///
+/// # Errors
+/// Returns the [`CliError`] of a store that cannot be read or written.
+pub fn set_idle_stop(
+    store: &dyn LocalState,
+    editor: &StackEditor<'_>,
+    project: &Project,
+    choice: IdleStopOverride,
+) -> Result<IdleStopView, CliError> {
+    let updated = editor.set_idle_stop(project.root(), choice.own())?;
+    let (idle_stop, source) = match updated.idle_stop() {
+        Some(own) => (*own, IdleStopSource::Project),
+        None => (*store.load()?.idle_stop(), IdleStopSource::Setting),
+    };
+    Ok(IdleStopView::builder()
+        .project(ProjectIdentityView::from(&updated))
+        .idle_stop(idle_stop)
+        .source(source)
+        .build())
+}
+
+/// The framed line `projects set` prints: `shop idle-stop 10m`, or `shop
+/// idle-stop follows the setting (30m)`.
+pub fn idle_stop_rows(view: &IdleStopView) -> Report {
+    let value = match view.source() {
+        IdleStopSource::Project => view.idle_stop().to_string(),
+        IdleStopSource::Setting => format!("{FOLLOWS_SETTING} ({})", view.idle_stop()),
+    };
+    Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
+        RowKind::Ok,
+        format!("{} {IDLE_STOP_LABEL} {value}", view.project().name()),
+    )])
 }
 
 /// Stops every process of `project` through `client`, then forgets the
@@ -266,8 +323,23 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
-    use crate::adapter::cli::report::plain;
+    use crate::{
+        adapter::{
+            cli::report::plain,
+            client::recording_notifier::RecordingNotifier,
+            store::{
+                SqliteStore,
+                test_support::{fresh_store, spec},
+            },
+        },
+        domain::{
+            config::ImportMode,
+            port::{ProjectStore, SettingsReader, StackStore},
+        },
+    };
 
     /// A listing of `name` at `root` with `processes`, `current` or not.
     fn listing(name: &str, root: &str, processes: usize, current: bool) -> ProjectListing {
@@ -301,7 +373,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(broken).unwrap(),
-            serde_json::json!({"name": null, "root": "/srv/odd", "processes": null, "current": false, "invalid": "its name is refused"})
+            serde_json::json!({"name": null, "root": "/srv/odd", "processes": null, "current": false, "invalid": "its name is refused", "idle_stop": null})
         );
     }
 
@@ -326,7 +398,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(broken).unwrap(),
-            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid"})
+            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid", "idle_stop": null})
         );
     }
 
@@ -346,12 +418,146 @@ mod tests {
         assert!(plain(&list_rows(&[])).contains("muster add"));
     }
 
-    /// The JSON names, roots, counts and marks each project.
+    /// The JSON names, roots, counts and marks each project, with its own
+    /// idle stop or null when it follows the setting.
     #[test]
     fn a_listing_reads_as_json() {
         assert_eq!(
             serde_json::to_value(listing("shop", "/home/me/shop", 3, true)).unwrap(),
-            serde_json::json!({"name": "shop", "root": "/home/me/shop", "processes": 3, "current": true})
+            serde_json::json!({"name": "shop", "root": "/home/me/shop", "processes": 3, "current": true, "idle_stop": null})
+        );
+    }
+
+    /// A store holding the project `shop` with one process, in a scratch
+    /// directory, and the project as stored.
+    fn shop_store() -> (SqliteStore, Project, TempDir) {
+        let (store, scratch) = fresh_store();
+        let root = ProjectRoot::try_new(scratch.path().join("shop")).unwrap();
+        store
+            .import(&root, &[spec("api", "true")], ImportMode::Strict)
+            .unwrap();
+        let project = store.project_at(&root).unwrap().unwrap();
+        (store, project, scratch)
+    }
+
+    /// `idle_stop` as written.
+    fn idle(raw: &str) -> IdleStop {
+        raw.parse().unwrap()
+    }
+
+    /// A duration and `never` are stored as the project's own, `default`
+    /// clears it, each change is told to the service, and each answer names
+    /// the idle stop in effect and where it comes from.
+    #[test]
+    fn projects_set_stores_a_duration_never_and_default() {
+        let (store, project, _scratch) = shop_store();
+        let notifier = RecordingNotifier::default();
+        let editor = StackEditor::builder()
+            .stacks(&store)
+            .settings(&store)
+            .notifier(&notifier)
+            .build();
+        let stored = || {
+            *store
+                .project_at(project.root())
+                .unwrap()
+                .unwrap()
+                .idle_stop()
+        };
+
+        let ten = set_idle_stop(
+            &store,
+            &editor,
+            &project,
+            IdleStopOverride::Own(idle("10m")),
+        )
+        .unwrap();
+        assert_eq!(stored(), Some(idle("10m")));
+        assert_eq!(
+            (ten.idle_stop(), ten.source()),
+            (idle("10m"), IdleStopSource::Project)
+        );
+
+        let never = set_idle_stop(
+            &store,
+            &editor,
+            &project,
+            IdleStopOverride::Own(IdleStop::Never),
+        )
+        .unwrap();
+        assert_eq!(stored(), Some(IdleStop::Never));
+        assert_eq!(never.idle_stop(), IdleStop::Never);
+
+        let inherited =
+            set_idle_stop(&store, &editor, &project, IdleStopOverride::Setting).unwrap();
+        assert_eq!(stored(), None);
+        assert_eq!(
+            (inherited.idle_stop(), inherited.source()),
+            (*store.load().unwrap().idle_stop(), IdleStopSource::Setting)
+        );
+        assert_eq!(notifier.stacks().lock().unwrap().len(), 3);
+        assert_eq!(plain(&idle_stop_rows(&ten)), "shop idle-stop 10m");
+        assert_eq!(
+            plain(&idle_stop_rows(&inherited)),
+            "shop idle-stop follows the setting (30m)"
+        );
+    }
+
+    /// The JSON of `projects set` names the project, the idle stop in
+    /// effect, and its source.
+    #[test]
+    fn projects_set_json_names_the_source() {
+        let (store, project, _scratch) = shop_store();
+        let notifier = RecordingNotifier::default();
+        let editor = StackEditor::builder()
+            .stacks(&store)
+            .settings(&store)
+            .notifier(&notifier)
+            .build();
+        let views: Vec<serde_json::Value> = [
+            IdleStopOverride::Own(idle("10m")),
+            IdleStopOverride::Own(IdleStop::Never),
+            IdleStopOverride::Setting,
+        ]
+        .into_iter()
+        .map(|choice| {
+            let mut json =
+                serde_json::to_value(set_idle_stop(&store, &editor, &project, choice).unwrap())
+                    .unwrap();
+            json["project"]["root"] = serde_json::json!("/home/me/shop");
+            json
+        })
+        .collect();
+
+        insta::assert_snapshot!(serde_json::to_string_pretty(&views).unwrap());
+    }
+
+    /// `muster projects` lists a project's own idle stop, and nothing for one
+    /// following the setting.
+    #[test]
+    fn projects_lists_the_override() {
+        let (store, project, scratch) = shop_store();
+        let blog = ProjectRoot::try_new(scratch.path().join("blog")).unwrap();
+        store
+            .import(&blog, &[spec("web", "true")], ImportMode::Strict)
+            .unwrap();
+        store
+            .set_idle_stop(project.root(), Some(idle("10m")))
+            .unwrap();
+
+        let listings = list(&store, scratch.path()).unwrap();
+
+        let own: Vec<Option<IdleStop>> = listings.iter().map(ProjectListing::idle_stop).collect();
+        assert_eq!(own, vec![None, Some(idle("10m"))]);
+        let rows = plain(&list_rows(&listings));
+        assert!(rows.ends_with("1 process  idle-stop 10m"), "{rows}");
+        assert!(
+            !rows.lines().next().unwrap().contains("idle-stop"),
+            "{rows}"
+        );
+        assert_eq!(
+            serde_json::to_value(&listings[1]).unwrap()["idle_stop"],
+            serde_json::json!("10m")
         );
     }
 }

@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use super::{
-    client_error::ClientError, service_access::ServiceAccess, service_client::ServiceClient,
+    client_error::ClientError,
+    served_service::{Connector, ServedService},
+    service_access::ServiceAccess,
+    service_client::ServiceClient,
     service_status::ServiceStatus,
 };
 use crate::{
@@ -15,12 +18,15 @@ use crate::{
     domain::value::ProjectRoot,
 };
 
-/// A service a test never reaches: connecting fails as an unreachable service
-/// would and is counted, nothing is loaded, notices are answered as `running`
-/// says, a request asked of a running service gets the answer the test
-/// scripted, and every request it is told or asked is recorded.
+/// A service a test never reaches unless told to: connecting fails as an
+/// unreachable service would, or reaches the [`ServedService`] it was handed,
+/// and is counted either way; nothing is loaded, notices are answered as
+/// `running` says, a request asked of a running service gets the answer the
+/// test scripted, and every request it is told or asked is recorded.
 #[derive(Default)]
 pub(crate) struct FakeService {
+    /// What a connection reaches, or none when no service can be reached.
+    starts: Option<Connector>,
     /// The live notices of a running service, or none when none runs.
     running: Option<Vec<Notice>>,
     /// What a request asked of a running service is answered, or none when
@@ -52,6 +58,14 @@ impl FakeService {
         }
     }
 
+    /// This service, connecting to `served` as if it had been started.
+    pub(crate) fn starting(self, served: &ServedService) -> Self {
+        Self {
+            starts: Some(served.connector()),
+            ..self
+        }
+    }
+
     /// Every request the service was told, in order.
     pub(crate) fn told(&self) -> Vec<ServiceRequest> {
         self.told.lock().unwrap().clone()
@@ -71,7 +85,10 @@ impl FakeService {
 impl ServiceAccess for FakeService {
     fn connect(&self) -> Result<ServiceClient, ClientError> {
         self.connects.fetch_add(1, Ordering::SeqCst);
-        Err(ClientError::NoStateDir(NoStateDir))
+        self.starts
+            .as_ref()
+            .map(|connect| connect())
+            .ok_or(ClientError::NoStateDir(NoStateDir))
     }
 
     fn loaded_status(&self, _project: &ProjectRoot) -> Result<Option<ProjectStatus>, ClientError> {

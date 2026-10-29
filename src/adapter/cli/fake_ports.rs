@@ -31,9 +31,15 @@ impl FakePorts {
     /// Ports over `store`, a fresh [`FakeService`], a fresh notifier and a
     /// fresh scratch state directory.
     pub(super) fn new(store: SqliteStore) -> Self {
+        Self::with_service(store, FakeService::default())
+    }
+
+    /// Ports over `store` and `service`, a fresh notifier and a fresh
+    /// scratch state directory.
+    pub(super) fn with_service(store: SqliteStore, service: FakeService) -> Self {
         Self {
             store,
-            service: Arc::new(FakeService::default()),
+            service: Arc::new(service),
             notifier: Arc::new(RecordingNotifier::default()),
             state_dir: TempDir::new().unwrap(),
         }

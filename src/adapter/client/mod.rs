@@ -43,6 +43,8 @@ mod removed_view;
 mod resolve_error;
 mod running_service;
 mod running_service_notifier;
+#[cfg(test)]
+pub(crate) mod served_service;
 mod service_access;
 mod service_client;
 mod service_log;

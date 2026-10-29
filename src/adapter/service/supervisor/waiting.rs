@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
+    thread,
     time::{Duration, Instant, SystemTime},
 };
 
 use crossbeam_channel::Sender;
 
 use super::{
-    entity::Supervisor, run_end::RunEnd, run_readiness::RunReadiness,
+    entity::Supervisor, held_wait::HeldWait, run_end::RunEnd, run_readiness::RunReadiness,
     spawn_generation::SpawnGeneration,
 };
 use crate::{
@@ -15,8 +16,8 @@ use crate::{
         service::{
             EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
             OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
-            ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
-            WaitSpec, WaitStatus, Waiter,
+            ServiceEvent, ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup,
+            WaitOutcome, WaitReply, WaitSpec, WaitStatus, Waiter,
         },
     },
     domain::{
@@ -130,14 +131,107 @@ impl Supervisor {
     /// Registers `prepared`, answering on `reply` when its condition holds,
     /// its run ends or its time runs out; a wait whose answer is already known
     /// is answered at once. With `after`, only runs started after that
-    /// generation count, as for a wait that rides on a start or restart.
+    /// generation count, as for a wait that rides on a start or restart. A
+    /// wait on a process this service never saw run is held while its log's
+    /// end is read off the loop, so its cursor and tail come from the log and
+    /// a `since` past the log's end is refused.
     pub fn begin_wait(
         &mut self,
         prepared: PreparedWait,
         after: Option<SpawnGeneration>,
         reply: Sender<ServiceResponse>,
     ) {
-        self.register(prepared, after, WaitReply::Direct(reply));
+        let pane = prepared.pane;
+        if !self.knows_no_output(pane) {
+            self.register(prepared, after, WaitReply::Direct(reply));
+            return;
+        }
+        let held = HeldWait {
+            prepared,
+            after,
+            reply,
+        };
+        match self.held_waits.get_mut(&pane) {
+            Some(waits) => waits.push(held),
+            None => {
+                self.held_waits.insert(pane, vec![held]);
+                self.read_log_tail(pane);
+            },
+        }
+    }
+
+    /// Answers the waits held on `pane` once the end of its log was read:
+    /// `tail`, the log's last bytes and where they start, seeds its output
+    /// when it still never ran here, then each wait is refused when its
+    /// `since` is past that end and registered otherwise.
+    pub fn handle_log_tail(&mut self, pane: PaneId, tail: Option<(OutputCursor, Vec<u8>)>) {
+        let Some(held) = self.held_waits.remove(&pane) else {
+            return;
+        };
+        if self.knows_no_output(pane) {
+            let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
+            let tap = self.tap(pane);
+            tap.begin_run_at(at);
+            tap.feed(Some(at), &bytes);
+        }
+        for HeldWait {
+            prepared,
+            after,
+            reply,
+        } in held
+        {
+            if let Some(since) = prepared.since
+                && let Some(end) = self.end_before(pane, since)
+            {
+                let _ = reply.send(ServiceResponse::Error(invalid_input(format!(
+                    "{}: {SINCE_PAST_END} ({since} > {end})",
+                    prepared.process
+                ))));
+                continue;
+            }
+            self.register(prepared, after, WaitReply::Direct(reply));
+        }
+    }
+
+    /// Whether `pane` neither runs nor starts and this service never placed a
+    /// run of it, so where its output ends is known only from its log.
+    fn knows_no_output(&self, pane: PaneId) -> bool {
+        self.adopter.is_some()
+            && !self.is_live(pane)
+            && !self.is_starting(pane)
+            && self
+                .taps
+                .get(&pane)
+                .is_none_or(|tap| tap.run_start().is_none())
+    }
+
+    /// Reads the end of `pane`'s log on a worker when the adopter allows it,
+    /// and inline otherwise, then answers the waits held on it.
+    fn read_log_tail(&mut self, pane: PaneId) {
+        let (Some(adopter), Some(name)) = (
+            self.adopter.as_ref(),
+            self.workspace
+                .process(pane)
+                .map(|process| process.name().clone()),
+        ) else {
+            self.handle_log_tail(pane, None);
+            return;
+        };
+        let project = self.root().clone();
+        let Some(detached) = adopter.detached() else {
+            let tail = adopter.log_tail(&project, &name);
+            self.handle_log_tail(pane, tail);
+            return;
+        };
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let tail = detached.log_tail(&project, &name);
+            let _ = events.send(ServiceEvent::LogTailRead {
+                project,
+                pane,
+                tail,
+            });
+        });
     }
 
     /// Starts every autostart process that is not running, like
@@ -1438,6 +1532,67 @@ mod tests {
             EventKind::Started,
             EventKind::Exited
         ]);
+    }
+
+    /// A wait on a process this service never saw run, as after a service
+    /// restart, answers with its log's end as the cursor and its last lines
+    /// as the tail, never `o:0`, and a `since` past the log's end is refused
+    /// as `process_logs` refuses it.
+    #[test]
+    fn a_wait_on_a_process_never_run_here_answers_from_its_log() {
+        let start = OutputCursor::new(100);
+        let tail = b"booting\nboom\n";
+        let end = start.advanced(tail.len() as u64);
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::new(start, tail)));
+
+        let crashed = Some(WaitCondition::State(StateGoal::Stopped));
+        let answers = wait_on(&mut harness, "api", &spec(crashed.clone(), None), None);
+        let outcome = answered(&answers).expect("a stopped process is answered at once");
+        assert_eq!(*outcome.cursor(), end);
+        assert_eq!(
+            *outcome.tail(),
+            Vec::<String>::new(),
+            "a match carries no tail"
+        );
+
+        let never = Some(log("never"));
+        let answers = wait_on(&mut harness, "api", &spec(never.clone(), Some(start)), None);
+        let outcome = answered(&answers).expect("a process not running is answered at once");
+        assert_eq!(*outcome.cursor(), end);
+        assert_eq!(*outcome.tail(), ["booting", "boom"]);
+
+        let past = end.advanced(1);
+        let prepared = harness.supervisor_mut().prepare_wait(
+            &super::super::testing::name("api"),
+            &spec(never, Some(past)),
+        );
+        assert!(prepared.is_err(), "a since past the log's end is refused");
+    }
+
+    /// A wait on a process this service never saw run, held while its log is
+    /// read, is refused once the read shows its `since` past the log's end.
+    #[test]
+    fn a_held_wait_past_the_log_end_is_refused() {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::new(
+                OutputCursor::new(0),
+                b"boom\n",
+            )));
+        let never = Some(log("never"));
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(never, Some(OutputCursor::new(50))),
+            None,
+        );
+
+        let Ok(ServiceResponse::Error(refusal)) = answers.try_recv() else {
+            panic!("a since past the log's end is refused");
+        };
+        assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidInput);
+        assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
     }
 
     /// A `restart: always` run that exits 0 is recorded as exited, never as

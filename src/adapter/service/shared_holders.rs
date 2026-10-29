@@ -6,7 +6,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::{OutputCursor, Pid},
+        value::{OutputCursor, Pid, ProcessName, ProjectRoot},
     },
 };
 
@@ -56,7 +56,16 @@ impl HolderAdopter for SharedHolders {
         self.0.adopt(record, since, sink)
     }
 
-    /// An adoption waits for the holder's screen, so it runs off the loop.
+    fn log_tail(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
+        self.0.log_tail(project, name)
+    }
+
+    /// An adoption waits for the holder's screen, and a log is read from
+    /// disk, so both run off the loop.
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {
         Some(Arc::new(self.clone()))
     }

@@ -451,6 +451,15 @@ impl ServiceRuntime {
                     supervisor.handle_adoption_retry_due(pane, attempt);
                 }
             },
+            ServiceEvent::LogTailRead {
+                project,
+                pane,
+                tail,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_log_tail(pane, tail);
+                }
+            },
             ServiceEvent::AdoptionProbed {
                 project,
                 pane,

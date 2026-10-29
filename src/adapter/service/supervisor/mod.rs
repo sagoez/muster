@@ -19,6 +19,7 @@ mod channel_output_sink;
 mod config_membership;
 mod deps;
 mod entity;
+mod held_wait;
 mod holder_screen;
 mod launch_book;
 mod launch_purpose;

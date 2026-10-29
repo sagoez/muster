@@ -16,6 +16,7 @@ use super::{
     holder_control::HolderControl,
     holder_launcher::HolderLauncher,
     id::HolderId,
+    log_reader::{log_end, read_log_range},
     protocol::HolderMessage,
     record::HolderRecord,
 };
@@ -27,7 +28,7 @@ use crate::{
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
-        value::{OutputCursor, Pid, PositiveDuration, ProjectRoot},
+        value::{OutputCursor, Pid, PositiveDuration, ProcessName, ProjectRoot},
     },
 };
 
@@ -49,6 +50,8 @@ const READY_POLL: Duration = Duration::from_millis(10);
 const ABANDON_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest a probe of whether a holder still accepts connections waits.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Most bytes of a log's end read back for a process no supervisor saw run.
+const LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Runs every process under its own detached holder, so processes outlive the
 /// service, and finds and adopts the holders a previous service left running.
@@ -187,6 +190,21 @@ impl HolderRunner {
         let surviving = || candidates.iter().position(child_runs);
         live.or_else(surviving)
             .and_then(|index| candidates.into_iter().nth(index))
+    }
+
+    /// Where the log of the process `name` of `project` ends, and its last
+    /// bytes before that, at most [`LOG_TAIL_BYTES`], with where they start:
+    /// what a supervisor that never saw the process run reports of it. None
+    /// when the log cannot be read, as before any run wrote one.
+    pub fn log_tail(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
+        let log = self.dirs.process_log(project, name);
+        let end = log_end(&log).ok()?;
+        let from = OutputCursor::new(end.offset().saturating_sub(LOG_TAIL_BYTES));
+        read_log_range(&log, from, end).ok()
     }
 
     /// The record of a live holder supervising the child with `child_pid`,

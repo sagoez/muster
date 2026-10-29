@@ -16,7 +16,7 @@ use crate::{
         port::{OutputSink, ProcessHandle},
         process::{ExitIntent, ProcessState, RestartPolicy},
         pty::{ExitOutcome, PtyError},
-        value::{OutputCursor, PaneId, Pid},
+        value::{OutputCursor, PaneId, Pid, ProcessName, ProjectRoot},
     },
 };
 
@@ -106,6 +106,17 @@ pub trait HolderAdopter {
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError>;
 
+    /// Where the log of the process `name` of `project` ends, and its last
+    /// bytes before that with where they start, for a process this service
+    /// never saw run. Defaults to none: no log is known.
+    fn log_tail(
+        &self,
+        _project: &ProjectRoot,
+        _name: &ProcessName,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
+        None
+    }
+
     /// This adopter, shareable with a worker thread, when an adoption may
     /// block long enough that the supervisor must not wait for it on its
     /// loop. Defaults to none: adoptions run inline.
@@ -130,6 +141,14 @@ impl HolderAdopter for HolderRunner {
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         HolderRunner::adopt(self, record, since, sink)
+    }
+
+    fn log_tail(
+        &self,
+        project: &ProjectRoot,
+        name: &ProcessName,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
+        HolderRunner::log_tail(self, project, name)
     }
 }
 

@@ -3685,6 +3685,50 @@ fn a_state_dir_too_deep_for_a_socket_is_reported() {
     );
 }
 
+/// After a service restart, `wait --json` on a process that is not running
+/// answers with the cursor `logs --json` gives and the run's last lines,
+/// never `o:0`, and a `since` past that end is refused as `logs` refuses it.
+#[test]
+fn a_wait_after_a_service_restart_answers_from_the_log() {
+    let scratch = Scratch::new();
+    let shop = scratch.project(
+        "shop",
+        &stack(&[entry("crash", "echo boom; exit 3", false)]),
+    );
+    scratch.on(&shop, &["start", "crash"]);
+    let (_, crashed) = scratch.json_on(&shop, &["wait", "crash", "--state", "crashed"]);
+    assert_eq!(crashed["status"], "matched", "{crashed}");
+    let (stopped, _) = scratch.json(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    let (_, logs) = scratch.json_on(&shop, &["logs", "crash", "-n", "5"]);
+    let end = logs["cursor"].as_str().unwrap().to_string();
+    assert_ne!(end, "o:0", "{logs}");
+
+    let (_, waited) = scratch.json_on(&shop, &["wait", "crash", "--state", "crashed"]);
+    let (_, missed) = scratch.json_on(&shop, &["wait", "crash", "--log", "zzz", "--since", &end]);
+    let past = format!(
+        "o:{}",
+        end.trim_start_matches("o:").parse::<u64>().unwrap() + 1
+    );
+    let (refused, _) = scratch.json_on(&shop, &["wait", "crash", "--log", "zzz", "--since", &past]);
+
+    assert_eq!(waited["cursor"], end.as_str(), "{waited}");
+    assert_eq!(missed["status"], "not-running", "{missed}");
+    assert_eq!(missed["cursor"], end.as_str(), "{missed}");
+    assert_eq!(missed["tail"], serde_json::json!(["boom"]), "{missed}");
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stdout(&refused).contains("past the end"),
+        "{}",
+        shown(&refused)
+    );
+}
+
 /// A state directory whose holder sockets fit serves, however long: the
 /// service socket lives in the short runtime directory, and the name it is
 /// first bound at is no longer than its own.

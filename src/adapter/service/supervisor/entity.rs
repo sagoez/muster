@@ -5,8 +5,8 @@ use getset::{Getters, MutGetters};
 
 use super::{
     adopter::HolderAdopter, adoption_retries::AdoptionRetries, attach_book::AttachBook,
-    attention::Attention, deps::SupervisorDeps, launch_book::LaunchBook, metrics_book::MetricsBook,
-    pane::Pane, restart_book::RestartBook, run_readiness::RunReadiness,
+    attention::Attention, deps::SupervisorDeps, held_wait::HeldWait, launch_book::LaunchBook,
+    metrics_book::MetricsBook, pane::Pane, restart_book::RestartBook, run_readiness::RunReadiness,
     spawn_generation::SpawnGeneration,
 };
 use crate::{
@@ -67,6 +67,9 @@ pub struct Supervisor {
     pub(super) taps: HashMap<PaneId, OutputTap>,
     /// Waits not yet answered.
     pub(super) waiters: Vec<Waiter>,
+    /// Waits held, by pane, while the log's end of a process this service
+    /// never saw run is read.
+    pub(super) held_waits: HashMap<PaneId, Vec<HeldWait>>,
     /// Waits of a project-wide start, answered together, by group.
     pub(super) wait_groups: HashMap<u64, WaitGroup>,
     /// The id the next group of waits takes.
@@ -112,6 +115,7 @@ impl Supervisor {
             probes,
             taps: HashMap::new(),
             waiters: Vec::new(),
+            held_waits: HashMap::new(),
             wait_groups: HashMap::new(),
             next_wait_group: 0,
             readiness: HashMap::new(),

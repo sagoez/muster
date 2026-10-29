@@ -13,7 +13,7 @@ use crate::{
     domain::{
         port::{ListeningSocket, PortOccupant, ProcessHandle},
         pty::{ProcessOutput, PtyError},
-        value::{LocalPort, PaneId, Pid, ProjectRoot},
+        value::{LocalPort, OutputCursor, PaneId, Pid, ProjectRoot},
     },
 };
 
@@ -121,6 +121,17 @@ pub enum ServiceEvent {
         /// The record of the holder serving the child, if one does, boxed so
         /// this rare event does not size every other one.
         record: Option<Box<HolderRecord>>,
+    },
+    /// A worker read the end of the log of a process this service never saw
+    /// run; answer the waits held on it.
+    LogTailRead {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane of the process.
+        pane: PaneId,
+        /// The last bytes of its log, with where they start, which end where
+        /// the log does; none when no log could be read.
+        tail: Option<(OutputCursor, Vec<u8>)>,
     },
     /// A port or HTTP probe passed for one run of a process; a pass for a run
     /// that is no longer current is ignored.

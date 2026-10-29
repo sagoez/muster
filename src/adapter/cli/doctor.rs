@@ -21,7 +21,7 @@ use super::{
     row_kind::RowKind,
 };
 use crate::{
-    adapter::client::ProjectTarget,
+    adapter::{client::ProjectTarget, sanitize::printable},
     domain::{
         config::ConfigError,
         port::{LocalState, ProjectStore, StackStore},
@@ -42,6 +42,8 @@ const PROCESSES_OK: &str = "every stored process reads";
 const INVALID_HINT: &str = "`muster projects rm <name> --yes` forgets them";
 /// What to do about registered folders that are gone.
 const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
+/// What to do about projects whose stored rows do not read.
+const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
 /// What to do about legacy files.
 const LEGACY_HINT: &str = "muster no longer reads them; delete them";
 /// Between the parts of a probe's detail.
@@ -141,10 +143,35 @@ pub fn database_probe(opened: &Result<Arc<dyn LocalState>, ConfigError>) -> Prob
     }
 }
 
-/// How many projects are registered, warning of any whose folder is gone.
+/// How many projects are registered, failing on any whose stored row does
+/// not read, naming its folder, and warning of any whose folder is gone.
 pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
-    match projects.projects() {
-        Ok(projects) => {
+    match projects.projects().and_then(|readable| {
+        projects
+            .unreadable_projects()
+            .map(|unreadable| (readable, unreadable))
+    }) {
+        Ok((_, unreadable)) if !unreadable.is_empty() => {
+            let named: Vec<String> = unreadable
+                .iter()
+                .map(|project| {
+                    format!(
+                        "{} ({})",
+                        printable(&project.root().to_string_lossy()),
+                        project.reason()
+                    )
+                })
+                .collect();
+            probe(
+                DoctorCheck::Projects,
+                ProbeOutcome::Fail,
+                format!(
+                    "unreadable: {}{DETAIL_SEPARATOR}{UNREADABLE_HINT}",
+                    named.join(LIST_SEPARATOR)
+                ),
+            )
+        },
+        Ok((projects, _)) => {
             let gone: Vec<String> = projects
                 .iter()
                 .filter(|project| !project.root().as_ref().is_dir())

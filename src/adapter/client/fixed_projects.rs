@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::domain::{
-    config::ConfigError,
+    config::{ConfigError, UnreadableProject},
     port::ProjectStore,
     project::Project,
     value::{ProjectName, ProjectRoot},
@@ -20,6 +20,10 @@ impl FixedProjects {
 impl ProjectStore for FixedProjects {
     fn projects(&self) -> Result<Vec<Project>, ConfigError> {
         Ok(self.0.clone())
+    }
+
+    fn unreadable_projects(&self) -> Result<Vec<UnreadableProject>, ConfigError> {
+        Ok(Vec::new())
     }
 
     fn project_at(&self, root: &ProjectRoot) -> Result<Option<Project>, ConfigError> {

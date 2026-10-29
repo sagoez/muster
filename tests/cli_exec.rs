@@ -2129,6 +2129,52 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
     );
 }
 
+/// A project row edited by hand to a name muster refuses breaks only that
+/// project: every other project keeps working, `projects` lists it by its
+/// folder, a command on it names that folder, `doctor` names it, and
+/// `projects rm <folder>` forgets it.
+#[test]
+fn a_corrupt_project_row_breaks_only_that_project() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let blog = scratch.project("blog", &single());
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE projects SET name = 'bad\u{1b}]2;pwn\u{7}' WHERE name = 'blog'",
+            [],
+        )
+        .unwrap();
+    let blog_root = blog.canonicalize().unwrap().display().to_string();
+
+    let (listed, projects) = scratch.json(&["projects"]);
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let rows = projects.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{projects}");
+    let broken = rows
+        .iter()
+        .find(|row| row["root"] == blog_root.as_str())
+        .unwrap_or_else(|| panic!("no row for {blog_root}: {projects}"));
+    assert_eq!(broken["name"], Value::Null, "{projects}");
+    assert!(broken["invalid"].is_string(), "{projects}");
+
+    let (healthy, _) = scratch.json_on(&shop, &["ps"]);
+    assert!(healthy.status.success(), "{}", shown(&healthy));
+    let named = scratch.on(&blog, &["ps"]);
+    assert!(!named.status.success(), "{}", shown(&named));
+    assert!(stderr(&named).contains(&blog_root), "{}", shown(&named));
+    assert!(!stderr(&named).contains('\u{1b}'), "{}", shown(&named));
+    let doctor = scratch.muster(&["doctor"]);
+    assert!(stdout(&doctor).contains(&blog_root), "{}", shown(&doctor));
+
+    let (rm, removal) = scratch.json(&["projects", "rm", &blog_root, "--yes"]);
+    assert!(rm.status.success(), "{}", shown(&rm));
+    assert_eq!(removal["removed"], true, "{removal}");
+    let (_, projects) = scratch.json(&["projects"]);
+    assert_eq!(projects.as_array().unwrap().len(), 1, "{projects}");
+    assert_eq!(projects[0]["name"], "shop");
+}
+
 /// A setting or field past its bound is refused as invalid input, never as a
 /// database error, and changes nothing; `config set` answers with the value
 /// the database holds.

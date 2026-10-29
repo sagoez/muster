@@ -1,12 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 use rusqlite::{Connection, Params, Row, params};
 
 use super::sqlite_store::{SqliteStore, corrupt, db_error, epoch_param};
 use crate::{
-    adapter::clock::epoch_now,
+    adapter::{clock::epoch_now, sanitize::printable},
     domain::{
-        config::{ConfigError, Registration},
+        config::{ConfigError, Registration, UnreadableProject},
         port::ProjectStore,
         project::Project,
         value::{ProjectName, ProjectRoot},
@@ -15,6 +18,12 @@ use crate::{
 
 /// Selects a project's row id, root and name, in that order.
 const SELECT_PROJECT: &str = "SELECT id, root, name FROM projects";
+/// What an unreadable project's refusal calls it, before its folder.
+const PROJECT_AT: &str = "project at ";
+/// The part of a project row naming its folder.
+const FOLDER: &str = "folder";
+/// The part of a project row naming it.
+const NAME: &str = "name";
 
 /// A project with the row id other tables key it by.
 pub(super) type ProjectRow = (i64, Project);
@@ -32,27 +41,44 @@ pub(super) fn root_text(root: &ProjectRoot) -> Result<&str, ConfigError> {
         })
 }
 
-/// Reads a `SELECT_PROJECT` row.
-fn project_from_row(row: &Row) -> Result<ProjectRow, ConfigError> {
+/// Reads a `SELECT_PROJECT` row: the project, or, when the domain refuses
+/// its root or name, the folder it is stored at and why.
+///
+/// # Errors
+/// Returns a [`ConfigError`] when SQLite fails.
+fn project_from_row(row: &Row) -> Result<Result<ProjectRow, UnreadableProject>, ConfigError> {
     let id: i64 = row.get("id").map_err(db_error)?;
     let root: String = row.get("root").map_err(db_error)?;
     let name: String = row.get("name").map_err(db_error)?;
-    let project = Project::builder()
-        .root(
-            ProjectRoot::try_new(PathBuf::from(root))
-                .map_err(|error| corrupt("project root", error))?,
-        )
-        .name(ProjectName::try_new(name).map_err(|error| corrupt("project name", error))?)
-        .build();
-    Ok((id, project))
+    let unreadable = |part: &str, error: &dyn Display| {
+        UnreadableProject::builder()
+            .root(PathBuf::from(&root))
+            .reason(format!("its {part} is refused: {error}"))
+            .build()
+    };
+    let project_root = match ProjectRoot::try_new(PathBuf::from(&root)) {
+        Ok(project_root) => project_root,
+        Err(error) => return Ok(Err(unreadable(FOLDER, &error))),
+    };
+    let name = match ProjectName::try_new(name) {
+        Ok(name) => name,
+        Err(error) => return Ok(Err(unreadable(NAME, &error))),
+    };
+    Ok(Ok((
+        id,
+        Project::builder().root(project_root).name(name).build(),
+    )))
 }
 
-/// Every project row `sql` selects with `values`.
-fn projects_where(
+/// Every project row `sql` selects with `values`, each read or refused.
+///
+/// # Errors
+/// Returns a [`ConfigError`] when SQLite fails.
+fn stored_where(
     conn: &Connection,
     sql: &str,
     values: impl Params,
-) -> Result<Vec<ProjectRow>, ConfigError> {
+) -> Result<Vec<Result<ProjectRow, UnreadableProject>>, ConfigError> {
     let mut statement = conn.prepare(sql).map_err(db_error)?;
     let mut rows = statement.query(values).map_err(db_error)?;
     let mut projects = Vec::new();
@@ -62,17 +88,58 @@ fn projects_where(
     Ok(projects)
 }
 
+/// Every project row `sql` selects with `values` that reads, the others
+/// left out.
+///
+/// # Errors
+/// Returns a [`ConfigError`] when SQLite fails.
+fn readable_where(
+    conn: &Connection,
+    sql: &str,
+    values: impl Params,
+) -> Result<Vec<ProjectRow>, ConfigError> {
+    Ok(stored_where(conn, sql, values)?
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect())
+}
+
+/// The one project row `sql` selects with `values`, if any.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] naming the project's folder when its
+/// row does not read, or a [`ConfigError`] when SQLite fails.
+fn one_where(
+    conn: &Connection,
+    sql: &str,
+    values: impl Params,
+) -> Result<Option<ProjectRow>, ConfigError> {
+    match stored_where(conn, sql, values)?.pop() {
+        None => Ok(None),
+        Some(Ok(project)) => Ok(Some(project)),
+        Some(Err(unreadable)) => Err(unreadable_row(&unreadable)),
+    }
+}
+
+/// The refusal of the project `unreadable`, naming its folder.
+fn unreadable_row(unreadable: &UnreadableProject) -> ConfigError {
+    corrupt(
+        &format!(
+            "{PROJECT_AT}{}",
+            printable(&unreadable.root().to_string_lossy())
+        ),
+        unreadable.reason(),
+    )
+}
+
 /// The project registered at `root`, if any.
 pub(super) fn find_project(
     conn: &Connection,
     root: &ProjectRoot,
 ) -> Result<Option<ProjectRow>, ConfigError> {
-    Ok(
-        projects_where(conn, &format!("{SELECT_PROJECT} WHERE root = ?1"), params![
-            root_text(root)?
-        ])?
-        .pop(),
-    )
+    one_where(conn, &format!("{SELECT_PROJECT} WHERE root = ?1"), params![
+        root_text(root)?
+    ])
 }
 
 /// The project registered at `root`.
@@ -110,7 +177,7 @@ pub(super) fn register(
                 .build(),
         ));
     }
-    if let Some((_, held)) = projects_where(conn, SELECT_PROJECT, [])?
+    if let Some((_, held)) = readable_where(conn, SELECT_PROJECT, [])?
         .into_iter()
         .find(|(_, other)| other.root().as_ref().starts_with(root.as_ref()))
     {
@@ -154,9 +221,20 @@ impl ProjectStore for SqliteStore {
     fn projects(&self) -> Result<Vec<Project>, ConfigError> {
         self.read(|conn| {
             Ok(
-                projects_where(conn, &format!("{SELECT_PROJECT} ORDER BY name"), [])?
+                readable_where(conn, &format!("{SELECT_PROJECT} ORDER BY name"), [])?
                     .into_iter()
                     .map(|(_, project)| project)
+                    .collect(),
+            )
+        })
+    }
+
+    fn unreadable_projects(&self) -> Result<Vec<UnreadableProject>, ConfigError> {
+        self.read(|conn| {
+            Ok(
+                stored_where(conn, &format!("{SELECT_PROJECT} ORDER BY root"), [])?
+                    .into_iter()
+                    .filter_map(Result::err)
                     .collect(),
             )
         })
@@ -169,10 +247,9 @@ impl ProjectStore for SqliteStore {
     fn project_named(&self, name: &ProjectName) -> Result<Option<Project>, ConfigError> {
         self.read(|conn| {
             Ok(
-                projects_where(conn, &format!("{SELECT_PROJECT} WHERE name = ?1"), params![
+                one_where(conn, &format!("{SELECT_PROJECT} WHERE name = ?1"), params![
                     name.as_ref()
                 ])?
-                .pop()
                 .map(|(_, project)| project),
             )
         })
@@ -180,11 +257,21 @@ impl ProjectStore for SqliteStore {
 
     fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
         self.read(|conn| {
-            Ok(projects_where(conn, SELECT_PROJECT, [])?
+            let deepest = stored_where(conn, SELECT_PROJECT, [])?
                 .into_iter()
-                .map(|(_, project)| project)
-                .filter(|project| project.root().contains(dir))
-                .max_by_key(|project| project.root().as_ref().components().count()))
+                .filter(|stored| match stored {
+                    Ok((_, project)) => project.root().contains(dir),
+                    Err(unreadable) => dir.starts_with(unreadable.root()),
+                })
+                .max_by_key(|stored| match stored {
+                    Ok((_, project)) => project.root().as_ref().components().count(),
+                    Err(unreadable) => unreadable.root().components().count(),
+                });
+            match deepest {
+                None => Ok(None),
+                Some(Ok((_, project))) => Ok(Some(project)),
+                Some(Err(unreadable)) => Err(unreadable_row(&unreadable)),
+            }
         })
     }
 
@@ -328,6 +415,61 @@ mod tests {
                 &Author::human(),
             )
             .unwrap();
+    }
+
+    /// A project row whose name the domain refuses is left out of the
+    /// listing and of other folders' lookups, named by its folder when looked
+    /// up itself, listed as unreadable, and removable by its folder.
+    #[test]
+    fn a_corrupt_project_row_is_skipped_and_named_by_its_folder() {
+        let (store, scratch) = fresh_store();
+        let shop = folder(&scratch, "shop");
+        let blog = folder(&scratch, "blog");
+        for root in [&shop, &blog] {
+            store
+                .add_process(root, &spec("web", "true"), &Author::human())
+                .unwrap();
+        }
+        store
+            .write(|conn| {
+                conn.execute("UPDATE projects SET name = 'x\u{7}' WHERE name = 'blog'", [
+                ])
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        let listed: Vec<String> = store
+            .projects()
+            .unwrap()
+            .iter()
+            .map(|project| project.name().to_string())
+            .collect();
+        assert_eq!(listed, ["shop"]);
+        assert_eq!(
+            store
+                .project_containing(&shop.as_ref().join("src"))
+                .unwrap(),
+            store.project_at(&shop).unwrap()
+        );
+        for refused in [
+            store.project_at(&blog).map(|_| ()),
+            store
+                .project_containing(&blog.as_ref().join("src"))
+                .map(|_| ()),
+        ] {
+            let message = refused.unwrap_err().to_string();
+            assert!(
+                message.contains(&blog.as_ref().display().to_string()),
+                "{message}"
+            );
+            assert!(!message.contains('\u{7}'), "{message}");
+        }
+        let unreadable = store.unreadable_projects().unwrap();
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(unreadable[0].root(), blog.as_ref());
+
+        assert!(store.remove_project(&blog).unwrap());
+        assert!(store.unreadable_projects().unwrap().is_empty());
     }
 
     /// Adds racing to register a folder and one inside it never leave the

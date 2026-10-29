@@ -56,7 +56,10 @@ use super::{
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
     process_args::ProcessArgs,
     project_log_slice::ProjectLogSlice,
-    projects::{REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove},
+    projects::{
+        REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove, remove_unreadable,
+        unreadable_named,
+    },
     projects_command::ProjectsCommand,
     report::{Report, print_error, print_note},
     rm::{removable, remove as remove_processes, rm_rows},
@@ -1089,22 +1092,30 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
 }
 
 /// `muster projects rm`: asks at a terminal, needs `--yes` elsewhere, then
-/// stops the project's processes and forgets it.
+/// stops the project's processes and forgets it. A project whose stored row
+/// does not read is named by its folder and forgotten as it is.
 fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: bool) {
     let presenter = Presenter::detect(json);
     let prepared = invocation.store().and_then(|store| {
-        let project =
-            resolve_project(Some(named), None, &invocation.cwd()?, store.as_ref())?.registered()?;
+        let cwd = invocation.cwd()?;
+        let target = match unreadable_named(store.as_ref(), named, &cwd)? {
+            Some(root) => Err(root),
+            None => Ok(resolve_project(Some(named), None, &cwd, store.as_ref())?.registered()?),
+        };
         if !yes && !presenter.is_interactive() {
             return Err(CliError::NeedsYes(REMOVE_ASKED));
         }
-        Ok((store, project))
+        Ok((store, target))
     });
-    let (store, project) = match prepared {
+    let (store, target) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => fail_command(json, &error),
     };
-    written(presenter.open(&output::project_title(PROJECTS_RM_WORDS, project.name())));
+    let title = match &target {
+        Ok(project) => output::project_title(PROJECTS_RM_WORDS, project.name()),
+        Err(root) => output::folder_title(PROJECTS_RM_WORDS, root),
+    };
+    written(presenter.open(&title));
     if !yes {
         match presenter.confirm(REMOVE_QUESTION, false, REMOVE_ASKED, YES_FLAG) {
             Ok(true) => {},
@@ -1113,15 +1124,18 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
         }
     }
     let mut spinners = presenter.spinners();
-    let result = invocation.connect().and_then(|client| {
-        remove(
-            &client,
-            store.as_ref(),
-            invocation.notifier(),
-            &project,
-            &mut spinners,
-        )
-    });
+    let result = match &target {
+        Ok(project) => invocation.connect().and_then(|client| {
+            remove(
+                &client,
+                store.as_ref(),
+                invocation.notifier(),
+                project,
+                &mut spinners,
+            )
+        }),
+        Err(root) => remove_unreadable(store.as_ref(), invocation.notifier(), root),
+    };
     drop(spinners);
     match result {
         Ok(removal) => {

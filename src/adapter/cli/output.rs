@@ -34,7 +34,7 @@ use crate::{
         process::{ProcessState, Readiness},
         project::Project,
         pty::{ExitCause, ExitOutcome, SignalName},
-        value::{ProcessName, ProjectName},
+        value::{ProcessName, ProjectName, ProjectRoot},
     },
 };
 
@@ -387,6 +387,15 @@ pub fn service_title() -> String {
 /// `muster <command> · <project>`.
 pub fn project_title(command: &str, project: &ProjectName) -> String {
     format!("{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{project}")
+}
+
+/// `muster <command> · <folder>`, for a project known only by its folder,
+/// the folder made printable.
+pub fn folder_title(command: &str, root: &ProjectRoot) -> String {
+    format!(
+        "{TITLE_PREFIX} {command}{TITLE_SEPARATOR}{}",
+        printable(&root.as_ref().to_string_lossy())
+    )
 }
 
 /// What to say when the action of `report` touched no process.

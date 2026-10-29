@@ -78,16 +78,13 @@ impl Supervisor {
                     .candidates(self.process_names())
                     .build()
             })?;
-        if let Some(since) = spec.since() {
-            let end = self
-                .taps
-                .get(process.id())
-                .map_or(OutputCursor::new(0), OutputTap::cursor);
-            if *since > end {
-                return Err(invalid_input(format!(
-                    "{name}: {SINCE_PAST_END} ({since} > {end})"
-                )));
-            }
+        if let Some(since) = spec.since()
+            && let Some(end) = self.known_output_end(*process.id())
+            && *since > end
+        {
+            return Err(invalid_input(format!(
+                "{name}: {SINCE_PAST_END} ({since} > {end})"
+            )));
         }
         let has_check = process.ready().is_some();
         let until = spec
@@ -348,6 +345,19 @@ impl Supervisor {
         }
     }
 
+    /// The end of `pane`'s output as far as its tap has caught up with the
+    /// log: `None` while a launch or adoption is in flight, or before this
+    /// service placed a run, when a later cursor may still be valid.
+    fn known_output_end(&self, pane: PaneId) -> Option<OutputCursor> {
+        if self.is_starting(pane) {
+            return None;
+        }
+        self.taps
+            .get(&pane)
+            .filter(|tap| tap.run_start().is_some())
+            .map(OutputTap::cursor)
+    }
+
     /// Places `pane`'s current run at `start`, the offset its holder's log
     /// says it began at, so cursors line up with the log.
     pub(super) fn place_run(&mut self, pane: PaneId, start: OutputCursor) {
@@ -577,6 +587,7 @@ impl Supervisor {
             .deadline(now + timeout)
             .reply(reply)
             .scanned_from(scanned_from)
+            .since(since)
             .build();
         let settled = match matched {
             Some(line) => Some((WaitStatus::Matched, Some(line))),
@@ -777,11 +788,13 @@ fn probe_of(condition: &WaitCondition) -> Option<ProbeTarget> {
     }
 }
 
-/// The first of `lines` that `waiter`'s log pattern matches.
+/// The first of `lines`, from `waiter`'s cursor on, that its log pattern
+/// matches.
 fn first_match(waiter: &Waiter, lines: &[TapLine]) -> Option<MatchedLine> {
     let matcher = waiter.matcher().as_ref()?;
     lines
         .iter()
+        .filter(|line| waiter.since().is_none_or(|since| line.at() >= since))
         .find(|line| matcher.is_match(line.text()))
         .cloned()
         .map(matched_line)
@@ -951,6 +964,35 @@ mod tests {
                 .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(19))))
                 .is_ok()
         );
+    }
+
+    /// A cursor past what the tap holds while the launch or adoption that
+    /// catches it up from the log is in flight, as after a restart, is
+    /// accepted, and matches the caught-up output from where it points.
+    #[test]
+    fn a_cursor_ahead_of_a_tap_still_catching_up_is_accepted() {
+        let mut harness = Harness::over(Box::new(WorkerBacklogRunner), &[api(
+            RestartPolicy::Never,
+            None,
+        )]);
+        harness.up();
+        let (pane, generation, result) = spawned(&harness);
+        let since = OutputCursor::new(BACKLOG_RUN_START).advanced("READY on 3000\n".len() as u64);
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("o")), Some(since)),
+            None,
+        );
+        assert!(answered(&answers).is_none());
+        harness.supervisor.handle_spawned(pane, generation, result);
+
+        let matched = answered(&answers).unwrap();
+        assert_eq!(matched.status(), WaitStatus::Matched);
+        let line = matched.matched().as_ref().unwrap();
+        assert_eq!(line.line(), "booting");
+        assert_eq!(*line.at(), since);
     }
 
     #[test]

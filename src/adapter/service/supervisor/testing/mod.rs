@@ -38,6 +38,7 @@ mod stop_signal_handle;
 mod stop_signal_runner;
 mod stop_signals;
 mod terminate_outcome;
+mod worker_backlog_runner;
 mod worker_runner;
 
 pub(crate) use ack_count_handle::*;
@@ -70,4 +71,5 @@ pub(crate) use spawn_recorder::*;
 pub(crate) use stop_signal_runner::*;
 pub(crate) use stop_signals::*;
 pub(crate) use terminate_outcome::*;
+pub(crate) use worker_backlog_runner::*;
 pub(crate) use worker_runner::*;

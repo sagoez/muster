@@ -43,6 +43,11 @@ pub struct Waiter {
     #[getset(get_copy = "pub")]
     #[builder(default)]
     scanned_from: Option<OutputCursor>,
+    /// The cursor it was asked from: a line beginning before it never
+    /// matches, even one a backlog replays after the wait was registered.
+    #[getset(get_copy = "pub")]
+    #[builder(default)]
+    since: Option<OutputCursor>,
 }
 
 impl Waiter {

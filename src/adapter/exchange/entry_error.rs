@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::domain::value::NameProblem;
+
 /// Why one process entry of a stack file is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EntryError {
@@ -12,12 +14,9 @@ pub enum EntryError {
         /// The parser's account of what is wrong.
         reason: String,
     },
-    /// `name` is blank.
-    #[error("name must not be empty")]
-    EmptyName,
-    /// `name` holds a control character.
-    #[error("name must not contain control characters")]
-    ControlCharacterName,
+    /// `name` is blank or holds a control character.
+    #[error("name {0}")]
+    InvalidName(NameProblem),
     /// `command` is blank.
     #[error("command must not be empty")]
     EmptyCommand,

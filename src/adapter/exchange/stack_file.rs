@@ -412,7 +412,7 @@ processes:
     fn an_entry_without_a_readable_name_is_named_by_index() {
         assert_eq!(
             refusal(&entry_with("").replace("name: web", "name: ''")),
-            "processes[0]: name must not be empty"
+            "processes[0]: name is empty"
         );
     }
 
@@ -422,7 +422,7 @@ processes:
     fn a_name_with_a_control_character_says_so() {
         let refused = refusal(&entry_with("").replace("name: web", "name: \"we\\eb\""));
         assert!(
-            refused.ends_with(": name must not contain control characters"),
+            refused.ends_with(": name holds a control character"),
             "{refused}"
         );
     }

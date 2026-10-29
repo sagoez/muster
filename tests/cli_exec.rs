@@ -3595,7 +3595,7 @@ fn add_explains_an_invalid_name_and_escapes_it() {
     );
     assert!(
         stderr(&refused).contains("'web\\u{1b}[2J' is not a valid process name")
-            && stderr(&refused).contains("control characters"),
+            && stderr(&refused).contains("holds a control character"),
         "{}",
         shown(&refused)
     );

@@ -2,7 +2,8 @@ use strum::Display;
 
 use super::{process_name::ProcessNameError, process_ref::ProcessRefError};
 
-/// Why a typed process name is refused, phrased to follow "it".
+/// Why a process name is refused, phrased to follow the name or "it"; the CLI,
+/// MCP and import all refuse a name with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
 pub enum NameProblem {
     /// Nothing but whitespace.

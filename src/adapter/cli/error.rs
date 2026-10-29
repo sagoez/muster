@@ -13,7 +13,7 @@ use crate::{
     domain::{
         config::ConfigError,
         coordination::Author,
-        value::{ProcessName, ProcessNameError, ProcessNameFault, ProjectName},
+        value::{NameProblem, ProcessName, ProcessNameError, ProjectName},
     },
 };
 
@@ -108,12 +108,12 @@ pub enum CliError {
     UnknownValue(String),
     /// The derived or given process name, escaped, was empty or held a
     /// control character.
-    #[error("'{name}' is not a valid process name: {fault}")]
+    #[error("'{name}' is not a valid process name: it {problem}")]
     InvalidName {
         /// The name as given, made printable.
         name: String,
         /// Why it was refused.
-        fault: ProcessNameFault,
+        problem: NameProblem,
     },
     /// The command was blank.
     #[error("the command is empty")]
@@ -281,7 +281,7 @@ impl CliError {
     pub fn invalid_name(raw: &str, error: ProcessNameError) -> Self {
         Self::InvalidName {
             name: printable(raw),
-            fault: error.into(),
+            problem: error.into(),
         }
     }
 

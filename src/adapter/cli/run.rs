@@ -136,7 +136,7 @@ fn process_name(explicit: Option<&str>, command: &[String]) -> Result<ProcessNam
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::value::ProcessNameFault;
+    use crate::domain::value::NameProblem;
 
     #[test]
     fn the_process_name_defaults_to_the_first_word() {
@@ -158,7 +158,7 @@ mod tests {
         assert!(matches!(
             process_name(None, &["  ".to_string()]),
             Err(CliError::InvalidName {
-                fault: ProcessNameFault::Empty,
+                problem: NameProblem::Empty,
                 ..
             })
         ));
@@ -171,12 +171,12 @@ mod tests {
         let refused = process_name(Some("web\u{1b}]0;x\u{7}"), &[]).unwrap_err();
 
         assert!(matches!(refused, CliError::InvalidName {
-            fault: ProcessNameFault::ControlCharacter,
+            problem: NameProblem::ControlCharacter,
             ..
         }));
         let message = refused.to_string();
         assert!(!message.chars().any(char::is_control), "{message}");
         assert!(message.contains("web\\u{1b}]0;x\\u{7}"), "{message}");
-        assert!(message.contains("control characters"), "{message}");
+        assert!(message.contains("holds a control character"), "{message}");
     }
 }

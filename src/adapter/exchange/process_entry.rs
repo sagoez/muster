@@ -11,10 +11,7 @@ use super::{EntryError, ReadyEntry, StopEntry};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
-    value::{
-        CommandLine, Description, EnvName, EnvValue, ProcessName, ProcessNameError, ProjectRoot,
-        StopGrace,
-    },
+    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StopGrace},
 };
 
 /// One process of a stack file. Optional keys are written only when set, and
@@ -114,10 +111,7 @@ impl From<&ProcessSpec> for ProcessEntry {
 /// Reads the entry's name, refusing a blank one and one holding a control
 /// character each for its own reason.
 fn process_name(raw: String) -> Result<ProcessName, EntryError> {
-    ProcessName::try_new(raw).map_err(|error| match error {
-        ProcessNameError::NotEmptyViolated => EntryError::EmptyName,
-        ProcessNameError::PredicateViolated => EntryError::ControlCharacterName,
-    })
+    ProcessName::try_new(raw).map_err(|error| EntryError::InvalidName(error.into()))
 }
 
 /// Reads the entry's working directory: a non-empty folder given relative to

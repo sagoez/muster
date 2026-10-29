@@ -23,7 +23,6 @@ mod last_exit_view;
 mod lock_acquire_arg;
 mod lock_name_arg;
 mod lock_view;
-mod logs_view;
 mod mcp_deps;
 mod mcp_error;
 mod name_arg;

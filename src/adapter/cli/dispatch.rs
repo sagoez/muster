@@ -19,8 +19,8 @@ use directories::{BaseDirs, ProjectDirs};
 use super::{
     add::{add, add_rows},
     args::{
-        Args, Command, ConfigCommand, CoordinationCommand, ProcessArgs, ProjectsCommand, RunArgs,
-        ServiceCommand, SetArgs, StartArgs, WaitArgs,
+        Args, Command, ConfigCommand, CoordinationCommand, LogFilterArgs, ProcessArgs,
+        ProjectsCommand, RunArgs, ServiceCommand, SetArgs, StartArgs, WaitArgs,
     },
     attach::{Announce, attach_named},
     attach_end::AttachEnd,
@@ -67,6 +67,7 @@ use crate::{
         },
         mcp::{self, McpDeps, Scope},
         private_dir::state_dir,
+        sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         store::SqliteStore,
     },
@@ -155,10 +156,14 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Resume(target)) => control(invocation, target, ProcessAction::Resume),
         Some(Command::Kill(target)) => control(invocation, target, ProcessAction::Kill),
         Some(Command::Logs {
+            name, filter, json, ..
+        }) if !filter.is_empty() => filtered_logs(invocation, name, &filter, json),
+        Some(Command::Logs {
             name,
             follow,
             screen,
             json,
+            ..
         }) => logs(invocation, name, follow, screen, json),
         Some(Command::Attach {
             name,
@@ -527,6 +532,46 @@ fn logs(
             }
         },
         Err(error) => fail_framed(framing, json, &error),
+    }
+}
+
+/// Prints the lines of a process's log that `filter` asks for, escapes
+/// removed, through the log reader agents use; the process is chosen at a
+/// terminal when `name` names none.
+fn filtered_logs(
+    invocation: &Invocation<'_>,
+    name: Option<ProcessRef>,
+    filter: &LogFilterArgs,
+    json: bool,
+) {
+    let presenter = asking_first(
+        Presenter::detect(json),
+        json,
+        name.is_none(),
+        Presenter::can_choose_process,
+    );
+    let query = filter
+        .query()
+        .unwrap_or_else(|error| fail_command(json, &error));
+    let project = project_or_fail(invocation, json);
+    let result = connect().and_then(|client| {
+        process::log_slice(
+            &client,
+            &project,
+            named_or_chosen(&project, name.as_ref(), presenter),
+            &query,
+        )
+    });
+    match result {
+        Ok(view) => print_result(json, &view, |view| {
+            if view.omitted_lines() > 0 {
+                emit_line(&output::omitted_lines(view.omitted_lines()));
+            }
+            if !view.text().is_empty() {
+                emit_line(&printable_lines(view.text()));
+            }
+        }),
+        Err(error) => fail_command(json, &error),
     }
 }
 

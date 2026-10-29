@@ -27,6 +27,8 @@ const NEWER_SERVICE_HINT: &str =
     "run the newer muster, or `muster service stop` to let this one start its own";
 /// Where a person sees how interrupted processes end.
 const INTERRUPTED_HINT: &str = "`muster ps` shows how they end";
+/// Where a person finds a cursor that names output.
+const CURSOR_HINT: &str = "pass a cursor an earlier `muster wait` or `muster logs --json` printed";
 /// What `muster run` suggests after a taken name.
 pub const RUN_NAME_HINT: &str = "; pass --name to choose another";
 
@@ -293,6 +295,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::ServiceNewer { .. } => format!("{error}; {NEWER_SERVICE_HINT}"),
         ClientError::Refused { kind, .. } => format!("{error}{}", refusal_hint(*kind)),
         ClientError::Interrupted => format!("{error}, {INTERRUPTED_HINT}"),
+        ClientError::CursorAhead { .. } => format!("{error}; {CURSOR_HINT}"),
         ClientError::NoStateDir
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }

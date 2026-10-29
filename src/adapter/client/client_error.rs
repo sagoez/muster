@@ -10,7 +10,7 @@ use crate::{
     adapter::service::ServiceErrorKind,
     domain::{
         config::ConfigError,
-        value::{ProcessName, ProjectName},
+        value::{OutputCursor, ProcessName, ProjectName},
     },
 };
 
@@ -118,6 +118,14 @@ pub enum ClientError {
         #[source]
         source: io::Error,
     },
+    /// A log read was given a cursor past the end of the process's output.
+    #[error("cursor {cursor} is past the end of the output, {end}")]
+    CursorAhead {
+        /// The cursor given.
+        cursor: OutputCursor,
+        /// The end of the output.
+        end: OutputCursor,
+    },
     /// The caller ended the wait before its request was sent.
     #[error("cancelled; nothing was changed")]
     InterruptedUnsent,
@@ -143,6 +151,7 @@ impl ClientError {
             Self::Refused { kind, .. } => FailureKind::from(*kind),
             Self::Config(error) => FailureKind::from(error),
             Self::Log { .. } => FailureKind::Io,
+            Self::CursorAhead { .. } => FailureKind::InvalidInput,
             Self::Interrupted | Self::InterruptedUnsent => FailureKind::Interrupted,
         }
     }
@@ -163,6 +172,7 @@ impl ClientError {
             | Self::Refused { .. }
             | Self::Config(_)
             | Self::Log { .. }
+            | Self::CursorAhead { .. }
             | Self::InterruptedUnsent
             | Self::Interrupted => &[],
         }

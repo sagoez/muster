@@ -777,6 +777,20 @@ fn up_ps_logs_and_down_report_what_happened() {
         stdout(&scratch.on(&project, &["logs", "dev server"])).contains("dev-ready"),
         "a stopped process's log is still read"
     );
+    let (grepped, slice) = scratch.json_on(&project, &[
+        "logs",
+        "dev server",
+        "--grep",
+        "dev-r.ady",
+        "--regex",
+    ]);
+    assert!(grepped.status.success(), "{}", shown(&grepped));
+    assert_eq!(slice["text"], "dev-ready", "{slice}");
+    let cursor = slice["cursor"].as_str().unwrap();
+    let (_, after) = scratch.json_on(&project, &["logs", "dev server", "--since", cursor]);
+    assert_eq!(after["lines_returned"], 0, "{after}");
+    let bad = scratch.on(&project, &["logs", "dev server", "--grep", "(", "--regex"]);
+    assert_eq!(bad.status.code(), Some(INVALID_INPUT), "{}", shown(&bad));
 
     let broken = scratch.project("broken", &failing());
     let up = scratch.on(&broken, &["up"]);
@@ -1075,6 +1089,44 @@ fn add_up_set_rm_against_a_real_service() {
         "{}",
         shown(&human)
     );
+    let (ready, with_ready) = scratch.json_on(&folder, &[
+        "set",
+        "web",
+        "--ready-log",
+        "ready in \\d+ms",
+        "--ready-regex",
+        "--ready-timeout",
+        "90s",
+    ]);
+    assert!(ready.status.success(), "{}", shown(&ready));
+    assert_eq!(
+        with_ready["process"]["ready"],
+        serde_json::json!({ "log": "ready in \\d+ms", "regex": true, "timeout": "1m 30s" })
+    );
+    let exported = stdout(&scratch.on(&folder, &["export", "-"]));
+    assert!(
+        exported.contains("ready:") && exported.contains("regex: true"),
+        "{exported}"
+    );
+    let timeless = scratch.on(&folder, &["set", "web", "--ready-port", "3000"]);
+    assert_eq!(timeless.status.code(), Some(USAGE), "{}", shown(&timeless));
+    let bad_regex = scratch.on(&folder, &[
+        "set",
+        "web",
+        "--ready-log",
+        "(",
+        "--ready-regex",
+        "--ready-timeout",
+        "5s",
+    ]);
+    assert_eq!(
+        bad_regex.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&bad_regex)
+    );
+    let (_, cleared) = scratch.json_on(&folder, &["set", "web", "--no-ready"]);
+    assert_eq!(cleared["process"]["ready"], serde_json::Value::Null);
 
     let (rm, removed) = scratch.json_on(&folder, &["rm", "web"]);
     assert!(rm.status.success(), "{}", shown(&rm));

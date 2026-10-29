@@ -6,9 +6,7 @@
 
 use std::{
     collections::HashSet,
-    fs::{self, File},
-    io::{self, Read},
-    os::unix::fs::MetadataExt,
+    io,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -19,6 +17,7 @@ use super::{
     action_report::ActionReport,
     client_error::ClientError,
     log_read::LogRead,
+    log_slice_view::LogSliceView,
     notice_view::NoticeView,
     outcome::Outcome,
     process_outcome::ProcessOutcome,
@@ -32,7 +31,7 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::rotated_path,
+        holder::{HolderError, LogQuery, read_log, read_log_bytes},
         service::{
             BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Notice, ProcessAction,
             ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind, ServiceRequest,
@@ -50,9 +49,6 @@ use crate::{
 const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// How an answer to `ps` of one project that listed none is reported.
 const EMPTY_STATUS: &str = "a status listing no project";
-/// Attempts at reading a log's two generations from one rotation, before
-/// reading them as they are.
-const LOG_READ_ATTEMPTS: usize = 3;
 
 /// The processes of the project at `project`, or of every project the
 /// service has loaded when it is `None`.
@@ -468,72 +464,8 @@ pub fn logs<E: From<ClientError>>(
         };
     }
     let log = log_path(client, project, &name)?;
-    let bytes = read_generations(&log)?;
+    let bytes = read_log_bytes(&log).map_err(|error| log_read_error(&log, error))?;
     Ok(read.log(Some(log)).bytes(bytes).build())
-}
-
-/// Both generations of `log`, the older first, read from one rotation: the
-/// rotated file is opened before the live one, and the read is taken again
-/// when a rotation replaced the rotated file in between, so no line is lost
-/// or shown twice.
-///
-/// # Errors
-/// Returns [`ClientError::Log`] when a file cannot be read.
-fn read_generations(log: &Path) -> Result<Vec<u8>, ClientError> {
-    let rotated_path = rotated_path(log);
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let rotated = open_if_present(&rotated_path)?;
-        let live = open_if_present(log)?;
-        let settled = attempt >= LOG_READ_ATTEMPTS
-            || same_file_at(rotated.as_ref(), &rotated_path)
-                .map_err(|source| log_error(&rotated_path, source))?;
-        if !settled {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        for (file, path) in [(rotated, rotated_path.as_path()), (live, log)] {
-            if let Some(mut file) = file {
-                file.read_to_end(&mut bytes)
-                    .map_err(|source| log_error(path, source))?;
-            }
-        }
-        return Ok(bytes);
-    }
-}
-
-/// `path` opened for reading, or none when it does not exist.
-///
-/// # Errors
-/// Returns [`ClientError::Log`] when it exists and cannot be opened.
-fn open_if_present(path: &Path) -> Result<Option<File>, ClientError> {
-    match File::open(path) {
-        Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(log_error(path, source)),
-    }
-}
-
-/// Whether `path` still names `opened`, or still names nothing when
-/// nothing was opened.
-///
-/// # Errors
-/// Returns the [`io::Error`] of a file that cannot be inspected.
-fn same_file_at(opened: Option<&File>, path: &Path) -> io::Result<bool> {
-    let now = match fs::metadata(path) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    Ok(match (opened, now) {
-        (None, None) => true,
-        (Some(file), Some(now)) => {
-            let then = file.metadata()?;
-            then.dev() == now.dev() && then.ino() == now.ino()
-        },
-        (None, Some(_)) | (Some(_), None) => false,
-    })
 }
 
 /// The failure of reading the log at `path`.
@@ -542,6 +474,38 @@ pub fn log_error(path: &Path, source: io::Error) -> ClientError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// The failure the log reader met reading the log at `path`: a cursor past
+/// its end is the caller's, anything else a failure reading it.
+fn log_read_error(path: &Path, error: HolderError) -> ClientError {
+    match error {
+        HolderError::CursorAhead { cursor, end } => ClientError::CursorAhead { cursor, end },
+        HolderError::Io(source) => log_error(path, source),
+        other => log_error(path, io::Error::other(other.to_string())),
+    }
+}
+
+/// Reads what `query` asks of the log of the process of `project` that
+/// `pick` chooses from its listing, stripped and filtered, with where its
+/// current run began.
+///
+/// # Errors
+/// Returns the error `pick` gives, or a [`ClientError`] when the service
+/// cannot be reached, the cursor is past the end of the output, or the log
+/// cannot be read.
+pub fn log_slice<E: From<ClientError>>(
+    client: &ServiceClient,
+    project: &Project,
+    pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, E>,
+    query: &LogQuery,
+) -> Result<LogSliceView, E> {
+    let status = status(client, project)?;
+    let name = pick(&status)?;
+    let run_start = find(&status, &name).and_then(|process| *process.run_start());
+    let log = log_path(client, project, &name)?;
+    let slice = read_log(&log, query).map_err(|error| log_read_error(&log, error))?;
+    Ok(LogSliceView::for_slice(name, &slice, run_start))
 }
 
 /// The log every run of the process `name` writes to.
@@ -846,8 +810,6 @@ fn refusal(
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-
     use super::*;
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
@@ -862,37 +824,5 @@ mod tests {
         );
         assert_eq!(wait_end_at_deadline(own, UNBOUNDED), WaitEnd::TimedOut);
         assert_eq!(wait_end_at_deadline(own, own), WaitEnd::TimedOut);
-    }
-
-    /// Both generations are read older first, byte for byte, including
-    /// bytes that are not UTF-8; a missing generation reads as nothing.
-    #[test]
-    fn both_log_generations_are_read_older_first_and_unchanged() {
-        let scratch = TempDir::new().unwrap();
-        let log = scratch.path().join("api.log");
-
-        assert!(read_generations(&log).unwrap().is_empty());
-        fs::write(&log, b"live \xff\n").unwrap();
-        assert_eq!(read_generations(&log).unwrap(), b"live \xff\n");
-        fs::write(rotated_path(&log), b"old\n").unwrap();
-        assert_eq!(read_generations(&log).unwrap(), b"old\nlive \xff\n");
-    }
-
-    /// A file still named by its path is the same file; one replaced by a
-    /// rename, as a rotation does, is not.
-    #[test]
-    fn a_rotation_between_opens_is_noticed() {
-        let scratch = TempDir::new().unwrap();
-        let rotated = scratch.path().join("api.log.1");
-        let live = scratch.path().join("api.log");
-        fs::write(&rotated, b"old").unwrap();
-        fs::write(&live, b"new").unwrap();
-        let opened = File::open(&rotated).unwrap();
-
-        assert!(same_file_at(Some(&opened), &rotated).unwrap());
-        fs::rename(&live, &rotated).unwrap();
-        assert!(!same_file_at(Some(&opened), &rotated).unwrap());
-        assert!(same_file_at(None, &live).unwrap());
-        assert!(!same_file_at(None, &rotated).unwrap());
     }
 }

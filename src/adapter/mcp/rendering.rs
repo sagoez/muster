@@ -1,34 +1,32 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
-use crate::{
-    adapter::{holder::LogSlice, sanitize::printable_lines, service::WaitOutcome},
-    domain::value::ProcessName,
-};
+use crate::adapter::{client::LogSliceView, sanitize::printable_lines, service::WaitOutcome};
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;
 /// Marks a screen cut to [`SCREEN_MAX_BYTES`].
 const SCREEN_CUT: &str = "[... screen cut]";
 
-/// `slice` of the log of `process`, under a one-line header naming the range
-/// it covers, with the count of earlier lines dropped to fit.
-pub fn log_text(process: &ProcessName, slice: &LogSlice) -> String {
+/// A log slice under a one-line header naming the range it covers, with the
+/// count of earlier lines dropped to fit.
+pub fn log_text(view: &LogSliceView) -> String {
     let mut text = format!(
-        "{process} {}..{} ({} lines)",
-        slice.from(),
-        slice.cursor(),
-        slice.lines().len()
+        "{} {}..{} ({} lines)",
+        view.process(),
+        view.from(),
+        view.cursor(),
+        view.lines_returned()
     );
-    if slice.omitted_lines() > 0 {
+    if view.omitted_lines() > 0 {
         text.push_str(&format!(
             "\n[... {} earlier lines omitted]",
-            slice.omitted_lines()
+            view.omitted_lines()
         ));
     }
-    for line in slice.lines() {
+    if !view.text().is_empty() {
         text.push('\n');
-        text.push_str(line);
+        text.push_str(view.text());
     }
     text
 }
@@ -66,7 +64,10 @@ pub fn tail_text(outcome: &WaitOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::value::OutputCursor;
+    use crate::{
+        adapter::holder::LogSlice,
+        domain::value::{OutputCursor, ProcessName},
+    };
 
     /// A log reads as its header, the omission marker and its lines.
     #[test]
@@ -81,9 +82,10 @@ mod tests {
             .omitted_lines(3)
             .rotated_away_bytes(0)
             .build();
+        let view = LogSliceView::for_slice(ProcessName::try_new("api").unwrap(), &slice, None);
 
         assert_eq!(
-            log_text(&ProcessName::try_new("api").unwrap(), &slice),
+            log_text(&view),
             "api o:16010..o:18234 (2 lines)\n[... 3 earlier lines omitted]\nListening on 3000\nGET / 200"
         );
     }

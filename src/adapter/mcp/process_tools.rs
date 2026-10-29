@@ -1,7 +1,7 @@
 //! The process tools: lifecycle, waiting, output, input and the stack
 //! definition of one process.
 
-use std::{io, path::Path, time::SystemTime};
+use std::time::SystemTime;
 
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
@@ -12,10 +12,9 @@ use super::{
     agent_wait_view::AgentWaitView,
     alerts_view::AlertsView,
     bounds::{CALL_BOUND, wait_bound},
-    condition_arg::{ConditionArg, log_pattern},
+    condition_arg::ConditionArg,
     control_arg::ControlArg,
     control_view::ControlView,
-    logs_view::LogsView,
     name_arg::NameArg,
     process_add_arg::ProcessAddArg,
     process_fields::{invalid, process_name},
@@ -38,13 +37,13 @@ use crate::{
             ServiceClient, Unwatched, process,
         },
         holder::{
-            ByteLimit, HolderError, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES,
-            MAX_LOG_LINES, read_log,
+            ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
         },
         service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
     },
     domain::{
         config::ConfigError,
+        process::PatternKind,
         project::Project,
         value::{OutputCursor, ProcessName, ProcessRef},
     },
@@ -128,16 +127,6 @@ fn waited(value: Value, outcome: &WaitOutcome, alerts: &AlertsView) -> ToolResul
         return rendered(tail_text(outcome), value, alerts, failed);
     }
     structured(with_alerts(value, alerts)?, failed)
-}
-
-/// The failure of reading the log at `log` with the log reader: a cursor
-/// past its end is the caller's mistake, anything else a fault reading it.
-fn log_failure(log: &Path, error: HolderError) -> ToolError {
-    match error {
-        HolderError::CursorAhead { cursor, end } => ToolError::CursorAhead { cursor, end },
-        HolderError::Io(source) => ToolError::Client(process::log_error(log, source)),
-        other => ToolError::Client(process::log_error(log, io::Error::other(other.to_string()))),
-    }
 }
 
 #[tool_router(router = process_router, vis = "pub(super)")]
@@ -234,32 +223,12 @@ impl MusterMcp {
     ) -> ToolResult {
         let name = reference(arg.name())?;
         let query = log_query(&arg)?;
-        let ((name, slice, run_start), alerts) = self
+        let (view, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
-                let status = process::status(client, project)?;
-                let name = process::resolve(&status, project, &name)?;
-                let run_start = status
-                    .processes()
-                    .iter()
-                    .find(|process| process.name() == &name)
-                    .and_then(|process| *process.run_start());
-                let log = process::log_path(client, project, &name)?;
-                let slice = read_log(&log, &query).map_err(|error| log_failure(&log, error))?;
-                Ok((name, slice, run_start))
+                process::log_slice(client, project, process::named(project, &name), &query)
             })
             .await?;
-        let text = slice.lines().join("\n");
-        let view = LogsView::builder()
-            .process(name.clone())
-            .from(slice.from().to_string())
-            .cursor(slice.cursor().to_string())
-            .run_start(run_start.map(|cursor| cursor.to_string()))
-            .lines_returned(slice.lines().len())
-            .omitted_lines(slice.omitted_lines())
-            .rotated_away_bytes(slice.rotated_away_bytes())
-            .text(text)
-            .build();
-        rendered(log_text(&name, &slice), json(&view)?, &alerts, false)
+        rendered(log_text(&view), json(&view)?, &alerts, false)
     }
 
     /// Reads a process's visible screen.
@@ -608,15 +577,12 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
     let errors_only = arg.errors_only().unwrap_or(false);
     match arg.grep() {
         Some(grep) if errors_only => Err(invalid(GREP_FIELD, GREP_OR_ERRORS, grep)),
-        Some(grep) => {
-            let pattern = log_pattern(GREP_FIELD, grep, regex)?;
-            let matcher =
-                LineMatcher::compile(&pattern).map_err(|source| ToolError::InvalidPattern {
-                    field: GREP_FIELD,
-                    source,
-                })?;
-            Ok(LineFilter::Grep(matcher))
-        },
+        Some(grep) => LineMatcher::of_text(grep, PatternKind::of_regex(regex))
+            .map(LineFilter::Grep)
+            .map_err(|source| ToolError::InvalidPattern {
+                field: GREP_FIELD,
+                source,
+            }),
         None if regex => Err(invalid(REGEX_FIELD, REGEX_NEEDS_GREP, "true")),
         None if errors_only => Ok(LineFilter::ErrorsOnly),
         None => Ok(LineFilter::All),

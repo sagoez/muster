@@ -7,10 +7,7 @@ use crate::{
         client::{ClientError, FailureKind},
         holder::PatternError,
     },
-    domain::{
-        config::ConfigError,
-        value::{OutputCursor, ValueParseError},
-    },
+    domain::{config::ConfigError, value::ValueParseError},
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
@@ -66,16 +63,6 @@ pub enum ToolError {
         field: &'static str,
         /// Why the pattern is refused.
         source: PatternError,
-    },
-    /// A cursor names output past the end of the process's log.
-    #[error(
-        "invalid since: {cursor} is past the end of the output, {end}; pass a cursor from an earlier result"
-    )]
-    CursorAhead {
-        /// The cursor given.
-        cursor: OutputCursor,
-        /// The end of the output.
-        end: OutputCursor,
     },
     /// A call that edits fields was given none to change.
     #[error("{0} changed nothing; pass at least one field to change")]
@@ -145,7 +132,6 @@ impl ToolError {
             | Self::EmptyCommand
             | Self::InvalidField { .. }
             | Self::InvalidPattern { .. }
-            | Self::CursorAhead { .. }
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
             | Self::InvalidTodoId(_)
@@ -171,7 +157,6 @@ impl ToolError {
             | Self::EmptyCommand
             | Self::InvalidField { .. }
             | Self::InvalidPattern { .. }
-            | Self::CursorAhead { .. }
             | Self::NothingToChange(_)
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)

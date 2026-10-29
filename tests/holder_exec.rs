@@ -79,9 +79,9 @@ fn receive_until(
     }
 }
 
-/// Whether `output` is a chunk showing a tick.
+/// Whether `output` is a chunk of output, placed in the log, showing a tick.
 fn is_tick(output: &ProcessOutput) -> bool {
-    matches!(output, ProcessOutput::Chunk(bytes) if String::from_utf8_lossy(bytes).contains(TICK))
+    matches!(output, ProcessOutput::Placed { bytes, .. } if String::from_utf8_lossy(bytes).contains(TICK))
 }
 
 /// Polls `condition` until it holds, failing at [`WAIT`].
@@ -226,8 +226,8 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
         .adopt(&record, Box::new(ChannelSink(sender)))
         .unwrap();
     assert_eq!(adopted.process_id(), Some(record.child_pid()));
-    receive_until(&outputs, "the adoption snapshot", |output| {
-        matches!(output, ProcessOutput::Chunk(_))
+    receive_until(&outputs, "output after adoption", |output| {
+        matches!(output, ProcessOutput::Placed { .. })
     });
     receive_until(&outputs, "a live tick after adoption", is_tick);
 

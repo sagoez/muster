@@ -119,6 +119,9 @@ const TITLE_PREFIX: &str = "muster";
 const ATTACH_COMMAND_WORD: &str = "attach";
 /// The command word of `muster logs`.
 const LOGS_COMMAND_WORD: &str = "logs";
+/// Around the count of lines a filtered log read dropped.
+const OMITTED_OPEN: &str = "[... ";
+const OMITTED_CLOSE: &str = " earlier lines omitted]";
 /// Between a command and its project in a title.
 const TITLE_SEPARATOR: &str = " · ";
 /// Start of the line saying the service runs, before its version.
@@ -323,6 +326,12 @@ pub fn action_title(action: Action, project: &ProjectName) -> String {
 /// The title `muster attach` opens with, such as `muster attach · shop`.
 pub fn attach_title(project: &ProjectName) -> String {
     project_title(ATTACH_COMMAND_WORD, project)
+}
+
+/// The line a filtered `muster logs` opens with when its caps dropped the
+/// oldest `count` lines.
+pub fn omitted_lines(count: usize) -> String {
+    format!("{OMITTED_OPEN}{count}{OMITTED_CLOSE}")
 }
 
 /// The title `muster logs` opens its question with, such as

@@ -29,11 +29,18 @@ impl LineMatcher {
     /// Returns [`PatternError::Malformed`] for blank or overlong text and
     /// [`PatternError::InvalidRegex`] for a regex that does not compile.
     pub fn checked(text: &str, kind: PatternKind) -> Result<LogPattern, PatternError> {
-        let text =
-            PatternText::try_new(text).map_err(|_| PatternError::Malformed(text.to_string()))?;
-        let pattern = LogPattern::builder().text(text).kind(kind).build();
+        let pattern = pattern_of(text, kind)?;
         Self::compile(&pattern)?;
         Ok(pattern)
+    }
+
+    /// The matcher for `text` matched as `kind`, for a read that only
+    /// filters with it.
+    ///
+    /// # Errors
+    /// Returns the [`PatternError`] [`Self::checked`] does.
+    pub fn of_text(text: &str, kind: PatternKind) -> Result<Self, PatternError> {
+        Self::compile(&pattern_of(text, kind)?)
     }
 
     /// Compiles `pattern`, bounding a regex's compiled size by
@@ -66,6 +73,15 @@ impl LineMatcher {
             Matcher::Regex(regex) => regex.is_match(line),
         }
     }
+}
+
+/// The pattern `text` matched as `kind`, its text checked but not compiled.
+///
+/// # Errors
+/// Returns [`PatternError::Malformed`] for blank or overlong text.
+fn pattern_of(text: &str, kind: PatternKind) -> Result<LogPattern, PatternError> {
+    let text = PatternText::try_new(text).map_err(|_| PatternError::Malformed(text.to_string()))?;
+    Ok(LogPattern::builder().text(text).kind(kind).build())
 }
 
 #[cfg(test)]

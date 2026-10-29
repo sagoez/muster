@@ -33,6 +33,8 @@ const CALL_TODO_LIST: &str = "todo_list lists the todos";
 const CALL_KV_READ: &str = "kv_read without key lists the entries";
 /// What an agent does about a project name that names no project.
 const PASS_PROJECT: &str = "pass a registered project's name or a folder as project";
+/// What an agent does about a cursor past the end of the output.
+const PASS_CURSOR: &str = "pass a cursor from an earlier result";
 
 /// Why a tool call did not succeed. The caller's mistake is answered as a
 /// result flagged `isError`, which the agent reads and can act on; a fault of
@@ -126,7 +128,6 @@ pub fn agent_message(error: &ToolError) -> String {
         | ToolError::EmptyCommand
         | ToolError::InvalidField { .. }
         | ToolError::InvalidPattern { .. }
-        | ToolError::CursorAhead { .. }
         | ToolError::NothingToChange(_)
         | ToolError::InvalidNoteKey(_)
         | ToolError::InvalidTodoTitle(_)
@@ -146,6 +147,7 @@ fn client_message(error: &ClientError) -> String {
         | ClientError::UnexpectedAnswer(_) => format!("{error}; {RESTART_SERVER}"),
         ClientError::Refused { kind, message } => refusal_message(*kind, message),
         ClientError::Config(config) => config_message(config),
+        ClientError::CursorAhead { .. } => format!("invalid since: {error}; {PASS_CURSOR}"),
         ClientError::NoStateDir
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }

@@ -215,6 +215,11 @@ Options:
   -f, --follow             Keep printing what the process writes, across restarts, until interrupted
   -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
       --screen             Print the process's current terminal screen instead of its log
+  -n, --lines <N>          Print only the newest N lines, escapes removed (at most 2000)
+      --since <CURSOR>     Print only output after this cursor, from an earlier `muster wait` or `muster logs --json`
+      --grep <TEXT>        Print only lines containing this text
+      --regex              Read --grep as a regular expression
+      --errors             Print only error lines, each with its stack trace
       --json               Print the result as JSON; with --follow, one JSON object per log line
   -h, --help               Print help
 

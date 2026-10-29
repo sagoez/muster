@@ -12,11 +12,12 @@ use strum::IntoEnumIterator;
 
 use super::{
     completions::CompletionShell,
+    error::CliError,
     process_flags::{ProcessFlags, READY_GROUP},
 };
 use crate::{
     adapter::{
-        holder::HOLDER_SUBCOMMAND,
+        holder::{HOLDER_SUBCOMMAND, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_LINES},
         service::{StateGoal, protocol::SERVICE_SUBCOMMAND},
         store::SqliteStore,
     },
@@ -25,7 +26,7 @@ use crate::{
         config::SettingKey,
         coordination::TodoStatus,
         port::ProjectStore,
-        process::{RestartPolicy, StopSignal},
+        process::{PatternKind, RestartPolicy, StopSignal},
         value::{
             CommandLine, CommandLineError, LocalPort, LocalUrl, OutputCursor, PositiveDuration,
             ProcessRef,
@@ -56,6 +57,12 @@ Exit codes:
 With --json, results and failures print as JSON on stdout. Object keys are
 snake_case, enum values are kebab-case, durations are seconds, and times are
 RFC 3339 in UTC.";
+
+/// What `muster logs --lines` takes, followed by its maximum.
+const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";
+/// The `muster logs` flags that print the whole raw log or follow it, which
+/// a filtered read conflicts with.
+const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
 
 /// The names `config` accepts for a setting.
 static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
@@ -110,6 +117,19 @@ pub(super) fn command_line(raw: &str) -> Result<CommandLine, CommandLineError> {
 pub(super) fn positive_duration(raw: &str) -> Result<PositiveDuration, String> {
     raw.parse::<PositiveDuration>()
         .map_err(|error| error.to_string())
+}
+
+/// Parses a `muster logs --lines`: a whole number from 1 to
+/// [`MAX_LOG_LINES`].
+///
+/// # Errors
+/// Returns the form expected for anything else.
+fn line_limit(raw: &str) -> Result<LineLimit, String> {
+    raw.trim()
+        .parse()
+        .ok()
+        .and_then(|lines| LineLimit::try_new(lines).ok())
+        .ok_or_else(|| format!("{LINE_LIMIT_FORM}{MAX_LOG_LINES}"))
 }
 
 /// Shell-completion candidates for `--project`: the registered projects'
@@ -206,6 +226,8 @@ pub enum Command {
         /// Print the process's current terminal screen instead of its log.
         #[arg(long)]
         screen: bool,
+        #[command(flatten)]
+        filter: LogFilterArgs,
         /// Print the result as JSON; with --follow, one JSON object per log
         /// line.
         #[arg(long)]
@@ -442,6 +464,56 @@ pub struct WaitArgs {
     /// Print the result as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// `muster logs` flags that read the log as stripped, filtered lines rather
+/// than the raw bytes; any one of them switches to that read.
+#[derive(clap::Args)]
+pub struct LogFilterArgs {
+    /// Print only the newest N lines, escapes removed (at most 2000).
+    #[arg(short = 'n', long, value_name = "N", value_parser = line_limit, conflicts_with_all = RAW_LOG_FLAGS)]
+    pub lines: Option<LineLimit>,
+    /// Print only output after this cursor, from an earlier `muster wait` or
+    /// `muster logs --json`.
+    #[arg(long, value_name = "CURSOR", conflicts_with_all = RAW_LOG_FLAGS)]
+    pub since: Option<OutputCursor>,
+    /// Print only lines containing this text.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = RAW_LOG_FLAGS)]
+    pub grep: Option<String>,
+    /// Read --grep as a regular expression.
+    #[arg(long, requires = "grep")]
+    pub regex: bool,
+    /// Print only error lines, each with its stack trace.
+    #[arg(long, conflicts_with = "grep", conflicts_with_all = RAW_LOG_FLAGS)]
+    pub errors: bool,
+}
+
+impl LogFilterArgs {
+    /// Whether any filter flag was given.
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_none() && self.since.is_none() && self.grep.is_none() && !self.errors
+    }
+
+    /// The log read these flags ask for, its pattern compiled first.
+    ///
+    /// # Errors
+    /// Returns [`CliError::InvalidPattern`] for a blank or overlong `--grep`
+    /// or a `--regex` that does not compile.
+    pub fn query(&self) -> Result<LogQuery, CliError> {
+        let filter = match &self.grep {
+            Some(grep) => LineFilter::Grep(LineMatcher::of_text(
+                grep,
+                PatternKind::of_regex(self.regex),
+            )?),
+            None if self.errors => LineFilter::ErrorsOnly,
+            None => LineFilter::All,
+        };
+        Ok(LogQuery::builder()
+            .since(self.since)
+            .lines(self.lines.unwrap_or_default())
+            .filter(filter)
+            .build())
+    }
 }
 
 /// `muster add`: a new process's definition.

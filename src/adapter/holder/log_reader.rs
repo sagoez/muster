@@ -81,6 +81,23 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
         .build())
 }
 
+/// Every byte still kept of the log at `log` and its rotated generation, the
+/// older first, exactly as written: the span [`read_log`] reads, unstripped,
+/// for a reader that wants the raw stream.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the files cannot be read.
+pub fn read_log_bytes(log: &Path) -> Result<Vec<u8>, HolderError> {
+    let span = Span::open(log)?;
+    let mut bytes = Vec::new();
+    SpanReader {
+        span: &span,
+        at: span.oldest,
+    }
+    .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Reads the next line from `reader`, stripped, keeping at most
 /// [`RAW_LINE_KEEP_BYTES`] of it and cutting what strips past
 /// [`LINE_MAX_CHARS`]. A final line with no line feed is returned too.
@@ -633,6 +650,21 @@ mod tests {
 
         let mid_line = fixture.read(&LogQuery::builder().since(Some(second.advanced(2))).build());
         assert_eq!(mid_line.lines(), &["cc", "dddd", "eeee"]);
+    }
+
+    /// The raw stream is both generations, the older first, byte for byte,
+    /// escapes and invalid UTF-8 included; a missing log reads as nothing.
+    #[test]
+    fn the_raw_stream_is_both_generations_unchanged() {
+        let mut fixture = Fixture::with_cap(12);
+        assert!(read_log_bytes(&fixture.path).unwrap().is_empty());
+        fixture.write(b"\x1b[31maaaa\n");
+        fixture.write(b"live \xff\n");
+
+        assert_eq!(
+            read_log_bytes(&fixture.path).unwrap(),
+            b"\x1b[31maaaa\nlive \xff\n"
+        );
     }
 
     /// The tail spans the rotated and live files as one stream.

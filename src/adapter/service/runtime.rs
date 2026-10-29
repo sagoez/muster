@@ -2422,11 +2422,9 @@ mod tests {
         wait_until("the removed process to go", || {
             find(&service.status(&project), "web").is_none()
         });
-        assert_eq!(
-            fixture.runner().live_records().len(),
-            1,
-            "web's holder ended"
-        );
+        wait_until("web's holder to end once its exit was collected", || {
+            fixture.runner().live_records().len() == 1
+        });
         service.stop();
     }
 
@@ -2645,7 +2643,9 @@ mod tests {
             }),
             "{notices:?}"
         );
-        assert_eq!(fixture.runner().live_records().len(), 1, "only api runs");
+        wait_until("gone's holder to end once its exit was collected", || {
+            fixture.runner().live_records().len() == 1
+        });
         successor.stop();
     }
 

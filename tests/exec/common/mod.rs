@@ -6,6 +6,7 @@ mod processes;
 mod pty;
 mod quiet_ports;
 mod scratch;
+mod shell_session;
 mod wait;
 
 pub use channel_sink::*;
@@ -16,4 +17,5 @@ pub use processes::*;
 pub use pty::*;
 pub use quiet_ports::*;
 pub use scratch::*;
+pub use shell_session::*;
 pub use wait::*;

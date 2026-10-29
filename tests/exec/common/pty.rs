@@ -6,7 +6,7 @@ use std::{
         unix::{fs::OpenOptionsExt, process::CommandExt},
     },
     path::Path,
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -39,6 +39,14 @@ const PTY_CHUNK: usize = 4096;
 const COLOR_TERM: &str = "xterm-256color";
 /// The Ctrl-C key.
 const CTRL_C: &[u8] = b"\x03";
+/// The primary device attributes query, with and without its parameter.
+/// fish waits for its answer before it draws a prompt.
+const DEVICE_ATTRIBUTES_QUERIES: [&[u8]; 2] = [b"\x1b[c", b"\x1b[0c"];
+/// What a VT220-class terminal answers that query.
+const DEVICE_ATTRIBUTES_ANSWER: &[u8] = b"\x1b[?62;22c";
+/// Bytes of the longest query kept from one read to the next, so a query
+/// split across two reads is still seen.
+const QUERY_CARRY: usize = 3;
 
 /// A pseudo-terminal a command runs on as a person's terminal: the test
 /// types on its master side and collects everything drawn there, so no test
@@ -92,10 +100,17 @@ impl Pty {
         let idle = Arc::clone(&pty.idle);
         thread::spawn(move || {
             let mut chunk = [0; PTY_CHUNK];
+            let mut carried = Vec::new();
             while let Ok(read) = reader.read(&mut chunk)
                 && read > 0
             {
                 idle.store(false, Ordering::SeqCst);
+                let fresh_from = carried.len();
+                carried.extend_from_slice(&chunk[..read]);
+                for _ in 0..device_attributes_queries(&carried, fresh_from) {
+                    let _ = (&reader).write_all(DEVICE_ATTRIBUTES_ANSWER);
+                }
+                carried.drain(..carried.len().saturating_sub(QUERY_CARRY));
                 drawn
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -140,10 +155,17 @@ impl Pty {
     /// own session with this terminal as its controlling one, so a Ctrl-C
     /// typed while it is not reading keys reaches it as `SIGINT`.
     pub fn spawn_controlling(&self, scratch: &mut Scratch, folder: &Path, args: &[&str]) -> Child {
-        let stdio = || Stdio::from(self.slave.try_clone().unwrap());
         let mut command = scratch.command(args);
+        command.current_dir(folder);
+        self.spawn_leading(scratch, command)
+    }
+
+    /// Runs `command` as the leader of its own session, with this terminal
+    /// as its controlling one and as its input, output and error, as a
+    /// terminal emulator runs a person's shell.
+    pub fn spawn_leading(&self, scratch: &mut Scratch, mut command: Command) -> Child {
+        let stdio = || Stdio::from(self.slave.try_clone().unwrap());
         command
-            .current_dir(folder)
             .env("TERM", COLOR_TERM)
             .env_remove("NO_COLOR")
             .stdin(stdio())
@@ -166,7 +188,12 @@ impl Pty {
 
     /// Types Ctrl-C at once, whether or not the command reads keys raw.
     pub fn interrupt(&self) {
-        (&self.master).write_all(CTRL_C).unwrap();
+        self.send(CTRL_C);
+    }
+
+    /// Types `keys` at once, as typeahead when the command is not reading.
+    pub fn send(&self, keys: &[u8]) {
+        (&self.master).write_all(keys).unwrap();
     }
 
     /// Everything drawn so far, escape sequences included.
@@ -222,7 +249,23 @@ impl Pty {
     }
 }
 
-/// `text` with its CSI and OSC escape sequences removed.
+/// How many device attributes queries `bytes` holds that end at or past
+/// `fresh_from`, so a query kept over from the last read counts once.
+fn device_attributes_queries(bytes: &[u8], fresh_from: usize) -> usize {
+    DEVICE_ATTRIBUTES_QUERIES
+        .iter()
+        .map(|query| {
+            bytes
+                .windows(query.len())
+                .enumerate()
+                .filter(|(start, window)| window == query && start + query.len() > fresh_from)
+                .count()
+        })
+        .sum()
+}
+
+/// `text` with its CSI sequences removed, and its OSC and DCS strings, which
+/// end at a BEL or at a string terminator.
 fn unstyled(text: &str) -> String {
     let mut plain = String::new();
     let mut chars = text.chars();
@@ -239,9 +282,13 @@ fn unstyled(text: &str) -> String {
                     }
                 }
             },
-            Some(']') => {
-                for c in chars.by_ref() {
+            Some(']' | 'P') => {
+                while let Some(c) = chars.next() {
                     if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' {
+                        chars.next();
                         break;
                     }
                 }

@@ -40,20 +40,20 @@ impl ModeScanner {
 
     /// Whether origin mode (DECOM) is on after what was fed.
     pub fn origin_mode(&self) -> bool {
-        self.modes.origin
+        self.modes.origin()
     }
 
     /// Whether DECSCUSR chose a cursor style other than the terminal's own
     /// after what was fed.
     pub fn cursor_style_set(&self) -> bool {
-        self.modes.cursor_style_set
+        self.modes.cursor_style_set()
     }
 
     /// Consumes one output byte and reports what, if anything, it completed.
     pub fn feed(&mut self, byte: u8) -> Observation {
-        self.modes.observed = Observation::Nothing;
+        self.modes.clear_observed();
         match self.parser.advance_byte(&mut self.modes, byte) {
-            Fed::Kept => self.modes.observed,
+            Fed::Kept => self.modes.observed(),
             Fed::Dropped => Observation::Dropped,
         }
     }

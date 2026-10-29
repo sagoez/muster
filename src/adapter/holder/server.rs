@@ -133,7 +133,7 @@ impl HolderServer {
             .ok_or(HolderError::MissingProject)?;
         let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
-        let handle = runner.spawn(request.clone(), Box::new(HolderSink(sender.clone())))?;
+        let handle = runner.spawn(request.clone(), Box::new(HolderSink::new(sender.clone())))?;
         let child_started_at = SystemTime::now();
         let server = Self::new(handle, log, (sender.clone(), events), request)?;
         let listener = bind_private(config.socket())?;
@@ -773,7 +773,7 @@ fn spawn_acceptor(listener: UnixListener, events: Sender<HolderEvent>, closing: 
             let Ok(reader) = stream.try_clone() else {
                 continue;
             };
-            let client = ClientId(next);
+            let client = ClientId::new(next);
             next += 1;
             if events
                 .send(HolderEvent::Connected { client, stream })
@@ -1457,9 +1457,9 @@ mod tests {
             TerminalEmulator::one_column(Rows::try_new(ROWS).unwrap(), 0, ColorScheme::Dark);
         let (supervisor, mut peer) = UnixStream::pair().unwrap();
         peer.set_read_timeout(Some(WAIT)).unwrap();
-        server.on_connected(ClientId(0), supervisor);
+        server.on_connected(ClientId::new(0), supervisor);
         server
-            .on_hello(ClientId(0), ClientRole::Supervisor)
+            .on_hello(ClientId::new(0), ClientRole::Supervisor)
             .unwrap();
 
         server

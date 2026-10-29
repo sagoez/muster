@@ -18,7 +18,19 @@ const SUBPARAM_SEPARATOR: char = ':';
 #[derive(Default)]
 pub(super) struct Kept {
     /// What is safe to show, in order.
-    pub(super) bytes: Vec<u8>,
+    bytes: Vec<u8>,
+}
+
+impl Kept {
+    /// The bytes kept since the last [`Kept::clear`].
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Forgets the bytes kept, keeping the buffer for the next parse.
+    pub(super) fn clear(&mut self) {
+        self.bytes.clear();
+    }
 }
 
 impl Perform for Kept {

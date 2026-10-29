@@ -39,8 +39,8 @@ impl<W: Write> Write for TerminalSafe<W> {
     /// Returns the [`io::Error`] of a failed write to the inner writer.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.parser.advance(&mut self.kept, bytes);
-        let written = self.out.write_all(&self.kept.bytes);
-        self.kept.bytes.clear();
+        let written = self.out.write_all(self.kept.bytes());
+        self.kept.clear();
         written.map(|()| bytes.len())
     }
 

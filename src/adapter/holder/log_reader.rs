@@ -45,28 +45,25 @@ const CUT_CLOSE: &str = " chars cut]";
 pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
     let span = Span::open(log)?;
     let (start, rotated_away_bytes) = match query.since() {
-        Some(since) if since > span.end => {
+        Some(since) if since > span.end() => {
             return Err(HolderError::CursorAhead {
                 cursor: since,
-                end: span.end,
+                end: span.end(),
             });
         },
-        Some(since) => (since.max(span.oldest), span.oldest.bytes_since(since)),
+        Some(since) => (since.max(span.oldest()), span.oldest().bytes_since(since)),
         None => (span.newest_start(query)?, 0),
     };
     let mut kept = Kept::new(query);
     let mut filter = FilterState::new(query.filter());
-    let mut lines = BufReader::with_capacity(BLOCK_BYTES, SpanReader {
-        span: &span,
-        at: start,
-    });
+    let mut lines = BufReader::with_capacity(BLOCK_BYTES, SpanReader::new(&span, start));
     while let Some(line) = next_line(&mut lines)? {
         filter.offer(line, &mut kept);
     }
     Ok(LogSlice::builder()
         .from(start)
-        .cursor(span.end)
-        .omitted_lines(kept.omitted)
+        .cursor(span.end())
+        .omitted_lines(kept.omitted())
         .lines(kept.into_lines())
         .rotated_away_bytes(rotated_away_bytes)
         .build())
@@ -82,12 +79,8 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
 pub fn read_log_stream(log: &Path) -> Result<(OutputCursor, Vec<u8>), HolderError> {
     let span = Span::open(log)?;
     let mut bytes = Vec::new();
-    SpanReader {
-        span: &span,
-        at: span.oldest,
-    }
-    .read_to_end(&mut bytes)?;
-    Ok((span.oldest, bytes))
+    SpanReader::new(&span, span.oldest()).read_to_end(&mut bytes)?;
+    Ok((span.oldest(), bytes))
 }
 
 /// Where `live`, a file opened from the live path of the log at `log`,
@@ -111,7 +104,7 @@ pub fn live_start(log: &Path, live: &File) -> io::Result<OutputCursor> {
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be inspected.
 pub(super) fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
-    Ok(Span::open(log)?.end)
+    Ok(Span::open(log)?.end())
 }
 
 /// The raw bytes of the log at `log` from `from` up to `to`, and where they
@@ -125,15 +118,12 @@ pub(super) fn read_log_range(
     to: OutputCursor,
 ) -> Result<(OutputCursor, Vec<u8>), HolderError> {
     let span = Span::open(log)?;
-    let start = from.max(span.oldest);
-    let length = to.min(span.end).bytes_since(start);
+    let start = from.max(span.oldest());
+    let length = to.min(span.end()).bytes_since(start);
     let mut bytes = Vec::new();
-    SpanReader {
-        span: &span,
-        at: start,
-    }
-    .take(length)
-    .read_to_end(&mut bytes)?;
+    SpanReader::new(&span, start)
+        .take(length)
+        .read_to_end(&mut bytes)?;
     Ok((start, bytes))
 }
 

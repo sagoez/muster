@@ -1,4 +1,5 @@
 use alacritty_terminal::vte::{Params, Perform};
+use getset::CopyGetters;
 
 use super::key_press::KeyPress;
 use crate::adapter::terminal::escape::{KITTY_FINAL, param_values};
@@ -16,12 +17,13 @@ const RELEASE_EVENT: u16 = 3;
 const LOCK_MODIFIERS: u16 = 64 | 128;
 
 /// What the parser made of the last byte of a held sequence.
-#[derive(Default)]
+#[derive(Default, CopyGetters)]
+#[getset(get_copy = "pub(super)")]
 pub(super) struct Parsed {
     /// Whether the byte completed anything: a sequence, a control or text.
-    pub(super) completed: bool,
+    completed: bool,
     /// The key press a completed control sequence reports.
-    pub(super) press: Option<KeyPress>,
+    press: Option<KeyPress>,
 }
 
 impl Perform for Parsed {

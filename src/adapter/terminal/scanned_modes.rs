@@ -1,4 +1,5 @@
 use alacritty_terminal::vte::{Params, Perform};
+use getset::CopyGetters;
 
 use super::{
     escape::{
@@ -39,20 +40,28 @@ const DEFAULT_CURSOR_STYLE: u16 = 0;
 
 /// The modes a [`ModeScanner`](super::mode_scanner::ModeScanner) follows,
 /// and what the byte it last fed completed.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, CopyGetters)]
 pub(super) struct Modes {
     /// Whether origin mode is on.
-    pub(super) origin: bool,
+    #[getset(get_copy = "pub(super)")]
+    origin: bool,
     /// Origin mode as the saved cursor holds it.
     saved_origin: bool,
     /// Whether the child chose a cursor style, rather than leaving the
     /// terminal's own.
-    pub(super) cursor_style_set: bool,
+    #[getset(get_copy = "pub(super)")]
+    cursor_style_set: bool,
     /// What the byte being fed completed.
-    pub(super) observed: Observation,
+    #[getset(get_copy = "pub(super)")]
+    observed: Observation,
 }
 
 impl Modes {
+    /// Forgets what the last byte completed, before the next is fed.
+    pub(super) fn clear_observed(&mut self) {
+        self.observed = Observation::Nothing;
+    }
+
     /// Applies the private modes of a completed set (`set`) or reset: origin
     /// mode, in order, with 1049's entry saving the cursor and its exit
     /// restoring it, then any alternate-screen switch.

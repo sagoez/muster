@@ -35,7 +35,7 @@ impl DetachScanner {
         BoundedParser::new().advance(&mut parsed, &key.kitty_sequence());
         Self {
             legacy: key.legacy_byte(),
-            kitty: parsed.press,
+            kitty: parsed.press(),
             parser: BoundedParser::new(),
             pending: Vec::new(),
         }
@@ -75,8 +75,8 @@ impl DetachScanner {
     fn classify(&mut self, byte: u8) -> HeldSequence {
         let mut parsed = Parsed::default();
         self.parser.advance(&mut parsed, &[byte]);
-        if parsed.completed {
-            if self.kitty.is_some() && parsed.press == self.kitty {
+        if parsed.completed() {
+            if self.kitty.is_some() && parsed.press() == self.kitty {
                 HeldSequence::Detach
             } else {
                 HeldSequence::Other

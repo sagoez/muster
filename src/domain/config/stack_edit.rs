@@ -87,7 +87,7 @@ impl Display for StackEdit {
                 author.label(),
                 spec.name().shell_quoted(),
                 spec.command(),
-                WorkingDir(spec.working_dir())
+                WorkingDir::new(spec.working_dir())
             ),
             Self::Changed {
                 author,
@@ -106,7 +106,11 @@ impl Display for StackEdit {
                     write!(f, "; command now `{}`", spec.command())?;
                 }
                 if fields.contains(&ProcessField::WorkingDir) {
-                    write!(f, "; working dir now {}", WorkingDir(spec.working_dir()))?;
+                    write!(
+                        f,
+                        "; working dir now {}",
+                        WorkingDir::new(spec.working_dir())
+                    )?;
                 }
                 Ok(())
             },

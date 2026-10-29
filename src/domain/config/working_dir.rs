@@ -7,7 +7,14 @@ use std::{
 const PROJECT_ROOT: &str = "the project root";
 
 /// A stored working directory as a person reads it.
-pub(super) struct WorkingDir<'a>(pub(super) &'a Option<PathBuf>);
+pub(super) struct WorkingDir<'a>(&'a Option<PathBuf>);
+
+impl<'a> WorkingDir<'a> {
+    /// The stored working directory `dir`, ready to show.
+    pub(super) fn new(dir: &'a Option<PathBuf>) -> Self {
+        Self(dir)
+    }
+}
 
 impl Display for WorkingDir<'_> {
     /// The folder, or [`PROJECT_ROOT`] for none.

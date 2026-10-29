@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 
+use getset::CopyGetters;
+
 use super::{log_query::LogQuery, log_reader::GROUP_SEPARATOR};
 
 /// The newest lines a read keeps, dropping the oldest past the line or byte
 /// cap. Group separators take bytes but do not count as lines.
+#[derive(CopyGetters)]
 pub(super) struct Kept {
     /// The lines, oldest first.
     lines: VecDeque<String>,
@@ -12,7 +15,8 @@ pub(super) struct Kept {
     /// Bytes the lines take with their line feeds.
     bytes: usize,
     /// Lines dropped to stay within the caps.
-    pub(super) omitted: usize,
+    #[getset(get_copy = "pub(super)")]
+    omitted: usize,
     /// The most lines kept.
     line_cap: usize,
     /// The most bytes kept.

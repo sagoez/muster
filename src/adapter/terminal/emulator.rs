@@ -5,7 +5,6 @@
 //! text, and repaint the screen with its modes onto a fresh terminal.
 
 use std::{
-    mem,
     panic::{self, AssertUnwindSafe},
     sync::{Arc, Mutex},
 };
@@ -166,7 +165,7 @@ impl TerminalEmulator {
         let pending = self.take_pty_writes();
         let size = TermSize::new(self.term.columns(), self.term.screen_lines());
         *self = Self::sized(size, self.history, self.color_scheme);
-        lock_sink(&self.sink).pty_writes = pending;
+        lock_sink(&self.sink).write(&pending);
         true
     }
 
@@ -309,7 +308,7 @@ impl TerminalEmulator {
     /// Takes any bytes the terminal wants written back to the child (status and
     /// identity reports), leaving the buffer empty.
     pub fn take_pty_writes(&mut self) -> Vec<u8> {
-        mem::take(&mut lock_sink(&self.sink).pty_writes)
+        lock_sink(&self.sink).take()
     }
 
     /// The escape sequence that rebuilds this terminal on a fresh one: reset, the

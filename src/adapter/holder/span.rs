@@ -5,6 +5,8 @@ use std::{
     path::Path,
 };
 
+use getset::CopyGetters;
+
 use super::{
     error_line::is_error_line,
     generation::Generation,
@@ -23,13 +25,16 @@ const OPEN_ATTEMPTS: usize = 3;
 
 /// The log's kept output as one stream, the rotated generation then the live
 /// one, fixed at the lengths they had when opened.
+#[derive(CopyGetters)]
 pub(super) struct Span {
     /// The generations present, oldest first.
     pieces: Vec<Piece>,
     /// The oldest byte still kept.
-    pub(super) oldest: OutputCursor,
+    #[getset(get_copy = "pub(super)")]
+    oldest: OutputCursor,
     /// Just past the newest byte.
-    pub(super) end: OutputCursor,
+    #[getset(get_copy = "pub(super)")]
+    end: OutputCursor,
 }
 
 impl Span {
@@ -60,22 +65,24 @@ impl Span {
             let base = resolved.offset();
             let rotated = rotated.map(|(file, generation)| {
                 let len = generation.len().min(base);
-                Piece {
-                    file,
-                    start: base - len,
-                    len,
-                    skip: generation.len() - len,
-                }
+                Piece::builder()
+                    .file(file)
+                    .start(base - len)
+                    .len(len)
+                    .skip(generation.len() - len)
+                    .build()
             });
-            let live = live.map(|(file, generation)| Piece {
-                file,
-                start: base,
-                len: generation.len(),
-                skip: 0,
+            let live = live.map(|(file, generation)| {
+                Piece::builder()
+                    .file(file)
+                    .start(base)
+                    .len(generation.len())
+                    .skip(0)
+                    .build()
             });
             let pieces: Vec<Piece> = rotated.into_iter().chain(live).collect();
-            let oldest = pieces.first().map_or(base, |piece| piece.start);
-            let end = pieces.last().map_or(base, |piece| piece.start + piece.len);
+            let oldest = pieces.first().map_or(base, Piece::start);
+            let end = pieces.last().map_or(base, Piece::end);
             return Ok(Self {
                 pieces,
                 oldest: OutputCursor::new(oldest),
@@ -90,20 +97,16 @@ impl Span {
     /// # Errors
     /// Returns an [`io::Error`] when the read fails.
     pub(super) fn read_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
-        let Some(piece) = self
-            .pieces
-            .iter()
-            .find(|piece| offset >= piece.start && offset < piece.start + piece.len)
-        else {
+        let Some(piece) = self.pieces.iter().find(|piece| piece.holds(offset)) else {
             return Ok(0);
         };
-        let available = piece.start + piece.len - offset;
+        let available = piece.end() - offset;
         let wanted = buffer
             .len()
             .min(usize::try_from(available).unwrap_or(usize::MAX));
         piece
-            .file
-            .read_at(&mut buffer[..wanted], offset - piece.start + piece.skip)
+            .file()
+            .read_at(&mut buffer[..wanted], offset - piece.start() + piece.skip())
     }
 
     /// Fills `buffer` from absolute `offset`, across pieces; returns the bytes

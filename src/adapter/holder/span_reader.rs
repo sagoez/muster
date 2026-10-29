@@ -6,9 +6,16 @@ use crate::domain::value::OutputCursor;
 /// A forward reader over a [`Span`] from an absolute offset.
 pub(super) struct SpanReader<'a> {
     /// The stream read.
-    pub(super) span: &'a Span,
+    span: &'a Span,
     /// The next offset to read.
-    pub(super) at: OutputCursor,
+    at: OutputCursor,
+}
+
+impl<'a> SpanReader<'a> {
+    /// A reader of `span` starting at `at`.
+    pub(super) fn new(span: &'a Span, at: OutputCursor) -> Self {
+        Self { span, at }
+    }
 }
 
 impl Read for SpanReader<'_> {

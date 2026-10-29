@@ -20,9 +20,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             // Status and identity reports the terminal wants written back verbatim.
-            Event::PtyWrite(text) => lock_sink(&self.sink)
-                .pty_writes
-                .extend_from_slice(text.as_bytes()),
+            Event::PtyWrite(text) => lock_sink(&self.sink).write(text.as_bytes()),
             // A child querying a color (OSC 10/11 for the default foreground and
             // background, OSC 4 for a palette entry) must get an answer, or an agent
             // like Codex, unable to read the background, themes for a light terminal
@@ -30,9 +28,7 @@ impl EventListener for EventProxy {
             // configured scheme's defaults, the way a real terminal does.
             Event::ColorRequest(index, format) => {
                 let reply = format(resolve_color(index, self.color_scheme));
-                lock_sink(&self.sink)
-                    .pty_writes
-                    .extend_from_slice(reply.as_bytes());
+                lock_sink(&self.sink).write(reply.as_bytes());
             },
             _ => {},
         }

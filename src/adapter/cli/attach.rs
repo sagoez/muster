@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn ctrl_c_is_forwarded_and_session_continues() {
         let holder = Holder::start(
-            "stty -isig; printf 'ready\\n'; while read -r line; do printf '%s' \"$line\" | od -An -tx1; done",
+            "stty -isig; printf 'ready\\n'; while read -r line; do printf 'got:%s\\n' \"$line\" | cat -v; done",
         );
         let pty = TestPty::open(ROWS, COLS);
         let cooked = pty.settings();
@@ -467,13 +467,13 @@ mod tests {
 
         pty.wait_for(b"ready");
         pty.type_keys(b"\x03a\r");
-        pty.wait_for(b"03 61");
+        pty.wait_for(b"got:^Ca");
         assert!(
             !running.session().is_finished(),
             "Ctrl-C does not end the session"
         );
         pty.type_keys(b"b\r");
-        pty.wait_for(b" 62");
+        pty.wait_for(b"got:b");
         pty.type_keys(DETACH_BYTE);
         let end = running.end();
 

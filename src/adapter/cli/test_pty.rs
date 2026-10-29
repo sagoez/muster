@@ -13,7 +13,10 @@ use std::{
 use rustix::{
     fs::OFlags,
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
-    termios::{Termios, Winsize, tcgetattr, tcsetwinsize},
+    termios::{
+        ControlModes, InputModes, LocalModes, OutputModes, Termios, Winsize, tcgetattr,
+        tcsetwinsize,
+    },
 };
 
 use super::host_terminal::HostTerminal;
@@ -121,10 +124,30 @@ impl TestPty {
     }
 }
 
-/// Whether two terminal settings agree on everything raw mode changes.
+/// The input flags raw mode changes.
+const RAW_INPUT: InputModes = InputModes::IGNBRK
+    .union(InputModes::BRKINT)
+    .union(InputModes::PARMRK)
+    .union(InputModes::ISTRIP)
+    .union(InputModes::INLCR)
+    .union(InputModes::IGNCR)
+    .union(InputModes::ICRNL)
+    .union(InputModes::IXON);
+/// The local flags raw mode changes.
+const RAW_LOCAL: LocalModes = LocalModes::ECHO
+    .union(LocalModes::ECHONL)
+    .union(LocalModes::ICANON)
+    .union(LocalModes::ISIG)
+    .union(LocalModes::IEXTEN);
+/// The control flags raw mode changes.
+const RAW_CONTROL: ControlModes = ControlModes::CSIZE.union(ControlModes::PARENB);
+
+/// Whether two terminal settings agree on everything raw mode changes. Only
+/// those flags are compared: macOS changes others, such as `PENDIN`, on its
+/// own.
 pub fn same_settings(left: &Termios, right: &Termios) -> bool {
-    left.input_modes == right.input_modes
-        && left.output_modes == right.output_modes
-        && left.control_modes == right.control_modes
-        && left.local_modes == right.local_modes
+    left.input_modes & RAW_INPUT == right.input_modes & RAW_INPUT
+        && left.output_modes & OutputModes::OPOST == right.output_modes & OutputModes::OPOST
+        && left.control_modes & RAW_CONTROL == right.control_modes & RAW_CONTROL
+        && left.local_modes & RAW_LOCAL == right.local_modes & RAW_LOCAL
 }

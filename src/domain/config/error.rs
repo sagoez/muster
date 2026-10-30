@@ -1,115 +1,205 @@
-use std::path::PathBuf;
+use std::{error::Error as StdError, path::PathBuf};
 
 use thiserror::Error;
 
 use crate::domain::{
-    agent_session::{AgentProcessId, AgentSessionId},
-    process::{AgentTool, ProcessKind},
-    value::{ProcessName, ProjectName},
+    config::{OverCap, PROCESSES_MAX, SettingKey},
+    coordination::LOCKS_PER_SESSION_MAX,
+    pty::PtyError,
+    value::{ProcessName, ProjectName, refused_name},
 };
 
-/// Errors from workspace configuration and project registry operations.
+/// Separates names listed in an error message.
+const NAME_SEPARATOR: &str = ", ";
+/// Stands in for an empty list of names in an error message.
+const NO_NAMES: &str = "none";
+
+/// Errors from muster's stored state: projects, stacks, settings and
+/// coordination.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// The configuration file could not be read from disk.
-    #[error("could not read config file {path}: {source}")]
-    Read {
-        /// Path that failed to load.
-        path: PathBuf,
-        /// Underlying I/O error.
-        source: std::io::Error,
-    },
-    /// The configuration file could not be written to disk.
-    #[error("could not write config file {path}: {source}")]
-    Write {
-        /// Path that failed to write.
-        path: PathBuf,
-        /// Underlying I/O error.
-        source: std::io::Error,
-    },
-    /// No writable config directory could be located on this platform.
-    #[error("no config directory is available")]
-    NoConfigDir,
-    /// The session-state file uses a schema newer than this binary understands.
-    #[error("unsupported agent-session state version {0}")]
-    UnsupportedAgentSessionVersion(u8),
-    /// The coordination-state file uses a schema newer than this binary
-    /// understands.
-    #[error("unsupported coordination state version {0}")]
-    UnsupportedCoordinationVersion(u8),
     /// A coordination id could not be generated (its UUID text was empty, which
     /// cannot happen in practice).
     #[error("could not generate a coordination id: {0}")]
     CoordinationId(String),
-    /// The coordination database could not be opened, read, or written. Carries a
-    /// message rather than the driver's error type so no database library leaks
-    /// into the domain.
-    #[error("coordination database error: {0}")]
-    Database(String),
-    /// A lifecycle update referenced a session no longer present in state.
-    #[error("agent session '{0}' is not present in session state")]
-    AgentSessionNotFound(AgentSessionId),
-    /// A lifecycle event came from a provider that does not own the session.
-    #[error(
-        "agent session '{id}' belongs to {expected}, but received a lifecycle event from {reported}"
-    )]
-    AgentSessionProviderMismatch {
-        /// Session whose provider rejected the lifecycle event.
-        id: AgentSessionId,
-        /// Provider recorded when the session was created.
-        expected: AgentTool,
-        /// Provider that emitted the lifecycle event.
-        reported: AgentTool,
+    /// The store behind a port failed. Opaque, so no storage library or path
+    /// detail leaks into the domain.
+    #[error(transparent)]
+    Storage(Box<dyn StdError + Send + Sync + 'static>),
+    /// The store stayed busy or locked by another writer past its own wait:
+    /// the same write may land if tried again later. Opaque like
+    /// [`ConfigError::Storage`].
+    #[error(transparent)]
+    Busy(Box<dyn StdError + Send + Sync + 'static>),
+    /// A stored row holds a value the domain refuses: it was edited by hand
+    /// or written by a different muster.
+    #[error("stored {what} is invalid: {reason}")]
+    CorruptRow {
+        /// What the refused value is.
+        what: String,
+        /// Why it was refused.
+        reason: String,
     },
-    /// A concurrent Muster instance already owns the managed agent session.
-    #[error("agent session '{id}' is already owned by live process {owner}")]
-    AgentSessionAlreadyOwned {
-        /// Session whose ownership claim was rejected.
-        id: AgentSessionId,
-        /// Live provider process retaining ownership.
-        owner: AgentProcessId,
+    /// A value is too large for the database to store.
+    #[error("{what} is too large to store")]
+    TooLarge {
+        /// What the value is.
+        what: String,
     },
-    /// A concurrent pin already transferred the conversation into a different
-    /// configured agent, so transferring it again would clobber that agent's
-    /// session and orphan its seeded record.
-    #[error("agent session '{0}' was already pinned by another instance")]
-    AgentSessionAlreadyPinned(AgentSessionId),
-    /// A legacy registry entry has no stable location outside its original
-    /// launch directory.
+    /// The database was written by a newer muster.
     #[error(
-        "registered project '{name}' uses unsupported relative config path {path:?}; edit or remove it in projects.yml"
+        "the database is at schema version {found}, newer than the {supported} this muster supports; upgrade muster"
     )]
-    RelativeProjectConfig {
-        /// Registered project whose config path is ambiguous.
-        name: ProjectName,
-        /// Relative config path stored by an earlier version.
+    UnsupportedSchema {
+        /// The schema version the database records.
+        found: u32,
+        /// The newest schema version this binary knows.
+        supported: u32,
+    },
+    /// No project is registered at a folder.
+    #[error("no muster project at {}; `muster add` registers one", root.display())]
+    UnknownProject {
+        /// The folder that is not a project.
+        root: PathBuf,
+    },
+    /// No process in the project has a name.
+    #[error(
+        "no process named '{name}' in this project; processes: {}",
+        list(valid)
+    )]
+    UnknownProcess {
+        /// The name asked for.
+        name: ProcessName,
+        /// The names the project defines.
+        valid: Vec<ProcessName>,
+    },
+    /// A write would leave a process with a value past a cap.
+    #[error("'{}': {over}", refused_name(name.as_ref()))]
+    OverCap {
+        /// The process written.
+        name: ProcessName,
+        /// The cap it would run past.
+        over: OverCap,
+    },
+    /// A write would leave the project with more processes than it may have.
+    #[error(
+        "this would leave the project with {found} processes, more than the {PROCESSES_MAX} it may have; remove one first"
+    )]
+    TooManyProcesses {
+        /// How many processes the project would hold.
+        found: usize,
+    },
+    /// A connection would hold more live locks than it may.
+    #[error(
+        "this connection already holds {LOCKS_PER_SESSION_MAX} locks, the most it may; release one first"
+    )]
+    TooManyLocks,
+    /// A process of that name, by NFC key, already exists in the project.
+    #[error("a process named '{name}' already exists in this project")]
+    DuplicateProcessName {
+        /// The name refused.
+        name: ProcessName,
+    },
+    /// A strict import names processes the project already defines.
+    #[error(
+        "the project already defines {}; import with --merge or --replace",
+        list(names)
+    )]
+    ImportConflict {
+        /// Every imported name already defined.
+        names: Vec<ProcessName>,
+    },
+    /// A setting's value is not one it accepts.
+    #[error("invalid {key}: {reason}")]
+    InvalidSetting {
+        /// The setting refused.
+        key: SettingKey,
+        /// Why, naming the accepted form.
+        reason: String,
+    },
+    /// The default size is one no PTY can take.
+    #[error("invalid {}: {source}", SettingKey::DefaultSize)]
+    InvalidDefaultSize {
+        /// Why the size was refused.
+        source: PtyError,
+    },
+    /// A project folder is missing or not a directory.
+    #[error("{} is not a directory", path.display())]
+    RootNotADirectory {
+        /// The path refused.
         path: PathBuf,
     },
-    /// The configuration was not valid YAML or violated the schema.
-    #[error("could not parse config: {0}")]
-    Parse(#[from] serde_yaml_ng::Error),
-    /// A non-command process configured command-only graceful shutdown.
-    #[error("{kind} process '{name}' configures stop, which is only valid for commands")]
-    InvalidStopPolicy {
-        /// Section containing the invalid process.
-        kind: ProcessKind,
-        /// Name of the invalid process.
-        name: ProcessName,
+    /// A project folder's path is not UTF-8, so the database cannot store it.
+    #[error("{} is not valid UTF-8 and cannot be a project folder", path.display())]
+    RootNotUtf8 {
+        /// The path refused.
+        path: PathBuf,
     },
-    /// Two configured agents share a name. An agent's name is its durable
-    /// session key within a project, so duplicates would bind to one another's
-    /// conversation; the config is rejected rather than loaded ambiguously.
-    #[error("duplicate agent '{name}': agent names must be unique within a project")]
-    DuplicateAgentName {
-        /// Name shared by more than one configured agent.
-        name: ProcessName,
+    /// A folder would become a project holding a registered one, which
+    /// another write registered first.
+    #[error(
+        "{} holds the project '{project}', so it cannot be a muster project",
+        dir.display()
+    )]
+    HoldsProject {
+        /// The folder refused.
+        dir: PathBuf,
+        /// The registered project inside it.
+        project: ProjectName,
     },
-    /// A configured agent omits its command. An agent with no command is a login
-    /// shell mislabeled as an agent: it cannot resume or capture a session, so it
-    /// is rejected rather than persisted as an unlaunchable row.
-    #[error("agent '{name}' has no command; every agent must define one")]
-    AgentCommandMissing {
-        /// Name of the agent missing a command.
-        name: ProcessName,
-    },
+}
+
+impl ConfigError {
+    /// Whether the store was only busy, so the same write may land later.
+    #[must_use]
+    pub const fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
+}
+
+/// `names` joined for an error message.
+fn list(names: &[ProcessName]) -> String {
+    if names.is_empty() {
+        return NO_NAMES.to_string();
+    }
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(NAME_SEPARATOR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The process names `raw`.
+    fn names(raw: &[&str]) -> Vec<ProcessName> {
+        raw.iter()
+            .map(|name| ProcessName::try_new(*name).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_process_lists_the_valid_names() {
+        let error = ConfigError::UnknownProcess {
+            name: ProcessName::try_new("wbe").unwrap(),
+            valid: names(&["web", "api"]),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "no process named 'wbe' in this project; processes: 'web', 'api'"
+        );
+    }
+
+    #[test]
+    fn an_empty_project_lists_none() {
+        let error = ConfigError::UnknownProcess {
+            name: ProcessName::try_new("web").unwrap(),
+            valid: Vec::new(),
+        };
+
+        assert!(error.to_string().ends_with("processes: none"));
+    }
 }

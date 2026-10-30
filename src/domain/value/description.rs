@@ -1,10 +1,13 @@
 use nutype::nutype;
 
-/// Optional secondary line shown under a process name in the sidebar: trimmed
-/// and non-empty. Wrap in `Option` for the absent case.
+/// Most characters a process's description holds.
+pub const DESCRIPTION_MAX_CHARS: usize = 300;
+
+/// Optional one-line description of a process: trimmed, non-empty and at most
+/// [`DESCRIPTION_MAX_CHARS`] long. Wrap in `Option` for the absent case.
 #[nutype(
     sanitize(trim),
-    validate(not_empty),
+    validate(not_empty, len_char_max = DESCRIPTION_MAX_CHARS),
     derive(
         Debug,
         Clone,
@@ -32,5 +35,15 @@ mod tests {
     fn accepts_a_sentence() {
         let d = Description::try_new("A CLI interface for the project").unwrap();
         assert_eq!(d.as_ref(), "A CLI interface for the project");
+    }
+
+    /// A description up to the maximum is kept; one past it is refused.
+    #[test]
+    fn a_description_is_bounded() {
+        assert!(Description::try_new("x".repeat(DESCRIPTION_MAX_CHARS)).is_ok());
+        assert_eq!(
+            Description::try_new("x".repeat(DESCRIPTION_MAX_CHARS + 1)),
+            Err(DescriptionError::LenCharMaxViolated)
+        );
     }
 }

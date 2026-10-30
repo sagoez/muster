@@ -1,0 +1,6 @@
+---
+source: src/adapter/cli/output.rs
+assertion_line: 521
+expression: "render_status(&[], true)"
+---
+no projects are loaded; `muster up` in a project folder starts its processes

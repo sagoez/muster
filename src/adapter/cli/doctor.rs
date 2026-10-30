@@ -2,46 +2,69 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use getset::{CopyGetters, Getters};
-use typed_builder::TypedBuilder;
+use clap::ValueEnum;
 
 use super::{
-    check::{CheckOutcome, VALID_SUFFIX, check, error_chain},
     completions::{CompletionShell, registration_line},
-    report::{Report, Row, RowKind, summary_line},
+    doctor_check::DoctorCheck,
+    error::CliError,
+    output::COLUMN_GAP,
+    probe::Probe,
+    probe_outcome::ProbeOutcome,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
 };
 use crate::{
     adapter::{
-        clipboard,
-        hooks::{HookState, HookStatus},
-        path::absolutize,
+        client::{ClientError, ProjectTarget, SocketDirCheck},
+        sanitize::printable,
     },
-    domain::port::{AgentSessionStore, ProjectRegistry},
+    domain::{
+        config::{ConfigError, ProcessSpec, Stack},
+        port::{LocalState, ProjectStore, StackStore},
+    },
 };
 
-/// Title of the doctor report box.
+/// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
-/// Summary word for passing probes.
-const SUMMARY_OK: &str = "ok";
-/// Summary words for advisory probes.
-const SUMMARY_HINT: &str = "hint";
-const SUMMARY_HINTS: &str = "hints";
-/// Summary words for failing probes.
-const SUMMARY_FAILURE: &str = "failure";
-const SUMMARY_FAILURES: &str = "failures";
-/// Probe labels.
-const CONFIG_LABEL: &str = "config";
-const REGISTRY_LABEL: &str = "projects";
-const SESSIONS_LABEL: &str = "sessions";
-const HOOKS_LABEL: &str = "agent hooks";
-const CLIPBOARD_LABEL: &str = "clipboard";
-const COMPLETIONS_LABEL: &str = "completions";
+/// The database probe when the database opens and its settings read.
+const DATABASE_OK: &str = "opens at the current schema, settings valid";
+/// The current-folder probe outside every project.
+const NO_PROJECT_HERE: &str = "not inside a project; `muster add` starts one";
+/// The legacy probe with nothing left over.
+const NO_LEGACY_FILES: &str = "none left over";
+/// The processes probe when every stored process reads.
+const PROCESSES_OK: &str = "every stored process reads";
+/// What to do about projects whose stored processes do not read.
+const INVALID_HINT: &str = "`muster projects rm <name> --yes` forgets them";
+/// What to do about registered folders that are gone.
+const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
+/// What to do about projects whose stored rows do not read.
+const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
+/// What to do about legacy files.
+const LEGACY_HINT: &str = "muster no longer reads them; delete them";
+/// The socket probe when every directory the service is reached through is
+/// private.
+const SOCKET_OK: &str = "private to you";
+/// Opens the socket probe's warning about a published socket it passes
+/// over; why follows.
+const PUBLISHED_PASSED_OVER: &str = "the socket a service published is passed over: ";
+/// Between the parts of a probe's detail.
+const DETAIL_SEPARATOR: &str = "; ";
+/// Between the items a probe lists.
+const LIST_SEPARATOR: &str = ", ";
+/// Between the messages of an error and its sources.
+const CHAIN_SEPARATOR: &str = ": ";
+/// Files an older muster kept in the state directory.
+const LEGACY_STATE_FILES: &[&str] = &["coordination.db", "agent-sessions.yml"];
+/// Files an older muster kept in the config directory.
+const LEGACY_CONFIG_FILES: &[&str] = &["settings.yml", "projects.yml"];
 /// Prefix of a commented-out rc line, ignored by every probed shell.
 const COMMENT_PREFIX: &str = "#";
-/// Hint shown when providers need (re)installation.
-const HOOKS_HINT: &str = "run `muster hooks setup`";
 /// Bash shell rc file for sourcing completions.
 const BASH_RC: &str = ".bashrc";
 /// Zsh shell rc file for sourcing completions.
@@ -54,159 +77,252 @@ const FISH_COMPLETIONS: &str = "fish/completions/muster.fish";
 const ELVISH_RC: &str = ".elvish/rc.elv";
 /// Elvish rc under the XDG config root, the modern location.
 const ELVISH_XDG_RC: &str = "elvish/rc.elv";
-/// PowerShell profile for sourcing completions on Unix.
-#[cfg(not(windows))]
+/// PowerShell profile for sourcing completions.
 const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
-/// PowerShell 7 profile relative to the user's home directory on Windows.
-#[cfg(windows)]
-const POWERSHELL_RC: &str = "Documents/PowerShell/Microsoft.PowerShell_profile.ps1";
-/// Windows PowerShell 5 profile relative to the user's home directory.
-#[cfg(windows)]
-const WINDOWS_POWERSHELL_RC: &str = "Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1";
-
-/// Severity of a probe result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeOutcome {
-    /// Healthy.
-    Ok,
-    /// Advisory; does not fail the doctor run.
-    Warn,
-    /// Broken; the doctor run exits non-zero.
-    Fail,
-}
-
-/// One diagnostic line: what was probed, how it went, and the detail text.
-#[derive(Debug, Getters, CopyGetters, TypedBuilder)]
-pub struct Probe {
-    /// What was probed.
-    #[getset(get = "pub")]
-    label: String,
-    /// Severity of the result.
-    #[getset(get_copy = "pub")]
-    outcome: ProbeOutcome,
-    /// Human detail for the line.
-    #[getset(get = "pub")]
-    detail: String,
-}
 
 /// Builds one probe.
-fn probe(label: &str, outcome: ProbeOutcome, detail: String) -> Probe {
+fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
     Probe::builder()
-        .label(label.to_string())
+        .check(check)
         .outcome(outcome)
         .detail(detail)
         .build()
 }
 
-/// Validates the workspace config.
-pub fn config_probe(config_path: PathBuf) -> Probe {
-    let display = config_path.display().to_string();
-    match check(config_path) {
-        Ok(CheckOutcome::Valid) => probe(
-            CONFIG_LABEL,
+/// `error` and each source it does not already show, joined.
+pub fn error_chain(error: &dyn Error) -> String {
+    let mut report = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !report.contains(&text) {
+            report.push_str(CHAIN_SEPARATOR);
+            report.push_str(&text);
+        }
+        source = cause.source();
+    }
+    report
+}
+
+/// Whether the database `opened` and its settings row reads.
+pub fn database_probe(opened: &Result<Arc<dyn LocalState>, ConfigError>) -> Probe {
+    match opened.as_ref().map(|state| state.load()) {
+        Ok(Ok(_)) => probe(
+            DoctorCheck::Database,
             ProbeOutcome::Ok,
-            format!("{display} {VALID_SUFFIX}"),
+            DATABASE_OK.to_string(),
         ),
-        Ok(CheckOutcome::Invalid(report)) => probe(CONFIG_LABEL, ProbeOutcome::Fail, report),
-        // The doctor is a reporter: even an unreadable config becomes a
-        // failing probe rather than aborting the other probes.
-        Err(error) => probe(CONFIG_LABEL, ProbeOutcome::Fail, error_chain(&error)),
+        Ok(Err(error)) => probe(
+            DoctorCheck::Database,
+            ProbeOutcome::Fail,
+            error_chain(&error),
+        ),
+        Err(error) => probe(
+            DoctorCheck::Database,
+            ProbeOutcome::Fail,
+            error_chain(error),
+        ),
     }
 }
 
-/// Reads the registry and flags projects whose config file is not a reachable
-/// regular file - missing, a directory, or a dangling symlink all fail.
-pub fn registry_probe(registry: &dyn ProjectRegistry) -> Probe {
-    match registry.projects() {
-        Ok(projects) => {
-            let dangling: Vec<String> = projects
+/// How many projects are registered, failing on any whose stored row does
+/// not read, naming its folder, and warning of any whose folder is gone.
+pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
+    match projects.projects().and_then(|readable| {
+        projects
+            .unreadable_projects()
+            .map(|unreadable| (readable, unreadable))
+    }) {
+        Ok((_, unreadable)) if !unreadable.is_empty() => {
+            let named: Vec<String> = unreadable
                 .iter()
-                .filter(|project| {
-                    !fs::metadata(absolutize(project.config()))
-                        .map(|meta| meta.is_file())
-                        .unwrap_or(false)
+                .map(|project| {
+                    format!(
+                        "{} ({})",
+                        printable(&project.root().to_string_lossy()),
+                        project.reason()
+                    )
                 })
-                .map(|project| project.name().as_ref().to_string())
                 .collect();
-            if dangling.is_empty() {
+            probe(
+                DoctorCheck::Projects,
+                ProbeOutcome::Fail,
+                format!(
+                    "unreadable: {}{DETAIL_SEPARATOR}{UNREADABLE_HINT}",
+                    named.join(LIST_SEPARATOR)
+                ),
+            )
+        },
+        Ok((projects, _)) => {
+            let gone: Vec<String> = projects
+                .iter()
+                .filter(|project| !project.root().as_ref().is_dir())
+                .map(|project| project.name().to_string())
+                .collect();
+            if gone.is_empty() {
                 probe(
-                    REGISTRY_LABEL,
+                    DoctorCheck::Projects,
                     ProbeOutcome::Ok,
                     format!("{} registered", projects.len()),
                 )
             } else {
                 probe(
-                    REGISTRY_LABEL,
-                    ProbeOutcome::Fail,
-                    format!("missing config for: {}", dangling.join(", ")),
+                    DoctorCheck::Projects,
+                    ProbeOutcome::Warn,
+                    format!(
+                        "folder gone for: {}{DETAIL_SEPARATOR}{GONE_HINT}",
+                        gone.join(LIST_SEPARATOR)
+                    ),
                 )
             }
         },
-        Err(error) => probe(REGISTRY_LABEL, ProbeOutcome::Fail, error_chain(&error)),
-    }
-}
-
-/// Confirms the agent-session store is readable.
-pub fn sessions_probe(store: &dyn AgentSessionStore) -> Probe {
-    match store.sessions() {
-        Ok(sessions) => probe(
-            SESSIONS_LABEL,
-            ProbeOutcome::Ok,
-            format!("{} stored", sessions.len()),
-        ),
-        Err(error) => probe(SESSIONS_LABEL, ProbeOutcome::Fail, error_chain(&error)),
-    }
-}
-
-/// Aggregates provider hook states into one line.
-pub fn hooks_probe(statuses: &[HookStatus]) -> Probe {
-    let broken: Vec<String> = statuses
-        .iter()
-        .filter(|status| status.state() != HookState::Installed)
-        .map(|status| format!("{} ({})", status.provider(), status.state()))
-        .collect();
-    if broken.is_empty() {
-        probe(
-            HOOKS_LABEL,
-            ProbeOutcome::Ok,
-            format!("{} providers installed", statuses.len()),
-        )
-    } else {
-        probe(
-            HOOKS_LABEL,
+        Err(error) => probe(
+            DoctorCheck::Projects,
             ProbeOutcome::Fail,
-            format!("{}; {HOOKS_HINT}", broken.join(", ")),
+            error_chain(&error),
+        ),
+    }
+}
+
+/// Whether every registered project's stored processes read and may start,
+/// naming each project whose rows do not and why, and each process never
+/// started for a stored problem, with the commands that fix it.
+pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> Probe {
+    let projects = match projects.projects() {
+        Ok(projects) => projects,
+        Err(error) => {
+            return probe(
+                DoctorCheck::Processes,
+                ProbeOutcome::Fail,
+                error_chain(&error),
+            );
+        },
+    };
+    let mut invalid = Vec::new();
+    let mut never_started = Vec::new();
+    for project in &projects {
+        match stacks.stack(project.root()) {
+            Ok(stack) => never_started.extend(
+                stack
+                    .iter()
+                    .flat_map(Stack::processes)
+                    .filter_map(ProcessSpec::stored_problem)
+                    .map(|problem| format!("in {}, {problem}", project.name())),
+            ),
+            Err(error) => invalid.push(format!("{} ({})", project.name(), error_chain(&error))),
+        }
+    }
+    let mut problems = Vec::new();
+    if !invalid.is_empty() {
+        problems.push(format!(
+            "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
+            invalid.join(LIST_SEPARATOR)
+        ));
+    }
+    problems.extend(never_started);
+    if problems.is_empty() {
+        probe(
+            DoctorCheck::Processes,
+            ProbeOutcome::Ok,
+            PROCESSES_OK.to_string(),
+        )
+    } else {
+        probe(
+            DoctorCheck::Processes,
+            ProbeOutcome::Fail,
+            printable(&problems.join(DETAIL_SEPARATOR)),
         )
     }
 }
 
-/// A hooks probe for when the status scan itself failed.
-pub fn hooks_probe_error(error: &dyn Error) -> Probe {
-    probe(HOOKS_LABEL, ProbeOutcome::Fail, error_chain(error))
+/// Which project the current folder belongs to, as every command finds it.
+pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
+    match target {
+        Ok(ProjectTarget::Registered(project)) => probe(
+            DoctorCheck::ThisFolder,
+            ProbeOutcome::Ok,
+            format!(
+                "{}{COLUMN_GAP}{}",
+                project.name(),
+                project.root().as_ref().display()
+            ),
+        ),
+        Ok(ProjectTarget::Unregistered(_)) => probe(
+            DoctorCheck::ThisFolder,
+            ProbeOutcome::Ok,
+            NO_PROJECT_HERE.to_string(),
+        ),
+        Err(error) => probe(
+            DoctorCheck::ThisFolder,
+            ProbeOutcome::Fail,
+            error_chain(error),
+        ),
+    }
 }
 
-/// Reports which clipboard path a copy would take. Informational only.
-pub fn clipboard_probe() -> Probe {
-    let tool = clipboard::preferred_tool();
-    let detail = match (clipboard::prefers_osc52(), &tool) {
-        (true, _) => "remote session; OSC 52 via the terminal".to_string(),
-        (false, Some(tool_name)) => format!("native tool: {tool_name}"),
-        (false, None) => "no native tool; OSC 52 via the terminal".to_string(),
+/// Files an older muster left in `state_dir` and `config_dir`, which this
+/// one never reads.
+pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
+    let left: Vec<PathBuf> = [
+        (state_dir, LEGACY_STATE_FILES),
+        (config_dir, LEGACY_CONFIG_FILES),
+    ]
+    .into_iter()
+    .filter_map(|(dir, files)| dir.map(|dir| (dir, files)))
+    .flat_map(|(dir, files)| files.iter().map(move |file| dir.join(file)))
+    .filter(|path| fs::symlink_metadata(path).is_ok())
+    .collect();
+    if left.is_empty() {
+        return probe(
+            DoctorCheck::OldFiles,
+            ProbeOutcome::Ok,
+            NO_LEGACY_FILES.to_string(),
+        );
+    }
+    let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+    probe(
+        DoctorCheck::OldFiles,
+        ProbeOutcome::Warn,
+        format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
+            listed.join(LIST_SEPARATOR)
+        ),
+    )
+}
+
+/// Whether the directories this user's service is reached through are
+/// private: this client's own fails, since no request goes there, and a
+/// published one that is not private warns, since it is passed over.
+pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
+    let check = match check {
+        Ok(check) => check,
+        Err(error) => {
+            return probe(DoctorCheck::Socket, ProbeOutcome::Fail, error_chain(error));
+        },
     };
-    let outcome = if tool.is_some() || clipboard::prefers_osc52() {
-        ProbeOutcome::Ok
-    } else {
-        ProbeOutcome::Warn
-    };
-    probe(CLIPBOARD_LABEL, outcome, detail)
+    if let Some(own) = check.own() {
+        return probe(
+            DoctorCheck::Socket,
+            ProbeOutcome::Fail,
+            printable(&own.to_string()),
+        );
+    }
+    match check.published() {
+        Some(published) => probe(
+            DoctorCheck::Socket,
+            ProbeOutcome::Warn,
+            printable(&format!("{PUBLISHED_PASSED_OVER}{published}")),
+        ),
+        None => probe(DoctorCheck::Socket, ProbeOutcome::Ok, SOCKET_OK.to_string()),
+    }
 }
 
 /// Best-effort check that the shell's rc file registers completions; warns
 /// with the exact line to add when it does not.
 pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Path) -> Probe {
-    let Some(shell) = detect_shell(shell_path) else {
+    let Some(shell) = shell_path.and_then(shell_from_path) else {
         return probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Warn,
             "unknown shell; see `muster completions --help`".to_string(),
         );
@@ -216,13 +332,13 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
     });
     if let Some(matched) = matched {
         probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Ok,
             format!("registered in {}", matched.display()),
         )
     } else {
         probe(
-            COMPLETIONS_LABEL,
+            DoctorCheck::Completions,
             ProbeOutcome::Warn,
             format!("not registered; add: {}", registration_line(shell)),
         )
@@ -238,32 +354,10 @@ fn registers_completions(content: &str, shell: CompletionShell) -> bool {
     })
 }
 
-/// The shell whose completions the probe should check: `$SHELL` when it
-/// names a known shell, else PowerShell on Windows, where `$SHELL` is
-/// normally unset even though a profile may register completions.
-fn detect_shell(shell_env: Option<&str>) -> Option<CompletionShell> {
-    let named = shell_env.and_then(shell_from_path);
-    if named.is_some() {
-        return named;
-    }
-    if cfg!(windows) {
-        Some(CompletionShell::Powershell)
-    } else {
-        None
-    }
-}
-
 /// The completion shell inferred from a `$SHELL` path.
 fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
     let name = Path::new(shell_path).file_name()?.to_str()?;
-    match name {
-        "bash" => Some(CompletionShell::Bash),
-        "zsh" => Some(CompletionShell::Zsh),
-        "fish" => Some(CompletionShell::Fish),
-        "elvish" => Some(CompletionShell::Elvish),
-        "pwsh" | "powershell" => Some(CompletionShell::Powershell),
-        _ => None,
-    }
+    CompletionShell::from_str(name, false).ok()
 }
 
 /// The rc files probed for each shell, relative to home. Fish returns two
@@ -275,38 +369,18 @@ fn rc_paths(shell: CompletionShell, home: &Path, xdg_config: &Path) -> Vec<PathB
         CompletionShell::Zsh => vec![home.join(ZSH_RC)],
         CompletionShell::Fish => vec![xdg_config.join(FISH_RC), xdg_config.join(FISH_COMPLETIONS)],
         CompletionShell::Elvish => vec![home.join(ELVISH_RC), xdg_config.join(ELVISH_XDG_RC)],
-        #[cfg(not(windows))]
         CompletionShell::Powershell => vec![xdg_config.join(POWERSHELL_RC)],
-        // Best effort: $PROFILE can point elsewhere (e.g. OneDrive-redirected
-        // Documents), which a spawned-shell query would be needed to resolve.
-        #[cfg(windows)]
-        CompletionShell::Powershell => {
-            vec![home.join(POWERSHELL_RC), home.join(WINDOWS_POWERSHELL_RC)]
-        },
     }
 }
 
 /// The report over all probes: one labeled row each, closed by a summary
-/// counting outcomes (shown in the boxed layout only).
+/// counting outcomes (shown in the interactive layout only), and failed when
+/// a probe failed.
 pub fn doctor_report(probes: &[Probe]) -> Report {
     let rows = probes.iter().map(probe_row).collect();
-    let ok = outcome_count(probes, ProbeOutcome::Ok);
-    let hints = outcome_count(probes, ProbeOutcome::Warn);
-    let failures = outcome_count(probes, ProbeOutcome::Fail);
-    let mut parts = vec![format!("{ok} {SUMMARY_OK}")];
-    if hints > 0 {
-        parts.push(format!(
-            "{hints} {}",
-            plural(hints, SUMMARY_HINT, SUMMARY_HINTS)
-        ));
-    }
-    if failures > 0 {
-        parts.push(format!(
-            "{failures} {}",
-            plural(failures, SUMMARY_FAILURE, SUMMARY_FAILURES)
-        ));
-    }
-    Report::new(DOCTOR_TITLE, rows).with_summary(summary_line(&parts))
+    Report::new(DOCTOR_TITLE, rows)
+        .with_tally()
+        .with_failure(any_failed(probes))
 }
 
 /// One probe as a report row: outcome glyph, bold label, detail.
@@ -316,20 +390,7 @@ fn probe_row(probe: &Probe) -> Row {
         ProbeOutcome::Warn => RowKind::Hint,
         ProbeOutcome::Fail => RowKind::Fail,
     };
-    Row::labeled(kind, probe.label().clone(), probe.detail().clone())
-}
-
-/// How many probes ended with `outcome`.
-fn outcome_count(probes: &[Probe], outcome: ProbeOutcome) -> usize {
-    probes
-        .iter()
-        .filter(|probe| probe.outcome() == outcome)
-        .count()
-}
-
-/// The singular or plural word for a count.
-fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
-    if count == 1 { singular } else { many }
+    Row::labeled(kind, probe.check().label(), probe.detail().clone())
 }
 
 /// Whether any probe failed (warnings do not fail the run).
@@ -341,175 +402,147 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::Path};
+    use std::io;
+
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{
-        config::ConfigError, process::AgentTool, project::Project, value::ProjectName,
+    use crate::{
+        adapter::{
+            cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
+            client::fixed_projects::FixedProjects,
+        },
+        domain::{
+            project::Project,
+            value::{ProjectName, ProjectRoot},
+        },
     };
 
-    /// A registry recording saves of projects and workspaces.
-    #[derive(Default)]
-    struct RecordingRegistry {
-        projects: Vec<Project>,
-        saved_projects: RefCell<Option<Vec<Project>>>,
-    }
-
-    impl crate::domain::port::ProjectRegistry for RecordingRegistry {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.projects.clone())
-        }
-
-        fn workspace(
-            &self,
-            _config_path: &Path,
-        ) -> Result<crate::domain::config::WorkspaceConfig, ConfigError> {
-            unreachable!("doctor never loads a workspace")
-        }
-
-        fn workspace_exists(&self, _config_path: &Path) -> bool {
-            false
-        }
-
-        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-            *self.saved_projects.borrow_mut() = Some(projects.to_vec());
-            Ok(())
-        }
-
-        fn save_workspace(
-            &self,
-            _config_path: &Path,
-            _config: &crate::domain::config::WorkspaceConfig,
-        ) -> Result<(), ConfigError> {
-            unreachable!("doctor never saves a workspace")
-        }
-    }
-
-    fn project(name: &str, config: &str) -> Project {
+    /// A project called `name` at `root`.
+    fn project(name: &str, root: &Path) -> Project {
         Project::builder()
+            .root(ProjectRoot::try_new(root.to_path_buf()).unwrap())
             .name(ProjectName::try_new(name).unwrap())
-            .config(PathBuf::from(config))
             .build()
     }
 
-    fn hook_status(provider: AgentTool, state: HookState) -> HookStatus {
-        HookStatus::builder()
-            .provider(provider)
-            .path(PathBuf::from("/dummy/path"))
-            .state(state)
-            .build()
+    /// A registered project whose folder was deleted is named as a warning,
+    /// never a failure.
+    #[test]
+    fn a_registered_folder_that_is_gone_is_a_warning() {
+        let scratch = TempDir::new().unwrap();
+        let here = scratch.path().canonicalize().unwrap();
+        let probe = projects_probe(&FixedProjects::new(vec![
+            project("here", &here),
+            project("gone", &here.join("gone")),
+        ]));
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(probe.detail().contains("gone"), "{}", probe.detail());
+        let fine = projects_probe(&FixedProjects::new(vec![project("here", &here)]));
+        assert_eq!(fine.outcome(), ProbeOutcome::Ok);
+        assert_eq!(fine.detail(), "1 registered");
     }
 
-    /// A missing config fails the config probe.
+    /// A database that does not open fails the doctor, naming why.
     #[test]
-    fn config_probe_fails_on_a_missing_file() {
-        let probe = config_probe(std::path::PathBuf::from("/definitely/missing/muster.yml"));
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-    }
-
-    /// Registry entries whose config is gone are flagged.
-    #[test]
-    fn registry_probe_flags_dangling_projects() {
-        let registry = RecordingRegistry {
-            projects: vec![project("gone", "/definitely/missing/muster.yml")],
-            ..RecordingRegistry::default()
-        };
-        let probe = registry_probe(&registry);
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("gone"));
-    }
-
-    /// A project whose config path is a dangling symlink is flagged as missing.
-    #[cfg(unix)]
-    #[test]
-    fn registry_probe_flags_dangling_symlink_project() {
-        use std::os::unix::fs::symlink;
-
-        let dir =
-            std::env::temp_dir().join(format!("muster-probe-dangling-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let config_path = dir.join("muster.yml");
-        symlink(dir.join("nonexistent.yml"), &config_path).unwrap();
-
-        let registry = RecordingRegistry {
-            projects: vec![project("dangling", config_path.to_str().unwrap())],
-            ..RecordingRegistry::default()
-        };
-        let probe = registry_probe(&registry);
+    fn a_database_that_does_not_open_fails() {
+        let probe = database_probe(&Err(ConfigError::UnsupportedSchema {
+            found: 9,
+            supported: 1,
+        }));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Fail);
         assert!(
-            probe.detail().contains("dangling"),
-            "dangling project named in detail"
+            probe.detail().contains("upgrade muster"),
+            "{}",
+            probe.detail()
         );
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Hook statuses aggregate: any missing or stale provider fails the probe.
+    /// Files an older muster left are named for deletion.
     #[test]
-    fn hooks_probe_fails_when_any_provider_is_missing() {
-        let statuses = vec![
-            hook_status(AgentTool::Claude, HookState::Installed),
-            hook_status(AgentTool::Codex, HookState::Missing),
-        ];
-        let probe = hooks_probe(&statuses);
-        assert_eq!(probe.outcome(), ProbeOutcome::Fail);
-        assert!(probe.detail().contains("Codex"));
+    fn leftover_files_are_named() {
+        let state = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        assert_eq!(
+            legacy_probe(Some(state.path()), Some(config.path())).outcome(),
+            ProbeOutcome::Ok
+        );
+        fs::write(state.path().join("coordination.db"), "").unwrap();
+        fs::write(config.path().join("settings.yml"), "").unwrap();
+
+        let probe = legacy_probe(Some(state.path()), Some(config.path()));
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(probe.detail().contains("coordination.db"));
+        assert!(probe.detail().contains("settings.yml"));
     }
 
-    /// All-installed hooks pass.
+    /// The current folder's project is named; outside one it is not a
+    /// failure.
     #[test]
-    fn hooks_probe_passes_when_everything_is_installed() {
-        let statuses = vec![hook_status(AgentTool::Claude, HookState::Installed)];
-        assert_eq!(hooks_probe(&statuses).outcome(), ProbeOutcome::Ok);
+    fn the_current_project_is_named() {
+        let root = ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap();
+        let shop = project("shop", root.as_ref());
+
+        assert_eq!(
+            project_probe(&Ok(ProjectTarget::Registered(shop))).detail(),
+            "shop  /home/me/shop"
+        );
+        assert_eq!(
+            project_probe(&Ok(ProjectTarget::Unregistered(root))).outcome(),
+            ProbeOutcome::Ok
+        );
     }
 
-    /// The clipboard probe never fails; it informs.
+    /// A source the message already shows is not repeated.
     #[test]
-    fn clipboard_probe_is_informational() {
-        let probe = clipboard_probe();
-        assert_ne!(probe.outcome(), ProbeOutcome::Fail);
+    fn the_error_chain_skips_sources_already_shown() {
+        assert_eq!(
+            error_chain(&Embedding::new(Wrapped)),
+            "could not open: locked"
+        );
     }
 
     /// The completions probe warns with the exact line when unregistered.
     #[test]
     fn completions_probe_warns_with_the_hook_line() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".zshrc"), "# nothing here\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".zshrc"), "# nothing here\n").unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("COMPLETE=zsh"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// An rc file that mentions COMPLETE and muster in unrelated contexts must
     /// NOT be reported as registered.
     #[test]
     fn completions_probe_ignores_unrelated_complete_mention() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-needle-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Contains both words but not the actual hook line.
-        std::fs::write(dir.join(".zshrc"), "# COMPLETE list for muster tasks\n").unwrap();
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(".zshrc"),
+            "# COMPLETE list for muster tasks\n",
+        )
+        .unwrap();
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// When the hook line is in the second fish location (completions file),
     /// the probe reports Ok and names that file.
     #[test]
     fn completions_probe_detects_fish_completions_file() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-fish-{}", uuid::Uuid::new_v4()));
-        let completions_path = dir.join(".config").join(FISH_COMPLETIONS);
-        std::fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
-        // Write only to the completions drop-in, not config.fish.
-        std::fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
-        let probe = completions_probe(Some("/usr/bin/fish"), &dir, &dir.join(".config"));
+        let dir = TempDir::new().unwrap();
+        let completions_path = dir.path().join(".config").join(FISH_COMPLETIONS);
+        fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
+        fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
+        let probe = completions_probe(
+            Some("/usr/bin/fish"),
+            dir.path(),
+            &dir.path().join(".config"),
+        );
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
         assert!(probe.detail().contains("completions/muster.fish"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The completions probe detects a PowerShell profile containing the exact
@@ -517,76 +550,130 @@ mod tests {
     /// `COMPLETE=` needle.
     #[test]
     fn completions_probe_detects_powershell_registration() {
-        let dir = std::env::temp_dir().join(format!("muster-pwsh-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rc_path = dir.join(".config").join(POWERSHELL_RC);
-        std::fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
-        std::fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
+        let dir = TempDir::new().unwrap();
+        let rc_path = dir.path().join(".config").join(POWERSHELL_RC);
+        fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
+        fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
 
-        let probe = completions_probe(Some("/usr/bin/pwsh"), &dir, &dir.join(".config"));
+        let probe = completions_probe(
+            Some("/usr/bin/pwsh"),
+            dir.path(),
+            &dir.path().join(".config"),
+        );
 
         assert_eq!(probe.outcome(), ProbeOutcome::Ok);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// PowerShell paths map to the powershell completion shell.
-    #[test]
-    fn shell_from_path_recognizes_powershell() {
-        assert_eq!(
-            shell_from_path("/usr/bin/pwsh"),
-            Some(CompletionShell::Powershell)
-        );
     }
 
     /// A commented-out registration line does not count as registered.
     #[test]
     fn completions_probe_ignores_commented_registrations() {
-        let dir = std::env::temp_dir().join(format!("muster-doc-comment-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(".zshrc"),
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join(".zshrc"),
             format!("# {}\n", registration_line(CompletionShell::Zsh)),
         )
         .unwrap();
 
-        let probe = completions_probe(Some("/bin/zsh"), &dir, &dir.join(".config"));
+        let probe = completions_probe(Some("/bin/zsh"), dir.path(), &dir.path().join(".config"));
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A named shell always wins; without one, only Windows assumes a shell.
+    /// A `$SHELL` path maps to a completion shell only when muster knows it.
     #[test]
-    fn detect_shell_prefers_the_environment_then_the_platform() {
-        assert_eq!(detect_shell(Some("/bin/zsh")), Some(CompletionShell::Zsh));
-        #[cfg(windows)]
-        assert_eq!(detect_shell(None), Some(CompletionShell::Powershell));
-        #[cfg(not(windows))]
-        assert_eq!(detect_shell(None), None);
+    fn shell_from_path_names_known_shells_only() {
+        assert_eq!(shell_from_path("/bin/zsh"), Some(CompletionShell::Zsh));
+        assert_eq!(
+            shell_from_path("/usr/bin/pwsh"),
+            Some(CompletionShell::Powershell)
+        );
+        assert_eq!(shell_from_path("/bin/tcsh"), None);
+    }
+
+    /// The socket probe fails on a squatted own socket directory, warns
+    /// naming a published one it passes over, and is fine otherwise.
+    #[test]
+    fn the_socket_probe_names_a_squatted_directory() {
+        let squat = |dir: &str| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("the socket directory {dir} is not a directory owned by you"),
+            )
+        };
+        let checked = |published, own| {
+            Ok(SocketDirCheck::builder()
+                .published(published)
+                .own(own)
+                .build())
+        };
+
+        let own = socket_probe(&checked(None, Some(squat("/tmp/muster-1000"))));
+        let published = socket_probe(&checked(Some(squat("/old/run/muster")), None));
+        let fine = socket_probe(&checked(None, None));
+
+        assert_eq!(own.outcome(), ProbeOutcome::Fail);
+        assert!(
+            own.detail().contains("/tmp/muster-1000"),
+            "{}",
+            own.detail()
+        );
+        assert_eq!(published.outcome(), ProbeOutcome::Warn);
+        assert!(
+            published.detail().contains("passed over")
+                && published.detail().contains("/old/run/muster"),
+            "{}",
+            published.detail()
+        );
+        assert_eq!(fine.outcome(), ProbeOutcome::Ok);
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.
     #[test]
     fn doctor_report_maps_probes_and_summarizes() {
         let probes = vec![
-            Probe::builder()
-                .label("config".to_string())
-                .outcome(ProbeOutcome::Ok)
-                .detail("fine".to_string())
-                .build(),
-            Probe::builder()
-                .label("completions".to_string())
-                .outcome(ProbeOutcome::Warn)
-                .detail("not registered".to_string())
-                .build(),
+            probe(DoctorCheck::Database, ProbeOutcome::Ok, "fine".to_string()),
+            probe(
+                DoctorCheck::Completions,
+                ProbeOutcome::Warn,
+                "not registered".to_string(),
+            ),
         ];
 
         let report = doctor_report(&probes);
 
         assert_eq!(report.rows().len(), 2);
         assert_eq!(report.rows()[0].kind(), RowKind::Ok);
-        assert_eq!(report.rows()[0].label().as_deref(), Some("config"));
+        assert_eq!(report.rows()[0].label().as_deref(), Some("database"));
         assert_eq!(report.rows()[1].kind(), RowKind::Hint);
         assert_eq!(report.summary().as_deref(), Some("1 ok · 1 hint"));
+    }
+
+    /// `--json` names each check and outcome in kebab case and says whether
+    /// one failed.
+    #[test]
+    fn the_json_names_checks_and_outcomes() {
+        let probes = vec![
+            probe(
+                DoctorCheck::ThisFolder,
+                ProbeOutcome::Ok,
+                "here".to_string(),
+            ),
+            probe(DoctorCheck::OldFiles, ProbeOutcome::Fail, "bad".to_string()),
+        ];
+        let view = DoctorView::builder()
+            .checks(&probes)
+            .failed(any_failed(&probes))
+            .build();
+
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({
+                "checks": [
+                    {"check": "this-folder", "outcome": "ok", "detail": "here"},
+                    {"check": "old-files", "outcome": "fail", "detail": "bad"},
+                ],
+                "failed": true,
+            })
+        );
     }
 }

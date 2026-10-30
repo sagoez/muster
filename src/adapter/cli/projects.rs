@@ -1,437 +1,357 @@
+//! `muster projects`: the registered projects, and removing one.
+
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
+use getset::{CopyGetters, Getters};
+use serde::Serialize;
+use typed_builder::TypedBuilder;
+
 use super::{
     error::CliError,
-    report::{Row, RowKind},
+    output::{COLUMN_GAP, action_rows, table_lines},
+    project_removal::ProjectRemoval,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
 };
 use crate::{
-    adapter::path::absolutize,
-    constants::WORKSPACE_FILE_NAME,
-    domain::{port::ProjectRegistry, project::Project},
+    adapter::{
+        client::{ServiceClient, SettleWatch, process::down},
+        path::expand_home,
+        sanitize::printable,
+    },
+    domain::{
+        config::ConfigError,
+        port::{LocalState, StateChangeNotifier},
+        project::Project,
+        value::{ProjectName, ProjectRoot},
+    },
 };
 
-/// Marker prefixing the project that contains the current directory.
+/// Title of the `projects` reports.
+const PROJECTS_TITLE: &str = "muster projects";
+/// Marks the project containing the current folder.
 const CURRENT_MARKER: &str = "* ";
-/// Indent for projects that are not current, aligning the columns.
+/// Aligns the other projects with the marked one.
 const OTHER_INDENT: &str = "  ";
-/// Line printed when no projects are registered.
-const EMPTY_NOTE: &str = "no registered projects; run `muster init` in a project folder";
+/// One process, counted.
+const PROCESS: &str = "process";
+/// Several processes, counted.
+const PROCESSES: &str = "processes";
+/// Said when no project is registered.
+const NO_PROJECTS: &str =
+    "no registered projects; `muster add <name> -- <command>` in a folder starts one";
+/// Opens the reason a project's processes do not read.
+const INVALID: &str = "unreadable: ";
+/// Stands for the name of a project whose stored row does not read.
+const UNNAMED: &str = "?";
+/// Said when a removed project's processes could not be stopped first.
+const NOTHING_STOPPED: &str = "its stored processes did not read, so none were stopped first";
+/// Opens the line saying a project was removed.
+const REMOVED: &str = "removed project";
+/// The question `projects rm` asks at a terminal.
+pub const REMOVE_QUESTION: &str =
+    "Remove this project, its processes and its shared notes, todos and values?";
+/// What the plain layout says it could not ask.
+pub const REMOVE_ASKED: &str = "whether to remove the project";
 
-/// Lists registered projects, marking the one containing `current_dir`.
+/// One registered project, as `projects --json` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
+pub struct ProjectListing {
+    /// The project's name, or none when its stored row does not read.
+    #[getset(get = "pub")]
+    name: Option<ProjectName>,
+    /// Its folder.
+    #[getset(get = "pub")]
+    root: PathBuf,
+    /// How many processes it has, or none when its stored processes do not
+    /// read.
+    #[getset(get_copy = "pub")]
+    processes: Option<usize>,
+    /// Why its stored row or processes do not read, when they do not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    #[getset(get = "pub")]
+    invalid: Option<String>,
+    /// Whether it contains the current folder.
+    #[getset(get_copy = "pub")]
+    current: bool,
+}
+
+/// Every registered project, the one containing `cwd` marked current, then
+/// every project whose stored row does not read, by folder. A project whose
+/// row or processes do not read is listed with the reason, so one corrupt
+/// row never hides the others.
 ///
 /// # Errors
-/// Returns [`CliError`] when the registry cannot be read.
-pub fn list(registry: &dyn ProjectRegistry, current_dir: &Path) -> Result<Vec<Row>, CliError> {
-    let projects = registry.projects()?;
-    if projects.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
+/// Returns the [`CliError`] of a store that cannot be read.
+pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, CliError> {
+    let current = match store.project_containing(cwd) {
+        Ok(current) => current,
+        Err(ConfigError::CorruptRow { .. }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let readable = store.projects()?.into_iter().map(|project| {
+        let (processes, invalid) = match store.stack(project.root()) {
+            Ok(stack) => (Some(stack.map_or(0, |stack| stack.processes().len())), None),
+            Err(error @ ConfigError::CorruptRow { .. }) => (None, Some(error.to_string())),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(ProjectListing::builder()
+            .current(current.as_ref() == Some(&project))
+            .name(Some(project.name().clone()))
+            .root(project.root().as_ref().clone())
+            .processes(processes)
+            .invalid(invalid)
+            .build())
+    });
+    let unreadable = store.unreadable_projects()?.into_iter().map(|project| {
+        Ok(ProjectListing::builder()
+            .name(None)
+            .root(project.root().clone())
+            .processes(None)
+            .invalid(Some(project.reason().clone()))
+            .current(false)
+            .build())
+    });
+    readable.chain(unreadable).collect()
+}
+
+/// The human list of `listings`: `name  folder  N processes`, aligned,
+/// the current project marked.
+pub fn list_rows(listings: &[ProjectListing]) -> Report {
+    if listings.is_empty() {
+        return Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
+            RowKind::Hint,
+            NO_PROJECTS,
+        )]);
     }
-    Ok(projects
+    let cells: Vec<Vec<String>> = listings
         .iter()
-        .map(|project| {
-            let marker = if is_current(project, current_dir) {
+        .map(|listing| {
+            let contents = match (listing.processes(), listing.invalid()) {
+                (Some(1), _) => format!("1 {PROCESS}"),
+                (Some(count), _) => format!("{count} {PROCESSES}"),
+                (None, reason) => format!("{INVALID}{}", reason.as_deref().unwrap_or_default()),
+            };
+            vec![
+                listing
+                    .name()
+                    .as_ref()
+                    .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
+                printable(&listing.root().to_string_lossy()),
+                contents,
+            ]
+        })
+        .collect();
+    let rows = listings
+        .iter()
+        .zip(table_lines(&cells))
+        .map(|(listing, line)| {
+            let marker = if listing.current() {
                 CURRENT_MARKER
             } else {
                 OTHER_INDENT
             };
-            let folder = absolutize(project.config())
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| project.config().display().to_string());
-            Row::unlabeled(
-                RowKind::Plain,
-                format!("{marker}{}  {folder}", project.name().as_ref()),
-            )
+            Row::unlabeled(RowKind::Plain, format!("{marker}{line}"))
         })
-        .collect())
+        .collect();
+    Report::new(PROJECTS_TITLE, rows)
 }
 
-/// Whether the project's folder contains the current directory. Both sides
-/// compare by canonical identity: the registry may hold a symlink alias while
-/// the OS reports the resolved working directory.
-fn is_current(project: &Project, current_dir: &Path) -> bool {
-    absolutize(project.config())
-        .parent()
-        .is_some_and(|folder| resolved_identity(current_dir).starts_with(resolved_identity(folder)))
-}
-
-/// The canonical form of a path when it exists, else the path itself.
-fn resolved_identity(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Registers an existing folder that already contains a workspace file.
+/// Stops every process of `project` through `client`, then forgets the
+/// project with its processes, environment and coordination state, and tells
+/// the service. `watch` hears what is still stopping.
 ///
 /// # Errors
-/// Returns [`CliError::MissingWorkspaceFile`] when the folder has no
-/// `muster.yml`, when the path is a directory, or when it is a dangling
-/// symlink - anything other than a readable regular file.
-pub fn add(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
-    let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
-    if !fs::metadata(&config_path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
-    {
-        return Err(CliError::MissingWorkspaceFile(config_path));
-    }
-    let name = super::init::project_name(directory)?;
-    super::init::ensure_representable(&config_path)?;
-    Ok(vec![super::init::register_folder(
-        name,
-        &config_path,
-        registry,
-    )?])
+/// Returns the [`CliError`] of a service that cannot be reached or a store
+/// that cannot be written.
+pub fn remove(
+    client: &ServiceClient,
+    store: &dyn LocalState,
+    notifier: &dyn StateChangeNotifier,
+    project: &Project,
+    watch: &mut dyn SettleWatch,
+) -> Result<ProjectRemoval, CliError> {
+    let stopped = match down(client, project, watch) {
+        Ok(stopped) => Some(stopped),
+        Err(_)
+            if matches!(
+                store.stack(project.root()),
+                Err(ConfigError::CorruptRow { .. })
+            ) =>
+        {
+            None
+        },
+        Err(error) => return Err(error.into()),
+    };
+    let removed = store.remove_project(project.root())?;
+    notifier.stack_changed(project.root());
+    Ok(ProjectRemoval::builder()
+        .name(Some(project.name().clone()))
+        .root(project.root().as_ref().clone())
+        .removed(removed)
+        .stopped(stopped)
+        .build())
 }
 
-/// Outcome captured inside the `update_projects` closure.
-enum RemoveOutcome {
-    Removed,
-    Unknown { known: String },
-    Ambiguous { count: usize, paths: String },
-}
-
-/// Unregisters the named project; files on disk are untouched.
-///
-/// The match-count check and removal run inside `update_projects` so the read
-/// and the write are atomic with respect to concurrent registry mutations.
+/// The stored root of the project whose row does not read that `named`
+/// names, either as the exact text it is listed under or as a folder given
+/// against `cwd`; none when no such project is there.
 ///
 /// # Errors
-/// Returns [`CliError::UnknownProjectAmong`] when no project has that name, or
-/// [`CliError::AmbiguousProject`] when more than one project shares the name.
-pub fn remove(name: &str, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
-    let mut outcome = RemoveOutcome::Removed;
+/// Returns the [`CliError`] of a store that cannot be read.
+pub fn unreadable_named(
+    store: &dyn LocalState,
+    named: &str,
+    cwd: &Path,
+) -> Result<Option<PathBuf>, CliError> {
+    let typed = Path::new(named);
+    let path = cwd.join(expand_home(typed));
+    let resolved = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    Ok(store
+        .unreadable_projects()?
+        .into_iter()
+        .map(|project| project.root().clone())
+        .find(|stored| stored == typed || stored == &path || stored == &resolved))
+}
 
-    registry.update_projects(&mut |projects| {
-        let matches: Vec<&Project> = projects
-            .iter()
-            .filter(|p| p.name().as_ref() == name)
-            .collect();
-
-        if matches.is_empty() {
-            outcome = RemoveOutcome::Unknown {
-                known: projects
-                    .iter()
-                    .map(|p| p.name().as_ref().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            };
-            return projects;
-        }
-
-        if matches.len() > 1 {
-            let paths = matches
-                .iter()
-                .map(|p| p.config().display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            outcome = RemoveOutcome::Ambiguous {
-                count: matches.len(),
-                paths,
-            };
-            return projects;
-        }
-
-        projects
-            .into_iter()
-            .filter(|p| p.name().as_ref() != name)
-            .collect()
-    })?;
-
-    match outcome {
-        RemoveOutcome::Removed => Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{name}' from the registry"),
-        )]),
-        RemoveOutcome::Unknown { known } => Err(CliError::UnknownProjectAmong {
-            name: name.to_string(),
-            known,
-        }),
-        RemoveOutcome::Ambiguous { count, paths } => Err(CliError::AmbiguousProject {
-            name: name.to_string(),
-            count,
-            paths,
-        }),
+/// Forgets the project stored at `stored`, whose row does not read, with its
+/// processes, environment and coordination state, and tells the service when
+/// `stored` is a folder it could know. No service could load it, so nothing
+/// of it runs to stop first.
+///
+/// # Errors
+/// Returns the [`CliError`] of a store that cannot be written.
+pub fn remove_unreadable(
+    store: &dyn LocalState,
+    notifier: &dyn StateChangeNotifier,
+    stored: &Path,
+) -> Result<ProjectRemoval, CliError> {
+    let removed = store.remove_unreadable_project(stored)?;
+    if let Ok(root) = ProjectRoot::try_new(stored.to_path_buf()) {
+        notifier.stack_changed(&root);
     }
+    Ok(ProjectRemoval::builder()
+        .name(None)
+        .root(stored.to_path_buf())
+        .removed(removed)
+        .stopped(None)
+        .build())
+}
+
+/// The human report of `removal`: what became of the processes, then the
+/// project forgotten.
+pub fn removal_rows(removal: &ProjectRemoval) -> Report {
+    let mut rows: Vec<Row> = removal.stopped().as_ref().map_or_else(
+        || vec![Row::unlabeled(RowKind::Hint, NOTHING_STOPPED)],
+        |stopped| action_rows(stopped).rows().clone(),
+    );
+    rows.push(Row::unlabeled(
+        RowKind::Ok,
+        format!(
+            "{REMOVED} {}{COLUMN_GAP}{}",
+            removal
+                .name()
+                .as_ref()
+                .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
+            printable(&removal.root().to_string_lossy())
+        ),
+    ));
+    Report::new(PROJECTS_TITLE, rows).with_failure(removal.failed())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, fs, path::PathBuf};
-
     use super::*;
-    use crate::domain::{
-        config::{ConfigError, WorkspaceConfig},
-        project::Project,
-        value::ProjectName,
-    };
+    use crate::adapter::cli::report::plain;
 
-    /// A registry recording saves of projects and workspaces.
-    #[derive(Default)]
-    struct RecordingRegistry {
-        projects: Vec<Project>,
-        saved_projects: RefCell<Option<Vec<Project>>>,
-    }
-
-    impl ProjectRegistry for RecordingRegistry {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.projects.clone())
-        }
-
-        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-            unreachable!("projects never loads a workspace")
-        }
-
-        fn workspace_exists(&self, _config_path: &Path) -> bool {
-            false
-        }
-
-        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-            *self.saved_projects.borrow_mut() = Some(projects.to_vec());
-            Ok(())
-        }
-
-        fn save_workspace(
-            &self,
-            _config_path: &Path,
-            _config: &WorkspaceConfig,
-        ) -> Result<(), ConfigError> {
-            unreachable!("projects never saves a workspace")
-        }
-    }
-
-    fn project(name: &str, config: &str) -> Project {
-        Project::builder()
-            .name(ProjectName::try_new(name).unwrap())
-            .config(PathBuf::from(config))
+    /// A listing of `name` at `root` with `processes`, `current` or not.
+    fn listing(name: &str, root: &str, processes: usize, current: bool) -> ProjectListing {
+        ProjectListing::builder()
+            .name(Some(ProjectName::try_new(name).unwrap()))
+            .root(PathBuf::from(root))
+            .processes(Some(processes))
+            .current(current)
             .build()
     }
 
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("muster-projects-{tag}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// Listing marks the project containing the current directory.
+    /// A project whose stored row does not read is listed by its folder,
+    /// with the reason and no name.
     #[test]
-    fn list_marks_the_current_project() {
-        let registry = RecordingRegistry {
-            projects: vec![
-                project("web", "/w/web/muster.yml"),
-                project("api", "/w/api/muster.yml"),
-            ],
-            ..RecordingRegistry::default()
-        };
-        let rows = list(&registry, Path::new("/w/api/src")).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(!rows[0].detail().starts_with(CURRENT_MARKER));
-        assert!(rows[1].detail().starts_with(CURRENT_MARKER));
-        assert!(rows[1].detail().contains("api") && rows[1].detail().contains("/w/api"));
-        // The second column must be the project folder, not the config file path.
-        assert!(!rows[1].detail().contains("muster.yml"));
-    }
+    fn a_project_whose_row_does_not_read_is_listed_by_its_folder() {
+        let broken = ProjectListing::builder()
+            .name(None)
+            .root(PathBuf::from("/srv/odd"))
+            .processes(None)
+            .invalid(Some("its name is refused".to_string()))
+            .current(false)
+            .build();
 
-    /// A project registered through a symlink alias still gets the current
-    /// marker when the working directory is its resolved target.
-    #[cfg(unix)]
-    #[test]
-    fn list_marks_a_symlinked_current_project() {
-        use std::os::unix::fs::symlink;
-
-        let base = temp_dir("symlink-current");
-        let real = base.join("real");
-        let link = base.join("link");
-        fs::create_dir_all(real.join("src")).unwrap();
-        symlink(&real, &link).unwrap();
-        let registry = RecordingRegistry {
-            projects: vec![
-                Project::builder()
-                    .name(ProjectName::try_new("here").unwrap())
-                    .config(link.join(WORKSPACE_FILE_NAME))
-                    .build(),
-            ],
-            ..RecordingRegistry::default()
-        };
-
-        let rows = list(&registry, &real.join("src")).unwrap();
-
-        assert!(
-            rows[0].detail().starts_with(CURRENT_MARKER),
-            "resolved cwd matches the aliased registration: {}",
-            rows[0].detail()
+        assert_eq!(
+            plain(&list_rows(&[
+                listing("shop", "/home/me/shop", 3, true),
+                broken.clone()
+            ])),
+            "* shop  /home/me/shop  3 processes\n  ?     /srv/odd       unreadable: its name is \
+             refused"
         );
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    /// An empty registry says so instead of printing nothing.
-    #[test]
-    fn list_reports_an_empty_registry() {
-        let registry = RecordingRegistry::default();
-        let rows = list(&registry, Path::new("/")).unwrap();
-        assert_eq!(rows[0].detail(), EMPTY_NOTE);
-    }
-
-    /// Adding requires the folder to contain a workspace file.
-    #[test]
-    fn add_requires_a_workspace_file() {
-        let dir = temp_dir("no-config");
-        let registry = RecordingRegistry::default();
-        assert!(matches!(
-            add(&dir, &registry),
-            Err(CliError::MissingWorkspaceFile(_))
-        ));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A directory named muster.yml is not a valid workspace file.
-    #[test]
-    fn add_rejects_a_directory_named_muster_yml() {
-        let dir = temp_dir("dir-as-config");
-        fs::create_dir(dir.join(WORKSPACE_FILE_NAME)).unwrap();
-        let registry = RecordingRegistry::default();
-        assert!(matches!(
-            add(&dir, &registry),
-            Err(CliError::MissingWorkspaceFile(_))
-        ));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Adding a folder with a config registers it once.
-    #[test]
-    fn add_registers_and_readd_is_a_no_op() {
-        let dir = temp_dir("add");
-        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
-        let registry = RecordingRegistry::default();
-
-        let rows = add(&dir, &registry).unwrap();
-        assert!(registry.saved_projects.borrow().is_some());
-        assert!(rows[0].detail().contains("registered"));
-
-        let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
-        let seeded = RecordingRegistry {
-            projects: vec![
-                Project::builder()
-                    .name(ProjectName::try_new("here").unwrap())
-                    .config(config)
-                    .build(),
-            ],
-            ..RecordingRegistry::default()
-        };
-        let again = add(&dir, &seeded).unwrap();
-        // The list is written back unchanged: still exactly the seeded entry.
-        {
-            let saved = seeded.saved_projects.borrow();
-            let written = saved.as_ref().expect("list written back");
-            assert_eq!(written.len(), 1, "re-add keeps exactly one project");
-            assert_eq!(written[0].name().as_ref(), "here", "the seeded entry kept");
-        }
-        assert!(again[0].detail().contains("already registered"));
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// The same folder addressed through parent components is recognized as
-    /// already registered instead of appended twice.
-    #[test]
-    fn add_normalizes_parent_components() {
-        let dir = temp_dir("dotdot");
-        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
-        fs::create_dir_all(dir.join("sub")).unwrap();
-        let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
-        let seeded = RecordingRegistry {
-            projects: vec![
-                Project::builder()
-                    .name(ProjectName::try_new("here").unwrap())
-                    .config(config)
-                    .build(),
-            ],
-            ..RecordingRegistry::default()
-        };
-
-        let aliased = dir.join("sub").join("..");
-        let rows = add(&aliased, &seeded).unwrap();
-
-        let saved = seeded.saved_projects.borrow();
-        let written = saved.as_ref().expect("list written back");
-        assert_eq!(written.len(), 1, "no duplicate entry for the same folder");
-        assert!(rows[0].detail().contains("already registered"));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Removing an unknown name lists the known ones.
-    #[test]
-    fn remove_unknown_lists_known_names() {
-        let registry = RecordingRegistry {
-            projects: vec![project("web", "/w/web/muster.yml")],
-            ..RecordingRegistry::default()
-        };
-        match remove("nope", &registry) {
-            Err(CliError::UnknownProjectAmong { name, known }) => {
-                assert_eq!(name, "nope");
-                assert!(known.contains("web"));
-            },
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    /// Removing a name that matches two projects returns AmbiguousProject and
-    /// leaves the list unchanged.
-    #[test]
-    fn remove_rejects_ambiguous_name() {
-        let registry = RecordingRegistry {
-            projects: vec![
-                project("web", "/w/site/muster.yml"),
-                project("web", "/w/app/muster.yml"),
-            ],
-            ..RecordingRegistry::default()
-        };
-        match remove("web", &registry) {
-            Err(CliError::AmbiguousProject { name, count, paths }) => {
-                assert_eq!(name, "web");
-                assert_eq!(count, 2);
-                assert!(paths.contains("/w/site/muster.yml"));
-                assert!(paths.contains("/w/app/muster.yml"));
-            },
-            other => panic!("unexpected: {other:?}"),
-        }
-        // The list is written back unchanged: both same-named entries survive
-        // with their distinct paths.
-        let saved = registry.saved_projects.borrow();
-        let written = saved.as_ref().expect("list written back");
-        assert_eq!(written.len(), 2, "both projects remain");
-        assert!(
-            written
-                .iter()
-                .any(|project| project.config().ends_with("site/muster.yml"))
-                && written
-                    .iter()
-                    .any(|project| project.config().ends_with("app/muster.yml")),
-            "each original path survives"
+        assert_eq!(
+            serde_json::to_value(broken).unwrap(),
+            serde_json::json!({"name": null, "root": "/srv/odd", "processes": null, "current": false, "invalid": "its name is refused"})
         );
     }
 
-    /// Removing keeps every other project and never touches files.
+    /// A project whose processes do not read is listed with the reason.
     #[test]
-    fn remove_drops_only_the_named_project() {
-        let registry = RecordingRegistry {
-            projects: vec![
-                project("web", "/w/web/muster.yml"),
-                project("api", "/w/api/muster.yml"),
-            ],
-            ..RecordingRegistry::default()
-        };
-        remove("web", &registry).unwrap();
-        let saved = registry.saved_projects.borrow();
-        let names: Vec<_> = saved
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|p| p.name().as_ref().to_string())
-            .collect();
-        assert_eq!(names, vec!["api"]);
+    fn an_unreadable_project_is_listed_with_its_reason() {
+        let broken = ProjectListing::builder()
+            .name(Some(ProjectName::try_new("blog").unwrap()))
+            .root(PathBuf::from("/srv/blog"))
+            .processes(None)
+            .invalid(Some("stored stop grace is invalid".to_string()))
+            .current(false)
+            .build();
+
+        assert_eq!(
+            plain(&list_rows(&[
+                listing("shop", "/home/me/shop", 3, true),
+                broken.clone()
+            ])),
+            "* shop  /home/me/shop  3 processes\n  blog  /srv/blog      unreadable: stored stop \
+             grace is invalid"
+        );
+        assert_eq!(
+            serde_json::to_value(broken).unwrap(),
+            serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid"})
+        );
+    }
+
+    /// Each project is one aligned line with its folder and count, the
+    /// current one marked.
+    #[test]
+    fn projects_are_listed_aligned_with_the_current_one_marked() {
+        let report = list_rows(&[
+            listing("shop", "/home/me/shop", 3, true),
+            listing("blog-2", "/srv/blog", 1, false),
+        ]);
+
+        assert_eq!(
+            plain(&report),
+            "* shop    /home/me/shop  3 processes\n  blog-2  /srv/blog      1 process"
+        );
+        assert!(plain(&list_rows(&[])).contains("muster add"));
+    }
+
+    /// The JSON names, roots, counts and marks each project.
+    #[test]
+    fn a_listing_reads_as_json() {
+        assert_eq!(
+            serde_json::to_value(listing("shop", "/home/me/shop", 3, true)).unwrap(),
+            serde_json::json!({"name": "shop", "root": "/home/me/shop", "processes": 3, "current": true})
+        );
     }
 }

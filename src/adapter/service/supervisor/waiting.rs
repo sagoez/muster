@@ -1,0 +1,2121 @@
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant, SystemTime},
+};
+
+use crossbeam_channel::Sender;
+
+use super::{
+    entity::Supervisor, held_scan::HeldScan, held_wait::HeldWait, log_ask::LogAsk, run_end::RunEnd,
+    run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
+};
+use crate::{
+    adapter::{
+        holder::LineMatcher,
+        service::{
+            EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
+            OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
+            ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
+            WaitSpec, WaitStatus, Waiter,
+        },
+    },
+    domain::{
+        port::ListeningSocket,
+        process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
+        value::{OutputCursor, PaneId, Pid, ProcessName},
+    },
+};
+
+/// Lines of a run a wait that did not match carries.
+pub const FAILURE_TAIL_LINES: usize = 30;
+/// Shown when a readiness wait names a process with no readiness check.
+const NO_READY_CHECK: &str = "has no readiness check; wait for a log line, port, URL or state";
+/// Shown when a process name matches nothing in its project.
+const UNKNOWN_PROCESS: &str = "no process with that name in this project";
+/// Why a wait from a cursor past a process's output is refused, before the
+/// cursor and the output's end.
+const SINCE_PAST_END: &str = "since is past the end of the output";
+/// Longest a wait is held while its process's log is read, past which it is
+/// refused, and longest an answer waits for its run's last lines from the
+/// log, past which it is sent with those the tap holds.
+pub(super) const LOG_TAIL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Why a wait held on its log's end is refused once the read is overdue,
+/// before the timeout.
+const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
+/// Why a wait held on a scan of its log from its cursor is refused once the
+/// read is overdue, before the timeout.
+const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
+/// Prefix of the notice for a stored readiness pattern that does not compile.
+const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
+
+/// A wait checked against its process and ready to register: what it waits
+/// for, resolved and compiled. Made by [`Supervisor::prepare_wait`] before a
+/// request acts, so a bad wait refuses the request before anything changes.
+pub struct PreparedWait {
+    /// The pane of the process.
+    pane: PaneId,
+    /// The process.
+    process: ProcessName,
+    /// What it waits for.
+    until: WaitCondition,
+    /// The compiled pattern of a log condition.
+    matcher: Option<LineMatcher>,
+    /// Output after this cursor counts.
+    since: Option<OutputCursor>,
+    /// How long it waits.
+    timeout: Duration,
+    /// Whether the start it rides on found the process already running.
+    already_running: bool,
+}
+
+impl PreparedWait {
+    /// This wait as riding on a start that found its process already running
+    /// or starting, which its answer then says.
+    pub fn on_a_running_process(mut self) -> Self {
+        self.already_running = true;
+        self
+    }
+
+    /// The scan of the log from this wait's cursor up to `until` for its
+    /// pattern; none for a wait with no cursor or no pattern.
+    pub(super) fn scan_ask(&self, until: OutputCursor) -> Option<LogAsk> {
+        Some(LogAsk::Scan {
+            since: self.since?,
+            until,
+            matcher: self.matcher.clone()?,
+        })
+    }
+}
+
+impl Supervisor {
+    /// Checks a wait on `name` as `spec` asks: resolves the default
+    /// condition and compiles a log pattern.
+    ///
+    /// # Errors
+    /// Returns the refusal for an unknown process, a pattern that does not
+    /// compile, or a readiness wait on a process with no check.
+    pub fn prepare_wait(
+        &self,
+        name: &ProcessName,
+        spec: &WaitSpec,
+    ) -> Result<PreparedWait, ServiceErrorBody> {
+        let process = self
+            .pane_named(name)
+            .and_then(|pane| self.workspace.process(pane))
+            .ok_or_else(|| {
+                ServiceErrorBody::builder()
+                    .kind(ServiceErrorKind::UnknownProcess)
+                    .message(format!("{UNKNOWN_PROCESS}: {name}"))
+                    .candidates(self.process_names())
+                    .build()
+            })?;
+        if let Some(since) = spec.since()
+            && let Some(end) = self.end_before(*process.id(), *since)
+        {
+            return Err(invalid_input(format!(
+                "{name}: {SINCE_PAST_END} ({since} > {end})"
+            )));
+        }
+        let has_check = process.ready().is_some();
+        let until = spec
+            .until()
+            .clone()
+            .unwrap_or_else(|| WaitCondition::default_for(has_check));
+        if until == WaitCondition::Ready && !has_check {
+            return Err(invalid_input(format!("{name} {NO_READY_CHECK}")));
+        }
+        let matcher = match &until {
+            WaitCondition::Log(pattern) => Some(
+                LineMatcher::compile(pattern).map_err(|error| invalid_input(error.to_string()))?,
+            ),
+            WaitCondition::Port(_)
+            | WaitCondition::Http { .. }
+            | WaitCondition::State(_)
+            | WaitCondition::Ready => None,
+        };
+        Ok(PreparedWait {
+            pane: *process.id(),
+            process: process.name().clone(),
+            until,
+            matcher,
+            since: *spec.since(),
+            timeout: *spec.timeout(),
+            already_running: false,
+        })
+    }
+
+    /// The current spawn generation of the process `name`, so a wait
+    /// registered after a start or restart can be pinned to the runs after it.
+    pub fn generation_of(&self, name: &ProcessName) -> SpawnGeneration {
+        self.pane_named(name)
+            .map_or_else(SpawnGeneration::initial, |pane| {
+                self.current_generation(pane)
+            })
+    }
+
+    /// Whether the process `name` runs or is being started.
+    pub fn runs_or_starts(&self, name: &ProcessName) -> bool {
+        self.pane_named(name)
+            .is_some_and(|pane| self.is_live(pane) || self.is_starting(pane))
+    }
+
+    /// Registers `prepared`, answering on `reply` when its condition holds,
+    /// its run ends or its time runs out; a wait whose answer is already known
+    /// is answered at once. With `after`, only runs started after that
+    /// generation count, as for a wait that rides on a start or restart. A
+    /// wait on a process this service never saw run is held while its log's
+    /// end is read off the loop, so its cursor and tail come from the log and
+    /// a `since` past the log's end is refused.
+    pub fn begin_wait(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+    ) {
+        if self.knows_no_output(prepared.pane) {
+            self.hold_wait(prepared, after, reply, None);
+            return;
+        }
+        self.register_or_scan(prepared, after, reply);
+    }
+
+    /// Registers `prepared`, or, when its cursor is older than every line its
+    /// process's tap holds, as after an adoption, holds it while the log from
+    /// that cursor up to the tap is scanned off the loop, so no line from
+    /// the cursor on is missed.
+    fn register_or_scan(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+    ) {
+        match self.scan_for(&prepared, after) {
+            Some(scan) => self.hold_wait(prepared, after, reply, Some(scan)),
+            None => self.register(prepared, after, WaitReply::Direct(reply)),
+        }
+    }
+
+    /// The scan of the log `prepared` needs before its process's tap: a log
+    /// wait on every run from now whose cursor is older than the lines the
+    /// tap holds, when the log can be read and no launch or adoption is in
+    /// flight.
+    fn scan_for(
+        &self,
+        prepared: &PreparedWait,
+        after: Option<SpawnGeneration>,
+    ) -> Option<HeldScan> {
+        let pane = prepared.pane;
+        if self.adopter.is_none()
+            || after.is_some()
+            || prepared.matcher.is_none()
+            || self.is_starting(pane)
+        {
+            return None;
+        }
+        let since = prepared.since?;
+        let until = self.tapped_from(pane)?;
+        (since < until).then(|| HeldScan {
+            until,
+            pin: RunPin::From(self.current_generation(pane)),
+            ended: None,
+            found: None,
+        })
+    }
+
+    /// Where `pane`'s tap holds every line from, once it is placed: its
+    /// oldest line, or the start of an adopted run's streamed output when
+    /// that is later, since the replay before it forwards only some lines.
+    pub(super) fn tapped_from(&self, pane: PaneId) -> Option<OutputCursor> {
+        let held = self
+            .taps
+            .get(&pane)
+            .filter(|tap| tap.is_placed())?
+            .held_from();
+        Some(
+            self.replays
+                .get(&pane)
+                .map_or(held, |streamed| held.max(*streamed)),
+        )
+    }
+
+    /// Holds `prepared` on a read of its process's log: of `scan`, or of the
+    /// log's end without one.
+    fn hold_wait(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+        scan: Option<HeldScan>,
+    ) {
+        let pane = prepared.pane;
+        let held_at = Instant::now();
+        let key = self.next_ask_key();
+        self.held_waits.entry(pane).or_default().push(HeldWait {
+            prepared,
+            after,
+            reply,
+            held_at,
+            deadline: held_at + LOG_TAIL_TIMEOUT,
+            key,
+            scan,
+            read: None,
+        });
+        self.read_log(pane);
+    }
+
+    /// Refuses each wait held on a log read past its deadline, so a log that
+    /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`]. The read
+    /// itself stays in flight, and later waits on the log's end join it.
+    fn refuse_overdue_held_waits(&mut self, now: Instant) {
+        let mut overdue = Vec::new();
+        for waits in self.held_waits.values_mut() {
+            overdue.extend(waits.extract_if(.., |held| held.deadline <= now));
+        }
+        self.held_waits.retain(|_, waits| !waits.is_empty());
+        for held in overdue {
+            let why = if held.scan.is_some() {
+                LOG_SCAN_OVERDUE
+            } else {
+                LOG_TAIL_OVERDUE
+            };
+            let _ = held.reply.send(ServiceResponse::Error(
+                ServiceErrorBody::builder()
+                    .kind(ServiceErrorKind::Internal)
+                    .message(format!(
+                        "{}: {why} {}",
+                        held.prepared.process,
+                        humantime::format_duration(LOG_TAIL_TIMEOUT)
+                    ))
+                    .build(),
+            ));
+        }
+    }
+
+    /// Answers the waits held on `pane`'s log's end once it was read:
+    /// `tail`, the log's last bytes and where they start, seeds its output
+    /// when it still never ran here, then each wait is refused when its
+    /// `since` is past that end and registered, or held on a scan, otherwise.
+    pub(super) fn answer_held_waits(
+        &mut self,
+        pane: PaneId,
+        tail: Option<(OutputCursor, Vec<u8>)>,
+    ) {
+        let Some(waits) = self.held_waits.get_mut(&pane) else {
+            return;
+        };
+        let held: Vec<HeldWait> = waits.extract_if(.., |held| held.scan.is_none()).collect();
+        if waits.is_empty() {
+            self.held_waits.remove(&pane);
+        }
+        if held.is_empty() {
+            return;
+        }
+        if self.knows_no_output(pane) {
+            let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
+            self.tap(pane).seed_at(at, &bytes);
+        }
+        for HeldWait {
+            prepared,
+            after,
+            reply,
+            ..
+        } in held
+        {
+            if let Some(since) = prepared.since
+                && let Some(end) = self.end_before(pane, since)
+            {
+                let _ = reply.send(ServiceResponse::Error(invalid_input(format!(
+                    "{}: {SINCE_PAST_END} ({since} > {end})",
+                    prepared.process
+                ))));
+                continue;
+            }
+            self.register_or_scan(prepared, after, reply);
+        }
+    }
+
+    /// Whether `pane` neither runs nor starts and this service never placed a
+    /// run of it nor read its log's end, so where its output ends is known
+    /// only from its log.
+    fn knows_no_output(&self, pane: PaneId) -> bool {
+        self.adopter.is_some()
+            && !self.is_live(pane)
+            && !self.is_starting(pane)
+            && self.taps.get(&pane).is_none_or(|tap| !tap.is_placed())
+    }
+
+    /// Answers the waits held on `pane` that count `generation`, or all of
+    /// them when none is given, as [`Self::end_waits`] answers registered
+    /// ones. A wait held on a scan of its log is not answered when its run
+    /// ends: it keeps how, so a line the scan finds still matches it.
+    fn end_held_waits(
+        &mut self,
+        pane: PaneId,
+        generation: Option<SpawnGeneration>,
+        status: WaitStatus,
+        next: ProcessState,
+    ) {
+        let Some(waits) = self.held_waits.get_mut(&pane) else {
+            return;
+        };
+        if let Some(generation) = generation {
+            for held in waits.iter_mut() {
+                if let Some(scan) = held.scan.as_mut()
+                    && scan.ended.is_none()
+                    && scan.pin.counts(generation)
+                {
+                    scan.ended = Some(ended_status(&held.prepared.until, status, next));
+                }
+            }
+        }
+        let ended: Vec<HeldWait> = waits
+            .extract_if(.., |held| match (generation, &held.scan) {
+                (None, _) => true,
+                (Some(_), Some(_)) => false,
+                (Some(generation), None) => held
+                    .after
+                    .is_none_or(|after| RunPin::After(after).counts(generation)),
+            })
+            .collect();
+        if waits.is_empty() {
+            self.held_waits.remove(&pane);
+        }
+        for held in ended {
+            let waiter = self.held_waiter(held);
+            let status = ended_status(waiter.until(), status, next);
+            self.answer(waiter, status, None);
+        }
+    }
+
+    /// The waiter `held` stands for, timed from when it was held, to answer
+    /// it without registering it.
+    fn held_waiter(&self, held: HeldWait) -> Waiter {
+        let HeldWait {
+            prepared,
+            after,
+            reply,
+            held_at,
+            scan,
+            ..
+        } = held;
+        let pin = scan.map_or_else(
+            || {
+                after.map_or(
+                    RunPin::From(self.current_generation(prepared.pane)),
+                    RunPin::After,
+                )
+            },
+            |scan| scan.pin,
+        );
+        Waiter::builder()
+            .pane(prepared.pane)
+            .process(prepared.process)
+            .until(prepared.until)
+            .matcher(prepared.matcher)
+            .pin(pin)
+            .started(held_at)
+            .deadline(held_at + prepared.timeout)
+            .reply(WaitReply::Direct(reply))
+            .scanned_from(None)
+            .since(prepared.since)
+            .already_running(prepared.already_running)
+            .build()
+    }
+
+    /// Starts every autostart process that is not running, like
+    /// [`Self::up`], then waits on each one it started for `spec`'s condition
+    /// or that process's default, and answers the batch on `reply` once every
+    /// wait ended.
+    ///
+    /// # Errors
+    /// Returns the refusal, before anything starts, when a process that may
+    /// start cannot take the wait.
+    pub fn up_waiting(
+        &mut self,
+        environment: &LaunchEnvironment,
+        spec: &WaitSpec,
+        reply: Sender<ServiceResponse>,
+    ) -> Result<(), ServiceErrorBody> {
+        let mut prepared: HashMap<PaneId, (PreparedWait, SpawnGeneration)> = HashMap::new();
+        for pane in self.autostart_panes() {
+            let Some(name) = self
+                .workspace
+                .process(pane)
+                .map(|process| process.name().clone())
+            else {
+                continue;
+            };
+            let wait = self.prepare_wait(&name, spec)?;
+            prepared.insert(pane, (wait, self.current_generation(pane)));
+        }
+        let batch = self.up(environment);
+        let acted: Vec<(PreparedWait, SpawnGeneration)> = batch
+            .acted()
+            .iter()
+            .filter_map(|name| self.pane_named(name))
+            .filter_map(|pane| prepared.remove(&pane))
+            .collect();
+        if acted.is_empty() {
+            let _ = reply.send(ServiceResponse::Batch(batch));
+            return Ok(());
+        }
+        let group = self.next_wait_group;
+        self.next_wait_group += 1;
+        self.wait_groups
+            .insert(group, WaitGroup::new(batch, acted.len(), reply));
+        for (slot, (wait, before)) in acted.into_iter().enumerate() {
+            self.register(wait, Some(before), WaitReply::Batch { group, slot });
+        }
+        Ok(())
+    }
+
+    /// When the next wait or readiness check times out, or a wait for
+    /// `running` outlasts its run's quick-exit window.
+    pub fn next_wait_deadline(&self) -> Option<Instant> {
+        let waits = self.waiters.iter().map(Waiter::deadline);
+        let checks = self
+            .readiness
+            .values()
+            .filter(|readiness| readiness.state().is_waiting())
+            .map(|readiness| readiness.deadline());
+        let windows = self
+            .waiters
+            .iter()
+            .filter(|waiter| {
+                *waiter.until() == WaitCondition::State(StateGoal::Running)
+                    && waiter.pin().counts(self.current_generation(waiter.pane()))
+                    && self
+                        .workspace
+                        .process(waiter.pane())
+                        .is_some_and(|process| *process.state() == ProcessState::Running)
+            })
+            .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
+        let held = self.held_waits.values().flatten().map(|held| held.deadline);
+        let answers = self.held_answers.iter().map(|held| held.deadline);
+        waits
+            .chain(checks)
+            .chain(windows)
+            .chain(held)
+            .chain(answers)
+            .min()
+    }
+
+    /// When the quick-exit window of `pane`'s live run ends.
+    fn quick_exit_end(&self, pane: PaneId) -> Option<Instant> {
+        self.panes
+            .get(&pane)
+            .filter(|_| self.is_live(pane))
+            .map(|target| target.started_at() + QUICK_EXIT_WINDOW)
+    }
+
+    /// Times out the readiness checks, waits, held waits and held answers
+    /// whose deadline passed, and answers every wait whose state or
+    /// readiness condition now holds. The host runs it after each event it
+    /// hands the supervisor.
+    pub fn settle_waits(&mut self, now: Instant) {
+        self.refuse_overdue_held_waits(now);
+        self.send_overdue_answers(now);
+        let expired: Vec<PaneId> = self
+            .readiness
+            .iter()
+            .filter(|(_, readiness)| readiness.state().is_waiting() && readiness.deadline() <= now)
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in expired {
+            self.time_out_readiness(pane);
+        }
+        let mut index = 0;
+        while index < self.waiters.len() {
+            let waiter = &self.waiters[index];
+            let settled = self
+                .check(waiter, now)
+                .or_else(|| (waiter.deadline() <= now).then_some((WaitStatus::Waiting, None)));
+            match settled {
+                Some((status, matched)) => {
+                    let waiter = self.waiters.remove(index);
+                    self.answer(waiter, status, matched);
+                },
+                None => index += 1,
+            }
+        }
+    }
+
+    /// Applies a passed port or HTTP probe to `pane`'s current run: passes
+    /// its readiness check and answers the waits on that probe. A pass for a
+    /// run that is no longer current is ignored.
+    pub fn handle_probe_passed(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        probe: &ProbeTarget,
+    ) {
+        if self.generations.get(&pane) != Some(&generation) {
+            return;
+        }
+        if self.readiness.get(&pane).is_some_and(|readiness| {
+            readiness.state().is_waiting() && readiness.probe().as_ref() == Some(probe)
+        }) {
+            self.pass_readiness(pane);
+        }
+        let mut index = 0;
+        while index < self.waiters.len() {
+            let waiter = &self.waiters[index];
+            if waiter.pane() == pane
+                && waiter.pin().counts(generation)
+                && probe_of(waiter.until()).as_ref() == Some(probe)
+            {
+                let waiter = self.waiters.remove(index);
+                self.answer(waiter, WaitStatus::Matched, None);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Records the ports each live process tree listens on, from a sample
+    /// keyed by root pid; a process missing from it listens on none.
+    pub fn take_ports(&mut self, sample: &HashMap<Pid, Vec<ListeningSocket>>) {
+        let ports = self
+            .live_pids()
+            .into_iter()
+            .filter_map(|(pane, pid)| sample.get(&pid).map(|sockets| (pane, sockets.clone())))
+            .collect();
+        self.metrics.replace_ports(ports);
+    }
+
+    /// The pid of every live process, to sample their ports.
+    pub fn live_root_pids(&self) -> Vec<Pid> {
+        self.live_pids().into_iter().map(|(_, pid)| pid).collect()
+    }
+
+    /// Where `pane`'s output stands and where its current run began.
+    pub(super) fn output_position(&self, pane: PaneId) -> (OutputCursor, Option<OutputCursor>) {
+        self.taps
+            .get(&pane)
+            .map_or((OutputCursor::new(0), None), |tap| {
+                (tap.cursor(), tap.run_start())
+            })
+    }
+
+    /// Feeds one chunk of `pane`'s output to its tap and tests what it
+    /// completed against the pane's readiness pattern and log waits.
+    pub(super) fn tap_output(&mut self, pane: PaneId, at: Option<OutputCursor>, bytes: &[u8]) {
+        let lines = self.tap(pane).feed(at, bytes);
+        self.test_lines(pane, &lines);
+    }
+
+    /// Tests `lines` of `pane`'s current run against its readiness pattern
+    /// and the log waits that count that run.
+    fn test_lines(&mut self, pane: PaneId, lines: &[TapLine]) {
+        if lines.is_empty() {
+            return;
+        }
+        let generation = self.current_generation(pane);
+        if self.readiness.get(&pane).is_some_and(|readiness| {
+            readiness.state().is_waiting()
+                && readiness
+                    .matcher()
+                    .as_ref()
+                    .is_some_and(|matcher| lines.iter().any(|line| matcher.is_match(line.text())))
+        }) {
+            self.pass_readiness(pane);
+        }
+        let mut index = 0;
+        while index < self.waiters.len() {
+            let waiter = &self.waiters[index];
+            let matched = (waiter.pane() == pane && waiter.pin().counts(generation))
+                .then(|| first_match(waiter, lines))
+                .flatten();
+            match matched {
+                Some(line) => {
+                    let waiter = self.waiters.remove(index);
+                    self.answer(waiter, WaitStatus::Matched, Some(line));
+                },
+                None => index += 1,
+            }
+        }
+    }
+
+    /// The end of `pane`'s output as far as its tap has caught up with the
+    /// log: `None` while a launch or adoption is in flight, or before this
+    /// service placed a run or read the log's end, when a later cursor may
+    /// still be valid.
+    fn known_output_end(&self, pane: PaneId) -> Option<OutputCursor> {
+        if self.is_starting(pane) {
+            return None;
+        }
+        self.taps
+            .get(&pane)
+            .filter(|tap| tap.is_placed())
+            .map(OutputTap::cursor)
+    }
+
+    /// The end of `pane`'s output when `since` is past it. A cursor ahead of
+    /// the tap is checked against the log as well, since a cursor read from
+    /// the log reaches output the tap is still catching up on.
+    fn end_before(&self, pane: PaneId, since: OutputCursor) -> Option<OutputCursor> {
+        let tapped = self.known_output_end(pane)?;
+        if since <= tapped {
+            return None;
+        }
+        let logged = self
+            .panes
+            .get(&pane)
+            .and_then(|target| target.handle().as_ref())
+            .and_then(|handle| handle.output_end())
+            .map_or(tapped, |logged| logged.max(tapped));
+        (since > logged).then_some(logged)
+    }
+
+    /// Places `pane`'s current run at `start`, the offset its holder's log
+    /// says it began at, so cursors line up with the log.
+    pub(super) fn place_run(&mut self, pane: PaneId, start: OutputCursor) {
+        self.tap(pane).begin_run_at(start);
+    }
+
+    /// Starts a new run on `pane`: its output continues the same stream from
+    /// a new run start, and its readiness check, when it has one, waits from
+    /// now.
+    pub(super) fn begin_run(&mut self, pane: PaneId) {
+        self.tap(pane).begin_run();
+        self.readiness.remove(&pane);
+        let Some(check) = self
+            .workspace
+            .process(pane)
+            .and_then(|process| process.ready().clone())
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let deadline = now + check.timeout().into_inner();
+        self.start_readiness(pane, check, now, deadline);
+    }
+
+    /// Takes over the run of a holder adopted from an earlier service. Its
+    /// readiness check waits out what is left of its timeout, against the
+    /// output read back from its log too; once that passed, a log check counts
+    /// as passed, since the earlier service saw the lines and they may predate
+    /// what is read back, while a port or HTTP check is probed afresh.
+    pub(super) fn adopt_run(&mut self, pane: PaneId) {
+        self.tap(pane).begin_run();
+        self.readiness.remove(&pane);
+        let Some(check) = self
+            .workspace
+            .process(pane)
+            .and_then(|process| process.ready().clone())
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let since = self
+            .panes
+            .get(&pane)
+            .map_or(now, |target| target.started_at());
+        let timeout = check.timeout().into_inner();
+        let deadline = since + timeout;
+        match (deadline > now, check.probe()) {
+            (true, _) => self.start_readiness(pane, check, since, deadline),
+            (false, ReadyProbe::Log(_)) => {
+                self.readiness.insert(
+                    pane,
+                    RunReadiness::builder()
+                        .state(Readiness::Ready)
+                        .check(check)
+                        .since(since)
+                        .deadline(deadline)
+                        .matcher(None)
+                        .build(),
+                );
+            },
+            (false, _) => self.start_readiness(pane, check, since, now + timeout),
+        }
+    }
+
+    /// Asks the probe worker to try `pane`'s readiness probe and the probes of
+    /// its waits that count the current run, replacing any it tried before.
+    /// Runs when a run is installed, so a probe always names the generation
+    /// whose pass the loop accepts.
+    pub(super) fn arm_probes(&mut self, pane: PaneId) {
+        let Some(probes) = self.probes.clone() else {
+            return;
+        };
+        let generation = self.current_generation(pane);
+        probes.forget(self.root(), pane);
+        if let Some(readiness) = self
+            .readiness
+            .get(&pane)
+            .filter(|readiness| readiness.state().is_waiting())
+            && let Some(probe) = readiness.probe()
+        {
+            probes.watch(self.root(), pane, generation, probe, readiness.deadline());
+        }
+        for waiter in &self.waiters {
+            if waiter.pane() == pane
+                && waiter.pin().counts(generation)
+                && let Some(probe) = probe_of(waiter.until())
+            {
+                probes.watch(self.root(), pane, generation, probe, waiter.deadline());
+            }
+        }
+    }
+
+    /// Ends `pane`'s run `generation`, which went `reason`: records why for
+    /// `ps`, clears its readiness, ports and probes, records the event with
+    /// `detail`, and answers every wait on that run, matched when it waited
+    /// for `next`, the state the pane is left in.
+    pub(super) fn end_run(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        reason: ExitReason,
+        next: ProcessState,
+        detail: &str,
+    ) {
+        self.restarts.end_run(
+            pane,
+            RunEnd::builder()
+                .generation(generation)
+                .at(SystemTime::now())
+                .reason(reason)
+                .build(),
+        );
+        if let Some(readiness) = self.readiness.get_mut(&pane) {
+            readiness.settle(readiness.state().on_exit());
+        }
+        self.metrics.clear_ports(pane);
+        if let Some(probes) = &self.probes {
+            probes.forget(self.root(), pane);
+        }
+        let kind = match reason {
+            ExitReason::Crashed | ExitReason::Killed | ExitReason::FailedToStart => {
+                EventKind::Crashed
+            },
+            ExitReason::Stopped if next == ProcessState::Restarting => EventKind::Restarting,
+            ExitReason::Stopped => EventKind::Stopped,
+            ExitReason::Exited => EventKind::Exited,
+        };
+        self.record_event(Some(pane), kind, detail.to_string());
+        self.end_waits(pane, Some(generation), reason.wait_status(), next);
+    }
+
+    /// Answers the waits on `pane` that count `generation`, or all of them
+    /// when none is given, those held on a log read included: matched when
+    /// one waited for the state `next`, otherwise with `status`.
+    pub(super) fn end_waits(
+        &mut self,
+        pane: PaneId,
+        generation: Option<SpawnGeneration>,
+        status: WaitStatus,
+        next: ProcessState,
+    ) {
+        self.end_held_waits(pane, generation, status, next);
+        let mut index = 0;
+        while index < self.waiters.len() {
+            let waiter = &self.waiters[index];
+            if waiter.pane() == pane
+                && generation.is_none_or(|generation| waiter.pin().counts(generation))
+            {
+                let waiter = self.waiters.remove(index);
+                let status = ended_status(waiter.until(), status, next);
+                self.answer(waiter, status, None);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Records a lifecycle event about `pane`'s process, or the project.
+    pub(super) fn record_event(&self, pane: Option<PaneId>, kind: EventKind, detail: String) {
+        let process = pane
+            .and_then(|pane| self.workspace.process(pane))
+            .map(|process| process.name().clone());
+        let cursor = pane
+            .and_then(|pane| self.taps.get(&pane))
+            .map(OutputTap::cursor);
+        self.attention.record(
+            EventDraft::builder()
+                .project(Some(self.root().clone()))
+                .process(process)
+                .kind(kind)
+                .detail(detail)
+                .cursor(cursor)
+                .build(),
+        );
+    }
+
+    /// `pane`'s current spawn generation.
+    pub(super) fn current_generation(&self, pane: PaneId) -> SpawnGeneration {
+        self.generations
+            .get(&pane)
+            .copied()
+            .unwrap_or_else(SpawnGeneration::initial)
+    }
+
+    /// The log patterns a replay of `pane`'s adopted run is scanned for: its
+    /// readiness check's while that still waits, and those of the log waits
+    /// on its current run, registered or held. None when nothing waits on a
+    /// line.
+    fn replay_patterns(&self, pane: PaneId) -> Vec<LogPattern> {
+        let generation = self.current_generation(pane);
+        let readiness = self
+            .readiness
+            .get(&pane)
+            .filter(|readiness| readiness.state().is_waiting())
+            .and_then(|readiness| match readiness.check().probe() {
+                ReadyProbe::Log(pattern) => Some(pattern.clone()),
+                ReadyProbe::Port(_) | ReadyProbe::Http(_) => None,
+            });
+        let registered = self
+            .waiters
+            .iter()
+            .filter(|waiter| waiter.pane() == pane && waiter.pin().counts(generation))
+            .map(Waiter::until);
+        let held = self
+            .held_waits
+            .get(&pane)
+            .into_iter()
+            .flatten()
+            .map(|held| &held.prepared.until);
+        let waited = registered.chain(held).filter_map(|until| match until {
+            WaitCondition::Log(pattern) => Some(pattern.clone()),
+            WaitCondition::Port(_)
+            | WaitCondition::Http { .. }
+            | WaitCondition::State(_)
+            | WaitCondition::Ready => None,
+        });
+        readiness.into_iter().chain(waited).collect()
+    }
+
+    /// Lets `pane`'s freshly adopted handle replay its run's logged lines
+    /// that a readiness check or wait still looks for, scanned off the loop
+    /// so only matches arrive; with nothing looking, nothing is read back
+    /// and the tap is only placed where the streamed output begins.
+    pub(super) fn start_replay(&mut self, pane: PaneId) {
+        let patterns = self.replay_patterns(pane);
+        let start = self
+            .panes
+            .get_mut(&pane)
+            .and_then(|target| target.handle_mut().as_mut())
+            .and_then(|handle| handle.replay_matching(&patterns));
+        if patterns.is_empty()
+            && let Some(start) = start
+        {
+            self.tap(pane).seed_at(start, &[]);
+        }
+    }
+
+    /// Where a wait with no cursor of its own starts counting `pane`'s lines
+    /// while its adopted handle still replays older output: the end of that
+    /// replay, until the tap has caught up with it.
+    fn replay_floor(&self, pane: PaneId) -> Option<OutputCursor> {
+        let end = self.replays.get(&pane).copied()?;
+        let behind = self.taps.get(&pane).is_none_or(|tap| tap.cursor() < end);
+        behind.then_some(end)
+    }
+
+    /// Registers `prepared` with its answer going to `reply`, answering it at
+    /// once when that is already known.
+    fn register(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: WaitReply,
+    ) {
+        self.register_held(prepared, after, reply, None);
+    }
+
+    /// Registers `prepared` as [`Self::register`] does, after the scan of its
+    /// log it was held on, when it was: a line that scan found matches it,
+    /// otherwise the tap is tested from where the scan stopped, and a run
+    /// that ended meanwhile answers it as it ended.
+    pub(super) fn register_held(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: WaitReply,
+        scan: Option<HeldScan>,
+    ) {
+        let PreparedWait {
+            pane,
+            process,
+            until,
+            matcher,
+            since,
+            timeout,
+            already_running,
+        } = prepared;
+        let since = since.or_else(|| self.replay_floor(pane));
+        let current = self.current_generation(pane);
+        let pin = scan.as_ref().map_or_else(
+            || after.map_or(RunPin::From(current), RunPin::After),
+            |scan| scan.pin,
+        );
+        let now = Instant::now();
+        let mut matched = None;
+        let mut scanned_from = None;
+        if let (Some(since), Some(matcher), false) = (since, matcher.as_ref(), pin.is_fresh()) {
+            let logged = scan
+                .as_ref()
+                .and_then(|scan| scan.found.as_ref().map(|found| (scan.until, found)));
+            let tapped_since = match logged {
+                Some((tapped, found)) => {
+                    scanned_from = (since < found.from()).then(|| found.from().min(tapped));
+                    matched = found.matched().as_ref().map(|line| {
+                        MatchedLine::builder()
+                            .at(line.at())
+                            .line(line.text().clone())
+                            .build()
+                    });
+                    tapped
+                },
+                None => since,
+            };
+            if matched.is_none() {
+                let (lines, from) = self.tap(pane).scan_from(tapped_since);
+                if logged.is_none() {
+                    scanned_from = from;
+                }
+                matched = lines
+                    .into_iter()
+                    .find(|line| matcher.is_match(line.text()))
+                    .map(matched_line);
+            }
+        }
+        let waiter = Waiter::builder()
+            .pane(pane)
+            .process(process)
+            .until(until)
+            .matcher(matcher)
+            .pin(pin)
+            .started(now)
+            .deadline(now + timeout)
+            .reply(reply)
+            .scanned_from(scanned_from)
+            .since(since)
+            .already_running(already_running)
+            .build();
+        let ended = scan.and_then(|scan| scan.ended);
+        let settled = match matched {
+            Some(line) => Some((WaitStatus::Matched, Some(line))),
+            None => ended
+                .map(|status| (status, None))
+                .or_else(|| self.check(&waiter, now))
+                .or_else(|| self.not_running(&waiter).map(|status| (status, None))),
+        };
+        if let Some((status, matched)) = settled {
+            self.answer(waiter, status, matched);
+            return;
+        }
+        if let (Some(probes), Some(probe), true) = (
+            self.probes.as_ref(),
+            probe_of(waiter.until()),
+            self.is_live(pane) && pin.counts(current),
+        ) {
+            probes.watch(self.root(), pane, current, probe, waiter.deadline());
+        }
+        self.waiters.push(waiter);
+    }
+
+    /// How `waiter` ends at `now` when its state or readiness condition
+    /// holds, or its readiness check timed out. A wait for `running` holds on
+    /// through the run's [`QUICK_EXIT_WINDOW`], so a run that ends inside it
+    /// answers crashed or exited instead.
+    fn check(&self, waiter: &Waiter, now: Instant) -> Option<(WaitStatus, Option<MatchedLine>)> {
+        let pane = waiter.pane();
+        if !waiter.pin().counts(self.current_generation(pane)) {
+            return None;
+        }
+        match waiter.until() {
+            WaitCondition::State(goal) => self
+                .workspace
+                .process(pane)
+                .filter(|process| goal.reached(*process.state()))
+                .filter(|_| {
+                    *goal != StateGoal::Running
+                        || self.quick_exit_end(pane).is_none_or(|end| end <= now)
+                })
+                .map(|_| (WaitStatus::Matched, None)),
+            WaitCondition::Ready => {
+                match self.readiness.get(&pane).map(|readiness| readiness.state()) {
+                    Some(Readiness::Ready) => Some((WaitStatus::Matched, None)),
+                    Some(Readiness::TimedOut) => Some((WaitStatus::ReadyTimeout, None)),
+                    Some(Readiness::None | Readiness::Waiting) | None => None,
+                }
+            },
+            WaitCondition::Log(_) | WaitCondition::Port(_) | WaitCondition::Http { .. } => None,
+        }
+    }
+
+    /// How `waiter` ends at once because there is no run for it to wait on:
+    /// not running when nothing runs, or as its run already ended when a start
+    /// it rides on ended before it registered.
+    fn not_running(&self, waiter: &Waiter) -> Option<WaitStatus> {
+        let pane = waiter.pane();
+        if self.is_live(pane) || self.is_starting(pane) {
+            return None;
+        }
+        if let Some(end) = self
+            .restarts
+            .run_end(pane)
+            .filter(|end| waiter.pin().is_fresh() && waiter.pin().counts(end.generation()))
+        {
+            return Some(end.reason().wait_status());
+        }
+        let state = self.workspace.process(pane).map(|process| *process.state());
+        match waiter.pin() {
+            RunPin::After(after) if self.current_generation(pane) == after => {
+                Some(WaitStatus::NotRunning)
+            },
+            RunPin::From(_) if state.is_none_or(|state| !state.may_be_running()) => {
+                Some(WaitStatus::NotRunning)
+            },
+            RunPin::After(_) | RunPin::From(_) => None,
+        }
+    }
+
+    /// Answers `waiter` with `status`, the line that matched, where the
+    /// output stands, and the run's last lines when it did not match. When
+    /// the tap holds fewer of those than an answer shows and missed the
+    /// run's start, as after an adoption, the answer is held while they are
+    /// read from the log off the loop.
+    fn answer(&mut self, waiter: Waiter, status: WaitStatus, matched: Option<MatchedLine>) {
+        let pane = waiter.pane();
+        let (cursor, _) = self.output_position(pane);
+        let tail = if status == WaitStatus::Matched {
+            Vec::new()
+        } else {
+            self.taps
+                .get(&pane)
+                .map(|tap| tap.tail(FAILURE_TAIL_LINES))
+                .unwrap_or_default()
+        };
+        let outcome = WaitOutcome::builder()
+            .process(waiter.process().clone())
+            .status(status)
+            .until(waiter.until().clone())
+            .matched(matched)
+            .cursor(cursor)
+            .elapsed(waiter.started().elapsed())
+            .tail(tail)
+            .scanned_from(waiter.scanned_from())
+            .already_running(waiter.already_running())
+            .build();
+        let reply = waiter.into_reply();
+        if status != WaitStatus::Matched
+            && let Some((from, until)) = self.short_tail(pane, outcome.tail().len())
+        {
+            self.hold_answer(pane, outcome, reply, from, until);
+            return;
+        }
+        self.deliver(outcome, reply);
+    }
+
+    /// Where `pane`'s current run began and where its output stands, when
+    /// its tap holds only `held` of the run's last [`FAILURE_TAIL_LINES`]
+    /// lines and none from its start, so the log holds lines it lacks.
+    fn short_tail(&self, pane: PaneId, held: usize) -> Option<(OutputCursor, OutputCursor)> {
+        if held >= FAILURE_TAIL_LINES || self.adopter.is_none() {
+            return None;
+        }
+        let tap = self.taps.get(&pane)?;
+        let start = tap.run_start()?;
+        (self.tapped_from(pane)? > start).then(|| (start, tap.cursor()))
+    }
+
+    /// Sends `outcome` to `reply`.
+    pub(super) fn deliver(&mut self, outcome: WaitOutcome, reply: WaitReply) {
+        match reply {
+            WaitReply::Direct(reply) => {
+                let _ = reply.send(ServiceResponse::Waited(outcome));
+            },
+            WaitReply::Batch { group, slot } => {
+                if self
+                    .wait_groups
+                    .get_mut(&group)
+                    .is_some_and(|waits| waits.fill(slot, outcome))
+                {
+                    self.wait_groups.remove(&group);
+                }
+            },
+        }
+    }
+
+    /// Starts `pane`'s readiness under `check`, from `since` until
+    /// `deadline`; a log pattern that does not compile is told once and the
+    /// run has no readiness.
+    fn start_readiness(
+        &mut self,
+        pane: PaneId,
+        check: ReadyCheck,
+        since: Instant,
+        deadline: Instant,
+    ) {
+        let matcher = match check.probe() {
+            ReadyProbe::Log(pattern) => match LineMatcher::compile(pattern) {
+                Ok(matcher) => Some(matcher),
+                Err(error) => {
+                    self.notify(
+                        NoticeLevel::Warning,
+                        Some(pane),
+                        format!("{READY_PATTERN_NOTICE}: {error}"),
+                    );
+                    return;
+                },
+            },
+            ReadyProbe::Port(_) | ReadyProbe::Http(_) => None,
+        };
+        self.readiness.insert(
+            pane,
+            RunReadiness::builder()
+                .state(Readiness::on_spawn(Some(&check)))
+                .check(check)
+                .since(since)
+                .deadline(deadline)
+                .matcher(matcher)
+                .build(),
+        );
+    }
+
+    /// Passes `pane`'s readiness check and records the event.
+    fn pass_readiness(&mut self, pane: PaneId) {
+        let Some(readiness) = self.readiness.get_mut(&pane) else {
+            return;
+        };
+        readiness.settle(readiness.state().on_passed());
+        let took = humantime::format_duration(whole_millis(readiness.since().elapsed()));
+        self.record_event(Some(pane), EventKind::Ready, format!("ready in {took}"));
+    }
+
+    /// Times out `pane`'s readiness check: a warning notice and an event; the
+    /// process keeps running.
+    fn time_out_readiness(&mut self, pane: PaneId) {
+        let Some(readiness) = self.readiness.get_mut(&pane) else {
+            return;
+        };
+        readiness.settle(readiness.state().on_deadline());
+        let timeout = *readiness.check().timeout();
+        let name = self
+            .workspace
+            .process(pane)
+            .map(|process| process.name().to_string())
+            .unwrap_or_default();
+        let message = format!("{name} did not become ready within {timeout}");
+        self.notify(NoticeLevel::Warning, Some(pane), message.clone());
+        self.record_event(Some(pane), EventKind::ReadyTimeout, message);
+    }
+
+    /// `pane`'s output tap, made on first use.
+    fn tap(&mut self, pane: PaneId) -> &mut OutputTap {
+        self.taps
+            .entry(pane)
+            .or_insert_with(|| OutputTap::new(OutputCursor::new(0)))
+    }
+}
+
+/// How a wait for `until` ends when its run ends with `status` and the
+/// process goes on to `next`: matched when it waited for that state.
+fn ended_status(until: &WaitCondition, status: WaitStatus, next: ProcessState) -> WaitStatus {
+    match until {
+        WaitCondition::State(goal) if goal.reached(next) => WaitStatus::Matched,
+        WaitCondition::State(_)
+        | WaitCondition::Log(_)
+        | WaitCondition::Port(_)
+        | WaitCondition::Http { .. }
+        | WaitCondition::Ready => status,
+    }
+}
+
+/// The probe a port or HTTP condition is tested with.
+fn probe_of(condition: &WaitCondition) -> Option<ProbeTarget> {
+    match condition {
+        WaitCondition::Port(port) => Some(ProbeTarget::Port(*port)),
+        WaitCondition::Http { url, status } => Some(ProbeTarget::Http {
+            url: url.clone(),
+            status: *status,
+        }),
+        WaitCondition::Log(_) | WaitCondition::State(_) | WaitCondition::Ready => None,
+    }
+}
+
+/// The first of `lines`, from `waiter`'s cursor on, that its log pattern
+/// matches.
+fn first_match(waiter: &Waiter, lines: &[TapLine]) -> Option<MatchedLine> {
+    let matcher = waiter.matcher().as_ref()?;
+    lines
+        .iter()
+        .filter(|line| waiter.since().is_none_or(|since| line.at() >= since))
+        .find(|line| matcher.is_match(line.text()))
+        .cloned()
+        .map(matched_line)
+}
+
+/// `line` as the line a wait matched.
+fn matched_line(line: TapLine) -> MatchedLine {
+    MatchedLine::builder()
+        .at(line.at())
+        .line(line.text().clone())
+        .build()
+}
+
+/// `duration` to the millisecond, so it reads as `2s 140ms`.
+fn whole_millis(duration: Duration) -> Duration {
+    Duration::from_millis(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// A refusal of a value in the request, saying `message`.
+fn invalid_input(message: String) -> ServiceErrorBody {
+    ServiceErrorBody::builder()
+        .kind(ServiceErrorKind::InvalidInput)
+        .message(message)
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::atomic::AtomicUsize, thread};
+
+    use crossbeam_channel::{Receiver, unbounded};
+
+    use super::*;
+    use crate::{
+        adapter::service::{
+            LaunchEnvironment, StackEvent, StateGoal,
+            supervisor::{
+                LogReadResult,
+                testing::{name as process_name, spec as process_spec, *},
+            },
+        },
+        domain::{
+            config::ProcessSpec,
+            process::{LogPattern, PatternKind, PatternText, RestartPolicy},
+            pty::{ExitCause, ExitOutcome, ProcessOutput},
+            value::{LocalPort, PositiveDuration},
+        },
+    };
+
+    /// How long every test wait may take.
+    const WAIT: Duration = Duration::from_secs(30);
+    /// How long a test lets a second log read start, were one started.
+    const READ_SETTLE: Duration = Duration::from_millis(200);
+
+    /// A substring pattern.
+    fn log(text: &str) -> WaitCondition {
+        WaitCondition::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new(text).unwrap())
+                .kind(PatternKind::Substring)
+                .build(),
+        )
+    }
+
+    /// A wait for `until` from `since`.
+    fn spec(until: Option<WaitCondition>, since: Option<OutputCursor>) -> WaitSpec {
+        WaitSpec::builder()
+            .until(until)
+            .since(since)
+            .timeout(WAIT)
+            .build()
+    }
+
+    /// A readiness check of `probe` with a 30 s timeout.
+    fn ready(probe: ReadyProbe) -> ReadyCheck {
+        ReadyCheck::builder()
+            .probe(probe)
+            .timeout(PositiveDuration::try_new(WAIT).unwrap())
+            .build()
+    }
+
+    /// The process `api` under `restart`, with `check`.
+    fn api(restart: RestartPolicy, check: Option<ReadyCheck>) -> ProcessSpec {
+        process_spec("api", "true", restart).with_ready(check)
+    }
+
+    /// A harness running `processes`, every one brought up.
+    fn up(processes: &[ProcessSpec]) -> Harness {
+        let mut harness = Harness::over(Box::new(FakeRunner), processes);
+        harness.up();
+        harness
+    }
+
+    /// Feeds `bytes` as `name`'s current run's output.
+    fn print(harness: &mut Harness, name: &str, bytes: &[u8]) {
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name(name))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Chunk(bytes.to_vec()),
+        );
+    }
+
+    /// Ends `name`'s current run with `outcome`.
+    fn end(harness: &mut Harness, name: &str, outcome: ExitOutcome) {
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name(name))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, ProcessOutput::Exited(outcome));
+    }
+
+    /// Registers a wait on `name`, pinned past `after` when given.
+    fn wait_on(
+        harness: &mut Harness,
+        name: &str,
+        wait: &WaitSpec,
+        after: Option<SpawnGeneration>,
+    ) -> Receiver<ServiceResponse> {
+        let (reply, answers) = unbounded();
+        let prepared = harness
+            .supervisor_mut()
+            .prepare_wait(&process_name(name), wait)
+            .unwrap();
+        harness.supervisor_mut().begin_wait(prepared, after, reply);
+        answers
+    }
+
+    /// The wait outcome answered on `answers`, if any yet.
+    fn answered(answers: &Receiver<ServiceResponse>) -> Option<WaitOutcome> {
+        match answers.try_recv() {
+            Ok(ServiceResponse::Waited(outcome)) => Some(outcome),
+            Ok(_) => panic!("a wait answers with how it ended"),
+            Err(_) => None,
+        }
+    }
+
+    /// The kinds of the events recorded so far.
+    fn event_kinds(harness: &Harness) -> Vec<EventKind> {
+        harness
+            .event_log()
+            .lock()
+            .unwrap()
+            .page(harness.supervisor().root(), None, &[])
+            .events()
+            .iter()
+            .map(StackEvent::kind)
+            .collect()
+    }
+
+    /// A cursor past the output written so far is refused, never waited
+    /// from as if it were the end; the end itself is accepted.
+    #[test]
+    fn a_wait_from_past_the_end_is_refused() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        print(&mut harness, "api", b"Listening on :3000\n");
+        let name = process_name("api");
+
+        let Err(refused) = harness
+            .supervisor_mut()
+            .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(20))))
+        else {
+            panic!("a cursor past the end is refused");
+        };
+        assert_eq!(refused.kind(), &ServiceErrorKind::InvalidInput);
+        assert!(refused.message().contains("o:20"), "{}", refused.message());
+        assert!(
+            harness
+                .supervisor_mut()
+                .prepare_wait(&name, &spec(Some(log("x")), Some(OutputCursor::new(19))))
+                .is_ok()
+        );
+    }
+
+    /// A cursor read from the log, ahead of output the tap has not caught up
+    /// on yet, is accepted up to the log's end; past it, it is refused.
+    #[test]
+    fn a_cursor_up_to_the_log_end_is_accepted_while_the_tap_catches_up() {
+        let mut harness = Harness::over(Box::new(LoggedAheadRunner), &[api(
+            RestartPolicy::Never,
+            None,
+        )]);
+        harness.up();
+        print(&mut harness, "api", b"Listening on :3000\n");
+        let name = process_name("api");
+        let log_end = OutputCursor::new(LOGGED_AHEAD_END);
+
+        assert!(
+            harness
+                .supervisor_mut()
+                .prepare_wait(&name, &spec(Some(log("x")), Some(log_end)))
+                .is_ok()
+        );
+        let Err(refused) = harness
+            .supervisor_mut()
+            .prepare_wait(&name, &spec(Some(log("x")), Some(log_end.advanced(1))))
+        else {
+            panic!("a cursor past the log's end is refused");
+        };
+        assert_eq!(refused.kind(), &ServiceErrorKind::InvalidInput);
+        assert!(
+            refused.message().contains(&format!("> {log_end}")),
+            "{}",
+            refused.message()
+        );
+    }
+
+    /// A wait with no cursor, asked while an adopted run still replays its
+    /// log, never matches a replayed line printed before it was asked, only
+    /// one past where the replay ends.
+    #[test]
+    fn a_wait_asked_during_a_replay_skips_the_replayed_lines() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        let replay_end = OutputCursor::new(64);
+        harness.supervisor_mut().replays.insert(pane, replay_end);
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("listening")), None),
+            None,
+        );
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, ProcessOutput::Placed {
+                at: OutputCursor::new(0),
+                bytes: b"listening before\n".to_vec(),
+            });
+        assert!(answered(&answers).is_none(), "a replayed line is older");
+        harness
+            .supervisor_mut()
+            .handle_output(pane, generation, ProcessOutput::Placed {
+                at: replay_end,
+                bytes: b"listening after\n".to_vec(),
+            });
+
+        let matched = answered(&answers).unwrap();
+        assert_eq!(*matched.matched().as_ref().unwrap().at(), replay_end);
+    }
+
+    /// A cursor past what the tap holds while the launch or adoption that
+    /// catches it up from the log is in flight, as after a restart, is
+    /// accepted, and matches the caught-up output from where it points.
+    #[test]
+    fn a_cursor_ahead_of_a_tap_still_catching_up_is_accepted() {
+        let mut harness = Harness::over(Box::new(WorkerBacklogRunner), &[api(
+            RestartPolicy::Never,
+            None,
+        )]);
+        harness.up();
+        let (pane, generation, result) = spawned(&harness);
+        let since = OutputCursor::new(BACKLOG_RUN_START).advanced("READY on 3000\n".len() as u64);
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("o")), Some(since)),
+            None,
+        );
+        assert!(answered(&answers).is_none());
+        harness
+            .supervisor_mut()
+            .handle_spawned(pane, generation, result);
+
+        let matched = answered(&answers).unwrap();
+        assert_eq!(matched.status(), WaitStatus::Matched);
+        let line = matched.matched().as_ref().unwrap();
+        assert_eq!(line.line(), "booting");
+        assert_eq!(*line.at(), since);
+    }
+
+    #[test]
+    fn a_log_wait_matches_only_output_after_it_unless_given_a_cursor() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        print(&mut harness, "api", b"Listening on :3000\n");
+
+        let fresh = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("Listening")), None),
+            None,
+        );
+        let resumed = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("Listening")), Some(OutputCursor::new(0))),
+            None,
+        );
+
+        assert!(answered(&fresh).is_none(), "earlier output does not count");
+        let matched = answered(&resumed).unwrap();
+        assert_eq!(matched.status(), WaitStatus::Matched);
+        assert_eq!(
+            matched.matched().as_ref().unwrap().line(),
+            "Listening on :3000"
+        );
+        assert_eq!(*matched.cursor(), OutputCursor::new(19));
+
+        print(&mut harness, "api", b"\x1b[32mListening\x1b[0m again\n");
+        let again = answered(&fresh).unwrap();
+        assert_eq!(again.matched().as_ref().unwrap().line(), "Listening again");
+        assert_eq!(
+            *again.matched().as_ref().unwrap().at(),
+            OutputCursor::new(19)
+        );
+    }
+
+    #[test]
+    fn a_wait_riding_on_a_restart_never_sees_the_old_run() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let name = process_name("api");
+        let before = harness.supervisor_mut().generation_of(&name);
+        harness
+            .supervisor_mut()
+            .restart(&name, &LaunchEnvironment::default());
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("ready")), None),
+            Some(before),
+        );
+
+        print(&mut harness, "api", b"ready (old run, shutting down)\n");
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(143)),
+        );
+        assert!(
+            answered(&answers).is_none(),
+            "the old run's lines and exit do not count"
+        );
+
+        print(&mut harness, "api", b"ready\n");
+        assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Matched);
+    }
+
+    #[test]
+    fn a_crash_ends_a_wait_with_the_run_s_last_lines() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("Listening")), None),
+            None,
+        );
+
+        print(&mut harness, "api", b"Error: EADDRINUSE\n    at listen\n");
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(1)),
+        );
+
+        let crashed = answered(&answers).unwrap();
+        assert_eq!(crashed.status(), WaitStatus::Crashed);
+        assert_eq!(crashed.tail(), &["Error: EADDRINUSE", "    at listen"]);
+        assert!(event_kinds(&harness).contains(&EventKind::Crashed));
+    }
+
+    /// A wait for `running` holds on through the quick-exit window: a run
+    /// that ends inside it answers crashed or exited, and one that outlasts
+    /// it answers matched once the window ends, which the loop wakes for.
+    #[test]
+    fn a_running_wait_holds_through_the_quick_exit_window() {
+        for (outcome, status) in [
+            (
+                ExitOutcome::Failed(ExitCause::Status(1)),
+                WaitStatus::Crashed,
+            ),
+            (ExitOutcome::Succeeded, WaitStatus::Exited),
+        ] {
+            let mut harness = up(&[api(RestartPolicy::Never, None)]);
+            let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+            harness.supervisor_mut().settle_waits(Instant::now());
+            assert!(answered(&answers).is_none(), "running, inside the window");
+
+            end(&mut harness, "api", outcome);
+            harness.supervisor_mut().settle_waits(Instant::now());
+            assert_eq!(answered(&answers).unwrap().status(), status);
+        }
+
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+        let window_end = harness.supervisor_mut().next_wait_deadline().unwrap();
+        assert!(window_end <= Instant::now() + QUICK_EXIT_WINDOW);
+        harness.supervisor_mut().settle_waits(window_end);
+        assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Matched);
+    }
+
+    #[test]
+    fn a_process_that_is_not_running_answers_at_once() {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)]);
+
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("x")), None), None);
+        let stopped = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(WaitCondition::State(StateGoal::Stopped)), None),
+            None,
+        );
+
+        assert_eq!(answered(&answers).unwrap().status(), WaitStatus::NotRunning);
+        assert_eq!(answered(&stopped).unwrap().status(), WaitStatus::Matched);
+    }
+
+    #[test]
+    fn a_wait_past_its_deadline_answers_waiting_with_its_cursor() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        print(&mut harness, "api", b"booting\n");
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+
+        harness.supervisor_mut().settle_waits(Instant::now());
+        assert!(answered(&answers).is_none());
+        harness.supervisor_mut().settle_waits(Instant::now() + WAIT);
+
+        let waiting = answered(&answers).unwrap();
+        assert_eq!(waiting.status(), WaitStatus::Waiting);
+        assert_eq!(*waiting.cursor(), OutputCursor::new(8));
+        assert!(harness.supervisor_mut().next_wait_deadline().is_none());
+    }
+
+    /// A marker the process printed on its first line, before its handle
+    /// connected, reaches readiness and waits from the log, at its real
+    /// offset.
+    #[test]
+    fn output_logged_before_the_handle_connected_reaches_readiness_and_waits() {
+        let check = ready(ReadyProbe::from_stored("log", "READY").unwrap());
+        let mut harness = Harness::over(Box::new(BacklogRunner), &[api(
+            RestartPolicy::Never,
+            Some(check),
+        )]);
+        harness.up();
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        let snapshot = harness.supervisor_mut().snapshot();
+        let status = &snapshot.processes()[0];
+        assert_eq!(*status.ready(), Readiness::Ready);
+        let start = OutputCursor::new(BACKLOG_RUN_START);
+        assert_eq!(*status.run_start(), Some(start));
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("booting")), Some(start)),
+            None,
+        );
+        let matched = answered(&answers).unwrap();
+        assert_eq!(matched.status(), WaitStatus::Matched);
+        assert_eq!(
+            *matched.matched().as_ref().unwrap().at(),
+            start.advanced("READY on 3000\n".len() as u64)
+        );
+        assert_eq!(
+            *matched.cursor(),
+            start.advanced(BACKLOG.len() as u64),
+            "the cursor stands past the backlog"
+        );
+    }
+
+    #[test]
+    fn a_log_readiness_check_passes_on_its_line_and_answers_a_ready_wait() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
+            Readiness::Waiting
+        );
+
+        print(&mut harness, "api", b"webpack compiled in 3ms\n");
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        let ready = answered(&answers).unwrap();
+        assert_eq!(ready.status(), WaitStatus::Matched);
+        assert_eq!(*ready.until(), WaitCondition::Ready);
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
+            Readiness::Ready
+        );
+        assert!(event_kinds(&harness).contains(&EventKind::Ready));
+    }
+
+    #[test]
+    fn a_readiness_check_that_times_out_warns_and_fails_its_wait() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let answers = wait_on(&mut harness, "api", &spec(None, None), None);
+
+        harness.supervisor_mut().settle_waits(Instant::now() + WAIT);
+
+        assert_eq!(
+            answered(&answers).unwrap().status(),
+            WaitStatus::ReadyTimeout
+        );
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
+            Readiness::TimedOut
+        );
+        assert_eq!(harness.notice_messages(), [
+            "api did not become ready within 30s"
+        ]);
+        assert!(event_kinds(&harness).contains(&EventKind::ReadyTimeout));
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].state(),
+            ProcessState::Running
+        );
+    }
+
+    #[test]
+    fn a_probe_pass_counts_only_for_the_current_run() {
+        let port = LocalPort::try_new(3000).unwrap();
+        let mut harness = up(&[api(
+            RestartPolicy::Never,
+            Some(ready(ReadyProbe::Port(port))),
+        )]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let current = harness.supervisor_mut().current_generation(pane);
+        let stale = SpawnGeneration::initial();
+
+        harness
+            .supervisor_mut()
+            .handle_probe_passed(pane, stale, &ProbeTarget::Port(port));
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
+            Readiness::Waiting
+        );
+
+        harness
+            .supervisor_mut()
+            .handle_probe_passed(pane, current, &ProbeTarget::Port(port));
+        assert_eq!(
+            *harness.supervisor_mut().snapshot().processes()[0].ready(),
+            Readiness::Ready
+        );
+    }
+
+    #[test]
+    fn a_stop_while_waiting_answers_stopped_or_matched_for_a_stopped_goal() {
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+        let for_log = wait_on(&mut harness, "api", &spec(Some(log("x")), None), None);
+        let for_stop = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(WaitCondition::State(StateGoal::Stopped)), None),
+            None,
+        );
+
+        harness.supervisor_mut().stop(&process_name("api"));
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(143)),
+        );
+
+        assert_eq!(answered(&for_log).unwrap().status(), WaitStatus::Stopped);
+        assert_eq!(answered(&for_stop).unwrap().status(), WaitStatus::Matched);
+        let last = harness.supervisor_mut().snapshot().processes()[0]
+            .last_exit()
+            .clone()
+            .unwrap();
+        assert_eq!(last.reason(), ExitReason::Stopped);
+    }
+
+    #[test]
+    fn an_up_with_a_wait_answers_one_batch_once_every_wait_ended() {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[
+            api(RestartPolicy::Never, None),
+            process_spec("web", "true", RestartPolicy::Never),
+        ]);
+        let (reply, answers) = unbounded();
+
+        harness
+            .supervisor_mut()
+            .up_waiting(
+                &LaunchEnvironment::default(),
+                &spec(Some(log("up")), None),
+                reply,
+            )
+            .unwrap();
+        print(&mut harness, "api", b"up\n");
+        assert!(answers.try_recv().is_err(), "web still waits");
+        end(
+            &mut harness,
+            "web",
+            ExitOutcome::Failed(ExitCause::Status(2)),
+        );
+
+        let Ok(ServiceResponse::Batch(batch)) = answers.try_recv() else {
+            panic!("the batch answers once both waits ended");
+        };
+        let statuses: Vec<WaitStatus> = batch.waits().iter().map(WaitOutcome::status).collect();
+        assert_eq!(statuses, [WaitStatus::Matched, WaitStatus::Crashed]);
+        assert_eq!(batch.acted().len(), 2);
+    }
+
+    #[test]
+    fn a_bad_pattern_or_a_readiness_wait_without_a_check_is_refused() {
+        let harness = up(&[api(RestartPolicy::Never, None)]);
+        let regex = WaitCondition::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new("(").unwrap())
+                .kind(PatternKind::Regex)
+                .build(),
+        );
+        let name = process_name("api");
+
+        for until in [regex, WaitCondition::Ready] {
+            let refusal = harness
+                .supervisor()
+                .prepare_wait(&name, &spec(Some(until), None))
+                .err()
+                .unwrap();
+            assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn a_restart_that_fails_to_launch_ends_its_wait_as_crashed() {
+        let mut harness = Harness::over(
+            Box::new(FlakyRunner::builder().spawns(AtomicUsize::new(0)).build()),
+            &[api(RestartPolicy::Never, None)],
+        );
+        harness.up();
+        let name = process_name("api");
+        let before = harness.supervisor_mut().generation_of(&name);
+        harness
+            .supervisor_mut()
+            .restart(&name, &LaunchEnvironment::default());
+        let answers = wait_on(&mut harness, "api", &spec(None, None), Some(before));
+
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(143)),
+        );
+
+        assert_eq!(answered(&answers).unwrap().status(), WaitStatus::Crashed);
+        let last = harness.supervisor_mut().snapshot().processes()[0]
+            .last_exit()
+            .clone()
+            .unwrap();
+        assert_eq!(last.reason(), ExitReason::FailedToStart);
+        assert_eq!(*last.outcome(), ExitOutcome::FAILED_UNKNOWN);
+    }
+
+    #[test]
+    fn a_start_and_an_exit_are_recorded_as_events() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+
+        end(&mut harness, "api", ExitOutcome::Succeeded);
+
+        assert_eq!(event_kinds(&harness), [
+            EventKind::Started,
+            EventKind::Exited
+        ]);
+    }
+
+    /// A wait on a process this service never saw run, as after a service
+    /// restart, answers with its log's end as the cursor and its last lines
+    /// as the tail, never `o:0`, and a `since` past the log's end is refused
+    /// as `process_logs` refuses it.
+    #[test]
+    fn a_wait_on_a_process_never_run_here_answers_from_its_log() {
+        let start = OutputCursor::new(100);
+        let tail = b"booting\nboom\n";
+        let end = start.advanced(tail.len() as u64);
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::new(start, tail)));
+
+        let crashed = Some(WaitCondition::State(StateGoal::Stopped));
+        let answers = wait_on(&mut harness, "api", &spec(crashed.clone(), None), None);
+        let outcome = answered(&answers).expect("a stopped process is answered at once");
+        assert_eq!(*outcome.cursor(), end);
+        assert_eq!(
+            *outcome.tail(),
+            Vec::<String>::new(),
+            "a match carries no tail"
+        );
+
+        let never = Some(log("never"));
+        let answers = wait_on(&mut harness, "api", &spec(never.clone(), Some(start)), None);
+        let outcome = answered(&answers).expect("a process not running is answered at once");
+        assert_eq!(*outcome.cursor(), end);
+        assert_eq!(*outcome.tail(), ["booting", "boom"]);
+
+        let past = end.advanced(1);
+        let prepared = harness
+            .supervisor_mut()
+            .prepare_wait(&process_name("api"), &spec(never, Some(past)));
+        assert!(prepared.is_err(), "a since past the log's end is refused");
+    }
+
+    /// A wait on a process this service never saw run, held while its log is
+    /// read, is refused once the read shows its `since` past the log's end.
+    #[test]
+    fn a_held_wait_past_the_log_end_is_refused() {
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::new(
+                OutputCursor::new(0),
+                b"boom\n",
+            )));
+        let never = Some(log("never"));
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(never, Some(OutputCursor::new(50))),
+            None,
+        );
+
+        let Ok(ServiceResponse::Error(refusal)) = answers.try_recv() else {
+            panic!("a since past the log's end is refused");
+        };
+        assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidInput);
+        assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
+    }
+
+    /// A harness over `api` adopting through `adopter`, whose log reads
+    /// stall until its gate is released.
+    fn stalled(adopter: &StuckLogAdopter) -> Harness {
+        Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(adopter.clone()))
+    }
+
+    /// Waits held on a stalled log read are refused through the loop's own
+    /// deadline once [`LOG_TAIL_TIMEOUT`] passes, naming the timeout; the
+    /// read stays in flight, so however many waits come and go it runs once.
+    #[test]
+    fn held_waits_time_out_on_the_loop_deadline_and_share_one_stalled_read() {
+        let (_release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let held = Instant::now();
+        let never = spec(Some(log("never")), None);
+
+        let first: Vec<_> = (0..5)
+            .map(|_| wait_on(&mut harness, "api", &never, None))
+            .collect();
+        let deadline = harness
+            .supervisor()
+            .next_wait_deadline()
+            .expect("a held wait has a deadline");
+        assert!(deadline >= held + LOG_TAIL_TIMEOUT, "{deadline:?}");
+        assert!(
+            deadline <= Instant::now() + LOG_TAIL_TIMEOUT,
+            "{deadline:?}"
+        );
+        harness.supervisor_mut().settle_waits(Instant::now());
+        assert!(first.iter().all(|answers| answers.try_recv().is_err()));
+
+        harness
+            .supervisor_mut()
+            .settle_waits(Instant::now() + LOG_TAIL_TIMEOUT);
+        for answers in &first {
+            let Ok(ServiceResponse::Error(refusal)) = answers.try_recv() else {
+                panic!("an overdue held wait is refused");
+            };
+            assert!(refusal.message().contains(LOG_TAIL_OVERDUE), "{refusal:?}");
+        }
+        let later: Vec<_> = (0..5)
+            .map(|_| wait_on(&mut harness, "api", &never, None))
+            .collect();
+        assert!(later.iter().all(|answers| answers.try_recv().is_err()));
+
+        let started = Instant::now();
+        while adopter.reads_started() == 0 && started.elapsed() < WAIT {
+            thread::yield_now();
+        }
+        thread::sleep(READ_SETTLE);
+        assert_eq!(adopter.reads_started(), 1, "one read serves every wait");
+    }
+
+    /// A wait held on a log read ends as stopped when its pane is retired
+    /// before the read lands, and the read then landing is dropped: it seeds
+    /// no output and registers no wait.
+    #[test]
+    fn a_retire_before_the_read_lands_stops_the_wait_and_drops_the_read() {
+        let (release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        harness.supervisor_mut().retire_pane(pane);
+        let outcome = answered(&answers).expect("a retired pane ends its held wait");
+        assert_eq!(outcome.status(), WaitStatus::Stopped);
+
+        drop(release);
+        let (landed, read, _) = harness.landed_log_read();
+        harness.supervisor_mut().handle_log_read(
+            landed,
+            read,
+            LogReadResult::builder()
+                .tail(Some((OutputCursor::new(0), b"late\n".to_vec())))
+                .build(),
+        );
+        let supervisor = harness.supervisor();
+        assert!(!supervisor.taps.contains_key(&pane), "no tap is seeded");
+        assert!(supervisor.waiters.is_empty(), "no wait is registered");
+        assert!(supervisor.held_waits.is_empty());
+    }
+
+    /// Ending a pane's waits ends one still held on its log read as stopped,
+    /// and a wait held after joins the read in flight; a read that lands
+    /// before the pane is retired answers that wait from the log as usual,
+    /// and the retire after leaves nothing of it behind.
+    #[test]
+    fn ended_waits_include_held_ones_and_a_read_landing_before_a_retire_answers() {
+        let (release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        let never = spec(Some(log("never")), None);
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        let ended = wait_on(&mut harness, "api", &never, None);
+        harness
+            .supervisor_mut()
+            .end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
+        let outcome = answered(&ended).expect("ending the pane's waits ends a held one");
+        assert_eq!(outcome.status(), WaitStatus::Stopped);
+
+        let answers = wait_on(&mut harness, "api", &never, None);
+        drop(release);
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        let outcome = answered(&answers).expect("the landed read answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::NotRunning);
+        assert_eq!(adopter.reads_started(), 1, "the later wait joined the read");
+        assert!(harness.supervisor().taps.contains_key(&pane));
+
+        harness.supervisor_mut().retire_pane(pane);
+        let supervisor = harness.supervisor();
+        assert!(answers.try_recv().is_err(), "a wait is answered once");
+        assert!(!supervisor.taps.contains_key(&pane));
+        assert!(!supervisor.log_reads.contains_key(&pane));
+        assert!(supervisor.held_waits.is_empty() && supervisor.waiters.is_empty());
+    }
+
+    /// A `restart: always` run that exits 0 is recorded as exited, never as
+    /// crashed or restarting, though its policy starts it again.
+    #[test]
+    fn a_clean_exit_under_restart_always_is_recorded_as_exited() {
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+
+        end(&mut harness, "api", ExitOutcome::Succeeded);
+
+        assert_eq!(event_kinds(&harness)[..2], [
+            EventKind::Started,
+            EventKind::Exited
+        ]);
+    }
+}

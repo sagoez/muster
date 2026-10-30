@@ -1,7 +1,9 @@
+use std::io;
+
 use thiserror::Error;
 
 use crate::{
-    adapter::hooks::HookError,
+    adapter::{holder::HolderError, mcp::McpError, service::ServiceError},
     domain::{config::ConfigError, pty::PtyError},
 };
 
@@ -12,18 +14,21 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum MusterError {
     /// An I/O failure while driving the terminal or a child process.
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
-    /// A workspace configuration failure.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// A failure reading or writing muster's stored state.
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// A PTY / process-spawning failure.
     #[error(transparent)]
     Pty(#[from] PtyError),
-    /// A provider lifecycle integration failure.
+    /// A process holder failure.
     #[error(transparent)]
-    Hook(#[from] HookError),
+    Holder(#[from] HolderError),
+    /// A service failure.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
+    /// An MCP server failure.
+    #[error(transparent)]
+    Mcp(#[from] McpError),
 }
-
-/// Crate-wide result alias.
-pub type Result<T> = std::result::Result<T, MusterError>;

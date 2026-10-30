@@ -1,0 +1,12 @@
+---
+source: src/adapter/cli/wait.rs
+expression: "format!(\"{}\\n---\\n{}\", wait_text(&crashed), wait_text(&matched))"
+---
+api: crashed waiting for ready after 1.200s
+  Error: boom
+      at main
+cursor o:90
+---
+api: matched waiting for state running after 0.005s
+  Listening on :3000
+cursor o:30

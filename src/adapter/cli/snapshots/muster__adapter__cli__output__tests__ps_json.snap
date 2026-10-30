@@ -1,0 +1,72 @@
+---
+source: src/adapter/cli/output.rs
+expression: json(&views).unwrap()
+---
+[
+  {
+    "project": {
+      "name": "shop",
+      "root": "/home/me/shop"
+    },
+    "processes": [
+      {
+        "name": "dev server",
+        "state": "running",
+        "ready": "ready",
+        "pid": 4123,
+        "uptime": 3723,
+        "restarts": 2,
+        "cpu_percent": 2.25,
+        "memory_bytes": 134217728,
+        "attached": 1,
+        "last_exit": null,
+        "stop_grace": 1
+      },
+      {
+        "name": "café",
+        "state": "crashed",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": {
+          "status": 127,
+          "signal": null
+        },
+        "stop_grace": 5
+      },
+      {
+        "name": "worker",
+        "state": "starting",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5
+      },
+      {
+        "name": "cron",
+        "state": "crashed",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": {
+          "status": null,
+          "signal": "sigkill"
+        },
+        "stop_grace": 5
+      }
+    ]
+  }
+]

@@ -1,15 +1,40 @@
-pub mod bridge;
+pub mod bounded_read;
+#[cfg(test)]
+pub(crate) mod channel_sink;
 pub mod cli;
-pub mod clipboard;
-pub mod config;
-pub mod editor;
-pub mod hooks;
-#[cfg(unix)]
+pub mod client;
+pub mod clock;
+pub mod detect;
+pub mod exchange;
+pub mod holder;
 pub mod ipc;
+pub mod listening;
 pub mod mcp;
 pub mod metrics;
+pub mod no_state_dir;
 pub mod notifier;
+pub mod open_files;
 pub mod path;
+#[cfg(test)]
+pub(crate) mod ping;
+#[cfg(test)]
+pub(crate) mod pong;
+pub mod port_occupants;
+pub mod private_dir;
+pub mod probe;
 pub mod process_identity;
+pub mod process_tree;
 pub mod pty;
-pub mod tui;
+pub mod sanitize;
+pub mod service;
+pub mod signal_target;
+pub mod store;
+pub mod terminal;
+#[cfg(test)]
+pub(crate) mod test_fifo;
+#[cfg(test)]
+pub(crate) mod test_scratch;
+#[cfg(test)]
+pub(crate) mod test_wait;
+pub mod wire;
+pub mod workspace_request;

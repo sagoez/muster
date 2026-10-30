@@ -1,73 +1,23 @@
 use std::{
-    ffi::OsStr,
-    fs,
-    path::{Component, MAIN_SEPARATOR, Path, PathBuf, is_separator},
+    env, fs,
+    path::{Component, Path, PathBuf},
 };
 
 use directories::BaseDirs;
 
-use crate::domain::{config::ConfigError, port::PathCompleter, project::Project};
+use crate::domain::{config::ConfigError, value::ProjectRoot};
 
 /// Leading path component expanded to the user's home directory.
 const HOME_PREFIX: &str = "~";
-/// Maximum directory suggestions offered at once.
-const MAX_COMPLETIONS: usize = 8;
+/// Marks a project value as a folder when it starts with one of these.
+const FOLDER_PREFIXES: [char; 2] = ['.', '~'];
+/// Marks a project value as a folder when it contains it anywhere.
+const PATH_SEPARATOR: char = '/';
 
-/// A [`PathCompleter`] that lists directories on the local filesystem.
-#[derive(Default)]
-pub struct FsPathCompleter;
-
-impl FsPathCompleter {
-    /// Returns directory completions for `partial` from the local filesystem.
-    fn complete(partial: &str) -> Vec<String> {
-        // When `partial` is itself an existing directory (and not already ending
-        // in a separator), browse inside it; otherwise complete the last segment
-        // within its parent. `is_separator` accepts both `/` and the platform
-        // separator, so Windows-style paths split correctly too.
-        let (typed_dir, prefix): (String, String) =
-            if !partial.ends_with(is_separator) && expand_home(Path::new(partial)).is_dir() {
-                (format!("{partial}{MAIN_SEPARATOR}"), String::new())
-            } else {
-                match partial.rfind(is_separator) {
-                    Some(index) => (
-                        partial[..=index].to_string(),
-                        partial[index + 1..].to_string(),
-                    ),
-                    None => (String::new(), partial.to_string()),
-                }
-            };
-        let read_dir = if typed_dir.is_empty() {
-            PathBuf::from(".")
-        } else {
-            expand_home(Path::new(&typed_dir))
-        };
-        let Ok(entries) = fs::read_dir(&read_dir) else {
-            return Vec::new();
-        };
-        let mut matches: Vec<String> = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| Self::candidate(&entry.file_name(), &typed_dir, &prefix))
-            .collect();
-        matches.sort();
-        matches.truncate(MAX_COMPLETIONS);
-        matches
-    }
-
-    /// Converts one directory name to a completion, rejecting non-UTF-8 names
-    /// because a lossy string would identify a different filesystem path.
-    fn candidate(raw: &OsStr, typed_dir: &str, prefix: &str) -> Option<String> {
-        let name = raw.to_str()?;
-        let hidden = name.starts_with('.') && !prefix.starts_with('.');
-        (name.starts_with(prefix) && name != prefix && !hidden)
-            .then(|| format!("{typed_dir}{name}"))
-    }
-}
-
-impl PathCompleter for FsPathCompleter {
-    fn complete_dir(&self, partial: &str) -> Vec<String> {
-        Self::complete(partial)
-    }
+/// Whether a project value someone typed names a folder (it contains `/` or
+/// starts with `.` or `~`) rather than a registered project's name.
+pub fn names_a_folder(value: &str) -> bool {
+    value.contains(PATH_SEPARATOR) || value.starts_with(FOLDER_PREFIXES)
 }
 
 /// Expands a leading `~` to the user's home directory; any other path is left
@@ -82,17 +32,59 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
+/// The user's home folder, canonicalized when it exists, so it compares with
+/// a [`ProjectRoot`].
+pub fn home_dir() -> Option<PathBuf> {
+    BaseDirs::new().map(|dirs| {
+        let home = dirs.home_dir();
+        home.canonicalize().unwrap_or_else(|_| home.to_path_buf())
+    })
+}
+
+/// The project folder `dir` names: `~` expanded, canonicalized, and required
+/// to be an existing directory whose path is UTF-8, since the store keeps
+/// roots as text.
+///
+/// # Errors
+/// Returns [`ConfigError::RootNotADirectory`] when `dir` is missing or is not
+/// a directory, and [`ConfigError::RootNotUtf8`] when its canonical path is
+/// not UTF-8.
+pub fn project_root(dir: &Path) -> Result<ProjectRoot, ConfigError> {
+    let refused = || ConfigError::RootNotADirectory {
+        path: dir.to_path_buf(),
+    };
+    let canonical = expand_home(dir).canonicalize().map_err(|_| refused())?;
+    if !canonical.is_dir() {
+        return Err(refused());
+    }
+    if canonical.to_str().is_none() {
+        return Err(ConfigError::RootNotUtf8 { path: canonical });
+    }
+    ProjectRoot::try_new(canonical).map_err(|_| refused())
+}
+
+/// Where absolute `path` leads with every symlink followed: its deepest
+/// existing ancestor canonicalized, with the missing rest appended as written.
+pub fn resolved(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find_map(|ancestor| {
+            let rest = path.strip_prefix(ancestor).ok()?;
+            ancestor.canonicalize().ok().map(|real| real.join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Expands `~` and makes a path absolute, preserving the user-selected
 /// filesystem location. `.` and `..` components are normalized so equivalent
 /// addressings of one location compare and store identically; a `..` whose
 /// preceding component exists on disk follows that component's real nature
-/// (see [`parent_step`]).
+/// (see `parent_step`).
 pub fn absolutize(path: &Path) -> PathBuf {
     let expanded = expand_home(path);
     let absolute = if expanded.is_absolute() {
         expanded
     } else {
-        match std::env::current_dir() {
+        match env::current_dir() {
             Ok(cwd) => cwd.join(&expanded),
             Err(_) => expanded,
         }
@@ -177,30 +169,15 @@ fn parent_step(prefix: &Path) -> ParentStep {
     }
 }
 
-/// Resolves a registered config only when its stored path is independent of the
-/// caller's directory.
-///
-/// # Errors
-/// Returns [`ConfigError::RelativeProjectConfig`] for ambiguous legacy entries.
-pub fn registered_config_path(project: &Project) -> Result<PathBuf, ConfigError> {
-    if expand_home(project.config()).is_relative() {
-        return Err(ConfigError::RelativeProjectConfig {
-            name: project.name().clone(),
-            path: project.config().clone(),
-        });
-    }
-    Ok(absolutize(project.config()))
-}
-
-/// Normalizes a config path for identity comparison: absolutizes it, then
-/// canonicalizes existing paths so aliases naming the same file compare equal.
-pub fn normalize(path: &Path) -> PathBuf {
-    let absolute = absolutize(path);
-    absolute.canonicalize().unwrap_or(absolute)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        process,
+    };
+
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -216,22 +193,64 @@ mod tests {
         );
     }
 
+    /// A folder reached through a relative path or a symlink alias is one
+    /// project root: the canonical folder.
     #[test]
-    fn relative_and_absolute_paths_to_one_file_normalize_equal() {
-        // `cargo test` runs with the crate root as the working directory, so the
-        // relative name and its absolute form resolve to the same file.
-        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        assert_eq!(normalize(Path::new("Cargo.toml")), normalize(&absolute));
+    fn project_root_canonicalizes_aliases_of_one_folder() {
+        let scratch = TempDir::new().unwrap();
+        let real = scratch.path().join("real");
+        let link = scratch.path().join("link");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        let canonical = real.canonicalize().unwrap();
+
+        assert_eq!(project_root(&link).unwrap().as_ref(), &canonical);
+        assert_eq!(project_root(&real.join(".")).unwrap().as_ref(), &canonical);
+        assert_eq!(
+            project_root(Path::new(".")).unwrap().as_ref(),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .canonicalize()
+                .unwrap(),
+            "a relative folder resolves against the working directory"
+        );
     }
 
-    #[cfg(unix)]
-    /// An absolute location retains a symlink alias while identity normalization
-    /// resolves it to its target.
+    /// A missing folder or a file is not a project root.
+    #[test]
+    fn project_root_refuses_a_missing_folder_or_a_file() {
+        let scratch = TempDir::new().unwrap();
+        let file = scratch.path().join("file");
+        fs::write(&file, "").unwrap();
+
+        for refused in [scratch.path().join("missing"), file] {
+            assert!(matches!(
+                project_root(&refused),
+                Err(ConfigError::RootNotADirectory { path }) if path == refused
+            ));
+        }
+    }
+
+    /// A folder whose path is not UTF-8 is refused as such, since the store
+    /// keeps roots as text.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn project_root_refuses_a_path_that_is_not_utf8() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let scratch = TempDir::new().unwrap();
+        let folder = scratch.path().join(OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir(&folder).unwrap();
+
+        assert!(matches!(
+            project_root(&folder),
+            Err(ConfigError::RootNotUtf8 { .. })
+        ));
+    }
+
+    /// An absolute location retains a symlink alias.
     #[test]
     fn absolutize_preserves_a_symlink_path() {
-        use std::os::unix::fs::symlink;
-
-        let dir = std::env::temp_dir().join(format!("muster-path-link-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("muster-path-link-{}", process::id()));
         let target = dir.join("target.yml");
         let link = dir.join("muster.yml");
         fs::create_dir_all(&dir).unwrap();
@@ -239,57 +258,8 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         assert_eq!(absolutize(&link), link);
-        assert_eq!(normalize(&link), target.canonicalize().unwrap());
 
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn complete_dir_suggests_matching_subdirectories() {
-        let dir = std::env::temp_dir().join(format!("muster-complete-{}", std::process::id()));
-        for sub in ["prism", "proto", "other"] {
-            fs::create_dir_all(dir.join(sub)).unwrap();
-        }
-        fs::write(dir.join("prfile"), "").unwrap();
-
-        let base = dir.display();
-        let got = FsPathCompleter::complete(&format!("{base}/pr"));
-
-        assert_eq!(
-            got,
-            vec![format!("{base}/prism"), format!("{base}/proto")],
-            "only matching directories, prefixed as typed, sorted"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn complete_dir_browses_inside_an_existing_directory() {
-        let dir = std::env::temp_dir().join(format!("muster-browse-{}", std::process::id()));
-        for sub in ["alpha", "beta"] {
-            fs::create_dir_all(dir.join(sub)).unwrap();
-        }
-
-        // The path is an existing directory with no trailing slash: list its
-        // children, not its siblings.
-        let base = dir.display();
-        let got = FsPathCompleter::complete(&base.to_string());
-
-        assert_eq!(got, vec![format!("{base}/alpha"), format!("{base}/beta")]);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    /// Non-UTF-8 names are rejected without asking the filesystem to create one.
-    #[test]
-    fn candidate_rejects_non_utf8_names() {
-        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
-
-        let raw = OsStr::from_bytes(b"val\xffid");
-
-        assert_eq!(FsPathCompleter::candidate(raw, "/tmp/", "val"), None);
     }
 
     /// Dot components vanish; `..` over a real directory pops to its parent.
@@ -304,7 +274,7 @@ mod tests {
             PathBuf::from("/etc/passwd"),
             "excess parent components at the root are dropped"
         );
-        let real = std::env::temp_dir().join(format!("muster-abs-dot-{}", std::process::id()));
+        let real = env::temp_dir().join(format!("muster-abs-dot-{}", process::id()));
         let sub = real.join("sub");
         fs::create_dir_all(&sub).unwrap();
         assert_eq!(
@@ -336,20 +306,15 @@ mod tests {
     }
 
     /// A search-permission mode removing all access, for the denied case.
-    #[cfg(unix)]
     const LOCKED_MODE: u32 = 0o000;
     /// A normal directory mode, restored so cleanup can run.
-    #[cfg(unix)]
     const OPEN_MODE: u32 = 0o755;
 
-    #[cfg(unix)]
     /// `..` under an unsearchable directory is preserved instead of escaping
     /// lexically toward a different, accessible workspace.
     #[test]
     fn traversal_in_an_unsearchable_directory_is_preserved() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let base = std::env::temp_dir().join(format!("muster-denied-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-denied-{}", process::id()));
         let locked = base.join("locked");
         let inner = locked.join("inner");
         fs::create_dir_all(&inner).unwrap();
@@ -368,7 +333,7 @@ mod tests {
     /// traversal, so normalization must not rewrite it to a valid path.
     #[test]
     fn parent_of_a_regular_file_is_preserved() {
-        let base = std::env::temp_dir().join(format!("muster-file-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-file-dotdot-{}", process::id()));
         let blocker = base.join("blocker");
         fs::create_dir_all(&base).unwrap();
         fs::write(&blocker, "").unwrap();
@@ -384,7 +349,7 @@ mod tests {
     /// `..` after an existing real directory still pops, matching the OS.
     #[test]
     fn parent_of_a_real_directory_pops() {
-        let base = std::env::temp_dir().join(format!("muster-dir-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-dir-dotdot-{}", process::id()));
         let sub = base.join("sub");
         fs::create_dir_all(&sub).unwrap();
 
@@ -395,14 +360,11 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[cfg(unix)]
     /// `..` across a real symlink resolves through the filesystem: the parent
     /// of the link's target, not of the link itself.
     #[test]
     fn parent_of_a_symlink_resolves_through_the_filesystem() {
-        use std::os::unix::fs::symlink;
-
-        let base = std::env::temp_dir().join(format!("muster-link-dotdot-{}", std::process::id()));
+        let base = env::temp_dir().join(format!("muster-link-dotdot-{}", process::id()));
         let real_sub = base.join("real/sub");
         let link = base.join("link");
         fs::create_dir_all(&real_sub).unwrap();

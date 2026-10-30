@@ -1,0 +1,27 @@
+---
+source: src/adapter/cli/output.rs
+expression: "printed.join(\"\\n\\n\")"
+---
+/home/me/shop
+● api: running (pid 4200)
+
+/home/me/shop
+● api: stopped
+
+/home/me/shop
+● api: running (pid 4200)
+
+/home/me/shop
+● api: stopped
+
+/home/me/shop
+● api: restarted (pid 4200)
+
+/home/me/shop
+● api: running (pid 4200)
+
+/home/me/shop
+● api: stopped
+
+stopped the muster service
+every process keeps running; the next muster command starts the service again

@@ -1,36 +1,64 @@
-use std::path::Path;
+use serde_json::json;
 
 use super::{
-    args::TodoCommand,
-    error::CliError,
-    report::{Row, RowKind, attribution},
+    answer::Answer, error::CliError, page_cursor::parse_cursor, report::attribution, row::Row,
+    row_kind::RowKind, todo_command::TodoCommand,
 };
-use crate::domain::{
-    coordination::{Author, TodoId, TodoStatus, TodoTitle},
-    port::CoordinationStore,
+use crate::{
+    adapter::{
+        client::{PageSize, TodoPage, TodoView},
+        clock::epoch_now,
+    },
+    domain::{
+        coordination::{
+            Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
+            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoStatus,
+            TodoUpdate,
+        },
+        port::CoordinationStore,
+        value::{EpochSeconds, ProjectRoot},
+    },
 };
 
+/// What a refusal calls a todo's title.
+const TODO_TITLE: &str = "todo title";
+/// What a refusal calls a todo id.
+const TODO_ID: &str = "todo id";
+/// What a refusal calls a todo's dependencies.
+const TODO_DEPS: &str = "dependency list";
 /// Line printed when the project has no todos yet.
 const EMPTY_NOTE: &str = "no todos; add one with `muster todo add <title>`";
 /// Columns between the fields of a listed todo line.
 const FIELD_GAP: &str = "  ";
+/// Line printed under a page that more todos follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster todo --cursor ";
+/// The JSON key of the id a delete named.
+const ID: &str = "id";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
 
-/// Runs a `muster todo` action against `store` for `project`, returning the rows
-/// to print. Absent a subcommand, lists the project's todos.
+/// Runs a `muster todo` action against `store` for `project`, returning what
+/// to print. Absent a subcommand, lists one page of `limit` todos after the
+/// todo `cursor` names.
 ///
 /// # Errors
-/// Returns [`CliError`] when a title or id is invalid, a status targets an
-/// unknown todo, or the store cannot be read or written.
+/// Returns [`CliError`] when a title, id or cursor is invalid, a status
+/// targets an unknown todo or one an agent holds, or the store cannot be read
+/// or written.
 pub fn todo(
     command: Option<TodoCommand>,
+    limit: PageSize,
+    cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project),
+        None => list(store, project, limit, cursor, epoch_now()),
         Some(TodoCommand::Add { title, deps }) => add(store, project, author, &title, &deps),
-        Some(TodoCommand::Status { id, status }) => set_status(store, project, author, &id, status),
+        Some(TodoCommand::Status { id, status, force }) => {
+            set_status(store, project, author, &id, status, force)
+        },
         Some(TodoCommand::Rm { id }) => remove(store, project, &id),
     }
 }
@@ -38,82 +66,156 @@ pub fn todo(
 /// Parses a user-supplied id into a validated [`TodoId`].
 ///
 /// # Errors
-/// Returns [`CliError::InvalidTodoId`] when the id is blank or whitespace-only.
+/// Returns [`CliError::InvalidTodoId`] when the id is blank or whitespace-only,
+/// or [`CliError::TooLong`] past [`TODO_ID_MAX_CHARS`].
 fn parse_id(id: &str) -> Result<TodoId, CliError> {
-    TodoId::try_new(id).map_err(|_| CliError::InvalidTodoId(id.to_string()))
+    TodoId::try_new(id).map_err(|error| match error {
+        TodoIdError::LenCharMaxViolated => CliError::TooLong {
+            what: TODO_ID,
+            max: TODO_ID_MAX_CHARS,
+            found: id.chars().count(),
+        },
+        TodoIdError::NotEmptyViolated => CliError::InvalidTodoId(id.to_string()),
+    })
 }
 
-/// Lists every todo for `project` as `id  status  title`, one per line.
+/// Lists one page of `limit` todos for `project`, after the position
+/// `cursor` names, as `id  status  title`, one per line, with who holds it
+/// and for how long at `now` (Unix seconds), and how to read on when more
+/// follow.
 ///
 /// # Errors
-/// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliError> {
-    let todos = store.todos(project)?;
-    if todos.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(todos
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
+fn list(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    limit: PageSize,
+    cursor: Option<&str>,
+    now: EpochSeconds,
+) -> Result<Answer, CliError> {
+    let after = cursor.map(parse_cursor).transpose()?;
+    let todos = store.positioned_todos(project)?;
+    let listed = &todos[TodoPage::resume(&todos, after)..];
+    let page = TodoPage::of(
+        listed
+            .iter()
+            .map(|(position, todo)| (*position, TodoView::at(todo, now))),
+        limit,
+    );
+    let mut rows: Vec<Row> = listed
         .iter()
-        .map(|todo| {
+        .take(page.todos().len())
+        .map(|(_, todo)| {
             Row::unlabeled(
                 RowKind::Plain,
                 format!(
-                    "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{attribution}",
+                    "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
                     id = todo.id().as_ref(),
-                    status = todo.status(),
+                    status = todo.effective_status(now),
                     title = todo.title().as_ref(),
+                    claim = claim_note(todo, now),
                     attribution = attribution(todo.author()),
                 ),
             )
         })
-        .collect())
+        .collect();
+    if todos.is_empty() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    if let Some(next) = page.cursor() {
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
+    }
+    Answer::of(rows, &page)
+}
+
+/// Who holds `todo` at `now`, as a suffix for its listed line: the holder and
+/// what its lease has left, or whose lease ran out.
+fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
+    match todo.claim_state(now) {
+        ClaimState::Unclaimed => String::new(),
+        ClaimState::Held { owner, expires_in } => format!(
+            "{FIELD_GAP}[claimed by {owner}, {} left]",
+            humantime::format_duration(expires_in)
+        ),
+        ClaimState::Stale { owner } => format!("{FIELD_GAP}[{owner}'s claim lapsed]"),
+    }
 }
 
 /// Adds a new pending todo with `title` and `deps`, printing its generated id.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoTitle`] for a blank title,
-/// [`CliError::InvalidTodoId`] for a blank dependency id, or a store failure.
+/// [`CliError::TooLong`] for one past [`TODO_TITLE_MAX_CHARS`],
+/// [`CliError::InvalidTodoId`] for a blank dependency id,
+/// [`CliError::TooMany`] for more than [`TODO_DEPS_MAX`] dependencies, or a
+/// store failure.
 fn add(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     title: &str,
     deps: &[String],
-) -> Result<Vec<Row>, CliError> {
-    let title =
-        TodoTitle::try_new(title).map_err(|_| CliError::InvalidTodoTitle(title.to_string()))?;
-    let deps = deps
+) -> Result<Answer, CliError> {
+    let title = NewTodoTitle::try_new(title).map_err(|error| match error {
+        NewTodoTitleError::TooLong => CliError::TooLong {
+            what: TODO_TITLE,
+            max: TODO_TITLE_MAX_CHARS,
+            found: title.chars().count(),
+        },
+        NewTodoTitleError::Blank => CliError::InvalidTodoTitle(title.to_string()),
+    })?;
+    let ids = deps
         .iter()
         .map(|dep| parse_id(dep))
         .collect::<Result<Vec<_>, _>>()?;
+    let deps = TodoDeps::try_new(ids).map_err(|_| CliError::TooMany {
+        what: TODO_DEPS,
+        max: TODO_DEPS_MAX,
+        found: deps.len(),
+    })?;
     let created = store.add_todo(project, author, &title, &deps)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        created.id().as_ref().to_string(),
-    )])
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            created.id().as_ref().to_string(),
+        )],
+        &TodoView::at(&created, epoch_now()),
+    )
 }
 
-/// Sets the status of the todo identified by `id`.
+/// Sets the status of the todo identified by `id`; `force` overrides an
+/// agent's live claim.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoId`] for a blank id, [`CliError::UnknownTodo`]
-/// when no todo has that id, or a store failure.
+/// when no todo has that id, [`CliError::HeldByOther`] when an agent holds it
+/// and `force` is off, or a store failure.
 fn set_status(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     id: &str,
     status: TodoStatus,
-) -> Result<Vec<Row>, CliError> {
+    force: bool,
+) -> Result<Answer, CliError> {
     let parsed = parse_id(id)?;
-    if store.set_todo_status(project, author, &parsed, status)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("{parsed} is {status}"),
-        )])
-    } else {
-        Err(CliError::UnknownTodo(id.to_string()))
+    let change = TodoChange::builder()
+        .title(None)
+        .status(Some(status))
+        .force(force)
+        .build();
+    match store.update_todo(project, author, &parsed, &change)? {
+        TodoUpdate::Updated(updated) => Answer::of(
+            vec![Row::unlabeled(RowKind::Ok, format!("{parsed} is {status}"))],
+            &TodoView::at(&updated, epoch_now()),
+        ),
+        TodoUpdate::HeldBy { owner, expires_in } => Err(CliError::HeldByOther {
+            what: format!("todo '{parsed}'"),
+            owner,
+            expires_in,
+        }),
+        TodoUpdate::Missing => Err(CliError::UnknownTodo(id.to_string())),
     }
 }
 
@@ -121,198 +223,157 @@ fn set_status(
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoId`] for a blank id, or a store failure.
-fn remove(store: &dyn CoordinationStore, project: &Path, id: &str) -> Result<Vec<Row>, CliError> {
+fn remove(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    id: &str,
+) -> Result<Answer, CliError> {
     let parsed = parse_id(id)?;
-    if store.delete_todo(project, &parsed)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{parsed}'"),
-        )])
+    let deleted = store.delete_todo(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{parsed}'"))
     } else {
-        Ok(vec![Row::unlabeled(
-            RowKind::Hint,
-            format!("no todo '{parsed}' to remove"),
-        )])
-    }
+        Row::unlabeled(RowKind::Hint, format!("no todo '{parsed}' to remove"))
+    };
+    Answer::of(vec![row], &json!({ ID: parsed.as_ref(), DELETED: deleted }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::PathBuf};
+    use std::{fs, time::Duration};
+
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{
-        config::ConfigError,
-        coordination::{KeyValue, KvKey, Scratchpad, ScratchpadKey, Todo},
+    use crate::{
+        adapter::store::{
+            SqliteStore,
+            test_support::{fresh_store, spec},
+        },
+        domain::{
+            coordination::{Claim, TodoLease},
+            port::StackStore,
+        },
     };
 
-    /// An in-memory coordination store recording todos for one project.
-    #[derive(Default)]
-    struct FakeStore {
-        todos: RefCell<Vec<Todo>>,
-    }
-
-    impl CoordinationStore for FakeStore {
-        fn todos(&self, _project: &Path) -> Result<Vec<Todo>, ConfigError> {
-            Ok(self.todos.borrow().clone())
-        }
-
-        fn todo(&self, _project: &Path, id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-            Ok(self
-                .todos
-                .borrow()
-                .iter()
-                .find(|todo| todo.id() == id)
-                .cloned())
-        }
-
-        fn add_todo(
-            &self,
-            _project: &Path,
-            author: &Author,
-            title: &TodoTitle,
-            deps: &[TodoId],
-        ) -> Result<Todo, ConfigError> {
-            let todo = Todo::builder()
-                .id(TodoId::generate().unwrap())
-                .title(title.clone())
-                .status(TodoStatus::Pending)
-                .deps(deps.to_vec())
-                .author(author.clone())
-                .updated_at(0)
-                .build();
-            self.todos.borrow_mut().push(todo.clone());
-            Ok(todo)
-        }
-
-        fn set_todo_status(
-            &self,
-            _project: &Path,
-            author: &Author,
-            id: &TodoId,
-            status: TodoStatus,
-        ) -> Result<bool, ConfigError> {
-            let mut todos = self.todos.borrow_mut();
-            match todos.iter_mut().find(|todo| todo.id() == id) {
-                Some(todo) => {
-                    *todo = Todo::builder()
-                        .id(todo.id().clone())
-                        .title(todo.title().clone())
-                        .status(status)
-                        .deps(todo.deps().clone())
-                        .author(author.clone())
-                        .updated_at(0)
-                        .build();
-                    Ok(true)
-                },
-                None => Ok(false),
-            }
-        }
-
-        fn delete_todo(&self, _project: &Path, id: &TodoId) -> Result<bool, ConfigError> {
-            let mut todos = self.todos.borrow_mut();
-            let before = todos.len();
-            todos.retain(|todo| todo.id() != id);
-            Ok(todos.len() != before)
-        }
-
-        fn scratchpads(&self, _project: &Path) -> Result<Vec<Scratchpad>, ConfigError> {
-            unreachable!("todo commands never touch scratchpads")
-        }
-
-        fn scratchpad(
-            &self,
-            _project: &Path,
-            _key: &ScratchpadKey,
-        ) -> Result<Option<Scratchpad>, ConfigError> {
-            unreachable!("todo commands never touch scratchpads")
-        }
-
-        fn set_scratchpad(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _key: &ScratchpadKey,
-            _body: &str,
-        ) -> Result<(), ConfigError> {
-            unreachable!("todo commands never touch scratchpads")
-        }
-
-        fn delete_scratchpad(
-            &self,
-            _project: &Path,
-            _key: &ScratchpadKey,
-        ) -> Result<bool, ConfigError> {
-            unreachable!("todo commands never touch scratchpads")
-        }
-
-        fn values(&self, _project: &Path) -> Result<Vec<KeyValue>, ConfigError> {
-            unreachable!("todo commands never touch key-values")
-        }
-
-        fn value(&self, _project: &Path, _key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {
-            unreachable!("todo commands never touch key-values")
-        }
-
-        fn set_value(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _key: &KvKey,
-            _value: &str,
-        ) -> Result<(), ConfigError> {
-            unreachable!("todo commands never touch key-values")
-        }
-
-        fn delete_value(&self, _project: &Path, _key: &KvKey) -> Result<bool, ConfigError> {
-            unreachable!("todo commands never touch key-values")
-        }
-
-        fn import(
-            &self,
-            _project: &Path,
-            _scratchpads: &[Scratchpad],
-            _todos: &[Todo],
-            _values: &[KeyValue],
-        ) -> Result<(), ConfigError> {
-            unreachable!("todo commands never import")
-        }
-    }
-
-    fn project() -> PathBuf {
-        PathBuf::from("/repo/muster.yml")
+    /// A store with one registered project, and the scratch folder holding
+    /// both.
+    fn fixture() -> (SqliteStore, ProjectRoot, TempDir) {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        (store, root, scratch)
     }
 
     /// The added id is the row detail, so a script can capture it directly.
-    fn added_id(store: &FakeStore, title: &str) -> String {
-        add(store, &project(), &Author::human(), title, &[]).unwrap()[0]
+    fn added_id(store: &SqliteStore, root: &ProjectRoot, title: &str) -> String {
+        add(store, root, &Author::human(), title, &[])
+            .unwrap()
+            .rows()[0]
             .detail()
             .clone()
+    }
+
+    /// `id`'s todo claimed by `agent` with the default lease.
+    fn claim(store: &SqliteStore, root: &ProjectRoot, agent: &str, id: &str) -> Todo {
+        let claim = store
+            .claim_todo(
+                root,
+                &Author::agent(agent),
+                Some(&parse_id(id).unwrap()),
+                TodoLease::DEFAULT,
+            )
+            .unwrap();
+        let Claim::Claimed(todo) = claim else {
+            panic!("the todo is free, got {claim:?}");
+        };
+        todo
+    }
+
+    /// The moment leases are read at.
+    fn now() -> EpochSeconds {
+        epoch_now()
     }
 
     /// Adding prints the id; listing shows it with the pending status and title.
     #[test]
     fn add_then_list() {
-        let store = FakeStore::default();
-        let id = added_id(&store, "wire the store");
+        let (store, root, _scratch) = fixture();
+        let id = added_id(&store, &root, "wire the store");
 
-        let listed = list(&store, &project()).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert!(listed[0].detail().starts_with(&id));
-        assert!(listed[0].detail().contains("pending"));
-        assert!(listed[0].detail().contains("wire the store"));
+        let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
+        assert_eq!(listed.rows().len(), 1);
+        assert_eq!(
+            listed.rows()[0].detail(),
+            &format!("{id}  pending  wire the store")
+        );
+        assert_eq!(listed.json()["todos"][0]["id"], id.as_str());
+        assert_eq!(listed.json()["todos"][0]["status"], "pending");
+    }
+
+    /// A claimed todo lists its holder and lease; once the lease lapses it
+    /// lists as pending, naming whose claim ran out.
+    #[test]
+    fn list_shows_the_claim_and_a_lapsed_one() {
+        let (store, root, _scratch) = fixture();
+        let id = added_id(&store, &root, "task");
+        let todo = claim(&store, &root, "claude", &id);
+        let until = *todo.claim().as_ref().unwrap().claimed_until();
+
+        let held = list(
+            &store,
+            &root,
+            PageSize::default(),
+            None,
+            EpochSeconds::new(until.into_inner() - 90),
+        )
+        .unwrap();
+        assert_eq!(
+            held.rows()[0].detail(),
+            &format!(
+                "{id}  in-progress  task  [claimed by claude, {} left]  (by claude)",
+                humantime::format_duration(Duration::from_secs(90))
+            )
+        );
+        let lapsed = list(
+            &store,
+            &root,
+            PageSize::default(),
+            None,
+            until.after(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(
+            lapsed.rows()[0].detail(),
+            &format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
+        );
     }
 
     /// Setting a status updates the listed line; an unknown id errors.
     #[test]
     fn status_updates_and_unknown_errors() {
-        let store = FakeStore::default();
-        let id = added_id(&store, "task");
+        let (store, root, _scratch) = fixture();
+        let id = added_id(&store, &root, "task");
 
-        let ok = set_status(&store, &project(), &Author::human(), &id, TodoStatus::Done).unwrap();
-        assert_eq!(ok[0].kind(), RowKind::Ok);
+        let ok = set_status(
+            &store,
+            &root,
+            &Author::human(),
+            &id,
+            TodoStatus::Done,
+            false,
+        )
+        .unwrap();
+        assert_eq!(ok.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(ok.json()["status"], "done");
         assert!(
-            list(&store, &project()).unwrap()[0]
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
                 .detail()
                 .contains("done")
         );
@@ -321,27 +382,59 @@ mod tests {
         assert!(matches!(
             set_status(
                 &store,
-                &project(),
+                &root,
                 &Author::human(),
                 unknown.as_ref(),
-                TodoStatus::Done
+                TodoStatus::Done,
+                false
             ),
             Err(CliError::UnknownTodo(_))
         ));
     }
 
+    /// The human is refused a todo an agent holds, naming the agent, until
+    /// they force it.
+    #[test]
+    fn a_held_todo_needs_force() {
+        let (store, root, _scratch) = fixture();
+        let id = added_id(&store, &root, "task");
+        claim(&store, &root, "claude", &id);
+
+        let refused = set_status(
+            &store,
+            &root,
+            &Author::human(),
+            &id,
+            TodoStatus::Done,
+            false,
+        );
+        assert!(matches!(
+            refused,
+            Err(CliError::HeldByOther { ref owner, .. }) if owner == &Author::agent("claude")
+        ));
+        assert!(refused.unwrap_err().to_string().contains("--force"));
+
+        set_status(&store, &root, &Author::human(), &id, TodoStatus::Done, true).unwrap();
+        assert!(
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
+                .detail()
+                .contains("done")
+        );
+    }
+
     /// Removing succeeds once, then reports absence idempotently.
     #[test]
     fn remove_is_idempotent() {
-        let store = FakeStore::default();
-        let id = added_id(&store, "task");
+        let (store, root, _scratch) = fixture();
+        let id = added_id(&store, &root, "task");
 
+        let first = remove(&store, &root, &id).unwrap();
+        assert_eq!(first.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(first.json()["deleted"], true);
         assert_eq!(
-            remove(&store, &project(), &id).unwrap()[0].kind(),
-            RowKind::Ok
-        );
-        assert_eq!(
-            remove(&store, &project(), &id).unwrap()[0].kind(),
+            remove(&store, &root, &id).unwrap().rows()[0].kind(),
             RowKind::Hint
         );
     }
@@ -349,27 +442,82 @@ mod tests {
     /// A blank id or title is rejected before the store is touched.
     #[test]
     fn blank_inputs_are_rejected() {
-        let store = FakeStore::default();
+        let (store, root, _scratch) = fixture();
         assert!(matches!(
-            add(&store, &project(), &Author::human(), "   ", &[]),
+            add(&store, &root, &Author::human(), "   ", &[]),
             Err(CliError::InvalidTodoTitle(_))
         ));
         assert!(matches!(
-            add(&store, &project(), &Author::human(), "task", &[
-                "  ".to_string()
-            ]),
+            add(
+                &store,
+                &root,
+                &Author::human(),
+                &"x".repeat(TODO_TITLE_MAX_CHARS + 1),
+                &[]
+            ),
+            Err(CliError::TooLong {
+                max: TODO_TITLE_MAX_CHARS,
+                ..
+            })
+        ));
+        assert!(matches!(
+            add(&store, &root, &Author::human(), "task", &["  ".to_string()]),
             Err(CliError::InvalidTodoId(_))
         ));
         assert!(matches!(
-            remove(&store, &project(), "  "),
+            remove(&store, &root, "  "),
             Err(CliError::InvalidTodoId(_))
+        ));
+    }
+
+    /// A listing pages by cursor like `todo_list`, saying how to read on; a
+    /// todo deleted where a page ended never breaks the next page, and text
+    /// no page printed is refused.
+    #[test]
+    fn list_pages_by_cursor() {
+        let (store, root, _scratch) = fixture();
+        let ids: Vec<String> = ["one", "two", "three"]
+            .iter()
+            .map(|title| added_id(&store, &root, title))
+            .collect();
+        let two = PageSize::try_new(2).unwrap();
+
+        let first = list(&store, &root, two, None, now()).unwrap();
+        assert_eq!(first.json()["todos"].as_array().unwrap().len(), 2);
+        assert_eq!(first.json()["more"], true);
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
+        assert!(
+            first.rows()[2]
+                .detail()
+                .contains(&format!("--cursor {cursor}`")),
+            "{:?}",
+            first.rows()
+        );
+        let id = TodoId::try_new(ids[1].as_str()).unwrap();
+        assert!(store.delete_todo(&root, &id).unwrap());
+
+        let rest = list(&store, &root, two, Some(&cursor), now()).unwrap();
+        assert_eq!(rest.json()["todos"][0]["id"], ids[2].as_str());
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert_eq!(rest.rows().len(), 1);
+
+        assert!(matches!(
+            list(&store, &root, two, Some(&ids[0]), now()),
+            Err(CliError::InvalidCursor(_))
         ));
     }
 
     /// An empty store lists a hint rather than nothing.
     #[test]
     fn list_reports_empty() {
-        let store = FakeStore::default();
-        assert_eq!(list(&store, &project()).unwrap()[0].detail(), EMPTY_NOTE);
+        let (store, root, _scratch) = fixture();
+        assert_eq!(
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .rows()[0]
+                .detail(),
+            EMPTY_NOTE
+        );
     }
 }

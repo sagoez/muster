@@ -1,16 +1,12 @@
 /// Human-facing application name, reused for window titles and labels.
 pub const APP_NAME: &str = "muster";
+/// This build's version, which a client and the service compare so a newer
+/// binary replaces an older service.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Conventional workspace filename looked for in a project folder.
-pub const WORKSPACE_FILE_NAME: &str = "muster.yml";
+/// The file argument that means stdout or stdin.
+pub const STDIO_PATH: &str = "-";
 
-/// Environment variable exported into each spawned pane, holding the path of the
-/// current project's config so the `muster` CLI can target it without a flag.
+/// Environment variable exported into each process, holding its project's
+/// folder so the `muster` CLI run inside it targets that project.
 pub const MUSTER_PROJECT_ENV: &str = "MUSTER_PROJECT";
-/// Internal agent-session identity inherited by provider lifecycle hooks.
-pub const MUSTER_AGENT_SESSION_ENV: &str = "MUSTER_AGENT_SESSION_ID";
-/// Per-launch token inherited by provider lifecycle hooks, distinguishing this
-/// launch of a session from earlier ones so a stale capture cannot bind.
-pub const MUSTER_AGENT_LAUNCH_TOKEN_ENV: &str = "MUSTER_AGENT_LAUNCH_TOKEN";
-/// Exact durable session-state file inherited by provider lifecycle hooks.
-pub const MUSTER_AGENT_SESSION_STATE_FILE_ENV: &str = "MUSTER_AGENT_SESSION_STATE_FILE";

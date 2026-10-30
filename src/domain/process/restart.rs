@@ -1,15 +1,12 @@
-use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum::{Display, EnumIter, EnumString};
 
 use crate::domain::pty::ExitOutcome;
 
 /// How a process should be restarted when its child exits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Display)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
+#[strum(serialize_all = "kebab-case")]
 pub enum RestartPolicy {
     /// Never restart; a stopped process stays stopped.
-    #[default]
     Never,
     /// Restart only when the process exits with a failure status or signal.
     OnFailure,
@@ -19,10 +16,10 @@ pub enum RestartPolicy {
 
 impl RestartPolicy {
     /// Whether a process with this policy should be restarted after `outcome`.
-    pub fn should_restart(self, outcome: ExitOutcome) -> bool {
+    pub fn should_restart(self, outcome: &ExitOutcome) -> bool {
         match self {
             Self::Never => false,
-            Self::OnFailure => outcome == ExitOutcome::Failed,
+            Self::OnFailure => outcome.is_failure(),
             Self::Always => true,
         }
     }
@@ -31,27 +28,37 @@ impl RestartPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::pty::{ExitCause, SignalName};
 
     #[test]
     fn never_never_restarts() {
-        assert!(!RestartPolicy::Never.should_restart(ExitOutcome::Failed));
-        assert!(!RestartPolicy::Never.should_restart(ExitOutcome::Succeeded));
+        assert!(!RestartPolicy::Never.should_restart(&ExitOutcome::FAILED_UNKNOWN));
+        assert!(!RestartPolicy::Never.should_restart(&ExitOutcome::Succeeded));
     }
 
     #[test]
     fn on_failure_restarts_only_on_failure() {
-        assert!(RestartPolicy::OnFailure.should_restart(ExitOutcome::Failed));
-        assert!(!RestartPolicy::OnFailure.should_restart(ExitOutcome::Succeeded));
+        assert!(RestartPolicy::OnFailure.should_restart(&ExitOutcome::FAILED_UNKNOWN));
+        assert!(
+            RestartPolicy::OnFailure.should_restart(&ExitOutcome::Failed(ExitCause::Signal(
+                SignalName::try_new("sigkill").unwrap()
+            )))
+        );
+        assert!(!RestartPolicy::OnFailure.should_restart(&ExitOutcome::Succeeded));
     }
 
     #[test]
     fn always_restarts_regardless() {
-        assert!(RestartPolicy::Always.should_restart(ExitOutcome::Succeeded));
-        assert!(RestartPolicy::Always.should_restart(ExitOutcome::Failed));
+        assert!(RestartPolicy::Always.should_restart(&ExitOutcome::Succeeded));
+        assert!(RestartPolicy::Always.should_restart(&ExitOutcome::FAILED_UNKNOWN));
     }
 
     #[test]
-    fn defaults_to_never() {
-        assert_eq!(RestartPolicy::default(), RestartPolicy::Never);
+    fn reads_its_kebab_case_name() {
+        assert_eq!(
+            "on-failure".parse::<RestartPolicy>().unwrap(),
+            RestartPolicy::OnFailure
+        );
+        assert!("sometimes".parse::<RestartPolicy>().is_err());
     }
 }

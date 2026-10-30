@@ -1,772 +1,194 @@
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
-#[cfg(not(unix))]
-use std::process::Child;
-#[cfg(any(not(unix), test))]
-use std::{
-    fs::{self, File, OpenOptions},
-    io::{Seek, SeekFrom, Write},
-};
-use std::{path::PathBuf, process::Command as ProcessCommand};
+use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
-use clap::{CommandFactory, Parser};
-use directories::BaseDirs;
 use muster::{
     adapter::{
-        cli::{
-            self, Args, CheckOutcome, Command, CoordinationCommand, HooksCommand,
-            InternalHookCommand, KvCommand, NoteCommand, ProjectsCommand, RunArgs, TodoCommand,
-            VALID_SUFFIX,
-        },
-        config::{
-            SqliteCoordinationStore, YamlAgentSessionStore, YamlConfigSource, YamlProjectRegistry,
-            YamlSettingsStore,
-        },
-        editor::EnvEditorLauncher,
-        hooks::ProviderHooks,
-        mcp,
+        cli::{self, CliPorts, McpLaunch},
+        client::{RunningServiceNotifier, ServiceAccess, UserService},
+        holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
+        listening::OsListeningPorts,
+        mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
-        path::{FsPathCompleter, absolutize},
-        process_identity::LocalProcessIdentity,
+        open_files::OpenFilesLimit,
+        path::home_dir,
+        port_occupants::OsPortOccupants,
+        private_dir::{prepare_state_dir, socket_dir, state_dir},
         pty::PortablePtyRunner,
-        tui::{self, Adapters, TerminalGuard},
+        service::{
+            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
+            protocol, redirect_stderr,
+        },
+        store::SqliteStore,
     },
-    application::Workspace,
-    constants::{APP_NAME, MUSTER_AGENT_LAUNCH_TOKEN_ENV, WORKSPACE_FILE_NAME},
     domain::{
-        agent_session::{AgentProcessId, AgentSessionId, LaunchToken},
-        coordination::Author,
-        port::{AgentSessionStore, ConfigSource, CoordinationStore},
+        config::ConfigError,
+        port::{LocalState, Notifier, PortOccupants, StateChangeNotifier},
     },
-    error::Result,
+    error::MusterError,
+};
+use signal_hook::{
+    consts::{SIGHUP, SIGTERM},
+    iterator::Signals,
 };
 
-/// Environment variable controlling the XDG configuration root.
-const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
-/// XDG configuration root under home when the environment does not override.
-const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
-/// Exit code used when a command finds problems to report but does not itself
-/// fail. Shared by `muster check` and `muster doctor`.
-const FINDINGS_EXIT_CODE: i32 = 1;
-/// Exit code used when a command encounters a fatal error.
-const FAILURE_EXIT_CODE: i32 = 1;
-/// Report titles for the styled CLI output boxes.
-const INIT_TITLE: &str = "muster init";
-const CHECK_TITLE: &str = "muster check";
-const PROJECTS_TITLE: &str = "muster projects";
-const NOTE_TITLE: &str = "muster note";
-const TODO_TITLE: &str = "muster todo";
-const KV_TITLE: &str = "muster kv";
-const COORDINATION_TITLE: &str = "muster coordination";
-const COMPLETIONS_TITLE: &str = "muster completions";
-const HOOKS_TITLE: &str = "muster hooks";
+/// What a service started beside a running one records before it exits, so
+/// each start that lost the race is visible in the service log.
+const SERVICE_ALREADY_RUNNING: &str =
+    "another muster service already runs for this state directory; this one exits";
+/// The signals that stop the service as a client's stop does, its records
+/// flushed: a kill, a logout or an OS shutdown.
+const SERVICE_EXIT_SIGNALS: [c_int; 2] = [SIGTERM, SIGHUP];
 
-/// Codex requires user approval before executing a new hook command.
-const CODEX_HOOK_APPROVAL_NOTICE: &str =
-    "Codex: approve the Muster hook with /hooks before sessions can be resumed.";
-/// Prefix for the exclusive readiness file that holds a Windows command shell
-/// until its ownership is durable.
-#[cfg(any(not(unix), test))]
-const WINDOWS_LAUNCH_GATE_PREFIX: &str = "muster-agent-launch-";
-/// Content that releases a Windows command shell after ownership persistence.
-#[cfg(any(not(unix), test))]
-const WINDOWS_LAUNCH_GATE_READY: &[u8] = b"ready";
-/// Content that stops a Windows command shell without starting its provider.
-#[cfg(any(not(unix), test))]
-const WINDOWS_LAUNCH_GATE_CANCELLED: &[u8] = b"cancelled";
+/// The adapters every command of this binary runs on.
+static PORTS: LocalPorts = LocalPorts;
 
-/// Owns a Windows process tree that must die with the PTY-side launcher.
-#[cfg(windows)]
-struct WindowsProcessTree {
-    job: windows_sys::Win32::Foundation::HANDLE,
-}
-
-#[cfg(windows)]
-impl WindowsProcessTree {
-    /// Creates a job whose children are killed when this launcher exits.
-    ///
-    /// # Errors
-    /// Returns the Windows error when the job cannot be created or configured.
-    fn create() -> std::io::Result<Self> {
-        use std::{mem::size_of, ptr};
-
-        use windows_sys::Win32::{
-            Foundation::{CloseHandle, HANDLE},
-            System::JobObjects::{
-                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-                SetInformationJobObject,
-            },
-        };
-
-        // SAFETY: Null security attributes and name request a new unnamed job.
-        // Windows returns either a valid owned handle or null, which is checked.
-        let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-        if job == HANDLE::default() {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `limits` is initialized, lives for this synchronous call, and
-        // its pointer and byte length exactly match the requested information class.
-        let configured = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if configured == 0 {
-            // SAFETY: `job` is the valid owned handle created immediately above.
-            let _ = unsafe { CloseHandle(job) };
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self { job })
-    }
-
-    /// Adds the gated command shell and every descendant provider to this job.
-    ///
-    /// # Errors
-    /// Returns the Windows error when the child cannot join the job.
-    fn assign(&self, child: &Child) -> std::io::Result<()> {
-        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-
-        let child_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-        // SAFETY: `self.job` remains owned by this value and `child_handle`
-        // names the live child process for this synchronous assignment.
-        let assigned = unsafe { AssignProcessToJobObject(self.job, child_handle) };
-        (assigned != 0)
-            .then_some(())
-            .ok_or_else(std::io::Error::last_os_error)
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsProcessTree {
-    /// Closes the sole job handle, causing Windows to terminate its process tree.
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-
-        // SAFETY: `job` is uniquely owned by this RAII guard and is closed once.
-        let _ = unsafe { CloseHandle(self.job) };
-    }
-}
-
-/// Holds a Windows command shell before it can start the provider.
-#[cfg(any(not(unix), test))]
-struct WindowsLaunchGate {
-    path: PathBuf,
-    file: File,
-}
-
-#[cfg(any(not(unix), test))]
-impl WindowsLaunchGate {
-    /// Creates an exclusive empty readiness file for one pending command shell.
-    ///
-    /// # Errors
-    /// Returns an error when the temporary readiness file cannot be created.
-    fn create() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "{WINDOWS_LAUNCH_GATE_PREFIX}{}",
-            uuid::Uuid::new_v4()
-        ));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        Ok(Self { path, file })
-    }
-
-    /// Returns the PowerShell readiness wait that precedes the Windows command.
-    ///
-    /// # Errors
-    /// Returns an error when the temporary path cannot be represented safely.
-    fn powershell_wait_command(&self) -> std::io::Result<String> {
-        let path = self.path.to_str().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agent launch gate path is not valid UTF-8",
-            )
-        })?;
-        let path = path.replace('\'', "''");
-        Ok(format!(
-            "powershell.exe -NoProfile -NonInteractive -Command \"$gate = '{path}'; while ($true) {{ $state = [System.IO.File]::ReadAllText($gate); if ($state -eq 'ready') {{ exit 0 }}; if ($state -eq 'cancelled') {{ exit 1 }}; Start-Sleep -Milliseconds 10 }}\""
-        ))
-    }
-
-    /// Releases the command shell after its PID is stored in session state.
-    ///
-    /// # Errors
-    /// Returns an error when the readiness file cannot be updated.
-    fn release(&mut self) -> std::io::Result<()> {
-        self.write_state(WINDOWS_LAUNCH_GATE_READY)
-    }
-
-    /// Stops the command shell when its durable ownership could not be saved.
-    fn cancel(&mut self) -> std::io::Result<()> {
-        self.write_state(WINDOWS_LAUNCH_GATE_CANCELLED)
-    }
-
-    /// Replaces the observable gate state instead of appending a second state.
-    fn write_state(&mut self, state: &[u8]) -> std::io::Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(state)?;
-        self.file.sync_all()
-    }
-
-    /// Cancels a gated launch and kills a shell that may have observed partial readiness.
-    #[cfg(not(unix))]
-    fn cancel_and_wait(&mut self, child: &mut Child) {
-        let _ = self.cancel();
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
-
-#[cfg(any(not(unix), test))]
-impl Drop for WindowsLaunchGate {
-    /// Removes the temporary readiness file after the command completes.
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Entry point: dispatches to the `run` capture command or, by default, the TUI.
-///
-/// # Errors
-/// Returns an error if the config cannot be loaded or the terminal fails.
+/// Entry point: parses the command line and runs it on the concrete
+/// adapters wired here.
 fn main() {
-    // When invoked by a shell's completion hook this generates candidates and
-    // exits; otherwise it returns and normal parsing proceeds.
-    clap_complete::CompleteEnv::with_factory(Args::command).complete();
-    let args = Args::parse();
-    if let Err(error) = dispatch(args) {
-        // Every escaping error speaks in the CLI's styled voice; the default
-        // Result-from-main path would print the Debug form instead.
-        fail_with(&error);
-    }
+    restore_terminals_on_panic();
+    let args = cli::parse_args(&PORTS);
+    cli::run(args, &PORTS);
 }
 
-/// Routes the parsed arguments to their command.
-///
-/// # Errors
-/// Returns an error when a command fails; `main` renders it via [`fail_with`].
-fn dispatch(args: Args) -> Result<()> {
-    match args.command {
-        Some(Command::Init) => run_init(),
-        Some(Command::Check) => run_check(
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Run(run_args)) => run_capture(
-            run_args,
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Projects { command }) => run_projects(command),
-        Some(Command::Note { command }) => run_note(
-            command,
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Todo { command }) => run_todo(
-            command,
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Kv { command }) => run_kv(
-            command,
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Coordination { command }) => run_coordination(
-            command,
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Mcp {
-            print_config,
-            author,
-        }) => run_mcp(
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-            print_config,
-            author,
-        ),
-        Some(Command::Hooks { command }) => run_hooks(command),
-        Some(Command::Doctor) => run_doctor(
-            args.config
-                .unwrap_or_else(|| PathBuf::from(WORKSPACE_FILE_NAME)),
-        ),
-        Some(Command::Completions { shell }) => run_completions(shell),
-        Some(Command::Hook { command }) => run_internal_hook(command),
-        None => run_tui(args.config),
-    }
-}
-
-/// Prints the shell-specific registration hook lines for completions.
-fn run_completions(shell: cli::CompletionShell) -> Result<()> {
-    let [hint, line] = cli::registration(shell);
-    cli::print(&cli::Report::new(COMPLETIONS_TITLE, vec![
-        cli::Row::unlabeled(cli::RowKind::Dim, hint),
-        cli::Row::unlabeled(cli::RowKind::Plain, line),
-    ]));
-    Ok(())
-}
-
-/// Runs user-facing hook setup.
-///
-/// # Errors
-/// Returns an error if the current executable or a provider config cannot be
-/// resolved, parsed, or written.
-fn run_hooks(command: HooksCommand) -> Result<()> {
-    match command {
-        HooksCommand::Setup => {
-            let executable = std::env::current_exe()?;
-            let paths = ProviderHooks::setup(&executable)?;
-            let mut rows = vec![cli::Row::unlabeled(
-                cli::RowKind::Ok,
-                "installed agent session integrations:",
-            )];
-            rows.extend(paths.iter().map(|path| {
-                cli::Row::unlabeled(cli::RowKind::Plain, format!("  {}", path.display()))
-            }));
-            rows.push(cli::Row::unlabeled(
-                cli::RowKind::Hint,
-                CODEX_HOOK_APPROVAL_NOTICE,
-            ));
-            cli::print(&cli::Report::new(HOOKS_TITLE, rows));
-        },
-    }
-    Ok(())
-}
-
-/// Receives lifecycle events from supported provider hooks.
-///
-/// # Errors
-/// Returns an error if a Muster-owned hook payload is invalid or cannot be
-/// persisted. Hooks from agents outside Muster are ignored.
-fn run_internal_hook(command: InternalHookCommand) -> Result<()> {
-    match command {
-        // `process_id` is the reporting provider process, used only to keep a
-        // nested same-provider launch from overwriting the managed conversation;
-        // `parent_process_id` is still accepted for compatibility with previously
-        // installed hooks but ignored. See `ProviderHooks::capture`.
-        InternalHookCommand::Capture {
-            provider,
-            process_id,
-            ..
-        } => {
-            ProviderHooks::capture(
-                &YamlAgentSessionStore,
-                provider,
-                process_id,
-                std::io::stdin(),
-            )?;
-        },
-        InternalHookCommand::Launch { session, command } => {
-            let session = AgentSessionId::try_new(session)
-                .map_err(|_| muster::adapter::hooks::HookError::MissingSessionId)?;
-            run_agent_launch(session, command)?;
-        },
-    }
-    Ok(())
-}
-
-/// Binds the current launcher to `session` before replacing it with `command`.
-///
-/// # Errors
-/// Returns an error when durable ownership cannot be written or the provider
-/// command cannot be started.
-fn run_agent_launch(session: AgentSessionId, command: String) -> Result<()> {
-    // Persist this launch's token in the ownership claim. On Unix the TUI already
-    // recorded it, but its claim no-ops on other platforms, so the launcher's claim
-    // is the only one that advances the token there; without it the reporter is
-    // never reset and later restarts are ignored as a different PID.
-    let launch_token = std::env::var_os(MUSTER_AGENT_LAUNCH_TOKEN_ENV).and_then(|value| {
-        value
-            .to_str()
-            .and_then(|value| LaunchToken::try_new(value).ok())
-    });
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-
-        let process_id = AgentProcessId::try_new(std::process::id())
-            .map_err(|_| muster::adapter::hooks::HookError::MissingProviderProcessId)?;
-        YamlAgentSessionStore.set_owner_process_id(
-            &session,
-            process_id,
-            LocalProcessIdentity::start_token(process_id),
-            launch_token,
-        )?;
-        let command = format!("{command}\nexit $?");
-        let error = ProcessCommand::new("/bin/sh").arg("-c").arg(command).exec();
-        Err(error.into())
-    }
-    #[cfg(not(unix))]
-    {
-        let mut gate = WindowsLaunchGate::create()?;
-        #[cfg(windows)]
-        let process_tree = WindowsProcessTree::create()?;
-        let command = format!("{} && {command}", gate.powershell_wait_command()?);
-        let mut child = ProcessCommand::new("cmd.exe")
-            .args(["/D", "/S", "/C", &command])
-            .spawn()?;
-        #[cfg(windows)]
-        if let Err(error) = process_tree.assign(&child) {
-            gate.cancel_and_wait(&mut child);
-            return Err(error.into());
+/// Installs the top-level panic hook: a terminal `muster attach` holds in
+/// raw mode is given back before the panic is printed, so the message is
+/// readable and the shell usable. A panic on one of the session's helper
+/// threads is held instead, and the session prints it once it has given the
+/// terminal back itself.
+fn restore_terminals_on_panic() {
+    let print = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        if cli::hold_helper_panic(info.to_string()) {
+            return;
         }
-        let process_id = match AgentProcessId::try_new(child.id()) {
-            Ok(process_id) => process_id,
-            Err(_) => {
-                gate.cancel_and_wait(&mut child);
-                return Err(muster::adapter::hooks::HookError::MissingProviderProcessId.into());
-            },
-        };
-        if let Err(error) = YamlAgentSessionStore.set_owner_process_id(
-            &session,
-            process_id,
-            LocalProcessIdentity::start_token(process_id),
-            launch_token,
-        ) {
-            gate.cancel_and_wait(&mut child);
-            return Err(error.into());
-        }
-        if let Err(error) = gate.release() {
-            gate.cancel_and_wait(&mut child);
-            return Err(error.into());
-        }
-        let status = child.wait()?;
-        drop(gate);
-        std::process::exit(status.code().unwrap_or(1));
-    }
-}
-
-/// Lists, adds, or removes registered projects. Prints each report line and
-/// exits non-zero on failure.
-///
-/// # Errors
-/// Returns an error if the current directory cannot be determined.
-fn run_projects(command: Option<ProjectsCommand>) -> Result<()> {
-    let registry = YamlProjectRegistry;
-    let result = match command {
-        None => cli::list(&registry, &std::env::current_dir()?),
-        Some(ProjectsCommand::Add { path }) => {
-            cli::add(&path.unwrap_or(PathBuf::from(".")), &registry)
-        },
-        Some(ProjectsCommand::Remove { name }) => cli::remove(&name, &registry),
-    };
-    match result {
-        Ok(rows) => cli::print(&cli::Report::new(PROJECTS_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Reads or writes shared scratchpad notes for the project at `config`. The
-/// config path is absolutized so a note keeps the same project identity however
-/// the command is invoked. Prints each report line and exits non-zero on failure.
-///
-/// # Errors
-/// This function always exits on error rather than propagating; it returns
-/// `Result<()>` to match the dispatch signature.
-fn run_note(command: Option<NoteCommand>, config: PathBuf) -> Result<()> {
-    let project = absolutize(&config);
-    let store = SqliteCoordinationStore::open_default()?;
-    match cli::note(command, &store, &project, &Author::human()) {
-        Ok(rows) => cli::print(&cli::Report::new(NOTE_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Lists or manages the shared todos for the project at `config`, absolutizing
-/// the path for a stable project identity. Prints each report line and exits
-/// non-zero on failure.
-///
-/// # Errors
-/// This function always exits on error rather than propagating; it returns
-/// `Result<()>` to match the dispatch signature.
-fn run_todo(command: Option<TodoCommand>, config: PathBuf) -> Result<()> {
-    let project = absolutize(&config);
-    let store = SqliteCoordinationStore::open_default()?;
-    match cli::todo(command, &store, &project, &Author::human()) {
-        Ok(rows) => cli::print(&cli::Report::new(TODO_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Reads or writes the shared key-value state for the project at `config`,
-/// absolutizing the path for a stable project identity. Prints each report line
-/// and exits non-zero on failure.
-///
-/// # Errors
-/// This function always exits on error rather than propagating; it returns
-/// `Result<()>` to match the dispatch signature.
-fn run_kv(command: Option<KvCommand>, config: PathBuf) -> Result<()> {
-    let project = absolutize(&config);
-    let store = SqliteCoordinationStore::open_default()?;
-    match cli::kv(command, &store, &project, &Author::human()) {
-        Ok(rows) => cli::print(&cli::Report::new(KV_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Exports or restores this project's coordination state as portable YAML.
-/// Prints the summary line and exits non-zero on failure.
-///
-/// # Errors
-/// Returns an error if the coordination store cannot be opened.
-fn run_coordination(command: CoordinationCommand, config: PathBuf) -> Result<()> {
-    let project = absolutize(&config);
-    let store = SqliteCoordinationStore::open_default()?;
-    match cli::coordination(command, &store, &project) {
-        Ok(rows) => cli::print(&cli::Report::new(COORDINATION_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Serves this project's coordination state to agents over stdio as an MCP
-/// server, blocking until the connecting agent disconnects. With `print_config`,
-/// prints the paste-in config snippet and exits instead of serving. Builds a
-/// single-threaded tokio runtime scoped to this subprocess; the sync TUI runtime
-/// is untouched.
-///
-/// # Errors
-/// Returns an error if the async runtime cannot be built; a server failure exits
-/// via `fail_with` rather than propagating.
-fn run_mcp(config: PathBuf, print_config: bool, author: Option<String>) -> Result<()> {
-    let project = absolutize(&config);
-    if print_config {
-        let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
-        println!("{}", mcp::connection_config(&executable, &project));
-        return Ok(());
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let author = Author::agent(author.as_deref().unwrap_or_default());
-    let store: Box<dyn CoordinationStore + Send + Sync> =
-        Box::new(SqliteCoordinationStore::open_default()?);
-    if let Err(error) = runtime.block_on(mcp::serve_stdio(store, project, author)) {
-        fail_with(&error);
-    }
-    Ok(())
-}
-
-/// Scaffolds a starter workspace in the current directory and registers it.
-/// Prints each report line and exits non-zero on failure.
-///
-/// # Errors
-/// Returns an error if the current directory cannot be determined.
-fn run_init() -> Result<()> {
-    let directory = std::env::current_dir()?;
-    let registry = YamlProjectRegistry;
-    match cli::init(&directory, &registry) {
-        Ok(rows) => cli::print(&cli::Report::new(INIT_TITLE, rows)),
-        Err(error) => fail_with(&error),
-    }
-    Ok(())
-}
-
-/// Validates the workspace config at `path`, printing a success line or the
-/// full error chain, and exiting with `FINDINGS_EXIT_CODE` on failure.
-///
-/// # Errors
-/// This function always exits rather than propagating; it returns `Result<()>`
-/// to match the dispatch signature.
-fn run_check(path: PathBuf) -> Result<()> {
-    let display = path.display().to_string();
-    match cli::check(path) {
-        Err(error) => fail_with(&error),
-        Ok(CheckOutcome::Valid) => {
-            cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
-                cli::RowKind::Ok,
-                format!("{display} {VALID_SUFFIX}"),
-            )]));
-            Ok(())
-        },
-        Ok(CheckOutcome::Invalid(report)) => {
-            cli::print(&cli::Report::new(CHECK_TITLE, vec![cli::Row::unlabeled(
-                cli::RowKind::Fail,
-                report,
-            )]));
-            std::process::exit(FINDINGS_EXIT_CODE);
-        },
-    }
-}
-
-/// Runs all doctor probes, prints each line, and exits non-zero if any probe
-/// failed.
-///
-/// # Errors
-/// Returns an error if the running executable path cannot be resolved.
-fn run_doctor(config_path: PathBuf) -> Result<()> {
-    let mut probes = vec![
-        cli::config_probe(config_path),
-        cli::registry_probe(&YamlProjectRegistry),
-        cli::sessions_probe(&YamlAgentSessionStore),
-    ];
-    probes.push(match ProviderHooks::status(&std::env::current_exe()?) {
-        Ok(statuses) => cli::hooks_probe(&statuses),
-        Err(error) => cli::hooks_probe_error(&error),
-    });
-    probes.push(cli::clipboard_probe());
-    let shell = std::env::var("SHELL").ok();
-    let home = BaseDirs::new()
-        .map(|dirs| dirs.home_dir().to_path_buf())
-        .unwrap_or_default();
-    // The XDG root the shells actually read: the override when absolute,
-    // else the conventional ~/.config.
-    let xdg_config = std::env::var_os(XDG_CONFIG_HOME_ENV)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
-    probes.push(cli::completions_probe(shell.as_deref(), &home, &xdg_config));
-    cli::print(&cli::doctor_report(&probes));
-    if cli::any_failed(&probes) {
-        std::process::exit(FINDINGS_EXIT_CODE);
-    }
-    Ok(())
-}
-
-/// Adds a command to a project and runs it in place, reporting a friendly error
-/// and exiting non-zero on failure. `config` is the top-level `--config`, used
-/// as the target when neither `--project` nor `$MUSTER_PROJECT` is given.
-fn run_capture(args: RunArgs, config: PathBuf) -> Result<()> {
-    let registry = YamlProjectRegistry;
-    if let Err(error) = cli::run(args, config, &registry) {
-        fail_with(&error);
-    }
-    Ok(())
-}
-
-/// Composition root for the TUI: resolves and loads the workspace config, wires
-/// its adapters, and runs it under a restoring terminal guard.
-///
-/// # Errors
-/// Returns an error if the config cannot be loaded or the terminal fails.
-fn run_tui(explicit_config: Option<PathBuf>) -> Result<()> {
-    install_panic_hook();
-    let registry = YamlProjectRegistry;
-    let current_project = cli::current_project_from_env();
-    let local_config = PathBuf::from(WORKSPACE_FILE_NAME);
-    let config_path = cli::resolve_tui_config(
-        explicit_config.as_deref(),
-        current_project.as_deref(),
-        &local_config,
-        &registry,
-    )?;
-    let config = YamlConfigSource::builder()
-        .path(config_path.clone())
-        .build();
-    let workspace = Workspace::builder()
-        .processes(config.load()?.to_processes())
-        .build();
-    let adapters = Adapters::builder()
-        .runner(Box::new(PortablePtyRunner))
-        .registry(Box::new(registry))
-        .completer(Box::new(FsPathCompleter))
-        .notifier(Box::new(DesktopNotifier::new()))
-        .settings_store(Box::new(YamlSettingsStore))
-        .agent_session_store(Box::new(YamlAgentSessionStore))
-        .editor_launcher(Box::new(EnvEditorLauncher::new(Box::new(
-            YamlSettingsStore,
-        ))))
-        .process_metrics(Box::new(SysinfoMetrics::default()))
-        .build();
-    // Queried before the guard takes the terminal over: the color reply
-    // arrives on stdin, which the input thread owns afterwards.
-    let selection_style = tui::detect_selection_style();
-    let mut guard = TerminalGuard::new()?;
-    tui::run(
-        &mut guard,
-        workspace,
-        adapters,
-        config_path,
-        selection_style,
-    )
-}
-
-/// Prints `error` to stderr in the CLI's styled voice and exits with
-/// [`FAILURE_EXIT_CODE`].
-fn fail_with(error: &dyn std::error::Error) -> ! {
-    cli::print_error(APP_NAME, error);
-    std::process::exit(FAILURE_EXIT_CODE);
-}
-
-/// Installs a panic hook that restores the terminal before delegating to the
-/// previous hook, so a panic never leaves the user stuck in raw mode.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = TerminalGuard::restore();
-        previous(info);
+        cli::restore_terminals();
+        print(info);
     }));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The concrete adapters this binary runs on: the user's own database,
+/// desktop and process table.
+struct LocalPorts;
 
-    /// A Windows launch gate remains closed until durable ownership releases it.
-    #[test]
-    fn windows_launch_gate_releases_one_owned_command_shell() {
-        let mut gate = WindowsLaunchGate::create().unwrap();
-        let wait = gate.powershell_wait_command().unwrap();
-
-        assert!(wait.contains("powershell.exe"));
-        assert!(wait.contains("ReadAllText"));
-        assert!(wait.contains("cancelled"));
-        assert_eq!(std::fs::read(&gate.path).unwrap(), b"");
-
-        gate.release().unwrap();
-        assert_eq!(
-            std::fs::read(&gate.path).unwrap(),
-            WINDOWS_LAUNCH_GATE_READY
-        );
-
-        gate.cancel().unwrap();
-        assert_eq!(
-            std::fs::read(&gate.path).unwrap(),
-            WINDOWS_LAUNCH_GATE_CANCELLED
-        );
-
-        let mut cancelled = WindowsLaunchGate::create().unwrap();
-        cancelled.cancel().unwrap();
-        assert_eq!(
-            std::fs::read(&cancelled.path).unwrap(),
-            WINDOWS_LAUNCH_GATE_CANCELLED
-        );
+impl CliPorts for LocalPorts {
+    fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError> {
+        Ok(Arc::new(SqliteStore::open_default()?))
     }
 
-    /// The internal launch handshake accepts one opaque provider shell command.
-    #[test]
-    fn agent_launch_command_accepts_a_shell_expression() {
-        let args = Args::try_parse_from([
-            "muster",
-            "hook",
-            "launch",
-            "--session",
-            "session-id",
-            "--",
-            "FOO=bar codex | tee agent.log",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            args.command,
-            Some(Command::Hook {
-                command: InternalHookCommand::Launch { session, command }
-            }) if session == "session-id" && command == "FOO=bar codex | tee agent.log"
-        ));
+    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
+        Ok(SqliteStore::open_default_existing()?
+            .map(|store| -> Arc<dyn LocalState> { Arc::new(store) }))
     }
+
+    fn service(&self) -> Arc<dyn ServiceAccess> {
+        Arc::new(UserService)
+    }
+
+    fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
+        Arc::new(RunningServiceNotifier::new(CliPorts::service(self)))
+    }
+
+    fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {
+        serve_mcp(launch)
+    }
+
+    fn mcp_config(&self, executable: &Path) -> String {
+        connection_config(executable)
+    }
+
+    fn run_service(&self) -> Result<(), MusterError> {
+        run_service()
+    }
+
+    fn run_holder(&self, spec: &Path) -> Result<(), MusterError> {
+        Ok(run_holder(spec, &PortablePtyRunner)?)
+    }
+}
+
+impl ProjectPorts for LocalPorts {
+    fn notifier(&self) -> Option<Box<dyn Notifier>> {
+        Some(Box::new(DesktopNotifier::new()))
+    }
+
+    fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
+        Some(Box::new(OsPortOccupants::default()))
+    }
+}
+
+/// Serves muster to an agent over MCP on stdio, on this user's database and
+/// service, until the agent disconnects.
+///
+/// # Errors
+/// Returns a [`MusterError`] when the database cannot be opened or the
+/// server fails.
+fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
+    let store = SqliteStore::open_default()?;
+    let service: Arc<dyn ServiceAccess> = Arc::new(UserService);
+    let deps = McpDeps::builder()
+        .scope(
+            Scope::builder()
+                .cwd(launch.cwd().clone())
+                .base(launch.base().clone())
+                .home(home_dir())
+                .build(),
+        )
+        .agent(launch.agent().clone())
+        .service(service.clone())
+        .projects(Arc::new(store.clone()))
+        .coordination(Arc::new(store.clone()))
+        .stacks(Arc::new(store.clone()))
+        .settings(Arc::new(store.clone()))
+        .edits(Arc::new(store))
+        .notifier(Arc::new(RunningServiceNotifier::new(service)))
+        .build();
+    Ok(run_stdio(deps)?)
+}
+
+/// Runs this user's service until a client stops or replaces it, unless one
+/// already runs, in which case it returns at once. Its own stderr goes to the
+/// service log first, so a failure to start is recorded even when it was
+/// spawned with no terminal. Every process runs under a holder launched from
+/// this binary, with its logs under the state directory, and starts at the
+/// open-files limit the service started with, read before `sysinfo` raises it.
+/// What the service records as runs end goes through a database connection
+/// of its own, so its wait for another writer never holds the loop's.
+///
+/// # Errors
+/// Returns a [`MusterError`] when the state directory, database or service
+/// cannot be set up.
+fn run_service() -> Result<(), MusterError> {
+    let open_files = OpenFilesLimit::current();
+    let state_dir = state_dir().map_err(ServiceError::from)?;
+    prepare_state_dir(&state_dir)?;
+    redirect_stderr(&protocol::log_path(&state_dir))?;
+    let Some(singleton) = Singleton::acquire(&state_dir)? else {
+        eprintln!("{SERVICE_ALREADY_RUNNING} (pid {})", process::id());
+        return Ok(());
+    };
+    let store = SqliteStore::open_default()?;
+    let recorder_store = SqliteStore::open_default()?;
+    let binary = env::current_exe()?;
+    let launcher = ExecHolderLauncher::builder()
+        .binary(binary.clone())
+        .open_files(open_files)
+        .build();
+    let runner = HolderRunner::new(Box::new(launcher), HolderDirs::under(&state_dir));
+    let deps = ServiceDeps::builder()
+        .version(ServiceVersion::current())
+        .binary(binary)
+        .socket(protocol::socket_path(&socket_dir(), &state_dir))
+        .holders(Arc::new(runner))
+        .ports(Box::new(LocalPorts))
+        .metrics(Some(Box::new(SysinfoMetrics::default())))
+        .stacks(Box::new(store.clone()))
+        .settings(Box::new(store.clone()))
+        .runs(Box::new(store.clone()))
+        .raised(Box::new(store.clone()))
+        .run_writes(Box::new(recorder_store.clone()))
+        .raised_writes(Box::new(recorder_store))
+        .edits(Box::new(store))
+        .listening(Some(Box::new(OsListeningPorts::default())))
+        .exit_signals(Some(Signals::new(SERVICE_EXIT_SIGNALS)?))
+        .build();
+    Ok(ServiceRuntime::run(singleton, deps)?)
 }

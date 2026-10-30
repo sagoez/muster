@@ -1,32 +1,62 @@
-use std::path::Path;
+use serde_json::json;
 
 use super::{
-    args::NoteCommand,
-    error::CliError,
-    report::{Row, RowKind, attribution},
+    answer::Answer, error::CliError, note_command::NoteCommand, page_cursor::parse_cursor,
+    report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::domain::{
-    coordination::{Author, ScratchpadKey},
-    port::CoordinationStore,
+use crate::{
+    adapter::{
+        client::{NoteEntry, PageSize},
+        wire::WireForm,
+    },
+    domain::{
+        coordination::{
+            Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
+            ScratchpadKeyError,
+        },
+        port::CoordinationStore,
+        value::ProjectRoot,
+    },
 };
 
+/// What a refusal calls a note's body.
+const NOTE_BODY: &str = "note body";
+/// What a refusal calls a note's key.
+const NOTE_KEY: &str = "note key";
 /// Line printed when the project has no notes yet.
 const EMPTY_NOTE: &str = "no notes; write one with `muster note set <key> <body>`";
+/// The JSON key of the listed notes.
+const NOTES: &str = "notes";
+/// The JSON key of whether notes follow the listed page.
+const MORE: &str = "more";
+/// The JSON key of where the next page starts.
+const CURSOR: &str = "cursor";
+/// Line printed under a page that more notes follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster note --cursor ";
+/// The JSON key of the key a write saved.
+const SAVED: &str = "saved";
+/// The JSON key of the key a delete named.
+const KEY: &str = "key";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
 
-/// Runs a `muster note` action against `store` for `project`, returning the rows
-/// to print. Absent a subcommand, lists the project's notes.
+/// Runs a `muster note` action against `store` for `project`, returning what
+/// to print. Absent a subcommand, lists one page of `limit` note keys after
+/// the position `cursor` names.
 ///
 /// # Errors
-/// Returns [`CliError`] when a key is invalid, a requested note is absent, or the
-/// store cannot be read or written.
+/// Returns [`CliError`] when a key or cursor is invalid, a requested note is
+/// absent, or the store cannot be read or written.
 pub fn note(
     command: Option<NoteCommand>,
+    limit: PageSize,
+    cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project),
+        None => list(store, project, limit, cursor),
         Some(NoteCommand::Get { key }) => get(store, project, &key),
         Some(NoteCommand::Set { key, body }) => set(store, project, author, &key, &body),
         Some(NoteCommand::Rm { key }) => remove(store, project, &key),
@@ -36,21 +66,37 @@ pub fn note(
 /// Parses a user-supplied note key into a validated [`ScratchpadKey`].
 ///
 /// # Errors
-/// Returns [`CliError::InvalidNoteKey`] when the key is blank or whitespace-only.
+/// Returns [`CliError::InvalidNoteKey`] when the key is blank or
+/// whitespace-only, or [`CliError::TooLong`] past [`NOTE_KEY_MAX_CHARS`].
 fn parse_key(key: &str) -> Result<ScratchpadKey, CliError> {
-    ScratchpadKey::try_new(key).map_err(|_| CliError::InvalidNoteKey(key.to_string()))
+    ScratchpadKey::try_new(key).map_err(|error| match error {
+        ScratchpadKeyError::LenCharMaxViolated => CliError::TooLong {
+            what: NOTE_KEY,
+            max: NOTE_KEY_MAX_CHARS,
+            found: key.trim().chars().count(),
+        },
+        ScratchpadKeyError::NotEmptyViolated => CliError::InvalidNoteKey(key.to_string()),
+    })
 }
 
-/// Lists the keys of every note stored for `project`, one per line.
+/// Lists one page of `limit` note keys for `project` after the position
+/// `cursor` names, one per line, without their bodies, and how to read on
+/// when more follow; its JSON is `note_read`'s listing.
 ///
 /// # Errors
-/// Returns [`CliError`] when the store cannot be read.
-fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliError> {
-    let notes = store.scratchpads(project)?;
-    if notes.is_empty() {
-        return Ok(vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]);
-    }
-    Ok(notes
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
+fn list(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    limit: PageSize,
+    cursor: Option<&str>,
+) -> Result<Answer, CliError> {
+    let after = cursor.map(parse_cursor).transpose()?;
+    let page = store.scratchpad_page(project, after, limit.into_inner())?;
+    let entries: Vec<NoteEntry> = page.entries().iter().map(NoteEntry::from).collect();
+    let mut rows: Vec<Row> = page
+        .entries()
         .iter()
         .map(|note| {
             Row::unlabeled(
@@ -58,202 +104,110 @@ fn list(store: &dyn CoordinationStore, project: &Path) -> Result<Vec<Row>, CliEr
                 format!("{}{}", note.key().as_ref(), attribution(note.author())),
             )
         })
-        .collect())
+        .collect();
+    if rows.is_empty() && after.is_none() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    let mut answer = json!({ NOTES: entries, MORE: page.next().is_some() });
+    if let Some(next) = page.next() {
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
+        answer[CURSOR] = json!(next.to_string());
+    }
+    Answer::of(rows, &answer)
 }
 
-/// Prints the body of the note under `key`, one row per line so the boxed layout
-/// stays intact and piped output reproduces the body verbatim.
+/// Prints the body of the note under `key`, one row per line so the framed
+/// layout stays intact and piped output reproduces the body verbatim.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, [`CliError::UnknownNote`]
 /// when no note is stored under it, or a store read failure.
-fn get(store: &dyn CoordinationStore, project: &Path, key: &str) -> Result<Vec<Row>, CliError> {
+fn get(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
     let note = store
         .scratchpad(project, &parsed)?
         .ok_or_else(|| CliError::UnknownNote(key.to_string()))?;
-    Ok(note
+    let rows = note
         .body()
         .lines()
         .map(|line| Row::unlabeled(RowKind::Plain, line.to_string()))
-        .collect())
+        .collect();
+    Answer::of(rows, &note.to_wire())
 }
 
 /// Creates or replaces the note under `key` with `body`.
 ///
 /// # Errors
-/// Returns [`CliError::InvalidNoteKey`] for a blank key, or a store write failure.
+/// Returns [`CliError::InvalidNoteKey`] for a blank key,
+/// [`CliError::TooLong`] for a body past [`NOTE_BODY_MAX_CHARS`], or a store
+/// write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &Path,
+    project: &ProjectRoot,
     author: &Author,
     key: &str,
     body: &str,
-) -> Result<Vec<Row>, CliError> {
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    store.set_scratchpad(project, author, &parsed, body)?;
-    Ok(vec![Row::unlabeled(
-        RowKind::Ok,
-        format!("saved '{}'", parsed.as_ref()),
-    )])
+    let body = NoteBody::try_new(body).map_err(|_| CliError::TooLong {
+        what: NOTE_BODY,
+        max: NOTE_BODY_MAX_CHARS,
+        found: body.chars().count(),
+    })?;
+    store.set_scratchpad(project, author, &parsed, &body)?;
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("saved '{}'", parsed.as_ref()),
+        )],
+        &json!({ SAVED: parsed.as_ref() }),
+    )
 }
 
 /// Deletes the note under `key`. Deleting an absent note is not an error.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key, or a store write failure.
-fn remove(store: &dyn CoordinationStore, project: &Path, key: &str) -> Result<Vec<Row>, CliError> {
+fn remove(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Answer, CliError> {
     let parsed = parse_key(key)?;
-    if store.delete_scratchpad(project, &parsed)? {
-        Ok(vec![Row::unlabeled(
-            RowKind::Ok,
-            format!("removed '{}'", parsed.as_ref()),
-        )])
+    let deleted = store.delete_scratchpad(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{}'", parsed.as_ref()))
     } else {
-        Ok(vec![Row::unlabeled(
+        Row::unlabeled(
             RowKind::Hint,
             format!("no note '{}' to remove", parsed.as_ref()),
-        )])
-    }
+        )
+    };
+    Answer::of(
+        vec![row],
+        &json!({ KEY: parsed.as_ref(), DELETED: deleted }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::PathBuf};
+    use std::path::PathBuf;
 
-    use super::*;
-    use crate::domain::{
-        config::ConfigError,
-        coordination::{KeyValue, KvKey, Scratchpad, Todo, TodoId, TodoStatus, TodoTitle},
-    };
+    use super::{super::memory_coordination::MemoryCoordination, *};
 
-    /// An in-memory coordination store recording scratchpads for one project.
-    #[derive(Default)]
-    struct FakeStore {
-        notes: RefCell<Vec<Scratchpad>>,
-    }
-
-    impl CoordinationStore for FakeStore {
-        fn scratchpads(&self, _project: &Path) -> Result<Vec<Scratchpad>, ConfigError> {
-            Ok(self.notes.borrow().clone())
-        }
-
-        fn scratchpad(
-            &self,
-            _project: &Path,
-            key: &ScratchpadKey,
-        ) -> Result<Option<Scratchpad>, ConfigError> {
-            Ok(self
-                .notes
-                .borrow()
-                .iter()
-                .find(|note| note.key() == key)
-                .cloned())
-        }
-
-        fn set_scratchpad(
-            &self,
-            _project: &Path,
-            author: &Author,
-            key: &ScratchpadKey,
-            body: &str,
-        ) -> Result<(), ConfigError> {
-            let note = Scratchpad::builder()
-                .key(key.clone())
-                .body(body.to_owned())
-                .author(author.clone())
-                .updated_at(0)
-                .build();
-            let mut notes = self.notes.borrow_mut();
-            notes.retain(|existing| existing.key() != key);
-            notes.push(note);
-            Ok(())
-        }
-
-        fn delete_scratchpad(
-            &self,
-            _project: &Path,
-            key: &ScratchpadKey,
-        ) -> Result<bool, ConfigError> {
-            let mut notes = self.notes.borrow_mut();
-            let before = notes.len();
-            notes.retain(|note| note.key() != key);
-            Ok(notes.len() != before)
-        }
-
-        fn todos(&self, _project: &Path) -> Result<Vec<Todo>, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn todo(&self, _project: &Path, _id: &TodoId) -> Result<Option<Todo>, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn add_todo(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _title: &TodoTitle,
-            _deps: &[TodoId],
-        ) -> Result<Todo, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn set_todo_status(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _id: &TodoId,
-            _status: TodoStatus,
-        ) -> Result<bool, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn delete_todo(&self, _project: &Path, _id: &TodoId) -> Result<bool, ConfigError> {
-            unreachable!("note commands never touch todos")
-        }
-
-        fn values(&self, _project: &Path) -> Result<Vec<KeyValue>, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn value(&self, _project: &Path, _key: &KvKey) -> Result<Option<KeyValue>, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn set_value(
-            &self,
-            _project: &Path,
-            _author: &Author,
-            _key: &KvKey,
-            _value: &str,
-        ) -> Result<(), ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn delete_value(&self, _project: &Path, _key: &KvKey) -> Result<bool, ConfigError> {
-            unreachable!("note commands never touch key-values")
-        }
-
-        fn import(
-            &self,
-            _project: &Path,
-            _scratchpads: &[Scratchpad],
-            _todos: &[Todo],
-            _values: &[KeyValue],
-        ) -> Result<(), ConfigError> {
-            unreachable!("note commands never import")
-        }
-    }
-
-    fn project() -> PathBuf {
-        PathBuf::from("/repo/muster.yml")
+    /// The project every test note belongs to.
+    fn project() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
     }
 
     /// Setting then listing shows the key; getting returns the body verbatim.
     #[test]
     fn set_then_get_and_list() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(
             &store,
             &project(),
@@ -263,41 +217,89 @@ mod tests {
         )
         .unwrap();
 
-        let listed = list(&store, &project()).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].detail(), "plan");
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(listed.rows().len(), 1);
+        assert_eq!(listed.rows()[0].detail(), "plan");
+        assert_eq!(listed.json()["notes"][0]["key"], "plan");
+        assert!(listed.json()["notes"][0].get("body").is_none());
 
         let body = get(&store, &project(), "plan").unwrap();
-        assert_eq!(body.len(), 2);
-        assert_eq!(body[0].detail(), "line one");
-        assert_eq!(body[1].detail(), "line two");
+        assert_eq!(body.rows().len(), 2);
+        assert_eq!(body.rows()[0].detail(), "line one");
+        assert_eq!(body.rows()[1].detail(), "line two");
+        assert_eq!(body.json()["body"], "line one\nline two");
+    }
+
+    /// A body past the maximum is refused with its length, and not stored.
+    #[test]
+    fn an_oversized_body_is_refused() {
+        let store = MemoryCoordination::default();
+        let body = "x".repeat(NOTE_BODY_MAX_CHARS + 1);
+        assert!(matches!(
+            set(&store, &project(), &Author::human(), "plan", &body),
+            Err(CliError::TooLong { max: NOTE_BODY_MAX_CHARS, found, .. })
+                if found == NOTE_BODY_MAX_CHARS + 1
+        ));
+        assert!(store.scratchpads(&project()).unwrap().is_empty());
     }
 
     /// An empty store lists a hint rather than nothing.
     #[test]
     fn list_reports_empty() {
-        let store = FakeStore::default();
-        let rows = list(&store, &project()).unwrap();
-        assert_eq!(rows[0].detail(), EMPTY_NOTE);
-        assert_eq!(rows[0].kind(), RowKind::Hint);
+        let store = MemoryCoordination::default();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(listed.rows()[0].detail(), EMPTY_NOTE);
+        assert_eq!(listed.rows()[0].kind(), RowKind::Hint);
+        assert_eq!(listed.json()["notes"], json!([]));
+        assert_eq!(listed.json()["more"], false);
+    }
+
+    /// A listing pages by `limit` and `cursor` as `note_read` does, printing
+    /// the cursor to read on with; text no page printed is refused.
+    #[test]
+    fn list_pages_by_cursor() {
+        let store = MemoryCoordination::default();
+        for key in ["one", "two", "three"] {
+            set(&store, &project(), &Author::human(), key, "b").unwrap();
+        }
+        let two = PageSize::try_new(2).unwrap();
+
+        let first = list(&store, &project(), two, None).unwrap();
+        assert_eq!(first.json()["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(first.json()["more"], true);
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
+        assert_eq!(first.rows()[2].detail(), &format!("{MORE_NOTE}{cursor}`"));
+
+        let rest = list(&store, &project(), two, Some(&cursor)).unwrap();
+        assert_eq!(rest.json()["notes"][0]["key"], "three");
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert!(matches!(
+            list(&store, &project(), two, Some("three")),
+            Err(CliError::InvalidCursor(_))
+        ));
     }
 
     /// A note an agent wrote is attributed in the list; the human's is not.
     #[test]
     fn list_attributes_agent_notes() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(&store, &project(), &Author::human(), "mine", "human note").unwrap();
-        store.notes.borrow_mut().push(
-            Scratchpad::builder()
-                .key(ScratchpadKey::try_new("theirs").unwrap())
-                .body("agent note".to_string())
-                .author(Author::agent("claude"))
-                .updated_at(0)
-                .build(),
-        );
+        store
+            .set_scratchpad(
+                &project(),
+                &Author::agent("claude"),
+                &ScratchpadKey::try_new("theirs").unwrap(),
+                &NoteBody::try_new("agent note").unwrap(),
+            )
+            .unwrap();
 
-        let rows = list(&store, &project()).unwrap();
-        let details: Vec<&str> = rows.iter().map(|row| row.detail().as_str()).collect();
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        let details: Vec<&str> = listed
+            .rows()
+            .iter()
+            .map(|row| row.detail().as_str())
+            .collect();
         assert!(details.contains(&"mine"), "human note is unadorned");
         assert!(
             details.contains(&"theirs  (by claude)"),
@@ -308,7 +310,7 @@ mod tests {
     /// Getting an absent note errors so scripts see a non-zero exit.
     #[test]
     fn get_absent_is_an_error() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         assert!(matches!(
             get(&store, &project(), "ghost"),
             Err(CliError::UnknownNote(key)) if key == "ghost"
@@ -318,19 +320,21 @@ mod tests {
     /// Removing reports success, then reports absence idempotently.
     #[test]
     fn remove_is_idempotent() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         set(&store, &project(), &Author::human(), "plan", "body").unwrap();
 
         let first = remove(&store, &project(), "plan").unwrap();
-        assert_eq!(first[0].kind(), RowKind::Ok);
+        assert_eq!(first.rows()[0].kind(), RowKind::Ok);
+        assert_eq!(first.json(), &json!({"key": "plan", "deleted": true}));
         let second = remove(&store, &project(), "plan").unwrap();
-        assert_eq!(second[0].kind(), RowKind::Hint);
+        assert_eq!(second.rows()[0].kind(), RowKind::Hint);
+        assert_eq!(second.json()["deleted"], false);
     }
 
     /// A blank key is rejected before the store is touched.
     #[test]
     fn a_blank_key_is_rejected() {
-        let store = FakeStore::default();
+        let store = MemoryCoordination::default();
         assert!(matches!(
             set(&store, &project(), &Author::human(), "   ", "body"),
             Err(CliError::InvalidNoteKey(_))

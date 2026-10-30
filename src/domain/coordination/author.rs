@@ -1,9 +1,9 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use super::BlankAuthor;
 
 /// Stored label for a write the human made through the CLI.
-const HUMAN_LABEL: &str = "human";
+pub(crate) const HUMAN_LABEL: &str = "human";
 /// Fallback label for an agent that did not name itself.
 const DEFAULT_AGENT_LABEL: &str = "agent";
 
@@ -47,14 +47,19 @@ impl Author {
         matches!(self, Author::Human)
     }
 
-    /// Reconstructs an author from a stored flat label - the inverse of
-    /// [`Author::label`], for reading back persisted entries.
-    #[must_use]
-    pub fn from_label(label: &str) -> Self {
-        if label == HUMAN_LABEL {
-            Author::Human
+    /// Reconstructs an author from a stored or imported label - the inverse of
+    /// [`Author::label`]. The label is trimmed and `human` matches in any case.
+    ///
+    /// # Errors
+    /// Returns [`BlankAuthor`] when the label is blank once trimmed.
+    pub fn from_label(label: &str) -> Result<Self, BlankAuthor> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            Err(BlankAuthor)
+        } else if trimmed.eq_ignore_ascii_case(HUMAN_LABEL) {
+            Ok(Author::Human)
         } else {
-            Author::agent(label)
+            Ok(Author::agent(trimmed))
         }
     }
 
@@ -74,27 +79,6 @@ impl fmt::Display for Author {
     }
 }
 
-impl Serialize for Author {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.label())
-    }
-}
-
-impl<'de> Deserialize<'de> for Author {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return Err(D::Error::custom("author label must not be empty"));
-        }
-        Ok(if trimmed == HUMAN_LABEL {
-            Author::Human
-        } else {
-            Author::Agent(trimmed.to_string())
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,12 +87,8 @@ mod tests {
     #[test]
     fn the_human_round_trips() {
         assert_eq!(Author::human().label(), "human");
-        let json = serde_json::to_string(&Author::Human).unwrap();
-        assert_eq!(json, "\"human\"");
-        assert_eq!(
-            serde_json::from_str::<Author>(&json).unwrap(),
-            Author::Human
-        );
+        assert_eq!(Author::Human.to_string(), "human");
+        assert_eq!(Author::from_label("human"), Ok(Author::Human));
     }
 
     /// A named agent trims and round-trips.
@@ -116,8 +96,21 @@ mod tests {
     fn an_agent_name_trims_and_round_trips() {
         let author = Author::agent("  claude  ");
         assert_eq!(author.label(), "claude");
-        let json = serde_json::to_string(&author).unwrap();
-        assert_eq!(serde_json::from_str::<Author>(&json).unwrap(), author);
+        assert_eq!(Author::from_label(&author.to_string()), Ok(author));
+    }
+
+    /// A label is trimmed and `human` matches in any case.
+    #[test]
+    fn a_respelt_human_label_reads_as_the_human() {
+        assert_eq!(Author::from_label(" HUMAN "), Ok(Author::Human));
+        assert_eq!(Author::from_label(" claude "), Ok(Author::agent("claude")));
+    }
+
+    /// A blank label names nobody and is refused.
+    #[test]
+    fn a_blank_label_is_refused() {
+        assert_eq!(Author::from_label(""), Err(BlankAuthor));
+        assert_eq!(Author::from_label("  \t"), Err(BlankAuthor));
     }
 
     /// A blank name, or one impersonating the human, collapses to the generic

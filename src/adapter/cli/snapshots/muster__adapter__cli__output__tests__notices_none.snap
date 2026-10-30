@@ -1,0 +1,6 @@
+---
+source: src/adapter/cli/output.rs
+expression: "plain(&notices_rows(&shop_project(), &[], now))"
+---
+/home/me/shop
+no notices

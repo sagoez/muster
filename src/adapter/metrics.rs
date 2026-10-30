@@ -1,8 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, set_open_files_limit};
 
-use crate::domain::port::{ProcessMetrics, ProcessSample};
+use super::process_tree::ProcessTree;
+use crate::domain::{
+    port::{ProcessMetrics, ProcessSample},
+    value::Pid,
+};
+
+/// How many `/proc` files `sysinfo` may keep open between refreshes. It keeps
+/// one per process it has seen otherwise, up to half the hard limit.
+const SYSINFO_OPEN_FILES: usize = 0;
 
 /// A [`ProcessMetrics`] backed by `sysinfo`, aggregating CPU and memory over each
 /// process subtree so a shell's real workload (its children) is counted, not just
@@ -13,7 +21,11 @@ pub struct SysinfoMetrics {
 }
 
 impl Default for SysinfoMetrics {
+    /// A sampler that keeps no `/proc` file open between samples. Building one
+    /// raises this process's open-files soft limit to the hard limit, so a
+    /// service reads its own limit first.
     fn default() -> Self {
+        set_open_files_limit(SYSINFO_OPEN_FILES);
         Self {
             system: System::new(),
         }
@@ -21,7 +33,7 @@ impl Default for SysinfoMetrics {
 }
 
 impl ProcessMetrics for SysinfoMetrics {
-    fn sample(&mut self, pids: &[u32]) -> HashMap<u32, ProcessSample> {
+    fn sample(&mut self, pids: &[Pid]) -> HashMap<Pid, ProcessSample> {
         // Nothing to measure: skip the scan entirely rather than refresh every
         // process on the host for no roots.
         if pids.is_empty() {
@@ -29,7 +41,7 @@ impl ProcessMetrics for SysinfoMetrics {
         }
         // Refresh only CPU and memory (the parent PID is always collected), so a
         // host with many processes is not enumerated for disk, exe, and command
-        // data on the single TUI event loop. `without_tasks` is essential, not
+        // data on the service's event loop. `without_tasks` is essential, not
         // just cheaper: `nothing()` leaves task collection on, and on Linux each
         // thread would appear as a child in `processes()`, so summing the subtree
         // would add the process-wide RSS once per thread and inflate the total.
@@ -43,30 +55,17 @@ impl ProcessMetrics for SysinfoMetrics {
                 .without_tasks(),
         );
         let processes = self.system.processes();
-        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-        for (pid, process) in processes {
-            if let Some(parent) = process.parent() {
-                children.entry(parent).or_default().push(*pid);
-            }
-        }
+        let tree = ProcessTree::of(&self.system);
         let mut samples = HashMap::new();
         for &root in pids {
             let mut cpu_percent = 0.0_f32;
             let mut memory_bytes = 0_u64;
             let mut found = false;
-            let mut seen = HashSet::new();
-            let mut stack = vec![Pid::from(root as usize)];
-            while let Some(pid) = stack.pop() {
-                if !seen.insert(pid) {
-                    continue;
-                }
+            for pid in tree.subtree(root) {
                 if let Some(process) = processes.get(&pid) {
                     found = true;
                     cpu_percent += process.cpu_usage();
                     memory_bytes += process.memory();
-                }
-                if let Some(kids) = children.get(&pid) {
-                    stack.extend(kids);
                 }
             }
             if found {

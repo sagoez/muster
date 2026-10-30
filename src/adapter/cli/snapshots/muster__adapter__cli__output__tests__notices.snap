@@ -1,0 +1,7 @@
+---
+source: src/adapter/cli/output.rs
+expression: "plain(&notices_rows(&shop_project(), &notices, now))"
+---
+/home/me/shop
+✗ api: 1m 15s ago: crashed: exited with status 1
+! project: 1m 15s ago: stopped worker: removed from the project

@@ -1,389 +1,331 @@
+//! `muster init`: processes found in the files a folder already has, offered
+//! to add. Detection only reads files; what is chosen is added in one
+//! transaction, registering the folder.
+
 use std::path::{Path, PathBuf};
 
-use super::{
-    error::CliError,
-    report::{Row, RowKind},
-};
+use getset::{CopyGetters, Getters};
+use serde::Serialize;
+use typed_builder::TypedBuilder;
+
+use super::{error::CliError, output::COLUMN_GAP, report::Report, row::Row, row_kind::RowKind};
 use crate::{
-    adapter::{config::starter_workspace, path::absolutize},
-    constants::WORKSPACE_FILE_NAME,
-    domain::{port::ProjectRegistry, project::Project, value::ProjectName},
+    adapter::{
+        detect::{Candidate, DetectSource, detect},
+        path::project_root,
+    },
+    application::StackEditor,
+    domain::{
+        config::{ImportMode, ProcessDraft, ProcessSpec},
+        port::{SettingsStore, StackStore},
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
-/// Note printed when the workspace file already exists.
-const EXISTS_NOTE: &str = "already exists, left unchanged";
-/// Note printed when the folder is already a registered project.
-const REGISTERED_NOTE: &str = "already registered";
-/// Closing hint after a successful init.
-const RUN_HINT: &str = "run `muster` here to start";
+/// Title of the `init` reports.
+pub const INIT_TITLE: &str = "muster init";
+/// Marks a suggested candidate in the plain list.
+const CHOSEN_MARK: &str = "[x]";
+/// Marks a candidate that is not suggested.
+const UNCHOSEN_MARK: &str = "[ ]";
+/// How the plain list ends.
+const YES_HINT: &str = "`muster init --yes` adds the suggested ones";
+/// Said when nothing was found.
+const NOTHING_FOUND: &str =
+    "nothing to suggest here; `muster add <name> -- <command>` adds a process";
+/// Opens the step naming where candidates were found.
+const FOUND_IN: &str = "found processes in";
+/// Between the sources named.
+const SOURCE_SEPARATOR: &str = ", ";
+/// Marks an added process.
+const ADDED_MARK: &str = "+";
+/// Opens the outro of an interactive `init`.
+const ADDED: &str = "added";
+/// One process, counted.
+const PROCESS: &str = "process";
+/// Several processes, counted.
+const PROCESSES: &str = "processes";
+/// How what was added starts, when it autostarts.
+const UP_HINT: &str = "`muster up` starts them";
+/// How what was added starts, when it does not.
+const START_HINT: &str = "`muster start <name>` starts one";
+/// Said when the person chose nothing.
+pub const NOTHING_ADDED: &str = "nothing added";
+/// The question whether `muster up` starts what is added.
+pub const AUTOSTART_QUESTION: &str = "Start them with `muster up`?";
+/// What the plain layout says it could not ask.
+pub const AUTOSTART_ASKED: &str = "whether `muster up` starts them";
 
-/// Scaffolds a starter workspace in `directory` and registers it as a project.
-/// Returns the report rows to print, in order.
-///
-/// # Errors
-/// Returns [`CliError`] when the folder name is not a usable project name or
-/// the registry cannot be read or written.
-pub fn init(directory: &Path, registry: &dyn ProjectRegistry) -> Result<Vec<Row>, CliError> {
-    // Validate everything the registry will persist first: a folder that
-    // cannot become a project (a filesystem root, a non-UTF-8 path) must
-    // fail before anything is written.
-    let name = project_name(directory)?;
-    let config_path = absolutize(&directory.join(WORKSPACE_FILE_NAME));
-    ensure_representable(&config_path)?;
-    let mut rows = Vec::new();
-    // An exclusive create keeps the no-overwrite guarantee even against a
-    // concurrent creation. Anything already occupying the path - including a
-    // dangling symlink, which the exclusive open also refuses - is left
-    // untouched, intentionally asymmetric with `projects add` and `doctor`,
-    // which require a reachable regular file.
-    if registry.create_workspace(&config_path, &starter_workspace())? {
-        rows.push(Row::unlabeled(
-            RowKind::Ok,
-            format!("created {WORKSPACE_FILE_NAME}"),
-        ));
-    } else {
-        rows.push(Row::unlabeled(
-            RowKind::Hint,
-            format!("{WORKSPACE_FILE_NAME} {EXISTS_NOTE}"),
-        ));
-    }
-    rows.push(register_folder(name, &config_path, registry)?);
-    rows.push(Row::unlabeled(RowKind::Dim, RUN_HINT));
-    Ok(rows)
+/// Opens the line naming the folder scanned.
+const SCANNED: &str = "scanned";
+/// Said when the current folder, not the one scanned, has processes of its
+/// own to offer.
+pub const HERE_HINT: &str =
+    "this folder has processes of its own; `muster init --project .` offers them";
+
+/// What `muster init` offered and added, as `--json` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
+pub struct InitView {
+    /// The folder whose files were scanned.
+    #[getset(get = "pub")]
+    folder: PathBuf,
+    /// Every process offered.
+    #[getset(get = "pub")]
+    candidates: Vec<Candidate>,
+    /// The ones added.
+    #[getset(get = "pub")]
+    added: Vec<ProcessName>,
+    /// Whether the current folder, not the one scanned, offers processes of
+    /// its own.
+    #[serde(skip)]
+    #[getset(get_copy = "pub")]
+    offered_here: bool,
 }
 
-/// Registers `name` at `config_path` unless that config path already is a
-/// project. `pub(super)` because `muster projects add` reuses it.
-///
-/// The check-and-insert runs inside `update_projects` so it is atomic with
-/// respect to concurrent `muster init` or `muster projects add` invocations.
+/// Whether `cwd`, a folder other than the scanned `root`, has files that
+/// offer processes of their own.
+pub fn offers_here(cwd: &Path, root: &ProjectRoot) -> bool {
+    project_root(cwd).is_ok_and(|here| here != *root && !detect(&here, |_| false).is_empty())
+}
+
+/// The line naming the folder `root` that was scanned.
+pub fn scanned(root: &Path) -> String {
+    format!("{SCANNED} {}", root.display())
+}
+
+/// The rows every `init` report opens with: the folder scanned, and when
+/// the current folder offers processes of its own, how to scan it instead.
+fn scan_rows(view: &InitView) -> Vec<Row> {
+    let mut rows = vec![Row::unlabeled(RowKind::Dim, scanned(view.folder()))];
+    if view.offered_here() {
+        rows.push(Row::unlabeled(RowKind::Hint, HERE_HINT));
+    }
+    rows
+}
+
+/// The candidates found under `root`, leaving out names the project
+/// already has, whether as found or as prefixed by their source.
 ///
 /// # Errors
-/// Returns [`CliError`] when the registry cannot be updated.
-pub(super) fn register_folder(
-    name: ProjectName,
-    config_path: &Path,
-    registry: &dyn ProjectRegistry,
-) -> Result<Row, CliError> {
-    let label = name.as_ref().to_string();
+/// Returns the [`CliError`] of a stack that cannot be read.
+pub fn offered(store: &dyn StackStore, root: &ProjectRoot) -> Result<Vec<Candidate>, CliError> {
+    let stack = store.stack(root)?;
+    Ok(detect(root, |name| {
+        stack
+            .as_ref()
+            .is_some_and(|stack| stack.process(name).is_some())
+    }))
+}
 
-    // Capture the already-registered project name (if any) inside the closure
-    // so the outcome is observable after the lock releases.
-    let mut existing_name: Option<String> = None;
+/// The suggested ones of `candidates`.
+pub fn suggested(candidates: &[Candidate]) -> Vec<Candidate> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.suggested())
+        .cloned()
+        .collect()
+}
 
-    registry.update_projects(&mut |projects| {
-        if let Some(existing) = projects
-            .iter()
-            .find(|project| absolutize(project.config()) == config_path)
-        {
-            existing_name = Some(existing.name().as_ref().to_string());
-            // Already registered - return list unchanged.
-            return projects;
+/// Adds `chosen` to the project at `root` in one transaction, registering
+/// it when new, `autostart` as asked or the default when not asked.
+///
+/// # Errors
+/// Returns the [`CliError`] of a name the project took meanwhile or a store
+/// that cannot be written.
+pub fn add_chosen(
+    settings: &dyn SettingsStore,
+    editor: &StackEditor<'_>,
+    root: &ProjectRoot,
+    chosen: &[Candidate],
+    autostart: Option<bool>,
+) -> Result<Vec<ProcessName>, CliError> {
+    if chosen.is_empty() {
+        return Ok(Vec::new());
+    }
+    let defaults = settings.load()?.process_defaults();
+    let specs: Vec<ProcessSpec> = chosen
+        .iter()
+        .map(|candidate| {
+            ProcessDraft::builder()
+                .name(candidate.name().clone())
+                .command(candidate.command().clone())
+                .autostart(autostart)
+                .build()
+                .complete(&defaults)
+        })
+        .collect();
+    let (_, plan) = editor.import(root, &specs, ImportMode::Strict)?;
+    Ok(plan.added().clone())
+}
+
+/// The plain list of the candidates of `view`, the suggested ones checked,
+/// and how to add them.
+pub fn candidate_rows(view: &InitView) -> Report {
+    if view.candidates().is_empty() {
+        return nothing_found(view);
+    }
+    let mut rows = scan_rows(view);
+    rows.extend(view.candidates().iter().map(|candidate| {
+        let mark = if candidate.suggested() {
+            CHOSEN_MARK
+        } else {
+            UNCHOSEN_MARK
+        };
+        Row::unlabeled(
+            RowKind::Plain,
+            format!(
+                "{mark} {}{COLUMN_GAP}{}{COLUMN_GAP}{}",
+                candidate.name(),
+                candidate.command(),
+                candidate.source()
+            ),
+        )
+    }));
+    rows.push(Row::unlabeled(RowKind::Dim, YES_HINT));
+    Report::new(INIT_TITLE, rows)
+}
+
+/// The report of `view` when nothing was found to offer.
+pub fn nothing_found(view: &InitView) -> Report {
+    let mut rows = scan_rows(view);
+    rows.push(Row::unlabeled(RowKind::Hint, NOTHING_FOUND));
+    Report::new(INIT_TITLE, rows)
+}
+
+/// The step naming the sources `candidates` came from.
+pub fn found_in(candidates: &[Candidate]) -> String {
+    let mut sources: Vec<DetectSource> = Vec::new();
+    for candidate in candidates {
+        if !sources.contains(&candidate.source()) {
+            sources.push(candidate.source());
         }
-        let mut updated = projects;
-        updated.push(
-            Project::builder()
-                .name(name.clone())
-                .config(config_path.to_path_buf())
-                .build(),
-        );
-        updated
-    })?;
-
-    if let Some(found) = existing_name {
-        Ok(Row::unlabeled(
-            RowKind::Hint,
-            format!("{REGISTERED_NOTE} as '{found}'"),
-        ))
-    } else {
-        Ok(Row::unlabeled(
-            RowKind::Ok,
-            format!("registered project '{label}'"),
-        ))
     }
+    let names: Vec<String> = sources.iter().map(ToString::to_string).collect();
+    format!("{FOUND_IN} {}", names.join(SOURCE_SEPARATOR))
 }
 
-/// The project name derived from the folder's file name. `pub(super)` because
-/// `muster projects add` derives the same way.
-///
-/// # Errors
-/// Returns [`CliError::InvalidProjectFolder`] when the folder yields no name.
-pub(super) fn project_name(directory: &Path) -> Result<ProjectName, CliError> {
-    // Normalize without resolving the final symlink: the registry preserves
-    // the alias the user selected, so its name must come from the alias too.
-    // No lossy conversion: a non-UTF-8 name would not round-trip through the
-    // registry, so it is rejected rather than mangled.
-    let file_name = absolutize(directory)
-        .file_name()
-        .and_then(|name| name.to_str().map(str::to_string))
-        .unwrap_or_default();
-    ProjectName::try_new(&file_name)
-        .map_err(|_| CliError::InvalidProjectFolder(PathBuf::from(directory)))
+/// The report of what `view` added: one line per process.
+pub fn added_rows(view: &InitView) -> Report {
+    let mut rows = scan_rows(view);
+    if view.added().is_empty() {
+        rows.push(Row::unlabeled(RowKind::Ok, NOTHING_ADDED));
+    }
+    rows.extend(
+        view.added()
+            .iter()
+            .map(|name| Row::unlabeled(RowKind::Ok, format!("{ADDED_MARK} {name}"))),
+    );
+    Report::new(INIT_TITLE, rows)
 }
 
-/// Rejects a config path the registry cannot persist as UTF-8.
-///
-/// # Errors
-/// Returns [`CliError::UnrepresentablePath`] for non-UTF-8 paths.
-pub(super) fn ensure_representable(config_path: &Path) -> Result<(), CliError> {
-    if config_path.to_str().is_none() {
-        return Err(CliError::UnrepresentablePath(config_path.to_path_buf()));
-    }
-    Ok(())
+/// How an interactive `init` ends once `added` were added, `autostart` or
+/// not.
+pub fn added_outro(added: &[ProcessName], autostart: bool) -> String {
+    let count = added.len();
+    let noun = if count == 1 { PROCESS } else { PROCESSES };
+    let hint = if autostart { UP_HINT } else { START_HINT };
+    format!("{ADDED} {count} {noun}; {hint}")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, fs, path::PathBuf};
+    use std::fs;
+
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{
-        config::{ConfigError, WorkspaceConfig},
-        project::Project,
-        value::ProjectName,
-    };
+    use crate::{adapter::cli::report::plain, domain::value::CommandLine};
 
-    /// A registry recording saves of projects and workspaces.
-    #[derive(Default)]
-    struct RecordingRegistry {
-        projects: Vec<Project>,
-        saved_projects: RefCell<Option<Vec<Project>>>,
-        saved_workspace: RefCell<Option<PathBuf>>,
+    /// A candidate `name` running `command` from `source`.
+    fn candidate(name: &str, command: &str, source: DetectSource, suggested: bool) -> Candidate {
+        Candidate::builder()
+            .name(ProcessName::try_new(name).unwrap())
+            .command(CommandLine::try_new(command).unwrap())
+            .source(source)
+            .suggested(suggested)
+            .build()
     }
 
-    impl ProjectRegistry for RecordingRegistry {
-        fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-            Ok(self.projects.clone())
-        }
-
-        fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-            unreachable!("init never loads a workspace")
-        }
-
-        fn workspace_exists(&self, config_path: &Path) -> bool {
-            config_path.exists()
-        }
-
-        fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-            *self.saved_projects.borrow_mut() = Some(projects.to_vec());
-            Ok(())
-        }
-
-        fn save_workspace(
-            &self,
-            config_path: &Path,
-            _config: &WorkspaceConfig,
-        ) -> Result<(), ConfigError> {
-            *self.saved_workspace.borrow_mut() = Some(config_path.to_path_buf());
-            Ok(())
-        }
+    /// The view of scanning `/p/shop` and offering `candidates`, the current
+    /// folder offering its own or not.
+    fn scan(candidates: Vec<Candidate>, offered_here: bool) -> InitView {
+        InitView::builder()
+            .folder(PathBuf::from("/p/shop"))
+            .candidates(candidates)
+            .added(Vec::new())
+            .offered_here(offered_here)
+            .build()
     }
 
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("muster-init-{tag}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// A fresh folder gets a starter config and a registry entry.
+    /// The plain list names the folder scanned, checks the suggested
+    /// candidates, names each command and source, and says how to add them;
+    /// it writes nothing.
     #[test]
-    fn scaffolds_and_registers_a_fresh_folder() {
-        let dir = temp_dir("fresh");
-        let registry = RecordingRegistry::default();
+    fn the_plain_list_checks_the_suggested_ones() {
+        let found = vec![
+            candidate("dev", "npm run dev", DetectSource::PackageJson, true),
+            candidate("lint", "npm run lint", DetectSource::PackageJson, false),
+        ];
 
-        let rows = init(&dir, &registry).unwrap();
-
-        assert!(
-            registry.saved_workspace.borrow().is_some(),
-            "config written"
+        assert_eq!(
+            plain(&candidate_rows(&scan(found.clone(), false))),
+            format!(
+                "scanned /p/shop\n[x] dev  npm run dev  package-json\n[ ] lint  npm run lint  package-json\n{YES_HINT}"
+            )
         );
-        let saved = registry.saved_projects.borrow();
-        assert_eq!(saved.as_ref().unwrap().len(), 1, "project registered");
-        assert!(
-            rows.iter()
-                .any(|row| row.detail().contains(WORKSPACE_FILE_NAME))
-        );
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(suggested(&found), vec![found[0].clone()]);
+        assert_eq!(found_in(&found), "found processes in package-json");
     }
 
-    /// An existing config is never overwritten, but registration still runs.
+    /// With nothing found, it names the folder scanned and says how to add
+    /// a process by hand, and how to scan the current folder when it offers
+    /// its own.
     #[test]
-    fn refuses_to_overwrite_but_still_registers() {
-        let dir = temp_dir("existing");
-        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
-        let registry = RecordingRegistry::default();
+    fn nothing_found_says_how_to_add_one() {
+        let rendered = plain(&candidate_rows(&scan(Vec::new(), false)));
+        assert!(rendered.starts_with("scanned /p/shop\n"), "{rendered}");
+        assert!(rendered.contains("muster add"), "{rendered}");
+        assert!(!rendered.contains(HERE_HINT), "{rendered}");
 
-        let rows = init(&dir, &registry).unwrap();
-
-        assert!(registry.saved_workspace.borrow().is_none(), "no overwrite");
-        assert!(
-            registry.saved_projects.borrow().is_some(),
-            "still registered"
-        );
-        assert!(rows.iter().any(|row| row.detail().contains(EXISTS_NOTE)));
-        fs::remove_dir_all(dir).unwrap();
+        let rendered = plain(&nothing_found(&scan(Vec::new(), true)));
+        assert!(rendered.contains("`muster init --project .`"), "{rendered}");
     }
 
-    /// A symlinked folder keeps its alias name, matching the alias the
-    /// registry stores, so two aliases of one target stay distinguishable.
-    #[cfg(unix)]
+    /// The current folder is pointed at only when it is not the folder
+    /// scanned and its files offer processes.
     #[test]
-    fn project_name_keeps_the_symlink_alias() {
-        use std::os::unix::fs::symlink;
+    fn the_current_folder_is_offered_only_with_files_of_its_own() {
+        let scratch = TempDir::new().unwrap();
+        let shop = scratch.path().canonicalize().unwrap();
+        let web = shop.join("web");
+        fs::create_dir(&web).unwrap();
+        let root = ProjectRoot::try_new(shop.clone()).unwrap();
 
-        let base = temp_dir("alias-name");
-        let target = base.join("real-target");
-        let alias = base.join("nice-alias");
-        fs::create_dir_all(&target).unwrap();
-        symlink(&target, &alias).unwrap();
-
-        assert_eq!(project_name(&alias).unwrap().as_ref(), "nice-alias");
-        fs::remove_dir_all(base).unwrap();
+        assert!(!offers_here(&web, &root));
+        fs::write(web.join("Procfile"), "web: puma\n").unwrap();
+        assert!(offers_here(&web, &root));
+        fs::write(shop.join("Procfile"), "api: rails s\n").unwrap();
+        assert!(!offers_here(&shop, &root));
     }
 
-    /// A non-UTF-8 folder fails before anything is written, not after the
-    /// workspace exists. The directory is never created: APFS rejects
-    /// non-UTF-8 names entirely, and init's validation must fire before any
-    /// filesystem access anyway.
-    #[cfg(unix)]
+    /// The JSON names the folder scanned, lists each candidate with its
+    /// source and whether it is suggested, and what was added.
     #[test]
-    fn init_rejects_a_non_utf8_folder_before_writing() {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    fn the_json_lists_candidates_and_additions() {
+        let view = InitView::builder()
+            .folder(PathBuf::from("/p/shop"))
+            .candidates(vec![candidate("web", "puma", DetectSource::Procfile, true)])
+            .added(vec![ProcessName::try_new("web").unwrap()])
+            .offered_here(false)
+            .build();
 
-        let mut raw = std::env::temp_dir().into_os_string().into_vec();
-        raw.extend_from_slice(b"/muster-bad-\xff");
-        let dir = PathBuf::from(OsString::from_vec(raw));
-        let registry = RecordingRegistry::default();
-
-        let result = init(&dir, &registry);
-
-        assert!(
-            matches!(
-                result,
-                Err(CliError::InvalidProjectFolder(_) | CliError::UnrepresentablePath(_))
-            ),
-            "unexpected: {result:?}"
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({
+                "folder": "/p/shop",
+                "candidates": [{"name": "web", "command": "puma", "source": "procfile", "suggested": true}],
+                "added": ["web"]
+            })
         );
-        assert!(
-            registry.saved_workspace.borrow().is_none(),
-            "no workspace file was created"
-        );
-        assert!(
-            registry.saved_projects.borrow().is_none(),
-            "no registration"
-        );
-    }
-
-    /// A directory with no usable name fails before anything is written.
-    #[test]
-    fn init_at_a_root_creates_nothing() {
-        let registry = RecordingRegistry::default();
-
-        let result = init(Path::new("/"), &registry);
-
-        assert!(matches!(result, Err(CliError::InvalidProjectFolder(_))));
-        assert!(
-            registry.saved_workspace.borrow().is_none(),
-            "no workspace file was created"
-        );
-        assert!(
-            registry.saved_projects.borrow().is_none(),
-            "no registration"
-        );
-    }
-
-    /// An already registered project is reported, not duplicated.
-    #[test]
-    fn re_init_is_a_registration_no_op() {
-        let dir = temp_dir("registered");
-        fs::write(dir.join(WORKSPACE_FILE_NAME), "agents: []\n").unwrap();
-        let config = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
-        let registry = RecordingRegistry {
-            projects: vec![
-                Project::builder()
-                    .name(ProjectName::try_new("here").unwrap())
-                    .config(config)
-                    .build(),
-            ],
-            ..RecordingRegistry::default()
-        };
-
-        let rows = init(&dir, &registry).unwrap();
-
-        // The list is written back unchanged: still exactly the seeded entry.
-        let saved = registry.saved_projects.borrow();
-        let written = saved.as_ref().expect("list written back");
-        assert_eq!(written.len(), 1, "one project remains");
-        assert_eq!(written[0].name().as_ref(), "here", "the seeded entry kept");
-        assert!(
-            rows.iter()
-                .any(|row| row.detail().contains(REGISTERED_NOTE))
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// `register_folder` routes through `update_projects`, not a bare
-    /// `projects()` + `save()` pair, so the check-and-insert is atomic.
-    #[test]
-    fn register_folder_goes_through_update_projects() {
-        /// Fake that records whether `update_projects` was called.
-        #[derive(Default)]
-        struct TrackingRegistry {
-            update_projects_called: RefCell<bool>,
-            saved_projects: RefCell<Option<Vec<Project>>>,
-        }
-
-        impl ProjectRegistry for TrackingRegistry {
-            fn projects(&self) -> Result<Vec<Project>, ConfigError> {
-                Ok(Vec::new())
-            }
-
-            fn workspace(&self, _config_path: &Path) -> Result<WorkspaceConfig, ConfigError> {
-                unreachable!()
-            }
-
-            fn workspace_exists(&self, _config_path: &Path) -> bool {
-                false
-            }
-
-            fn save(&self, projects: &[Project]) -> Result<(), ConfigError> {
-                *self.saved_projects.borrow_mut() = Some(projects.to_vec());
-                Ok(())
-            }
-
-            fn save_workspace(
-                &self,
-                _config_path: &Path,
-                _config: &WorkspaceConfig,
-            ) -> Result<(), ConfigError> {
-                unreachable!()
-            }
-
-            fn update_projects(
-                &self,
-                update: &mut dyn FnMut(Vec<Project>) -> Vec<Project>,
-            ) -> Result<(), ConfigError> {
-                *self.update_projects_called.borrow_mut() = true;
-                // Delegate to default logic so the insertion actually runs.
-                let projects = self.projects()?;
-                self.save(&update(projects))
-            }
-        }
-
-        let dir = temp_dir("atomic");
-        let config_path = crate::adapter::path::absolutize(&dir.join(WORKSPACE_FILE_NAME));
-        let registry = TrackingRegistry::default();
-
-        register_folder(project_name(&dir).unwrap(), &config_path, &registry).unwrap();
-
-        assert!(
-            *registry.update_projects_called.borrow(),
-            "register_folder must call update_projects"
-        );
-        assert!(
-            registry.saved_projects.borrow().is_some(),
-            "project was saved"
-        );
-        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -1,16 +1,33 @@
-use std::path::PathBuf;
+use std::{error::Error, fmt::Display, str::FromStr, sync::LazyLock};
 
 use clap::{
-    Parser, Subcommand,
-    builder::styling::{AnsiColor, Styles},
+    Command as ClapCommand, CommandFactory, Parser,
+    builder::{
+        PossibleValuesParser, TypedValueParser,
+        styling::{AnsiColor, Styles},
+    },
 };
+use clap_complete::{ArgValueCandidates, CompletionCandidate};
+use getset::Getters;
+use strum::IntoEnumIterator;
 
-use super::{completions::CompletionShell, run::RunArgs};
+use super::{cli_ports::CliPorts, command::Command};
 use crate::{
+    adapter::{
+        holder::{LineLimit, MAX_LOG_LINES},
+        sanitize::printable,
+        service::StateGoal,
+    },
     constants::APP_NAME,
-    domain::{coordination::TodoStatus, process::AgentTool},
+    domain::{
+        config::SettingKey,
+        process::{RestartPolicy, StopSignal},
+        value::{PositiveDuration, StopGrace},
+    },
 };
 
+/// The id of the global `--project` argument.
+const PROJECT_ARG: &str = "project";
 /// Help styling matching the CLI's report palette: cyan structure, green
 /// literals, yellow placeholders.
 const HELP_STYLES: Styles = Styles::styled()
@@ -19,237 +36,161 @@ const HELP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Yellow.on_default());
 
-/// Command-line arguments. With no subcommand, muster launches its TUI.
-#[derive(Parser)]
+/// What the main help says after the commands: the exit codes and the JSON
+/// conventions every command keeps. Tests pin the codes to
+/// [`CliExit`](super::CliExit) and to the README's table.
+const AFTER_HELP: &str = "\
+Exit codes:
+    0  success
+    1  a process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds)
+    2  the command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled
+    3  the muster service is unavailable or runs a newer version
+    4  an invalid value: not a project, an unknown project or process, a refused argument, or an unusable file
+  130  interrupted with Ctrl-C while it waited at a terminal
+
+With --json, results and failures print as JSON on stdout. Object keys are
+snake_case, enum values are kebab-case, durations are seconds, and times are
+RFC 3339 in UTC.";
+
+/// What `muster logs --lines` takes, followed by its maximum.
+const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";
+/// The `muster logs` flags that print the whole raw log or follow it, which
+/// a filtered read conflicts with.
+pub(super) const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
+
+/// The names `config` accepts for a setting.
+pub(super) static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
+/// The names `--restart` accepts.
+static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<RestartPolicy>);
+/// The names `--stop-signal` accepts.
+static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopSignal>);
+/// The names `muster wait --state` accepts.
+static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateGoal>);
+
+/// The kebab-case name of each variant of `T`.
+fn variant_names<T: IntoEnumIterator + Display>() -> Vec<String> {
+    T::iter().map(|variant| variant.to_string()).collect()
+}
+
+/// Parses one of `names` into `T`, listing them all in help and on a typo.
+pub(super) fn one_of<T>(names: &'static [String]) -> impl TypedValueParser<Value = T>
+where
+    T: FromStr + Clone + Send + Sync + 'static,
+    T::Err: Error + Send + Sync + 'static,
+{
+    PossibleValuesParser::new(names.iter().map(String::as_str)).try_map(|raw| raw.parse::<T>())
+}
+
+/// Parses a `--restart` policy.
+pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
+    one_of(&RESTART_POLICIES)
+}
+
+/// Parses a `--stop-signal`.
+pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> {
+    one_of(&STOP_SIGNALS)
+}
+
+/// Parses a `muster wait --state`.
+pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
+    one_of(&STATE_GOALS)
+}
+
+/// Parses a positive duration such as `5s` or `1m 30s`.
+///
+/// # Errors
+/// Returns the parse failure of anything else.
+pub(super) fn positive_duration(raw: &str) -> Result<PositiveDuration, String> {
+    raw.parse::<PositiveDuration>()
+        .map_err(|error| error.to_string())
+}
+
+/// Parses a stop grace such as `5s`, at most an hour.
+///
+/// # Errors
+/// Returns the parse failure of anything else.
+pub(super) fn stop_grace(raw: &str) -> Result<StopGrace, String> {
+    raw.parse::<StopGrace>().map_err(|error| error.to_string())
+}
+
+/// Parses a `muster logs --lines`: a whole number from 1 to
+/// [`MAX_LOG_LINES`].
+///
+/// # Errors
+/// Returns the form expected for anything else.
+pub(super) fn line_limit(raw: &str) -> Result<LineLimit, String> {
+    raw.trim()
+        .parse()
+        .ok()
+        .and_then(|lines| LineLimit::try_new(lines).ok())
+        .ok_or_else(|| format!("{LINE_LIMIT_FORM}{MAX_LOG_LINES}"))
+}
+
+/// The command line's definition, with `--project` completing the projects
+/// `ports` has registered.
+pub(super) fn completing_command(ports: &'static dyn CliPorts) -> ClapCommand {
+    Args::command().mut_arg(PROJECT_ARG, |arg| {
+        arg.add(ArgValueCandidates::new(move || project_candidates(ports)))
+    })
+}
+
+/// Shell-completion candidates for `--project`: the registered projects'
+/// names, read fresh each time so a new project completes at once, each made
+/// [`printable`] so the shell never echoes a terminal sequence. Reads an
+/// existing database read-only and never creates one.
+fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
+    ports
+        .existing_state()
+        .ok()
+        .flatten()
+        .and_then(|state| state.projects().ok())
+        .unwrap_or_default()
+        .iter()
+        .map(|project| CompletionCandidate::new(printable(project.name().as_ref())))
+        .collect()
+}
+
+/// Command-line arguments. With no subcommand, muster prints `ps` for the
+/// current project, or every loaded project outside one.
+#[derive(Parser, Getters)]
 #[command(
     name = APP_NAME,
     bin_name = APP_NAME,
     version,
-    about = "A terminal workspace for running CLI agents and dev processes",
+    about = "Run a project's dev processes in the background, and control them from any shell",
+    after_help = AFTER_HELP,
     styles = HELP_STYLES
 )]
 pub struct Args {
-    /// Path to the workspace config file. Global, so it is recognized before or
-    /// after a subcommand rather than being swallowed by `run`'s command args.
-    #[arg(short, long, global = true)]
-    pub config: Option<PathBuf>,
+    /// The project: a registered project's name, or a folder (a value with
+    /// `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then
+    /// the registered project containing the current folder.
+    // Global, so it is recognized before or after a subcommand rather than
+    // being swallowed by `run`'s command words.
+    #[arg(short, long, global = true, value_name = "PROJECT")]
+    #[getset(get = "pub")]
+    project: Option<String>,
+    /// The command to run; none prints `ps`.
     #[command(subcommand)]
-    pub command: Option<Command>,
+    command: Option<Command>,
 }
 
-/// Subcommands. Absent, muster runs the TUI.
-#[derive(Subcommand)]
-pub enum Command {
-    /// Create a starter muster.yml here and register this folder as a project.
-    Init,
-    /// Validate the workspace config and exit non-zero on problems.
-    Check,
-    /// Register a command in a project, then run it.
-    Run(RunArgs),
-    /// List registered projects, or add and remove them.
-    Projects {
-        #[command(subcommand)]
-        command: Option<ProjectsCommand>,
-    },
-    /// Read or write shared scratchpad notes for the current project.
-    Note {
-        #[command(subcommand)]
-        command: Option<NoteCommand>,
-    },
-    /// List or manage the current project's shared todos.
-    Todo {
-        #[command(subcommand)]
-        command: Option<TodoCommand>,
-    },
-    /// Read or write the current project's shared key-value state.
-    Kv {
-        #[command(subcommand)]
-        command: Option<KvCommand>,
-    },
-    /// Export or restore this project's coordination state as portable YAML.
-    Coordination {
-        #[command(subcommand)]
-        command: CoordinationCommand,
-    },
-    /// Serve this project's coordination state to agents as an MCP server over
-    /// stdio (spawned as a child process by a connecting agent).
-    Mcp {
-        /// Print the JSON config snippet to add muster to an agent's MCP servers,
-        /// then exit instead of serving.
-        #[arg(long)]
-        print_config: bool,
-        /// Identity this server stamps on coordination writes (the connecting
-        /// agent's name), so entries are attributable. Defaults to a generic
-        /// agent label.
-        #[arg(long = "as", value_name = "NAME")]
-        author: Option<String>,
-    },
-    /// Install provider integrations used to preserve native agent sessions.
-    Hooks {
-        #[command(subcommand)]
-        command: HooksCommand,
-    },
-    /// Diagnose config, projects, sessions, hooks, clipboard, and completions.
-    Doctor,
-    /// Print the shell hook that enables completions.
-    Completions {
-        /// Shell to print the hook for.
-        #[arg(value_enum)]
-        shell: CompletionShell,
-    },
-    /// Internal provider-hook receiver.
-    #[command(hide = true)]
-    Hook {
-        #[command(subcommand)]
-        command: InternalHookCommand,
-    },
-}
-
-/// Registry management actions under `muster projects`.
-#[derive(Subcommand)]
-pub enum ProjectsCommand {
-    /// Register an existing folder containing a muster.yml.
-    Add {
-        /// Folder to register (defaults to the current directory).
-        path: Option<PathBuf>,
-    },
-    /// Unregister a project by name; files on disk are untouched.
-    Remove {
-        /// Registered project name.
-        name: String,
-    },
-}
-
-/// Scratchpad actions under `muster note`. Absent, notes are listed.
-#[derive(Subcommand)]
-pub enum NoteCommand {
-    /// Print a note's body by key.
-    Get {
-        /// Note key.
-        key: String,
-    },
-    /// Create or replace a note.
-    Set {
-        /// Note key.
-        key: String,
-        /// Markdown body.
-        body: String,
-    },
-    /// Delete a note by key.
-    Rm {
-        /// Note key.
-        key: String,
-    },
-}
-
-/// Todo actions under `muster todo`. Absent, todos are listed.
-#[derive(Subcommand)]
-pub enum TodoCommand {
-    /// Add a new pending todo.
-    Add {
-        /// What the task is.
-        title: String,
-        /// Id of a todo this one depends on (repeatable).
-        #[arg(long = "dep")]
-        deps: Vec<String>,
-    },
-    /// Set a todo's status: pending, in-progress, or done.
-    Status {
-        /// Todo id.
-        id: String,
-        /// New status.
-        status: TodoStatus,
-    },
-    /// Delete a todo by id.
-    Rm {
-        /// Todo id.
-        id: String,
-    },
-}
-
-/// Key-value actions under `muster kv`. Absent, entries are listed.
-#[derive(Subcommand)]
-pub enum KvCommand {
-    /// Print a value by key.
-    Get {
-        /// Entry key.
-        key: String,
-    },
-    /// Create or replace a value.
-    Set {
-        /// Entry key.
-        key: String,
-        /// Value to store.
-        value: String,
-    },
-    /// Delete an entry by key.
-    Rm {
-        /// Entry key.
-        key: String,
-    },
-}
-
-/// Snapshot actions under `muster coordination`.
-#[derive(Subcommand)]
-pub enum CoordinationCommand {
-    /// Write this project's scratchpads, todos, and key-values to a YAML file.
-    Export {
-        /// File to write.
-        file: PathBuf,
-    },
-    /// Restore entries from a YAML file, preserving ids, authors, and timestamps.
-    /// Entries merge; those absent from the file are left alone.
-    Import {
-        /// File to read.
-        file: PathBuf,
-    },
-}
-
-/// User-facing lifecycle-integration commands.
-#[derive(Subcommand)]
-pub enum HooksCommand {
-    /// Install idempotent session-ID hooks/plugins for supported agents.
-    Setup,
-}
-
-/// Commands invoked by installed provider integrations.
-#[derive(Subcommand)]
-pub enum InternalHookCommand {
-    /// Capture a provider session ID from JSON on standard input.
-    Capture {
-        /// Provider integration that emitted this lifecycle event.
-        #[arg(long)]
-        provider: AgentTool,
-        /// Parent provider process that invoked the capture hook.
-        #[arg(long)]
-        process_id: u32,
-        /// Parent of the provider process, when the provider was launched by a shell wrapper.
-        #[arg(long)]
-        parent_process_id: Option<u32>,
-    },
-    /// Bind a durable session to this process, then start its provider command.
-    Launch {
-        /// Stable Muster identity of the session being launched.
-        #[arg(long)]
-        session: String,
-        /// Original provider command, preserved as one shell expression.
-        #[arg(last = true, allow_hyphen_values = true)]
-        command: String,
-    },
+impl Args {
+    /// The command to run, taken out of the arguments to be dispatched.
+    pub fn into_command(self) -> Option<Command> {
+        self.command
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
+    use crate::adapter::{holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND};
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.
     #[test]
     fn the_command_is_named_after_the_binary() {
-        use clap::CommandFactory;
-
         assert_eq!(Args::command().get_name(), APP_NAME);
         assert_eq!(Args::command().get_bin_name(), Some(APP_NAME));
         assert_eq!(
@@ -259,15 +200,195 @@ mod tests {
         );
     }
 
-    /// The global config flag parses before and after a subcommand.
+    /// Appends the help of `command`, invoked as `invocation`, and of each of
+    /// its visible subcommands to `helps`.
+    fn collect_help(command: &mut ClapCommand, invocation: &str, helps: &mut Vec<String>) {
+        helps.push(format!("$ {invocation} --help\n{}", command.render_help()));
+        for sub in command
+            .get_subcommands_mut()
+            .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+        {
+            let invocation = format!("{invocation} {}", sub.get_name());
+            collect_help(sub, &invocation, helps);
+        }
+    }
+
+    /// Every visible command's help, so a changed flag, name or description
+    /// shows up in review.
     #[test]
-    fn global_config_flag_parses_anywhere() {
-        let before = Args::try_parse_from(["muster", "-c", "x.yml", "run", "--", "ls"]).unwrap();
-        assert_eq!(
-            before.config.as_deref(),
-            Some(std::path::Path::new("x.yml"))
+    fn cli_args_snapshot() {
+        let mut command = Args::command();
+        command.build();
+        let mut helps = Vec::new();
+        collect_help(&mut command, APP_NAME, &mut helps);
+
+        insta::assert_snapshot!(helps.join("\n\n"));
+    }
+
+    /// clap's own consistency checks pass for every command.
+    #[test]
+    fn the_command_line_is_consistent() {
+        Args::command().debug_assert();
+    }
+
+    /// A name with spaces or an accent reaches a lifecycle command whole and
+    /// in normal form C.
+    #[test]
+    fn names_with_spaces_and_unicode_parse_as_one_argument() {
+        let args = Args::try_parse_from(["muster", "stop", "dev server", "--json"]).unwrap();
+        let Some(Command::Stop(stop)) = args.command else {
+            panic!("stop parses");
+        };
+        assert!(stop.json());
+        assert_eq!(stop.name().as_ref().map(AsRef::as_ref), Some("dev server"));
+        let args = Args::try_parse_from(["muster", "logs", "cafe\u{301}", "-f"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Logs { name: Some(name), follow: true, .. }) if name.as_ref() == "caf\u{e9}"
+        ));
+        assert!(Args::try_parse_from(["muster", "start", "  "]).is_err());
+        assert!(Args::try_parse_from(["muster", "logs", "api", "-f", "--screen"]).is_err());
+    }
+
+    /// A lifecycle, log or attach command may leave its name out, to be
+    /// chosen from a list; `down` takes no agent flags any more.
+    #[test]
+    fn a_name_may_be_left_to_choose() {
+        for command in ["start", "stop", "restart", "logs", "attach"] {
+            assert!(
+                Args::try_parse_from(["muster", command]).is_ok(),
+                "{command}"
+            );
+        }
+        assert!(Args::try_parse_from(["muster", "down", "--agents"]).is_err());
+        assert!(Args::try_parse_from(["muster", "rm"]).is_err());
+    }
+
+    /// `add` takes its command after `--` and the shared process flags;
+    /// `set` takes the command as a flag or after `--`, never both.
+    #[test]
+    fn add_and_set_parse_their_definitions() {
+        let args = Args::try_parse_from([
+            "muster",
+            "add",
+            "web",
+            "--env",
+            "PORT=5173",
+            "--restart",
+            "on-failure",
+            "--stop-grace",
+            "10s",
+            "--no-autostart",
+            "--",
+            "npm",
+            "run",
+            "dev",
+        ])
+        .unwrap();
+        let Some(Command::Add(add)) = args.command else {
+            panic!("add parses");
+        };
+        assert_eq!(add.name(), "web");
+        assert_eq!(add.command(), &["npm", "run", "dev"]);
+        assert_eq!(add.flags().restart(), Some(RestartPolicy::OnFailure));
+        assert_eq!(add.flags().autostart(), Some(false));
+        assert!(Args::try_parse_from(["muster", "add", "web"]).is_err());
+        assert!(
+            Args::try_parse_from(["muster", "add", "web", "--restart", "sometimes", "--", "x"])
+                .is_err()
         );
+        assert!(
+            Args::try_parse_from(["muster", "set", "web", "--command", "a", "--", "b"]).is_err()
+        );
+        assert!(Args::try_parse_from(["muster", "set", "web", "--cwd", "x", "--no-cwd"]).is_err());
+    }
+
+    /// A misspelt setting lists every valid key; `config` alone lists them.
+    #[test]
+    fn config_keys_are_listed_on_a_typo() {
+        let error = match Args::try_parse_from(["muster", "config", "get", "detach_key"]) {
+            Err(error) => error.render().to_string(),
+            Ok(_) => panic!("a typo parses"),
+        };
+        for key in SettingKey::iter() {
+            assert!(error.contains(&key.to_string()), "{error}");
+        }
+        let args = Args::try_parse_from(["muster", "config", "--json"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Config {
+                command: None,
+                json: true
+            })
+        ));
+    }
+
+    /// `import` takes one of `--merge` and `--replace`, not both.
+    #[test]
+    fn import_modes_exclude_each_other() {
+        assert!(Args::try_parse_from(["muster", "import", "--merge", "--replace"]).is_err());
+        assert!(Args::try_parse_from(["muster", "import", "-", "--replace", "--dry-run"]).is_ok());
+    }
+
+    /// The exit codes the help documents are the ones commands exit with.
+    #[test]
+    fn the_documented_exit_codes_match() {
+        use crate::adapter::cli::CliExit;
+
+        for exit in CliExit::iter() {
+            assert!(
+                AFTER_HELP.contains(&format!("\n{:>5}  ", exit.code())),
+                "{exit:?} is documented, aligned with the others"
+            );
+        }
+        assert_eq!(
+            AFTER_HELP.matches("\n  ").count(),
+            CliExit::iter().count(),
+            "no undocumented code is listed"
+        );
+    }
+
+    /// The README's exit code table says what the help says, code for code.
+    #[test]
+    fn the_readme_documents_the_same_exit_codes() {
+        let readme = include_str!("../../../README.md");
+
+        for line in AFTER_HELP.lines().filter(|line| line.starts_with("  ")) {
+            let (code, meaning) = line.trim_start().split_once("  ").unwrap();
+            let mut letters = meaning.chars();
+            let first = letters.next().unwrap().to_uppercase();
+            let row = format!("| {code} | {first}{} |", letters.as_str());
+            assert!(readme.contains(&row), "the README lacks {row}");
+        }
+    }
+
+    /// The global project flag parses before and after a subcommand, and is
+    /// not swallowed by `run`'s command words.
+    #[test]
+    fn the_project_flag_parses_anywhere() {
+        let before = Args::try_parse_from(["muster", "-p", "shop", "run", "--", "ls"]).unwrap();
+        assert_eq!(before.project.as_deref(), Some("shop"));
+        let after = Args::try_parse_from(["muster", "ps", "--project", "./web"]).unwrap();
+        assert_eq!(after.project.as_deref(), Some("./web"));
         let bare = Args::try_parse_from(["muster"]).unwrap();
         assert!(bare.command.is_none());
+    }
+
+    /// The hidden holder entry point takes its spec from its own `--spec`.
+    #[test]
+    fn the_holder_command_reads_its_spec_path() {
+        let args =
+            Args::try_parse_from(["muster", HOLDER_SUBCOMMAND, "--spec", "/run/holder.json"])
+                .unwrap();
+
+        assert!(matches!(
+            args.command,
+            Some(Command::Holder { spec }) if spec.as_os_str() == "/run/holder.json"
+        ));
+        assert_eq!(args.project, None);
+        assert!(matches!(
+            Args::try_parse_from(["muster", SERVICE_SUBCOMMAND]).map(|args| args.command),
+            Ok(Some(Command::RunService))
+        ));
     }
 }

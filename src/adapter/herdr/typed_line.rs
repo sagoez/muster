@@ -1,7 +1,8 @@
 use std::{ffi::OsString, iter};
 
 use crate::{
-    constants::MUSTER_OPEN_ARG_PREFIX as ARG_ENV_PREFIX, domain::terminal_workspace::PaneCommand,
+    constants::{MUSTER_OPEN_ARG_PREFIX as ARG_ENV_PREFIX, MUSTER_OPEN_PROGRAM_ENV},
+    domain::terminal_workspace::PaneCommand,
 };
 
 /// Leads the line, which keeps it out of the history of a shell that skips
@@ -38,9 +39,9 @@ pub(super) fn typed_line(command: &PaneCommand) -> (Vec<(String, OsString)>, Str
         .iter()
         .map(|(name, _)| format!("{REFERENCE_OPEN}{name}{REFERENCE_CLOSE}"))
         .collect();
-    let program = &references[0];
     let line = format!(
-        "{HISTORY_SKIP}{GUARD_OPEN}{program}{GUARD_CLOSE}{}{EXIT_ON_SUCCESS}",
+        "{HISTORY_SKIP}{GUARD_OPEN}{REFERENCE_OPEN}{MUSTER_OPEN_PROGRAM_ENV}{REFERENCE_CLOSE}\
+         {GUARD_CLOSE}{}{EXIT_ON_SUCCESS}",
         references.join(WORD_SEPARATOR)
     );
     (env, line)
@@ -51,7 +52,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::constants::MUSTER_OPEN_PROGRAM_ENV;
 
     /// A command whose words would each break a typed shell line.
     fn hostile() -> PaneCommand {

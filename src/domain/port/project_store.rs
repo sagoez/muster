@@ -42,7 +42,11 @@ pub trait ProjectStore {
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be read.
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError>;
+    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
+        Ok(self
+            .registered_project_containing(dir)?
+            .map(|found| found.project().clone()))
+    }
 
     /// The project [`ProjectStore::project_containing`] finds for `dir`,
     /// with when it was registered, read with it.

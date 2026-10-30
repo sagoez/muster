@@ -43,26 +43,22 @@ impl ProjectStore for FixedProjects {
             .cloned())
     }
 
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
-        Ok(self
-            .0
-            .iter()
-            .filter(|project| project.root().contains(dir))
-            .max_by_key(|project| project.root().as_ref().components().count())
-            .cloned())
-    }
-
     /// Every fixed project was registered at the epoch.
     fn registered_project_containing(
         &self,
         dir: &Path,
     ) -> Result<Option<RegisteredProject>, ConfigError> {
-        Ok(self.project_containing(dir)?.map(|project| {
-            RegisteredProject::builder()
-                .project(project)
-                .registered(Some(EpochNanos::new(0)))
-                .build()
-        }))
+        Ok(self
+            .0
+            .iter()
+            .filter(|project| project.root().contains(dir))
+            .max_by_key(|project| project.root().as_ref().components().count())
+            .map(|project| {
+                RegisteredProject::builder()
+                    .project(project.clone())
+                    .registered(Some(EpochNanos::new(0)))
+                    .build()
+            }))
     }
 
     fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {

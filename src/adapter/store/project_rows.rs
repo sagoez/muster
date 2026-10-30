@@ -329,12 +329,6 @@ impl ProjectStore for SqliteStore {
         })
     }
 
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
-        Ok(self
-            .registered_project_containing(dir)?
-            .map(|found| found.project().clone()))
-    }
-
     /// One query reads the projects and their registration times; a time
     /// that does not read leaves its project readable, registered at no
     /// known moment.

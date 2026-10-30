@@ -223,7 +223,8 @@ impl Supervisor {
     /// Settles an adoption a worker finished on the loop: supervises the
     /// holder, or leaves its child unsupervised when it still runs. A result
     /// a later action superseded is never installed; its process is detached
-    /// when a shutdown superseded it and stopped otherwise.
+    /// when a shutdown superseded it and stopped otherwise. The waits held on
+    /// it then go on to scan its log.
     pub fn handle_adopted(
         &mut self,
         pane: PaneId,
@@ -232,6 +233,7 @@ impl Supervisor {
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     ) {
         self.settle_adoption(pane, generation, record, result);
+        self.release_adoption_waits();
     }
 
     /// Reconnects to the holder of `pane`'s process after its output stream
@@ -1230,6 +1232,60 @@ mod tests {
         assert_eq!(
             *outcome.matched().clone().unwrap().at(),
             OutputCursor::new(0)
+        );
+    }
+
+    /// A wait from a cursor asked while its process is still being adopted
+    /// is held until the adoption settles, then scans the log from that
+    /// cursor, so a line the replay never forwards, as this one replays
+    /// nothing, still matches it at its offset.
+    #[test]
+    fn a_wait_asked_mid_adoption_sees_the_whole_replay_range_from_its_cursor() {
+        let mut harness = logging(
+            vec![logged_line(0, "booting"), logged_line(8, "compiled")],
+            true,
+        );
+        harness.supervisor_mut().adopt(record("p"));
+
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        assert!(waited(&answers).is_none(), "held while the adoption runs");
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        assert!(waited(&answers).is_none(), "held while its log is scanned");
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+
+        let outcome = waited(&answers).expect("the logged line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        let matched = outcome.matched().clone().unwrap();
+        assert_eq!(*matched.at(), OutputCursor::new(8));
+        assert_eq!(matched.line(), "compiled");
+        assert_eq!(*outcome.scanned_from(), None);
+    }
+
+    /// A wait held on an adoption that does not settle within the wait's
+    /// own timeout is refused, saying so.
+    #[test]
+    fn a_wait_held_on_an_adoption_that_never_settles_is_refused_at_its_timeout() {
+        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+
+        harness
+            .supervisor_mut()
+            .settle_waits(Instant::now() + RESPAWN_WAIT);
+
+        let Ok(ServiceResponse::Error(refused)) = answers.try_recv() else {
+            panic!("the held wait is refused");
+        };
+        assert!(
+            refused.message().contains("adoption did not settle"),
+            "{}",
+            refused.message()
         );
     }
 

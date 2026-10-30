@@ -45,6 +45,9 @@ const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
 /// Why a wait held on a scan of its log from its cursor is refused once the
 /// read is overdue, before the timeout.
 const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
+/// Why a wait held on its process's adoption is refused once its timeout
+/// passes first, before the timeout.
+const ADOPTION_OVERDUE: &str = "its adoption did not settle within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
 
@@ -182,16 +185,52 @@ impl Supervisor {
     /// Registers `prepared`, or, when its cursor is older than every line its
     /// process's tap holds, as after an adoption, holds it while the log from
     /// that cursor up to the tap is scanned off the loop, so no line from
-    /// the cursor on is missed.
+    /// the cursor on is missed. One asked while its process is being adopted
+    /// is held until the adoption settles, since the replay then forwards
+    /// only some lines from only part of that range.
     fn register_or_scan(
         &mut self,
         prepared: PreparedWait,
         after: Option<SpawnGeneration>,
         reply: Sender<ServiceResponse>,
     ) {
+        if self.awaits_adoption(&prepared, after) {
+            self.push_held(prepared, after, reply, None, true);
+            return;
+        }
         match self.scan_for(&prepared, after) {
             Some(scan) => self.hold_wait(prepared, after, reply, Some(scan)),
             None => self.register(prepared, after, WaitReply::Direct(reply)),
+        }
+    }
+
+    /// Whether `prepared`, a log wait on every run from now with a cursor,
+    /// must wait for the adoption of its process in flight to settle before
+    /// its log can be scanned from that cursor.
+    fn awaits_adoption(&self, prepared: &PreparedWait, after: Option<SpawnGeneration>) -> bool {
+        let pane = prepared.pane;
+        self.adopter.is_some()
+            && after.is_none()
+            && prepared.matcher.is_some()
+            && prepared.since.is_some()
+            && self.is_starting(pane)
+            && !self.is_spawning(pane)
+    }
+
+    /// Lets go of each wait held on an adoption that has settled since, or
+    /// was dropped, beginning it afresh so its log is scanned from its
+    /// cursor.
+    pub(super) fn release_adoption_waits(&mut self) {
+        let mut released = Vec::new();
+        for (pane, waits) in &mut self.held_waits {
+            if self.launches.is_starting(*pane) {
+                continue;
+            }
+            released.extend(waits.extract_if(.., |held| held.adopting));
+        }
+        self.held_waits.retain(|_, waits| !waits.is_empty());
+        for held in released {
+            self.begin_wait(held.prepared, held.after, held.reply);
         }
     }
 
@@ -248,24 +287,46 @@ impl Supervisor {
         scan: Option<HeldScan>,
     ) {
         let pane = prepared.pane;
+        self.push_held(prepared, after, reply, scan, false);
+        self.read_log(pane);
+    }
+
+    /// Keeps `prepared` held, on `scan` or the log's end, or on its
+    /// process's adoption when `adopting`, which holds it as long as its own
+    /// timeout rather than [`LOG_TAIL_TIMEOUT`].
+    fn push_held(
+        &mut self,
+        prepared: PreparedWait,
+        after: Option<SpawnGeneration>,
+        reply: Sender<ServiceResponse>,
+        scan: Option<HeldScan>,
+        adopting: bool,
+    ) {
+        let pane = prepared.pane;
         let held_at = Instant::now();
+        let bound = if adopting {
+            prepared.timeout
+        } else {
+            LOG_TAIL_TIMEOUT
+        };
         let key = self.next_ask_key();
         self.held_waits.entry(pane).or_default().push(HeldWait {
             prepared,
             after,
             reply,
             held_at,
-            deadline: held_at + LOG_TAIL_TIMEOUT,
+            deadline: held_at + bound,
             key,
             scan,
+            adopting,
             read: None,
         });
-        self.read_log(pane);
     }
 
     /// Refuses each wait held on a log read past its deadline, so a log that
-    /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`]. The read
-    /// itself stays in flight, and later waits on the log's end join it.
+    /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`], nor an
+    /// adoption that does not settle past its own timeout. The read itself
+    /// stays in flight, and later waits on the log's end join it.
     fn refuse_overdue_held_waits(&mut self, now: Instant) {
         let mut overdue = Vec::new();
         for waits in self.held_waits.values_mut() {
@@ -273,10 +334,10 @@ impl Supervisor {
         }
         self.held_waits.retain(|_, waits| !waits.is_empty());
         for held in overdue {
-            let why = if held.scan.is_some() {
-                LOG_SCAN_OVERDUE
-            } else {
-                LOG_TAIL_OVERDUE
+            let (why, bound) = match (&held.scan, held.adopting) {
+                (_, true) => (ADOPTION_OVERDUE, held.prepared.timeout),
+                (Some(_), false) => (LOG_SCAN_OVERDUE, LOG_TAIL_TIMEOUT),
+                (None, false) => (LOG_TAIL_OVERDUE, LOG_TAIL_TIMEOUT),
             };
             let _ = held.reply.send(ServiceResponse::Error(
                 ServiceErrorBody::builder()
@@ -284,7 +345,7 @@ impl Supervisor {
                     .message(format!(
                         "{}: {why} {}",
                         held.prepared.process,
-                        humantime::format_duration(LOG_TAIL_TIMEOUT)
+                        humantime::format_duration(bound)
                     ))
                     .build(),
             ));
@@ -303,7 +364,9 @@ impl Supervisor {
         let Some(waits) = self.held_waits.get_mut(&pane) else {
             return;
         };
-        let held: Vec<HeldWait> = waits.extract_if(.., |held| held.scan.is_none()).collect();
+        let held: Vec<HeldWait> = waits
+            .extract_if(.., |held| held.scan.is_none() && !held.adopting)
+            .collect();
         if waits.is_empty() {
             self.held_waits.remove(&pane);
         }
@@ -347,7 +410,9 @@ impl Supervisor {
     /// Answers the waits held on `pane` that count `generation`, or all of
     /// them when none is given, as [`Self::end_waits`] answers registered
     /// ones. A wait held on a scan of its log is not answered when its run
-    /// ends: it keeps how, so a line the scan finds still matches it.
+    /// ends: it keeps how, so a line the scan finds still matches it. One
+    /// held on its process's adoption is begun afresh once that settles, so
+    /// it is answered then, from its log.
     fn end_held_waits(
         &mut self,
         pane: PaneId,
@@ -372,6 +437,7 @@ impl Supervisor {
             .extract_if(.., |held| match (generation, &held.scan) {
                 (None, _) => true,
                 (Some(_), Some(_)) => false,
+                (Some(_), None) if held.adopting => false,
                 (Some(generation), None) => held
                     .after
                     .is_none_or(|after| RunPin::After(after).counts(generation)),
@@ -508,11 +574,13 @@ impl Supervisor {
             .map(|target| target.started_at() + QUICK_EXIT_WINDOW)
     }
 
-    /// Times out the readiness checks, waits, held waits and held answers
-    /// whose deadline passed, and answers every wait whose state or
-    /// readiness condition now holds. The host runs it after each event it
-    /// hands the supervisor.
+    /// Lets go of the waits held on adoptions no longer in flight, times out
+    /// the readiness checks, waits, held waits and held answers whose
+    /// deadline passed, and answers every wait whose state or readiness
+    /// condition now holds. The host runs it after each event it hands the
+    /// supervisor.
     pub fn settle_waits(&mut self, now: Instant) {
+        self.release_adoption_waits();
         self.refuse_overdue_held_waits(now);
         self.send_overdue_answers(now);
         let expired: Vec<PaneId> = self

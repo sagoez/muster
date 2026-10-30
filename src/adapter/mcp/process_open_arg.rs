@@ -26,8 +26,9 @@ pub struct ProcessOpenArg {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     read_only: Option<bool>,
-    /// Which side of your pane it opens on: <split-directions>. Defaults to
-    /// the longer side of your pane.
+    /// Which side of your pane it opens on: <split-directions>. Without it,
+    /// right when the pane is wider than tall and each half keeps at least
+    /// <split-min-half-cols> columns, and down otherwise.
     #[builder(default)]
     direction: Option<String>,
 }

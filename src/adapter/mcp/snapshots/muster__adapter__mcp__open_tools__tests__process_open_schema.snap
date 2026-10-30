@@ -1,6 +1,6 @@
 ---
 source: src/adapter/mcp/open_tools.rs
-assertion_line: 433
+assertion_line: 596
 expression: "serde_json::to_string_pretty(&Value::Object(tool.input_schema.as_ref().clone())).unwrap()"
 ---
 {
@@ -8,7 +8,7 @@ expression: "serde_json::to_string_pretty(&Value::Object(tool.input_schema.as_re
   "additionalProperties": false,
   "properties": {
     "direction": {
-      "description": "Which side of your pane it opens on: right, down. Defaults to\nthe longer side of your pane.",
+      "description": "Which side of your pane it opens on: right, down. Without it,\nright when the pane is wider than tall and each half keeps at least\n40 columns, and down otherwise.",
       "type": [
         "string",
         "null"

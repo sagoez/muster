@@ -93,9 +93,9 @@ you at the CLI.
 ## herdr
 
 From a herdr pane, `muster open web` splits a new pane, focuses it and attaches
-to `web`. Detaching closes the pane. Without `--direction right|down` it
-splits to the right when the pane is wider than tall and each half keeps at
-least 40 columns, and downward otherwise. If herdr cannot be reached, `open`
+to `web`. Detaching closes the pane. Without `--direction right|down`, it
+splits right when the pane is wider than tall and each half keeps at least 40
+columns, and down otherwise. If herdr cannot be reached, `open`
 fails with herdr's message and points you at `muster attach`; over MCP,
 `process_open` answers `workspace-failed`. Outside herdr, `muster open` is
 `muster attach`.

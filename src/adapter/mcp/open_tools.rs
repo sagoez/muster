@@ -43,7 +43,8 @@ impl MusterMcp {
         description = "Show a running process to the user in a new pane beside yours in the \
             terminal workspace you run in, attached to it, without taking the \
             user's focus. read_only=true opens it watch-only. direction is one of \
-            <split-directions>; without it the pane splits along its longer side. Returns \
+            <split-directions>; without it, right when the pane is wider than tall and each \
+            half keeps at least <split-min-half-cols> columns, and down otherwise. Returns \
             {project, process, pane, read_only, alerts}. The process is resolved first: an \
             unknown name is unknown-process with candidates, and a process that is not running \
             is not-running: start it first with process_start. Outside a terminal workspace, a \

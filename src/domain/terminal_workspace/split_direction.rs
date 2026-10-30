@@ -5,7 +5,7 @@ use crate::domain::value::{Cols, Rows};
 /// A terminal cell is about this many times as tall as it is wide.
 const CELL_ASPECT: u32 = 2;
 /// The narrowest a side-by-side half may be, in columns.
-const MIN_HALF_COLS: u32 = 40;
+pub const MIN_HALF_COLS: u32 = 40;
 /// The halves a side-by-side split makes.
 const HALVES: u32 = 2;
 
@@ -23,9 +23,9 @@ impl SplitDirection {
     /// The split for a pane whose size cannot be learned.
     pub const FOR_UNKNOWN_AREA: Self = Self::Down;
 
-    /// The split for a pane `cols` wide and `rows` tall: right when it looks
-    /// wider than tall and halves into two columns of at least
-    /// `MIN_HALF_COLS`, down otherwise.
+    /// The split for a pane `cols` wide and `rows` tall: right when the pane
+    /// is wider than tall and each half keeps at least `MIN_HALF_COLS`
+    /// columns, and down otherwise.
     pub fn for_area(cols: Cols, rows: Rows) -> Self {
         let (cols, rows) = (u32::from(cols.into_inner()), u32::from(rows.into_inner()));
         if cols >= rows * CELL_ASPECT && cols >= MIN_HALF_COLS * HALVES {

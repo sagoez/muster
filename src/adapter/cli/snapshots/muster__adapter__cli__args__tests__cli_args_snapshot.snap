@@ -254,7 +254,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>      The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
       --read-only              Watch without typing into the process or resizing it
-      --direction <DIRECTION>  Which side of this pane the new one opens on; without it, the pane splits along its longer side [possible values: right, down]
+      --direction <DIRECTION>  Which side of this pane the new one opens on; without it, right when the pane is wider than tall and each half keeps at least 40 columns, and down otherwise [possible values: right, down]
       --json                   Print the opened pane, or a refusal or failure, as JSON
   -h, --help                   Print help (see more with '--help')
 

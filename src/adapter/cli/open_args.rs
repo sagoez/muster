@@ -14,8 +14,9 @@ pub struct OpenArgs {
     #[arg(long)]
     #[getset(get_copy = "pub")]
     read_only: bool,
-    /// Which side of this pane the new one opens on; without it, the pane
-    /// splits along its longer side.
+    /// Which side of this pane the new one opens on; without it, right when
+    /// the pane is wider than tall and each half keeps at least 40 columns,
+    /// and down otherwise.
     #[arg(long, value_name = "DIRECTION", value_parser = split_direction_parser())]
     #[getset(get_copy = "pub")]
     direction: Option<SplitDirection>,

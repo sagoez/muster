@@ -294,9 +294,8 @@ screen at once, follows resizes and passes keys through. The detach key is
 
 `muster open <name>`, run from a herdr pane, opens a new pane beside it,
 focuses it and attaches there, leaving your pane as it was. `--direction
-right|down` picks the side. Without it the pane splits to the right when it is
-wider than tall and each half keeps at least 40 columns, and downward
-otherwise. Detaching closes the pane, and a failed attach leaves its message on
+right|down` picks the side. Without it, right when the pane is wider than tall
+and each half keeps at least 40 columns, and down otherwise. Detaching closes the pane, and a failed attach leaves its message on
 screen there. Only a running process opens.
 
 muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`

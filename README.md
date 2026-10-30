@@ -9,6 +9,8 @@ to yours.
 
 Beta. Linux and macOS.
 
+![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](docs/muster-demo.gif)
+
 ## Install
 
 You need a recent Rust toolchain.

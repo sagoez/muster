@@ -24,15 +24,13 @@ use muster::{
         shell::ShellFiles,
         store::SqliteStore,
     },
-    constants::MUSTER_SHELL_ENV,
     domain::{
         config::ConfigError,
-        occupancy::ShellId,
         port::{
             LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier,
             TerminalWorkspace,
         },
-        value::Pid,
+        value::{Pid, ProjectRoot},
     },
     error::MusterError,
 };
@@ -82,9 +80,7 @@ struct LocalPorts;
 
 impl CliPorts for LocalPorts {
     fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError> {
-        Ok(Arc::new(
-            SqliteStore::open_default()?.registering_for(registering_shell()),
-        ))
+        Ok(Arc::new(SqliteStore::open_default()?))
     }
 
     fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
@@ -102,6 +98,10 @@ impl CliPorts for LocalPorts {
 
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
         Ok(Arc::new(ShellFiles::under(&state_dir()?)))
+    }
+
+    fn hooked_shell_in(&self, root: &ProjectRoot) -> Option<Pid> {
+        cli::hooked_shell_in(root)
     }
 
     fn claim_state_dir(&self) -> bool {
@@ -137,15 +137,6 @@ impl ProjectPorts for LocalPorts {
     fn port_occupants(&self) -> Option<Box<dyn PortOccupants>> {
         Some(Box::new(OsPortOccupants::default()))
     }
-}
-
-/// The hooked shell this command runs from, as its hook exported it, while
-/// that shell still runs as it did: a project the command registers was
-/// registered around that shell, never entered by it.
-fn registering_shell() -> Option<ShellId> {
-    let pid = env::var(MUSTER_SHELL_ENV).ok()?.parse::<u32>().ok()?;
-    let pid = Pid::try_new(pid).ok()?;
-    ShellFiles::under(&state_dir().ok()?).identify(pid)
 }
 
 /// Serves muster to an agent over MCP on stdio, on this user's database and

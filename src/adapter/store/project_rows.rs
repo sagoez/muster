@@ -1,35 +1,31 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, Params, Row, params};
+use rusqlite::{Connection, Params, Row, params};
 
 use super::{
     idle_stop_refusal::IdleStopRefusal,
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
-    sqlite_store::{SqliteStore, column_integer, corrupt, db_error, nanos_from, nanos_param},
+    sqlite_store::{SqliteStore, corrupt, db_error, nanos_param},
 };
 use crate::{
     adapter::{clock::nanos_now, sanitize::printable},
     domain::{
         config::{ConfigError, Registration, UnreadableProject},
-        occupancy::{RegistrationOrigin, ShellId},
+        occupancy::RegisteredProject,
         port::ProjectStore,
         project::Project,
         value::{
-            IdleStop, Pid, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError, StartToken,
+            EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError,
         },
     },
 };
 
-/// Selects a project's row id, root, name and idle-stop columns.
-const SELECT_PROJECT: &str = "SELECT id, root, name, idle_stop_kind, idle_stop_ms FROM projects";
+/// Selects a project's row id, root, name, idle-stop columns and
+/// registration time.
+const SELECT_PROJECT: &str =
+    "SELECT id, root, name, idle_stop_kind, idle_stop_ms, registered_ns FROM projects";
 /// What an unreadable project's refusal calls it, before its folder.
 const PROJECT_AT: &str = "project at ";
-/// What a refusal of a stored registration time calls it.
-const REGISTERED_AT: &str = "project registration time";
-/// What a refusal of a stored registering shell calls it.
-const REGISTERED_BY: &str = "project registering shell";
-/// Why a registering shell with only one of its pid and start is refused.
-const REGISTRANT_HALF_SET: &str = "only one of its pid and start token is stored";
 /// Why a stored folder that is not absolute is refused.
 const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
 /// Why a blank stored name is refused.
@@ -135,13 +131,35 @@ fn stored_where(
     sql: &str,
     values: impl Params,
 ) -> Result<Vec<Result<ProjectRow, UnreadableProject>>, ConfigError> {
+    rows_where(conn, sql, values, project_from_row)
+}
+
+/// Every row `sql` selects with `values`, each as `read` reads it.
+///
+/// # Errors
+/// Returns a [`ConfigError`] when SQLite fails or `read` does.
+fn rows_where<T>(
+    conn: &Connection,
+    sql: &str,
+    values: impl Params,
+    read: impl Fn(&Row) -> Result<T, ConfigError>,
+) -> Result<Vec<T>, ConfigError> {
     let mut statement = conn.prepare(sql).map_err(db_error)?;
     let mut rows = statement.query(values).map_err(db_error)?;
-    let mut projects = Vec::new();
+    let mut read_rows = Vec::new();
     while let Some(row) = rows.next().map_err(db_error)? {
-        projects.push(project_from_row(row)?);
+        read_rows.push(read(row)?);
     }
-    Ok(projects)
+    Ok(read_rows)
+}
+
+/// When a `SELECT_PROJECT` row's project was registered, `None` when its
+/// stored time is no moment.
+fn registered_from_row(row: &Row) -> Option<EpochNanos> {
+    row.get::<_, i64>("registered_ns")
+        .ok()
+        .and_then(|nanos| u64::try_from(nanos).ok())
+        .map(EpochNanos::new)
 }
 
 /// Every project row `sql` selects with `values` that reads, the others
@@ -211,36 +229,11 @@ pub(super) fn require_project(
     })
 }
 
-/// The shell a project's registrant columns hold, if any.
-///
-/// # Errors
-/// Returns [`ConfigError::CorruptRow`] when only one column is set, or
-/// either holds what no process could.
-fn registrant_from(pid: Option<i64>, start: Option<i64>) -> Result<Option<ShellId>, ConfigError> {
-    let (pid, start) = match (pid, start) {
-        (None, None) => return Ok(None),
-        (Some(pid), Some(start)) => (pid, start),
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(corrupt(REGISTERED_BY, REGISTRANT_HALF_SET));
-        },
-    };
-    let pid = u32::try_from(pid)
-        .map_err(|error| corrupt(REGISTERED_BY, error))
-        .and_then(|pid| Pid::try_new(pid).map_err(|error| corrupt(REGISTERED_BY, error)))?;
-    let start = u64::try_from(start)
-        .map_err(|error| corrupt(REGISTERED_BY, error))
-        .and_then(|start| {
-            StartToken::try_new(start).map_err(|error| corrupt(REGISTERED_BY, error))
-        })?;
-    Ok(Some(ShellId::builder().pid(pid).start(start).build()))
-}
-
 /// The project at `root`, registering it first under the first free name
 /// [`ProjectName::candidates`] yields. Runs inside the caller's write
 /// transaction, so the name stays free, and no project is registered inside
 /// `root`, until it commits: of two folders registered at once, one inside
-/// the other, the outer one is refused whichever commits first. A project
-/// registered now records `registrant`, the hooked shell muster ran from.
+/// the other, the outer one is refused whichever commits first.
 ///
 /// # Errors
 /// Returns [`ConfigError::HoldsProject`] when a registered project lies
@@ -248,7 +241,6 @@ fn registrant_from(pid: Option<i64>, start: Option<i64>) -> Result<Option<ShellI
 pub(super) fn register(
     conn: &Connection,
     root: &ProjectRoot,
-    registrant: Option<ShellId>,
 ) -> Result<(i64, Registration), ConfigError> {
     if let Some((id, project)) = find_project(conn, root)? {
         return Ok((
@@ -284,17 +276,8 @@ pub(super) fn register(
     let name = name.ok_or_else(|| corrupt("project names", "every candidate is taken"))?;
     let id = conn
         .query_row(
-            "INSERT INTO projects (root, name, registered_ns, registered_by_pid, \
-                 registered_by_start) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            params![
-                root_text(root)?,
-                name.as_ref(),
-                nanos_param(nanos_now()),
-                registrant.map(|shell| shell.pid().into_inner()),
-                registrant
-                    .map(|shell| column_integer(REGISTERED_BY, shell.start().into_inner()))
-                    .transpose()?,
-            ],
+            "INSERT INTO projects (root, name, registered_ns) VALUES (?1, ?2, ?3) RETURNING id",
+            params![root_text(root)?, name.as_ref(), nanos_param(nanos_now())],
             |row| row.get(0),
         )
         .map_err(db_error)?;
@@ -346,47 +329,41 @@ impl ProjectStore for SqliteStore {
         })
     }
 
-    fn registration_origin(
-        &self,
-        root: &ProjectRoot,
-    ) -> Result<Option<RegistrationOrigin>, ConfigError> {
-        self.read(|conn| {
-            let stored: Option<(i64, Option<i64>, Option<i64>)> = conn
-                .query_row(
-                    "SELECT registered_ns, registered_by_pid, registered_by_start \
-                     FROM projects WHERE root = ?1",
-                    params![root_text(root)?],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()
-                .map_err(db_error)?;
-            stored
-                .map(|(nanos, pid, start)| {
-                    Ok(RegistrationOrigin::builder()
-                        .at(nanos_from(REGISTERED_AT, nanos)?)
-                        .by(registrant_from(pid, start)?)
-                        .build())
-                })
-                .transpose()
-        })
+    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
+        Ok(self
+            .registered_project_containing(dir)?
+            .map(|found| found.project().clone()))
     }
 
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
+    /// One query reads the projects and their registration times; a time
+    /// that does not read leaves its project readable, registered at no
+    /// known moment.
+    fn registered_project_containing(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<RegisteredProject>, ConfigError> {
         self.read(|conn| {
-            let deepest = stored_where(conn, SELECT_PROJECT, [])?
-                .into_iter()
-                .filter(|stored| match stored {
-                    Ok((_, project)) => project.root().contains(dir),
-                    Err(unreadable) => dir.starts_with(unreadable.root()),
-                })
-                .max_by_key(|stored| match stored {
-                    Ok((_, project)) => project.root().as_ref().components().count(),
-                    Err(unreadable) => unreadable.root().components().count(),
-                });
+            let deepest = rows_where(conn, SELECT_PROJECT, [], |row| {
+                Ok((project_from_row(row)?, registered_from_row(row)))
+            })?
+            .into_iter()
+            .filter(|(stored, _)| match stored {
+                Ok((_, project)) => project.root().contains(dir),
+                Err(unreadable) => dir.starts_with(unreadable.root()),
+            })
+            .max_by_key(|(stored, _)| match stored {
+                Ok((_, project)) => project.root().as_ref().components().count(),
+                Err(unreadable) => unreadable.root().components().count(),
+            });
             match deepest {
                 None => Ok(None),
-                Some(Ok((_, project))) => Ok(Some(project)),
-                Some(Err(unreadable)) => Err(unreadable_row(&unreadable)),
+                Some((Ok((_, project)), registered)) => Ok(Some(
+                    RegisteredProject::builder()
+                        .project(project)
+                        .registered(registered)
+                        .build(),
+                )),
+                Some((Err(unreadable), _)) => Err(unreadable_row(&unreadable)),
             }
         })
     }
@@ -688,41 +665,63 @@ mod tests {
     }
 
     /// A project is stamped, to the nanosecond, with when it was
-    /// registered and the shell the store registers for, if any, on its
-    /// first registration only; a folder never registered has no origin.
+    /// registered, on its first registration only, and found with that time
+    /// from any folder inside it.
     #[test]
-    fn registering_stamps_the_project_with_its_time_and_shell() {
+    fn registering_stamps_the_project_with_its_time() {
         let (store, scratch) = fresh_store();
-        let shell = ShellId::builder()
-            .pid(Pid::try_new(4242).unwrap())
-            .start(StartToken::try_new(7).unwrap())
-            .build();
         let shop = folder(&scratch, "shop");
-        let blog = folder(&scratch, "blog");
         let before = nanos_now();
         store
             .add_process(&shop, &spec("web", "true"), &Author::human())
             .unwrap();
         let after = nanos_now();
-        let from_shell = store.clone().registering_for(Some(shell));
-        from_shell
-            .add_process(&blog, &spec("web", "true"), &Author::human())
-            .unwrap();
-        from_shell
+        store
             .add_process(&shop, &spec("api", "true"), &Author::human())
             .unwrap();
 
-        let origin = store.registration_origin(&shop).unwrap().unwrap();
-        assert!((before..=after).contains(&origin.at()), "{}", origin.at());
-        assert_eq!(origin.by(), None, "an existing project keeps its origin");
-        let origin = store.registration_origin(&blog).unwrap().unwrap();
-        assert_eq!(origin.by(), Some(shell));
+        let found = store
+            .registered_project_containing(&shop.as_ref().join("src"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.project().root(), &shop);
+        let at = found.registered().unwrap();
+        assert!((before..=after).contains(&at), "{at}");
         assert_eq!(
             store
-                .registration_origin(&folder(&scratch, "docs"))
+                .registered_project_containing(folder(&scratch, "docs").as_ref())
                 .unwrap(),
             None
         );
+    }
+
+    /// CR-4: a registration time that does not read leaves its project
+    /// found, registered at no known moment, rather than refusing the
+    /// lookup.
+    #[test]
+    fn a_corrupt_registration_time_leaves_the_project_found() {
+        let (store, scratch) = fresh_store();
+        let shop = folder(&scratch, "shop");
+        store
+            .add_process(&shop, &spec("web", "true"), &Author::human())
+            .unwrap();
+
+        for corrupt in ["-5", "'soon'"] {
+            store
+                .write(|conn| {
+                    conn.execute(&format!("UPDATE projects SET registered_ns = {corrupt}"), [
+                    ])
+                    .map_err(db_error)
+                })
+                .unwrap();
+
+            let found = store
+                .registered_project_containing(shop.as_ref())
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.project().root(), &shop, "{corrupt}");
+            assert_eq!(found.registered(), None, "{corrupt}");
+        }
     }
 
     /// The deepest registered ancestor wins, and containment is by whole

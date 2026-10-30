@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
-    occupancy::RegistrationOrigin,
+    occupancy::RegisteredProject,
     port::ProjectStore,
     project::Project,
     value::{EpochNanos, ProjectName, ProjectRoot},
@@ -43,19 +43,6 @@ impl ProjectStore for FixedProjects {
             .cloned())
     }
 
-    /// Every fixed project was registered at the epoch, by no shell.
-    fn registration_origin(
-        &self,
-        root: &ProjectRoot,
-    ) -> Result<Option<RegistrationOrigin>, ConfigError> {
-        Ok(self.project_at(root)?.map(|_| {
-            RegistrationOrigin::builder()
-                .at(EpochNanos::new(0))
-                .by(None)
-                .build()
-        }))
-    }
-
     fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
         Ok(self
             .0
@@ -63,6 +50,19 @@ impl ProjectStore for FixedProjects {
             .filter(|project| project.root().contains(dir))
             .max_by_key(|project| project.root().as_ref().components().count())
             .cloned())
+    }
+
+    /// Every fixed project was registered at the epoch.
+    fn registered_project_containing(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<RegisteredProject>, ConfigError> {
+        Ok(self.project_containing(dir)?.map(|project| {
+            RegisteredProject::builder()
+                .project(project)
+                .registered(Some(EpochNanos::new(0)))
+                .build()
+        }))
     }
 
     fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {

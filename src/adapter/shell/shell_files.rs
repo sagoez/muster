@@ -1,12 +1,18 @@
 use std::{
     fs,
     io::{self, Write as _},
-    os::{fd::OwnedFd, unix::fs::OpenOptionsExt as _},
+    os::{
+        fd::OwnedFd,
+        unix::fs::{MetadataExt as _, OpenOptionsExt as _},
+    },
     path::{Path, PathBuf},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
+use rustix::{
+    fs::{FlockOperation, Mode, OFlags, flock, open},
+    process::geteuid,
+};
 
 use crate::{
     adapter::{
@@ -200,6 +206,32 @@ impl ShellRegistry for ShellFiles {
         Ok(true)
     }
 
+    /// The look and the write hold the records lock; a record file that is
+    /// no regular file of this user's is left alone.
+    fn amend(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError> {
+        let pid = record.shell().pid();
+        let failed = |error: &dyn ToString| ShellRegistryError::Write {
+            pid,
+            reason: error.to_string(),
+        };
+        let bytes = serde_json::to_vec(&record.to_wire()).map_err(|error| failed(&error))?;
+        let Ok(_lock) = self.lock_records() else {
+            return Ok(false);
+        };
+        let path = self.record_path(pid);
+        let own = fs::symlink_metadata(&path)
+            .is_ok_and(|stored| stored.file_type().is_file() && stored.uid() == geteuid().as_raw());
+        if !own
+            || self
+                .record(record.shell())
+                .is_none_or(|stored| stored.stamp() != record.stamp())
+        {
+            return Ok(false);
+        }
+        self.write(pid, &path, &bytes)?;
+        Ok(true)
+    }
+
     /// Writes nothing for no lines, and drops the batch whole once the shell
     /// has `MAX_NOTE_FILES` waiting.
     fn deliver(
@@ -257,7 +289,7 @@ fn read_record(path: &Path) -> Option<ShellRecord> {
 #[cfg(test)]
 mod tests {
     use std::{
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{PermissionsExt, symlink},
         process::{self, Command, Stdio},
         thread,
         time::Duration,
@@ -379,6 +411,34 @@ mod tests {
 
         assert_eq!(files.record(&shell), Some(record(shell, 5, Some("/new"))));
         assert!(files.save_if_newer(&record(shell, 6, None)).unwrap());
+        assert_eq!(files.record(&shell), Some(record(shell, 6, None)));
+    }
+
+    /// A record is amended only while the stored one is the report of the
+    /// same stamp, in a regular file: never with none stored, past a newer
+    /// report, or through a link standing in for the record.
+    #[test]
+    fn a_record_is_amended_only_while_it_is_the_same_report() {
+        let (scratch, files) = files();
+        let shell = this_shell(&files);
+
+        assert!(!files.amend(&record(shell, 5, Some("/new"))).unwrap());
+        assert_eq!(files.record(&shell), None);
+
+        files.save_if_newer(&record(shell, 5, None)).unwrap();
+        assert!(files.amend(&record(shell, 5, Some("/new"))).unwrap());
+        assert_eq!(files.record(&shell), Some(record(shell, 5, Some("/new"))));
+        assert!(!files.amend(&record(shell, 4, Some("/old"))).unwrap());
+
+        files.save_if_newer(&record(shell, 6, None)).unwrap();
+        assert!(!files.amend(&record(shell, 5, Some("/new"))).unwrap());
+        assert_eq!(files.record(&shell), Some(record(shell, 6, None)));
+
+        let path = files.record_path(shell.pid());
+        let target = scratch.path().join("elsewhere.json");
+        fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(!files.amend(&record(shell, 6, Some("/new"))).unwrap());
         assert_eq!(files.record(&shell), Some(record(shell, 6, None)));
     }
 

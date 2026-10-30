@@ -17,8 +17,8 @@ pub(super) fn root() -> ProjectRoot {
     ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap()
 }
 
-/// The registration of [`root`] as the newly registered `shop`.
-pub(super) fn registration() -> Registration {
+/// The registration of [`root`] as `shop`, newly registered when `new`.
+pub(super) fn registration(new: bool) -> Registration {
     Registration::builder()
         .project(
             Project::builder()
@@ -26,7 +26,7 @@ pub(super) fn registration() -> Registration {
                 .name(ProjectName::try_new("shop").unwrap())
                 .build(),
         )
-        .newly_registered(true)
+        .newly_registered(new)
         .build()
 }
 

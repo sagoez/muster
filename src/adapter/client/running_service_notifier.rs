@@ -23,6 +23,10 @@ impl RunningServiceNotifier {
 }
 
 impl StateChangeNotifier for RunningServiceNotifier {
+    /// The service needs nothing more: it loads the project when told its
+    /// stack changed.
+    fn project_registered(&self, _root: &ProjectRoot) {}
+
     fn stack_changed(&self, root: &ProjectRoot) {
         self.service.notify(&ServiceRequest::StackChanged {
             project: root.clone(),

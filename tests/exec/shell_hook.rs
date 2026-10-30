@@ -17,6 +17,7 @@ use muster::{
         service::{SHELL_SWEEP_INTERVAL, protocol::SERVICE_SUBCOMMAND},
         shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
     },
+    constants::MUSTER_SHELL_ENV,
     domain::{occupancy::ReportSeq, value::ProjectRoot},
 };
 use rustix::process::{Pid, Signal, kill_process};
@@ -66,6 +67,9 @@ const SLOW_REPORT: Duration = Duration::from_secs(2);
 const SLOW_MUSTER: &str = "slow-muster";
 /// Mode of that program: runnable by its owner.
 const SCRIPT_MODE: u32 = 0o700;
+/// The muster arguments that add `web`, autostarting, to the project the
+/// folder is in.
+const ADD_WEB: &str = "add --autostart web -- sleep 600";
 
 /// Runs `body` once for each shell installed, printing which are skipped.
 fn each_shell(test: &str, body: impl Fn(&mut Scratch, HookShell, &Path)) {
@@ -482,6 +486,68 @@ fn cd_and_add_on_one_line_starts_nothing_until_the_shell_leaves_and_returns() {
         });
         wait_recorded_in(&registrant, &fresh);
         assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 1, "{shell}");
+    });
+}
+
+/// R-I1: a registration the hooked shell did not make from where it stands
+/// spares it no first walk in, even on the same line: `muster -p` naming
+/// another folder, and a child shell that inherits `MUSTER_SHELL_PID` and
+/// runs `cd x && muster add`, each followed by `cd x`, start `web`.
+#[test]
+fn a_registration_from_elsewhere_or_a_child_shell_spares_no_walk_in() {
+    each_shell("elsewhere or child", |scratch, shell, program| {
+        let binary = shlex::try_quote(BINARY).unwrap().into_owned();
+        let child = shlex::try_quote(program.to_str().unwrap())
+            .unwrap()
+            .into_owned();
+        let home = scratch.path().as_path().to_path_buf();
+        let session = ShellSession::start(scratch, shell, program);
+        for (folder, from_child) in [("named", false), ("child", true)] {
+            let dir = home.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            let quoted = shlex::try_quote(dir.to_str().unwrap()).unwrap();
+            let registration = if from_child {
+                let inner = format!("cd {quoted} && {binary} {ADD_WEB}");
+                format!("{child} -c {}", shlex::try_quote(&inner).unwrap())
+            } else {
+                format!("{binary} -p {quoted} {ADD_WEB}")
+            };
+
+            session.run(&format!("{registration} && cd {quoted}"));
+
+            wait_until("walking in to start web", || running(scratch, &dir, "web"));
+            wait_recorded_in(&session, &dir);
+            cd_reported(&session, &home);
+        }
+    });
+}
+
+/// R-I1: a registration run with `MUSTER_SHELL_PID` forged to name another
+/// hooked shell, outside the new project, spares that shell no first walk
+/// in.
+#[test]
+fn a_forged_shell_pid_spares_its_shell_no_walk_in() {
+    each_shell("forged pid", |scratch, shell, program| {
+        let fresh = scratch.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let registering = ShellSession::start(scratch, shell, program);
+        let named = ShellSession::start(scratch, shell, program);
+        let binary = shlex::try_quote(BINARY).unwrap();
+        cd_reported(&registering, &fresh);
+
+        registering.run(&format!(
+            "env {MUSTER_SHELL_ENV}={} {binary} {ADD_WEB}",
+            named.pid()
+        ));
+        registering.wait_reports_done();
+        assert!(!running(scratch, &fresh, "web"), "{shell}: web started");
+        cd_reported(&registering, scratch.path().as_path());
+
+        named.cd(&fresh);
+        wait_until("walking in to start web", || {
+            running(scratch, &fresh, "web")
+        });
+        wait_recorded_in(&named, &fresh);
     });
 }
 

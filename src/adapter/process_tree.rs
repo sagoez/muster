@@ -1,6 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
-use sysinfo::{Pid as SysinfoPid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{
+    Pid as SysinfoPid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
+};
 
 use crate::domain::value::Pid;
 
@@ -75,6 +80,20 @@ pub fn named_ancestors(system: &mut System, pid: Pid, limit: usize) -> Vec<(Pid,
     ancestors
 }
 
+/// The folder `pid` works in now, none when it cannot be read.
+pub fn working_dir(pid: Pid) -> Option<PathBuf> {
+    let pid = SysinfoPid::from_u32(pid.into_inner());
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_cwd(UpdateKind::Always),
+    );
+    system.process(pid)?.cwd().map(PathBuf::from)
+}
+
 /// Reads `pid`'s entry, with its parent, into `system`.
 fn refresh_one(system: &mut System, pid: SysinfoPid) {
     system.refresh_processes_specifics(
@@ -87,6 +106,8 @@ fn refresh_one(system: &mut System, pid: SysinfoPid) {
 #[cfg(test)]
 mod tests {
     use std::process::{self, Command, Stdio};
+
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -116,6 +137,25 @@ mod tests {
 
         assert_eq!(all.first(), Some(&this), "{all:?}");
         assert_eq!(one, [this]);
+    }
+
+    /// A process's working folder is the one it was started in.
+    #[test]
+    fn a_process_s_working_dir_is_read() {
+        let scratch = TempDir::new().unwrap();
+        let mut child = Command::new(SLEEPER)
+            .arg(SLEEP_SECONDS)
+            .current_dir(scratch.path())
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = Pid::try_new(child.id()).unwrap();
+
+        let dir = working_dir(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(dir, Some(scratch.path().canonicalize().unwrap()));
     }
 
     /// Each ancestor comes with its process name.

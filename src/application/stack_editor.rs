@@ -42,7 +42,7 @@ impl StackEditor<'_> {
     ) -> Result<(Registration, ProcessSpec), ConfigError> {
         let spec = draft.complete(&self.settings.load()?.process_defaults());
         let registration = self.stacks.add_process(root, &spec, author)?;
-        self.notifier.stack_changed(root);
+        self.told(root, &registration);
         Ok((registration, spec))
     }
 
@@ -95,9 +95,19 @@ impl StackEditor<'_> {
         processes: &[ProcessSpec],
         mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError> {
-        let imported = self.stacks.import(root, processes, mode)?;
+        let (registration, plan) = self.stacks.import(root, processes, mode)?;
+        self.told(root, &registration);
+        Ok((registration, plan))
+    }
+
+    /// Tells the notifier of a write to the project at `root` that
+    /// `registration` describes: its registration first when it was new,
+    /// then the change to its stack.
+    fn told(&self, root: &ProjectRoot, registration: &Registration) {
+        if *registration.newly_registered() {
+            self.notifier.project_registered(root);
+        }
         self.notifier.stack_changed(root);
-        Ok(imported)
     }
 
     /// Sets the project's own idle stop, or clears it (`None`) to follow the
@@ -156,6 +166,16 @@ mod tests {
         assert_eq!(fakes.steps(), [write, EditorStep::StackChanged(root())]);
     }
 
+    /// The write commits first, then the notifier hears the project was
+    /// registered, then that its stack changed.
+    fn assert_registered_then_notified(fakes: &EditorFakes, write: EditorStep) {
+        assert_eq!(fakes.steps(), [
+            write,
+            EditorStep::ProjectRegistered(root()),
+            EditorStep::StackChanged(root())
+        ]);
+    }
+
     /// The agent every attributed edit is made by.
     fn agent() -> Author {
         Author::agent("claude")
@@ -177,7 +197,30 @@ mod tests {
         assert_eq!(*spec.stop().grace_period(), grace(7));
         assert_eq!(spec.environment(), &Environment::empty());
         assert_eq!(fakes.added(), [spec]);
-        assert_wrote_then_notified(&fakes, EditorStep::WroteFor(Author::human()));
+        assert_registered_then_notified(&fakes, EditorStep::WroteFor(Author::human()));
+    }
+
+    /// Only a write that registered its project tells the notifier so; one
+    /// to a project registered already tells it only of the stack change.
+    #[test]
+    fn only_a_new_project_is_told_as_registered() {
+        let known = EditorFakes::new(false).over_known_project();
+
+        known
+            .editor()
+            .add(&root(), draft(), &Author::human())
+            .unwrap();
+        known
+            .editor()
+            .import(&root(), &[spec()], ImportMode::Strict)
+            .unwrap();
+
+        assert_eq!(known.steps(), [
+            EditorStep::WroteFor(Author::human()),
+            EditorStep::StackChanged(root()),
+            EditorStep::Wrote,
+            EditorStep::StackChanged(root()),
+        ]);
     }
 
     /// The agent making a change reaches the store's write, which records it.
@@ -233,7 +276,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(*plan.added(), [name()]);
-        assert_wrote_then_notified(&fakes, EditorStep::Wrote);
+        assert_registered_then_notified(&fakes, EditorStep::Wrote);
     }
 
     /// The change the `change` edits apply.

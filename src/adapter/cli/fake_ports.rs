@@ -22,6 +22,7 @@ use crate::{
     domain::{
         config::ConfigError,
         port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
+        value::{Pid, ProjectRoot},
     },
     error::MusterError,
 };
@@ -44,6 +45,9 @@ pub(super) struct FakePorts {
     user: u32,
     /// The terminal workspace the ports run in, if any.
     workspace: Option<Arc<RecordingWorkspace>>,
+    /// The hooked shell the ports run straight from, if any, and the folder
+    /// it works in.
+    hooked: Option<(Pid, PathBuf)>,
 }
 
 impl FakePorts {
@@ -65,6 +69,16 @@ impl FakePorts {
             state_home,
             user: geteuid().as_raw(),
             workspace: None,
+            hooked: None,
+        }
+    }
+
+    /// These ports run straight from the hooked shell `pid`, working in
+    /// `folder`.
+    pub(super) fn hooked_from(self, pid: Pid, folder: &Path) -> Self {
+        Self {
+            hooked: Some((pid, folder.to_path_buf())),
+            ..self
         }
     }
 
@@ -133,6 +147,13 @@ impl CliPorts for FakePorts {
 
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
         Ok(Arc::new(ShellFiles::under(&self.state_dir())))
+    }
+
+    fn hooked_shell_in(&self, root: &ProjectRoot) -> Option<Pid> {
+        self.hooked
+            .as_ref()
+            .filter(|(_, folder)| root.contains(folder))
+            .map(|(pid, _)| *pid)
     }
 
     fn claim_state_dir(&self) -> bool {

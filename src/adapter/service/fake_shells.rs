@@ -85,6 +85,17 @@ impl ShellRegistry for FakeShells {
         Ok(true)
     }
 
+    fn amend(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError> {
+        if self
+            .record(record.shell())
+            .is_none_or(|stored| stored.stamp() != record.stamp())
+        {
+            return Ok(false);
+        }
+        self.put(record.clone());
+        Ok(true)
+    }
+
     fn deliver(
         &self,
         _shell: &ShellId,

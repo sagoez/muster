@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
-    occupancy::RegistrationOrigin,
+    occupancy::RegisteredProject,
     project::Project,
     value::{ProjectName, ProjectRoot},
 };
@@ -37,23 +37,22 @@ pub trait ProjectStore {
     /// Returns a [`ConfigError`] when the store cannot be read.
     fn project_named(&self, name: &ProjectName) -> Result<Option<Project>, ConfigError>;
 
-    /// When the project at `root` was registered and by which hooked shell,
-    /// if it is.
-    ///
-    /// # Errors
-    /// Returns a [`ConfigError`] when the store cannot be read or holds a
-    /// time before the epoch or a shell no process could be.
-    fn registration_origin(
-        &self,
-        root: &ProjectRoot,
-    ) -> Result<Option<RegistrationOrigin>, ConfigError>;
-
     /// The registered project whose root is `dir` or its nearest ancestor,
     /// among those that read.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be read.
     fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError>;
+
+    /// The project [`ProjectStore::project_containing`] finds for `dir`,
+    /// with when it was registered, read with it.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be read.
+    fn registered_project_containing(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<RegisteredProject>, ConfigError>;
 
     /// Deletes the project registered at `root`, readable or not, with its
     /// processes and coordination. Returns whether it existed.

@@ -35,9 +35,7 @@ impl ShellRecord {
     /// a project registered around the shell nests it in a new project
     /// without it leaving the one it was in, which it holds, as it holds
     /// what `previous` held, for as long as its project stays nested inside.
-    /// `around` says its project was registered around the shell, as
-    /// [`RegistrationOrigin::around`](super::RegistrationOrigin::around)
-    /// tells.
+    /// `around` says its project was registered around the shell.
     pub fn following(self, previous: Option<&Self>, around: bool) -> Self {
         let Some(previous) = previous else {
             return self;
@@ -54,6 +52,19 @@ impl ShellRecord {
         held.sort();
         held.dedup();
         Self { held, ..self }
+    }
+
+    /// This record once `root`, a project registered around the shell where
+    /// it is, names it, as [`Self::following`] makes a report of it: the
+    /// shell's next report there finds it already in, not entering.
+    #[must_use]
+    pub fn registered_around(self, root: ProjectRoot) -> Self {
+        let previous = self.clone();
+        Self {
+            project: Some(root),
+            ..self
+        }
+        .following(Some(&previous), true)
     }
 
     /// Whether this report may enter its project and start it: it names a
@@ -161,6 +172,39 @@ mod tests {
             "registered before it"
         );
         assert!(walked.held().is_empty());
+    }
+
+    /// A record named for a project registered around the shell keeps its
+    /// stamp, folder and arrival, holds the project it was in when that one
+    /// holds the new one, and lets the next report there stay rather than
+    /// enter; leaving and coming back enters it.
+    #[test]
+    fn a_record_named_for_a_project_registered_around_it_stays_there() {
+        let outside = at(1, "elsewhere", None);
+        let named = outside.clone().registered_around(test_root("fresh"));
+        assert_eq!(named.project(), &Some(test_root("fresh")));
+        assert_eq!(
+            (named.stamp(), named.folder(), named.arrived()),
+            (outside.stamp(), outside.folder(), outside.arrived())
+        );
+        assert!(named.held().is_empty());
+        let next = at(2, "fresh", Some("fresh")).following(Some(&named), false);
+        assert!(!next.may_enter(Some(&named), false));
+
+        let left = at(3, "elsewhere", None).following(Some(&next), false);
+        assert!(at(4, "fresh", Some("fresh")).may_enter(Some(&left), false));
+
+        let in_shop = at(1, "shop/admin", Some("shop"));
+        let nested = in_shop.registered_around(test_root("shop/admin"));
+        assert_eq!(nested.held(), &[test_root("shop")]);
+        let elsewhere = at(1, "elsewhere", Some("blog"));
+        assert!(
+            elsewhere
+                .registered_around(test_root("fresh"))
+                .held()
+                .is_empty(),
+            "a project that does not hold it is left"
+        );
     }
 
     /// A project registered inside the one the shell is in keeps the outer

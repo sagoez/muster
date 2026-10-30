@@ -28,6 +28,14 @@ pub trait ShellRegistry: Send + Sync {
     /// Returns [`ShellRegistryError::Write`] when the record cannot be written.
     fn save_if_newer(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError>;
 
+    /// Rewrites the stored record of `record`'s shell as `record`, only
+    /// while it is still the report of the same stamp and this user's own.
+    /// Returns whether it wrote.
+    ///
+    /// # Errors
+    /// Returns [`ShellRegistryError::Write`] when the record cannot be written.
+    fn amend(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError>;
+
     /// Leaves `lines`, answered to the report stamped `stamp`, for the
     /// shell's hook to print at its next prompt.
     ///

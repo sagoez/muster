@@ -335,8 +335,9 @@ pub enum Command {
         #[arg(long)]
         seq: ReportSeq,
         /// When the shell was first seen, at a prompt, in the folder it is
-        /// in, in nanoseconds since the epoch; the report's own start stands
-        /// in when the shell cannot read its clock.
+        /// in, in nanoseconds since the epoch; when the shell cannot read its
+        /// clock, its last report's from the same folder stands in, or the
+        /// report's own start.
         #[arg(long)]
         arrived: Option<EpochNanos>,
     },

@@ -19,7 +19,6 @@ use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
     domain::{
         config::ConfigError,
-        occupancy::ShellId,
         value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
     },
 };
@@ -68,28 +67,9 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Clone)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
-    /// The hooked shell `muster` was run from, which each project this
-    /// store registers is recorded as registered by.
-    registrant: Option<ShellId>,
 }
 
 impl SqliteStore {
-    /// This store, recording `shell` as the registrant of each project it
-    /// registers.
-    #[must_use]
-    pub fn registering_for(self, shell: Option<ShellId>) -> Self {
-        Self {
-            registrant: shell,
-            ..self
-        }
-    }
-
-    /// The shell each project this store registers is recorded as
-    /// registered by.
-    pub(super) fn registrant(&self) -> Option<ShellId> {
-        self.registrant
-    }
-
     /// Opens the database in muster's state directory, creating it if absent.
     ///
     /// # Errors
@@ -171,7 +151,6 @@ impl SqliteStore {
     fn over(conn: Connection) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            registrant: None,
         }
     }
 
@@ -381,16 +360,6 @@ pub(super) fn epoch_from_secs(what: &str, secs: i64) -> Result<EpochSeconds, Con
 /// SQLite can store.
 pub(super) fn nanos_param(at: EpochNanos) -> i64 {
     i64::try_from(at.into_inner()).unwrap_or(i64::MAX)
-}
-
-/// The moment a nanoseconds column holds.
-///
-/// # Errors
-/// Returns [`ConfigError::CorruptRow`] naming `what` when it is negative.
-pub(super) fn nanos_from(what: &str, nanos: i64) -> Result<EpochNanos, ConfigError> {
-    u64::try_from(nanos)
-        .map(EpochNanos::new)
-        .map_err(|error| refused(what, &error))
 }
 
 #[cfg(test)]
@@ -650,9 +619,11 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
 
         assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
-        let origin = store.registration_origin(&root).unwrap().unwrap();
-        assert_eq!(origin.at(), EpochNanos::new(7_000_000_000));
-        assert_eq!(origin.by(), None);
+        let found = store
+            .registered_project_containing(root.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.registered(), Some(EpochNanos::new(7_000_000_000)));
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

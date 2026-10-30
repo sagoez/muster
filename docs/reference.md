@@ -262,16 +262,18 @@ occupies the project or holds off its idle stop.
 Entering a registered project's folder starts its autostart processes, as
 `muster up` would, and the next prompt prints a `muster:` line saying what
 happened. Registering a project around a shell that is already in it does not
-count as entering. A project registered by a muster command run from a hooked
-shell, as `cd x && muster add --autostart web -- npm run dev` does, is not
-entered by that shell, which counts in it from its next prompt; once that shell
-has left, coming back is an ordinary entering, and other shells enter it as
-usual. For other shells, the hook passes the time of the first
-prompt it drew in its folder, and a project registered later was registered
-around the shell, even when the report of the `cd` reads the projects only
-after the registration. bash 5 and zsh read that time from their own clock and
-fish from `date`; a shell that cannot read it falls back to when the report
-starts. A process you stopped yourself stays stopped.
+count as entering. The hook passes the time of the first prompt it drew in its
+folder, and a project registered later was registered around the shell, even
+when the report of the `cd` reads the projects only after the registration.
+bash 5 and zsh read that time from their own clock and fish from `date`; a
+shell that cannot read it keeps the time of its first report in that folder.
+A muster command that registers a project, run straight from a hooked shell
+with both inside the new project, as
+`cd x && muster add --autostart web -- npm run dev` is, also tells that
+shell's record it is there, so the prompt after it is not an entering either;
+once that shell has left, coming back is an ordinary entering. A registration from elsewhere, as `muster -p x add`, or
+from a child shell or script, gives the shell no such pass. A process you
+stopped yourself stays stopped.
 
 Leaving is noticed at that shell's next report, and a shell that ends within a
 few seconds. Once no shell has been in the project for `idle-stop`, muster

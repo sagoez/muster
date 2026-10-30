@@ -56,6 +56,7 @@ use super::{
     shell_notes::ShellNotes,
     shell_sweeper::{SHELL_SWEEP_INTERVAL, ShellSweeper},
     singleton::Singleton,
+    stopping_entries::{StoppingEntries, StoppingEntry},
     store_recorder::StoreRecorder,
     supervisor::{
         HolderScreen, ScreenReply, SpawnGeneration, StaleRelease, Supervisor, SupervisorDeps,
@@ -199,6 +200,9 @@ pub struct ServiceRuntime {
     shell_notes: ShellNotes,
     /// Which shell's entering started each launch still in flight.
     entering: EnteringLaunches,
+    /// Enterings that found autostart processes still stopping, to enter
+    /// again once they have stopped.
+    stopping_entries: StoppingEntries,
 }
 
 impl ServiceRuntime {
@@ -311,6 +315,7 @@ impl ServiceRuntime {
             sweep_deadline: Instant::now() + SHELL_SWEEP_INTERVAL,
             shell_notes: ShellNotes::default(),
             entering: EnteringLaunches::default(),
+            stopping_entries: StoppingEntries::default(),
             events,
             notices,
             supervisors: HashMap::new(),
@@ -417,6 +422,7 @@ impl ServiceRuntime {
         for change in changes {
             match change {
                 OccupancyChange::Left(root) => {
+                    self.stopping_entries.forget_project(root);
                     if let Some(supervisor) = self.supervisors.get_mut(root) {
                         supervisor.arm_idle(now);
                     }
@@ -490,6 +496,7 @@ impl ServiceRuntime {
             supervisor.release_settled_exits();
             supervisor.settle_waits(now);
         }
+        self.enter_stopped();
         if let Some(sampler) = &mut self.usage_sampler {
             sampler.sample(now, self.supervisors.values_mut());
         }
@@ -504,6 +511,7 @@ impl ServiceRuntime {
             .cloned()
             .collect();
         for root in finished {
+            self.stopping_entries.forget_project(&root);
             self.unregistered.remove(&root);
             self.supervisors.remove(&root);
             self.stack_revisions.remove(&root);
@@ -588,6 +596,7 @@ impl ServiceRuntime {
                 for shell in shells {
                     self.shell_notes.forget(&shell);
                     self.entering.forget_shell(&shell);
+                    self.stopping_entries.forget_shell(&shell);
                     changes.extend(self.occupancy.remove(&shell));
                 }
                 self.occupancy_changed(&changes, Instant::now());
@@ -710,10 +719,12 @@ impl ServiceRuntime {
     ) -> Result<Reply, ServiceErrorBody> {
         match &request {
             ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } => {
+                self.stopping_entries.forget_project(project);
                 self.refresh_stack(project)?;
                 self.supervisor(project)?;
                 self.share_held_ports();
             },
+            ServiceRequest::Down { project } => self.stopping_entries.forget_project(project),
             ServiceRequest::Ps {
                 project: Some(project),
             }
@@ -725,7 +736,6 @@ impl ServiceRuntime {
                 }
             },
             ServiceRequest::Hello { .. }
-            | ServiceRequest::Down { .. }
             | ServiceRequest::Wait { .. }
             | ServiceRequest::Locate { .. }
             | ServiceRequest::Log { .. }
@@ -935,7 +945,9 @@ impl ServiceRuntime {
 
     /// Starts the autostart set of `project`, which `shell` is the first to
     /// enter, with the shell's `environment`, and remembers that shell for
-    /// each launch it began. Returns what started and what was refused. A
+    /// each launch it began. Autostart processes still stopping, as an idle
+    /// stop still running leaves them, are started once they have stopped,
+    /// and the shell told then. Returns what started and what was refused. A
     /// project that cannot be loaded, being unregistered or unreadable,
     /// starts nothing.
     fn enter(
@@ -954,6 +966,16 @@ impl ServiceRuntime {
         let outcome = supervisor.up(environment);
         let name = supervisor.project().name().clone();
         self.entering.begin(project, outcome.acted(), shell);
+        if !outcome.stopping().is_empty() {
+            self.stopping_entries.wait(
+                project,
+                StoppingEntry::builder()
+                    .shell(shell)
+                    .environment(environment.clone())
+                    .names(outcome.stopping().clone())
+                    .build(),
+            );
+        }
         let started = (!outcome.acted().is_empty()).then(|| ShellNote::Started {
             project: name.clone(),
             names: outcome.acted().clone(),
@@ -973,6 +995,27 @@ impl ServiceRuntime {
         self.entering.forget_project(project);
         if let Some(supervisor) = self.supervisors.get_mut(project) {
             supervisor.hold_up();
+        }
+    }
+
+    /// Enters again each project an entering found still stopping, now that
+    /// what it waited on has stopped, leaving what that starts or refuses
+    /// for its shell's next report.
+    fn enter_stopped(&mut self) {
+        if self.stopping_entries.is_empty() {
+            return;
+        }
+        let supervisors = &self.supervisors;
+        let stopped = self.stopping_entries.take_stopped(|project, name| {
+            supervisors
+                .get(project)
+                .is_some_and(|supervisor| supervisor.runs_or_starts(name))
+        });
+        for (project, entry) in stopped {
+            let shell = *entry.shell();
+            for note in self.enter(&project, shell, entry.environment()) {
+                self.shell_notes.queue(shell, note);
+            }
         }
     }
 
@@ -1643,10 +1686,10 @@ mod tests {
             port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
             process::{
                 LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
-                ReadyProbe,
+                ReadyProbe, StopPolicy, StopSignal,
             },
             pty::{ProcessOutput, PtySize},
-            value::{CommandLine, LocalPort, PaneId, PositiveDuration},
+            value::{CommandLine, LocalPort, PaneId, PositiveDuration, StopGrace},
         },
     };
 
@@ -3139,6 +3182,11 @@ mod tests {
     const HOOK_LOAD: u64 = 1;
     /// The folder a test shell outside every project reports from.
     const OUTSIDE: &str = "/";
+    /// A child that ignores the signals that ask it to stop, so stopping it
+    /// takes its whole grace.
+    const STUBBORN: &str = "trap '' INT TERM; sleep 600";
+    /// How long a stop waits on that child before killing it.
+    const STUBBORN_GRACE: Duration = Duration::from_secs(1);
 
     /// Sends `shell`'s report at prompt `seq` that its folder is in
     /// `project`, as one that may enter it with an empty environment, and
@@ -3293,6 +3341,48 @@ mod tests {
             };
             screen.contains(&seen)
         });
+        service.stop();
+    }
+
+    /// Concurrency M1: a shell back in a project its idle stop is still
+    /// stopping finds its autostart processes started again once they have
+    /// stopped, and its next report says so.
+    #[test]
+    fn re_entering_a_project_its_idle_stop_is_stopping_starts_it_once_stopped() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let stubborn = sleeper("api", true)
+            .with_command(CommandLine::try_new(STUBBORN).unwrap())
+            .with_stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
+                    .build(),
+            );
+        let project = fixture.project(vec![stubborn]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        let first = service.wait_for(&project, "api", ProcessState::Running);
+        let first_pid = process(&first, "api").pid().unwrap();
+        report(&service, shell, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+
+        assert!(
+            report(&service, shell, 3, Some(&project)).is_empty(),
+            "nothing starts while api stops"
+        );
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != first_pid)
+        });
+        assert_eq!(report(&service, shell, 4, Some(&project)), [started(
+            &project,
+            &["api"]
+        )]);
         service.stop();
     }
 

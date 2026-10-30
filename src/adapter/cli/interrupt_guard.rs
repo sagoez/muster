@@ -6,12 +6,10 @@ use std::{
     },
 };
 
-use signal_hook::{
-    consts::SIGINT,
-    flag::{register, register_conditional_default},
-};
+use signal_hook::{consts::SIGINT, flag::register};
 
 use super::interrupt_flags::Flags;
+use crate::adapter::signal_hold::{SignalHold, catch_ending_signals};
 
 /// The flags, registered once per process; `None` when registering failed,
 /// which leaves `SIGINT` to end the process as usual.
@@ -24,21 +22,23 @@ static FLAGS: OnceLock<Option<Flags>> = OnceLock::new();
 pub struct InterruptGuard {
     /// The flags it armed, unless they could not be registered.
     flags: Option<&'static Flags>,
+    /// Keeps `SIGINT` from ending the process while the guard lives.
+    hold: Option<SignalHold>,
 }
 
 impl InterruptGuard {
     /// Arms `SIGINT` as a flag until the guard drops.
     pub fn arm() -> Self {
         let flags = FLAGS.get_or_init(|| register_flags().ok()).as_ref();
-        if let Some(flags) = flags {
+        let hold = flags.and_then(|flags| {
             let mut armed = flags.armed.lock().unwrap_or_else(PoisonError::into_inner);
             if *armed == 0 {
                 flags.interrupted.store(false, Ordering::SeqCst);
-                flags.disarmed.store(false, Ordering::SeqCst);
             }
             *armed += 1;
-        }
-        Self { flags }
+            SignalHold::take(SIGINT).ok()
+        });
+        Self { flags, hold }
     }
 
     /// Whether a `SIGINT` arrived since the guard was armed.
@@ -54,24 +54,21 @@ impl Drop for InterruptGuard {
         if let Some(flags) = self.flags {
             let mut armed = flags.armed.lock().unwrap_or_else(PoisonError::into_inner);
             *armed = armed.saturating_sub(1);
-            if *armed == 0 {
-                flags.disarmed.store(true, Ordering::SeqCst);
-            }
+            self.hold.take();
         }
     }
 }
 
-/// Registers the flags `SIGINT` drives.
+/// Catches the ending signals and registers the flag `SIGINT` sets.
 ///
 /// # Errors
 /// Returns the [`io::Error`] of a handler that could not be registered.
 fn register_flags() -> io::Result<Flags> {
+    catch_ending_signals()?;
     let flags = Flags {
         interrupted: Arc::new(AtomicBool::new(false)),
-        disarmed: Arc::new(AtomicBool::new(true)),
         armed: Mutex::new(0),
     };
-    register_conditional_default(SIGINT, Arc::clone(&flags.disarmed))?;
     register(SIGINT, Arc::clone(&flags.interrupted))?;
     Ok(flags)
 }
@@ -96,14 +93,14 @@ mod tests {
         assert!(!InterruptGuard::arm().interrupted());
 
         // A guard armed inside another neither clears its pending interrupt
-        // nor disarms it when it drops. One test, as the flags are global.
+        // nor disarms it when it drops: a later SIGINT still only sets the
+        // flag. One test, as the flags are global.
         let outer = InterruptGuard::arm();
         raise(SIGINT).unwrap();
         let inner = InterruptGuard::arm();
         assert!(inner.interrupted(), "the pending interrupt survives");
         drop(inner);
-        let flags = outer.flags.unwrap();
-        assert!(!flags.disarmed.load(Ordering::SeqCst), "still armed");
+        raise(SIGINT).unwrap();
         assert!(outer.interrupted());
         let put: Result<(), CliError> = asked(|| unreachable!("the question is never put"));
         assert!(matches!(put, Err(CliError::Cancelled)));

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     io::{self, Read},
+    os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     thread,
@@ -8,27 +9,39 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, bounded};
+use rustix::process::Signal;
 
 use super::herdr_failure::HerdrFailure;
-use crate::adapter::bounded_read::read_capped;
+use crate::{
+    adapter::{
+        bounded_read::read_capped, child_group::ChildGroup, signal_hold::catch_ending_signals,
+        signal_target::SignalTarget,
+    },
+    domain::value::Pid,
+};
 
 /// The most bytes muster reads of what herdr prints on either stream.
 const MAX_REPLY_BYTES: u64 = 1024 * 1024;
 /// How often a herdr that closed its output is checked for having exited.
 const EXIT_POLL: Duration = Duration::from_millis(10);
+/// Puts the child in a process group of its own, which it leads.
+const OWN_GROUP: i32 = 0;
 /// Why a stream's reader ended without an answer.
 const READER_LOST: &str = "the reader of herdr's output stopped";
+/// Why a started herdr was stopped before it was asked anything.
+const UNTRACKED: &str = "muster is exiting or already waits on too many herdr calls";
 
 /// Runs `program` with `args` and returns what it printed on stdout once it
-/// exits 0, all within `timeout`. Past it the child is killed and reaped
-/// before this returns, so a hung herdr costs at most `timeout` and leaves
-/// no zombie. The child stays in muster's process group, so a Ctrl-C or a
-/// hangup that ends muster ends it too.
+/// exits 0, all within `timeout`. The child leads a process group of its
+/// own, which muster tracks while it waits: past `timeout` the whole group
+/// is killed and the child reaped before this returns, so a hung herdr costs
+/// at most `timeout` and leaves nothing behind, and an ending signal or a
+/// closed MCP client kills the group as muster exits.
 ///
 /// # Errors
-/// Returns a [`HerdrFailure`] for a binary that would not start, a run past
-/// `timeout`, output past [`MAX_REPLY_BYTES`] or not UTF-8, or an
-/// unsuccessful exit.
+/// Returns a [`HerdrFailure`] for a binary that would not start or could not
+/// be tracked, a run past `timeout`, output past [`MAX_REPLY_BYTES`] or not
+/// UTF-8, or an unsuccessful exit.
 pub(super) fn call(
     program: &Path,
     args: &[OsString],
@@ -39,13 +52,21 @@ pub(super) fn call(
         program: program.to_path_buf(),
         source,
     };
+    // Without the handlers the group is still killed at the timeout and when
+    // an MCP client closes; only a signal would leave it behind.
+    let _ = catch_ending_signals();
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(OWN_GROUP)
         .spawn()
         .map_err(spawn_failed)?;
+    let Some(_tracked) = Pid::try_new(child.id()).ok().and_then(ChildGroup::track) else {
+        stop(&mut child);
+        return Err(spawn_failed(io::Error::other(UNTRACKED)));
+    };
     let stdout = child.stdout.take().map(drained);
     let stderr = child.stderr.take().map(drained);
     let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
@@ -126,9 +147,12 @@ fn exit_by(
     }
 }
 
-/// Kills `child`, then reaps it. Only the child: it shares muster's process
-/// group, and the herdr CLI starts nothing that outlives it.
+/// Kills `child`'s whole process group, so nothing it started outlives it
+/// or holds its pipes open, then reaps it.
 fn stop(child: &mut Child) {
-    let _ = child.kill();
+    let group = Pid::try_new(child.id()).map(SignalTarget::Group);
+    if !group.is_ok_and(|group| group.send(Signal::KILL).is_ok()) {
+        let _ = child.kill();
+    }
     let _ = child.wait();
 }

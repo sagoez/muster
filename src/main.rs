@@ -2,6 +2,7 @@ use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
+        child_group,
         cli::{self, CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         herdr::HerdrWorkspace,
@@ -134,7 +135,8 @@ impl ProjectPorts for LocalPorts {
 }
 
 /// Serves muster to an agent over MCP on stdio, on this user's database and
-/// service, until the agent disconnects.
+/// service, until the agent disconnects; a herdr call still in flight then
+/// is killed with everything it started.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when the database cannot be opened or the
@@ -161,7 +163,9 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .terminal_workspace(terminal_workspace())
         .binary(Arc::new(this_binary))
         .build();
-    Ok(run_stdio(deps)?)
+    let served = run_stdio(deps);
+    child_group::end_all();
+    Ok(served?)
 }
 
 /// The terminal workspace this process runs in: the herdr pane its

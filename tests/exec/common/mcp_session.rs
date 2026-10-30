@@ -148,6 +148,18 @@ impl McpSession {
         answers.into_iter().flatten().collect()
     }
 
+    /// Calls the tool `name` with `arguments` without waiting for an answer.
+    pub fn call_unanswered(&mut self, name: &str, arguments: Value) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.write(&serde_json::json!({
+            "jsonrpc": JSON_RPC_VERSION,
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments },
+        }));
+    }
+
     /// Calls the tool `name` with `arguments` and returns the response.
     pub fn call(&mut self, name: &str, arguments: Value) -> Value {
         self.request(

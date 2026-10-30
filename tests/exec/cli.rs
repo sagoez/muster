@@ -4832,6 +4832,10 @@ fn projects_set_gives_a_project_its_own_idle_stop() {
 const BLANK_PANE: &str = "  ";
 /// A herdr binary that does not exist, inside the scratch.
 const MISSING_HERDR: &str = "no-such-herdr";
+/// How late a slow herdr answers a layout: well inside both the 5 second
+/// bound of a herdr call and the 5 seconds an MCP server drains its answers
+/// for once its client closes.
+const LATE_LAYOUT: Duration = Duration::from_secs(2);
 /// How a herdr that cannot be run is reported.
 const HERDR_UNREACHABLE: &str = "cannot reach herdr";
 /// What herdr prints when it refuses to type into a pane.
@@ -5280,30 +5284,65 @@ fn the_typed_line_is_inert_in_a_shell_without_its_variables() {
     }
 }
 
-/// A Ctrl-C that ends muster while it waits on herdr reaches the herdr call
-/// too, so no herdr outlives the muster that started it.
+/// A Ctrl-C or a hangup that ends muster while it waits on herdr kills the
+/// herdr call's whole process group, so neither the call nor a child it
+/// started, as a wrapper around herdr might, outlives the muster that
+/// started it, though the group is not the terminal's.
 #[test]
-fn an_interrupt_that_ends_muster_ends_its_herdr_call() {
+fn a_signal_that_ends_muster_ends_its_herdr_call_and_what_it_started() {
+    for hang_up in [false, true] {
+        let mut scratch = Scratch::new();
+        let herdr = FakeHerdr::new(&scratch);
+        herdr.fork_and_hang("pane-get");
+        let mut doctor = scratch.command(&["doctor"]);
+        FakeHerdr::place(&mut doctor, &herdr.program());
+
+        let pty = Pty::open();
+        let mut muster = pty.spawn_leading(&mut scratch, doctor);
+        let mut started = None;
+        wait_until("muster's herdr call to start its child", || {
+            started = herdr.pid("pane-get").zip(herdr.grandchild("pane-get"));
+            started.is_some()
+        });
+        let (called, grandchild) = started.unwrap();
+        scratch.keep_child(called);
+        scratch.keep_child(grandchild);
+        assert!(
+            alive(called) && alive(grandchild),
+            "the herdr call ended on its own"
+        );
+        if hang_up {
+            let pid = Pid::from_raw(i32::try_from(muster.id()).unwrap()).unwrap();
+            kill_process(pid, Signal::HUP).unwrap();
+        } else {
+            pty.interrupt();
+        }
+
+        assert_eq!(pty.exit_code(&mut muster), None, "{}", pty.drawn());
+        wait_until("the herdr call and its child to end with muster", || {
+            !alive(called) && !alive(grandchild)
+        });
+    }
+}
+
+/// A herdr call that runs past its bound has its whole process group
+/// killed, so a child it started does not outlive it.
+#[test]
+fn a_herdr_call_past_its_bound_ends_with_what_it_started() {
     let mut scratch = Scratch::new();
     let herdr = FakeHerdr::new(&scratch);
-    herdr.hang("pane-get");
-    let mut doctor = scratch.command(&["doctor"]);
+    herdr.fork_and_hang("pane-get");
+    let mut doctor = scratch.command(&["doctor", "--json"]);
     FakeHerdr::place(&mut doctor, &herdr.program());
 
-    let pty = Pty::open();
-    let mut muster = pty.spawn_leading(&mut scratch, doctor);
-    let mut called = None;
-    wait_until("muster to call herdr", || {
-        called = herdr.pid("pane-get");
-        called.is_some()
-    });
-    let called = called.unwrap();
-    scratch.keep_child(called);
-    assert!(alive(called), "the herdr call ended on its own");
-    pty.interrupt();
+    let output = doctor.output().unwrap();
 
-    assert_eq!(pty.exit_code(&mut muster), None, "{}", pty.drawn());
-    wait_until("the herdr call to end with muster", || !alive(called));
+    assert!(output.status.success(), "{}", shown(&output));
+    let row = workspace_row(&parsed(&output));
+    assert_eq!(row["outcome"], "warn", "{row}");
+    let grandchild = herdr.grandchild("pane-get").unwrap();
+    scratch.keep_child(grandchild);
+    wait_until("the herdr call's child to end", || !alive(grandchild));
 }
 
 /// Decision 9: a process that is not running, an unknown name and a missing
@@ -5485,6 +5524,75 @@ fn mcp_process_open_splits_beside_the_agent_without_focus() {
         "{unknown}"
     );
     assert_eq!(herdr.calls().len(), 3);
+}
+
+/// Outside a terminal workspace `process_open` resolves the name against
+/// the stored stack and never starts the service: with none running the
+/// process is not running, and an unknown name lists the stored ones.
+#[test]
+fn mcp_process_open_outside_a_workspace_never_starts_the_service() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut session = McpSession::start(&mut scratch, &project);
+
+    let stopped = session.mistake("process_open", serde_json::json!({ "name": "api" }));
+    let unknown = session.mistake("process_open", serde_json::json!({ "name": "nope" }));
+    drop(session);
+
+    assert_eq!(
+        stopped["structuredContent"]["error"]["kind"], "not-running",
+        "{stopped}"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["error"]["kind"], "unknown-process",
+        "{unknown}"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["error"]["candidates"],
+        serde_json::json!(["api"])
+    );
+    assert!(processes_under(SERVICE_SUBCOMMAND, &scratch.path()).is_empty());
+    assert!(!scratch.socket().exists());
+}
+
+/// An agent that closes `muster mcp`'s stdin while a `process_open` waits
+/// on herdr ends the server once its in-flight answers are drained, and
+/// with it the whole process group of the herdr call then running, so
+/// neither that call nor a child it started is left behind. The layout
+/// answers late, after the client closed, so the split that follows is
+/// still within its own bound when the server exits.
+#[test]
+fn an_mcp_client_closing_ends_its_herdr_call_and_what_it_started() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+    herdr.delay("pane-layout", LATE_LAYOUT);
+    herdr.fork_and_hang("pane-split");
+    let program = herdr.program();
+
+    let mut session = McpSession::start_placed(&mut scratch, &project, |command| {
+        FakeHerdr::place(command, &program);
+    });
+    let server = session.pid();
+    session.call_unanswered("process_open", serde_json::json!({ "name": "api" }));
+    wait_until("muster to ask herdr for the layout", || {
+        herdr.pid("pane-layout").is_some()
+    });
+
+    drop(session);
+
+    assert!(!alive(server), "the server outlived its client");
+    let called = herdr.pid("pane-split").expect("the split was asked for");
+    let grandchild = herdr
+        .grandchild("pane-split")
+        .expect("the split started its child");
+    scratch.keep_child(called);
+    scratch.keep_child(grandchild);
+    wait_until("the split and its child to end with the server", || {
+        !alive(called) && !alive(grandchild)
+    });
 }
 
 /// Correctness M2: a project whose folder name starts or ends with a space

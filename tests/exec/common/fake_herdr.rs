@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use super::{
@@ -36,8 +36,10 @@ pub const CALLER: &str = "w1:p1";
 /// The pane the fake's split opens.
 pub const OPENED: &str = "w1:p2";
 /// The fake itself. Each `<group> <verb>` call is answered from
-/// `<group>-<verb>.out`, `.err` and `.status`, or sleeps as `.sleep` says,
-/// and records its pid in `.pid`.
+/// `<group>-<verb>.out`, `.err` and `.status`, after sleeping as `.delay`
+/// says, and records its pid in `.pid`. With `.fork` it instead starts a
+/// child sleeping that long, records the child's pid in `.grandchild` and
+/// waits on it, as a wrapper around herdr might.
 const SCRIPT_BODY: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 [ "$1" = settle ] && exit 0
@@ -45,7 +47,13 @@ printf '%s\0' "$@" >> "$dir/argv.log"
 printf '\036' >> "$dir/argv.log"
 key="$1-$2"
 echo $$ > "$dir/$key.pid"
-[ -f "$dir/$key.sleep" ] && exec sleep "$(cat "$dir/$key.sleep")"
+[ -f "$dir/$key.delay" ] && sleep "$(cat "$dir/$key.delay")"
+if [ -f "$dir/$key.fork" ]; then
+  sleep "$(cat "$dir/$key.fork")" &
+  echo $! > "$dir/$key.grandchild"
+  wait
+  exit 0
+fi
 [ -f "$dir/$key.out" ] && cat "$dir/$key.out"
 [ -f "$dir/$key.err" ] && cat "$dir/$key.err" >&2
 [ -f "$dir/$key.status" ] && exit "$(cat "$dir/$key.status")"
@@ -75,11 +83,16 @@ const OUT: &str = "out";
 const ERR: &str = "err";
 /// The answer file's extension for a call's exit status.
 const STATUS: &str = "status";
-/// The answer file's extension for how long a call sleeps instead of
-/// answering.
-const SLEEP: &str = "sleep";
 /// The file extension a call records its pid in.
 const PID: &str = "pid";
+/// The answer file's extension for how long a call's child sleeps while
+/// the call waits on it.
+const FORK: &str = "fork";
+/// The file extension a call records its child's pid in.
+const GRANDCHILD: &str = "grandchild";
+/// The answer file's extension for how long a call sleeps before it
+/// answers.
+const DELAY: &str = "delay";
 /// How long a hung call sleeps, far past any test.
 const HANG_SECONDS: &str = "300";
 /// Joins a variable's name to its value in a split's `--env`.
@@ -152,15 +165,31 @@ impl FakeHerdr {
         fs::write(self.file(call, STATUS), status.to_string()).unwrap();
     }
 
-    /// Makes the `call` sleep far past any test instead of answering, as
-    /// the process it ran as, which starts nothing of its own.
-    pub fn hang(&self, call: &str) {
-        fs::write(self.file(call, SLEEP), HANG_SECONDS).unwrap();
+    /// Makes the `call` answer only after `delay`, in whole seconds.
+    pub fn delay(&self, call: &str, delay: Duration) {
+        fs::write(self.file(call, DELAY), delay.as_secs().to_string()).unwrap();
+    }
+
+    /// Makes the `call` start a child that sleeps far past any test and
+    /// wait on it instead of answering.
+    pub fn fork_and_hang(&self, call: &str) {
+        fs::write(self.file(call, FORK), HANG_SECONDS).unwrap();
     }
 
     /// The pid the `call` last ran as, once it has run.
     pub fn pid(&self, call: &str) -> Option<u32> {
-        fs::read_to_string(self.file(call, PID))
+        self.recorded(call, PID)
+    }
+
+    /// The pid of the child the `call` last started, once it has.
+    pub fn grandchild(&self, call: &str) -> Option<u32> {
+        self.recorded(call, GRANDCHILD)
+    }
+
+    /// The pid the `call` recorded in its file with `extension`, once it
+    /// has.
+    fn recorded(&self, call: &str, extension: &str) -> Option<u32> {
+        fs::read_to_string(self.file(call, extension))
             .ok()?
             .trim()
             .parse()

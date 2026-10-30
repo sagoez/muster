@@ -94,7 +94,7 @@ use crate::{
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
             ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
-            resolve_project,
+            resolve_project, this_binary,
         },
         private_dir::state_dir,
         process_tree::named_ancestors,
@@ -857,12 +857,6 @@ fn open(invocation: &Invocation<'_>, args: &OpenArgs) {
         }),
         Err(error) => fail_framed(presenter, json, &error),
     }
-}
-
-/// This muster binary, for what runs it again, or its name when the path
-/// cannot be read.
-fn this_binary() -> PathBuf {
-    env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME))
 }
 
 /// Prints the current project's stored notices, with the service's own when

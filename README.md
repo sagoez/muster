@@ -638,9 +638,16 @@ a stack edit, so `mcp-stack-edits: read-only` does not refuse it.
 muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
 on `PATH`, or the absolute path in `HERDR_BIN_PATH`. It reaches herdr through
 that binary, so `HERDR_SOCKET_PATH` and `HERDR_SESSION` select the server as they
-do for herdr itself. Each herdr call is cut off after 5 seconds. The new pane
-is a shell that runs one typed line, so `open` supports bash, zsh and fish;
-another shell shows its own error in the pane.
+do for herdr itself. Each herdr call is cut off after 5 seconds, and a Ctrl-C
+or hangup that ends muster ends the call too. When no direction is given and
+herdr's layout cannot be read, the pane splits down. The new pane is a shell
+that runs one typed line, so `open` supports bash, zsh and fish 3 or later;
+another shell shows its own error in the pane. The line runs only where the
+pane's own variables are set, so a copy recalled from history elsewhere does
+nothing. The pane runs the muster binary as it is at each open: once an
+upgrade has replaced the binary a `muster mcp` server started from, its
+`process_open` answers `workspace-failed` naming it, and restarting the server
+fixes it.
 
 When herdr cannot be reached or refuses, `open` exits 1 and `process_open`
 answers `workspace-failed`, both with herdr's message. Neither falls back to

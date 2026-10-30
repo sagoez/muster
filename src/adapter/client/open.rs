@@ -49,11 +49,13 @@ pub fn attach_command(
 /// Locates the process `name` of `project`, refusing one that is unknown or
 /// not running before anything opens, then asks `workspace` for a pane
 /// beside the caller's, in the project's folder, attached to it as
-/// `request` says.
+/// `request` says. A binary that no longer exists opens nothing, since the
+/// pane could not run it.
 ///
 /// # Errors
-/// Returns the locate's [`ClientError`], or [`ClientError::Workspace`] when
-/// the workspace did not open the pane.
+/// Returns the locate's [`ClientError`], [`ClientError::BinaryGone`] for a
+/// binary that no longer exists, or [`ClientError::Workspace`] when the
+/// workspace did not open the pane.
 pub fn open_beside(
     client: &ServiceClient,
     project: &Project,
@@ -62,6 +64,9 @@ pub fn open_beside(
     request: &OpenRequest,
 ) -> Result<OpenView, ClientError> {
     locate(client, project, name)?;
+    if !request.binary().is_file() {
+        return Err(ClientError::BinaryGone(request.binary().clone()));
+    }
     let root = project.root();
     let pane = PaneRequest::builder()
         .cwd(root.as_ref().clone())
@@ -91,7 +96,8 @@ mod tests {
     use crate::{
         adapter::{
             client::{
-                FailureKind, recording_workspace::RecordingWorkspace, served_service::ServedService,
+                FailureKind, recording_workspace::RecordingWorkspace,
+                served_service::ServedService, this_binary,
             },
             service::{
                 Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
@@ -103,7 +109,7 @@ mod tests {
         },
     };
 
-    /// The muster binary each pane runs.
+    /// A muster binary that does not exist.
     const BINARY: &str = "/opt/muster/bin/muster";
     /// The project's folder, with a space in it.
     const ROOT: &str = "/home/me/my shop";
@@ -132,10 +138,11 @@ mod tests {
             .collect()
     }
 
-    /// An interactive request that takes the focus, split as `direction`.
+    /// An interactive request that takes the focus, split as `direction`,
+    /// running this test binary, which exists.
     fn request(read_only: bool, direction: Option<SplitDirection>) -> OpenRequest {
         OpenRequest::builder()
-            .binary(PathBuf::from(BINARY))
+            .binary(this_binary())
             .read_only(read_only)
             .focus(PaneFocus::Take)
             .direction(direction)
@@ -206,7 +213,7 @@ mod tests {
         let expected = PaneRequest::builder()
             .cwd(PathBuf::from(ROOT))
             .command(attach_command(
-                Path::new(BINARY),
+                &this_binary(),
                 shop().root(),
                 &name("web"),
                 true,
@@ -278,5 +285,40 @@ mod tests {
         assert_eq!(error.kind(), FailureKind::WorkspaceFailed);
         assert_eq!(error.to_string(), refusal.to_string());
         assert_eq!(workspace.requests().len(), 1);
+    }
+
+    /// A binary that no longer exists, removed or named by Linux as
+    /// replaced, fails as `workspace-failed` naming it, and no pane is
+    /// asked for.
+    #[test]
+    fn a_binary_that_no_longer_exists_opens_no_pane() {
+        let replaced = PathBuf::from(format!("{} (deleted)", this_binary().display()));
+        for gone in [PathBuf::from(BINARY), replaced] {
+            let served = locating();
+            let workspace = RecordingWorkspace::opening(OPENED);
+            let asked = OpenRequest::builder()
+                .binary(gone.clone())
+                .read_only(false)
+                .focus(PaneFocus::Take)
+                .direction(None)
+                .build();
+
+            let error = open_beside(
+                &served.connector()(),
+                &shop(),
+                &name("web"),
+                &workspace,
+                &asked,
+            )
+            .unwrap_err();
+
+            assert!(matches!(&error, ClientError::BinaryGone(path) if *path == gone));
+            assert_eq!(error.kind(), FailureKind::WorkspaceFailed);
+            assert!(
+                error.to_string().contains(&gone.display().to_string()),
+                "{error}"
+            );
+            assert!(workspace.requests().is_empty());
+        }
     }
 }

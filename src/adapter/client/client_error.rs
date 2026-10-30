@@ -151,6 +151,13 @@ pub enum ClientError {
     /// The terminal workspace the caller runs in did not open a pane.
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// The muster binary a new pane would run to attach no longer exists,
+    /// as after an upgrade replaced it, so no pane was opened.
+    #[error(
+        "the muster binary {} no longer exists, so no pane was opened to run it",
+        .0.display()
+    )]
+    BinaryGone(PathBuf),
 }
 
 impl ClientError {
@@ -174,7 +181,7 @@ impl ClientError {
             Self::CursorAhead { .. } => FailureKind::InvalidInput,
             Self::Interrupted | Self::InterruptedUnsent => FailureKind::Interrupted,
             Self::NoWorkspace => FailureKind::NoWorkspace,
-            Self::Workspace(_) => FailureKind::WorkspaceFailed,
+            Self::Workspace(_) | Self::BinaryGone(_) => FailureKind::WorkspaceFailed,
         }
     }
 
@@ -199,7 +206,8 @@ impl ClientError {
             | Self::InterruptedUnsent
             | Self::Interrupted
             | Self::NoWorkspace
-            | Self::Workspace(_) => &[],
+            | Self::Workspace(_)
+            | Self::BinaryGone(_) => &[],
         }
     }
 }

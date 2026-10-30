@@ -507,7 +507,8 @@ fn client_message(error: &ClientError) -> String {
         | ClientError::Log { .. }
         | ClientError::InterruptedUnsent
         | ClientError::NoWorkspace
-        | ClientError::Workspace(_) => error.to_string(),
+        | ClientError::Workspace(_)
+        | ClientError::BinaryGone(_) => error.to_string(),
     }
 }
 

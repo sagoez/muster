@@ -1,16 +1,9 @@
-use std::{
-    env,
-    ffi::c_int,
-    panic,
-    path::{Path, PathBuf},
-    process,
-    sync::Arc,
-};
+use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
         cli::{self, CliPorts, McpLaunch},
-        client::{RunningServiceNotifier, ServiceAccess, UserService},
+        client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
@@ -30,7 +23,6 @@ use muster::{
         shell::ShellFiles,
         store::SqliteStore,
     },
-    constants::APP_NAME,
     domain::{
         config::ConfigError,
         port::{
@@ -166,8 +158,8 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store))
         .notifier(Arc::new(RunningServiceNotifier::new(service)))
-        .workspace(terminal_workspace())
-        .binary(env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME)))
+        .terminal_workspace(terminal_workspace())
+        .binary(Arc::new(this_binary))
         .build();
     Ok(run_stdio(deps)?)
 }

@@ -54,7 +54,7 @@ mod tests {
             },
             client::{
                 FailureKind, open::attach_command, recording_workspace::RecordingWorkspace,
-                served_service::ServedService,
+                served_service::ServedService, this_binary,
             },
             service::{
                 Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
@@ -69,8 +69,6 @@ mod tests {
         },
     };
 
-    /// The muster binary each pane runs.
-    const BINARY: &str = "/opt/muster/bin/muster";
     /// The project's folder, with a space in it.
     const ROOT: &str = "/home/me/my shop";
     /// The pane the workspace opens.
@@ -170,7 +168,7 @@ mod tests {
             &shop(),
             &open_args(words),
             workspace,
-            Path::new(BINARY),
+            &this_binary(),
             Presenter::Plain,
         )
     }
@@ -197,7 +195,7 @@ mod tests {
         let expected = PaneRequest::builder()
             .cwd(PathBuf::from(ROOT))
             .command(attach_command(
-                Path::new(BINARY),
+                &this_binary(),
                 shop().root(),
                 &name("api"),
                 false,
@@ -231,7 +229,7 @@ mod tests {
         assert_eq!(request.direction(), Some(SplitDirection::Down));
         assert_eq!(
             request.command(),
-            &attach_command(Path::new(BINARY), shop().root(), &name("api"), true)
+            &attach_command(&this_binary(), shop().root(), &name("api"), true)
         );
         assert!(view.read_only());
     }
@@ -323,7 +321,7 @@ mod tests {
     #[test]
     fn the_pane_command_parses_as_attach() {
         for read_only in [false, true] {
-            let command = attach_command(Path::new(BINARY), shop().root(), &name("-x"), read_only);
+            let command = attach_command(&this_binary(), shop().root(), &name("-x"), read_only);
 
             let args = Args::try_parse_from(
                 iter::once(command.program().as_os_str().to_os_string())

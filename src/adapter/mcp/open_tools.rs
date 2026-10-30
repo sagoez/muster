@@ -19,9 +19,11 @@ use crate::{
 /// pane opened.
 fn not_opened(name: &ProcessRef, error: ClientError) -> ToolError {
     match error {
-        ClientError::NoWorkspace | ClientError::Workspace(_) => ToolError::NotOpened {
-            name: name.clone(),
-            source: Box::new(error),
+        ClientError::NoWorkspace | ClientError::Workspace(_) | ClientError::BinaryGone(_) => {
+            ToolError::NotOpened {
+                name: name.clone(),
+                source: Box::new(error),
+            }
         },
         other => other.into(),
     }
@@ -46,12 +48,12 @@ impl MusterMcp {
     ) -> ToolResult {
         let name = reference(arg.name())?;
         let request = OpenRequest::builder()
-            .binary(self.deps.binary().clone())
+            .binary((self.deps.binary())())
             .read_only(arg.read_only().unwrap_or(false))
             .focus(PaneFocus::Keep)
             .direction(arg.split()?)
             .build();
-        let Some(workspace) = self.deps.workspace().clone() else {
+        let Some(workspace) = self.deps.terminal_workspace().clone() else {
             return Err(not_opened(&name, ClientError::NoWorkspace).into());
         };
         let (view, alerts) = self
@@ -67,11 +69,7 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
     use rmcp::model::ErrorCode;
     use serde_json::Value;
@@ -84,7 +82,7 @@ mod tests {
                 recording_workspace::RecordingWorkspace, served_service::ServedService,
             },
             mcp::test_support::{
-                BINARY, Fixture, content, fixture, fixture_with, refusal, register, runtime,
+                Fixture, content, fixture, fixture_with, refusal, register, runtime,
             },
             service::{
                 Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
@@ -195,7 +193,7 @@ mod tests {
         PaneRequest::builder()
             .cwd(fixture.root().as_ref().clone())
             .command(attach_command(
-                Path::new(BINARY),
+                &fixture.binary(),
                 fixture.root(),
                 &name,
                 read_only,
@@ -438,6 +436,70 @@ mod tests {
             "{message}"
         );
         assert_eq!(workspace.requests().len(), 1);
+    }
+
+    /// Each open reads the binary anew, so the pane runs the binary as it
+    /// is at that open, not as it was when the server started.
+    #[test]
+    fn each_open_reads_the_binary_anew() {
+        let served = service(&["web"], located());
+        let workspace = Arc::new(RecordingWorkspace::opening(OPENED));
+        let fixture = inside(&served, &workspace);
+        let first = fixture.binary();
+        let second = first.with_file_name("muster-upgraded");
+        fs::write(&second, "").unwrap();
+
+        for binary in [&first, &second] {
+            fixture.use_binary(binary.clone());
+            runtime().block_on(async {
+                content(
+                    fixture
+                        .server()
+                        .process_open(open(serde_json::json!({"name": "web"})))
+                        .await,
+                )
+            });
+        }
+
+        let programs: Vec<PathBuf> = workspace
+            .requests()
+            .iter()
+            .map(|request| request.command().program().clone())
+            .collect();
+        assert_eq!(programs, [first, second]);
+    }
+
+    /// A binary removed since the server started, as Linux names one an
+    /// upgrade replaced, fails the open as `workspace-failed` naming the
+    /// path, and no pane is asked for.
+    #[test]
+    fn a_binary_gone_since_the_server_started_opens_no_pane() {
+        let served = service(&["web"], located());
+        let workspace = Arc::new(RecordingWorkspace::opening(OPENED));
+        let fixture = inside(&served, &workspace);
+        let removed = fixture.binary();
+        fs::remove_file(&removed).unwrap();
+        let replaced = PathBuf::from(format!("{} (deleted)", removed.display()));
+
+        for gone in [removed, replaced] {
+            fixture.use_binary(gone.clone());
+            let error = runtime()
+                .block_on(async {
+                    fixture
+                        .server()
+                        .process_open(open(serde_json::json!({"name": "web"})))
+                        .await
+                })
+                .unwrap_err()
+                .answer()
+                .unwrap_err();
+
+            let failure = error.data.expect("the failure rides along");
+            assert_eq!(failure["error"]["kind"], "workspace-failed");
+            let message = failure["error"]["message"].as_str().unwrap();
+            assert!(message.contains(&gone.display().to_string()), "{message}");
+        }
+        assert!(workspace.requests().is_empty());
     }
 
     /// The tool's description and arguments, as an agent reads them.

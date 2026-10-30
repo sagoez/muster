@@ -42,9 +42,10 @@ pub struct McpDeps {
     /// Told after each committed edit, so a running service picks it up.
     notifier: Arc<dyn StateChangeNotifier + Send + Sync>,
     /// The terminal workspace the agent's own pane is in, if any.
-    workspace: Option<Arc<dyn TerminalWorkspace>>,
-    /// The muster binary a pane runs to attach.
-    binary: PathBuf,
+    terminal_workspace: Option<Arc<dyn TerminalWorkspace>>,
+    /// Reads the muster binary a pane runs to attach, at each open, so one
+    /// replaced since the server started is never handed to a pane.
+    binary: Arc<dyn Fn() -> PathBuf + Send + Sync>,
 }
 
 impl McpDeps {

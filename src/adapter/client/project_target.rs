@@ -122,9 +122,11 @@ impl ProjectTarget {
 /// A `--project` naming a folder (it contains `/` or starts with `.` or `~`)
 /// is read against `cwd`, unless no such folder exists and a registered
 /// project has that name, as `.dotfiles` may; anything else is a registered
-/// project's name. `MUSTER_PROJECT` is a folder, or when no such folder
-/// exists, a registered project's name; a bare word that is neither is an
-/// unknown project. There is no fallback to some other registered project.
+/// project's name. Only a name is trimmed, never a folder, whose name may
+/// start or end with a space. `MUSTER_PROJECT` is a folder, or when no such
+/// folder exists, a registered project's name; a bare word that is neither
+/// is an unknown project. There is no fallback to some other registered
+/// project.
 ///
 /// # Errors
 /// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
@@ -135,14 +137,15 @@ pub fn resolve_project(
     cwd: &Path,
     projects: &dyn ProjectStore,
 ) -> Result<ProjectTarget, ResolveError> {
-    let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
+    let explicit = explicit.filter(|value| !value.trim().is_empty());
     if let Some(value) = explicit {
-        if !names_a_folder(value) {
-            return named(value, projects);
+        let name = value.trim();
+        if !names_a_folder(name) {
+            return named(name, projects);
         }
         let path = cwd.join(expand_home(Path::new(value)));
         if !path.is_dir()
-            && let Some(project) = registered_named(value, projects)?
+            && let Some(project) = registered_named(name, projects)?
         {
             return Ok(ProjectTarget::Registered(project));
         }
@@ -488,6 +491,33 @@ mod tests {
             )
         );
         assert!(resolve_project(Some(".missing"), None, &base, &projects).is_err());
+    }
+
+    /// A folder whose name starts or ends with a space is that very folder,
+    /// never one trimmed of it; a name is still trimmed.
+    #[test]
+    fn a_folder_is_never_trimmed_and_a_name_is() {
+        let (_scratch, base) = tree();
+        for folder in ["trail ", " lead"] {
+            fs::create_dir(base.join(folder)).unwrap();
+        }
+        fs::create_dir(base.join("trail")).unwrap();
+        let trail = project("trail", &base.join("trail "));
+        let lead = project("lead", &base.join(" lead"));
+        let projects = FixedProjects::new(vec![trail.clone(), lead.clone()]);
+
+        assert_eq!(
+            resolve_project(base.join("trail ").to_str(), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(trail.clone())
+        );
+        assert_eq!(
+            resolve_project(Some("./ lead"), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(lead)
+        );
+        assert_eq!(
+            resolve_project(Some("  trail "), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(trail)
+        );
     }
 
     /// Only a non-empty `MUSTER_PROJECT` names a project.

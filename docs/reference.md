@@ -444,8 +444,10 @@ names its `kind` and up to 20 `candidates`. A wait ended by an exit or crash
 does the same, with the run's last lines. A wait that ran out of time, and a
 lock or todo someone else holds, are not errors. `process_open` resolves the
 process first, so an unknown or stopped one gets its own answer. Outside herdr
-it resolves the name against the stored stack and never starts the service:
-with no service running the process is `not-running`, and for a running one it
+it resolves the name against the stored stack and never starts or replaces the
+service: with no service running the process is `not-running`, with one of
+another version running it answers kind `version-mismatch` naming both
+versions, and for a running process it
 answers kind `no-workspace`, telling the agent to ask you to run
 `muster --project <root> attach -- <name>` in your own terminal, and
 when herdr cannot be reached or refuses it answers `workspace-failed` with

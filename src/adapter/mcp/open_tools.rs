@@ -60,8 +60,10 @@ impl MusterMcp {
             {project, process, pane, read_only, alerts}. The process is resolved first: an \
             unknown name is unknown-process with candidates, and a process that is not running \
             is not-running: start it first with process_start. Outside a terminal workspace, \
-            the name is resolved against the stored stack and the service is never started: \
-            with none running the process is not-running, and a running process is isError, \
+            the name is resolved against the stored stack and the service is never started \
+            or replaced: with none running the process is not-running, with one of another \
+            version running the error is kind version-mismatch naming both versions, and a \
+            running process is isError, \
             kind no-workspace; the message names the muster attach command to ask the user to \
             run in their own terminal. A workspace that does not open the pane is an error of \
             kind workspace-failed naming the same command."
@@ -137,7 +139,7 @@ mod tests {
     use crate::{
         adapter::{
             client::{
-                Asked,
+                Asked, RunningService,
                 fake_service::FakeService,
                 open::{attach_command, attach_hint},
                 recording_workspace::RecordingWorkspace,
@@ -148,7 +150,7 @@ mod tests {
             },
             service::{
                 Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
-                ServiceErrorKind, ServiceRequest, ServiceResponse,
+                ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
             },
         },
         domain::{
@@ -446,6 +448,48 @@ mod tests {
             if kind == "unknown-process" {
                 assert_eq!(failure["candidates"], serde_json::json!(["web"]), "{typed}");
             }
+        }
+    }
+
+    /// Outside a terminal workspace, a service of another version, which
+    /// may well run the process, is named as a version mismatch with both
+    /// versions, never as not-running, and is neither asked nor replaced:
+    /// connecting to it would fail.
+    #[test]
+    fn process_open_outside_a_workspace_names_a_service_of_another_version() {
+        let ours = ServiceVersion::current().to_string();
+        for (theirs, named, hint) in [
+            (
+                "0.0.1",
+                "version 0.0.1, older than this muster",
+                "call stack_status",
+            ),
+            (
+                "999.0.0",
+                "version 999.0.0, newer than this muster",
+                "restart the muster MCP server",
+            ),
+        ] {
+            let running = RunningService::builder()
+                .version(Some(theirs.parse().unwrap()))
+                .binary(None)
+                .build();
+            let fixture = outside(Asked::OtherVersion(running), &["web"]);
+
+            let result = runtime().block_on(async {
+                fixture
+                    .server()
+                    .process_open(open(serde_json::json!({"name": "web"})))
+                    .await
+            });
+            let fault = result.unwrap_err().answer().unwrap_err();
+            let failure = fault.data.unwrap()["error"].clone();
+
+            assert_eq!(failure["kind"], "version-mismatch", "{theirs}");
+            let message = failure["message"].as_str().unwrap();
+            assert!(message.contains(named), "{message}");
+            assert!(message.contains(&format!("({ours})")), "{message}");
+            assert!(message.contains(hint), "{message}");
         }
     }
 

@@ -38,6 +38,9 @@ const STOP_SERVICE_HINT: &str = "`muster service stop` and run the command again
 /// What a person does about a service newer than this binary.
 const NEWER_SERVICE_HINT: &str =
     "run the newer muster, or `muster service stop` to let this one start its own";
+/// What a person does about a service older than this binary.
+const OLDER_SERVICE_HINT: &str =
+    "the next muster command replaces it, and every process keeps running";
 /// Where a person sees how interrupted processes end.
 const INTERRUPTED_HINT: &str = "`muster ps` shows how they end";
 /// Where a person finds a cursor that names output.
@@ -502,6 +505,7 @@ fn client_message(error: &ClientError) -> String {
             format!("{error}; {STOP_SERVICE_HINT}")
         },
         ClientError::ServiceNewer { .. } => format!("{error}; {NEWER_SERVICE_HINT}"),
+        ClientError::ServiceOlder { .. } => format!("{error}; {OLDER_SERVICE_HINT}"),
         ClientError::Refused { kind, .. } => format!("{error}{}", refusal_hint(*kind)),
         ClientError::Interrupted => format!("{error}, {INTERRUPTED_HINT}"),
         ClientError::CursorAhead { .. } => format!("{error}; {CURSOR_HINT}"),

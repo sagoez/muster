@@ -83,10 +83,10 @@ pub fn shell_report(
             match service.ask_if_running(&request)? {
                 Asked::Answered(answer) => answer,
                 Asked::Absent => return Ok(()),
-                Asked::OtherVersion | Asked::Starting => service.connect()?.send(&request)?,
+                Asked::OtherVersion(_) | Asked::Starting => service.connect()?.send(&request)?,
             }
         },
-        Asked::Absent | Asked::OtherVersion | Asked::Starting => {
+        Asked::Absent | Asked::OtherVersion(_) | Asked::Starting => {
             service.connect()?.send(&request)?
         },
     };
@@ -114,7 +114,7 @@ mod tests {
     use super::{super::fake_ports::FakePorts, *};
     use crate::{
         adapter::{
-            client::{fake_service::FakeService, served_service::ServedService},
+            client::{RunningService, fake_service::FakeService, served_service::ServedService},
             service::ShellNote,
             store::test_support::{fresh_store, spec},
         },
@@ -274,7 +274,9 @@ mod tests {
         let served = ServedService::answering(ServiceResponse::ShellNotes(Vec::new()));
         let (ports, _shop, scratch) = shop_ports(
             FakeService::default()
-                .asked_in_turn(vec![Asked::OtherVersion])
+                .asked_in_turn(vec![Asked::OtherVersion(
+                    RunningService::builder().version(None).binary(None).build(),
+                )])
                 .starting(&served),
         );
 

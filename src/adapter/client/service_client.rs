@@ -256,11 +256,20 @@ impl ServiceClient {
         };
         match self.send_once(&hello, ASK_TIMEOUT) {
             Ok(ServiceResponse::Hello { version, .. }) if version == ours => {},
-            Ok(ServiceResponse::Hello { .. }) => return Ok(Asked::OtherVersion),
+            Ok(ServiceResponse::Hello { version, binary }) => {
+                return Ok(Asked::OtherVersion(
+                    RunningService::builder()
+                        .version(Some(version))
+                        .binary(Some(binary))
+                        .build(),
+                ));
+            },
             Ok(ServiceResponse::Error(body))
                 if *body.kind() == ServiceErrorKind::InvalidRequest =>
             {
-                return Ok(Asked::OtherVersion);
+                return Ok(Asked::OtherVersion(
+                    RunningService::builder().version(None).binary(None).build(),
+                ));
             },
             Ok(ServiceResponse::Error(_)) => return Ok(Asked::Absent),
             Ok(other) => return Err(ClientError::UnexpectedAnswer((&other).into())),
@@ -767,6 +776,18 @@ fn io_error(failure: ExchangeFailure) -> ClientError {
     ClientError::ServiceIo { socket, source }
 }
 
+/// The refusal to use `running`, a service of another version that a call
+/// which never replaces one found: newer as `connect` names it, or older.
+pub(super) fn other_version(running: RunningService) -> ClientError {
+    if running.compared_with(&ServiceVersion::current()) == Ordering::Less {
+        return newer(running);
+    }
+    ClientError::ServiceOlder {
+        ours: APP_VERSION.to_string(),
+        theirs: running.version().as_ref().map(ToString::to_string),
+    }
+}
+
 /// The refusal to use the newer service `running`.
 fn newer(running: RunningService) -> ClientError {
     ClientError::ServiceNewer {
@@ -1002,7 +1023,12 @@ mod tests {
             .ask(&ServiceRequest::SettingsChanged)
             .unwrap();
 
-        assert_eq!(answer, Asked::OtherVersion);
+        assert!(
+            matches!(&answer, Asked::OtherVersion(running)
+                if running.version().as_ref().map(ToString::to_string).as_deref()
+                    == Some(OTHER_VERSION)),
+            "{answer:?}"
+        );
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 }

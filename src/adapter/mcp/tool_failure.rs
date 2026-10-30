@@ -17,6 +17,9 @@ use crate::{
 /// What an agent does about a muster service that runs another version, since
 /// no tool can fix it.
 const RESTART_SERVER: &str = "restart the muster MCP server";
+/// What an agent does about an older muster service left running.
+const CALL_STACK_STATUS: &str =
+    "call stack_status, which replaces it while every process keeps running, then call again";
 /// What an agent does about a service that is shutting down.
 const CALL_AGAIN: &str = "the muster service is shutting down; call the tool again";
 /// What an agent does about a process that is not running.
@@ -154,6 +157,7 @@ fn client_message(error: &ClientError) -> String {
         ClientError::ServiceNewer { .. }
         | ClientError::VersionMismatch { .. }
         | ClientError::UnexpectedAnswer(_) => format!("{error}; {RESTART_SERVER}"),
+        ClientError::ServiceOlder { .. } => format!("{error}; {CALL_STACK_STATUS}"),
         ClientError::Refused { kind, message } => refusal_message(*kind, message),
         ClientError::Config(config) => config_message(config),
         ClientError::CursorAhead { .. } => format!("invalid since: {error}; {PASS_CURSOR}"),
@@ -246,6 +250,11 @@ mod tests {
                 ours: "0.9.1".to_string(),
                 theirs: "9.0.0".to_string(),
                 binary: None,
+            }
+            .into(),
+            ClientError::ServiceOlder {
+                ours: "0.9.1".to_string(),
+                theirs: Some("0.9.0".to_string()),
             }
             .into(),
             ClientError::VersionMismatch {

@@ -12,19 +12,26 @@ use super::{
 };
 use crate::{
     adapter::client::{ClientError, OpenRequest, open::open_beside},
-    domain::{terminal_workspace::PaneFocus, value::ProcessRef},
+    domain::{project::Project, terminal_workspace::PaneFocus, value::ProcessName},
 };
 
-/// `error` from opening `name`, with what the user can do instead when no
-/// pane opened.
-fn not_opened(name: &ProcessRef, error: ClientError) -> ToolError {
+/// `error` from opening the running process `name` of `project` as
+/// `request` asks, with what the user can do instead when no pane opened.
+fn not_opened(
+    project: &Project,
+    name: &ProcessName,
+    request: &OpenRequest,
+    error: ClientError,
+) -> ToolError {
     match error {
         ClientError::NoWorkspace | ClientError::Workspace(_) | ClientError::BinaryGone(_) => {
             ToolError::NotOpened {
+                root: project.root().clone(),
                 name: name.clone(),
+                read_only: request.read_only(),
                 source: Box::new(error),
             }
-        },
+        }
         other => other.into(),
     }
 }
@@ -37,10 +44,12 @@ impl MusterMcp {
             terminal workspace you run in, attached to it, without taking the \
             user's focus. read_only=true opens it watch-only. direction is one of \
             <split-directions>; without it the pane splits along its longer side. Returns \
-            {project, process, pane, read_only, alerts}. Outside a terminal workspace: isError, \
-            kind no-workspace; the message names the muster attach command to ask the user to \
-            run in their own terminal. \
-            A process that is not running is not-running: start it first with process_start."
+            {project, process, pane, read_only, alerts}. The process is resolved first: an \
+            unknown name is unknown-process with candidates, and a process that is not running \
+            is not-running: start it first with process_start. Outside a terminal workspace, a \
+            running process is isError, kind no-workspace; the message names the muster attach \
+            command to ask the user to run in their own terminal. A workspace that does not open \
+            the pane is an error of kind workspace-failed naming the same command."
     )]
     pub(super) async fn process_open(
         &self,
@@ -53,14 +62,12 @@ impl MusterMcp {
             .focus(PaneFocus::Keep)
             .direction(arg.split()?)
             .build();
-        let Some(workspace) = self.deps.terminal_workspace().clone() else {
-            return Err(not_opened(&name, ClientError::NoWorkspace).into());
-        };
+        let workspace = self.deps.terminal_workspace().clone();
         let (view, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
                 let resolved = resolved(client, project, &name)?;
-                open_beside(client, project, &resolved, workspace.as_ref(), &request)
-                    .map_err(|error| not_opened(&name, error))
+                open_beside(client, project, &resolved, workspace.as_deref(), &request)
+                    .map_err(|error| not_opened(project, &resolved, &request, error))
             })
             .await?;
         structured(with_alerts(json(&view)?, &alerts)?, false)
@@ -78,8 +85,10 @@ mod tests {
     use crate::{
         adapter::{
             client::{
-                fake_service::FakeService, open::attach_command,
-                recording_workspace::RecordingWorkspace, served_service::ServedService,
+                fake_service::FakeService,
+                open::{attach_command, attach_hint},
+                recording_workspace::RecordingWorkspace,
+                served_service::ServedService,
             },
             mcp::test_support::{
                 Fixture, content, fixture, fixture_with, refusal, register, runtime,
@@ -270,39 +279,103 @@ mod tests {
         assert_eq!(answer["read_only"], true);
     }
 
-    /// Outside a terminal workspace the open is the agent's to answer, as
-    /// `no-workspace` naming the command the user can run, and the service
-    /// is never reached or started.
+    /// A registered fixture driving `served` in no terminal workspace.
+    fn outside(served: &ServedService) -> Fixture {
+        let fixture = fixture_with(FakeService::default().starting(served), None);
+        register(&fixture);
+        fixture
+    }
+
+    /// The failure `json` asks of `fixture`'s server, answered as a result.
+    fn failed_open(fixture: &Fixture, json: Value) -> Value {
+        let result = runtime().block_on(async { fixture.server().process_open(open(json)).await });
+        let answer = result.unwrap_err().answer().unwrap();
+        assert_eq!(answer.is_error, Some(true));
+        answer.structured_content.unwrap()["error"].clone()
+    }
+
+    /// Outside a terminal workspace a running process is the agent's to
+    /// answer, as `no-workspace` naming the attach the user can run: the
+    /// pane's own command, with the project's root and `--` before the
+    /// name, for the project the agent named too.
     #[test]
     fn process_open_outside_a_workspace_is_no_workspace_with_the_attach_hint() {
-        let fixture = fixture();
-        register(&fixture);
-
-        for (name, command) in [
-            ("web", "muster attach web"),
-            ("-x", "muster attach -- -x"),
-            ("$(id) x", "muster attach '$(id) x'"),
-        ] {
-            let result = runtime().block_on(async {
-                fixture
-                    .server()
-                    .process_open(open(serde_json::json!({"name": name})))
-                    .await
+        for name in ["web", "-x", "$(id) x"] {
+            let served = service(&[name], located());
+            let fixture = outside(&served);
+            let other = fixture.root().as_ref().join("frontend");
+            runtime().block_on(async {
+                content(
+                    fixture
+                        .server()
+                        .process_add(Parameters(
+                            serde_json::from_value(serde_json::json!({
+                                "name": "web",
+                                "command": "npm run dev",
+                                "project": other,
+                            }))
+                            .unwrap(),
+                        ))
+                        .await,
+                );
             });
-            let answer = result.unwrap_err().answer().unwrap();
+            let other = ProjectRoot::try_new(other).unwrap();
 
-            assert_eq!(answer.is_error, Some(true));
-            let failure = answer.structured_content.unwrap();
-            assert_eq!(failure["error"]["kind"], "no-workspace");
-            let message = failure["error"]["message"].as_str().unwrap().to_string();
+            for (project, root) in [(None, fixture.root()), (Some(&other), &other)] {
+                let mut json = serde_json::json!({"name": name});
+                if let Some(project) = project {
+                    json["project"] = serde_json::json!(project);
+                }
+                let failure = failed_open(&fixture, json);
+
+                assert_eq!(failure["kind"], "no-workspace", "{name}");
+                let message = failure["message"].as_str().unwrap();
+                assert!(
+                    message.starts_with("not inside a terminal workspace"),
+                    "{message}"
+                );
+                let hint = attach_hint(root, &ProcessName::try_new(name).unwrap(), false);
+                assert!(
+                    message.contains(&format!("run {hint} in their own terminal")),
+                    "{message}"
+                );
+                let root = root.as_ref().to_str().unwrap();
+                assert_eq!(shlex::split(&hint).unwrap(), [
+                    "muster",
+                    "--project",
+                    root,
+                    "attach",
+                    "--",
+                    name
+                ]);
+            }
+        }
+    }
+
+    /// Outside a terminal workspace the process is still resolved and
+    /// located first: an unknown or stopped one gets its own answer, and a
+    /// nul in a name never reaches a hint.
+    #[test]
+    fn process_open_outside_a_workspace_resolves_before_no_workspace() {
+        for (located, typed, kind) in [
+            (refused(ServiceErrorKind::NotRunning), "web", "not-running"),
+            (located(), "nope", "unknown-process"),
+            (located(), "x\u{0}; touch pwned", "unknown-process"),
+        ] {
+            let served = service(&["web"], located);
+            let fixture = outside(&served);
+
+            let failure = failed_open(&fixture, serde_json::json!({"name": typed}));
+
+            assert_eq!(failure["kind"], kind, "{typed}");
+            let message = failure["message"].as_str().unwrap();
             assert!(
-                message.starts_with("not inside a terminal workspace"),
-                "{message}"
+                !message.contains("terminal") && !message.contains("attach"),
+                "{message:?}"
             );
-            assert!(
-                message.contains(&format!("run {command} in their own terminal")),
-                "{message}"
-            );
+            if kind == "unknown-process" {
+                assert_eq!(failure["candidates"], serde_json::json!(["web"]), "{typed}");
+            }
         }
     }
 
@@ -431,8 +504,9 @@ mod tests {
             message.contains("no\\u{1b}]0;owned\\u{7} pane"),
             "{message}"
         );
+        let hint = attach_hint(fixture.root(), &ProcessName::try_new("web").unwrap(), false);
         assert!(
-            message.contains("run muster attach web in their own terminal"),
+            message.contains(&format!("run {hint} in their own terminal")),
             "{message}"
         );
         assert_eq!(workspace.requests().len(), 1);

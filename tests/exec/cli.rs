@@ -866,10 +866,11 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
             "--name",
             "tail job",
             "--",
-            &format!("echo caller-${CALLER_VARIABLE}; sleep 600"),
+            &format!("echo caller-${CALLER_VARIABLE} pane-${{{HERDR_PANE_ENV}-none}}; sleep 600"),
         ])
         .current_dir(&project)
         .env(CALLER_VARIABLE, "seen")
+        .env(HERDR_PANE_ENV, "w1:p3")
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", shown(&output));
@@ -879,7 +880,7 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
     assert!(scratch.exported(&project).contains("tail job"));
     assert_eq!(scratch.row(&project, "tail job")["state"], "running");
     wait_until("the run to see its caller's environment", || {
-        stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen")
+        stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen pane-none")
     });
 
     let run_here = |args: &[&str]| {
@@ -4852,6 +4853,23 @@ const TYPED_ATTACH: &str = r#" [ -n "$MUSTER_OPEN_ARG_0" ] && "$MUSTER_OPEN_ARG_
 /// The detach key a terminal workspace often reserves for itself.
 const RESERVED_DETACH_KEY: &str = "ctrl-b";
 
+/// The command that attaches to `api` of the project in `project` from
+/// anywhere, as a failed open or a detach names it.
+fn api_attach_hint(project: &Path) -> String {
+    let root = fs::canonicalize(project).unwrap();
+    let root = shlex::try_quote(root.to_str().unwrap()).unwrap();
+    format!("muster --project {root} attach -- api")
+}
+
+/// The words of the attach command named between backticks in `text`.
+fn hinted_words(text: &str) -> Vec<String> {
+    let hint = text
+        .split('`')
+        .find(|part| part.starts_with("muster --project"))
+        .unwrap_or_else(|| panic!("no attach hint in {text}"));
+    shlex::split(hint).unwrap()
+}
+
 /// `muster -p <project> <args>` run from `project` in the caller pane of
 /// the herdr whose binary is `herdr`.
 fn in_pane(scratch: &Scratch, project: &Path, herdr: &Path, args: &[&str]) -> Command {
@@ -4990,10 +5008,8 @@ fn open_inside_a_workspace_whose_herdr_is_missing_fails_without_attaching() {
     let drawn = pty.drawn();
     assert!(drawn.contains("muster open · shop"), "{drawn}");
     assert!(drawn.contains(HERDR_UNREACHABLE), "{drawn}");
-    assert!(
-        drawn.contains("`muster attach 'api'` shows it here"),
-        "{drawn}"
-    );
+    let hint = format!("`{}` shows it here", api_attach_hint(&project));
+    assert!(drawn.contains(&hint), "{drawn}");
     assert!(!drawn.contains("attached to"), "{drawn}");
     assert_eq!(scratch.row(&project, "api")["attached"], 0);
 
@@ -5012,7 +5028,7 @@ fn open_inside_a_workspace_whose_herdr_is_missing_fails_without_attaching() {
         failure["error"]["message"]
             .as_str()
             .unwrap()
-            .ends_with("`muster attach 'api'` shows it here"),
+            .ends_with(&hint),
         "{failure}"
     );
 }
@@ -5348,7 +5364,7 @@ fn a_herdr_refusal_closes_the_pane_and_names_the_attach_hint() {
     assert!(drawn.contains("no such pane (pane_not_found)"), "{drawn}");
     assert!(drawn.contains("the pane is closed"), "{drawn}");
     assert!(
-        drawn.contains("`muster attach 'api'` shows it here"),
+        drawn.contains(&format!("`{}` shows it here", api_attach_hint(&project))),
         "{drawn}"
     );
     let raw = pty.raw();
@@ -5444,17 +5460,79 @@ fn mcp_process_open_splits_beside_the_agent_without_focus() {
     assert_eq!(calls[1].last().unwrap(), "--no-focus", "{calls:?}");
     drop(inside);
 
+    let other = scratch.project("other", &single());
+    let up = scratch.on(&other, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
     let mut outside = McpSession::start(&mut scratch, &project);
-    let refused = outside.mistake("process_open", serde_json::json!({ "name": "api" }));
+    for (asked, root) in [
+        (serde_json::json!({ "name": "api" }), &project),
+        (
+            serde_json::json!({ "name": "api", "project": other }),
+            &other,
+        ),
+    ] {
+        let refused = outside.mistake("process_open", asked);
+        assert_eq!(
+            refused["structuredContent"]["error"]["kind"], "no-workspace",
+            "{refused}"
+        );
+        let hint = format!("run {} in their own terminal", api_attach_hint(root));
+        assert!(result_text(&refused).contains(&hint), "{refused}");
+    }
+    let unknown = outside.mistake("process_open", serde_json::json!({ "name": "nope" }));
     assert_eq!(
-        refused["structuredContent"]["error"]["kind"], "no-workspace",
-        "{refused}"
-    );
-    assert!(
-        result_text(&refused).contains("run muster attach api in their own terminal"),
-        "{refused}"
+        unknown["structuredContent"]["error"]["kind"], "unknown-process",
+        "{unknown}"
     );
     assert_eq!(herdr.calls().len(), 3);
+}
+
+/// Correctness M2: a project whose folder name starts or ends with a space
+/// is that very folder: it registers and opens, the pane's command
+/// attaches to it, and the command the detach line names attaches again
+/// from another folder.
+#[test]
+fn a_project_folder_with_surrounding_spaces_opens_and_attaches() {
+    for folder in ["trail ", " lead"] {
+        let mut scratch = Scratch::new();
+        let project = scratch.project(folder, &single());
+        let up = scratch.on(&project, &["up"]);
+        assert!(up.status.success(), "{folder:?}: {}", shown(&up));
+        let herdr = FakeHerdr::new(&scratch);
+
+        let output = in_pane(&scratch, &project, &herdr.program(), &["open", "api"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+        let (cwd, env, _) = herdr.pane_shell();
+        assert_eq!(cwd, project);
+        let words: Vec<&OsStr> = env.iter().map(|(_, word)| word.as_os_str()).collect();
+
+        let mut pane = scratch.isolated(Path::new(words[0]));
+        pane.args(&words[1..]).current_dir(&cwd);
+        let pty = Pty::open();
+        let mut attach = pty.spawn_leading(&mut scratch, pane);
+        pty.wait_for("attached to api", 1);
+        pty.type_keys(DETACH);
+        assert_eq!(pty.exit_code(&mut attach), Some(0), "{}", pty.drawn());
+        let hinted = hinted_words(&pty.drawn());
+        assert_eq!(hinted, [
+            "muster",
+            "--project",
+            fs::canonicalize(&project).unwrap().to_str().unwrap(),
+            "attach",
+            "--",
+            "api"
+        ]);
+
+        let mut again = scratch.isolated(Path::new(words[0]));
+        again.args(&hinted[1..]);
+        let pty = Pty::open();
+        let mut attach = pty.spawn_leading(&mut scratch, again);
+        pty.wait_for("attached to api", 1);
+        pty.type_keys(DETACH);
+        assert_eq!(pty.exit_code(&mut attach), Some(0), "{}", pty.drawn());
+    }
 }
 
 /// `doctor`'s workspace row: outside a workspace it says `open` attaches in

@@ -4,39 +4,19 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError},
+        client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint},
         holder::PatternError,
         sanitize::printable,
     },
-    constants::APP_NAME,
     domain::{
         config::{ConfigError, McpStackEdits, SettingKey},
-        value::{NameProblem, ProcessRef, ValueParseError},
+        value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
     },
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
 /// caller.
 pub const MAX_CANDIDATES: usize = 20;
-/// The subcommand that shows a process in the user's own terminal.
-const ATTACH_SUBCOMMAND: &str = "attach";
-/// Ends the options, so a name starting with `-` is read as the name.
-const END_OF_OPTIONS: &str = "--";
-/// What starts an option, which a name may start with too.
-const OPTION_LEAD: char = '-';
-
-/// The command line that shows `name` in the user's own terminal, quoted so
-/// it pastes back as typed, and safe to print.
-fn attach_line(name: &ProcessRef) -> String {
-    let typed = name.as_ref();
-    let quoted = shlex::try_quote(typed).map_or_else(|_| typed.to_string(), |quoted| quoted.into());
-    let line = if typed.starts_with(OPTION_LEAD) {
-        format!("{APP_NAME} {ATTACH_SUBCOMMAND} {END_OF_OPTIONS} {quoted}")
-    } else {
-        format!("{APP_NAME} {ATTACH_SUBCOMMAND} {quoted}")
-    };
-    printable(&line)
-}
 
 /// Why a tool could not do what it was asked: the agent's mistake, the
 /// store's refusal or a failure reaching the service.
@@ -210,11 +190,15 @@ pub enum ToolError {
     #[error(
         "{}; ask the user to run {} in their own terminal to see it",
         printable(&source.to_string()),
-        attach_line(name)
+        attach_hint(root, name, *read_only)
     )]
     NotOpened {
-        /// The process as the agent named it.
-        name: ProcessRef,
+        /// The project's folder.
+        root: ProjectRoot,
+        /// The running process the agent named.
+        name: ProcessName,
+        /// Whether the pane was to be watch-only.
+        read_only: bool,
         /// Why no pane opened.
         source: Box<ClientError>,
     },

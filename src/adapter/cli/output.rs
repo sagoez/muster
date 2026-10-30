@@ -25,7 +25,7 @@ use crate::{
     adapter::{
         client::{
             Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
-            ProcessOutcome, RunningService, ServiceStatus, listening_ports,
+            ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
         },
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
@@ -97,9 +97,7 @@ const DURATION_UNIT_SEPARATOR: char = ' ';
 const UNKNOWN_EXIT: &str = "unknown";
 /// Opens the line after a detach, before the process's name.
 const DETACHED_FROM: &str = "detached from";
-/// The command that attaches to a process again, before its quoted name.
-const ATTACH_COMMAND: &str = "muster attach";
-/// Follows that command in the line after a detach.
+/// Follows the command that attaches again in the line after a detach.
 const ATTACH_AGAIN: &str = "attaches again";
 /// Follows the process's name in the line after it exited while attached.
 const EXITED: &str = "exited";
@@ -760,13 +758,19 @@ pub fn service_stop_rows(running: bool) -> Report {
 }
 
 /// The line `muster attach` prints once the terminal is given back: that it
-/// detached and how to attach again, or how the process `name` exited. A
-/// signal that ended the client leaves nothing to say.
-pub fn attach_end_line(name: &ProcessName, end: &AttachEnd) -> Option<String> {
+/// detached and how to attach again to `name` of the project at `root`, as
+/// `read_only` as before, or how the process exited. A signal that ended
+/// the client leaves nothing to say.
+pub fn attach_end_line(
+    root: &ProjectRoot,
+    name: &ProcessName,
+    read_only: bool,
+    end: &AttachEnd,
+) -> Option<String> {
     match end {
         AttachEnd::Detached => Some(format!(
-            "{DETACHED_FROM} {name}; `{ATTACH_COMMAND} {}` {ATTACH_AGAIN}",
-            name.shell_quoted()
+            "{DETACHED_FROM} {name}; `{}` {ATTACH_AGAIN}",
+            attach_hint(root, name, read_only)
         )),
         AttachEnd::Exited(ExitOutcome::Succeeded) => Some(format!("{name} {EXITED}")),
         AttachEnd::Exited(outcome) => Some(match outcome.summary() {
@@ -1679,19 +1683,26 @@ mod tests {
     #[test]
     fn an_attach_ends_with_what_became_of_it() {
         let api = name("api");
-        let line = |end: AttachEnd| attach_end_line(&api, &end);
+        let shop = ProjectRoot::try_new(PathBuf::from("/srv/my shop")).unwrap();
+        let line = |end: AttachEnd| attach_end_line(&shop, &api, false, &end);
 
         assert_eq!(
             line(AttachEnd::Detached).as_deref(),
-            Some("detached from api; `muster attach 'api'` attaches again")
+            Some(
+                "detached from api; `muster --project '/srv/my shop' attach -- api` attaches again"
+            )
         );
-        let spaced = name("dev server");
-        let again = attach_end_line(&spaced, &AttachEnd::Detached).unwrap();
+        let dashed = name("-dev server");
+        let again = attach_end_line(&shop, &dashed, true, &AttachEnd::Detached).unwrap();
         let command = again.split('`').nth(1).unwrap();
         assert_eq!(shlex::split(command).unwrap(), vec![
             "muster",
+            "--project",
+            "/srv/my shop",
             "attach",
-            "dev server"
+            "--read-only",
+            "--",
+            "-dev server"
         ]);
         assert_eq!(
             line(AttachEnd::Exited(ExitOutcome::Succeeded)).as_deref(),

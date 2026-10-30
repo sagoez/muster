@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError},
+        client::{
+            ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError,
+            open::attach_hint,
+        },
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
         sanitize::printable,
@@ -17,7 +20,7 @@ use crate::{
         terminal_workspace::WorkspaceError,
         value::{
             COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
-            NameProblem, ProcessName, ProcessNameError, ProjectName, refused_name,
+            NameProblem, ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
         },
     },
 };
@@ -296,13 +299,17 @@ pub enum CliError {
         source: HolderError,
     },
     /// The terminal workspace did not open the pane `muster open` asked for.
-    #[error("{source}; `muster attach {}` shows it here", name.shell_quoted())]
+    #[error("{source}; `{}` shows it here", attach_hint(root, name, *read_only))]
     OpenFailed {
+        /// The project's folder.
+        root: ProjectRoot,
         /// The process to show.
         name: ProcessName,
+        /// Whether the pane was to be watch-only.
+        read_only: bool,
         /// What the workspace answered.
         #[source]
-        source: WorkspaceError,
+        source: Box<WorkspaceError>,
     },
 }
 

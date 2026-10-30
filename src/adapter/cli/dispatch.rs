@@ -788,16 +788,23 @@ fn attach(invocation: &Invocation<'_>, name: Option<&ProcessRef>, read_only: boo
         .map(|end| (name, end))
     });
     match result {
-        Ok((name, end)) => finish_attach(presenter, &name, &end),
+        Ok((name, end)) => finish_attach(presenter, &project, &name, read_only, &end),
         Err(error) => fail_framed(presenter, json, &error),
     }
 }
 
-/// Closes an attach's frame with what became of it once the terminal is
-/// back, then exits as it ended: a failed exit fails the command, and a
-/// signal that ended the session ends this process by the same signal.
-fn finish_attach(presenter: Presenter, name: &ProcessName, end: &AttachEnd) {
-    if let Some(line) = output::attach_end_line(name, end) {
+/// Closes the frame of an attach to `name` of `project`, `read_only` or
+/// not, with what became of it once the terminal is back, then exits as it
+/// ended: a failed exit fails the command, and a signal that ended the
+/// session ends this process by the same signal.
+fn finish_attach(
+    presenter: Presenter,
+    project: &Project,
+    name: &ProcessName,
+    read_only: bool,
+    end: &AttachEnd,
+) {
+    if let Some(line) = output::attach_end_line(project.root(), name, read_only, end) {
         written(presenter.conclude(&line));
     }
     match end {
@@ -1189,7 +1196,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
         detach,
         announcer(presenter),
     ) {
-        Ok(end) => finish_attach(presenter, &name, &end),
+        Ok(end) => finish_attach(presenter, &project, &name, false, &end),
         Err(CliError::Client(ClientError::NotRunning(_))) => written(presenter.close(&rows)),
         Err(error) => fail_framed(presenter, json, &error),
     }

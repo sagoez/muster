@@ -34,8 +34,13 @@ pub fn open_here(
         .focus(PaneFocus::Take)
         .direction(args.direction())
         .build();
-    open_beside(client, project, &name, workspace, &request).map_err(|error| match error {
-        ClientError::Workspace(source) => CliError::OpenFailed { name, source },
+    open_beside(client, project, &name, Some(workspace), &request).map_err(|error| match error {
+        ClientError::Workspace(source) => CliError::OpenFailed {
+            root: project.root().clone(),
+            name,
+            read_only: args.read_only(),
+            source: Box::new(source),
+        },
         other => other.into(),
     })
 }
@@ -313,6 +318,38 @@ mod tests {
         assert_eq!(CliExit::from(error.kind()), CliExit::ActionFailed);
         insta::assert_snapshot!("open_workspace_failed", error.to_string());
         insta::assert_snapshot!("open_workspace_failed_json", output::failure_json(&error));
+    }
+
+    /// The hint of a failed open names the project and ends the options, so
+    /// pasted anywhere it parses as an attach to that process, read-only
+    /// when the open was, even for a name starting with `-`.
+    #[test]
+    fn a_failed_open_hints_an_attach_that_parses_for_its_project() {
+        let listing = listing(vec![listed("-x", ProcessState::Running)]);
+        let served = ServedService::responding(move |request| match request {
+            ServiceRequest::Ps { .. } => listing.clone(),
+            _ => located(),
+        });
+        let workspace = RecordingWorkspace::failing(refusal());
+
+        let error = open(&served, &workspace, &["--read-only", "--", "-x"]).unwrap_err();
+
+        let message = error.to_string();
+        let hint = message
+            .strip_suffix("` shows it here")
+            .and_then(|head| head.rsplit_once('`'))
+            .map(|(_, hint)| hint)
+            .unwrap_or_else(|| panic!("no hint in {message}"));
+        assert_eq!(
+            hint,
+            "muster --project '/home/me/my shop' attach --read-only -- -x"
+        );
+        let args = Args::try_parse_from(shlex::split(hint).unwrap()).unwrap();
+        assert_eq!(args.project().as_deref(), Some(ROOT));
+        assert!(matches!(
+            args.into_command(),
+            Some(Command::Attach { name: Some(name), read_only: true, .. }) if name.as_ref() == "-x"
+        ));
     }
 
     /// The argv a pane runs parses, through the real command line, as an

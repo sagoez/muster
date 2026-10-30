@@ -1,17 +1,22 @@
 //! Opening a running process in a new pane of the terminal workspace the
 //! caller runs in, attached to it, as both drivers do.
 
-use std::{ffi::OsString, path::Path};
+use std::{ffi::OsString, iter, path::Path};
+
+use shlex::Quoter;
 
 use super::{
     client_error::ClientError, open_request::OpenRequest, open_view::OpenView, process::locate,
     service_client::ServiceClient,
 };
-use crate::domain::{
-    port::TerminalWorkspace,
-    project::Project,
-    terminal_workspace::{PaneCommand, PaneRequest},
-    value::{ProcessName, ProjectRoot},
+use crate::{
+    constants::APP_NAME,
+    domain::{
+        port::TerminalWorkspace,
+        project::Project,
+        terminal_workspace::{PaneCommand, PaneRequest},
+        value::{ProcessName, ProjectRoot, printable},
+    },
 };
 
 /// The subcommand a pane runs to show the process.
@@ -46,6 +51,22 @@ pub fn attach_command(
         .build()
 }
 
+/// The command line a person runs in their own terminal to attach to the
+/// process `name` of the project at `root`: the pane's [`attach_command`],
+/// each word made [`printable`] and then shell-quoted.
+pub fn attach_hint(root: &ProjectRoot, name: &ProcessName, read_only: bool) -> String {
+    let command = attach_command(Path::new(APP_NAME), root, name, read_only);
+    let words: Vec<String> = iter::once(command.program().as_os_str())
+        .chain(command.args().iter().map(OsString::as_os_str))
+        .map(|word| printable(&word.to_string_lossy()))
+        .collect();
+    // `printable` has escaped every nul, and a quoter allowing nul never fails.
+    Quoter::new()
+        .allow_nul(true)
+        .join(words.iter().map(String::as_str))
+        .unwrap_or_default()
+}
+
 /// Locates the process `name` of `project`, refusing one that is unknown or
 /// not running before anything opens, then asks `workspace` for a pane
 /// beside the caller's, in the project's folder, attached to it as
@@ -53,17 +74,19 @@ pub fn attach_command(
 /// pane could not run it.
 ///
 /// # Errors
-/// Returns the locate's [`ClientError`], [`ClientError::BinaryGone`] for a
-/// binary that no longer exists, or [`ClientError::Workspace`] when the
+/// Returns the locate's [`ClientError`], [`ClientError::NoWorkspace`] for a
+/// running process when there is no `workspace`, [`ClientError::BinaryGone`]
+/// for a binary that no longer exists, or [`ClientError::Workspace`] when the
 /// workspace did not open the pane.
 pub fn open_beside(
     client: &ServiceClient,
     project: &Project,
     name: &ProcessName,
-    workspace: &dyn TerminalWorkspace,
+    workspace: Option<&dyn TerminalWorkspace>,
     request: &OpenRequest,
 ) -> Result<OpenView, ClientError> {
     locate(client, project, name)?;
+    let workspace = workspace.ok_or(ClientError::NoWorkspace)?;
     if !request.binary().is_file() {
         return Err(ClientError::BinaryGone(request.binary().clone()));
     }
@@ -194,6 +217,52 @@ mod tests {
         ]);
     }
 
+    /// The hint is the pane's own command run as `muster`: the project by
+    /// its root and `--` before a name starting with `-`, so it pastes back
+    /// as the same words whatever the folder or name hold.
+    #[test]
+    fn the_attach_hint_is_the_pane_command_quoted() {
+        let other = ProjectRoot::try_new(PathBuf::from("/srv/other's app")).unwrap();
+
+        assert_eq!(
+            attach_hint(shop().root(), &name("-x"), false),
+            "muster --project '/home/me/my shop' attach -- -x"
+        );
+        assert_eq!(
+            attach_hint(&other, &name("dev server"), true),
+            "muster --project \"/srv/other's app\" attach --read-only -- 'dev server'"
+        );
+        assert_eq!(
+            shlex::split(&attach_hint(&other, &name("$(id)"), false)).unwrap(),
+            [
+                "muster",
+                "--project",
+                "/srv/other's app",
+                "attach",
+                "--",
+                "$(id)"
+            ]
+        );
+    }
+
+    /// A nul or a control character is made printable before quoting, so
+    /// it can never leave a word unquoted or reach the terminal.
+    #[test]
+    fn the_attach_hint_quotes_a_nul_and_a_control_character() {
+        let root = ProjectRoot::try_new(PathBuf::from("/srv/x\0; touch pwned\u{1b}[2J")).unwrap();
+
+        let hint = attach_hint(&root, &name("web"), false);
+
+        assert_eq!(
+            hint,
+            r#"muster --project "/srv/x\\u{0}; touch pwned\\u{1b}[2J" attach -- web"#
+        );
+        assert_eq!(
+            shlex::split(&hint).unwrap()[2],
+            r"/srv/x\u{0}; touch pwned\u{1b}[2J"
+        );
+    }
+
     /// Opening locates the process, then asks for one pane in the project's
     /// folder running attach, and answers with the pane it opened.
     #[test]
@@ -205,7 +274,7 @@ mod tests {
             &served.connector()(),
             &shop(),
             &name("web"),
-            &workspace,
+            Some(&workspace),
             &request(true, Some(SplitDirection::Down)),
         )
         .unwrap();
@@ -250,7 +319,7 @@ mod tests {
                 &served.connector()(),
                 &shop(),
                 &name("web"),
-                &workspace,
+                Some(&workspace),
                 &request(false, None),
             )
             .unwrap_err();
@@ -258,6 +327,37 @@ mod tests {
             assert_eq!(error.kind(), failure);
             assert!(workspace.requests().is_empty());
         }
+    }
+
+    /// Without a workspace, a running process is `no-workspace` once it is
+    /// located, and an unknown or stopped one fails as the locate says.
+    #[test]
+    fn without_a_workspace_a_running_process_is_no_workspace_after_the_locate() {
+        let served = locating();
+
+        let error = open_beside(
+            &served.connector()(),
+            &shop(),
+            &name("web"),
+            None,
+            &request(false, None),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::NoWorkspace);
+        assert!(served.asked().iter().any(|asked| matches!(
+            asked,
+            ServiceRequest::Locate { name, .. } if name.as_ref() == "web"
+        )));
+        let stopped = open_beside(
+            &refusing(ServiceErrorKind::NotRunning).connector()(),
+            &shop(),
+            &name("web"),
+            None,
+            &request(false, None),
+        )
+        .unwrap_err();
+        assert_eq!(stopped.kind(), FailureKind::NotRunning);
     }
 
     /// A workspace that does not open the pane fails the open as
@@ -277,7 +377,7 @@ mod tests {
             &served.connector()(),
             &shop(),
             &name("web"),
-            &workspace,
+            Some(&workspace),
             &request(false, None),
         )
         .unwrap_err();

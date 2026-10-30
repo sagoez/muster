@@ -16,6 +16,11 @@ const NOTES_DIR_PLACEHOLDER: &str = "@MUSTER_NOTES@";
 const SHELL_ENV_PLACEHOLDER: &str = "@MUSTER_SHELL_ENV@";
 /// Where a template takes the report subcommand.
 const REPORT_PLACEHOLDER: &str = "@MUSTER_REPORT@";
+/// Where the fish template takes the variable counting hook loads.
+const LOADS_ENV_PLACEHOLDER: &str = "@MUSTER_LOADS_ENV@";
+/// The variable the fish hook exports counting its loads along an `exec`
+/// chain, so each load's id leads with a count no earlier load had.
+const HOOK_LOADS_ENV: &str = "MUSTER_HOOK_LOADS";
 
 /// Punctuation every hooked shell reads bare in a word, besides letters and
 /// digits.
@@ -57,6 +62,7 @@ pub fn hook_script(
         .replace(MUSTER_BIN_PLACEHOLDER, &quoted(shell, binary)?)
         .replace(NOTES_DIR_PLACEHOLDER, &quoted(shell, notes_dir)?)
         .replace(SHELL_ENV_PLACEHOLDER, MUSTER_SHELL_ENV)
+        .replace(LOADS_ENV_PLACEHOLDER, HOOK_LOADS_ENV)
         .replace(REPORT_PLACEHOLDER, SHELL_REPORT_SUBCOMMAND))
 }
 
@@ -186,6 +192,10 @@ mod tests {
     const NOTE_LINES: [&str; 2] = ["first line", "second $line \\x1b"];
     /// What a probe runs to learn whether a shell runs here.
     const PROBE_SCRIPT: &str = "exit 0";
+    /// The most digits of a load count the fish hook takes up.
+    const FISH_COUNT_DIGITS: usize = 9;
+    /// The digits of the tick that follows the count in a fish load id.
+    const FISH_TICK_DIGITS: usize = 9;
 
     /// Each shell's driver: loads the hook twice, leaves two notes for this
     /// shell, fails a command, runs one prompt, then prints the status the
@@ -247,7 +257,10 @@ mod tests {
         if shell != HookShell::Fish {
             command.arg(shell.to_string());
         }
-        command.args(args).env_remove(MUSTER_SHELL_ENV);
+        command
+            .args(args)
+            .env_remove(MUSTER_SHELL_ENV)
+            .env_remove(HOOK_LOADS_ENV);
         shell_runs(shell, "check").then(|| {
             command
                 .output()
@@ -386,6 +399,69 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             format!("{AWKWARD_BINARY}\n{AWKWARD_BINARY}\n")
         );
+    }
+
+    /// The fish hook's load id is its exported load count, at most
+    /// [`FISH_COUNT_DIGITS`] digits before it adds one, then a tick of
+    /// [`FISH_TICK_DIGITS`] digits: an `exec` keeps the count, so a reload
+    /// within the same second still leads with a count no load before had,
+    /// and the largest id still fits a [`LoadId`].
+    #[test]
+    fn the_fish_load_id_leads_with_its_exported_load_count() {
+        let script = hook_script(
+            HookShell::Fish,
+            Path::new(SNAPSHOT_BINARY),
+            Path::new(SNAPSHOT_NOTES),
+        )
+        .unwrap();
+
+        for part in [
+            format!("set -gx {HOOK_LOADS_ENV} (math $loads + 1)"),
+            format!("set -g __muster_load ${HOOK_LOADS_ENV}$tick"),
+            format!("'^[0-9]{{1,{FISH_COUNT_DIGITS}}}$' -- \"${HOOK_LOADS_ENV}\""),
+            format!("'^[0-9]{{{FISH_TICK_DIGITS}}}$' -- \"$tick\""),
+        ] {
+            assert!(script.contains(&part), "{part}: {script}");
+        }
+        let largest_count = "9".repeat(FISH_COUNT_DIGITS).parse::<u64>().unwrap() + 1;
+        let largest_tick = "9".repeat(FISH_TICK_DIGITS);
+        assert!(
+            format!("{largest_count}{largest_tick}")
+                .parse::<LoadId>()
+                .is_ok()
+        );
+    }
+
+    /// The fish hook loaded again in the same shell, as an `exec` that
+    /// keeps its environment does, takes the next count and a new id.
+    #[test]
+    fn a_fish_reload_takes_the_next_load_count() {
+        let scratch = TempDir::new().unwrap();
+        let (script, ..) = installed_hook(HookShell::Fish, scratch.path());
+        let reload = format!(
+            "source $argv[1]; echo ${HOOK_LOADS_ENV} $__muster_load\nset -e __muster_hook\nsource \
+             $argv[1]; echo ${HOOK_LOADS_ENV} $__muster_load\n"
+        );
+
+        let Some(output) = run(HookShell::Fish, true, &reload, &[&script]) else {
+            return;
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let loads: Vec<(u64, &str)> = stdout
+            .lines()
+            .map(|line| {
+                let (count, load) = line.split_once(' ').unwrap();
+                (count.parse().unwrap(), load)
+            })
+            .collect();
+        assert_eq!(loads.len(), 2, "{output:?}");
+        assert_eq!(loads[1].0, loads[0].0 + 1, "{output:?}");
+        assert_ne!(loads[0].1, loads[1].1);
+        for (count, load) in loads {
+            assert!(load.starts_with(&count.to_string()), "{load}");
+            assert!(load.parse::<LoadId>().is_ok(), "{load}");
+        }
     }
 
     #[test]

@@ -96,7 +96,13 @@ if status is-interactive; and not set -q __muster_hook
     set -g __muster_hook 1
     set -g __muster_bin '/opt/muster bin/muster'
     set -g __muster_notes <notes>
-    set -g __muster_load (random 1 999999999)(random 0 999999999)
+    # The exported count survives an exec, so a reload never reuses a load id.
+    set -l loads 0
+    string match -qr '^[0-9]{1,9}$' -- "$MUSTER_HOOK_LOADS"; and set loads $MUSTER_HOOK_LOADS
+    set -gx MUSTER_HOOK_LOADS (math $loads + 1)
+    set -l tick (command date +%N 2>/dev/null)
+    string match -qr '^[0-9]{9}$' -- "$tick"; or set tick (random 100000000 999999999)
+    set -g __muster_load $MUSTER_HOOK_LOADS$tick
     set -g __muster_seq 0
     set -gx MUSTER_SHELL_PID $fish_pid
 

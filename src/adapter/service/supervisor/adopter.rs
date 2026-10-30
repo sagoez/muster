@@ -970,6 +970,10 @@ mod tests {
     const EARLIER: Duration = Duration::from_secs(3600);
     /// Longest a test waits for a scheduled respawn to arrive.
     const RESPAWN_WAIT: Duration = Duration::from_secs(5);
+    /// How long a test keeps a wait held on an adoption before it settles.
+    const ADOPTION_HOLD: Duration = Duration::from_millis(300);
+    /// A cursor inside the logged output, where a held wait is asked from.
+    const HELD_SINCE: u64 = 4;
     /// A socket path nothing serves.
     const UNSERVED_SOCKET: &str = "/nonexistent/holder.sock";
     /// Grace the graceful stop policy gives before the kill.
@@ -1267,26 +1271,54 @@ mod tests {
         assert_eq!(*outcome.scanned_from(), None);
     }
 
-    /// A wait held on an adoption that does not settle within the wait's
-    /// own timeout is refused, saying so.
+    /// R-M3: a wait held on an adoption that does not settle within the
+    /// wait's own timeout times out as any wait does, its cursor still the
+    /// one it was asked from, since nothing after it was tested.
     #[test]
-    fn a_wait_held_on_an_adoption_that_never_settles_is_refused_at_its_timeout() {
+    fn a_wait_held_on_an_adoption_that_never_settles_times_out_from_its_cursor() {
         let mut harness = logging(vec![logged_line(0, "booting")], true);
         harness.supervisor_mut().adopt(record("p"));
-        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        let since = OutputCursor::new(HELD_SINCE);
+        let answers = wait_for_line(&mut harness, "compiled", Some(since));
 
         harness
             .supervisor_mut()
             .settle_waits(Instant::now() + RESPAWN_WAIT);
 
-        let Ok(ServiceResponse::Error(refused)) = answers.try_recv() else {
-            panic!("the held wait is refused");
+        let outcome = waited(&answers).expect("the held wait is answered");
+        assert_eq!(outcome.status(), WaitStatus::Waiting);
+        assert_eq!(*outcome.cursor(), since);
+        assert_eq!(*outcome.matched(), None);
+    }
+
+    /// R-M2: a wait held on an adoption keeps the deadline it was asked
+    /// with: the time it spent held counts against its timeout once the
+    /// adoption settles and its log is scanned.
+    #[test]
+    fn a_wait_held_on_an_adoption_keeps_its_deadline_once_released() {
+        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let asked = Instant::now();
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        thread::sleep(ADOPTION_HOLD);
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        assert!(waited(&answers).is_none(), "nothing matched yet");
+
+        let [waiter] = &harness.supervisor().waiters[..] else {
+            panic!("the released wait is registered");
         };
         assert!(
-            refused.message().contains("adoption did not settle"),
-            "{}",
-            refused.message()
+            waiter.deadline() < asked + RESPAWN_WAIT + ADOPTION_HOLD / 2,
+            "its timeout counts from when it was asked"
         );
+        assert!(waiter.started() >= asked);
     }
 
     /// More output than the tap keeps, arriving while a wait's scan of the

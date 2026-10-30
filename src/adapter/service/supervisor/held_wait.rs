@@ -18,9 +18,8 @@ pub(super) struct HeldWait {
     pub(super) after: Option<SpawnGeneration>,
     /// Where the answer goes.
     pub(super) reply: Sender<ServiceResponse>,
-    /// When it was held.
-    pub(super) held_at: Instant,
-    /// When it is refused if the read, or the adoption, has not let it go.
+    /// When it is refused if the read has not let it go, or times out if
+    /// the adoption has not.
     pub(super) deadline: Instant,
     /// The key its scan's answer comes back under.
     pub(super) key: u64,

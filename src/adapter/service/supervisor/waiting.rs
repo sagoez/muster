@@ -45,9 +45,6 @@ const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
 /// Why a wait held on a scan of its log from its cursor is refused once the
 /// read is overdue, before the timeout.
 const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
-/// Why a wait held on its process's adoption is refused once its timeout
-/// passes first, before the timeout.
-const ADOPTION_OVERDUE: &str = "its adoption did not settle within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
 
@@ -67,6 +64,9 @@ pub struct PreparedWait {
     since: Option<OutputCursor>,
     /// How long it waits.
     timeout: Duration,
+    /// When it was asked, which its timeout counts from however long it is
+    /// held before it is registered.
+    asked: Instant,
     /// Whether the start it rides on found the process already running.
     already_running: bool,
 }
@@ -143,6 +143,7 @@ impl Supervisor {
             matcher,
             since: *spec.since(),
             timeout: *spec.timeout(),
+            asked: Instant::now(),
             already_running: false,
         })
     }
@@ -292,8 +293,9 @@ impl Supervisor {
     }
 
     /// Keeps `prepared` held, on `scan` or the log's end, or on its
-    /// process's adoption when `adopting`, which holds it as long as its own
-    /// timeout rather than [`LOG_TAIL_TIMEOUT`].
+    /// process's adoption when `adopting`, which holds it until its own
+    /// timeout, counted from when it was asked, rather than for
+    /// [`LOG_TAIL_TIMEOUT`].
     fn push_held(
         &mut self,
         prepared: PreparedWait,
@@ -303,19 +305,17 @@ impl Supervisor {
         adopting: bool,
     ) {
         let pane = prepared.pane;
-        let held_at = Instant::now();
-        let bound = if adopting {
-            prepared.timeout
+        let deadline = if adopting {
+            prepared.asked + prepared.timeout
         } else {
-            LOG_TAIL_TIMEOUT
+            Instant::now() + LOG_TAIL_TIMEOUT
         };
         let key = self.next_ask_key();
         self.held_waits.entry(pane).or_default().push(HeldWait {
             prepared,
             after,
             reply,
-            held_at,
-            deadline: held_at + bound,
+            deadline,
             key,
             scan,
             adopting,
@@ -323,10 +323,12 @@ impl Supervisor {
         });
     }
 
-    /// Refuses each wait held on a log read past its deadline, so a log that
-    /// cannot be read never holds a wait past [`LOG_TAIL_TIMEOUT`], nor an
-    /// adoption that does not settle past its own timeout. The read itself
-    /// stays in flight, and later waits on the log's end join it.
+    /// Ends each wait held past its deadline. One held on an adoption that
+    /// did not settle within its own timeout timed out, as any wait does,
+    /// its cursor still its own `since`, since nothing after it was tested.
+    /// One held on a log read is refused, so a log that cannot be read never
+    /// holds a wait past [`LOG_TAIL_TIMEOUT`]; the read itself stays in
+    /// flight, and later waits on the log's end join it.
     fn refuse_overdue_held_waits(&mut self, now: Instant) {
         let mut overdue = Vec::new();
         for waits in self.held_waits.values_mut() {
@@ -334,10 +336,17 @@ impl Supervisor {
         }
         self.held_waits.retain(|_, waits| !waits.is_empty());
         for held in overdue {
-            let (why, bound) = match (&held.scan, held.adopting) {
-                (_, true) => (ADOPTION_OVERDUE, held.prepared.timeout),
-                (Some(_), false) => (LOG_SCAN_OVERDUE, LOG_TAIL_TIMEOUT),
-                (None, false) => (LOG_TAIL_OVERDUE, LOG_TAIL_TIMEOUT),
+            let why = match (&held.scan, held.adopting) {
+                (_, true) => {
+                    let waiter = self.held_waiter(held);
+                    let cursor = waiter
+                        .since()
+                        .unwrap_or_else(|| self.output_position(waiter.pane()).0);
+                    self.answer_at(waiter, WaitStatus::Waiting, None, cursor);
+                    continue;
+                },
+                (Some(_), false) => LOG_SCAN_OVERDUE,
+                (None, false) => LOG_TAIL_OVERDUE,
             };
             let _ = held.reply.send(ServiceResponse::Error(
                 ServiceErrorBody::builder()
@@ -345,7 +354,7 @@ impl Supervisor {
                     .message(format!(
                         "{}: {why} {}",
                         held.prepared.process,
-                        humantime::format_duration(bound)
+                        humantime::format_duration(LOG_TAIL_TIMEOUT)
                     ))
                     .build(),
             ));
@@ -453,14 +462,13 @@ impl Supervisor {
         }
     }
 
-    /// The waiter `held` stands for, timed from when it was held, to answer
+    /// The waiter `held` stands for, timed from when it was asked, to answer
     /// it without registering it.
     fn held_waiter(&self, held: HeldWait) -> Waiter {
         let HeldWait {
             prepared,
             after,
             reply,
-            held_at,
             scan,
             ..
         } = held;
@@ -479,8 +487,8 @@ impl Supervisor {
             .until(prepared.until)
             .matcher(prepared.matcher)
             .pin(pin)
-            .started(held_at)
-            .deadline(held_at + prepared.timeout)
+            .started(prepared.asked)
+            .deadline(prepared.asked + prepared.timeout)
             .reply(WaitReply::Direct(reply))
             .scanned_from(None)
             .since(prepared.since)
@@ -997,7 +1005,8 @@ impl Supervisor {
     /// otherwise the tap is tested from where the scan stopped, and a run
     /// that ended meanwhile answers it as it ended. When the tap no longer
     /// holds where the scan stopped, its answer's `scanned_from` says where
-    /// the tested output resumes, as for a rotated log.
+    /// the tested output resumes, as for a rotated log. Its timeout counts
+    /// from when it was asked, so time spent held counts against it.
     pub(super) fn register_held(
         &mut self,
         prepared: PreparedWait,
@@ -1012,6 +1021,7 @@ impl Supervisor {
             matcher,
             since,
             timeout,
+            asked,
             already_running,
         } = prepared;
         let since = since.or_else(|| self.replay_floor(pane));
@@ -1057,8 +1067,8 @@ impl Supervisor {
             .until(until)
             .matcher(matcher)
             .pin(pin)
-            .started(now)
-            .deadline(now + timeout)
+            .started(asked)
+            .deadline(asked + timeout)
             .reply(reply)
             .scanned_from(scanned_from)
             .since(since)
@@ -1149,8 +1159,20 @@ impl Supervisor {
     /// run's start, as after an adoption, the answer is held while they are
     /// read from the log off the loop.
     fn answer(&mut self, waiter: Waiter, status: WaitStatus, matched: Option<MatchedLine>) {
+        let (cursor, _) = self.output_position(waiter.pane());
+        self.answer_at(waiter, status, matched, cursor);
+    }
+
+    /// Answers `waiter` as [`Self::answer`] does, with `cursor` as where a
+    /// wait asked again continues from.
+    fn answer_at(
+        &mut self,
+        waiter: Waiter,
+        status: WaitStatus,
+        matched: Option<MatchedLine>,
+        cursor: OutputCursor,
+    ) {
         let pane = waiter.pane();
-        let (cursor, _) = self.output_position(pane);
         let tail = if status == WaitStatus::Matched {
             Vec::new()
         } else {

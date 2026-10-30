@@ -89,7 +89,8 @@ pub struct ProjectListing {
     #[getset(get_copy = "pub")]
     current: bool,
     /// The idle stop in effect, its own or the setting's: whole seconds in
-    /// JSON, or null for never or when its stored row does not read.
+    /// JSON, or null for never, when its stored row does not read, or when
+    /// it follows a setting that does not read.
     #[serde(serialize_with = "crate::adapter::client::idle_stop_seconds::serialize_optional")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
@@ -99,13 +100,20 @@ pub struct ProjectListing {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     source: Option<IdleStopSource>,
+    /// Why the setting its idle stop follows does not read, when it does
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    #[getset(get = "pub")]
+    idle_stop_invalid: Option<String>,
 }
 
 /// Every registered project, the one containing `cwd` marked current, then
 /// every project whose stored row does not read, by folder. A project whose
 /// row or processes do not read is listed with the reason, so one corrupt
 /// row never hides the others. Each readable project carries the idle stop
-/// in effect and its source.
+/// in effect and its source; one following a settings row that does not
+/// read carries the reason instead of an idle stop.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a store that cannot be read.
@@ -115,16 +123,20 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
         Err(ConfigError::CorruptRow { .. }) => None,
         Err(error) => return Err(error.into()),
     };
-    let setting = *store.load()?.idle_stop();
+    let setting = store
+        .load()
+        .map(|settings| *settings.idle_stop())
+        .map_err(|error| error.to_string());
     let readable = store.projects()?.into_iter().map(|project| {
         let (processes, invalid) = match store.stack(project.root()) {
             Ok(stack) => (Some(stack.map_or(0, |stack| stack.processes().len())), None),
             Err(error @ ConfigError::CorruptRow { .. }) => (None, Some(error.to_string())),
             Err(error) => return Err(error.into()),
         };
-        let (idle_stop, source) = match project.idle_stop() {
-            Some(own) => (*own, IdleStopSource::Project),
-            None => (setting, IdleStopSource::Setting),
+        let (idle_stop, source, idle_stop_invalid) = match (project.idle_stop(), &setting) {
+            (Some(own), _) => (Some(*own), IdleStopSource::Project, None),
+            (None, Ok(setting)) => (Some(*setting), IdleStopSource::Setting, None),
+            (None, Err(reason)) => (None, IdleStopSource::Setting, Some(reason.clone())),
         };
         Ok(ProjectListing::builder()
             .current(current.as_ref() == Some(&project))
@@ -132,8 +144,9 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
             .root(project.root().as_ref().clone())
             .processes(processes)
             .invalid(invalid)
-            .idle_stop(Some(idle_stop))
+            .idle_stop(idle_stop)
             .source(Some(source))
+            .idle_stop_invalid(idle_stop_invalid)
             .build())
     });
     let unreadable = store.unreadable_projects()?.into_iter().map(|project| {
@@ -149,8 +162,8 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
 }
 
 /// The human list of `listings`: `name  folder  N processes`, then the
-/// project's own idle stop when it has one, aligned, the current project
-/// marked.
+/// project's own idle stop when it has one, or why the setting it follows
+/// does not read, aligned, the current project marked.
 pub fn list_rows(listings: &[ProjectListing]) -> Report {
     if listings.is_empty() {
         return Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
@@ -173,9 +186,16 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
                     .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
                 printable(&listing.root().to_string_lossy()),
                 contents,
-                match (listing.source(), listing.idle_stop()) {
-                    (Some(IdleStopSource::Project), Some(own)) => {
+                match (
+                    listing.source(),
+                    listing.idle_stop(),
+                    listing.idle_stop_invalid(),
+                ) {
+                    (Some(IdleStopSource::Project), Some(own), _) => {
                         format!("{IDLE_STOP_LABEL} {own}")
+                    },
+                    (_, _, Some(reason)) => {
+                        format!("{IDLE_STOP_LABEL} {INVALID}{}", printable(reason))
                     },
                     _ => String::new(),
                 },
@@ -338,6 +358,7 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     use super::*;
@@ -347,7 +368,7 @@ mod tests {
             client::recording_notifier::RecordingNotifier,
             store::{
                 SqliteStore,
-                test_support::{fresh_store, spec},
+                test_support::{database, fresh_store, spec},
             },
         },
         domain::{
@@ -606,5 +627,53 @@ mod tests {
             serde_json::json!([1800, "setting"]),
             serde_json::json!([600, "project"])
         ]);
+    }
+
+    /// CR-4: a settings row that does not read still lists every project;
+    /// one following the setting has its idle stop marked unreadable with
+    /// the reason, and one with its own keeps it.
+    #[test]
+    fn projects_are_listed_when_the_settings_row_does_not_read() {
+        let (store, project, scratch) = shop_store();
+        let blog = ProjectRoot::try_new(scratch.path().join("blog")).unwrap();
+        store
+            .import(&blog, &[spec("web", "true")], ImportMode::Strict)
+            .unwrap();
+        store.set_idle_stop(&blog, Some(idle("10m"))).unwrap();
+        Connection::open(database(&scratch))
+            .unwrap()
+            .execute("UPDATE settings SET detach_key = 'alt-x'", [])
+            .unwrap();
+        let reason = store.load().unwrap_err().to_string();
+
+        let listings = list(&store, scratch.path()).unwrap();
+
+        let shop = listings
+            .iter()
+            .find(|listing| listing.root() == project.root().as_ref())
+            .unwrap();
+        assert_eq!(
+            (shop.idle_stop(), shop.source(), shop.idle_stop_invalid()),
+            (None, Some(IdleStopSource::Setting), &Some(reason.clone()))
+        );
+        let rows = plain(&list_rows(&listings));
+        assert!(
+            rows.contains(&format!("idle-stop unreadable: {reason}")),
+            "{rows}"
+        );
+        assert!(rows.contains("idle-stop 10m"), "{rows}");
+        let json = serde_json::to_value(shop).unwrap();
+        assert_eq!(
+            (
+                &json["idle_stop"],
+                &json["source"],
+                &json["idle_stop_invalid"]
+            ),
+            (
+                &serde_json::Value::Null,
+                &serde_json::json!("setting"),
+                &serde_json::json!(reason)
+            )
+        );
     }
 }

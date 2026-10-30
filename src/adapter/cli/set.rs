@@ -351,7 +351,7 @@ mod tests {
 
     /// The ports stored for `web` in the project at `dir`.
     fn stored_ports(fakes: &FakePorts, dir: &Path) -> DeclaredPorts {
-        let root = ProjectRoot::try_new(dir.to_path_buf()).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
         let stack = fakes.store().stack(&root).unwrap().unwrap();
         stack
             .process(&ProcessName::try_new("web").unwrap())

@@ -540,7 +540,9 @@ mod tests {
 
     /// S-M1: a shell that moves from a project into a folder whose name is
     /// not UTF-8 reports the leave, which travels as JSON, and its record
-    /// keeps that folder whole.
+    /// keeps that folder whole. macOS file systems refuse such a name, so
+    /// there is no such folder to leave into there.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_leave_into_a_folder_that_is_not_utf8_is_reported_and_kept() {
         let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));

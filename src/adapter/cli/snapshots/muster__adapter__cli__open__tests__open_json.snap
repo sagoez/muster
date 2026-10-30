@@ -1,0 +1,10 @@
+---
+source: src/adapter/cli/open.rs
+expression: "output::json(&view).unwrap()"
+---
+{
+  "project": "shop",
+  "process": "api",
+  "pane": "w1:p4",
+  "read_only": false
+}

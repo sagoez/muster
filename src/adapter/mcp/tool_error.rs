@@ -4,13 +4,13 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError},
+        client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint},
         holder::PatternError,
         sanitize::printable,
     },
     domain::{
         config::{ConfigError, McpStackEdits, SettingKey},
-        value::{NameProblem, ValueParseError},
+        value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
     },
 };
 
@@ -45,6 +45,9 @@ pub enum ToolError {
         /// The registered projects' names.
         valid: Vec<String>,
     },
+    /// The `project` given is not a value any project can be found by.
+    #[error("{0}")]
+    InvalidProject(String),
     /// The folder `process_add` would register cannot be a project.
     #[error("{} is {why}, which cannot be a muster project", dir.display())]
     Unregistrable {
@@ -185,6 +188,23 @@ pub enum ToolError {
         /// The project's root.
         root: PathBuf,
     },
+    /// No pane opened beside the agent's: it runs in no terminal workspace,
+    /// or the workspace did not open one.
+    #[error(
+        "{}; ask the user to run {} in their own terminal to see it",
+        printable(&source.to_string()),
+        attach_hint(root, name, *read_only)
+    )]
+    NotOpened {
+        /// The project's folder.
+        root: ProjectRoot,
+        /// The running process the agent named.
+        name: ProcessName,
+        /// Whether the pane was to be watch-only.
+        read_only: bool,
+        /// Why no pane opened.
+        source: Box<ClientError>,
+    },
 }
 
 impl From<ResolveError> for ToolError {
@@ -196,6 +216,7 @@ impl From<ResolveError> for ToolError {
             },
             ResolveError::NotAProject { dir } => Self::NoProjectHere { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
+            error @ ResolveError::SpacedPath { .. } => Self::InvalidProject(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
         }
     }
@@ -206,6 +227,7 @@ impl ToolError {
     pub fn kind(&self) -> FailureKind {
         match self {
             Self::Client(error) => error.kind(),
+            Self::NotOpened { source, .. } => source.kind(),
             Self::Config(error) => FailureKind::from(error),
             Self::NoProjectHere { .. } | Self::UnknownProject { .. } => FailureKind::UnknownProject,
             Self::UnknownNote { .. } => FailureKind::UnknownNote,
@@ -218,6 +240,7 @@ impl ToolError {
             }
             | Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::Unregistrable { .. }
+            | Self::InvalidProject(_)
             | Self::OutsideBase { .. }
             | Self::ProjectRequired { .. }
             | Self::InvalidName { .. }
@@ -231,6 +254,15 @@ impl ToolError {
             | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
             Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
+    }
+
+    /// Whether the agent is answered with a result flagged `isError` rather
+    /// than a protocol error: its own mistake, or a pane that cannot open
+    /// because it runs in no terminal workspace, which it answers by asking
+    /// the user.
+    pub fn answers_as_result(&self) -> bool {
+        let kind = self.kind();
+        kind.is_caller_fault() || kind == FailureKind::NoWorkspace
     }
 
     /// The names the agent could have meant, at most [`MAX_CANDIDATES`].
@@ -247,6 +279,7 @@ impl ToolError {
             Self::Config(_)
             | Self::NoProjectHere { .. }
             | Self::Unregistrable { .. }
+            | Self::InvalidProject(_)
             | Self::OutsideBase { .. }
             | Self::ProjectRequired { .. }
             | Self::InvalidName { .. }
@@ -261,7 +294,8 @@ impl ToolError {
             | Self::InvalidKvKey(_)
             | Self::StackEditsReadOnly(_)
             | Self::SettingNotForAgents(_)
-            | Self::WorkingDirOutsideProject { .. } => Vec::new(),
+            | Self::WorkingDirOutsideProject { .. }
+            | Self::NotOpened { .. } => Vec::new(),
         };
         names.into_iter().take(MAX_CANDIDATES).collect()
     }

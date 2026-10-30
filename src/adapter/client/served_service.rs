@@ -44,6 +44,23 @@ impl ServedService {
     /// A service greeting as `version` and answering every request but a
     /// hello with `answer`.
     pub(crate) fn answering_as(version: ServiceVersion, answer: ServiceResponse) -> Self {
+        Self::serving(version, move |_| answer.clone())
+    }
+
+    /// A service of this version answering every request but a hello with
+    /// what `respond` gives for it.
+    pub(crate) fn responding(
+        respond: impl Fn(&ServiceRequest) -> ServiceResponse + Send + 'static,
+    ) -> Self {
+        Self::serving(ServiceVersion::current(), respond)
+    }
+
+    /// A service greeting as `version` and answering every request but a
+    /// hello with what `respond` gives for it.
+    fn serving(
+        version: ServiceVersion,
+        respond: impl Fn(&ServiceRequest) -> ServiceResponse + Send + 'static,
+    ) -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         fs::create_dir(scratch.path().join(STATE_DIR)).unwrap();
         prepare_socket_dir(&scratch.path().join(SOCKET_DIR)).unwrap();
@@ -65,8 +82,9 @@ impl ServedService {
                         }
                     },
                     _ => {
+                        let answer = respond(&request);
                         asked.push(request);
-                        answer.clone()
+                        answer
                     },
                 })
                 .unwrap();

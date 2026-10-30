@@ -1,6 +1,8 @@
 # muster's prompt hook for zsh. Load it from ~/.zshrc with:
 #   eval "$(muster shell-init zsh)"
-if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if [[ -o interactive ]] && (( ! ${+__muster_hook} && ! ${+@MUSTER_OPEN_ENV@} )); then
     typeset -g __muster_hook=1
     typeset -g __muster_bin=@MUSTER_BIN@
     typeset -g __muster_notes=@MUSTER_NOTES@

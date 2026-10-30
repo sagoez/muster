@@ -1,0 +1,6 @@
+---
+source: src/adapter/mcp/open_tools.rs
+assertion_line: 661
+expression: tool.description.clone().unwrap_or_default()
+---
+Show a running process to the user in a new pane beside yours in the terminal workspace you run in, attached to it, without taking the user's focus. read_only=true opens it watch-only. direction is one of right, down; without it, right when the pane is wider than tall and each half keeps at least 40 columns, and down otherwise. Returns {project, process, pane, read_only, alerts}. The process is resolved first: an unknown name is unknown-process with candidates, and a process that is not running is not-running: start it first with process_start. Outside a terminal workspace, the name is resolved against the stored stack and the service is never started: with none running the process is not-running, and a running process is isError, kind no-workspace; the message names the muster attach command to ask the user to run in their own terminal. A workspace that does not open the pane is an error of kind workspace-failed naming the same command.

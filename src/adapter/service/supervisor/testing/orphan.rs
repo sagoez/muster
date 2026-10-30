@@ -9,7 +9,10 @@ use crossbeam_channel::{Receiver, unbounded};
 use libc::{SIG_IGN, SIGINT, SIGTERM, signal};
 use rustix::process::Signal;
 
-use crate::{adapter::signal_target::SignalTarget, domain::value::Pid};
+use crate::{
+    adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget},
+    domain::value::Pid,
+};
 
 /// What an [`Orphan`] runs: a long sleep it never finishes on its own.
 const ORPHAN_PROGRAM: &str = "sleep";
@@ -67,9 +70,10 @@ impl Orphan {
         self.pid
     }
 
-    /// Whether the orphan still exists.
+    /// Whether the orphan still runs, by the test the supervisor settles an
+    /// unsupervised exit on.
     pub(crate) fn alive(&self) -> bool {
-        SignalTarget::Process(self.pid).is_alive()
+        running(self.pid)
     }
 
     /// Sends `signal` to the orphan and returns the signal that ended it,
@@ -86,8 +90,44 @@ impl Drop for Orphan {
     fn drop(&mut self) {
         let _ = SignalTarget::Group(self.pid).send(Signal::KILL);
         let started = Instant::now();
-        while self.alive() && started.elapsed() < ORPHAN_REAP_WAIT {
+        while SignalTarget::Process(self.pid).is_alive() && started.elapsed() < ORPHAN_REAP_WAIT {
             thread::sleep(ORPHAN_POLL);
         }
+    }
+}
+
+/// Whether `pid` runs: a zombie not yet reaped has ended, as the supervisor
+/// sees it, though a signal can still reach its pid until the reaper thread
+/// collects it.
+fn running(pid: Pid) -> bool {
+    SignalTarget::Process(pid).is_alive() && !LocalProcessIdentity::has_exited(pid)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+    use crate::adapter::test_wait::wait_until;
+
+    /// A killed child its parent has not reaped yet no longer runs, though
+    /// its pid still takes a signal.
+    #[test]
+    fn an_unreaped_zombie_is_not_running() {
+        let mut child = Command::new(ORPHAN_PROGRAM)
+            .arg(ORPHAN_SECONDS)
+            .spawn()
+            .unwrap();
+        let pid = Pid::try_new(child.id()).unwrap();
+        assert!(running(pid));
+
+        child.kill().unwrap();
+        wait_until("the child to become a zombie", || {
+            LocalProcessIdentity::has_exited(pid)
+        });
+
+        assert!(SignalTarget::Process(pid).is_alive(), "not reaped yet");
+        assert!(!running(pid));
+        child.wait().unwrap();
     }
 }

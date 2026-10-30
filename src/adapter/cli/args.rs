@@ -23,6 +23,7 @@ use crate::{
     domain::{
         config::SettingKey,
         process::{RestartPolicy, StopSignal},
+        terminal_workspace::SplitDirection,
         value::{Pid, PositiveDuration, StopGrace},
     },
 };
@@ -39,7 +40,7 @@ const HELP_STYLES: Styles = Styles::styled()
 
 /// What the main help says after the commands: the exit codes and the JSON
 /// conventions every command keeps. Tests pin the codes to
-/// [`CliExit`](super::CliExit) and to the README's table.
+/// [`CliExit`](super::CliExit) and to the reference's table.
 const AFTER_HELP: &str = "\
 Exit codes:
     0  success
@@ -69,6 +70,8 @@ static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopS
 static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateGoal>);
 /// The shells `muster shell-init` prints a hook for.
 pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
+/// The names `muster open --direction` accepts.
+static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -89,6 +92,11 @@ where
 /// Parses a `--restart` policy.
 pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
     one_of(&RESTART_POLICIES)
+}
+
+/// Parses a `muster open --direction`.
+pub(super) fn split_direction_parser() -> impl TypedValueParser<Value = SplitDirection> {
+    one_of(&SPLIT_DIRECTIONS)
 }
 
 /// Parses a `--stop-signal`.
@@ -273,17 +281,16 @@ mod tests {
         assert!(Args::try_parse_from(["muster", "logs", "api", "-f", "--screen"]).is_err());
     }
 
-    /// A lifecycle, log or attach command may leave its name out, to be
-    /// chosen from a list; `down` takes no agent flags any more.
+    /// A lifecycle, log, attach or open command may leave its name out, to
+    /// be chosen from a list; `rm` always names one.
     #[test]
     fn a_name_may_be_left_to_choose() {
-        for command in ["start", "stop", "restart", "logs", "attach"] {
+        for command in ["start", "stop", "restart", "logs", "attach", "open"] {
             assert!(
                 Args::try_parse_from(["muster", command]).is_ok(),
                 "{command}"
             );
         }
-        assert!(Args::try_parse_from(["muster", "down", "--agents"]).is_err());
         assert!(Args::try_parse_from(["muster", "rm"]).is_err());
     }
 
@@ -371,17 +378,17 @@ mod tests {
         );
     }
 
-    /// The README's exit code table says what the help says, code for code.
+    /// The reference's exit code table says what the help says, code for code.
     #[test]
-    fn the_readme_documents_the_same_exit_codes() {
-        let readme = include_str!("../../../README.md");
+    fn the_reference_documents_the_same_exit_codes() {
+        let reference = include_str!("../../../docs/reference.md");
 
         for line in AFTER_HELP.lines().filter(|line| line.starts_with("  ")) {
             let (code, meaning) = line.trim_start().split_once("  ").unwrap();
             let mut letters = meaning.chars();
             let first = letters.next().unwrap().to_uppercase();
             let row = format!("| {code} | {first}{} |", letters.as_str());
-            assert!(readme.contains(&row), "the README lacks {row}");
+            assert!(reference.contains(&row), "the reference lacks {row}");
         }
     }
 

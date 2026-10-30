@@ -23,6 +23,7 @@ use crate::{
             LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
             TODO_DEPS_MAX, TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
         },
+        terminal_workspace::{MIN_HALF_COLS, SplitDirection},
         value::{
             COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
             MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
@@ -37,7 +38,7 @@ const DESCRIPTION_KEY: &str = "description";
 const LIST_SEPARATOR: &str = ", ";
 
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 33] {
+fn placeholders() -> [(&'static str, String); 35] {
     [
         (
             "<event-kinds>",
@@ -46,6 +47,14 @@ fn placeholders() -> [(&'static str, String); 33] {
                 .collect::<Vec<_>>()
                 .join(LIST_SEPARATOR),
         ),
+        (
+            "<split-directions>",
+            SplitDirection::iter()
+                .map(|direction| direction.to_string())
+                .collect::<Vec<_>>()
+                .join(LIST_SEPARATOR),
+        ),
+        ("<split-min-half-cols>", MIN_HALF_COLS.to_string()),
         (
             "<process-name-max-chars>",
             PROCESS_NAME_MAX_CHARS.to_string(),

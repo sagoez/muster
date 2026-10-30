@@ -21,7 +21,7 @@ use muster::{
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use tempfile::{Builder, TempDir};
 
-use super::processes::processes_under;
+use super::{herdr_env::without_herdr, processes::processes_under};
 
 /// The muster binary cargo built for these tests.
 pub const BINARY: &str = env!("CARGO_BIN_EXE_muster");
@@ -145,10 +145,11 @@ impl Scratch {
         command
     }
 
-    /// `program` over this scratch's XDG roots, run from its root.
+    /// `program` over this scratch's XDG roots, run from its root, outside
+    /// any herdr pane the suite runs in.
     pub fn isolated(&self, program: &Path) -> Command {
         let mut command = Command::new(program);
-        command
+        without_herdr(&mut command)
             .current_dir(self.root())
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))

@@ -28,6 +28,7 @@ mod stop_grace;
 mod terminal_text;
 mod unresolved_process;
 mod value_parse_error;
+mod workspace_pane_id;
 
 pub use byte_size::*;
 pub use cols::*;
@@ -59,3 +60,4 @@ pub use stop_grace::*;
 pub use terminal_text::*;
 pub use unresolved_process::*;
 pub use value_parse_error::*;
+pub use workspace_pane_id::*;

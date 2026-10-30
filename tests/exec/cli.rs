@@ -5,6 +5,7 @@
 //! happened to processes.
 
 use std::{
+    ffi::{OsStr, OsString},
     fs::{self, Permissions},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
@@ -35,7 +36,7 @@ use muster::{
             Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
-        shell::{SHELL_REPORT_SUBCOMMAND, ShellFiles},
+        shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
         store::SqliteStore,
     },
     constants::{APP_NAME, MUSTER_SHELL_ENV},
@@ -55,10 +56,12 @@ use muster::{
 use rusqlite::Connection;
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
+use strum::IntoEnumIterator;
 
 use crate::common::{
-    BINARY, HeldLauncher, McpSession, Pty, QuietPorts, Scratch, WAIT, alive, entry,
-    processes_under, result_text, stack, wait_until,
+    BINARY, CALLER, FakeHerdr, HERDR_PANE_ENV, HeldLauncher, McpSession, OPENED, Pty, QuietPorts,
+    Scratch, WAIT, alive, entry, no_rc_args, processes_under, result_text, runnable_shell, stack,
+    wait_until,
 };
 
 /// The stack file `export` and `import` use by default.
@@ -863,10 +866,11 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
             "--name",
             "tail job",
             "--",
-            &format!("echo caller-${CALLER_VARIABLE}; sleep 600"),
+            &format!("echo caller-${CALLER_VARIABLE} pane-${{{HERDR_PANE_ENV}-none}}; sleep 600"),
         ])
         .current_dir(&project)
         .env(CALLER_VARIABLE, "seen")
+        .env(HERDR_PANE_ENV, "w1:p3")
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", shown(&output));
@@ -876,7 +880,7 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
     assert!(scratch.exported(&project).contains("tail job"));
     assert_eq!(scratch.row(&project, "tail job")["state"], "running");
     wait_until("the run to see its caller's environment", || {
-        stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen")
+        stdout(&scratch.on(&project, &["logs", "tail job"])).contains("caller-seen pane-none")
     });
 
     let run_here = |args: &[&str]| {
@@ -4821,5 +4825,885 @@ fn projects_set_gives_a_project_its_own_idle_stop() {
         stderr(&elsewhere).contains("no muster project"),
         "{}",
         shown(&elsewhere)
+    );
+}
+
+/// A pane id that is only blanks, which names no workspace.
+const BLANK_PANE: &str = "  ";
+/// A herdr binary that does not exist, inside the scratch.
+const MISSING_HERDR: &str = "no-such-herdr";
+/// How late a slow herdr answers a layout: well inside both the 5 second
+/// bound of a herdr call and the 5 seconds an MCP server drains its answers
+/// for once its client closes.
+const LATE_LAYOUT: Duration = Duration::from_secs(2);
+/// How a herdr that cannot be run is reported.
+const HERDR_UNREACHABLE: &str = "cannot reach herdr";
+/// What herdr prints when it refuses to type into a pane.
+const RUN_REFUSAL: &str =
+    r#"{"id":"1","error":{"code":"pane_not_found","message":"no such pane"}}"#;
+/// The exit status herdr refuses a call with.
+const HERDR_REFUSED: u8 = 1;
+/// A process name built to break a typed shell line: quotes, command
+/// substitutions that would create [`PWNED`], a semicolon and a leading
+/// dash.
+const HOSTILE_NAME: &str = "-x 'q' \"d\" $(touch pwned) `touch pwned`; touch pwned";
+/// The file the hostile name would create if a shell ever ran it.
+const PWNED: &str = "pwned";
+/// What the hostile-named process prints, to tell its screen.
+const HOSTILE_OUTPUT: &str = "hostile-ran";
+/// The line typed into a new pane for the six words of an interactive
+/// attach.
+const TYPED_ATTACH: &str = r#" [ -n "$MUSTER_OPEN_ARG_0" ] && "$MUSTER_OPEN_ARG_0" "$MUSTER_OPEN_ARG_1" "$MUSTER_OPEN_ARG_2" "$MUSTER_OPEN_ARG_3" "$MUSTER_OPEN_ARG_4" "$MUSTER_OPEN_ARG_5" && exit"#;
+/// The detach key a terminal workspace often reserves for itself.
+const RESERVED_DETACH_KEY: &str = "ctrl-b";
+
+/// The command that attaches to `api` of the project in `project` from
+/// anywhere, as a failed open or a detach names it.
+fn api_attach_hint(project: &Path) -> String {
+    let root = fs::canonicalize(project).unwrap();
+    let root = shlex::try_quote(root.to_str().unwrap()).unwrap();
+    format!("muster --project {root} attach -- api")
+}
+
+/// The words of the attach command named between backticks in `text`.
+fn hinted_words(text: &str) -> Vec<String> {
+    let hint = text
+        .split('`')
+        .find(|part| part.starts_with("muster --project"))
+        .unwrap_or_else(|| panic!("no attach hint in {text}"));
+    shlex::split(hint).unwrap()
+}
+
+/// `muster -p <project> <args>` run from `project` in the caller pane of
+/// the herdr whose binary is `herdr`.
+fn in_pane(scratch: &Scratch, project: &Path, herdr: &Path, args: &[&str]) -> Command {
+    let mut all = vec!["-p", project.to_str().unwrap()];
+    all.extend_from_slice(args);
+    let mut command = scratch.command(&all);
+    FakeHerdr::place(&mut command, herdr).current_dir(project);
+    command
+}
+
+/// `args` as a herdr call's arguments.
+fn herdr_call(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
+}
+
+/// The `MUSTER_OPEN_ARG_<i>` variables a split sets for `words`, in order.
+fn pane_words(words: &[&OsStr]) -> Vec<(OsString, OsString)> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            (
+                OsString::from(format!("MUSTER_OPEN_ARG_{index}")),
+                word.to_os_string(),
+            )
+        })
+        .collect()
+}
+
+/// This build's muster binary, as a pane runs it.
+fn this_muster() -> OsString {
+    Path::new(BINARY).canonicalize().unwrap().into_os_string()
+}
+
+/// The arguments that run `shell` on `line` with no rc file.
+fn line_args(shell: HookShell, line: &OsStr) -> Vec<OsString> {
+    let no_rc: &[&str] = match shell {
+        HookShell::Bash => &["--norc", "--noprofile"],
+        HookShell::Zsh => &["-f"],
+        HookShell::Fish => &["--no-config"],
+    };
+    let mut args = herdr_call(no_rc);
+    args.push(OsString::from("-c"));
+    args.push(line.to_os_string());
+    args
+}
+
+/// The `workspace` row of a `doctor --json` report.
+fn workspace_row(report: &Value) -> Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "workspace")
+        .cloned()
+        .unwrap_or_else(|| panic!("no workspace row: {report}"))
+}
+
+/// Review Focus 5: outside a terminal workspace `open` is `attach`. At a
+/// terminal it is framed as attach, attaches in place and ends 0 at the
+/// detach key; a blank pane id names no workspace, so the herdr beside it
+/// is never run.
+#[test]
+fn open_without_a_workspace_attaches_in_place() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+
+    let pty = Pty::open();
+    let mut open = pty.spawn(&mut scratch, &project, &["open", "api"]);
+    pty.wait_for("attached to api", 1);
+    pty.type_keys(DETACH);
+    assert_eq!(pty.exit_code(&mut open), Some(0), "{}", pty.drawn());
+    let drawn = pty.drawn();
+    assert!(drawn.contains("muster attach · shop"), "{drawn}");
+    assert!(drawn.contains("detached from api"), "{drawn}");
+
+    let mut blank = in_pane(&scratch, &project, &herdr.program(), &["open", "api"]);
+    blank.env(HERDR_PANE_ENV, BLANK_PANE);
+    let pty = Pty::open();
+    let mut open = pty.spawn_leading(&mut scratch, blank);
+    pty.wait_for("attached to api", 1);
+    pty.type_keys(DETACH);
+    assert_eq!(pty.exit_code(&mut open), Some(0), "{}", pty.drawn());
+    assert!(pty.drawn().contains("detached from api"), "{}", pty.drawn());
+    assert!(herdr.calls().is_empty(), "{:?}", herdr.calls());
+}
+
+/// Review Focus 5: outside a terminal workspace and without a terminal,
+/// `open` prints and exits exactly as `attach` does, `--json` included.
+#[test]
+fn open_outside_a_workspace_answers_as_attach_does() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+
+    for args in [
+        &["api"][..],
+        &["api", "--json"],
+        &["--read-only", "api", "--json"],
+        &["ghost", "--json"],
+        &["--json"],
+    ] {
+        let open = scratch.on(&project, &[&["open"][..], args].concat());
+        let attach = scratch.on(&project, &[&["attach"][..], args].concat());
+        assert_eq!(open.status.code(), attach.status.code(), "{args:?}");
+        assert_ne!(open.status.code(), Some(0), "{args:?}: {}", shown(&open));
+        assert_eq!(stdout(&open), stdout(&attach), "{args:?}");
+        assert_eq!(stderr(&open), stderr(&attach), "{args:?}");
+    }
+}
+
+/// Decision 8: inside a workspace whose herdr cannot be run, `open` fails
+/// with exit 1 and the attach hint, framed at a terminal and as
+/// `workspace-failed` in JSON, and never attaches in place.
+#[test]
+fn open_inside_a_workspace_whose_herdr_is_missing_fails_without_attaching() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let missing = scratch.path().join(MISSING_HERDR);
+
+    let command = in_pane(&scratch, &project, &missing, &["open", "api"]);
+    let pty = Pty::open();
+    let mut open = pty.spawn_leading(&mut scratch, command);
+    assert_eq!(
+        pty.exit_code(&mut open),
+        Some(ACTION_FAILED),
+        "{}",
+        pty.drawn()
+    );
+    let drawn = pty.drawn();
+    assert!(drawn.contains("muster open · shop"), "{drawn}");
+    assert!(drawn.contains(HERDR_UNREACHABLE), "{drawn}");
+    let hint = format!("`{}` shows it here", api_attach_hint(&project));
+    assert!(drawn.contains(&hint), "{drawn}");
+    assert!(!drawn.contains("attached to"), "{drawn}");
+    assert_eq!(scratch.row(&project, "api")["attached"], 0);
+
+    let output = in_pane(&scratch, &project, &missing, &["open", "api", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&output)
+    );
+    let failure = parsed(&output);
+    assert_eq!(failure["error"]["kind"], "workspace-failed", "{failure}");
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with(&hint),
+        "{failure}"
+    );
+}
+
+/// Inside a workspace, `open` at a terminal reads the caller's layout,
+/// splits it the wide way into the project's folder with the attach
+/// command's words as variables and the focus kept, types the fixed line
+/// into the new pane, only then focuses it, and closes its frame naming the
+/// pane; it attaches nothing here.
+#[test]
+fn open_in_a_workspace_frames_the_pane_it_opened() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+
+    let command = in_pane(&scratch, &project, &herdr.program(), &["open", "api"]);
+    let pty = Pty::open();
+    let mut open = pty.spawn_leading(&mut scratch, command);
+    assert_eq!(pty.exit_code(&mut open), Some(0), "{}", pty.drawn());
+    let drawn = pty.drawn();
+    assert!(drawn.contains("muster open · shop"), "{drawn}");
+    assert!(
+        drawn.contains(&format!("opened api in pane {OPENED}")),
+        "{drawn}"
+    );
+    assert!(!drawn.contains("attached to"), "{drawn}");
+
+    let project_word = project.as_os_str();
+    let expected_env = pane_words(&[
+        &this_muster(),
+        OsStr::new("--project"),
+        project_word,
+        OsStr::new("attach"),
+        OsStr::new("--"),
+        OsStr::new("api"),
+    ]);
+    let mut split = herdr_call(&["pane", "split", CALLER, "--direction", "right", "--cwd"]);
+    split.push(project_word.to_os_string());
+    for (name, value) in &expected_env {
+        let mut pair = name.clone();
+        pair.push("=");
+        pair.push(value);
+        split.push(OsString::from("--env"));
+        split.push(pair);
+    }
+    split.push(OsString::from("--no-focus"));
+    assert_eq!(herdr.calls(), [
+        herdr_call(&["pane", "layout", "--pane", CALLER]),
+        split,
+        herdr_call(&["pane", "run", OPENED, TYPED_ATTACH]),
+        herdr_call(&["pane", "focus", "--pane", CALLER, "--direction", "right"]),
+    ]);
+    assert_eq!(scratch.row(&project, "api")["attached"], 0);
+}
+
+/// `open --json` prints only the opened pane's view; `--direction` skips
+/// the layout read and `--read-only` reaches the attach command.
+#[test]
+fn open_json_prints_the_pane_and_passes_direction_and_read_only() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+
+    let output = in_pane(&scratch, &project, &herdr.program(), &[
+        "open",
+        "api",
+        "--read-only",
+        "--direction",
+        "down",
+        "--json",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+    assert!(output.stderr.is_empty(), "{}", shown(&output));
+    assert_eq!(
+        parsed(&output),
+        serde_json::json!({
+            "project": "shop",
+            "process": "api",
+            "pane": OPENED,
+            "read_only": true,
+        })
+    );
+    let calls = herdr.calls();
+    assert_eq!(calls.len(), 3, "no layout is read: {calls:?}");
+    assert_eq!(
+        calls[0][..5],
+        herdr_call(&["pane", "split", CALLER, "--direction", "down"])
+    );
+    let (_, env, _) = herdr.pane_shell();
+    assert_eq!(
+        env,
+        pane_words(&[
+            &this_muster(),
+            OsStr::new("--project"),
+            project.as_os_str(),
+            OsStr::new("attach"),
+            OsStr::new("--read-only"),
+            OsStr::new("--"),
+            OsStr::new("api"),
+        ])
+    );
+}
+
+/// Review Focus 1: a name holding quotes, command substitutions, a
+/// semicolon and a leading dash reaches the pane only as a variable's
+/// value; the line typed there, run by each installed shell as a pane's
+/// shell would run it, attaches to that very process, ends 0 at the detach
+/// key, and runs nothing the name holds.
+#[test]
+fn the_typed_line_attaches_from_each_shell_and_a_hostile_name_stays_a_name() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project(
+        "shop",
+        &stack(&[entry(
+            HOSTILE_NAME,
+            &format!("echo {HOSTILE_OUTPUT}; sleep 600"),
+            true,
+        )]),
+    );
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+
+    let output = in_pane(&scratch, &project, &herdr.program(), &[
+        "open",
+        "--json",
+        "--",
+        HOSTILE_NAME,
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+    assert_eq!(parsed(&output)["process"], HOSTILE_NAME);
+    let (cwd, env, line) = herdr.pane_shell();
+    assert_eq!(line, OsStr::new(TYPED_ATTACH));
+    assert_eq!(cwd, project);
+    assert_eq!(env.last().unwrap().1, OsStr::new(HOSTILE_NAME));
+
+    for shell in HookShell::iter() {
+        let Some(program) = runnable_shell(&scratch, shell) else {
+            eprintln!("{shell} is not installed or does not run: its typed line is not checked");
+            continue;
+        };
+        let mut pane = scratch.isolated(&program);
+        pane.args(line_args(shell, &line))
+            .current_dir(&cwd)
+            .envs(env.iter().map(|(name, value)| (name, value)));
+        let pty = Pty::open();
+        let mut shown_pane = pty.spawn_leading(&mut scratch, pane);
+        pty.wait_for("attached to", 1);
+        pty.wait_for(HOSTILE_OUTPUT, 1);
+        pty.type_keys(DETACH);
+        assert_eq!(
+            pty.exit_code(&mut shown_pane),
+            Some(0),
+            "{shell}: {}",
+            pty.drawn()
+        );
+        assert!(
+            pty.drawn().contains("detached from"),
+            "{shell}: {}",
+            pty.drawn()
+        );
+    }
+    assert!(!cwd.join(PWNED).exists());
+    assert!(!scratch.path().join(PWNED).exists());
+}
+
+/// The typed line, typed at an interactive bash or zsh prompt as herdr
+/// types it, attaches in the pane that holds its variables and ends the
+/// shell once detached; the same text recalled in a plain shell without
+/// them runs nothing and leaves that shell open.
+#[test]
+fn the_typed_line_is_inert_in_a_shell_without_its_variables() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+    let output = in_pane(&scratch, &project, &herdr.program(), &[
+        "open", "api", "--json",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+    let (cwd, env, line) = herdr.pane_shell();
+    let mut typed = line.into_encoded_bytes();
+    typed.extend_from_slice(ENTER);
+
+    for shell in [HookShell::Bash, HookShell::Zsh] {
+        let Some(program) = runnable_shell(&scratch, shell) else {
+            eprintln!("{shell} is not installed or does not run: its typed line is not checked");
+            continue;
+        };
+        let prompt = |with_variables: bool| {
+            let mut command = scratch.isolated(&program);
+            command
+                .args(no_rc_args(shell))
+                .current_dir(&cwd)
+                .env("HOME", scratch.root());
+            for (name, value) in &env {
+                if with_variables {
+                    command.env(name, value);
+                } else {
+                    command.env_remove(name);
+                }
+            }
+            command
+        };
+        let (pane, plain) = (prompt(true), prompt(false));
+
+        let pty = Pty::open();
+        let mut pane = pty.spawn_leading(&mut scratch, pane);
+        pty.type_keys(&typed);
+        pty.wait_for("attached to api", 1);
+        pty.type_keys(DETACH);
+        assert_eq!(
+            pty.exit_code(&mut pane),
+            Some(0),
+            "{shell}: {}",
+            pty.drawn()
+        );
+
+        let pty = Pty::open();
+        let mut plain = pty.spawn_leading(&mut scratch, plain);
+        pty.type_keys(&typed);
+        pty.type_keys(b"echo still-open-$((40 + 2))\r");
+        pty.wait_for("still-open-42", 1);
+        let drawn = pty.drawn();
+        assert!(!drawn.contains("attached to"), "{shell}: {drawn}");
+        assert!(!drawn.contains("not found"), "{shell}: {drawn}");
+        assert!(
+            plain.try_wait().unwrap().is_none(),
+            "{shell}: the plain shell exited: {drawn}"
+        );
+        pty.type_keys(b"exit\r");
+        assert_eq!(
+            pty.exit_code(&mut plain),
+            Some(0),
+            "{shell}: {}",
+            pty.drawn()
+        );
+    }
+}
+
+/// A Ctrl-C or a hangup that ends muster while it waits on herdr kills the
+/// herdr call's whole process group, so neither the call nor a child it
+/// started, as a wrapper around herdr might, outlives the muster that
+/// started it, though the group is not the terminal's.
+#[test]
+fn a_signal_that_ends_muster_ends_its_herdr_call_and_what_it_started() {
+    for hang_up in [false, true] {
+        let mut scratch = Scratch::new();
+        let herdr = FakeHerdr::new(&scratch);
+        herdr.fork_and_hang("pane-get");
+        let mut doctor = scratch.command(&["doctor"]);
+        FakeHerdr::place(&mut doctor, &herdr.program());
+
+        let pty = Pty::open();
+        let mut muster = pty.spawn_leading(&mut scratch, doctor);
+        let mut started = None;
+        wait_until("muster's herdr call to start its child", || {
+            started = herdr.pid("pane-get").zip(herdr.grandchild("pane-get"));
+            started.is_some()
+        });
+        let (called, grandchild) = started.unwrap();
+        scratch.keep_child(called);
+        scratch.keep_child(grandchild);
+        assert!(
+            alive(called) && alive(grandchild),
+            "the herdr call ended on its own"
+        );
+        if hang_up {
+            let pid = Pid::from_raw(i32::try_from(muster.id()).unwrap()).unwrap();
+            kill_process(pid, Signal::HUP).unwrap();
+        } else {
+            pty.interrupt();
+        }
+
+        assert_eq!(pty.exit_code(&mut muster), None, "{}", pty.drawn());
+        wait_until("the herdr call and its child to end with muster", || {
+            !alive(called) && !alive(grandchild)
+        });
+    }
+}
+
+/// A herdr call that runs past its bound has its whole process group
+/// killed, so a child it started does not outlive it.
+#[test]
+fn a_herdr_call_past_its_bound_ends_with_what_it_started() {
+    let mut scratch = Scratch::new();
+    let herdr = FakeHerdr::new(&scratch);
+    herdr.fork_and_hang("pane-get");
+    let mut doctor = scratch.command(&["doctor", "--json"]);
+    FakeHerdr::place(&mut doctor, &herdr.program());
+
+    let output = doctor.output().unwrap();
+
+    assert!(output.status.success(), "{}", shown(&output));
+    let row = workspace_row(&parsed(&output));
+    assert_eq!(row["outcome"], "warn", "{row}");
+    let grandchild = herdr.grandchild("pane-get").unwrap();
+    scratch.keep_child(grandchild);
+    wait_until("the herdr call's child to end", || !alive(grandchild));
+}
+
+/// Decision 9: a process that is not running, an unknown name and a missing
+/// name without a terminal to choose on fail as `attach` would, and herdr
+/// is never asked for a pane.
+#[test]
+fn a_process_that_cannot_be_shown_asks_herdr_for_nothing() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let herdr = FakeHerdr::new(&scratch);
+
+    for (args, code, kind) in [
+        (&["open", "api", "--json"][..], ACTION_FAILED, "not-running"),
+        (
+            &["open", "ghost", "--json"],
+            INVALID_INPUT,
+            "unknown-process",
+        ),
+        (&["open", "--json"], INVALID_INPUT, "invalid-input"),
+    ] {
+        let output = in_pane(&scratch, &project, &herdr.program(), args)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{args:?}: {}",
+            shown(&output)
+        );
+        assert_eq!(parsed(&output)["error"]["kind"], kind, "{args:?}");
+    }
+    assert!(herdr.calls().is_empty(), "{:?}", herdr.calls());
+}
+
+/// Decision 10: when herdr refuses to type into the pane it split, `open`
+/// closes that pane, closes its frame and exits 1 with herdr's own words
+/// and the attach hint, in JSON as `workspace-failed`.
+#[test]
+fn a_herdr_refusal_closes_the_pane_and_names_the_attach_hint() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+    herdr.refuse("pane-run", RUN_REFUSAL, HERDR_REFUSED);
+
+    let command = in_pane(&scratch, &project, &herdr.program(), &["open", "api"]);
+    let pty = Pty::open();
+    let mut open = pty.spawn_leading(&mut scratch, command);
+    assert_eq!(
+        pty.exit_code(&mut open),
+        Some(ACTION_FAILED),
+        "{}",
+        pty.drawn()
+    );
+    let drawn = pty.drawn();
+    assert!(drawn.contains("muster open · shop"), "{drawn}");
+    assert!(drawn.contains("no such pane (pane_not_found)"), "{drawn}");
+    assert!(drawn.contains("the pane is closed"), "{drawn}");
+    assert!(
+        drawn.contains(&format!("`{}` shows it here", api_attach_hint(&project))),
+        "{drawn}"
+    );
+    let raw = pty.raw();
+    assert!(
+        raw.rfind("\x1b[?25h") >= raw.rfind("\x1b[?25l"),
+        "the cursor is shown again: {raw:?}"
+    );
+    assert_eq!(
+        herdr.calls().last().unwrap(),
+        &herdr_call(&["pane", "close", OPENED])
+    );
+
+    let output = in_pane(&scratch, &project, &herdr.program(), &[
+        "open", "api", "--json",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&output)
+    );
+    let failure = parsed(&output);
+    assert_eq!(failure["error"]["kind"], "workspace-failed", "{failure}");
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no such pane (pane_not_found)"),
+        "{failure}"
+    );
+}
+
+/// Inside a workspace, `open` with no name at a terminal offers the running
+/// processes in its frame and opens the one chosen.
+#[test]
+fn open_without_a_name_in_a_workspace_offers_the_running_processes() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &shop());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+
+    let command = in_pane(&scratch, &project, &herdr.program(), &["open"]);
+    let pty = Pty::open();
+    let mut open = pty.spawn_leading(&mut scratch, command);
+    pty.wait_for("Which process?", 1);
+    pty.wait_for("café", 1);
+    pty.type_keys(ARROW_DOWN);
+    pty.type_keys(ENTER);
+    assert_eq!(pty.exit_code(&mut open), Some(0), "{}", pty.drawn());
+    assert!(
+        pty.drawn()
+            .contains(&format!("opened café in pane {OPENED}")),
+        "{}",
+        pty.drawn()
+    );
+    let (_, env, _) = herdr.pane_shell();
+    assert_eq!(env.last().unwrap().1, OsStr::new("café"));
+}
+
+/// Review Focus 6, through the built binary: `muster mcp` run in a
+/// workspace pane opens a pane beside it without taking the focus and
+/// answers the pane; run outside one, `process_open` is `no-workspace`
+/// naming the attach command, and no herdr is asked.
+#[test]
+fn mcp_process_open_splits_beside_the_agent_without_focus() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+    let program = herdr.program();
+
+    let mut inside = McpSession::start_placed(&mut scratch, &project, |command| {
+        FakeHerdr::place(command, &program);
+    });
+    let opened = inside.result("process_open", serde_json::json!({ "name": "api" }));
+    assert_eq!(opened["isError"], false, "{opened}");
+    assert_eq!(
+        opened["structuredContent"],
+        serde_json::json!({
+            "project": "shop",
+            "process": "api",
+            "pane": OPENED,
+            "read_only": false,
+            "alerts": [],
+        })
+    );
+    let calls = herdr.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls[1].last().unwrap(), "--no-focus", "{calls:?}");
+    drop(inside);
+
+    let other = scratch.project("other", &single());
+    let up = scratch.on(&other, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let mut outside = McpSession::start(&mut scratch, &project);
+    for (asked, root) in [
+        (serde_json::json!({ "name": "api" }), &project),
+        (
+            serde_json::json!({ "name": "api", "project": other }),
+            &other,
+        ),
+    ] {
+        let refused = outside.mistake("process_open", asked);
+        assert_eq!(
+            refused["structuredContent"]["error"]["kind"], "no-workspace",
+            "{refused}"
+        );
+        let hint = format!("run {} in their own terminal", api_attach_hint(root));
+        assert!(result_text(&refused).contains(&hint), "{refused}");
+    }
+    let unknown = outside.mistake("process_open", serde_json::json!({ "name": "nope" }));
+    assert_eq!(
+        unknown["structuredContent"]["error"]["kind"], "unknown-process",
+        "{unknown}"
+    );
+    assert_eq!(herdr.calls().len(), 3);
+}
+
+/// Outside a terminal workspace `process_open` resolves the name against
+/// the stored stack and never starts the service: with none running the
+/// process is not running, and an unknown name lists the stored ones.
+#[test]
+fn mcp_process_open_outside_a_workspace_never_starts_the_service() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let mut session = McpSession::start(&mut scratch, &project);
+
+    let stopped = session.mistake("process_open", serde_json::json!({ "name": "api" }));
+    let unknown = session.mistake("process_open", serde_json::json!({ "name": "nope" }));
+    drop(session);
+
+    assert_eq!(
+        stopped["structuredContent"]["error"]["kind"], "not-running",
+        "{stopped}"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["error"]["kind"], "unknown-process",
+        "{unknown}"
+    );
+    assert_eq!(
+        unknown["structuredContent"]["error"]["candidates"],
+        serde_json::json!(["api"])
+    );
+    assert!(processes_under(SERVICE_SUBCOMMAND, &scratch.path()).is_empty());
+    assert!(!scratch.socket().exists());
+}
+
+/// An agent that closes `muster mcp`'s stdin while a `process_open` waits
+/// on herdr ends the server once its in-flight answers are drained, and
+/// with it the whole process group of the herdr call then running, so
+/// neither that call nor a child it started is left behind. The layout
+/// answers late, after the client closed, so the split that follows is
+/// still within its own bound when the server exits.
+#[test]
+fn an_mcp_client_closing_ends_its_herdr_call_and_what_it_started() {
+    let mut scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+    let herdr = FakeHerdr::new(&scratch);
+    herdr.delay("pane-layout", LATE_LAYOUT);
+    herdr.fork_and_hang("pane-split");
+    let program = herdr.program();
+
+    let mut session = McpSession::start_placed(&mut scratch, &project, |command| {
+        FakeHerdr::place(command, &program);
+    });
+    let server = session.pid();
+    session.call_unanswered("process_open", serde_json::json!({ "name": "api" }));
+    wait_until("muster to ask herdr for the layout", || {
+        herdr.pid("pane-layout").is_some()
+    });
+
+    drop(session);
+
+    assert!(!alive(server), "the server outlived its client");
+    let called = herdr.pid("pane-split").expect("the split was asked for");
+    let grandchild = herdr
+        .grandchild("pane-split")
+        .expect("the split started its child");
+    scratch.keep_child(called);
+    scratch.keep_child(grandchild);
+    wait_until("the split and its child to end with the server", || {
+        !alive(called) && !alive(grandchild)
+    });
+}
+
+/// Correctness M2: a project whose folder name starts or ends with a space
+/// is that very folder: it registers and opens, the pane's command
+/// attaches to it, and the command the detach line names attaches again
+/// from another folder.
+#[test]
+fn a_project_folder_with_surrounding_spaces_opens_and_attaches() {
+    for folder in ["trail ", " lead"] {
+        let mut scratch = Scratch::new();
+        let project = scratch.project(folder, &single());
+        let up = scratch.on(&project, &["up"]);
+        assert!(up.status.success(), "{folder:?}: {}", shown(&up));
+        let herdr = FakeHerdr::new(&scratch);
+
+        let output = in_pane(&scratch, &project, &herdr.program(), &["open", "api"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
+        let (cwd, env, _) = herdr.pane_shell();
+        assert_eq!(cwd, project);
+        let words: Vec<&OsStr> = env.iter().map(|(_, word)| word.as_os_str()).collect();
+
+        let mut pane = scratch.isolated(Path::new(words[0]));
+        pane.args(&words[1..]).current_dir(&cwd);
+        let pty = Pty::open();
+        let mut attach = pty.spawn_leading(&mut scratch, pane);
+        pty.wait_for("attached to api", 1);
+        pty.type_keys(DETACH);
+        assert_eq!(pty.exit_code(&mut attach), Some(0), "{}", pty.drawn());
+        let hinted = hinted_words(&pty.drawn());
+        assert_eq!(hinted, [
+            "muster",
+            "--project",
+            fs::canonicalize(&project).unwrap().to_str().unwrap(),
+            "attach",
+            "--",
+            "api"
+        ]);
+
+        let mut again = scratch.isolated(Path::new(words[0]));
+        again.args(&hinted[1..]);
+        let pty = Pty::open();
+        let mut attach = pty.spawn_leading(&mut scratch, again);
+        pty.wait_for("attached to api", 1);
+        pty.type_keys(DETACH);
+        assert_eq!(pty.exit_code(&mut attach), Some(0), "{}", pty.drawn());
+    }
+}
+
+/// `doctor`'s workspace row: outside a workspace it says `open` attaches in
+/// place; inside, it names the pane herdr answered for, warns when herdr
+/// cannot be run without failing the report, and warns of a detach key a
+/// workspace often reserves.
+#[test]
+fn doctor_reports_the_workspace_it_runs_in() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let herdr = FakeHerdr::new(&scratch);
+    let missing = scratch.path().join(MISSING_HERDR);
+    let doctor = |herdr: Option<&Path>| {
+        let output = match herdr {
+            Some(herdr) => in_pane(&scratch, &project, herdr, &["doctor", "--json"])
+                .output()
+                .unwrap(),
+            None => scratch.on(&project, &["doctor", "--json"]),
+        };
+        assert!(output.status.success(), "{}", shown(&output));
+        let report = parsed(&output);
+        assert_eq!(report["failed"], false, "{report}");
+        workspace_row(&report)
+    };
+
+    let outside = doctor(None);
+    assert_eq!(outside["outcome"], "ok", "{outside}");
+    assert!(
+        outside["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not inside a terminal workspace"),
+        "{outside}"
+    );
+    let inside = doctor(Some(&herdr.program()));
+    assert_eq!(inside["outcome"], "ok", "{inside}");
+    assert!(
+        inside["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("herdr pane {CALLER} answers")),
+        "{inside}"
+    );
+    assert_eq!(herdr.calls(), [herdr_call(&["pane", "get", CALLER])]);
+    let unreachable = doctor(Some(&missing));
+    assert_eq!(unreachable["outcome"], "warn", "{unreachable}");
+    assert!(
+        unreachable["detail"]
+            .as_str()
+            .unwrap()
+            .contains(HERDR_UNREACHABLE),
+        "{unreachable}"
+    );
+
+    let set = scratch.muster(&["config", "set", "detach-key", RESERVED_DETACH_KEY]);
+    assert!(set.status.success(), "{}", shown(&set));
+    let reserved = doctor(None);
+    assert_eq!(reserved["outcome"], "warn", "{reserved}");
+    assert!(
+        reserved["detail"]
+            .as_str()
+            .unwrap()
+            .contains(RESERVED_DETACH_KEY),
+        "{reserved}"
     );
 }

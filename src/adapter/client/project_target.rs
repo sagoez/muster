@@ -12,6 +12,9 @@ use crate::{
     },
 };
 
+/// What starts an absolute path or one under the home folder.
+const ROOTED_PATH_LEADS: [char; 2] = ['/', '~'];
+
 /// The project a command acts on: a registered one, or a folder that is not
 /// a project yet, which only the commands that register one accept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,27 +125,38 @@ impl ProjectTarget {
 /// A `--project` naming a folder (it contains `/` or starts with `.` or `~`)
 /// is read against `cwd`, unless no such folder exists and a registered
 /// project has that name, as `.dotfiles` may; anything else is a registered
-/// project's name. `MUSTER_PROJECT` is a folder, or when no such folder
-/// exists, a registered project's name; a bare word that is neither is an
-/// unknown project. There is no fallback to some other registered project.
+/// project's name. Whether it is a folder is decided on the value as given:
+/// a folder is taken exactly, as its name may start or end with a space,
+/// and only a name is trimmed. `MUSTER_PROJECT` is a folder, or when no
+/// such folder exists, a registered project's name; a bare word that is
+/// neither is an unknown project. There is no fallback to some other
+/// registered project.
 ///
 /// # Errors
-/// Returns [`ResolveError::UnknownProject`] for an unregistered name, or the
-/// failure of a folder that is neither a directory nor a registered root.
+/// Returns [`ResolveError::UnknownProject`] for an unregistered name,
+/// [`ResolveError::SpacedPath`] for an absolute or `~` path led by a space,
+/// which would otherwise name a folder inside `cwd`, or the failure of a
+/// folder that is neither a directory nor a registered root.
 pub fn resolve_project(
     explicit: Option<&str>,
     env_project: Option<&Path>,
     cwd: &Path,
     projects: &dyn ProjectStore,
 ) -> Result<ProjectTarget, ResolveError> {
-    let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
+    let explicit = explicit.filter(|value| !value.trim().is_empty());
     if let Some(value) = explicit {
+        let name = value.trim();
         if !names_a_folder(value) {
-            return named(value, projects);
+            return named(name, projects);
+        }
+        if value.starts_with(char::is_whitespace) && name.starts_with(ROOTED_PATH_LEADS) {
+            return Err(ResolveError::SpacedPath {
+                value: value.to_string(),
+            });
         }
         let path = cwd.join(expand_home(Path::new(value)));
         if !path.is_dir()
-            && let Some(project) = registered_named(value, projects)?
+            && let Some(project) = registered_named(name, projects)?
         {
             return Ok(ProjectTarget::Registered(project));
         }
@@ -488,6 +502,60 @@ mod tests {
             )
         );
         assert!(resolve_project(Some(".missing"), None, &base, &projects).is_err());
+    }
+
+    /// A folder whose name starts or ends with a space is that very folder,
+    /// never one trimmed of it; a name is still trimmed.
+    #[test]
+    fn a_folder_is_never_trimmed_and_a_name_is() {
+        let (_scratch, base) = tree();
+        for folder in ["trail ", " lead"] {
+            fs::create_dir(base.join(folder)).unwrap();
+        }
+        fs::create_dir(base.join("trail")).unwrap();
+        let trail = project("trail", &base.join("trail "));
+        let lead = project("lead", &base.join(" lead"));
+        let projects = FixedProjects::new(vec![trail.clone(), lead.clone()]);
+
+        assert_eq!(
+            resolve_project(base.join("trail ").to_str(), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(trail.clone())
+        );
+        assert_eq!(
+            resolve_project(Some("./ lead"), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(lead)
+        );
+        assert_eq!(
+            resolve_project(Some("  trail "), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(trail)
+        );
+    }
+
+    /// An absolute or `~` path led by a space is refused naming the space,
+    /// never read as a folder inside the current one, even when that folder
+    /// exists; a relative folder led by a space is taken as given.
+    #[test]
+    fn a_rooted_path_led_by_a_space_is_refused() {
+        let (_scratch, base) = tree();
+        let lead = project("lead", &base.join(" lead"));
+        fs::create_dir(base.join(" lead")).unwrap();
+        let projects = FixedProjects::new(vec![lead.clone()]);
+        let rooted = format!(" {}", base.join(" lead").display());
+        fs::create_dir_all(base.join(&rooted)).unwrap();
+
+        for value in [rooted.as_str(), " ~/app", "\t/srv/app"] {
+            let error = resolve_project(Some(value), None, &base, &projects).unwrap_err();
+            assert!(
+                matches!(&error, ResolveError::SpacedPath { value: given } if given == value),
+                "{value:?}: {error}"
+            );
+            assert!(error.to_string().contains("starts with a space"), "{error}");
+            assert!(error.to_string().contains(&format!("{value:?}")), "{error}");
+        }
+        assert_eq!(
+            resolve_project(Some(" lead/"), None, &base, &projects).unwrap(),
+            ProjectTarget::Registered(lead)
+        );
     }
 
     /// Only a non-empty `MUSTER_PROJECT` names a project.

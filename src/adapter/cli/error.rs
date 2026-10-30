@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError},
+        client::{
+            ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError,
+            open::attach_hint,
+        },
         exchange::ExchangeError,
         holder::{HolderError, PatternError},
         sanitize::printable,
@@ -16,7 +19,7 @@ use crate::{
         coordination::Author,
         value::{
             COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
-            NameProblem, ProcessName, ProcessNameError, ProjectName, refused_name,
+            NameProblem, ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
         },
     },
 };
@@ -294,6 +297,20 @@ pub enum CliError {
         #[source]
         source: HolderError,
     },
+    /// No pane opened for `muster open`: the terminal workspace did not open
+    /// it, or the muster binary it would run is gone.
+    #[error("{source}; `{}` shows it here", attach_hint(root, name, *read_only))]
+    OpenFailed {
+        /// The project's folder.
+        root: ProjectRoot,
+        /// The process to show.
+        name: ProcessName,
+        /// Whether the pane was to be watch-only.
+        read_only: bool,
+        /// Why no pane opened.
+        #[source]
+        source: Box<ClientError>,
+    },
 }
 
 impl From<ResolveError> for CliError {
@@ -302,6 +319,7 @@ impl From<ResolveError> for CliError {
             ResolveError::UnknownProject { name, .. } => Self::UnknownProject(name),
             ResolveError::NotAProject { dir } => Self::NotAProject { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
+            error @ ResolveError::SpacedPath { .. } => Self::InvalidArgument(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
         }
     }
@@ -366,6 +384,7 @@ impl CliError {
             Self::UnknownNote(_) => FailureKind::UnknownNote,
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
+            Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -420,6 +439,7 @@ impl CliError {
             | Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
+            | Self::OpenFailed { .. }
             | Self::ReadFile { .. }
             | Self::WriteFile { .. }
             | Self::CurrentDir(_)
@@ -493,7 +513,10 @@ fn client_message(error: &ClientError) -> String {
         | ClientError::AmbiguousProcess { .. }
         | ClientError::Config(_)
         | ClientError::Log { .. }
-        | ClientError::InterruptedUnsent => error.to_string(),
+        | ClientError::InterruptedUnsent
+        | ClientError::NoWorkspace
+        | ClientError::Workspace(_)
+        | ClientError::BinaryGone(_) => error.to_string(),
     }
 }
 

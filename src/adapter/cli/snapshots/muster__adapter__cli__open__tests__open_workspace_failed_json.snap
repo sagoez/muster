@@ -1,0 +1,12 @@
+---
+source: src/adapter/cli/open.rs
+assertion_line: 322
+expression: "output::failure_json(&error)"
+---
+{
+  "error": {
+    "candidates": [],
+    "kind": "workspace-failed",
+    "message": "tiles refused to split a pane: no such pane (pane_not_found); `muster --project '/home/me/my shop' attach -- api` shows it here"
+  }
+}

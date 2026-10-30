@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
@@ -10,16 +10,16 @@ use crate::{
     domain::{
         port::{
             CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
-            StateChangeNotifier,
+            StateChangeNotifier, TerminalWorkspace,
         },
         project::Project,
     },
 };
 
 /// What the MCP server works with: where it resolves projects from, the
-/// identity it was given, the service it drives, and the stores and notifier
-/// its tools write through. Cheap to clone, so a tool can carry it onto a
-/// blocking thread.
+/// identity it was given, the service it drives, the stores and notifier
+/// its tools write through, and the terminal workspace the agent runs in.
+/// Cheap to clone, so a tool can carry it onto a blocking thread.
 #[derive(Clone, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct McpDeps {
@@ -41,6 +41,11 @@ pub struct McpDeps {
     edits: Arc<dyn StackEditLog + Send + Sync>,
     /// Told after each committed edit, so a running service picks it up.
     notifier: Arc<dyn StateChangeNotifier + Send + Sync>,
+    /// The terminal workspace the agent's own pane is in, if any.
+    terminal_workspace: Option<Arc<dyn TerminalWorkspace>>,
+    /// Reads the muster binary a pane runs to attach, at each open, so one
+    /// replaced since the server started is never handed to a pane.
+    binary: Arc<dyn Fn() -> PathBuf + Send + Sync>,
 }
 
 impl McpDeps {

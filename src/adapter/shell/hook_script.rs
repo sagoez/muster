@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::{HookScriptError, HookShell};
-use crate::constants::MUSTER_SHELL_ENV;
+use crate::constants::{MUSTER_OPEN_PROGRAM_ENV, MUSTER_SHELL_ENV};
 
 /// The hidden subcommand the hook runs at every prompt to report its shell.
 pub const SHELL_REPORT_SUBCOMMAND: &str = "__shell-report";
@@ -16,6 +16,8 @@ const NOTES_DIR_PLACEHOLDER: &str = "@MUSTER_NOTES@";
 const SHELL_ENV_PLACEHOLDER: &str = "@MUSTER_SHELL_ENV@";
 /// Where a template takes the report subcommand.
 const REPORT_PLACEHOLDER: &str = "@MUSTER_REPORT@";
+/// Where a template takes the variable set only in a pane `open` made.
+const OPEN_ENV_PLACEHOLDER: &str = "@MUSTER_OPEN_ENV@";
 
 /// Punctuation every hooked shell reads bare in a word, besides letters and
 /// digits.
@@ -57,7 +59,8 @@ pub fn hook_script(
         .replace(MUSTER_BIN_PLACEHOLDER, &quoted(shell, binary)?)
         .replace(NOTES_DIR_PLACEHOLDER, &quoted(shell, notes_dir)?)
         .replace(SHELL_ENV_PLACEHOLDER, MUSTER_SHELL_ENV)
-        .replace(REPORT_PLACEHOLDER, SHELL_REPORT_SUBCOMMAND))
+        .replace(REPORT_PLACEHOLDER, SHELL_REPORT_SUBCOMMAND)
+        .replace(OPEN_ENV_PLACEHOLDER, MUSTER_OPEN_PROGRAM_ENV))
 }
 
 /// `path` as one word of `shell`, as it is when every character is safe
@@ -240,6 +243,17 @@ mod tests {
     /// shell when `interactive`, passing `args`; none when the shell is not
     /// installed, which is reported.
     fn run(shell: HookShell, interactive: bool, script: &str, args: &[&Path]) -> Option<Output> {
+        run_in(shell, interactive, script, args, &[])
+    }
+
+    /// Runs `shell` as [`run`] does, with `env` set besides.
+    fn run_in(
+        shell: HookShell,
+        interactive: bool,
+        script: &str,
+        args: &[&Path],
+        env: &[(&str, &str)],
+    ) -> Option<Output> {
         let mut command = Command::new(shell.to_string());
         match shell {
             HookShell::Bash => command.args(["--norc", "--noprofile"]),
@@ -253,7 +267,11 @@ mod tests {
         if shell != HookShell::Fish {
             command.arg(shell.to_string());
         }
-        command.args(args).env_remove(MUSTER_SHELL_ENV);
+        command
+            .args(args)
+            .env_remove(MUSTER_SHELL_ENV)
+            .env_remove(MUSTER_OPEN_PROGRAM_ENV)
+            .envs(env.iter().copied());
         shell_runs(shell, "check").then(|| {
             command
                 .output()
@@ -331,7 +349,11 @@ mod tests {
     #[test]
     fn the_names_filled_in_as_is_need_no_quoting() {
         for shell in HookShell::iter() {
-            for name in [MUSTER_SHELL_ENV, SHELL_REPORT_SUBCOMMAND] {
+            for name in [
+                MUSTER_SHELL_ENV,
+                SHELL_REPORT_SUBCOMMAND,
+                MUSTER_OPEN_PROGRAM_ENV,
+            ] {
                 assert_eq!(quoted(shell, Path::new(name)).unwrap(), name, "{shell}");
             }
         }
@@ -527,6 +549,29 @@ mod tests {
             };
             assert!(output.status.success(), "{shell}: {output:?}");
             assert_eq!(String::from_utf8_lossy(&output.stdout), "nonenone\n");
+        }
+    }
+
+    /// Concurrency M3: the shell of a pane `muster open` made loads no hook,
+    /// so its prompts report nothing and it never occupies the project.
+    #[test]
+    fn the_shell_of_an_open_pane_reports_nothing() {
+        for shell in HookShell::iter() {
+            let scratch = TempDir::new().unwrap();
+            let (script, notes, calls_file) = installed_hook(shell, scratch.path());
+            let pane = [(MUSTER_OPEN_PROGRAM_ENV, "/usr/local/bin/muster")];
+            let Some(output) = run_in(shell, true, driver(shell), &[&script, &notes], &pane) else {
+                continue;
+            };
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("hooks=0"), "{shell}: {output:?}");
+            assert!(
+                stdout.lines().any(|line| line == PID_PREFIX),
+                "{shell}: {output:?}"
+            );
+            thread::sleep(SETTLE);
+            assert!(!calls_file.exists(), "{shell}: {:?}", calls(&calls_file));
         }
     }
 

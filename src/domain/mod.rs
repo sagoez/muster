@@ -8,4 +8,5 @@ pub mod process;
 pub mod project;
 pub mod pty;
 pub mod settings;
+pub mod terminal_workspace;
 pub mod value;

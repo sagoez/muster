@@ -853,6 +853,7 @@ mod tests {
             pty::PortablePtyRunner,
             signal_target::SignalTarget,
             terminal::TerminalEmulator,
+            test_wait::wait_within,
         },
         domain::{
             color_scheme::ColorScheme,
@@ -866,6 +867,9 @@ mod tests {
     /// Output a flooding child writes: past what any client outbox and socket
     /// buffer can hold, so only a holder that never blocks on clients keeps up.
     const FLOOD_BYTES: usize = 6 * 1024 * 1024;
+    /// Longest a flood may take to reach its log, on a loaded machine: the
+    /// time scales with the flood and the free CPU, not with [`WAIT`].
+    const FLOOD_WAIT: Duration = Duration::from_secs(60);
     /// Output a child writes just before it exits, far beyond a socket buffer.
     const TAIL_BYTES: usize = 512 * 1024;
     /// Input sent to a child that never reads, far beyond a PTY input buffer.
@@ -1159,7 +1163,7 @@ mod tests {
         let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
         supervisor.send(ClientMessage::Input(b"go\n".to_vec()));
 
-        wait_until("the flood to reach the log", || {
+        wait_within("the flood to reach the log", FLOOD_WAIT, || {
             harness.log().contains("FLOOD-END")
         });
         watcher.screen_until("FLOOD-END");
@@ -1190,7 +1194,7 @@ mod tests {
         ));
         let (mut slow, _) = harness.connect(ClientRole::Attach { read_only: false });
         slow.send(ClientMessage::Input(b"go\n".to_vec()));
-        wait_until("the flood to pass the stalled client", || {
+        wait_within("the flood to pass the stalled client", FLOOD_WAIT, || {
             harness.log().contains("MARK")
         });
 

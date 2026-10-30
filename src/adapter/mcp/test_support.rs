@@ -1,7 +1,12 @@
-//! A server over a scratch database whose service is never reached, so no
-//! test touches the user's real state or service socket.
+//! A server over a scratch database whose service is never reached unless a
+//! test hands it a scratch one, so no test touches the user's real state,
+//! service socket or terminal workspace.
 
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use getset::{Getters, MutGetters};
 use rmcp::{
@@ -22,7 +27,10 @@ use crate::{
         client::{fake_service::FakeService, recording_notifier::RecordingNotifier},
         store::SqliteStore,
     },
-    domain::{port::StackEditLog, value::ProjectRoot},
+    domain::{
+        port::{StackEditLog, TerminalWorkspace},
+        value::ProjectRoot,
+    },
 };
 
 /// The database file each test's store opens.
@@ -31,6 +39,9 @@ const DATABASE: &str = "muster.db";
 const PROJECT_DIR: &str = "shop";
 /// The `--as` name each test server writes under.
 pub const AGENT: &str = "test";
+/// The stand-in muster binary each test server's panes would run, inside
+/// its temporary directory.
+const BINARY: &str = "muster";
 
 /// A server started in a folder no project claims yet, with the store and
 /// notifier it writes through.
@@ -50,40 +61,83 @@ pub struct Fixture {
     /// The server.
     #[getset(get = "pub", get_mut = "pub")]
     server: MusterMcp,
+    /// The binary the server reads at each open, which a test may change.
+    binary: Arc<Mutex<PathBuf>>,
+}
+
+impl Fixture {
+    /// The binary the server's next open reads.
+    pub fn binary(&self) -> PathBuf {
+        self.binary.lock().unwrap().clone()
+    }
+
+    /// Makes the server's next open read `binary`.
+    pub fn use_binary(&self, binary: PathBuf) {
+        *self.binary.lock().unwrap() = binary;
+    }
 }
 
 /// A [`Fixture`] whose folder, holding a `frontend` folder, is not yet a
-/// project.
+/// project, and whose server reaches no service and runs in no terminal
+/// workspace.
 pub fn fixture() -> Fixture {
+    fixture_with(FakeService::default(), None)
+}
+
+/// A [`Fixture`] as [`fixture`] makes it, whose server drives `service` and
+/// runs in `workspace`, if any; its panes would run a stand-in binary that
+/// exists.
+pub fn fixture_with(
+    service: FakeService,
+    workspace: Option<Arc<dyn TerminalWorkspace>>,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join(PROJECT_DIR);
     fs::create_dir_all(folder.join("frontend")).unwrap();
     let root = ProjectRoot::try_new(fs::canonicalize(&folder).unwrap()).unwrap();
     let store = SqliteStore::open(&dir.path().join(DATABASE)).unwrap();
     let notifier = Arc::new(RecordingNotifier::default());
-    let server = serving(&root, &store, &notifier, AGENT);
+    let binary_path = dir.path().join(BINARY);
+    fs::write(&binary_path, "").unwrap();
+    let binary = Arc::new(Mutex::new(binary_path));
+    let server = serving(&root, &store, &notifier, AGENT, service, workspace, &binary);
     Fixture {
         _dir: dir,
         root,
         store,
         notifier,
         server,
+        binary,
     }
 }
 
-/// A second server in `fixture`'s folder and database, writing as `agent`.
+/// A second server in `fixture`'s folder and database, writing as `agent`,
+/// reaching no service and running in no terminal workspace.
 pub fn server_as(fixture: &Fixture, agent: &str) -> MusterMcp {
-    serving(&fixture.root, &fixture.store, &fixture.notifier, agent)
+    serving(
+        &fixture.root,
+        &fixture.store,
+        &fixture.notifier,
+        agent,
+        FakeService::default(),
+        None,
+        &fixture.binary,
+    )
 }
 
-/// A server started in `root` over `store`, telling `notifier` of its edits
-/// and writing as `agent`.
+/// A server started in `root` over `store`, telling `notifier` of its edits,
+/// writing as `agent`, driving `service`, running in `workspace` and
+/// reading its binary from `binary` at each open.
 fn serving(
     root: &ProjectRoot,
     store: &SqliteStore,
     notifier: &Arc<RecordingNotifier>,
     agent: &str,
+    service: FakeService,
+    workspace: Option<Arc<dyn TerminalWorkspace>>,
+    binary: &Arc<Mutex<PathBuf>>,
 ) -> MusterMcp {
+    let binary = binary.clone();
     let deps = McpDeps::builder()
         .scope(
             Scope::builder()
@@ -93,13 +147,15 @@ fn serving(
                 .build(),
         )
         .agent(Some(agent.to_string()))
-        .service(Arc::new(FakeService::default()))
+        .service(Arc::new(service))
         .projects(Arc::new(store.clone()))
         .coordination(Arc::new(store.clone()))
         .stacks(Arc::new(store.clone()))
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store.clone()))
         .notifier(notifier.clone())
+        .terminal_workspace(workspace)
+        .binary(Arc::new(move || binary.lock().unwrap().clone()))
         .build();
     MusterMcp::new(deps)
 }

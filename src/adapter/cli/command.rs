@@ -12,6 +12,7 @@ use super::{
     lock_command::LockCommand,
     log_filter_args::LogFilterArgs,
     note_command::NoteCommand,
+    open_args::OpenArgs,
     process_args::ProcessArgs,
     projects_command::ProjectsCommand,
     run_args::RunArgs,
@@ -115,6 +116,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show a running process in a new pane of the terminal workspace this
+    /// shell runs in, beside this one; outside one, attach to it here, as
+    /// `muster attach` does.
+    ///
+    /// The new pane takes the focus, and detaching closes it; a failed attach
+    /// stays on screen there.
+    Open(OpenArgs),
     /// Show this project's notices: the stack edits agents made, and failed
     /// starts, forced stops and crashes when the service runs. Never starts it.
     Notices {
@@ -285,7 +293,8 @@ pub enum Command {
         #[arg(long = "as", value_name = "NAME")]
         agent: Option<String>,
     },
-    /// Diagnose muster's database, projects, completions and shell hook.
+    /// Diagnose muster's database, projects, completions, shell hook and
+    /// terminal workspace.
     Doctor {
         /// Print the result as JSON.
         #[arg(long)]

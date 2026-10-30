@@ -45,6 +45,12 @@ pub enum FailureKind {
     Usage,
     /// A person pressed Ctrl-C while the command waited at a terminal.
     Interrupted,
+    /// The caller does not run inside a terminal workspace that could open a
+    /// pane.
+    NoWorkspace,
+    /// The terminal workspace the caller runs in could not be reached, or
+    /// refused or failed to open a pane.
+    WorkspaceFailed,
 }
 
 impl FailureKind {
@@ -69,7 +75,9 @@ impl FailureKind {
             | Self::VersionMismatch
             | Self::Busy
             | Self::Io
-            | Self::Interrupted => false,
+            | Self::Interrupted
+            | Self::NoWorkspace
+            | Self::WorkspaceFailed => false,
         }
     }
 }
@@ -173,6 +181,19 @@ mod tests {
                 .contains(&format!("the {DECLARED_PORTS_MAX} a process may declare")),
             "{refused}"
         );
+    }
+
+    /// Running outside a terminal workspace, or in one that fails, is not
+    /// the caller's fault, and each kind is named in kebab case.
+    #[test]
+    fn workspace_kinds_are_kebab_case_and_not_the_callers_fault() {
+        for (kind, named) in [
+            (FailureKind::NoWorkspace, "no-workspace"),
+            (FailureKind::WorkspaceFailed, "workspace-failed"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), named);
+            assert!(!kind.is_caller_fault());
+        }
     }
 
     /// A port listed twice is the caller's input to fix.

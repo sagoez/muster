@@ -2,8 +2,10 @@ use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
+        child_group,
         cli::{self, CliPorts, McpLaunch},
-        client::{RunningServiceNotifier, ServiceAccess, UserService},
+        client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
+        herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
@@ -24,7 +26,10 @@ use muster::{
     },
     domain::{
         config::ConfigError,
-        port::{LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier},
+        port::{
+            LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier,
+            TerminalWorkspace,
+        },
     },
     error::MusterError,
 };
@@ -98,6 +103,10 @@ impl CliPorts for LocalPorts {
         state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
     }
 
+    fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {
+        terminal_workspace()
+    }
+
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {
         serve_mcp(launch)
     }
@@ -126,7 +135,8 @@ impl ProjectPorts for LocalPorts {
 }
 
 /// Serves muster to an agent over MCP on stdio, on this user's database and
-/// service, until the agent disconnects.
+/// service, until the agent disconnects; a herdr call still in flight then
+/// is killed with everything it started.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when the database cannot be opened or the
@@ -150,8 +160,19 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store))
         .notifier(Arc::new(RunningServiceNotifier::new(service)))
+        .terminal_workspace(terminal_workspace())
+        .binary(Arc::new(this_binary))
         .build();
-    Ok(run_stdio(deps)?)
+    let served = run_stdio(deps);
+    child_group::end_all();
+    Ok(served?)
+}
+
+/// The terminal workspace this process runs in: the herdr pane its
+/// environment names, or none outside one.
+fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
+    HerdrWorkspace::from_env(|name| env::var_os(name))
+        .map(|workspace| Arc::new(workspace) as Arc<dyn TerminalWorkspace>)
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one

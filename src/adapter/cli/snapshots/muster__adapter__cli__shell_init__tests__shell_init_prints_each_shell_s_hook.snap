@@ -1,11 +1,14 @@
 ---
 source: src/adapter/cli/shell_init.rs
+assertion_line: 80
 expression: "hooks.join(\"\\n\")"
 ---
 # bash
 # muster's prompt hook for bash. Load it from ~/.bashrc with:
 #   eval "$(muster shell-init bash)"
-if [[ $- == *i* && -z ${__muster_hook-} ]]; then
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if [[ $- == *i* && -z ${__muster_hook-} && -z ${MUSTER_OPEN_ARG_0+set} ]]; then
     __muster_hook=1
     __muster_bin='/opt/muster bin/muster'
     __muster_notes=<notes>
@@ -61,7 +64,9 @@ fi
 # zsh
 # muster's prompt hook for zsh. Load it from ~/.zshrc with:
 #   eval "$(muster shell-init zsh)"
-if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if [[ -o interactive ]] && (( ! ${+__muster_hook} && ! ${+MUSTER_OPEN_ARG_0} )); then
     typeset -g __muster_hook=1
     typeset -g __muster_bin='/opt/muster bin/muster'
     typeset -g __muster_notes=<notes>
@@ -116,7 +121,9 @@ fi
 # fish
 # muster's prompt hook for fish. Load it from ~/.config/fish/config.fish with:
 #   muster shell-init fish | source
-if status is-interactive; and not set -q __muster_hook
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if status is-interactive; and not set -q __muster_hook; and not set -q MUSTER_OPEN_ARG_0
     set -g __muster_hook 1
     set -g __muster_bin '/opt/muster bin/muster'
     set -g __muster_notes <notes>

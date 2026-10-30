@@ -1,11 +1,13 @@
 pub mod bounded_read;
 #[cfg(test)]
 pub(crate) mod channel_sink;
+pub mod child_group;
 pub mod cli;
 pub mod client;
 pub mod clock;
 pub mod detect;
 pub mod exchange;
+pub mod herdr;
 pub mod holder;
 pub mod ipc;
 pub mod listening;
@@ -28,6 +30,7 @@ pub mod pty;
 pub mod sanitize;
 pub mod service;
 pub mod shell;
+pub mod signal_hold;
 pub mod signal_target;
 pub mod store;
 pub mod terminal;

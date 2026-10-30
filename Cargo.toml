@@ -13,6 +13,7 @@ include = [
     "/src/**",
     "/examples/**",
     "/docs/muster-demo.gif",
+    "/docs/reference.md",
     "/Cargo.lock",
     "/LICENSE",
     "/README.md",
@@ -60,7 +61,7 @@ signal-hook = "0.4.5"
 strum = { version = "0.28.0", features = ["derive"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt", "macros", "io-std", "io-util", "time"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
 typed-builder = "0.23.2"
 unicode-normalization = "0.1.25"
 unicode-properties = "0.1.4"
@@ -70,5 +71,5 @@ uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]
 insta = "1.48.0"
-rustix = { version = "1.1.4", features = ["fs", "net", "pty"] }
+rustix = { version = "1.1.4", features = ["pty"] }
 tempfile = "3.27.0"

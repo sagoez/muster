@@ -10,6 +10,7 @@ use crate::{
     adapter::{no_state_dir::NoStateDir, service::ServiceErrorKind},
     domain::{
         config::ConfigError,
+        terminal_workspace::WorkspaceError,
         value::{OutputCursor, ProcessName, ProjectName},
     },
 };
@@ -144,6 +145,19 @@ pub enum ClientError {
     /// The caller ended the wait for its processes to settle.
     #[error("interrupted; the muster service keeps settling the processes")]
     Interrupted,
+    /// The caller does not run inside a terminal workspace to open a pane in.
+    #[error("not inside a terminal workspace")]
+    NoWorkspace,
+    /// The terminal workspace the caller runs in did not open a pane.
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
+    /// The muster binary a new pane would run to attach no longer exists,
+    /// as after an upgrade replaced it, so no pane was opened.
+    #[error(
+        "the muster binary {} no longer exists, so no pane was opened to run it",
+        .0.display()
+    )]
+    BinaryGone(PathBuf),
 }
 
 impl ClientError {
@@ -166,6 +180,8 @@ impl ClientError {
             Self::Log { .. } => FailureKind::Io,
             Self::CursorAhead { .. } => FailureKind::InvalidInput,
             Self::Interrupted | Self::InterruptedUnsent => FailureKind::Interrupted,
+            Self::NoWorkspace => FailureKind::NoWorkspace,
+            Self::Workspace(_) | Self::BinaryGone(_) => FailureKind::WorkspaceFailed,
         }
     }
 
@@ -188,7 +204,10 @@ impl ClientError {
             | Self::Log { .. }
             | Self::CursorAhead { .. }
             | Self::InterruptedUnsent
-            | Self::Interrupted => &[],
+            | Self::Interrupted
+            | Self::NoWorkspace
+            | Self::Workspace(_)
+            | Self::BinaryGone(_) => &[],
         }
     }
 }
@@ -274,6 +293,7 @@ mod tests {
                 theirs: "0.9.0".to_string(),
             },
             ClientError::Interrupted,
+            ClientError::NoWorkspace,
         ];
         for error in errors {
             let message = error.to_string();

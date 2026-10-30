@@ -2,7 +2,6 @@ use std::{
     ffi::c_int,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
         mpsc::{SyncSender, TrySendError},
     },
     thread::JoinHandle,
@@ -10,7 +9,6 @@ use std::{
 
 use signal_hook::{
     consts::{SIGHUP, SIGTERM, SIGWINCH},
-    flag::register_conditional_default,
     iterator::{Handle, Signals},
 };
 
@@ -18,6 +16,10 @@ use super::{
     attach_event::AttachEvent, ending_signal::EndingSignal, error::CliError,
     session_alarm::SessionAlarm, session_thread::spawn_session_thread, signal_source::SignalSource,
 };
+use crate::adapter::signal_hold::SignalHold;
+
+/// The signals that end the session rather than the process.
+const SESSION_ENDING: [c_int; 2] = [SIGTERM, SIGHUP];
 
 /// The process's own signals: `SIGWINCH` as a resize, `SIGTERM` and `SIGHUP`
 /// as the session's end.
@@ -25,9 +27,9 @@ use super::{
 pub struct HostSignals {
     /// The listener and its thread, while listening.
     listening: Option<(Handle, JoinHandle<()>)>,
-    /// Set once listening stops, so an ending signal takes its default
-    /// effect again: catching it would otherwise swallow it for good.
-    ended: Arc<AtomicBool>,
+    /// Keeps `SIGTERM` and `SIGHUP` from ending the process while listening;
+    /// once released, each takes its default effect again.
+    holds: Vec<SignalHold>,
 }
 
 impl SignalSource for HostSignals {
@@ -36,21 +38,23 @@ impl SignalSource for HostSignals {
         events: SyncSender<AttachEvent>,
         alarm: Arc<SessionAlarm>,
     ) -> Result<(), CliError> {
-        for signal in [SIGTERM, SIGHUP] {
-            register_conditional_default(signal, Arc::clone(&self.ended))
-                .map_err(CliError::Terminal)?;
-        }
+        let holds = SESSION_ENDING
+            .into_iter()
+            .map(SignalHold::take)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CliError::Terminal)?;
         let mut signals = Signals::new([SIGWINCH, SIGTERM, SIGHUP]).map_err(CliError::Terminal)?;
         let handle = signals.handle();
         let thread = spawn_session_thread(events, Arc::clone(&alarm), move |events| {
             relay(signals.forever(), events, &alarm);
         });
+        self.holds = holds;
         self.listening = Some((handle, thread));
         Ok(())
     }
 
     fn stop(&mut self) {
-        self.ended.store(true, Ordering::SeqCst);
+        self.holds.clear();
         if let Some((handle, thread)) = self.listening.take() {
             handle.close();
             let _ = thread.join();

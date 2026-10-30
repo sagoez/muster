@@ -138,6 +138,20 @@ fn wait_recorded_in(session: &ShellSession, project: &Path) {
     });
 }
 
+/// Moves `session` to `folder` and waits until the move is recorded and no
+/// report is left running. The hook reports in the background, so a report
+/// of the move still in flight could otherwise read a project registered
+/// after it and take the move for an entering.
+fn cd_reported(session: &ShellSession, folder: &Path) {
+    session.cd(folder);
+    wait_until("the move to be recorded", || {
+        session
+            .record()
+            .is_some_and(|record| record.folder() == folder)
+    });
+    session.wait_reports_done();
+}
+
 /// Enters `project` in `session` and waits until its `api` runs and the
 /// report that started it is recorded.
 fn enter(scratch: &Scratch, session: &ShellSession, project: &Path) {
@@ -349,7 +363,7 @@ fn registering_a_project_from_inside_a_shell_starts_nothing() {
         enter(scratch, &session, &shop);
 
         for (folder, name) in [(&fresh, "dev"), (&admin, "panel")] {
-            session.cd(folder);
+            cd_reported(&session, folder);
             session.run(&add_autostart(folder, name));
             wait_recorded_in(&session, folder);
             session.wait_reports_done();

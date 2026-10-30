@@ -81,7 +81,10 @@ pub enum ClientError {
     /// call that never replaces one, so it was left running.
     #[error(
         "the running muster service is {}, older than this muster ({ours})",
-        theirs.as_ref().map_or_else(|| TOO_OLD_TO_SAY.to_string(), |theirs| format!("version {theirs}"))
+        theirs.as_ref().map_or_else(
+            || TOO_OLD_TO_SAY.to_string(),
+            |theirs| format!("version {theirs}")
+        )
     )]
     ServiceOlder {
         /// This binary's version.

@@ -69,8 +69,14 @@ const COMMAND_GROUPS: [(&str, &[&str]); 4] = [
 const OPTIONS_HEADING: &str = "Options";
 /// What the main help's last line says before the reference's address.
 const REFERENCE_LEAD: &str = "Exit codes and JSON output:";
-/// Where the reference lives in the repository.
-const REFERENCE_PATH: &str = "/blob/main/docs/reference.md";
+/// The reference as tagged for this release, so the help never describes a
+/// newer muster than the one installed.
+const REFERENCE_URL: &str = concat!(
+    env!("CARGO_PKG_REPOSITORY"),
+    "/blob/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/reference.md"
+);
 /// How far the main help indents a command, as clap indents its own lists.
 const COMMAND_INDENT: &str = "  ";
 /// What separates a command's name from its summary in the main help.
@@ -104,8 +110,7 @@ fn main_help_template() -> String {
         }
     }
     template.push_str(&format!(
-        "\n{header}{OPTIONS_HEADING}:{header:#}\n{{options}}\n\n{REFERENCE_LEAD} {}{REFERENCE_PATH}",
-        env!("CARGO_PKG_REPOSITORY")
+        "\n{header}{OPTIONS_HEADING}:{header:#}\n{{options}}\n\n{REFERENCE_LEAD} {REFERENCE_URL}"
     ));
     template
 }
@@ -313,7 +318,15 @@ mod tests {
         let mut helps = Vec::new();
         collect_help(&mut command, APP_NAME, &mut helps);
 
-        insta::assert_snapshot!(helps.join("\n\n"));
+        /// What stands in for the version, so a release bump leaves the
+        /// snapshot alone.
+        const VERSION_MARK: &str = "<version>";
+
+        insta::assert_snapshot!(
+            helps
+                .join("\n\n")
+                .replace(env!("CARGO_PKG_VERSION"), VERSION_MARK)
+        );
     }
 
     /// clap's own consistency checks pass for every command.
@@ -485,8 +498,12 @@ mod tests {
         ]] {
             let main = help(line);
             assert!(main.contains(PROJECT_LINE), "{main}");
-            assert!(main.trim_end().ends_with(REFERENCE_PATH), "{main}");
+            assert!(main.trim_end().ends_with(REFERENCE_URL), "{main}");
         }
+        assert!(
+            REFERENCE_URL.contains(&format!("/blob/v{}/", env!("CARGO_PKG_VERSION"))),
+            "the main help links the reference tagged for this release: {REFERENCE_URL}"
+        );
         for line in [
             &["muster", "ps", "--help"][..],
             &["muster", "help", "ps"],

@@ -1,7 +1,7 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 316
-expression: "helps.join(\"\\n\\n\")"
+assertion_line: 325
+expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
 Run a project's dev processes in the background, and control them from any shell
@@ -54,7 +54,7 @@ Options:
   -h, --help               Print help
   -V, --version            Print version
 
-Exit codes and JSON output: https://github.com/sagoez/muster/blob/main/docs/reference.md
+Exit codes and JSON output: https://github.com/sagoez/muster/blob/v<version>/docs/reference.md
 
 
 $ muster ps -h

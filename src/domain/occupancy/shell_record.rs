@@ -33,14 +33,15 @@ impl ShellRecord {
     /// a project registered around the shell nests it in a new project
     /// without it leaving the one it was in, which it holds, as it holds
     /// what `previous` held, for as long as its project stays nested inside.
-    /// `after_arrival` says its project was registered after the shell
-    /// arrived in its folder.
-    pub fn following(self, previous: Option<&Self>, after_arrival: bool) -> Self {
+    /// `around` says its project was registered around the shell, as
+    /// [`RegistrationOrigin::around`](super::RegistrationOrigin::around)
+    /// tells.
+    pub fn following(self, previous: Option<&Self>, around: bool) -> Self {
         let Some(previous) = previous else {
             return self;
         };
         let mut held = previous.held.clone();
-        if self.registered_since(previous, after_arrival) {
+        if self.registered_since(previous, around) {
             held.extend(previous.project.clone());
         }
         held.retain(|root| {
@@ -55,26 +56,25 @@ impl ShellRecord {
 
     /// Whether this report may enter its project and start it: it names a
     /// project `previous`, the shell's last stored report, did not, and that
-    /// project was not registered around the shell since, neither after it
-    /// arrived in its folder, as `after_arrival` says, nor while `previous`
-    /// was made from inside that folder.
-    pub fn may_enter(&self, previous: Option<&Self>, after_arrival: bool) -> bool {
+    /// project was not registered around the shell, as `around` says, nor
+    /// since `previous` was made from inside its folder.
+    pub fn may_enter(&self, previous: Option<&Self>, around: bool) -> bool {
         self.project.is_some()
-            && !after_arrival
+            && !around
             && previous.is_none_or(|previous| {
-                previous.project != self.project && !self.registered_since(previous, after_arrival)
+                previous.project != self.project && !self.registered_since(previous, around)
             })
     }
 
     /// Whether this report's project was registered while the shell was
-    /// already inside it: after it arrived in its folder, as `after_arrival`
-    /// says, or since `previous`, made from a folder inside it; and
-    /// `previous` named no project or only one this project is nested in.
-    fn registered_since(&self, previous: &Self, after_arrival: bool) -> bool {
+    /// already inside it: around it, as `around` says, or since `previous`,
+    /// made from a folder inside it; and `previous` named no project or
+    /// only one this project is nested in.
+    fn registered_since(&self, previous: &Self, around: bool) -> bool {
         let Some(project) = &self.project else {
             return false;
         };
-        (after_arrival || project.contains(&previous.folder))
+        (around || project.contains(&previous.folder))
             && previous
                 .project
                 .as_ref()

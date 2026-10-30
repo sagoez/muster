@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
+    occupancy::RegistrationOrigin,
     port::ProjectStore,
     project::Project,
     value::{EpochNanos, ProjectName, ProjectRoot},
@@ -42,9 +43,17 @@ impl ProjectStore for FixedProjects {
             .cloned())
     }
 
-    /// Every fixed project was registered at the epoch.
-    fn registered_at(&self, root: &ProjectRoot) -> Result<Option<EpochNanos>, ConfigError> {
-        Ok(self.project_at(root)?.map(|_| EpochNanos::new(0)))
+    /// Every fixed project was registered at the epoch, by no shell.
+    fn registration_origin(
+        &self,
+        root: &ProjectRoot,
+    ) -> Result<Option<RegistrationOrigin>, ConfigError> {
+        Ok(self.project_at(root)?.map(|_| {
+            RegistrationOrigin::builder()
+                .at(EpochNanos::new(0))
+                .by(None)
+                .build()
+        }))
     }
 
     fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {

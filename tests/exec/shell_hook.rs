@@ -439,6 +439,40 @@ fn a_late_report_of_a_move_into_a_folder_registered_since_starts_nothing() {
     });
 }
 
+/// The one line `cd x && muster add --autostart web -- sleep 600` registers
+/// `x` from the shell that typed it, so that shell's first prompt there is
+/// no entering and nothing starts, though the prompt comes after the
+/// registration. Once that shell has left, a second shell that moves into
+/// `x` enters it and starts `web`, and the first coming back counts in it.
+#[test]
+fn cd_and_add_on_one_line_starts_nothing_until_another_shell_enters() {
+    each_shell("cd && add", |scratch, shell, program| {
+        let fresh = scratch.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let registrant = ShellSession::start(scratch, shell, program);
+        let binary = shlex::try_quote(BINARY).unwrap();
+        let quoted = shlex::try_quote(fresh.to_str().unwrap()).unwrap();
+
+        registrant.run(&format!(
+            "cd {quoted} && {binary} add --autostart web -- sleep 600"
+        ));
+        wait_recorded_in(&registrant, &fresh);
+        registrant.wait_reports_done();
+
+        assert!(!running(scratch, &fresh, "web"), "{shell}: web started");
+        assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 1, "{shell}");
+
+        cd_reported(&registrant, scratch.path().as_path());
+        let walker = ShellSession::start(scratch, shell, program);
+        walker.cd(&fresh);
+        wait_until("entering to start web", || running(scratch, &fresh, "web"));
+        wait_recorded_in(&walker, &fresh);
+        registrant.cd(&fresh);
+        wait_recorded_in(&registrant, &fresh);
+        assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 2, "{shell}");
+    });
+}
+
 /// The line that adds `name`, autostarting, to the project in `folder`, as
 /// typed at a hooked shell's prompt.
 fn add_autostart(folder: &Path, name: &str) -> String {

@@ -424,7 +424,7 @@ impl StackStore for SqliteStore {
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
             spec.check_caps()?;
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, self.registrant())?;
             Stack::check_count(process_count(conn, project_id)? + 1)?;
             insert_process(conn, project_id, spec)?;
             bump_revision(conn, project_id)?;
@@ -493,7 +493,7 @@ impl StackStore for SqliteStore {
         mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError> {
         self.write(|conn| {
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, self.registrant())?;
             let project: Project = registration.project().clone();
             let plan = stack_of(conn, (project_id, project))?.plan_import(processes, mode)?;
             for name in plan.removed() {

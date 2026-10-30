@@ -5,16 +5,17 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 use super::{
     idle_stop_refusal::IdleStopRefusal,
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
-    sqlite_store::{SqliteStore, corrupt, db_error, nanos_from, nanos_param},
+    sqlite_store::{SqliteStore, column_integer, corrupt, db_error, nanos_from, nanos_param},
 };
 use crate::{
     adapter::{clock::nanos_now, sanitize::printable},
     domain::{
         config::{ConfigError, Registration, UnreadableProject},
+        occupancy::{RegistrationOrigin, ShellId},
         port::ProjectStore,
         project::Project,
         value::{
-            EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError,
+            IdleStop, Pid, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError, StartToken,
         },
     },
 };
@@ -25,6 +26,10 @@ const SELECT_PROJECT: &str = "SELECT id, root, name, idle_stop_kind, idle_stop_m
 const PROJECT_AT: &str = "project at ";
 /// What a refusal of a stored registration time calls it.
 const REGISTERED_AT: &str = "project registration time";
+/// What a refusal of a stored registering shell calls it.
+const REGISTERED_BY: &str = "project registering shell";
+/// Why a registering shell with only one of its pid and start is refused.
+const REGISTRANT_HALF_SET: &str = "only one of its pid and start token is stored";
 /// Why a stored folder that is not absolute is refused.
 const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
 /// Why a blank stored name is refused.
@@ -206,11 +211,36 @@ pub(super) fn require_project(
     })
 }
 
+/// The shell a project's registrant columns hold, if any.
+///
+/// # Errors
+/// Returns [`ConfigError::CorruptRow`] when only one column is set, or
+/// either holds what no process could.
+fn registrant_from(pid: Option<i64>, start: Option<i64>) -> Result<Option<ShellId>, ConfigError> {
+    let (pid, start) = match (pid, start) {
+        (None, None) => return Ok(None),
+        (Some(pid), Some(start)) => (pid, start),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(corrupt(REGISTERED_BY, REGISTRANT_HALF_SET));
+        },
+    };
+    let pid = u32::try_from(pid)
+        .map_err(|error| corrupt(REGISTERED_BY, error))
+        .and_then(|pid| Pid::try_new(pid).map_err(|error| corrupt(REGISTERED_BY, error)))?;
+    let start = u64::try_from(start)
+        .map_err(|error| corrupt(REGISTERED_BY, error))
+        .and_then(|start| {
+            StartToken::try_new(start).map_err(|error| corrupt(REGISTERED_BY, error))
+        })?;
+    Ok(Some(ShellId::builder().pid(pid).start(start).build()))
+}
+
 /// The project at `root`, registering it first under the first free name
 /// [`ProjectName::candidates`] yields. Runs inside the caller's write
 /// transaction, so the name stays free, and no project is registered inside
 /// `root`, until it commits: of two folders registered at once, one inside
-/// the other, the outer one is refused whichever commits first.
+/// the other, the outer one is refused whichever commits first. A project
+/// registered now records `registrant`, the hooked shell muster ran from.
 ///
 /// # Errors
 /// Returns [`ConfigError::HoldsProject`] when a registered project lies
@@ -218,6 +248,7 @@ pub(super) fn require_project(
 pub(super) fn register(
     conn: &Connection,
     root: &ProjectRoot,
+    registrant: Option<ShellId>,
 ) -> Result<(i64, Registration), ConfigError> {
     if let Some((id, project)) = find_project(conn, root)? {
         return Ok((
@@ -253,8 +284,17 @@ pub(super) fn register(
     let name = name.ok_or_else(|| corrupt("project names", "every candidate is taken"))?;
     let id = conn
         .query_row(
-            "INSERT INTO projects (root, name, registered_ns) VALUES (?1, ?2, ?3) RETURNING id",
-            params![root_text(root)?, name.as_ref(), nanos_param(nanos_now())],
+            "INSERT INTO projects (root, name, registered_ns, registered_by_pid, \
+                 registered_by_start) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            params![
+                root_text(root)?,
+                name.as_ref(),
+                nanos_param(nanos_now()),
+                registrant.map(|shell| shell.pid().into_inner()),
+                registrant
+                    .map(|shell| column_integer(REGISTERED_BY, shell.start().into_inner()))
+                    .transpose()?,
+            ],
             |row| row.get(0),
         )
         .map_err(db_error)?;
@@ -306,18 +346,27 @@ impl ProjectStore for SqliteStore {
         })
     }
 
-    fn registered_at(&self, root: &ProjectRoot) -> Result<Option<EpochNanos>, ConfigError> {
+    fn registration_origin(
+        &self,
+        root: &ProjectRoot,
+    ) -> Result<Option<RegistrationOrigin>, ConfigError> {
         self.read(|conn| {
-            let stored: Option<i64> = conn
+            let stored: Option<(i64, Option<i64>, Option<i64>)> = conn
                 .query_row(
-                    "SELECT registered_ns FROM projects WHERE root = ?1",
+                    "SELECT registered_ns, registered_by_pid, registered_by_start \
+                     FROM projects WHERE root = ?1",
                     params![root_text(root)?],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(db_error)?;
             stored
-                .map(|nanos| nanos_from(REGISTERED_AT, nanos))
+                .map(|(nanos, pid, start)| {
+                    Ok(RegistrationOrigin::builder()
+                        .at(nanos_from(REGISTERED_AT, nanos)?)
+                        .by(registrant_from(pid, start)?)
+                        .build())
+                })
                 .transpose()
         })
     }
@@ -639,22 +688,39 @@ mod tests {
     }
 
     /// A project is stamped, to the nanosecond, with when it was
-    /// registered; a folder never registered has no time.
+    /// registered and the shell the store registers for, if any, on its
+    /// first registration only; a folder never registered has no origin.
     #[test]
-    fn registering_stamps_the_project_with_its_time() {
+    fn registering_stamps_the_project_with_its_time_and_shell() {
         let (store, scratch) = fresh_store();
+        let shell = ShellId::builder()
+            .pid(Pid::try_new(4242).unwrap())
+            .start(StartToken::try_new(7).unwrap())
+            .build();
         let shop = folder(&scratch, "shop");
+        let blog = folder(&scratch, "blog");
         let before = nanos_now();
         store
             .add_process(&shop, &spec("web", "true"), &Author::human())
             .unwrap();
         let after = nanos_now();
+        let from_shell = store.clone().registering_for(Some(shell));
+        from_shell
+            .add_process(&blog, &spec("web", "true"), &Author::human())
+            .unwrap();
+        from_shell
+            .add_process(&shop, &spec("api", "true"), &Author::human())
+            .unwrap();
 
-        let registered = store.registered_at(&shop).unwrap().unwrap();
-
-        assert!((before..=after).contains(&registered), "{registered}");
+        let origin = store.registration_origin(&shop).unwrap().unwrap();
+        assert!((before..=after).contains(&origin.at()), "{}", origin.at());
+        assert_eq!(origin.by(), None, "an existing project keeps its origin");
+        let origin = store.registration_origin(&blog).unwrap().unwrap();
+        assert_eq!(origin.by(), Some(shell));
         assert_eq!(
-            store.registered_at(&folder(&scratch, "blog")).unwrap(),
+            store
+                .registration_origin(&folder(&scratch, "docs"))
+                .unwrap(),
             None
         );
     }

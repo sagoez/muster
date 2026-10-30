@@ -19,6 +19,7 @@ use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
     domain::{
         config::ConfigError,
+        occupancy::ShellId,
         value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
     },
 };
@@ -67,9 +68,28 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Clone)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
+    /// The hooked shell `muster` was run from, which each project this
+    /// store registers is recorded as registered by.
+    registrant: Option<ShellId>,
 }
 
 impl SqliteStore {
+    /// This store, recording `shell` as the registrant of each project it
+    /// registers.
+    #[must_use]
+    pub fn registering_for(self, shell: Option<ShellId>) -> Self {
+        Self {
+            registrant: shell,
+            ..self
+        }
+    }
+
+    /// The shell each project this store registers is recorded as
+    /// registered by.
+    pub(super) fn registrant(&self) -> Option<ShellId> {
+        self.registrant
+    }
+
     /// Opens the database in muster's state directory, creating it if absent.
     ///
     /// # Errors
@@ -151,6 +171,7 @@ impl SqliteStore {
     fn over(conn: Connection) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
+            registrant: None,
         }
     }
 
@@ -629,10 +650,9 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
 
         assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
-        assert_eq!(
-            store.registered_at(&root).unwrap(),
-            Some(EpochNanos::new(7_000_000_000))
-        );
+        let origin = store.registration_origin(&root).unwrap().unwrap();
+        assert_eq!(origin.at(), EpochNanos::new(7_000_000_000));
+        assert_eq!(origin.by(), None);
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

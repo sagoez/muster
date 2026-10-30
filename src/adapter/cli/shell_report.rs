@@ -20,18 +20,18 @@ use crate::{
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
 /// gives, in the folder `cwd` it was first seen in at `arrived`, sending its
 /// environment only when it may enter its project: never one registered
-/// after `arrived`, around the shell, though a report slow to read the
-/// projects, or overtaken by the next, finds it registered. A service of
-/// this version is told, one of another version replaced and one being
-/// started waited for. With none, one is started only when `cwd` is in a
-/// registered project; otherwise the record is kept and the service asked
-/// again, so one that started meanwhile from the old records still hears
-/// it. The answered notes are left for the
-/// hook, then the record is written; a report that fails writes neither, so
-/// the next prompt reports the same move again. A state directory not made
-/// yet is made first when its parent is this user's, so a fresh install
-/// keeps the record a later registration around the shell is told apart by.
-/// It never prints.
+/// around the shell, by the shell itself, as `cd x && muster add` does, or
+/// after `arrived`, though a report slow to read the projects, or overtaken
+/// by the next, finds it registered. A service of this version is told, one
+/// of another version replaced and one being started waited for. With none,
+/// one is started only when `cwd` is in a registered project; otherwise the
+/// record is kept and the service asked again, so one that started
+/// meanwhile from the old records still hears it. The answered notes are
+/// left for the hook, then the record is written; a report that fails
+/// writes neither, so the next prompt reports the same move again. A state
+/// directory not made yet is made first when its parent is this user's, so
+/// a fresh install keeps the record a later registration around the shell
+/// is told apart by. It never prints.
 ///
 /// # Errors
 /// Returns the [`ShellReportSkip`] saying why nothing was written: the state
@@ -59,13 +59,13 @@ pub fn shell_report(
     {
         return Err(ShellReportSkip::Stale);
     }
-    let (project, after_arrival) = match ports.existing_state()? {
+    let (project, around) = match ports.existing_state()? {
         Some(state) => match state.project_containing(cwd)? {
             Some(project) => {
-                let registered = state.registered_at(project.root())?;
+                let origin = state.registration_origin(project.root())?;
                 (
                     Some(project.root().clone()),
-                    registered.is_some_and(|registered| registered > arrived),
+                    origin.is_some_and(|origin| origin.around(shell, arrived)),
                 )
             },
             None => (None, false),
@@ -79,10 +79,10 @@ pub fn shell_report(
         .folder(cwd.to_path_buf())
         .project(project)
         .build()
-        .following(previous.as_ref(), after_arrival);
+        .following(previous.as_ref(), around);
     let request = ServiceRequest::ShellReport {
         environment: record
-            .may_enter(previous.as_ref(), after_arrival)
+            .may_enter(previous.as_ref(), around)
             .then(LaunchEnvironment::current),
         record: record.clone(),
     };
@@ -142,6 +142,8 @@ mod tests {
     const NOTE_SUFFIX: &str = ".note";
     /// The hook load the tests report from.
     const LOAD: u64 = 3;
+    /// The pid of a shell other than this test's.
+    const OTHER_SHELL_PID: u32 = 4242;
 
     /// The pid of this test, a live process to report as a shell.
     fn this_shell() -> Pid {
@@ -517,6 +519,54 @@ mod tests {
             })
             .collect();
         assert_eq!(entering, [true, false, true, true]);
+    }
+
+    /// A project the shell registered itself, as `cd fresh && muster add`
+    /// does on one line, is never entered by it, though the shell's first
+    /// prompt there comes after the registration; walking into one another
+    /// shell registered is an entering.
+    #[test]
+    fn a_project_the_shell_registered_itself_is_not_entered() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        let root = scratch.path().canonicalize().unwrap();
+        let (fresh, other) = (root.join("fresh"), root.join("other"));
+        for folder in [&fresh, &other] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let this = identified(&ports);
+        let elsewhere = ShellId::builder()
+            .pid(Pid::try_new(OTHER_SHELL_PID).unwrap())
+            .start(this.start())
+            .build();
+        for (folder, registrant) in [(&fresh, this), (&other, elsewhere)] {
+            ports
+                .store()
+                .clone()
+                .registering_for(Some(registrant))
+                .import(
+                    &ProjectRoot::try_new(folder.clone()).unwrap(),
+                    &[spec("dev", "true")],
+                    ImportMode::Strict,
+                )
+                .unwrap();
+        }
+        shell_report(&ports, this_shell(), seq(1), nanos_now(), &shop).unwrap();
+
+        shell_report(&ports, this_shell(), seq(2), nanos_now(), &fresh).unwrap();
+        shell_report(&ports, this_shell(), seq(3), nanos_now(), &other).unwrap();
+
+        let entering: Vec<bool> = ports
+            .fake_service()
+            .asked()
+            .iter()
+            .map(|request| {
+                matches!(request, ServiceRequest::ShellReport {
+                    environment: Some(_),
+                    ..
+                })
+            })
+            .collect();
+        assert_eq!(entering, [true, false, true]);
     }
 
     /// A report run as a user that does not own the state directory, as in

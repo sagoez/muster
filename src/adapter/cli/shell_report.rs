@@ -100,10 +100,10 @@ pub fn shell_report(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
     use std::{
-        ffi::OsStr,
         fs,
-        os::unix::ffi::OsStrExt as _,
         path::PathBuf,
         process::{self, Command},
     };

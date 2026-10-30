@@ -360,7 +360,9 @@ At each prompt the hook starts `muster __shell-report` in the background, with
 no input and no output, and carries on: the prompt never waits on muster, and a
 missing binary, a stopped service or a failed report changes nothing. It
 exports `MUSTER_SHELL_PID`, the shell's pid, and adds no alias and no exit trap.
-Only an interactive shell loads it.
+Only an interactive shell loads it, and `exec $SHELL` loads it afresh. A shell
+running as a user who does not own muster's state directory, such as a root
+shell that kept your home, reports nothing.
 
 - **Entering** a registered project's folder, from outside it or from another
   project, starts the project's `autostart` processes, as `muster up` would,
@@ -369,13 +371,21 @@ Only an interactive shell loads it.
   lines that begin `muster:`, such as `muster: shop: starting api, worker`, or
   `muster: shop: web <reason>; \`muster down -p admin\` frees it` when a start
   was refused because a port is held. Text from a process or a refusal is
-  printed with its control characters made safe.
+  printed with its control characters made safe. Registering a project around
+  a shell already in its folder, with `muster add`, `init` or `import`, is not
+  entering it: nothing starts, and the shell counts in it from its next prompt.
+  A shell back in a project whose idle stop is still stopping it starts its
+  `autostart` processes again once they have stopped.
 - **Leaving** is noticed by the next report from that shell, and a shell that
   ends is noticed within a few seconds. Once no shell has been in the project
   for the `idle-stop` time, muster stops its running processes through their
   stop policies, raises a warning notice and an `idle-stopped` event, and
   leaves it stopped. A shell entering before then cancels the stop, as does a
-  start from the CLI or over MCP.
+  start from the CLI or over MCP. Only a shell seen leaving, or found ended,
+  starts the countdown: a project brought up with no shell in it, before or
+  after a service restart or upgrade, is never stopped for want of one. A
+  project registered inside the one a shell is in keeps the outer one occupied
+  until the shell leaves its folder.
 - `muster ps` shows the count in its heading (` · 2 shells`) and, for a project
   with none, how long is left (` · idle, stops in 29m`). `stack_status` reports
   the same as `occupancy`.
@@ -384,8 +394,9 @@ Only an interactive shell loads it.
 changes it for every project, and `muster projects set --idle-stop 10m` gives
 one project its own value (`never` included). `muster projects set --idle-stop
 default` makes it follow the setting again. `muster doctor` has a `shell hook`
-check: it is ok when the shell it was run from loaded the hook, and otherwise
-warns with the line to add for `$SHELL`.
+check: it is ok when the shell it was run from, directly or through a wrapper
+such as `env` or `timeout`, loaded the hook, and otherwise warns with the line
+to add for `$SHELL`.
 
 ### Ports
 

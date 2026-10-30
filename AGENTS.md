@@ -184,7 +184,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
 | Log and wait patterns | `regex` |
-| Shell words of a command line, and the paths quoted into a shell hook | `shlex` |
+| Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |
 | Service version comparison | `semver` |
 | Todo and holder ids | `uuid` |

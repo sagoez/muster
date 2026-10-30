@@ -254,8 +254,9 @@ lists each `check` with its `outcome`.
 At each prompt the hook runs `muster __shell-report` in the background and
 moves on, so a missing binary or a stopped service changes nothing. It exports
 `MUSTER_SHELL_PID` and adds no alias or exit trap. Only interactive shells load
-it, and a shell running as a user who does not own the state directory reports
-nothing.
+it, a shell running as a user who does not own the state directory reports
+nothing, and the shell of a pane `muster open` made loads no hook, so it never
+occupies the project or holds off its idle stop.
 
 Entering a registered project's folder starts its autostart processes, as
 `muster up` would, and the next prompt prints a `muster:` line saying what
@@ -301,10 +302,22 @@ screen there. Only a running process opens.
 muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
 on `PATH` or the one in `HERDR_BIN_PATH`, so `HERDR_SOCKET_PATH` and
 `HERDR_SESSION` work as they do for herdr. Each herdr call times out after 5
-seconds. The new pane runs one typed line, so `open` supports bash, zsh and
-fish. When herdr cannot be reached or refuses, `open` exits 1 with herdr's
-message and never falls back to the current pane. Outside herdr, `open` is
-`attach`. `muster doctor` has a `workspace` row.
+seconds, and a Ctrl-C or hangup that ends muster ends the call too. When no
+direction is given and herdr's layout cannot be read, the pane splits down. The
+new pane runs one typed line, so `open` supports bash, zsh and fish 3 or later;
+the line runs only where the pane's own variables are set, so a copy recalled
+from history elsewhere does nothing. The pane runs the muster binary as it is at
+each open: once an upgrade has replaced the binary a `muster mcp` server started
+from, its `process_open` answers `workspace-failed` naming it until the server
+restarts. When herdr cannot be reached or refuses, `open` exits 1 with herdr's
+message, names the `muster --project <root> attach -- <name>` that shows the
+process in this pane, and never falls back to the current pane on its own.
+Outside herdr, `open` is `attach`. `muster doctor` has a `workspace` row.
+
+The processes muster starts never inherit herdr's pane identity
+(`HERDR_PANE_ID`, `HERDR_PANE_RUNTIME_ID`, `HERDR_TAB_ID`,
+`HERDR_WORKSPACE_ID`), so a script among them is never mistaken for the pane it
+was started from.
 
 herdr's prefix key is `ctrl+b` by default; `muster doctor` warns when
 `detach-key` is the same chord. A herdr custom command that opens a process in
@@ -422,7 +435,9 @@ and blocked starts since the agent's last call, each reported once, with
 A mistake in a call comes back as a result flagged `isError`, whose `error`
 names its `kind` and up to 20 `candidates`. A wait ended by an exit or crash
 does the same, with the run's last lines. A wait that ran out of time, and a
-lock or todo someone else holds, are not errors. `process_open` outside herdr
-answers kind `no-workspace`, telling the agent to ask you to run `muster attach
-<name>`; when herdr cannot be reached or refuses it answers `workspace-failed`
-with herdr's message.
+lock or todo someone else holds, are not errors. `process_open` resolves the
+process first, so an unknown or stopped one gets its own answer; for a running
+one outside herdr it answers kind `no-workspace`, telling the agent to ask you
+to run `muster --project <root> attach -- <name>` in your own terminal, and
+when herdr cannot be reached or refuses it answers `workspace-failed` with
+herdr's message and the same command.

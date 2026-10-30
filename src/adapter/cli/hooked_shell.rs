@@ -1,5 +1,6 @@
-//! The hooked shell a muster command runs straight from: the shell its hook
-//! exported, found among the command's ancestors as doctor finds it.
+//! The hooked shell a muster command runs from: the shell its hook exported,
+//! found among the command's ancestors as doctor finds it, or as its direct
+//! parent for a registration.
 
 use std::env;
 
@@ -15,6 +16,8 @@ use crate::{
 /// Most of this process's ancestors searched for the hooked shell: past any
 /// chain of wrappers it runs under.
 const HOOK_SEARCH_DEPTH: usize = 16;
+/// The ancestors a registration looks at: only its direct parent.
+const PARENT_ONLY: usize = 1;
 /// Names of the programs that are shells: the nearest of this process's
 /// ancestors running one is the shell it runs in, and wrappers such as
 /// `env`, `timeout` or `mise` between them are passed over.
@@ -25,22 +28,38 @@ const SHELL_NAMES: &[&str] = &[
 /// What a login shell's name starts with.
 const LOGIN_SHELL_MARK: char = '-';
 
-/// The hooked shell this process runs straight from, the nearest shell
-/// among its own ancestors when that is the one its hook exported, while
-/// that shell works in `root` or a folder inside it.
+/// The hooked shell this process runs straight from, its direct parent when
+/// that is the shell its hook exported, while that shell works in `root` or
+/// a folder inside it.
 pub fn hooked_shell_in(root: &ProjectRoot) -> Option<Pid> {
-    nearest_hooked_shell(env::var(MUSTER_SHELL_ENV).ok().as_deref(), &own_ancestors())
-        .filter(|shell| working_dir(*shell).is_some_and(|dir| root.contains(&dir)))
+    parent_hooked_shell(
+        env::var(MUSTER_SHELL_ENV).ok().as_deref(),
+        &ancestors_up_to(PARENT_ONLY),
+    )
+    .filter(|shell| working_dir(*shell).is_some_and(|dir| root.contains(&dir)))
 }
 
 /// This process's ancestors, nearest first, each a pid and its process
 /// name.
 pub(super) fn own_ancestors() -> Vec<(Pid, String)> {
+    ancestors_up_to(HOOK_SEARCH_DEPTH)
+}
+
+/// At most `limit` of this process's ancestors, nearest first, each a pid
+/// and its process name.
+fn ancestors_up_to(limit: usize) -> Vec<(Pid, String)> {
     u32::try_from(getpid().as_raw_nonzero().get())
         .ok()
         .and_then(|this| Pid::try_new(this).ok())
-        .map(|this| named_ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
+        .map(|this| named_ancestors(&mut System::new(), this, limit))
         .unwrap_or_default()
+}
+
+/// The shell the hook exported as `exported`, only when it is the first of
+/// `ancestors`, the direct parent: a program such as `npm` or `xargs` that
+/// runs muster as its child passes no hooked shell on.
+fn parent_hooked_shell(exported: Option<&str>, ancestors: &[(Pid, String)]) -> Option<Pid> {
+    nearest_hooked_shell(exported, ancestors.get(..PARENT_ONLY).unwrap_or(ancestors))
 }
 
 /// The shell the hook exported as `exported`, when it is the nearest shell
@@ -104,6 +123,34 @@ mod tests {
                 nearest_hooked_shell(exported, &pids(ancestors)),
                 None,
                 "{exported:?} {ancestors:?}"
+            );
+        }
+    }
+
+    /// A registration's hooked shell is only its direct parent: under a
+    /// program that runs muster as its child, as `npm`, `xargs` or
+    /// `timeout` do, there is none.
+    #[test]
+    fn a_registration_s_hooked_shell_is_its_direct_parent() {
+        let hooked = Pid::try_new(4242).unwrap();
+        for ancestors in [&[(4242, "zsh"), (300, "systemd")][..], &[(4242, "-bash")]] {
+            assert_eq!(
+                parent_hooked_shell(Some("4242"), &pids(ancestors)),
+                Some(hooked),
+                "{ancestors:?}"
+            );
+        }
+        for ancestors in [
+            &[(4301, "node"), (4300, "npm"), (4242, "bash")][..],
+            &[(4301, "xargs"), (4242, "zsh")],
+            &[(4301, "timeout"), (4242, "bash")],
+            &[(5000, "bash"), (4242, "bash")],
+            &[],
+        ] {
+            assert_eq!(
+                parent_hooked_shell(Some("4242"), &pids(ancestors)),
+                None,
+                "{ancestors:?}"
             );
         }
     }

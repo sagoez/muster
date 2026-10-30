@@ -70,6 +70,8 @@ const SCRIPT_MODE: u32 = 0o700;
 /// The muster arguments that add `web`, autostarting, to the project the
 /// folder is in.
 const ADD_WEB: &str = "add --autostart web -- sleep 600";
+/// A program that runs muster as its child, as `npm` runs a script.
+const XARGS: &str = "xargs";
 
 /// Runs `body` once for each shell installed, printing which are skipped.
 fn each_shell(test: &str, body: impl Fn(&mut Scratch, HookShell, &Path)) {
@@ -519,6 +521,30 @@ fn a_registration_from_elsewhere_or_a_child_shell_spares_no_walk_in() {
             wait_recorded_in(&session, &dir);
             cd_reported(&session, &home);
         }
+    });
+}
+
+/// A registration a program run from the hooked shell makes, as `npm` runs
+/// a script, spares that shell no first walk in even when the shell itself
+/// moved into the new project on the same line: `cd x && ... | xargs muster
+/// add` starts `web`.
+#[test]
+fn a_registration_from_a_program_the_shell_ran_spares_no_walk_in() {
+    each_shell("program", |scratch, shell, program| {
+        let fresh = scratch.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let session = ShellSession::start(scratch, shell, program);
+        let binary = shlex::try_quote(BINARY).unwrap();
+        let quoted = shlex::try_quote(fresh.to_str().unwrap()).unwrap();
+
+        session.run(&format!(
+            "cd {quoted} && echo 'web -- sleep 600' | {XARGS} {binary} add --autostart"
+        ));
+
+        wait_until("walking in to start web", || {
+            running(scratch, &fresh, "web")
+        });
+        wait_recorded_in(&session, &fresh);
     });
 }
 

@@ -43,8 +43,8 @@ pub trait CliPorts: Sync {
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir>;
 
     /// The hooked shell this process runs straight from: the shell its hook
-    /// exported, when that is the nearest shell among this process's
-    /// ancestors and works in `root` or a folder inside it.
+    /// exported, when that is this process's direct parent and works in
+    /// `root` or a folder inside it.
     fn hooked_shell_in(&self, root: &ProjectRoot) -> Option<Pid>;
 
     /// Whether this process's effective user owns muster's state directory,

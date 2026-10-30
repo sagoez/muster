@@ -271,9 +271,10 @@ A muster command that registers a project, run straight from a hooked shell
 with both inside the new project, as
 `cd x && muster add --autostart web -- npm run dev` is, also tells that
 shell's record it is there, so the prompt after it is not an entering either;
-once that shell has left, coming back is an ordinary entering. A registration from elsewhere, as `muster -p x add`, or
-from a child shell or script, gives the shell no such pass. A process you
-stopped yourself stays stopped.
+once that shell has left, coming back is an ordinary entering. A registration
+from elsewhere, as `muster -p x add`, or run by anything but the shell
+itself, as a child shell, a script or `npm` is, gives the shell no such
+pass. A process you stopped yourself stays stopped.
 
 Leaving is noticed at that shell's next report, and a shell that ends within a
 few seconds. Once no shell has been in the project for `idle-stop`, muster

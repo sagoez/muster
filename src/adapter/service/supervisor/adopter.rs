@@ -941,6 +941,7 @@ mod tests {
                     testing::*,
                     unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
                     unsupervised_child::UnsupervisedChild,
+                    waiting::LOG_TAIL_TIMEOUT,
                 },
             },
         },
@@ -1273,10 +1274,15 @@ mod tests {
 
     /// R-M3: a wait held on an adoption that does not settle within the
     /// wait's own timeout times out as any wait does, its cursor still the
-    /// one it was asked from, since nothing after it was tested.
+    /// one it was asked from, since nothing after it was tested; with no tap
+    /// holding the run yet, its tail is the end of the log, read off the
+    /// loop before it is answered.
     #[test]
     fn a_wait_held_on_an_adoption_that_never_settles_times_out_from_its_cursor() {
-        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        let mut harness = logging(
+            vec![logged_line(0, "booting"), logged_line(8, "listening")],
+            true,
+        );
         harness.supervisor_mut().adopt(record("p"));
         let since = OutputCursor::new(HELD_SINCE);
         let answers = wait_for_line(&mut harness, "compiled", Some(since));
@@ -1284,11 +1290,58 @@ mod tests {
         harness
             .supervisor_mut()
             .settle_waits(Instant::now() + RESPAWN_WAIT);
+        assert!(
+            waited(&answers).is_none(),
+            "held while its log's end is read"
+        );
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
 
         let outcome = waited(&answers).expect("the held wait is answered");
         assert_eq!(outcome.status(), WaitStatus::Waiting);
         assert_eq!(*outcome.cursor(), since);
         assert_eq!(*outcome.matched(), None);
+        assert_eq!(outcome.tail(), &vec![
+            "booting".to_string(),
+            "listening".to_string()
+        ]);
+    }
+
+    /// A wait timed out on an adoption whose log's end cannot be read, or
+    /// is not read in time, is still answered timed out from the cursor it
+    /// was asked from, with no tail rather than a made-up one.
+    #[test]
+    fn a_wait_timed_out_on_an_adoption_keeps_its_cursor_when_its_log_cannot_be_read() {
+        let since = OutputCursor::new(HELD_SINCE);
+        for lands in [true, false] {
+            let mut harness = logging(Vec::new(), true);
+            harness.supervisor_mut().adopt(record("p"));
+            let answers = wait_for_line(&mut harness, "compiled", Some(since));
+            let timed_out = Instant::now() + RESPAWN_WAIT;
+            harness.supervisor_mut().settle_waits(timed_out);
+            assert!(
+                waited(&answers).is_none(),
+                "held while its log's end is read"
+            );
+
+            if lands {
+                let (landed, read, result) = harness.landed_log_read();
+                harness
+                    .supervisor_mut()
+                    .handle_log_read(landed, read, result);
+            } else {
+                harness
+                    .supervisor_mut()
+                    .settle_waits(timed_out + LOG_TAIL_TIMEOUT);
+            }
+
+            let outcome = waited(&answers).expect("the held wait is answered");
+            assert_eq!(outcome.status(), WaitStatus::Waiting, "lands: {lands}");
+            assert_eq!(*outcome.cursor(), since, "lands: {lands}");
+            assert!(outcome.tail().is_empty(), "lands: {lands}");
+        }
     }
 
     /// R-M2: a wait held on an adoption keeps the deadline it was asked

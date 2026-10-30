@@ -31,7 +31,7 @@ impl Supervisor {
         let mut end = false;
         let mut asks = Vec::new();
         for held in self.held_waits.get_mut(&pane).into_iter().flatten() {
-            if held.adopting {
+            if held.adopting.is_some() {
                 continue;
             }
             let Some(scan) = &held.scan else {

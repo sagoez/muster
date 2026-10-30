@@ -66,6 +66,22 @@ impl HolderAdopter for ReplayAskAdopter {
         ))
     }
 
+    /// Every logged line, from the oldest's offset; none when nothing is
+    /// logged, as a log that cannot be read.
+    fn log_tail(
+        &self,
+        _project: &ProjectRoot,
+        _name: &ProcessName,
+    ) -> Option<(OutputCursor, Vec<u8>)> {
+        let oldest = self.logged.first()?;
+        let bytes = self
+            .logged
+            .iter()
+            .flat_map(|line| format!("{}\n", line.text()).into_bytes())
+            .collect();
+        Some((oldest.at(), bytes))
+    }
+
     fn log_scan(
         &self,
         _project: &ProjectRoot,

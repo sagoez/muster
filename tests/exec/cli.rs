@@ -17,7 +17,7 @@ use std::{
     process::{self, Child, Command, Output, Stdio},
     sync::{Arc, Mutex, PoisonError},
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crossbeam_channel::unbounded;
@@ -59,9 +59,9 @@ use serde_json::Value;
 use strum::IntoEnumIterator;
 
 use crate::common::{
-    BINARY, CALLER, FakeHerdr, HERDR_PANE_ENV, HeldLauncher, McpSession, OPENED, Pty, QuietPorts,
-    Scratch, WAIT, alive, entry, no_rc_args, processes_under, result_text, runnable_shell, stack,
-    wait_until,
+    BINARY, CALLER, Entry, FakeHerdr, HERDR_PANE_ENV, HeldLauncher, McpSession, OPENED, Pty,
+    QuietPorts, Scratch, WAIT, alive, entry, no_rc_args, processes_under, result_text,
+    runnable_shell, stack, wait_until,
 };
 
 /// The stack file `export` and `import` use by default.
@@ -104,6 +104,12 @@ const REFUSAL_REASON: &str = "cannot start: an earlier run may still be running 
 const CALLER_VARIABLE: &str = "CLI_EXEC_CALLER_MARK";
 /// The schema version a newer muster would have written.
 const FUTURE_SCHEMA: u32 = 999;
+/// The process that ignores the stop signal.
+const SLOW: &str = "slow";
+/// How long a stop waits on it before the kill.
+const SLOW_GRACE: Duration = Duration::from_secs(1);
+/// What it prints once it ignores the stop signal.
+const SLOW_TRAPPED: &str = "slow-trapped";
 
 /// Two long runners with a space and an accent in their names, and a third
 /// that does not autostart.
@@ -149,7 +155,28 @@ fn crash_loop() -> String {
 
 /// A process that ignores the stop signal for its one-second grace.
 fn slow_stop() -> String {
-    stack(&[entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true).with_grace("1s")])
+    slow_stack(Vec::new())
+}
+
+/// The stack of `others` followed by [`SLOW`], which ignores the stop
+/// signal for its whole [`SLOW_GRACE`] once it prints [`SLOW_TRAPPED`].
+fn slow_stack(others: Vec<Entry<'_>>) -> String {
+    let command = format!("trap '' TERM; echo {SLOW_TRAPPED}; while :; do sleep 0.1; done");
+    let grace = humantime::format_duration(SLOW_GRACE).to_string();
+    let entries: Vec<Entry<'_>> = others
+        .into_iter()
+        .chain([entry(SLOW, &command, true).with_grace(&grace)])
+        .collect();
+    stack(&entries)
+}
+
+/// Waits until [`SLOW`] of `project` ignores the stop signal, as its log
+/// shows. `running` only says it spawned, and a stop landing before its
+/// shell reached the trap ends it at once.
+fn wait_slow_trapped(scratch: &Scratch, project: &Path) {
+    wait_until("slow to ignore the stop signal", || {
+        stdout(&scratch.on(project, &["logs", SLOW])).contains(SLOW_TRAPPED)
+    });
 }
 
 /// A process that writes a line every tenth of a second.
@@ -754,15 +781,21 @@ fn a_stop_waits_for_a_slow_process() {
     let scratch = Scratch::new();
     let project = scratch.project("shop", &slow_stop());
     scratch.on(&project, &["up"]);
-    wait_until("slow to run", || {
-        scratch.row(&project, "slow")["state"] == "running"
-    });
+    wait_slow_trapped(&scratch, &project);
 
-    let stop = scratch.on(&project, &["stop", "slow"]);
+    let started = Instant::now();
+    let stop = scratch.on(&project, &["stop", SLOW]);
 
     assert!(stop.status.success(), "{}", shown(&stop));
+    assert!(
+        started.elapsed() >= SLOW_GRACE,
+        "the stop waited out the grace"
+    );
     assert!(stdout(&stop).contains("slow: stopped"), "{}", shown(&stop));
-    assert_eq!(scratch.row(&project, "slow")["stop_grace"], 1);
+    assert_eq!(
+        scratch.row(&project, SLOW)["stop_grace"],
+        SLOW_GRACE.as_secs()
+    );
 }
 
 /// `logs -f` of a stopped process shows its log and then follows it when it
@@ -3515,15 +3548,10 @@ fn a_question_nobody_can_answer_names_the_argument_to_pass() {
 #[test]
 fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
     let mut scratch = Scratch::new();
-    let project = scratch.project(
-        "shop",
-        &stack(&[
-            entry("api", "sleep 600", true),
-            entry("slow", "trap '' TERM; while :; do sleep 0.1; done", true).with_grace("1s"),
-        ]),
-    );
+    let project = scratch.project("shop", &slow_stack(vec![entry("api", "sleep 600", true)]));
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
+    wait_slow_trapped(&scratch, &project);
 
     let pty = Pty::open();
     let mut stop = pty.spawn_controlling(&mut scratch, &project, &["stop"]);
@@ -3660,6 +3688,7 @@ fn ctrl_c_under_the_spinner_closes_the_frame() {
     let project = scratch.project("shop", &slow_stop());
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
+    wait_slow_trapped(&scratch, &project);
 
     let pty = Pty::open();
     let mut down = pty.spawn_controlling(&mut scratch, &project, &["down"]);

@@ -550,6 +550,48 @@ mod tests {
         assert!(bare.command.is_none());
     }
 
+    /// The project a `projects rm` or `projects set` names stays apart from
+    /// the global `--project`, which both still list and take.
+    #[test]
+    fn a_projects_action_keeps_its_project_apart_from_the_flag() {
+        use crate::adapter::cli::projects_command::ProjectsCommand;
+
+        let removal = Args::try_parse_from(["muster", "-p", "x", "projects", "rm", "y"]).unwrap();
+        assert_eq!(removal.project.as_deref(), Some("x"));
+        assert!(matches!(
+            removal.command,
+            Some(Command::Projects { command: Some(ProjectsCommand::Rm { project, .. }), .. })
+                if project == "y"
+        ));
+        let alone = Args::try_parse_from(["muster", "projects", "rm", "y"]).unwrap();
+        assert_eq!(alone.project, None);
+        let set = Args::try_parse_from([
+            "muster",
+            "projects",
+            "set",
+            "y",
+            "--idle-stop",
+            "never",
+            "--project",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(set.project.as_deref(), Some("x"));
+        assert!(matches!(
+            set.command,
+            Some(Command::Projects { command: Some(ProjectsCommand::Set { project: Some(project), .. }), .. })
+                if project == "y"
+        ));
+        for action in ["rm", "set"] {
+            let shown = help(&["muster", "projects", action, "--help"]);
+            assert!(shown.contains("-p, --project <PROJECT>"), "{shown}");
+            assert!(
+                shown.contains("[PROJECT]") || shown.contains("<PROJECT>"),
+                "{shown}"
+            );
+        }
+    }
+
     /// The hidden shell report takes the `--pid`, `--load`, `--load-pid`,
     /// `--seq` and optional `--arrived` the hook passes, and refuses a pid
     /// no shell could have or a load or arrival time that is no number.

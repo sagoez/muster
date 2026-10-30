@@ -522,9 +522,10 @@ Arguments:
   <PROJECT>  The project's name, or its folder
 
 Options:
-  -y, --yes   Remove without asking; required where nobody can be asked
-      --json  Print the result as JSON
-  -h, --help  Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -y, --yes                Remove without asking; required where nobody can be asked
+      --json               Print the result as JSON
+  -h, --help               Print help
 
 
 $ muster projects set -h
@@ -537,6 +538,7 @@ Arguments:
 
 Options:
       --idle-stop <DURATION>  How long the project keeps running once no shell is in it: a duration such as 30m, never, or default to follow the idle-stop setting
+  -p, --project <PROJECT>     The project to act on, by name or folder
       --json                  Print the result as JSON
   -h, --help                  Print help
 

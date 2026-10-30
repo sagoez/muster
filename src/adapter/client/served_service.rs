@@ -47,18 +47,6 @@ impl ServedService {
         Self::serving(version, move |_| answer.clone())
     }
 
-    /// A service of this version giving `answers` in turn to the requests
-    /// but a hello asked of it, the last to every request after it.
-    pub(crate) fn answering_in_turn(mut answers: Vec<ServiceResponse>) -> Self {
-        Self::serving(ServiceVersion::current(), move |_| {
-            if answers.len() > 1 {
-                answers.remove(0)
-            } else {
-                answers[0].clone()
-            }
-        })
-    }
-
     /// A service of this version answering every request but a hello with
     /// what `respond` gives for it.
     pub(crate) fn responding(
@@ -71,7 +59,7 @@ impl ServedService {
     /// hello with what `respond` gives for it.
     fn serving(
         version: ServiceVersion,
-        mut respond: impl FnMut(&ServiceRequest) -> ServiceResponse + Send + 'static,
+        respond: impl Fn(&ServiceRequest) -> ServiceResponse + Send + 'static,
     ) -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         fs::create_dir(scratch.path().join(STATE_DIR)).unwrap();

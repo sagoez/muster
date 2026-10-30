@@ -136,16 +136,17 @@ mod tests {
         ])
     }
 
-    /// A service listing `api` running and `web` exited, then answering
-    /// every later request with `then`.
+    /// A service listing `api` running and `web` exited, and answering every
+    /// other request with `then`.
     fn serving(then: ServiceResponse) -> ServedService {
-        ServedService::answering_in_turn(vec![
-            listing(vec![
-                listed("api", ProcessState::Running),
-                listed("web", ProcessState::Exited),
-            ]),
-            then,
-        ])
+        let listing = listing(vec![
+            listed("api", ProcessState::Running),
+            listed("web", ProcessState::Exited),
+        ]);
+        ServedService::responding(move |request| match request {
+            ServiceRequest::Ps { .. } => listing.clone(),
+            _ => then.clone(),
+        })
     }
 
     /// The answer of a service that found the holder.

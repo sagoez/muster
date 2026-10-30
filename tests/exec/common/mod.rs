@@ -1,6 +1,7 @@
 mod channel_sink;
 mod entry;
 mod held_launcher;
+mod herdr_env;
 mod mcp_session;
 mod processes;
 mod pty;

@@ -5,7 +5,7 @@ use crate::{
     adapter::{client::ServiceAccess, no_state_dir::NoStateDir},
     domain::{
         config::ConfigError,
-        port::{LocalState, ShellRegistry, StateChangeNotifier},
+        port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
     },
     error::MusterError,
 };
@@ -45,6 +45,9 @@ pub trait CliPorts: Sync {
     /// which is made owner-only first when absent and its parent is that
     /// user's.
     fn claim_state_dir(&self) -> bool;
+
+    /// The terminal workspace this process runs in, when it runs in one.
+    fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>>;
 
     /// Serves muster over MCP on stdio as `launch` describes, until the
     /// connecting agent disconnects.

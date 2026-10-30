@@ -1,4 +1,11 @@
-use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
+use std::{
+    env,
+    ffi::c_int,
+    panic,
+    path::{Path, PathBuf},
+    process,
+    sync::Arc,
+};
 
 use muster::{
     adapter::{
@@ -22,9 +29,13 @@ use muster::{
         shell::ShellFiles,
         store::SqliteStore,
     },
+    constants::APP_NAME,
     domain::{
         config::ConfigError,
-        port::{LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier},
+        port::{
+            LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier,
+            TerminalWorkspace,
+        },
     },
     error::MusterError,
 };
@@ -98,6 +109,10 @@ impl CliPorts for LocalPorts {
         state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
     }
 
+    fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {
+        terminal_workspace()
+    }
+
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {
         serve_mcp(launch)
     }
@@ -150,8 +165,16 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store))
         .notifier(Arc::new(RunningServiceNotifier::new(service)))
+        .workspace(terminal_workspace())
+        .binary(env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME)))
         .build();
     Ok(run_stdio(deps)?)
+}
+
+/// The terminal workspace this process runs in. None yet: until a workspace
+/// adapter is wired here, every caller is outside one.
+fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
+    None
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one

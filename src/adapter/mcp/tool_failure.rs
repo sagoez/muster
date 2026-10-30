@@ -162,7 +162,9 @@ fn client_message(error: &ClientError) -> String {
         | ClientError::AmbiguousProcess { .. }
         | ClientError::Log { .. }
         | ClientError::InterruptedUnsent
-        | ClientError::Interrupted => error.to_string(),
+        | ClientError::Interrupted
+        | ClientError::NoWorkspace
+        | ClientError::Workspace(_) => error.to_string(),
     }
 }
 

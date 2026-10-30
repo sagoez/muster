@@ -1,7 +1,11 @@
 //! A server over a scratch database whose service is never reached, so no
 //! test touches the user's real state or service socket.
 
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use getset::{Getters, MutGetters};
 use rmcp::{
@@ -31,6 +35,8 @@ const DATABASE: &str = "muster.db";
 const PROJECT_DIR: &str = "shop";
 /// The `--as` name each test server writes under.
 pub const AGENT: &str = "test";
+/// The muster binary each test server's panes would run.
+pub const BINARY: &str = "/opt/muster/bin/muster";
 
 /// A server started in a folder no project claims yet, with the store and
 /// notifier it writes through.
@@ -100,6 +106,8 @@ fn serving(
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store.clone()))
         .notifier(notifier.clone())
+        .workspace(None)
+        .binary(PathBuf::from(BINARY))
         .build();
     MusterMcp::new(deps)
 }

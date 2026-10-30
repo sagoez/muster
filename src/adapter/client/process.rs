@@ -35,9 +35,9 @@ use crate::{
     adapter::{
         holder::{HolderError, LogQuery, read_log, read_log_stream},
         service::{
-            BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Notice, ProcessAction,
-            ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind, ServiceRequest,
-            ServiceResponse, WaitOutcome, WaitSpec,
+            BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
+            ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+            ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
         },
     },
     domain::{
@@ -681,6 +681,37 @@ pub fn log_path(
         | ServiceResponse::Batch(_)
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
+        | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
+        | ServiceResponse::Notices(_)
+        | ServiceResponse::Waited(_)
+        | ServiceResponse::Events(_)
+        | ServiceResponse::Error(_)) => Err(unexpected(other, project, Some(name))),
+    }
+}
+
+/// Where the running process `name` can be reached: its holder's socket and
+/// its log.
+///
+/// # Errors
+/// Returns [`ClientError::NotRunning`] or [`ClientError::UnknownProcess`]
+/// when there is nothing running to reach, or another [`ClientError`] when
+/// the service cannot be reached.
+pub fn locate(
+    client: &ServiceClient,
+    project: &Project,
+    name: &ProcessName,
+) -> Result<Located, ClientError> {
+    match client.send(&ServiceRequest::Locate {
+        project: project.root().clone(),
+        name: name.clone(),
+    })? {
+        ServiceResponse::Located(located) => Ok(located),
+        other @ (ServiceResponse::Hello { .. }
+        | ServiceResponse::Ok
+        | ServiceResponse::Batch(_)
+        | ServiceResponse::Log(_)
+        | ServiceResponse::Status(_)
         | ServiceResponse::Screen(_)
         | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)

@@ -29,14 +29,14 @@ use super::{
 };
 use crate::{
     adapter::{
-        client::{ClientError, ServiceClient, process::unexpected},
+        client::{ClientError, ServiceClient, process::locate},
         holder::{
             ClientRole, HolderError, HolderMessage,
             client::{Greeting, greet},
         },
         ipc,
         sanitize::printable,
-        service::{Located, ServiceRequest, ServiceResponse},
+        service::Located,
     },
     constants::APP_NAME,
     domain::{
@@ -83,23 +83,7 @@ pub fn attach_named(
     detach: DetachKey,
     announce: Announce,
 ) -> Result<AttachEnd, CliError> {
-    let target = match client.send(&ServiceRequest::Locate {
-        project: project.root().clone(),
-        name: name.clone(),
-    })? {
-        ServiceResponse::Located(located) => located,
-        other @ (ServiceResponse::Hello { .. }
-        | ServiceResponse::Ok
-        | ServiceResponse::Batch(_)
-        | ServiceResponse::Log(_)
-        | ServiceResponse::Status(_)
-        | ServiceResponse::Screen(_)
-        | ServiceResponse::ShellNotes(_)
-        | ServiceResponse::Notices(_)
-        | ServiceResponse::Waited(_)
-        | ServiceResponse::Events(_)
-        | ServiceResponse::Error(_)) => return Err(unexpected(other, project, Some(&name)).into()),
-    };
+    let target = locate(&client, project, &name)?;
     AttachSession::new(name, terminal, Box::new(HostSignals::default()), announce)
         .run(target, read_only, detach)
 }

@@ -31,6 +31,9 @@ mod note_entry;
 mod notice_log;
 mod notice_view;
 mod occupancy_view;
+pub mod open;
+mod open_request;
+mod open_view;
 mod outcome;
 mod page_size;
 mod port_block_view;
@@ -45,6 +48,8 @@ mod project_view;
 mod ready_view;
 #[cfg(test)]
 pub(crate) mod recording_notifier;
+#[cfg(test)]
+pub(crate) mod recording_workspace;
 mod refused_folder;
 mod removed_view;
 mod resolve_error;
@@ -94,6 +99,8 @@ pub use note_entry::*;
 pub use notice_log::*;
 pub use notice_view::*;
 pub use occupancy_view::*;
+pub use open_request::*;
+pub use open_view::*;
 pub use outcome::*;
 pub use page_size::*;
 pub use port_block_view::*;

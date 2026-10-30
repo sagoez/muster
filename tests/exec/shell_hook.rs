@@ -235,7 +235,10 @@ fn leaving_stops_the_stack_after_idle_stop() {
 
         session.cd(Path::new("/"));
 
-        wait_until("idle stop to stop api", || !running(scratch, &shop, "api"));
+        wait_until("idle stop to end api", || {
+            row(scratch, &shop, "api")["state"] != "running"
+                && row(scratch, &shop, "api")["state"] != "stopping"
+        });
         let api = row(scratch, &shop, "api");
         assert_eq!(api["state"], "exited", "{shell}: {api}");
     });

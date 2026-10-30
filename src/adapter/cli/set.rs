@@ -436,7 +436,7 @@ mod tests {
             }
         }
         assert_eq!(stored_ports(&fakes, &dir), ports(&[8080]));
-        let root = ProjectRoot::try_new(dir.clone()).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
         assert_eq!(
             fakes.store().stack(&root).unwrap().unwrap().names().len(),
             1

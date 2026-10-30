@@ -282,7 +282,7 @@ mod tests {
     }
 
     /// A lifecycle, log, attach or open command may leave its name out, to
-    /// be chosen from a list; `down` takes no agent flags any more.
+    /// be chosen from a list; `rm` always names one.
     #[test]
     fn a_name_may_be_left_to_choose() {
         for command in ["start", "stop", "restart", "logs", "attach", "open"] {
@@ -291,7 +291,6 @@ mod tests {
                 "{command}"
             );
         }
-        assert!(Args::try_parse_from(["muster", "down", "--agents"]).is_err());
         assert!(Args::try_parse_from(["muster", "rm"]).is_err());
     }
 

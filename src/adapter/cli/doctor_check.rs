@@ -9,6 +9,7 @@ const OLD_FILES_LABEL: &str = "old files";
 const SOCKET_LABEL: &str = "socket";
 const COMPLETIONS_LABEL: &str = "completions";
 const SHELL_HOOK_LABEL: &str = "shell hook";
+const WORKSPACE_LABEL: &str = "workspace";
 
 /// What one `muster doctor` probe checks, named in kebab case under
 /// `--json`.
@@ -31,6 +32,9 @@ pub enum DoctorCheck {
     Completions,
     /// Whether the shell doctor runs in loads muster's prompt hook.
     ShellHook,
+    /// Whether doctor runs in a terminal workspace `muster open` can split,
+    /// and whether the detach key is one such a workspace often takes.
+    Workspace,
 }
 
 impl DoctorCheck {
@@ -45,6 +49,7 @@ impl DoctorCheck {
             Self::Socket => SOCKET_LABEL,
             Self::Completions => COMPLETIONS_LABEL,
             Self::ShellHook => SHELL_HOOK_LABEL,
+            Self::Workspace => WORKSPACE_LABEL,
         }
     }
 }

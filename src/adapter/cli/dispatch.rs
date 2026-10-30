@@ -39,7 +39,7 @@ use super::{
     doctor::{
         HOOK_SEARCH_DEPTH, any_failed, completions_probe, database_probe, doctor_report,
         error_chain, legacy_probe, processes_probe, project_probe, projects_probe,
-        shell_hook_probe, socket_probe,
+        shell_hook_probe, socket_probe, workspace_probe,
     },
     doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
@@ -59,6 +59,8 @@ use super::{
     log_filter_args::LogFilterArgs,
     mcp_launch::McpLaunch,
     note::note,
+    open::open_here,
+    open_args::OpenArgs,
     output,
     presenter::Presenter,
     process::{follow_logs, named_or_chosen, running_named_or_chosen},
@@ -229,6 +231,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             read_only,
             json,
         }) => attach(invocation, name.as_ref(), read_only, json),
+        Some(Command::Open(args)) => open(invocation, &args),
         Some(Command::Notices { json }) => notices(invocation, json),
         Some(Command::Service { command }) => service(invocation, command),
         Some(Command::Add(args)) => {
@@ -809,6 +812,59 @@ fn finish_attach(presenter: Presenter, name: &ProcessName, end: &AttachEnd) {
     }
 }
 
+/// Shows a running process in a new pane of the terminal workspace this
+/// runs in, beside this one, and returns once the pane is open; outside a
+/// workspace, attaches to it here exactly as `muster attach` does.
+fn open(invocation: &Invocation<'_>, args: &OpenArgs) {
+    let Some(workspace) = invocation.ports().terminal_workspace() else {
+        attach(
+            invocation,
+            args.name().as_ref(),
+            args.read_only(),
+            args.json(),
+        );
+        return;
+    };
+    let json = args.json();
+    let presenter = Presenter::detect(json);
+    let choosable = if args.name().is_none() {
+        presenter.can_choose_process()
+    } else {
+        Ok(())
+    };
+    let project = choosable.and_then(|()| {
+        let store = invocation.store()?;
+        invocation.project(store.as_ref())
+    });
+    let project = match project {
+        Ok(project) => project,
+        Err(error) => fail_command(json, &error),
+    };
+    written(presenter.open(&output::open_title(project.name())));
+    let result = invocation.connect().and_then(|client| {
+        open_here(
+            &client,
+            &project,
+            args,
+            workspace.as_ref(),
+            &this_binary(),
+            presenter,
+        )
+    });
+    match result {
+        Ok(view) => print_result(json, &view, |view| {
+            written(presenter.conclude(&output::opened_line(view)));
+        }),
+        Err(error) => fail_framed(presenter, json, &error),
+    }
+}
+
+/// This muster binary, for what runs it again, or its name when the path
+/// cannot be read.
+fn this_binary() -> PathBuf {
+    env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME))
+}
+
 /// Prints the current project's stored notices, with the service's own when
 /// one already runs, never starting it.
 fn notices(invocation: &Invocation<'_>, json: bool) {
@@ -1307,8 +1363,7 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// folder registered later is found and one entry serves every project.
 fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
     if print_config {
-        let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
-        emit_line(&invocation.ports().mcp_config(&executable));
+        emit_line(&invocation.ports().mcp_config(&this_binary()));
         return;
     }
     let launch = invocation.store().and_then(|store| {
@@ -1372,6 +1427,15 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         &ancestors,
         shell.as_deref(),
     ));
+    let detach = opened
+        .as_ref()
+        .ok()
+        .and_then(|store| store.load().ok())
+        .map(|settings| settings.detach_key().clone());
+    probes.push(workspace_probe(
+        invocation.ports().terminal_workspace().as_deref(),
+        detach.as_ref(),
+    ));
     let view = DoctorView::builder()
         .checks(&probes)
         .failed(any_failed(&probes))
@@ -1386,8 +1450,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
 
 /// Prints the prompt hook for `shell`, running this binary.
 fn print_hook(ports: &dyn CliPorts, shell: HookShell) {
-    let binary = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
-    match shell_init(ports, shell, &binary) {
+    match shell_init(ports, shell, &this_binary()) {
         Ok(script) => emit_bytes(script.as_bytes()),
         Err(error) => fail_command(false, &error),
     }

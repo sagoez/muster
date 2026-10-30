@@ -14,6 +14,7 @@ use crate::{
     domain::{
         config::ConfigError,
         coordination::Author,
+        terminal_workspace::WorkspaceError,
         value::{
             COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
             NameProblem, ProcessName, ProcessNameError, ProjectName, refused_name,
@@ -294,6 +295,15 @@ pub enum CliError {
         #[source]
         source: HolderError,
     },
+    /// The terminal workspace did not open the pane `muster open` asked for.
+    #[error("{source}; `muster attach {}` shows it here", name.shell_quoted())]
+    OpenFailed {
+        /// The process to show.
+        name: ProcessName,
+        /// What the workspace answered.
+        #[source]
+        source: WorkspaceError,
+    },
 }
 
 impl From<ResolveError> for CliError {
@@ -366,6 +376,7 @@ impl CliError {
             Self::UnknownNote(_) => FailureKind::UnknownNote,
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
+            Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -420,6 +431,7 @@ impl CliError {
             | Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
+            | Self::OpenFailed { .. }
             | Self::ReadFile { .. }
             | Self::WriteFile { .. }
             | Self::CurrentDir(_)

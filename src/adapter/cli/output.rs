@@ -24,8 +24,8 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            Action, ActionReport, FailureView, NoticeView, OccupancyView, Outcome, ProcessOutcome,
-            RunningService, ServiceStatus, listening_ports,
+            Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
+            ProcessOutcome, RunningService, ServiceStatus, listening_ports,
         },
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
@@ -151,6 +151,12 @@ const TITLE_PREFIX: &str = APP_NAME;
 const ATTACH_COMMAND_WORD: &str = "attach";
 /// The command word of `muster logs`.
 const LOGS_COMMAND_WORD: &str = "logs";
+/// The command word of `muster open`.
+const OPEN_COMMAND_WORD: &str = "open";
+/// Opens the line after `muster open` opened a pane.
+const OPENED: &str = "opened";
+/// Between the process's name and its pane in that line.
+const IN_PANE: &str = "in pane";
 /// Around the count of lines a filtered log read dropped.
 const OMITTED_OPEN: &str = "[... ";
 const OMITTED_CLOSE: &str = " earlier lines omitted]";
@@ -473,6 +479,17 @@ pub fn action_title(action: Action, project: &ProjectName) -> String {
 /// The title `muster attach` opens with, such as `muster attach · shop`.
 pub fn attach_title(project: &ProjectName) -> String {
     project_title(ATTACH_COMMAND_WORD, project)
+}
+
+/// The title `muster open` opens with, such as `muster open · shop`.
+pub fn open_title(project: &ProjectName) -> String {
+    project_title(OPEN_COMMAND_WORD, project)
+}
+
+/// The line after `muster open` opened `view`'s pane, such as
+/// `opened web in pane w1:p4`.
+pub fn opened_line(view: &OpenView) -> String {
+    format!("{OPENED} {} {IN_PANE} {}", view.process(), view.pane())
 }
 
 /// The line a filtered `muster logs` opens with when its caps dropped the
@@ -806,6 +823,7 @@ mod tests {
             process::{RestartPolicy, StopPolicy, StopSignal},
             value::{
                 CommandLine, IdleStop, LocalPort, Pid, PositiveDuration, ProjectRoot, StopGrace,
+                WorkspacePaneId,
             },
         },
     };
@@ -1592,6 +1610,24 @@ mod tests {
 
         insta::assert_snapshot!("unknown_name", error.to_string());
         insta::assert_snapshot!("unknown_name_json", failure_json(&error));
+    }
+
+    /// `muster open` is titled for its project and ends naming the process
+    /// and the pane it opened in.
+    #[test]
+    fn open_is_titled_and_names_the_pane_it_opened() {
+        let view = OpenView::builder()
+            .project(ProjectName::try_new("shop").unwrap())
+            .process(name("dev server"))
+            .pane(WorkspacePaneId::try_new("w1:p4").unwrap())
+            .read_only(false)
+            .build();
+
+        assert_eq!(
+            open_title(&ProjectName::try_new("shop").unwrap()),
+            "muster open · shop"
+        );
+        assert_eq!(opened_line(&view), "opened dev server in pane w1:p4");
     }
 
     #[test]

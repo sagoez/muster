@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 248
+assertion_line: 256
 expression: "helps.join(\"\\n\\n\")"
 ---
 $ muster --help
@@ -21,6 +21,7 @@ Commands:
   kill          Kill a process at once, skipping its graceful stop
   logs          Print a process's output log, kept across its runs and after it exits
   attach        Show a running process in this terminal and type into it
+  open          Show a running process in a new pane of the terminal workspace this shell runs in, beside this one; outside one, attach to it here, as `muster attach` does
   notices       Show this project's notices: the stack edits agents made, and failed starts, forced stops and crashes when the service runs. Never starts it
   service       Show or stop the muster service. Processes keep running either way
   add           Add a process to this project, registering the folder as a project when it is not one yet. Nothing is started
@@ -240,6 +241,22 @@ Options:
       --read-only          Watch without typing into the process or resizing it
       --json               Print a refusal or failure as JSON; an attach prints nothing else
   -h, --help               Print help (see more with '--help')
+
+
+$ muster open --help
+Show a running process in a new pane of the terminal workspace this shell runs in, beside this one; outside one, attach to it here, as `muster attach` does
+
+Usage: muster open [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
+
+Options:
+  -p, --project <PROJECT>      The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+      --read-only              Watch without typing into the process or resizing it
+      --direction <DIRECTION>  Which side of this pane the new one opens on; without it, the pane splits along its longer side [possible values: right, down]
+      --json                   Print the opened pane, or a refusal or failure, as JSON
+  -h, --help                   Print help (see more with '--help')
 
 
 $ muster notices --help

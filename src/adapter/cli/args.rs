@@ -23,6 +23,7 @@ use crate::{
     domain::{
         config::SettingKey,
         process::{RestartPolicy, StopSignal},
+        terminal_workspace::SplitDirection,
         value::{Pid, PositiveDuration, StopGrace},
     },
 };
@@ -69,6 +70,8 @@ static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopS
 static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateGoal>);
 /// The shells `muster shell-init` prints a hook for.
 pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
+/// The names `muster open --direction` accepts.
+static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -89,6 +92,11 @@ where
 /// Parses a `--restart` policy.
 pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
     one_of(&RESTART_POLICIES)
+}
+
+/// Parses a `muster open --direction`.
+pub(super) fn split_direction_parser() -> impl TypedValueParser<Value = SplitDirection> {
+    one_of(&SPLIT_DIRECTIONS)
 }
 
 /// Parses a `--stop-signal`.
@@ -273,11 +281,11 @@ mod tests {
         assert!(Args::try_parse_from(["muster", "logs", "api", "-f", "--screen"]).is_err());
     }
 
-    /// A lifecycle, log or attach command may leave its name out, to be
-    /// chosen from a list; `down` takes no agent flags any more.
+    /// A lifecycle, log, attach or open command may leave its name out, to
+    /// be chosen from a list; `down` takes no agent flags any more.
     #[test]
     fn a_name_may_be_left_to_choose() {
-        for command in ["start", "stop", "restart", "logs", "attach"] {
+        for command in ["start", "stop", "restart", "logs", "attach", "open"] {
             assert!(
                 Args::try_parse_from(["muster", command]).is_ok(),
                 "{command}"

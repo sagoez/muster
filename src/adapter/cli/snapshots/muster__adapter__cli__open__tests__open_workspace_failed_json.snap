@@ -1,0 +1,11 @@
+---
+source: src/adapter/cli/open.rs
+expression: "output::failure_json(&error)"
+---
+{
+  "error": {
+    "candidates": [],
+    "kind": "workspace-failed",
+    "message": "tiles refused to split a pane: no such pane (pane_not_found); `muster attach 'api'` shows it here"
+  }
+}

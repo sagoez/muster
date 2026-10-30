@@ -44,6 +44,18 @@ impl ServedService {
     /// A service greeting as `version` and answering every request but a
     /// hello with `answer`.
     pub(crate) fn answering_as(version: ServiceVersion, answer: ServiceResponse) -> Self {
+        Self::serving(version, vec![answer])
+    }
+
+    /// A service of this version giving `answers` in turn to the requests
+    /// but a hello asked of it, the last to every request after it.
+    pub(crate) fn answering_in_turn(answers: Vec<ServiceResponse>) -> Self {
+        Self::serving(ServiceVersion::current(), answers)
+    }
+
+    /// A service greeting as `version` and giving `answers` in turn, the
+    /// last repeated.
+    fn serving(version: ServiceVersion, mut answers: Vec<ServiceResponse>) -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         fs::create_dir(scratch.path().join(STATE_DIR)).unwrap();
         prepare_socket_dir(&scratch.path().join(SOCKET_DIR)).unwrap();
@@ -66,7 +78,11 @@ impl ServedService {
                     },
                     _ => {
                         asked.push(request);
-                        answer.clone()
+                        if answers.len() > 1 {
+                            answers.remove(0)
+                        } else {
+                            answers[0].clone()
+                        }
                     },
                 })
                 .unwrap();

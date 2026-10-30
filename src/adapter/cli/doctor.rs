@@ -28,8 +28,8 @@ use crate::{
     },
     domain::{
         config::{ConfigError, ProcessSpec, Stack},
-        port::{LocalState, ProjectStore, StackStore},
-        value::Pid,
+        port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
+        value::{DetachKey, Pid},
     },
 };
 
@@ -101,6 +101,19 @@ const SHELL_NAMES: &[&str] = &[
 const LOGIN_SHELL_MARK: char = '-';
 /// The shell-hook probe when it does not, before the line that loads it.
 const HOOK_MISSING: &str = "not loaded in this shell; add to its rc file:";
+
+/// The workspace probe outside a terminal workspace.
+const NO_WORKSPACE: &str = "not inside a terminal workspace; `muster open` attaches in place";
+/// Between a terminal workspace's name and the caller's pane it answered for.
+const WORKSPACE_PANE: &str = "pane";
+/// Follows the pane a terminal workspace answered for.
+const PANE_ANSWERS: &str = "answers";
+/// Opens the list of shells a pane `muster open` splits may run.
+const OPEN_SHELLS: &str = "`muster open` runs in";
+/// The detach key terminal workspaces most often take as their own prefix.
+const DETACH_KEY_OFTEN_RESERVED: &str = "ctrl-b";
+/// Follows that key in the warning about it.
+const RESERVED_DETACH_KEY: &str = "is the detach key, a key terminal workspaces often take for themselves; `muster config set detach-key <key>` changes it";
 
 /// Builds one probe.
 fn probe(check: DoctorCheck, outcome: ProbeOutcome, detail: String) -> Probe {
@@ -410,6 +423,39 @@ fn is_shell(name: &str) -> bool {
     SHELL_NAMES.contains(&name.trim_start_matches(LOGIN_SHELL_MARK))
 }
 
+/// Whether doctor runs in a terminal workspace, and whether that `workspace`
+/// answers for doctor's pane, naming the shells a pane `muster open` splits
+/// may run; warns when it does not answer, or when `detach` is a key such a
+/// workspace often takes for itself.
+pub fn workspace_probe(
+    workspace: Option<&dyn TerminalWorkspace>,
+    detach: Option<&DetachKey>,
+) -> Probe {
+    let (mut outcome, mut detail) = match workspace.map(TerminalWorkspace::check) {
+        None => (ProbeOutcome::Ok, NO_WORKSPACE.to_string()),
+        Some(Ok(answered)) => {
+            let shells: Vec<String> = HookShell::iter().map(|shell| shell.to_string()).collect();
+            (
+                ProbeOutcome::Ok,
+                format!(
+                    "{} {WORKSPACE_PANE} {} {PANE_ANSWERS}{DETAIL_SEPARATOR}{OPEN_SHELLS} {}",
+                    answered.workspace(),
+                    answered.pane(),
+                    shells.join(LIST_SEPARATOR)
+                ),
+            )
+        },
+        Some(Err(error)) => (ProbeOutcome::Warn, error.to_string()),
+    };
+    if detach.is_some_and(|key| key.as_ref() == DETACH_KEY_OFTEN_RESERVED) {
+        outcome = ProbeOutcome::Warn;
+        detail.push_str(&format!(
+            "{DETAIL_SEPARATOR}{DETACH_KEY_OFTEN_RESERVED} {RESERVED_DETACH_KEY}"
+        ));
+    }
+    probe(DoctorCheck::Workspace, outcome, printable(&detail))
+}
+
 /// The hooked shell a `$SHELL` path names, if the hook supports it.
 fn hook_shell_from_path(shell_path: &str) -> Option<HookShell> {
     Path::new(shell_path).file_name()?.to_str()?.parse().ok()
@@ -480,10 +526,14 @@ mod tests {
     use crate::{
         adapter::{
             cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
-            client::fixed_projects::FixedProjects,
+            client::{
+                fixed_projects::FixedProjects,
+                recording_workspace::{CALLER_PANE, RECORDING_WORKSPACE, RecordingWorkspace},
+            },
         },
         domain::{
             project::Project,
+            terminal_workspace::WorkspaceError,
             value::{ProjectName, ProjectRoot},
         },
     };
@@ -837,5 +887,57 @@ mod tests {
                 "failed": true,
             })
         );
+    }
+
+    /// Outside a terminal workspace `open` attaches in place, which is fine;
+    /// inside one the workspace answers for the caller's pane, naming the
+    /// shells `open` runs in, and a workspace that does not answer warns
+    /// in its own words.
+    #[test]
+    fn doctor_reports_no_workspace_outside_and_the_pane_inside() {
+        let ctrl_backslash = DetachKey::try_new("ctrl-\\").unwrap();
+        let outside = workspace_probe(None, Some(&ctrl_backslash));
+        assert_eq!(outside.check(), DoctorCheck::Workspace);
+        assert_eq!(outside.outcome(), ProbeOutcome::Ok);
+        assert_eq!(outside.detail(), NO_WORKSPACE);
+
+        let answering = RecordingWorkspace::opening("w1:p4");
+        let inside = workspace_probe(Some(&answering), Some(&ctrl_backslash));
+        assert_eq!(inside.outcome(), ProbeOutcome::Ok);
+        assert_eq!(
+            inside.detail(),
+            &format!(
+                "{RECORDING_WORKSPACE} pane {CALLER_PANE} answers; `muster open` runs in bash, zsh, fish"
+            )
+        );
+
+        let refusal = WorkspaceError::Unreachable {
+            workspace: "tiles".to_string(),
+            reason: "no server \u{1b}[2J".to_string(),
+        };
+        let failing = RecordingWorkspace::failing(refusal);
+        let broken = workspace_probe(Some(&failing), None);
+        assert_eq!(broken.outcome(), ProbeOutcome::Warn);
+        assert_eq!(broken.detail(), "cannot reach tiles: no server \\u{1b}[2J");
+    }
+
+    /// A detach key of `ctrl-b`, which terminal workspaces often take for
+    /// themselves, warns inside a workspace or out, naming how to change it.
+    #[test]
+    fn doctor_warns_of_a_ctrl_b_detach_key() {
+        let ctrl_b = DetachKey::try_new("ctrl-b").unwrap();
+        let answering = RecordingWorkspace::opening("w1:p4");
+
+        for workspace in [None, Some(&answering as &dyn TerminalWorkspace)] {
+            let probe = workspace_probe(workspace, Some(&ctrl_b));
+
+            assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+            assert!(probe.detail().contains("ctrl-b"), "{}", probe.detail());
+            assert!(
+                probe.detail().contains("muster config set detach-key"),
+                "{}",
+                probe.detail()
+            );
+        }
     }
 }

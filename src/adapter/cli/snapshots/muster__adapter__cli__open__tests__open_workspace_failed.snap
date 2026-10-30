@@ -1,0 +1,5 @@
+---
+source: src/adapter/cli/open.rs
+expression: error.to_string()
+---
+tiles refused to split a pane: no such pane (pane_not_found); `muster attach 'api'` shows it here

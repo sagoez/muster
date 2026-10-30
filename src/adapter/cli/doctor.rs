@@ -90,6 +90,15 @@ const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
 
 /// The shell-hook probe when the shell doctor runs in loads the hook.
 const HOOK_ACTIVE: &str = "active in this shell";
+/// Names of the programs that are shells: the nearest of doctor's ancestors
+/// running one is the shell it runs in, and wrappers such as `env`,
+/// `timeout` or `mise` between them are passed over.
+const SHELL_NAMES: &[&str] = &[
+    "bash", "zsh", "fish", "sh", "dash", "ash", "ksh", "ksh93", "mksh", "oksh", "pdksh", "yash",
+    "posh", "csh", "tcsh", "nu", "elvish", "xonsh", "pwsh", "osh", "ysh", "rc", "es",
+];
+/// What a login shell's name starts with.
+const LOGIN_SHELL_MARK: char = '-';
 /// The shell-hook probe when it does not, before the line that loads it.
 const HOOK_MISSING: &str = "not loaded in this shell; add to its rc file:";
 
@@ -358,23 +367,25 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
     }
 }
 
-/// Whether the shell the hook exported as `exported` is one of doctor's
-/// `ancestors`, so doctor runs in it even under `env`, `timeout` or
-/// `mise exec`; when it is not, warns with the line that loads the hook for
-/// the shell `shell_path` names, or for every shell when it names none the
-/// hook supports.
+/// Whether the shell the hook exported as `exported` is the nearest shell
+/// among doctor's `ancestors`, each a pid and its process name, so doctor
+/// runs in it even under `env`, `timeout` or `mise exec`, while a shell
+/// started inside it without the hook, which inherits the exported pid, is
+/// not taken for it. When it is not, warns with the line that loads the
+/// hook for the shell `shell_path` names, or for every shell when it names
+/// none the hook supports.
 pub fn shell_hook_probe(
     exported: Option<&str>,
-    ancestors: &[Pid],
+    ancestors: &[(Pid, String)],
     shell_path: Option<&str>,
 ) -> Probe {
+    let nearest_shell = ancestors
+        .iter()
+        .find(|(_, name)| is_shell(name))
+        .map(|(pid, _)| pid.into_inner());
     let hooked = exported
         .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .is_some_and(|pid| {
-            ancestors
-                .iter()
-                .any(|ancestor| ancestor.into_inner() == pid)
-        });
+        .is_some_and(|pid| nearest_shell == Some(pid));
     if hooked {
         return probe(
             DoctorCheck::ShellHook,
@@ -391,6 +402,12 @@ pub fn shell_hook_probe(
         ProbeOutcome::Warn,
         format!("{HOOK_MISSING} {}", lines.join(DETAIL_SEPARATOR)),
     )
+}
+
+/// Whether a process named `name` runs a shell, a login shell's leading
+/// mark aside.
+fn is_shell(name: &str) -> bool {
+    SHELL_NAMES.contains(&name.trim_start_matches(LOGIN_SHELL_MARK))
 }
 
 /// The hooked shell a `$SHELL` path names, if the hook supports it.
@@ -632,18 +649,25 @@ mod tests {
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
     }
 
-    /// The pids `raw` names.
-    fn pids(raw: &[u32]) -> Vec<Pid> {
-        raw.iter().map(|pid| Pid::try_new(*pid).unwrap()).collect()
+    /// The ancestors `raw` names, each a pid and its process name.
+    fn pids(raw: &[(u32, &str)]) -> Vec<(Pid, String)> {
+        raw.iter()
+            .map(|(pid, name)| (Pid::try_new(*pid).unwrap(), (*name).to_string()))
+            .collect()
     }
 
-    /// The hook is found only when the shell that exported its pid is one of
-    /// doctor's ancestors, its parent or further up, as under `env` or
-    /// `timeout`; otherwise the probe warns with the line for `$SHELL`, or
-    /// every shell's line when `$SHELL` is none the hook supports.
+    /// The hook is found only when the shell that exported its pid is the
+    /// nearest shell among doctor's ancestors, its parent or past wrappers
+    /// such as `env`, `timeout` or `mise exec`; otherwise the probe warns
+    /// with the line for `$SHELL`, or every shell's line when `$SHELL` is
+    /// none the hook supports.
     #[test]
-    fn doctor_finds_the_hook_only_when_an_ancestor_is_the_hooked_shell() {
-        for ancestors in [&[4242, 300][..], &[4300, 4242, 300]] {
+    fn doctor_finds_the_hook_only_when_the_nearest_shell_is_the_hooked_one() {
+        for ancestors in [
+            &[(4242, "zsh"), (300, "systemd")][..],
+            &[(4300, "env"), (4242, "bash"), (300, "systemd")],
+            &[(4301, "timeout"), (4300, "mise"), (4242, "-zsh")],
+        ] {
             let active = shell_hook_probe(Some("4242"), &pids(ancestors), Some("/bin/zsh"));
             assert_eq!(active.outcome(), ProbeOutcome::Ok, "{ancestors:?}");
             assert_eq!(active.detail(), HOOK_ACTIVE);
@@ -651,10 +675,11 @@ mod tests {
         }
 
         for (exported, ancestors) in [
-            (Some("4242"), &[4243, 300][..]),
-            (None, &[4242]),
+            (Some("4242"), &[(4243, "zsh"), (300, "systemd")][..]),
+            (None, &[(4242, "zsh")]),
             (Some("4242"), &[]),
-            (Some("not a pid"), &[4242]),
+            (Some("4242"), &[(4242, "env")]),
+            (Some("not a pid"), &[(4242, "zsh")]),
         ] {
             let probe = shell_hook_probe(exported, &pids(ancestors), Some("/usr/bin/zsh"));
             assert_eq!(
@@ -668,7 +693,7 @@ mod tests {
             );
         }
 
-        let fish = shell_hook_probe(None, &pids(&[2]), Some("/opt/homebrew/bin/fish"));
+        let fish = shell_hook_probe(None, &pids(&[(2, "fish")]), Some("/opt/homebrew/bin/fish"));
         assert!(
             fish.detail().ends_with("muster shell-init fish | source"),
             "{}",
@@ -676,7 +701,7 @@ mod tests {
         );
 
         for shell_path in [Some("/bin/tcsh"), None] {
-            let unknown = shell_hook_probe(None, &pids(&[4242]), shell_path);
+            let unknown = shell_hook_probe(None, &pids(&[(4242, "tcsh")]), shell_path);
             assert_eq!(unknown.outcome(), ProbeOutcome::Warn);
             for shell in HookShell::iter() {
                 assert!(
@@ -685,6 +710,34 @@ mod tests {
                     unknown.detail()
                 );
             }
+        }
+    }
+
+    /// CR-3: a shell started inside the hooked one without the hook, as
+    /// `bash --norc` is, inherits the exported pid but is the nearest
+    /// shell, so doctor says the hook is not loaded there, under a wrapper
+    /// or not.
+    #[test]
+    fn an_unhooked_shell_inside_a_hooked_one_is_not_hooked() {
+        for ancestors in [
+            &[(5000, "bash"), (4242, "bash"), (300, "systemd")][..],
+            &[(5001, "env"), (5000, "bash"), (4242, "zsh")],
+            &[(5000, "sh"), (4999, "timeout"), (4242, "bash")],
+        ] {
+            let probe = shell_hook_probe(Some("4242"), &pids(ancestors), Some("/bin/bash"));
+            assert_eq!(probe.outcome(), ProbeOutcome::Warn, "{ancestors:?}");
+        }
+    }
+
+    /// A process is a shell by its name, a login shell's leading mark
+    /// aside; wrappers and other programs are not.
+    #[test]
+    fn shells_are_told_by_name() {
+        for shell in ["bash", "zsh", "fish", "sh", "dash", "ksh", "-bash", "-zsh"] {
+            assert!(is_shell(shell), "{shell}");
+        }
+        for other in ["env", "timeout", "mise", "muster", "sudo", ""] {
+            assert!(!is_shell(other), "{other}");
         }
     }
 

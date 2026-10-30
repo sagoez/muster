@@ -95,7 +95,7 @@ use crate::{
             resolve_project,
         },
         private_dir::state_dir,
-        process_tree::ancestors,
+        process_tree::named_ancestors,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
@@ -1365,7 +1365,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
     let ancestors = u32::try_from(getpid().as_raw_nonzero().get())
         .ok()
         .and_then(|this| Pid::try_new(this).ok())
-        .map(|this| ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
+        .map(|this| named_ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
         .unwrap_or_default();
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),

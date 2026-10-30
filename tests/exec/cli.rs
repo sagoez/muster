@@ -67,6 +67,10 @@ const STACK_FILE: &str = "muster.yml";
 const TIMEOUT: &str = "timeout";
 /// How long that wrapper lets the command run, in seconds.
 const WRAPPER_SECONDS: &str = "60";
+/// Another wrapper, run before [`TIMEOUT`].
+const ENV_WRAPPER: &str = "env";
+/// The shell `doctor` is run in, as a hooked one and an unhooked one inside.
+const DOCTOR_SHELL: &str = "bash";
 /// Exit code of an action that failed.
 const ACTION_FAILED: i32 = 1;
 /// Exit code of a command line that does not parse.
@@ -4680,17 +4684,19 @@ fn the_filesystem_root_and_home_are_never_registered() {
     assert_eq!(projects, serde_json::json!([]), "{projects}");
 }
 
-/// Correctness M4: `doctor` run through a wrapper, here `timeout`, from the
-/// shell whose pid the hook exported finds the hook, though that shell is
-/// its grandparent; a pid that is no ancestor still warns.
+/// Correctness M4 and CR-3: `doctor` run from the shell whose pid the hook
+/// exported finds the hook, directly or through wrappers such as `env` and
+/// `timeout`. A shell started inside it without the hook, as `bash --norc`
+/// is, inherits the pid but is not hooked, and a pid that is no ancestor
+/// warns too.
 #[test]
-fn doctor_finds_the_hook_of_a_shell_it_runs_under_through_a_wrapper() {
+fn doctor_finds_the_hook_only_in_the_nearest_shell_it_runs_in() {
     let scratch = Scratch::new();
-    let shell_check = |exported: u32| {
+    let shell_check = |script: &str| {
         let output = scratch
-            .isolated(Path::new(TIMEOUT))
-            .args([WRAPPER_SECONDS, BINARY, "doctor", "--json"])
-            .env(MUSTER_SHELL_ENV, exported.to_string())
+            .isolated(Path::new(DOCTOR_SHELL))
+            .args(["--norc", "--noprofile", "-c", script, DOCTOR_SHELL, BINARY])
+            .env_remove(MUSTER_SHELL_ENV)
             .output()
             .unwrap();
         parsed(&output)["checks"]
@@ -4699,14 +4705,28 @@ fn doctor_finds_the_hook_of_a_shell_it_runs_under_through_a_wrapper() {
             .iter()
             .find(|check| check["check"] == "shell-hook")
             .cloned()
-            .unwrap_or_else(|| panic!("no shell hook check: {}", shown(&output)))
+            .unwrap_or_else(|| panic!("no shell hook check: {script}: {}", shown(&output)))
     };
+    let hooked = format!("export {MUSTER_SHELL_ENV}=$$;");
 
-    let found = shell_check(process::id());
-    assert_eq!(found["outcome"], "ok", "{found}");
+    for wrapped in [
+        "\"$1\" doctor --json; :".to_string(),
+        format!("{ENV_WRAPPER} {TIMEOUT} {WRAPPER_SECONDS} \"$1\" doctor --json; :"),
+    ] {
+        let found = shell_check(&format!("{hooked} {wrapped}"));
+        assert_eq!(found["outcome"], "ok", "{wrapped}: {found}");
+    }
+
+    let nested = shell_check(&format!(
+        "{hooked} {DOCTOR_SHELL} --norc --noprofile -c '\"$0\" doctor --json; :' \"$1\"; :"
+    ));
+    assert_eq!(nested["outcome"], "warn", "{nested}");
 
     let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
-    let missing = shell_check(stranger.id());
+    let missing = shell_check(&format!(
+        "export {MUSTER_SHELL_ENV}={}; \"$1\" doctor --json; :",
+        stranger.id()
+    ));
     stranger.kill().unwrap();
     stranger.wait().unwrap();
     assert_eq!(missing["outcome"], "warn", "{missing}");
@@ -4729,6 +4749,8 @@ fn shell_report_prints_nothing_and_exits_0_without_a_database() {
             &pid,
             "--load",
             "1",
+            "--load-pid",
+            "2",
             "--seq",
             "1",
         ]);

@@ -45,6 +45,15 @@ impl ProcessTree {
 /// The parent of `pid`, its parent and so on, at most `limit` of them,
 /// each refreshed in `system` as it is reached.
 pub fn ancestors(system: &mut System, pid: Pid, limit: usize) -> Vec<Pid> {
+    named_ancestors(system, pid, limit)
+        .into_iter()
+        .map(|(ancestor, _)| ancestor)
+        .collect()
+}
+
+/// [`ancestors`] of `pid`, each with its process name, empty when it does
+/// not read.
+pub fn named_ancestors(system: &mut System, pid: Pid, limit: usize) -> Vec<(Pid, String)> {
     let mut ancestors = Vec::new();
     let mut current = SysinfoPid::from_u32(pid.into_inner());
     refresh_one(system, current);
@@ -55,8 +64,12 @@ pub fn ancestors(system: &mut System, pid: Pid, limit: usize) -> Vec<Pid> {
         let Ok(parent_pid) = Pid::try_new(parent.as_u32()) else {
             break;
         };
-        ancestors.push(parent_pid);
         refresh_one(system, parent);
+        let name = system
+            .process(parent)
+            .map(|process| process.name().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ancestors.push((parent_pid, name));
         current = parent;
     }
     ancestors
@@ -103,5 +116,27 @@ mod tests {
 
         assert_eq!(all.first(), Some(&this), "{all:?}");
         assert_eq!(one, [this]);
+    }
+
+    /// Each ancestor comes with its process name.
+    #[test]
+    fn named_ancestors_name_each_process() {
+        let mut child = Command::new(SLEEPER)
+            .arg(SLEEP_SECONDS)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = Pid::try_new(child.id()).unwrap();
+        let this = Pid::try_new(process::id()).unwrap();
+
+        let named = named_ancestors(&mut System::new(), pid, 1);
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let [(parent, name)] = &named[..] else {
+            panic!("one ancestor: {named:?}");
+        };
+        assert_eq!(*parent, this);
+        assert!(!name.is_empty());
     }
 }

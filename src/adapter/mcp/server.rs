@@ -128,6 +128,7 @@ impl MusterMcp {
             tool_router: described(
                 Self::stack_router()
                     + Self::process_router()
+                    + Self::open_router()
                     + Self::coordination_router()
                     + Self::config_router(),
             ),
@@ -335,6 +336,7 @@ mod tests {
             "note_write",
             "process_add",
             "process_logs",
+            "process_open",
             "process_remove",
             "process_restart",
             "process_screen",

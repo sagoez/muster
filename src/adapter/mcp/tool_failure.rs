@@ -41,7 +41,8 @@ const PASS_CURSOR: &str = "pass a cursor from an earlier result";
 /// muster's is answered as a protocol error.
 #[derive(Debug)]
 pub enum ToolFailure {
-    /// The request was wrong, such as an unknown name or a blank key.
+    /// The agent's to act on: the request was wrong, such as an unknown name
+    /// or a blank key, or no terminal workspace could open its pane.
     Caller(ToolError),
     /// muster could not answer it.
     Server(ErrorData),
@@ -68,7 +69,7 @@ impl ToolFailure {
 
 impl From<ToolError> for ToolFailure {
     fn from(error: ToolError) -> Self {
-        if error.kind().is_caller_fault() {
+        if error.answers_as_result() {
             return Self::Caller(error);
         }
         let message = agent_message(&error);
@@ -139,7 +140,8 @@ pub fn agent_message(error: &ToolError) -> String {
         | ToolError::InvalidKvKey(_)
         | ToolError::StackEditsReadOnly(_)
         | ToolError::SettingNotForAgents(_)
-        | ToolError::WorkingDirOutsideProject { .. } => error.to_string(),
+        | ToolError::WorkingDirOutsideProject { .. }
+        | ToolError::NotOpened { .. } => error.to_string(),
     }
 }
 

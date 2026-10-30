@@ -1,5 +1,6 @@
-//! A server over a scratch database whose service is never reached, so no
-//! test touches the user's real state or service socket.
+//! A server over a scratch database whose service is never reached unless a
+//! test hands it a scratch one, so no test touches the user's real state,
+//! service socket or terminal workspace.
 
 use std::{
     fs,
@@ -26,7 +27,10 @@ use crate::{
         client::{fake_service::FakeService, recording_notifier::RecordingNotifier},
         store::SqliteStore,
     },
-    domain::{port::StackEditLog, value::ProjectRoot},
+    domain::{
+        port::{StackEditLog, TerminalWorkspace},
+        value::ProjectRoot,
+    },
 };
 
 /// The database file each test's store opens.
@@ -59,15 +63,25 @@ pub struct Fixture {
 }
 
 /// A [`Fixture`] whose folder, holding a `frontend` folder, is not yet a
-/// project.
+/// project, and whose server reaches no service and runs in no terminal
+/// workspace.
 pub fn fixture() -> Fixture {
+    fixture_with(FakeService::default(), None)
+}
+
+/// A [`Fixture`] as [`fixture`] makes it, whose server drives `service` and
+/// runs in `workspace`, if any.
+pub fn fixture_with(
+    service: FakeService,
+    workspace: Option<Arc<dyn TerminalWorkspace>>,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join(PROJECT_DIR);
     fs::create_dir_all(folder.join("frontend")).unwrap();
     let root = ProjectRoot::try_new(fs::canonicalize(&folder).unwrap()).unwrap();
     let store = SqliteStore::open(&dir.path().join(DATABASE)).unwrap();
     let notifier = Arc::new(RecordingNotifier::default());
-    let server = serving(&root, &store, &notifier, AGENT);
+    let server = serving(&root, &store, &notifier, AGENT, service, workspace);
     Fixture {
         _dir: dir,
         root,
@@ -77,18 +91,28 @@ pub fn fixture() -> Fixture {
     }
 }
 
-/// A second server in `fixture`'s folder and database, writing as `agent`.
+/// A second server in `fixture`'s folder and database, writing as `agent`,
+/// reaching no service and running in no terminal workspace.
 pub fn server_as(fixture: &Fixture, agent: &str) -> MusterMcp {
-    serving(&fixture.root, &fixture.store, &fixture.notifier, agent)
+    serving(
+        &fixture.root,
+        &fixture.store,
+        &fixture.notifier,
+        agent,
+        FakeService::default(),
+        None,
+    )
 }
 
-/// A server started in `root` over `store`, telling `notifier` of its edits
-/// and writing as `agent`.
+/// A server started in `root` over `store`, telling `notifier` of its edits,
+/// writing as `agent`, driving `service` and running in `workspace`.
 fn serving(
     root: &ProjectRoot,
     store: &SqliteStore,
     notifier: &Arc<RecordingNotifier>,
     agent: &str,
+    service: FakeService,
+    workspace: Option<Arc<dyn TerminalWorkspace>>,
 ) -> MusterMcp {
     let deps = McpDeps::builder()
         .scope(
@@ -99,14 +123,14 @@ fn serving(
                 .build(),
         )
         .agent(Some(agent.to_string()))
-        .service(Arc::new(FakeService::default()))
+        .service(Arc::new(service))
         .projects(Arc::new(store.clone()))
         .coordination(Arc::new(store.clone()))
         .stacks(Arc::new(store.clone()))
         .settings(Arc::new(store.clone()))
         .edits(Arc::new(store.clone()))
         .notifier(notifier.clone())
-        .workspace(None)
+        .workspace(workspace)
         .binary(PathBuf::from(BINARY))
         .build();
     MusterMcp::new(deps)

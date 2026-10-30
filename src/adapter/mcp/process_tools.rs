@@ -87,7 +87,7 @@ const PROCESS_SEND: &str = "process_send";
 ///
 /// # Errors
 /// Returns the caller's mistake for a blank name.
-fn reference(name: &str) -> Result<ProcessRef, ToolError> {
+pub(super) fn reference(name: &str) -> Result<ProcessRef, ToolError> {
     ProcessRef::try_new(name.to_string()).map_err(|error| ToolError::InvalidName {
         name: refused_name(name),
         problem: error.into(),
@@ -112,7 +112,7 @@ fn output_cursor(
 /// # Errors
 /// Returns the caller's mistake for an unknown name, or a failure reaching
 /// the service.
-fn resolved(
+pub(super) fn resolved(
     client: &ServiceClient,
     project: &Project,
     name: &ProcessRef,

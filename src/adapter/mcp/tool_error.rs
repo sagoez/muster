@@ -8,15 +8,35 @@ use crate::{
         holder::PatternError,
         sanitize::printable,
     },
+    constants::APP_NAME,
     domain::{
         config::{ConfigError, McpStackEdits, SettingKey},
-        value::{NameProblem, ValueParseError},
+        value::{NameProblem, ProcessRef, ValueParseError},
     },
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
 /// caller.
 pub const MAX_CANDIDATES: usize = 20;
+/// The subcommand that shows a process in the user's own terminal.
+const ATTACH_SUBCOMMAND: &str = "attach";
+/// Ends the options, so a name starting with `-` is read as the name.
+const END_OF_OPTIONS: &str = "--";
+/// What starts an option, which a name may start with too.
+const OPTION_LEAD: char = '-';
+
+/// The command line that shows `name` in the user's own terminal, quoted so
+/// it pastes back as typed, and safe to print.
+fn attach_line(name: &ProcessRef) -> String {
+    let typed = name.as_ref();
+    let quoted = shlex::try_quote(typed).map_or_else(|_| typed.to_string(), |quoted| quoted.into());
+    let line = if typed.starts_with(OPTION_LEAD) {
+        format!("{APP_NAME} {ATTACH_SUBCOMMAND} {END_OF_OPTIONS} {quoted}")
+    } else {
+        format!("{APP_NAME} {ATTACH_SUBCOMMAND} {quoted}")
+    };
+    printable(&line)
+}
 
 /// Why a tool could not do what it was asked: the agent's mistake, the
 /// store's refusal or a failure reaching the service.
@@ -185,6 +205,19 @@ pub enum ToolError {
         /// The project's root.
         root: PathBuf,
     },
+    /// No pane opened beside the agent's: it runs in no terminal workspace,
+    /// or the workspace did not open one.
+    #[error(
+        "{}; ask the user to run {} in their own terminal to see it",
+        printable(&source.to_string()),
+        attach_line(name)
+    )]
+    NotOpened {
+        /// The process as the agent named it.
+        name: ProcessRef,
+        /// Why no pane opened.
+        source: Box<ClientError>,
+    },
 }
 
 impl From<ResolveError> for ToolError {
@@ -206,6 +239,7 @@ impl ToolError {
     pub fn kind(&self) -> FailureKind {
         match self {
             Self::Client(error) => error.kind(),
+            Self::NotOpened { source, .. } => source.kind(),
             Self::Config(error) => FailureKind::from(error),
             Self::NoProjectHere { .. } | Self::UnknownProject { .. } => FailureKind::UnknownProject,
             Self::UnknownNote { .. } => FailureKind::UnknownNote,
@@ -231,6 +265,15 @@ impl ToolError {
             | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
             Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
+    }
+
+    /// Whether the agent is answered with a result flagged `isError` rather
+    /// than a protocol error: its own mistake, or a pane that cannot open
+    /// because it runs in no terminal workspace, which it answers by asking
+    /// the user.
+    pub fn answers_as_result(&self) -> bool {
+        let kind = self.kind();
+        kind.is_caller_fault() || kind == FailureKind::NoWorkspace
     }
 
     /// The names the agent could have meant, at most [`MAX_CANDIDATES`].
@@ -261,7 +304,8 @@ impl ToolError {
             | Self::InvalidKvKey(_)
             | Self::StackEditsReadOnly(_)
             | Self::SettingNotForAgents(_)
-            | Self::WorkingDirOutsideProject { .. } => Vec::new(),
+            | Self::WorkingDirOutsideProject { .. }
+            | Self::NotOpened { .. } => Vec::new(),
         };
         names.into_iter().take(MAX_CANDIDATES).collect()
     }

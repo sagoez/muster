@@ -1,6 +1,8 @@
 # muster's prompt hook for bash. Load it from ~/.bashrc with:
 #   eval "$(muster shell-init bash)"
-if [[ $- == *i* && -z ${__muster_hook-} ]]; then
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if [[ $- == *i* && -z ${__muster_hook-} && -z ${@MUSTER_OPEN_ENV@+set} ]]; then
     __muster_hook=1
     __muster_bin=@MUSTER_BIN@
     __muster_notes=@MUSTER_NOTES@

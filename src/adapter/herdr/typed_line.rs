@@ -1,9 +1,9 @@
 use std::{ffi::OsString, iter};
 
-use crate::domain::terminal_workspace::PaneCommand;
+use crate::{
+    constants::MUSTER_OPEN_ARG_PREFIX as ARG_ENV_PREFIX, domain::terminal_workspace::PaneCommand,
+};
 
-/// Prefix of the variable each word of the pane's command travels in.
-const ARG_ENV_PREFIX: &str = "MUSTER_OPEN_ARG_";
 /// Leads the line, which keeps it out of the history of a shell that skips
 /// space-led lines: fish always, bash with `HISTCONTROL=ignorespace` and zsh
 /// with `HIST_IGNORE_SPACE`, neither of them by default.
@@ -51,6 +51,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::constants::MUSTER_OPEN_PROGRAM_ENV;
 
     /// A command whose words would each break a typed shell line.
     fn hostile() -> PaneCommand {
@@ -89,5 +90,6 @@ mod tests {
                 OsString::from("'\"$(id)`;\n-x")
             ),
         ]);
+        assert_eq!(env[0].0, MUSTER_OPEN_PROGRAM_ENV);
     }
 }

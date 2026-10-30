@@ -1,6 +1,8 @@
 # muster's prompt hook for fish. Load it from ~/.config/fish/config.fish with:
 #   muster shell-init fish | source
-if status is-interactive; and not set -q __muster_hook
+# A pane `muster open` made only shows a process, so its shell never
+# occupies the project.
+if status is-interactive; and not set -q __muster_hook; and not set -q @MUSTER_OPEN_ENV@
     set -g __muster_hook 1
     set -g __muster_bin @MUSTER_BIN@
     set -g __muster_notes @MUSTER_NOTES@

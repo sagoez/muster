@@ -199,6 +199,14 @@ mod tests {
     const NOTE_LINES: [&str; 2] = ["first line", "second $line \\x1b"];
     /// What a probe runs to learn whether a shell runs here.
     const PROBE_SCRIPT: &str = "exit 0";
+    /// Prints the running bash's major version.
+    const BASH_MAJOR_SCRIPT: &str = "echo \"${BASH_VERSINFO[0]}\"";
+    /// The first bash major version with `EPOCHREALTIME`.
+    const BASH_WITH_CLOCK: u32 = 5;
+    /// The line of the fish hook that passes the arrival time it read.
+    const FISH_ARRIVED_LINE: &str = "set arrived --arrived $__muster_arrived";
+    /// What the line of the fish hook that runs the report holds.
+    const FISH_REPORT_SEQ: &str = "--seq $__muster_seq";
     /// Digits of a load start in nanoseconds from 2001 to 2286.
     const NANOSECOND_DIGITS: usize = 19;
 
@@ -283,6 +291,24 @@ mod tests {
                 .output()
                 .unwrap_or_else(|error| panic!("cannot run {shell}: {error}"))
         })
+    }
+
+    /// Whether `shell`'s hook passes `--arrived` from the shell's own clock:
+    /// zsh always, bash from 5 on, which has `EPOCHREALTIME`. fish forks
+    /// `date` for it, whose `%N` not every system has, so its script is
+    /// checked by text instead.
+    fn reads_its_clock(shell: HookShell) -> bool {
+        match shell {
+            HookShell::Zsh => true,
+            HookShell::Fish => false,
+            HookShell::Bash => Command::new(shell.to_string())
+                .args(["-c", BASH_MAJOR_SCRIPT])
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|major| major.trim().parse::<u32>().ok())
+                .is_some_and(|major| major >= BASH_WITH_CLOCK),
+        }
     }
 
     /// Whether `shell` runs here at all, probed with an empty command; a
@@ -543,14 +569,59 @@ mod tests {
                 .strip_prefix(ARRIVED_FLAG)
                 .map(|arrived| arrived.parse::<EpochNanos>().unwrap());
             assert!(
-                arrived.is_some() || shell != HookShell::Zsh,
-                "{shell}: zsh reads its clock: {call}"
+                arrived.is_some() || !reads_its_clock(shell),
+                "{shell} reads its clock: {call}"
             );
             assert!(
                 arrived.is_none_or(|arrived| (before..=after).contains(&arrived)),
                 "{shell}: the first prompt's time: {call}"
             );
         }
+    }
+
+    /// R-M1: loading the bash hook and drawing a prompt leave the user's
+    /// `BASH_REMATCH` as their last match left it.
+    #[test]
+    fn the_bash_hook_keeps_the_user_s_bash_rematch() {
+        let scratch = TempDir::new().unwrap();
+        let (script, notes, _) = installed_hook(HookShell::Bash, scratch.path());
+        let probe = concat!(
+            "[[ abc =~ (b) ]]\n",
+            ". \"$1\"\n",
+            "echo \"loaded=${BASH_REMATCH[1]-}\"\n",
+            "for hook in \"${PROMPT_COMMAND[@]}\"; do eval \"$hook\"; done\n",
+            "echo \"prompted=${BASH_REMATCH[1]-}\"\n",
+        );
+        let Some(output) = run(HookShell::Bash, true, probe, &[&script, &notes]) else {
+            return;
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            ["loaded=b", "prompted=b"],
+            "{output:?}"
+        );
+    }
+
+    /// fish is not run here everywhere, so its hook is read: it passes the
+    /// time it read on arriving in a folder as `--arrived` with every
+    /// report.
+    #[test]
+    fn the_fish_hook_passes_its_arrival_time() {
+        let script = hook_script(
+            HookShell::Fish,
+            Path::new(SNAPSHOT_BINARY),
+            Path::new(SNAPSHOT_NOTES),
+        )
+        .unwrap();
+
+        assert!(script.contains(FISH_ARRIVED_LINE), "{script}");
+        let report = script
+            .lines()
+            .find(|line| line.contains(FISH_REPORT_SEQ))
+            .unwrap_or_else(|| panic!("{script}"));
+        assert!(report.contains("$arrived"), "{report}");
     }
 
     #[test]

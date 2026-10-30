@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
 use crate::{
     adapter::{
-        agent_config::{AgentConfigFiles, ConfigLocations, McpRegistry, ServerLaunch},
+        agent_config::{AgentConfigFiles, ConfigLocations, McpRegistry, testing::launch},
         client::{
             ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
             recording_workspace::RecordingWorkspace,
@@ -31,10 +31,6 @@ use crate::{
 /// The state directory's name under the scratch folder standing for its
 /// parent.
 const STATE_DIR: &str = "muster";
-/// The muster binary the agents' configs are told to launch.
-pub(super) const FAKE_MUSTER: &str = "/opt/muster/bin/muster";
-/// The argument that makes it serve MCP.
-const FAKE_MCP_ARG: &str = "mcp";
 
 /// Ports over a scratch database, a [`FakeService`], a
 /// [`RecordingNotifier`] and shell files in a scratch state directory,
@@ -189,11 +185,7 @@ impl CliPorts for FakePorts {
 
     fn mcp_registry(&self) -> Arc<dyn McpRegistry> {
         let locations = ConfigLocations::from_env(self.agent_home.path(), |_| None);
-        let launch = ServerLaunch::builder()
-            .command(PathBuf::from(FAKE_MUSTER))
-            .args(vec![FAKE_MCP_ARG.to_owned()])
-            .build();
-        Arc::new(AgentConfigFiles::new(Some(locations), launch))
+        Arc::new(AgentConfigFiles::new(Some(locations), launch()))
     }
 
     fn run_service(&self) -> Result<(), MusterError> {

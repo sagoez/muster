@@ -14,7 +14,7 @@ use strum::IntoEnumIterator;
 use super::{cli_ports::CliPorts, command::Command, shell_init::SHELL_INIT_SUBCOMMAND};
 use crate::{
     adapter::{
-        agent_config::{Agent, McpScope, McpServerName, SERVER_NAME_MAX_CHARS},
+        agent_config::{Agent, McpScope, McpServerName, SERVER_NAME_FORM},
         holder::{LineLimit, MAX_LOG_LINES},
         sanitize::printable,
         service::StateGoal,
@@ -138,8 +138,6 @@ static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<S
 static AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<Agent>);
 /// The scopes `muster mcp add --scope` accepts.
 static MCP_SCOPES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpScope>);
-/// What a server name takes, followed by its most characters and the rest.
-const SERVER_NAME_FORM: &str = "use 1 to ";
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -234,9 +232,7 @@ pub(super) fn pid(raw: &str) -> Result<Pid, String> {
 /// # Errors
 /// Returns the form expected for a name no agent takes as a server key.
 pub(super) fn server_name(raw: &str) -> Result<McpServerName, String> {
-    McpServerName::try_new(raw).map_err(|_| {
-        format!("{SERVER_NAME_FORM}{SERVER_NAME_MAX_CHARS} ASCII letters, digits, '-' and '_'")
-    })
+    McpServerName::try_new(raw).map_err(|_| SERVER_NAME_FORM.clone())
 }
 
 /// The command line's definition, with `--project` completing the projects

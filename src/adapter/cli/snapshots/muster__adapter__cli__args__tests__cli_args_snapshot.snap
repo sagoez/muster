@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 340
+assertion_line: 348
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -830,7 +830,7 @@ Usage: muster mcp add [OPTIONS]
 Options:
       --client <AGENT>     The agent: claude (Claude Code), codex or zed. Repeat it or separate with commas for several. At a terminal, chosen from a list of those installed when absent; required elsewhere [possible values: claude, codex, zed]
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Which config: local (this project, in your own Claude Code config), project (a file in this project, .mcp.json or .codex/config.toml) or user (every project). Defaults to local for Claude Code and user for Codex and Zed; Zed has only user [possible values: local, project, user]
+      --scope <SCOPE>      Which config: user (every project, the default), local (this project, in your own Claude Code config) or project (a file in this project, .mcp.json or .codex/config.toml, shared with whoever clones it). Zed has only user [possible values: local, project, user]
       --name <NAME>        The server's name in the agent's config [default: muster]
       --force              Replace or remove a server under the name that runs something else
       --json               Print the result as JSON
@@ -845,7 +845,7 @@ Usage: muster mcp remove [OPTIONS]
 Options:
       --client <AGENT>     The agent: claude (Claude Code), codex or zed. Repeat it or separate with commas for several. At a terminal, chosen from a list of those installed when absent; required elsewhere [possible values: claude, codex, zed]
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Which config: local (this project, in your own Claude Code config), project (a file in this project, .mcp.json or .codex/config.toml) or user (every project). Defaults to local for Claude Code and user for Codex and Zed; Zed has only user [possible values: local, project, user]
+      --scope <SCOPE>      Which config: user (every project, the default), local (this project, in your own Claude Code config) or project (a file in this project, .mcp.json or .codex/config.toml, shared with whoever clones it). Zed has only user [possible values: local, project, user]
       --name <NAME>        The server's name in the agent's config [default: muster]
       --force              Replace or remove a server under the name that runs something else
       --json               Print the result as JSON

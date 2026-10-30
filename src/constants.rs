@@ -4,6 +4,13 @@ pub const APP_NAME: &str = "muster";
 /// binary replaces an older service.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The variable listing the folders a binary is looked up in.
+pub const PATH_ENV: &str = "PATH";
+/// The variable naming the XDG config root.
+pub const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+/// The config root under home where `XDG_CONFIG_HOME` does not move it.
+pub const DOT_CONFIG: &str = ".config";
+
 /// The file argument that means stdout or stdin.
 pub const STDIO_PATH: &str = "-";
 

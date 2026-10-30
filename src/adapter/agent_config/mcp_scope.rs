@@ -1,6 +1,10 @@
 use serde::Serialize;
 use strum::{Display, EnumIter, EnumString};
 
+/// The scope an entry goes to when none is asked for: every project, as
+/// muster's server finds the project of each call itself.
+pub const DEFAULT_MCP_SCOPE: McpScope = McpScope::User;
+
 /// Where in an agent's config an MCP server entry lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Display, EnumString, EnumIter, Serialize)]
 #[strum(serialize_all = "kebab-case")]

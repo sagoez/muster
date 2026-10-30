@@ -71,10 +71,11 @@ muster mcp add   # add muster to Claude Code, Codex or Zed
 ```
 
 At a terminal it asks which of the agents it found to add muster to; pass
-`--client claude`, `codex` or `zed` to choose up front, and `--scope` to pick
-where the entry goes. It keeps everything else in the agent's config, and
-`muster mcp remove` takes the entry out again. For any other agent,
-`muster mcp --print-config` prints the snippet to paste in.
+`--client claude`, `codex` or `zed` to choose up front. The entry goes in
+your own config for every project, unless `--scope` picks one project. It
+keeps everything else in the agent's config, and `muster mcp remove` takes
+the entry out again. For any other agent, `muster mcp --print-config` prints
+the snippet to paste in.
 
 One entry serves every project. Over MCP an agent can:
 

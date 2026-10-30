@@ -23,6 +23,7 @@ use std::{
 use crossbeam_channel::unbounded;
 use muster::{
     adapter::{
+        agent_config::{CLAUDE_CONFIG_DIR_ENV, CODEX_HOME_ENV},
         holder::{
             ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderLauncher,
             HolderRunner, client::greet,
@@ -39,7 +40,7 @@ use muster::{
         shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
         store::SqliteStore,
     },
-    constants::{APP_NAME, MUSTER_SHELL_ENV},
+    constants::{APP_NAME, DOT_CONFIG, MUSTER_SHELL_ENV, PATH_ENV},
     domain::{
         config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
@@ -3502,22 +3503,45 @@ fn mcp_print_config_is_plain_data() {
 
 /// The variables that move an agent's config away from home, which a test
 /// must not inherit from the person running it.
-const AGENT_CONFIG_ENVS: [&str; 2] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+const AGENT_CONFIG_ENVS: [&str; 2] = [CODEX_HOME_ENV, CLAUDE_CONFIG_DIR_ENV];
+/// Zed's settings file in its config root.
+const ZED_SETTINGS_FILE: &str = "zed/settings.json";
+/// A folder's mode nobody may write into.
+const SEALED_FOLDER_MODE: u32 = 0o555;
+/// A folder's usual mode.
+const OPEN_FOLDER_MODE: u32 = SHARED_DIR_MODE;
 
 /// A home folder inside `scratch` for the agents' configs, and `muster
-/// <args>` run in `project` with it as `HOME`, so no test reaches the real
-/// user's configs.
+/// <args>` run in `project` with it as `HOME` and `PATH`, so no test
+/// reaches the real user's configs.
 fn agent_home_command(scratch: &Scratch, project: &Path, args: &[&str]) -> (PathBuf, Command) {
     let home = scratch.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let mut all = vec!["-p", project.to_str().unwrap()];
     all.extend_from_slice(args);
     let mut command = scratch.command(&all);
-    command.env("HOME", &home).env("PATH", &home);
+    command.env("HOME", &home).env(PATH_ENV, &home);
     for name in AGENT_CONFIG_ENVS {
         command.env_remove(name);
     }
     (home, command)
+}
+
+/// Zed's settings as muster finds them for `scratch` with `home`: under
+/// the scratch's XDG config root on Linux, and under `~/.config` on macOS,
+/// where Zed ignores `XDG_CONFIG_HOME`.
+fn zed_settings(scratch: &Scratch, home: &Path) -> PathBuf {
+    let root = if cfg!(target_os = "macos") {
+        home.join(DOT_CONFIG)
+    } else {
+        scratch.path().join("config")
+    };
+    root.join(ZED_SETTINGS_FILE)
+}
+
+/// Runs `command` and returns its output.
+fn ran(mut command: Command) -> Output {
+    command.output().unwrap()
 }
 
 /// Claude Code's user config, with another server and settings of its own.
@@ -3559,7 +3583,7 @@ fn mcp_add_and_remove_edit_each_agents_own_config() {
     let scratch = Scratch::new();
     let project = scratch.project("shop", &single());
     let (home, _) = agent_home_command(&scratch, &project, &[]);
-    let zed = scratch.path().join("config/zed/settings.json");
+    let zed = zed_settings(&scratch, &home);
     fs::create_dir_all(zed.parent().unwrap()).unwrap();
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(home.join(".claude.json"), CLAUDE_JSON_FIXTURE).unwrap();
@@ -3666,24 +3690,31 @@ fn mcp_add_and_remove_edit_each_agents_own_config() {
     assert_eq!(claude["mcpServers"]["other"]["command"], "other-mcp");
 }
 
-/// Claude Code's default is the project's local entry; a different entry
-/// under the name needs --force; and a refusal changes no file.
+/// Claude Code's default is the user's own entry, serving every project;
+/// another server's entry under the name needs --force; and a refusal
+/// changes no file.
 #[test]
 fn mcp_add_refuses_what_it_must_not_change() {
     let scratch = Scratch::new();
     let project = scratch.project("shop", &single());
-    let (home, mut local) =
+    let (home, mut user) =
         agent_home_command(&scratch, &project, &["mcp", "add", "--client", "claude"]);
-    let added = local.output().unwrap();
+    let added = user.output().unwrap();
     assert!(added.status.success(), "{}", shown(&added));
     let claude: Value =
         serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
-    let root = project.canonicalize().unwrap();
     assert_eq!(
-        claude["projects"][root.to_str().unwrap()]["mcpServers"]["muster"]["args"],
+        claude["mcpServers"]["muster"]["args"],
         serde_json::json!(["mcp"]),
         "{claude}"
     );
+    assert!(claude.get("projects").is_none(), "{claude}");
+    let mode = fs::metadata(home.join(".claude.json"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & PERMISSION_BITS;
+    assert_eq!(mode, PRIVATE_FILE_MODE, "a created .claude.json is private");
 
     let (_, mut zed_project) = agent_home_command(&scratch, &project, &[
         "mcp", "add", "--client", "zed", "--scope", "project", "--json",
@@ -3717,7 +3748,7 @@ fn mcp_add_refuses_what_it_must_not_change() {
     let mcp_json = project.join(".mcp.json");
     fs::write(
         &mcp_json,
-        "{\"mcpServers\": {\"muster\": {\"command\": \"/old/muster\", \"args\": [\"mcp\"]}}}",
+        "{\"mcpServers\": {\"muster\": {\"command\": \"/opt/other-tool\", \"args\": [\"mcp\"]}}}",
     )
     .unwrap();
     let (_, mut taken) = agent_home_command(&scratch, &project, &[
@@ -3733,21 +3764,21 @@ fn mcp_add_refuses_what_it_must_not_change() {
     assert!(
         fs::read_to_string(&mcp_json)
             .unwrap()
-            .contains("/old/muster")
+            .contains("/opt/other-tool")
     );
     let (_, mut forced) = agent_home_command(&scratch, &project, &[
         "mcp", "add", "--client", "claude", "--scope", "project", "--force",
     ]);
     let forced = forced.output().unwrap();
     assert!(forced.status.success(), "{}", shown(&forced));
-    assert!(
-        !fs::read_to_string(&mcp_json)
-            .unwrap()
-            .contains("/old/muster")
+    let shared: Value = serde_json::from_str(&fs::read_to_string(&mcp_json).unwrap()).unwrap();
+    assert_eq!(
+        shared["mcpServers"]["muster"]["command"], APP_NAME,
+        "a file shared with the project names muster for each person's PATH"
     );
 
     let broken = "{ \"theme\": ";
-    let zed = scratch.path().join("config/zed/settings.json");
+    let zed = zed_settings(&scratch, &home);
     fs::create_dir_all(zed.parent().unwrap()).unwrap();
     fs::write(&zed, broken).unwrap();
     let (_, mut unparseable) =
@@ -3760,6 +3791,124 @@ fn mcp_add_refuses_what_it_must_not_change() {
         shown(&unparseable)
     );
     assert_eq!(fs::read_to_string(&zed).unwrap(), broken);
+}
+
+/// The entry names this binary by the `PATH` link a person runs it
+/// through, not the versioned file it leads to; an entry an older install
+/// wrote is pointed at it without --force and removed as muster's own.
+#[test]
+fn mcp_add_writes_the_path_link_and_updates_an_older_entry() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let (home, _) = agent_home_command(&scratch, &project, &[]);
+    let link = home.join(APP_NAME);
+    symlink(Path::new(BINARY).canonicalize().unwrap(), &link).unwrap();
+    let claude_json = home.join(".claude.json");
+    let command_of = || {
+        let claude: Value =
+            serde_json::from_str(&fs::read_to_string(&claude_json).unwrap()).unwrap();
+        claude["mcpServers"]["muster"]["command"].clone()
+    };
+
+    let (_, add) = agent_home_command(&scratch, &project, &[
+        "mcp", "add", "--client", "claude", "--json",
+    ]);
+    let added = ran(add);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert_eq!(command_of(), link.to_str().unwrap());
+
+    fs::write(
+        &claude_json,
+        "{\"mcpServers\": {\"muster\": {\"command\": \"/gone/0.9.0/bin/muster\", \"args\": [\"mcp\"]}}}\n",
+    )
+    .unwrap();
+    let (_, again) = agent_home_command(&scratch, &project, &[
+        "mcp", "add", "--client", "claude", "--json",
+    ]);
+    let updated = ran(again);
+    assert!(updated.status.success(), "{}", shown(&updated));
+    assert_eq!(parsed(&updated)["edits"][0]["outcome"], "updated");
+    assert_eq!(command_of(), link.to_str().unwrap());
+
+    fs::write(
+        &claude_json,
+        "{\"mcpServers\": {\"muster\": {\"command\": \"/gone/0.9.0/bin/muster\", \"args\": [\"mcp\"]}}}\n",
+    )
+    .unwrap();
+    let (_, remove) =
+        agent_home_command(&scratch, &project, &["mcp", "remove", "--client", "claude"]);
+    let removed = ran(remove);
+    assert!(removed.status.success(), "{}", shown(&removed));
+    assert_eq!(fs::read_to_string(&claude_json).unwrap(), "{}\n");
+}
+
+/// A second agent's config that cannot be written stops the run before the
+/// first is touched, and the error says so in JSON as it does to a person.
+#[test]
+fn mcp_add_writes_no_config_when_another_cannot_be_written() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let (home, _) = agent_home_command(&scratch, &project, &[]);
+    fs::write(home.join(".claude.json"), CLAUDE_JSON_FIXTURE).unwrap();
+    let zed = zed_settings(&scratch, &home);
+    let folder = zed.parent().unwrap().to_path_buf();
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(&zed, ZED_FIXTURE).unwrap();
+    fs::set_permissions(&folder, Permissions::from_mode(SEALED_FOLDER_MODE)).unwrap();
+
+    let (_, add) = agent_home_command(&scratch, &project, &[
+        "mcp",
+        "add",
+        "--client",
+        "claude,zed",
+        "--json",
+    ]);
+    let refused = ran(add);
+    fs::set_permissions(&folder, Permissions::from_mode(OPEN_FOLDER_MODE)).unwrap();
+
+    assert!(!refused.status.success(), "{}", shown(&refused));
+    assert_eq!(
+        parsed(&refused)["error"]["kind"],
+        "io",
+        "{}",
+        shown(&refused)
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(".claude.json")).unwrap(),
+        CLAUDE_JSON_FIXTURE
+    );
+    assert_eq!(fs::read_to_string(&zed).unwrap(), ZED_FIXTURE);
+}
+
+/// A project's `.mcp.json` holding a server name twice is refused for add
+/// and remove alike and left as it was, since Claude Code would run the
+/// last copy whatever muster read in the first.
+#[test]
+fn mcp_add_refuses_a_repeated_server_name() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let crafted = "{\"mcpServers\": {\"muster\": {\"command\": \"muster\", \"args\": [\"mcp\"]}, \"muster\": {\"command\": \"/tmp/evil\", \"args\": []}}}\n";
+    let mcp_json = project.join(".mcp.json");
+    fs::write(&mcp_json, crafted).unwrap();
+
+    for verb in ["add", "remove"] {
+        let (_, command) = agent_home_command(&scratch, &project, &[
+            "mcp", verb, "--client", "claude", "--scope", "project", "--force", "--json",
+        ]);
+        let refused = ran(command);
+        assert_eq!(
+            refused.status.code(),
+            Some(INVALID_INPUT),
+            "{verb}: {}",
+            shown(&refused)
+        );
+        let message = parsed(&refused)["error"]["message"].to_string();
+        assert!(
+            message.contains("muster") && message.contains(".mcp.json"),
+            "{message}"
+        );
+        assert_eq!(fs::read_to_string(&mcp_json).unwrap(), crafted);
+    }
 }
 
 /// At a terminal without --client, `mcp add` offers the agents with the
@@ -3780,11 +3929,7 @@ fn mcp_add_at_a_terminal_offers_the_installed_agents() {
     assert!(pty.drawn().contains("added muster to"), "{}", pty.drawn());
     let claude: Value =
         serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
-    let root = project.canonicalize().unwrap();
-    assert!(
-        claude["projects"][root.to_str().unwrap()]["mcpServers"]["muster"].is_object(),
-        "{claude}"
-    );
+    assert!(claude["mcpServers"]["muster"].is_object(), "{claude}");
     assert!(
         !home.join(".codex").exists(),
         "codex was not installed, so not chosen"

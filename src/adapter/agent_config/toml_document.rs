@@ -10,8 +10,10 @@ use super::{
     agent_config_error::AgentConfigError,
     edit_outcome::EditOutcome,
     edited::Edited,
+    entry_action::EntryAction,
     entry_change::EntryChange,
-    server_entry::{ARGS_KEY, COMMAND_KEY, ServerEntry},
+    entry_match::EntryMatch,
+    server_entry::{ARGS_KEY, COMMAND_KEY, DISABLED_KEY, ENABLED_KEY, ServerEntry, turned_off},
     server_name::McpServerName,
 };
 
@@ -19,13 +21,14 @@ use super::{
 const SERVERS_TABLE: &str = "mcp_servers";
 
 /// `change` applied to the entry `name` in `text`, the Codex config at
-/// `path`, or in an empty one when there is none.
+/// `path`, or in an empty one when there is none. A removal that empties
+/// the table of servers takes it out too.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::Unparseable`] or
 /// [`AgentConfigError::NotATable`] for a file muster cannot edit safely, and
-/// [`AgentConfigError::Taken`] or [`AgentConfigError::NotOurs`] for a
-/// different entry under `name` without `force`.
+/// [`AgentConfigError::Taken`] or [`AgentConfigError::NotOurs`] for another
+/// server's entry under `name` without `force`.
 pub(super) fn edit_toml(
     text: Option<&str>,
     path: &Path,
@@ -41,50 +44,46 @@ pub(super) fn edit_toml(
             path: path.to_path_buf(),
             reason: error.message().to_owned(),
         })?;
-    let not_a_table = || AgentConfigError::NotATable {
-        path: path.to_path_buf(),
-        key: SERVERS_TABLE.to_owned(),
-    };
     if change == EntryChange::Add && !document.contains_key(SERVERS_TABLE) {
         let mut servers = Table::new();
         servers.set_implicit(true);
         document.insert(SERVERS_TABLE, Item::Table(servers));
     }
-    let outcome = match document.get_mut(SERVERS_TABLE) {
-        None => EditOutcome::Absent,
-        Some(item) => {
-            let servers = item.as_table_like_mut().ok_or_else(not_a_table)?;
-            let existing = servers.get(name.as_ref()).map(|item| holds(item, entry));
-            match (change, existing) {
-                (EntryChange::Add, None) => {
-                    servers.insert(name.as_ref(), entry_table(entry));
-                    EditOutcome::Added
-                },
-                (EntryChange::Add, Some(true)) => EditOutcome::AlreadyAdded,
-                (EntryChange::Add, Some(false)) if force => {
-                    servers.insert(name.as_ref(), entry_table(entry));
-                    EditOutcome::Replaced
-                },
-                (EntryChange::Add, Some(false)) => {
-                    return Err(AgentConfigError::Taken {
-                        path: path.to_path_buf(),
-                        name: name.clone(),
-                    });
-                },
-                (EntryChange::Remove, None) => EditOutcome::Absent,
-                (EntryChange::Remove, Some(ours)) if ours || force => {
-                    servers.remove(name.as_ref());
-                    EditOutcome::Removed
-                },
-                (EntryChange::Remove, Some(_)) => {
-                    return Err(AgentConfigError::NotOurs {
-                        path: path.to_path_buf(),
-                        name: name.clone(),
-                    });
-                },
+    let Some(item) = document.get_mut(SERVERS_TABLE) else {
+        return Ok(Edited::builder()
+            .outcome(EditOutcome::Absent)
+            .text(None)
+            .build());
+    };
+    let servers = item
+        .as_table_like_mut()
+        .ok_or_else(|| AgentConfigError::NotATable {
+            path: path.to_path_buf(),
+            key: SERVERS_TABLE.to_owned(),
+        })?;
+    let judged = servers.get(name.as_ref()).map(|item| judge(item, entry));
+    let action = EntryAction::decide(judged, change, force, path, name)?;
+    match action {
+        EntryAction::Insert | EntryAction::Replace => {
+            servers.insert(name.as_ref(), entry_table(entry));
+        },
+        EntryAction::Update => {
+            if let Some(existing) = servers
+                .get_mut(name.as_ref())
+                .and_then(Item::as_table_like_mut)
+            {
+                existing.insert(COMMAND_KEY, value(entry.command().as_str()));
             }
         },
-    };
+        EntryAction::Remove => {
+            servers.remove(name.as_ref());
+            if servers.is_empty() {
+                document.remove(SERVERS_TABLE);
+            }
+        },
+        EntryAction::Keep(_) => {},
+    }
+    let outcome = action.outcome();
     let text = outcome.writes().then(|| document.to_string());
     Ok(Edited::builder().outcome(outcome).text(text).build())
 }
@@ -100,23 +99,26 @@ fn entry_table(entry: &ServerEntry) -> Item {
     Item::Table(table)
 }
 
-/// Whether `item`, an existing entry, is `entry`.
-fn holds(item: &Item, entry: &ServerEntry) -> bool {
+/// What `item`, an existing entry, is to muster, and whether it is turned
+/// off.
+fn judge(item: &Item, entry: &ServerEntry) -> (EntryMatch, bool) {
     let Some(table) = item.as_table_like() else {
-        return false;
+        return (EntryMatch::Foreign, false);
     };
-    entry.matches(
-        string_at(table, COMMAND_KEY),
+    let matched = entry.judge(
+        table.get(COMMAND_KEY).and_then(Item::as_str),
         table
             .get(ARGS_KEY)
             .and_then(Item::as_array)
             .map(|args| args.iter().map(Value::as_str).collect()),
-    )
+    );
+    let flag = |key| bool_at(table, key);
+    (matched, turned_off(flag(ENABLED_KEY), flag(DISABLED_KEY)))
 }
 
-/// The string under `key` in `table`, if it holds one.
-fn string_at<'a>(table: &'a dyn TableLike, key: &str) -> Option<&'a str> {
-    table.get(key).and_then(Item::as_str)
+/// The boolean under `key` in `table`, if it holds one.
+fn bool_at(table: &dyn TableLike, key: &str) -> Option<bool> {
+    table.get(key).and_then(Item::as_bool)
 }
 
 #[cfg(test)]
@@ -124,24 +126,20 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::adapter::agent_config::testing::{MUSTER_BINARY, entry, muster};
 
     /// The path every fixture is said to live at.
     fn file() -> PathBuf {
         PathBuf::from("/h/.codex/config.toml")
     }
 
-    /// muster's entry.
-    fn entry() -> ServerEntry {
-        ServerEntry::builder()
-            .command("/bin/muster".to_owned())
-            .args(vec!["mcp".to_owned()])
-            .with_env(false)
-            .build()
-    }
-
-    /// The default server name.
-    fn muster() -> McpServerName {
-        McpServerName::try_new("muster").unwrap()
+    /// `change` made to muster's entry in `text`.
+    fn edited(
+        text: Option<&str>,
+        change: EntryChange,
+        force: bool,
+    ) -> Result<Edited, AgentConfigError> {
+        edit_toml(text, &file(), &muster(), &entry(false), change, force)
     }
 
     /// A Codex config with comments, settings and another server.
@@ -161,15 +159,7 @@ model = "o4-mini"
     /// its own, and a second add writes nothing.
     #[test]
     fn a_codex_config_keeps_everything_else() {
-        let added = edit_toml(
-            Some(CODEX_CONFIG),
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let added = edited(Some(CODEX_CONFIG), EntryChange::Add, false).unwrap();
         let text = added.text().clone().unwrap();
 
         assert_eq!(added.outcome(), EditOutcome::Added);
@@ -183,69 +173,40 @@ model = "o4-mini"
             assert!(text.contains(line), "{line} lost from:\n{text}");
         }
 
-        let again = edit_toml(
-            Some(&text),
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let again = edited(Some(&text), EntryChange::Add, false).unwrap();
         assert_eq!(again.outcome(), EditOutcome::AlreadyAdded);
         assert!(again.text().is_none());
 
-        let removed = edit_toml(
-            Some(&text),
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Remove,
-            false,
-        )
-        .unwrap();
+        let removed = edited(Some(&text), EntryChange::Remove, false).unwrap();
         assert_eq!(removed.outcome(), EditOutcome::Removed);
         assert_eq!(removed.text().as_deref(), Some(CODEX_CONFIG));
     }
 
-    /// A missing config gets the entry alone, with no empty parent table.
+    /// A missing config gets the entry alone, with no empty parent table,
+    /// and removing it leaves no empty table of servers behind.
     #[test]
     fn a_missing_config_gets_the_entry_alone() {
-        let added = edit_toml(None, &file(), &muster(), &entry(), EntryChange::Add, false).unwrap();
+        let added = edited(None, EntryChange::Add, false).unwrap();
         assert_eq!(
             added.text().as_deref(),
             Some("[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\n")
         );
-        let removed = edit_toml(
-            None,
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Remove,
-            false,
-        )
-        .unwrap();
-        assert_eq!(removed.outcome(), EditOutcome::Absent);
+        let removed = edited(added.text().as_deref(), EntryChange::Remove, false).unwrap();
+        assert_eq!(removed.text().as_deref(), Some(""));
+        let absent = edited(None, EntryChange::Remove, false).unwrap();
+        assert_eq!(absent.outcome(), EditOutcome::Absent);
     }
 
     /// An inline table of servers takes the entry inline.
     #[test]
     fn an_inline_table_of_servers_stays_inline() {
         let text = "mcp_servers = { other = { command = \"x\" } }\n";
-        let added = edit_toml(
-            Some(text),
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let added = edited(Some(text), EntryChange::Add, false).unwrap();
         let written = added.text().clone().unwrap();
         let reread = written.parse::<DocumentMut>().unwrap();
         assert_eq!(
             reread[SERVERS_TABLE]["muster"][COMMAND_KEY].as_str(),
-            Some("/bin/muster")
+            Some(MUSTER_BINARY)
         );
         assert_eq!(
             reread[SERVERS_TABLE]["other"][COMMAND_KEY].as_str(),
@@ -253,65 +214,53 @@ model = "o4-mini"
         );
     }
 
-    /// A different entry under the name needs force; a broken file or a
+    /// muster's entry from another install's path is updated in place, its
+    /// other keys kept; a turned-off one is reported and needs force.
+    #[test]
+    fn an_older_or_turned_off_entry_of_musters() {
+        let older = "[mcp_servers.muster]\ncommand = \"/old/bin/muster\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n";
+        let updated = edited(Some(older), EntryChange::Add, false).unwrap();
+        assert_eq!(updated.outcome(), EditOutcome::Updated);
+        assert_eq!(
+            updated.text().as_deref(),
+            Some(
+                "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n"
+            )
+        );
+
+        let off =
+            "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\nenabled = false\n";
+        let kept = edited(Some(off), EntryChange::Add, false).unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::Disabled);
+        assert!(kept.text().is_none());
+        let forced = edited(Some(off), EntryChange::Add, true).unwrap();
+        assert_eq!(forced.outcome(), EditOutcome::Replaced);
+        assert!(!forced.text().as_ref().unwrap().contains("enabled"));
+    }
+
+    /// Another server under the name needs force; a broken file or a
     /// servers key that is no table is refused.
     #[test]
-    fn a_different_entry_or_a_broken_file_is_refused() {
-        let theirs = "[mcp_servers.muster]\ncommand = \"/old/muster\"\nargs = [\"mcp\"]\n";
+    fn another_servers_entry_or_a_broken_file_is_refused() {
+        let theirs = "[mcp_servers.muster]\ncommand = \"/opt/other-tool\"\nargs = [\"mcp\"]\n";
         assert!(matches!(
-            edit_toml(
-                Some(theirs),
-                &file(),
-                &muster(),
-                &entry(),
-                EntryChange::Add,
-                false
-            ),
+            edited(Some(theirs), EntryChange::Add, false),
             Err(AgentConfigError::Taken { .. })
         ));
         assert!(matches!(
-            edit_toml(
-                Some(theirs),
-                &file(),
-                &muster(),
-                &entry(),
-                EntryChange::Remove,
-                false
-            ),
+            edited(Some(theirs), EntryChange::Remove, false),
             Err(AgentConfigError::NotOurs { .. })
         ));
-        let forced = edit_toml(
-            Some(theirs),
-            &file(),
-            &muster(),
-            &entry(),
-            EntryChange::Add,
-            true,
-        )
-        .unwrap();
+        let forced = edited(Some(theirs), EntryChange::Add, true).unwrap();
         assert_eq!(forced.outcome(), EditOutcome::Replaced);
         assert!(forced.text().as_ref().unwrap().contains("\"/bin/muster\""));
 
         assert!(matches!(
-            edit_toml(
-                Some("model = "),
-                &file(),
-                &muster(),
-                &entry(),
-                EntryChange::Add,
-                false
-            ),
+            edited(Some("model = "), EntryChange::Add, false),
             Err(AgentConfigError::Unparseable { .. })
         ));
         assert!(matches!(
-            edit_toml(
-                Some("mcp_servers = 3\n"),
-                &file(),
-                &muster(),
-                &entry(),
-                EntryChange::Add,
-                false
-            ),
+            edited(Some("mcp_servers = 3\n"), EntryChange::Add, false),
             Err(AgentConfigError::NotATable { .. })
         ));
     }

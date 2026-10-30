@@ -39,15 +39,6 @@ impl Agent {
         }
     }
 
-    /// The scope an entry goes to when none is asked for: the one the
-    /// agent's own `mcp add` picks, or its only one.
-    pub fn default_scope(self) -> McpScope {
-        match self {
-            Self::Claude => McpScope::Local,
-            Self::Codex | Self::Zed => McpScope::User,
-        }
-    }
-
     /// Whether the agent reads MCP servers from `scope`.
     pub fn supports(self, scope: McpScope) -> bool {
         match self {
@@ -72,13 +63,14 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::adapter::agent_config::DEFAULT_MCP_SCOPE;
 
-    /// Each agent's default scope is one it supports, and only Claude Code
-    /// has a local scope and only Zed lacks a project one.
+    /// Every agent supports the default scope, and only Claude Code has a
+    /// local scope and only Zed lacks a project one.
     #[test]
     fn scopes_follow_each_agents_docs() {
         for agent in Agent::iter() {
-            assert!(agent.supports(agent.default_scope()), "{agent}");
+            assert!(agent.supports(DEFAULT_MCP_SCOPE), "{agent}");
         }
         assert!(Agent::Claude.supports(McpScope::Project));
         assert!(Agent::Codex.supports(McpScope::Project));

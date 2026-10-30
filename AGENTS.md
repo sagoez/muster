@@ -93,11 +93,12 @@ plugs into a port.
     the `idle_stop_*` columns of `settings` and `projects`),
     `adapter/exchange` (the export file), `adapter/detect` (stack
     detection for `muster init`), `adapter/agent_config` (the MCP server
-    entries `muster mcp add` and `remove` edit in Claude Code's, Codex's and
-    Zed's own configs, at locations the composition root finds), `adapter/terminal` (the VT emulator,
-    keyboard tracker and log line renderer), `adapter/herdr` (the `TerminalWorkspace` port over
-    the herdr CLI, each call bounded and its child killed and reaped),
-    notifier, metrics.
+    entries `muster mcp add` and `remove` edit in Claude Code's, Codex's
+    and Zed's own configs, at locations the composition root finds),
+    `adapter/terminal` (the VT emulator, keyboard tracker and log line
+    renderer), `adapter/herdr` (the `TerminalWorkspace` port over the herdr
+    CLI, each call bounded and its child killed and reaped), notifier,
+    metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs. It hands the CLI
   its ports through `CliPorts`, builds the MCP server's deps when the CLI asks
@@ -114,11 +115,11 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 
 Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
 `HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts`,
-`SettleWatch`, `FollowedStream` and `McpRegistry`. Each abstracts one adapter's call into
-another, or what the composition root hands an adapter, and carries adapter
-types (service requests, holder records, clap launches), so it has no place
-in `domain`. A seam the core itself needs, with only domain types in its
-signature, is a domain port.
+`SettleWatch`, `FollowedStream` and `McpRegistry`. Each abstracts one
+adapter's call into another, or what the composition root hands an adapter,
+and carries adapter types (service requests, holder records, clap launches),
+so it has no place in `domain`. A seam the core itself needs, with only
+domain types in its signature, is a domain port.
 
 ```
 src/

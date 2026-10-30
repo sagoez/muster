@@ -1,19 +1,25 @@
 //! An edit of one server entry in a JSON or JSONC file, made on its concrete
 //! syntax tree so every other key, comment and blank line stays as written.
 
-use std::path::Path;
+use std::collections::HashSet;
 
-use getset::{CopyGetters, Getters};
 use jsonc_parser::{
     ParseOptions,
-    cst::{CstInputValue, CstNode, CstObject, CstRootNode},
+    cst::{CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode},
 };
 use serde::de::IgnoredAny;
-use typed_builder::TypedBuilder;
 
 use super::{
-    agent_config_error::AgentConfigError, edit_outcome::EditOutcome, edited::Edited,
-    entry_change::EntryChange, server_entry::ServerEntry, server_name::McpServerName,
+    agent_config_error::AgentConfigError,
+    edit_outcome::EditOutcome,
+    edited::Edited,
+    entry_action::EntryAction,
+    entry_change::EntryChange,
+    entry_match::EntryMatch,
+    json_dialect::JsonDialect,
+    json_place::JsonPlace,
+    server_entry::{COMMAND_KEY, ServerEntry},
+    server_name::McpServerName,
 };
 
 /// The text a file muster creates starts from.
@@ -21,39 +27,16 @@ const EMPTY_OBJECT: &str = "{}\n";
 /// The line break a file muster writes ends with.
 const LINE_BREAK: char = '\n';
 
-/// How strictly a file is read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum JsonDialect {
-    /// Plain JSON, as Claude Code reads it: a comment or trailing comma
-    /// makes the file one muster leaves alone.
-    Strict,
-    /// JSON with comments and trailing commas, as Zed reads its settings.
-    WithComments,
-}
-
-/// Where in a JSON file an entry lives and how strictly the file is read.
-#[derive(Clone, Debug, Getters, CopyGetters, TypedBuilder)]
-pub(super) struct JsonPlace<'a> {
-    /// The file, for messages.
-    #[getset(get_copy = "pub(super)")]
-    path: &'a Path,
-    /// The keys of the objects leading to the table of servers, outermost
-    /// first; the last is the table itself.
-    #[getset(get = "pub(super)")]
-    table: Vec<String>,
-    /// How strictly the file is read.
-    #[getset(get_copy = "pub(super)")]
-    dialect: JsonDialect,
-}
-
 /// `change` applied to the entry `name` in `text`, the file at `place`, or
-/// in an empty file when there is none.
+/// in an empty file when there is none. A removal takes out the objects it
+/// leaves empty on the way to the entry.
 ///
 /// # Errors
-/// Returns [`AgentConfigError::Unparseable`] or
-/// [`AgentConfigError::NotATable`] for a file muster cannot edit safely, and
-/// [`AgentConfigError::Taken`] or [`AgentConfigError::NotOurs`] for a
-/// different entry under `name` without `force`.
+/// Returns [`AgentConfigError::Unparseable`],
+/// [`AgentConfigError::NotAnObject`], [`AgentConfigError::NotATable`] or
+/// [`AgentConfigError::DuplicateKey`] for a file muster cannot edit safely,
+/// and [`AgentConfigError::Taken`] or [`AgentConfigError::NotOurs`] for
+/// another server's entry under `name` without `force`.
 pub(super) fn edit_json(
     text: Option<&str>,
     place: &JsonPlace<'_>,
@@ -77,19 +60,45 @@ pub(super) fn edit_json(
     }
     let root = CstRootNode::parse(source, &ParseOptions::default())
         .map_err(|error| unparseable(error.to_string()))?;
-    let Some(top) = root.object_value() else {
-        return Err(not_a_table(place, "(the top level)"));
+    // A file of comments alone is empty settings, which gain an object.
+    let top = root
+        .object_value_or_create()
+        .ok_or_else(|| AgentConfigError::NotAnObject(place.path().to_path_buf()))?;
+    unique_keys(&top, place)?;
+    let Some((table, holders)) = table_of(&top, place, change == EntryChange::Add)? else {
+        return Ok(Edited::builder()
+            .outcome(EditOutcome::Absent)
+            .text(None)
+            .build());
     };
-    let outcome = match change {
-        EntryChange::Add => {
-            let table = table_of(&top, place, true)?.ok_or_else(|| not_a_table(place, ""))?;
-            add(&table, place, name, entry, force)?
+    let existing = table.get(name.as_ref());
+    if let Some(object) = existing.as_ref().and_then(CstObjectProp::object_value) {
+        unique_keys(&object, place)?;
+    }
+    let judged = existing
+        .as_ref()
+        .map(|prop| judge(prop.value().as_ref(), entry));
+    let action = EntryAction::decide(judged, change, force, place.path(), name)?;
+    match (action, existing) {
+        (EntryAction::Insert, _) => {
+            table.append(name.as_ref(), entry.json_input());
         },
-        EntryChange::Remove => match table_of(&top, place, false)? {
-            Some(table) => remove(&table, place, name, entry, force)?,
-            None => EditOutcome::Absent,
+        (EntryAction::Update, Some(prop)) => {
+            if let Some(command) = prop
+                .object_value()
+                .and_then(|object| object.get(COMMAND_KEY))
+            {
+                command.set_value(CstInputValue::from(entry.command().as_str()));
+            }
         },
-    };
+        (EntryAction::Replace, Some(prop)) => prop.set_value(entry.json_input()),
+        (EntryAction::Remove, Some(prop)) => {
+            prop.remove();
+            prune(&holders);
+        },
+        _ => {},
+    }
+    let outcome = action.outcome();
     let text = outcome.writes().then(|| {
         let mut written = root.to_string();
         if !written.ends_with(LINE_BREAK) {
@@ -100,107 +109,93 @@ pub(super) fn edit_json(
     Ok(Edited::builder().outcome(outcome).text(text).build())
 }
 
-/// The table of servers under `top`, made with the objects leading to it
-/// when `create`, or none when it is absent and not made.
+/// The table of servers under `top`, with the property holding each object
+/// on the way to it, outermost first; made with those objects when
+/// `create`, or none when it is absent and not made.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::NotATable`] when a key on the way holds
-/// something other than an object.
+/// something other than an object, or [`AgentConfigError::DuplicateKey`]
+/// when an object on the way holds a key twice.
 fn table_of(
     top: &CstObject,
     place: &JsonPlace<'_>,
     create: bool,
-) -> Result<Option<CstObject>, AgentConfigError> {
+) -> Result<Option<(CstObject, Vec<CstObjectProp>)>, AgentConfigError> {
     let mut object = top.clone();
+    let mut holders = Vec::new();
     for key in place.table() {
-        object = match object.get(key) {
-            Some(prop) => prop.object_value().ok_or_else(|| not_a_table(place, key))?,
-            None if create => object
-                .append(key, CstInputValue::Object(Vec::new()))
-                .object_value()
-                .ok_or_else(|| not_a_table(place, key))?,
+        let prop = match object.get(key) {
+            Some(prop) => prop,
+            None if create => object.append(key, CstInputValue::Object(Vec::new())),
             None => return Ok(None),
         };
+        object = prop
+            .object_value()
+            .ok_or_else(|| AgentConfigError::NotATable {
+                path: place.path().to_path_buf(),
+                key: key.clone(),
+            })?;
+        unique_keys(&object, place)?;
+        holders.push(prop);
     }
-    Ok(Some(object))
+    Ok(Some((object, holders)))
 }
 
-/// Adds `entry` under `name` to `table`.
+/// Refuses `object` when it holds a key twice: agents disagree on which
+/// one counts, so no edit of it is safe.
 ///
 /// # Errors
-/// Returns [`AgentConfigError::Taken`] for a different entry under `name`
-/// without `force`.
-fn add(
-    table: &CstObject,
-    place: &JsonPlace<'_>,
-    name: &McpServerName,
-    entry: &ServerEntry,
-    force: bool,
-) -> Result<EditOutcome, AgentConfigError> {
-    let Some(existing) = table.get(name.as_ref()) else {
-        table.append(name.as_ref(), entry.json_input());
-        return Ok(EditOutcome::Added);
-    };
-    if holds(existing.value().as_ref(), entry) {
-        return Ok(EditOutcome::AlreadyAdded);
+/// Returns [`AgentConfigError::DuplicateKey`] naming the key.
+fn unique_keys(object: &CstObject, place: &JsonPlace<'_>) -> Result<(), AgentConfigError> {
+    let mut seen = HashSet::new();
+    for key in object
+        .properties()
+        .iter()
+        .filter_map(CstObjectProp::decoded_name)
+    {
+        if !seen.insert(key.clone()) {
+            return Err(AgentConfigError::DuplicateKey {
+                path: place.path().to_path_buf(),
+                key,
+            });
+        }
     }
-    if !force {
-        return Err(AgentConfigError::Taken {
-            path: place.path().to_path_buf(),
-            name: name.clone(),
-        });
-    }
-    existing.set_value(entry.json_input());
-    Ok(EditOutcome::Replaced)
+    Ok(())
 }
 
-/// Removes the entry under `name` from `table`.
-///
-/// # Errors
-/// Returns [`AgentConfigError::NotOurs`] for a different entry under `name`
-/// without `force`.
-fn remove(
-    table: &CstObject,
-    place: &JsonPlace<'_>,
-    name: &McpServerName,
-    entry: &ServerEntry,
-    force: bool,
-) -> Result<EditOutcome, AgentConfigError> {
-    let Some(existing) = table.get(name.as_ref()) else {
-        return Ok(EditOutcome::Absent);
-    };
-    if !force && !holds(existing.value().as_ref(), entry) {
-        return Err(AgentConfigError::NotOurs {
-            path: place.path().to_path_buf(),
-            name: name.clone(),
-        });
+/// Takes out the objects `holders` hold that a removal left empty,
+/// innermost first, stopping at the first one still holding a key.
+fn prune(holders: &[CstObjectProp]) {
+    for prop in holders.iter().rev() {
+        if !prop
+            .object_value()
+            .is_some_and(|object| object.properties().is_empty())
+        {
+            return;
+        }
+        prop.clone().remove();
     }
-    existing.remove();
-    Ok(EditOutcome::Removed)
 }
 
-/// Whether `value`, an existing entry, is `entry`.
-fn holds(value: Option<&CstNode>, entry: &ServerEntry) -> bool {
+/// What `value`, an existing entry, is to muster, and whether it is turned
+/// off.
+fn judge(value: Option<&CstNode>, entry: &ServerEntry) -> (EntryMatch, bool) {
     value
         .and_then(CstNode::to_serde_value)
-        .is_some_and(|value| entry.matches_json(&value))
-}
-
-/// The refusal of `key` in the file at `place` as not an object.
-fn not_a_table(place: &JsonPlace<'_>, key: &str) -> AgentConfigError {
-    AgentConfigError::NotATable {
-        path: place.path().to_path_buf(),
-        key: key.to_owned(),
-    }
+        .map_or((EntryMatch::Foreign, false), |value| {
+            entry.judge_json(&value)
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::adapter::agent_config::testing::{MUSTER_BINARY, entry, muster};
 
     /// The path every fixture is said to live at.
     fn file() -> PathBuf {
@@ -216,23 +211,29 @@ mod tests {
             .build()
     }
 
-    /// muster's entry, with `env` as Zed writes it when `with_env`.
-    fn entry(with_env: bool) -> ServerEntry {
-        ServerEntry::builder()
-            .command("/bin/muster".to_owned())
-            .args(vec!["mcp".to_owned()])
-            .with_env(with_env)
-            .build()
-    }
-
-    /// The default server name.
-    fn muster() -> McpServerName {
-        McpServerName::try_new("muster").unwrap()
+    /// `change` made to muster's entry in `text` at `at`.
+    fn edited(
+        text: Option<&str>,
+        at: &JsonPlace<'_>,
+        change: EntryChange,
+        force: bool,
+    ) -> Result<Edited, AgentConfigError> {
+        edit_json(text, at, &muster(), &entry(false), change, force)
     }
 
     /// `text` as plain JSON.
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
+    }
+
+    /// `text` as JSON with comments.
+    fn loosely_parsed(text: &str) -> Value {
+        CstRootNode::parse(text, &ParseOptions::default())
+            .unwrap()
+            .value()
+            .unwrap()
+            .to_serde_value()
+            .unwrap()
     }
 
     /// Zed settings with comments, a trailing comma and another server.
@@ -253,18 +254,13 @@ mod tests {
     fn zed_settings_keep_their_comments() {
         let path = file();
         let at = place(&path, &["context_servers"], JsonDialect::WithComments);
-        let edited = edit_json(
-            Some(ZED_SETTINGS),
-            &at,
-            &muster(),
-            &entry(true),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
-        let text = edited.text().clone().unwrap();
+        let zed = |text: &str, change| {
+            edit_json(Some(text), &at, &muster(), &entry(true), change, false).unwrap()
+        };
+        let added = zed(ZED_SETTINGS, EntryChange::Add);
+        let text = added.text().clone().unwrap();
 
-        assert_eq!(edited.outcome(), EditOutcome::Added);
+        assert_eq!(added.outcome(), EditOutcome::Added);
         assert!(
             text.contains(
                 "    \"other\": { \"command\": \"other-mcp\", \"args\": [] },\n    \"muster\": {\n      \"command\": \"/bin/muster\",\n      \"args\": [\"mcp\"],\n      \"env\": {},\n    },\n  },\n}\n"
@@ -279,42 +275,43 @@ mod tests {
         ] {
             assert!(text.contains(kept), "{kept} lost from:\n{text}");
         }
-        let root = CstRootNode::parse(&text, &ParseOptions::default()).unwrap();
-        let value = root.value().unwrap().to_serde_value().unwrap();
+        let value = loosely_parsed(&text);
         assert_eq!(
             value["context_servers"]["muster"],
-            json!({"command": "/bin/muster", "args": ["mcp"], "env": {}})
+            json!({"command": MUSTER_BINARY, "args": ["mcp"], "env": {}})
         );
         assert_eq!(value["theme"], "One Dark");
 
-        let again = edit_json(
-            Some(&text),
-            &at,
-            &muster(),
-            &entry(true),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let again = zed(&text, EntryChange::Add);
         assert_eq!(again.outcome(), EditOutcome::AlreadyAdded);
         assert!(again.text().is_none(), "an identical entry writes nothing");
 
-        let removed = edit_json(
-            Some(&text),
-            &at,
-            &muster(),
-            &entry(true),
-            EntryChange::Remove,
-            false,
-        )
-        .unwrap();
+        let removed = zed(&text, EntryChange::Remove);
         let after = removed.text().clone().unwrap();
         assert_eq!(removed.outcome(), EditOutcome::Removed);
         assert!(
             after.contains("/* keep this one */") && after.contains("other-mcp"),
             "{after}"
         );
-        assert!(!after.contains("/bin/muster"), "{after}");
+        assert!(!after.contains(MUSTER_BINARY), "{after}");
+    }
+
+    /// A Zed settings file of comments alone is empty settings: the entry
+    /// is added below the comments.
+    #[test]
+    fn a_settings_file_of_comments_alone_gains_the_entry() {
+        let path = file();
+        let at = place(&path, &["context_servers"], JsonDialect::WithComments);
+        let comments = "// Zed settings\n// nothing yet\n";
+        let added = edited(Some(comments), &at, EntryChange::Add, false).unwrap();
+        let text = added.text().clone().unwrap();
+        assert!(text.starts_with(comments), "{text}");
+        assert_eq!(
+            loosely_parsed(&text)["context_servers"]["muster"]["command"],
+            MUSTER_BINARY
+        );
+        let absent = edited(Some(comments), &at, EntryChange::Remove, false).unwrap();
+        assert_eq!(absent.outcome(), EditOutcome::Absent);
     }
 
     /// A Claude Code file gains the entry beside the servers and keys it
@@ -338,19 +335,11 @@ mod tests {
 }
 "#;
         let user = place(&path, &["mcpServers"], JsonDialect::Strict);
-        let added = edit_json(
-            Some(original),
-            &user,
-            &muster(),
-            &entry(false),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let added = edited(Some(original), &user, EntryChange::Add, false).unwrap();
         let value = parsed(added.text().as_ref().unwrap());
         assert_eq!(
             value["mcpServers"]["muster"],
-            json!({"command": "/bin/muster", "args": ["mcp"]})
+            json!({"command": MUSTER_BINARY, "args": ["mcp"]})
         );
         assert_eq!(value["mcpServers"]["other"]["command"], "other-mcp");
         assert_eq!(value["numStartups"], 12);
@@ -367,15 +356,7 @@ mod tests {
             &["projects", "/work/shop", "mcpServers"],
             JsonDialect::Strict,
         );
-        let added = edit_json(
-            Some(original),
-            &local,
-            &muster(),
-            &entry(false),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let added = edited(Some(original), &local, EntryChange::Add, false).unwrap();
         let value = parsed(added.text().as_ref().unwrap());
         assert_eq!(
             value["projects"]["/work/shop"]["mcpServers"]["muster"]["args"],
@@ -388,91 +369,121 @@ mod tests {
         );
     }
 
+    /// A removal leaves no empty table of servers behind, nor a project's
+    /// object it emptied, but keeps any object still holding a key.
+    #[test]
+    fn a_removal_takes_out_the_objects_it_empties() {
+        let path = file();
+        let project = place(&path, &["mcpServers"], JsonDialect::Strict);
+        let added = edited(None, &project, EntryChange::Add, false).unwrap();
+        let removed = edited(
+            added.text().as_deref(),
+            &project,
+            EntryChange::Remove,
+            false,
+        )
+        .unwrap();
+        assert_eq!(parsed(removed.text().as_ref().unwrap()), json!({}));
+
+        let local = place(
+            &path,
+            &["projects", "/work/shop", "mcpServers"],
+            JsonDialect::Strict,
+        );
+        let original = r#"{"projects": {"/work/other": {"allowedTools": []}}}"#;
+        let added = edited(Some(original), &local, EntryChange::Add, false).unwrap();
+        let removed = edited(added.text().as_deref(), &local, EntryChange::Remove, false).unwrap();
+        assert_eq!(parsed(removed.text().as_ref().unwrap()), parsed(original));
+
+        let kept = r#"{"projects": {"/work/shop": {"allowedTools": [], "mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"]}}}}}"#;
+        let removed = edited(Some(kept), &local, EntryChange::Remove, false).unwrap();
+        assert_eq!(
+            parsed(removed.text().as_ref().unwrap()),
+            json!({"projects": {"/work/shop": {"allowedTools": []}}})
+        );
+    }
+
     /// A missing or empty file becomes one holding just the entry.
     #[test]
     fn a_missing_file_gets_the_entry_alone() {
         let path = file();
         let at = place(&path, &["mcpServers"], JsonDialect::Strict);
         for text in [None, Some(""), Some("  \n")] {
-            let added =
-                edit_json(text, &at, &muster(), &entry(false), EntryChange::Add, false).unwrap();
+            let added = edited(text, &at, EntryChange::Add, false).unwrap();
             let written = added.text().clone().unwrap();
             assert_eq!(
                 parsed(&written),
-                json!({"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"]}}})
+                json!({"mcpServers": {"muster": {"command": MUSTER_BINARY, "args": ["mcp"]}}})
             );
             assert!(written.ends_with('\n'), "{written:?}");
         }
-        let removed = edit_json(
-            None,
-            &at,
-            &muster(),
-            &entry(false),
-            EntryChange::Remove,
-            false,
-        )
-        .unwrap();
+        let removed = edited(None, &at, EntryChange::Remove, false).unwrap();
         assert_eq!(removed.outcome(), EditOutcome::Absent);
         assert!(removed.text().is_none());
     }
 
-    /// A different entry under the name is kept unless forced, then
-    /// replaced or removed.
+    /// Another server under the name is kept unless forced, then replaced
+    /// or removed.
     #[test]
-    fn a_different_entry_needs_force() {
+    fn another_servers_entry_needs_force() {
         let path = file();
         let at = place(&path, &["mcpServers"], JsonDialect::Strict);
-        let theirs = r#"{"mcpServers": {"muster": {"command": "/old/muster", "args": ["mcp"]}}}"#;
+        let theirs = r#"{"mcpServers": {"muster": {"command": "/opt/other-tool", "args": ["mcp"]}, "x": {}}}"#;
 
         assert!(matches!(
-            edit_json(
-                Some(theirs),
-                &at,
-                &muster(),
-                &entry(false),
-                EntryChange::Add,
-                false
-            ),
+            edited(Some(theirs), &at, EntryChange::Add, false),
             Err(AgentConfigError::Taken { .. })
         ));
         assert!(matches!(
-            edit_json(
-                Some(theirs),
-                &at,
-                &muster(),
-                &entry(false),
-                EntryChange::Remove,
-                false
-            ),
+            edited(Some(theirs), &at, EntryChange::Remove, false),
             Err(AgentConfigError::NotOurs { .. })
         ));
-        let replaced = edit_json(
-            Some(theirs),
-            &at,
-            &muster(),
-            &entry(false),
-            EntryChange::Add,
-            true,
-        )
-        .unwrap();
+        let replaced = edited(Some(theirs), &at, EntryChange::Add, true).unwrap();
         assert_eq!(replaced.outcome(), EditOutcome::Replaced);
         assert_eq!(
             parsed(replaced.text().as_ref().unwrap())["mcpServers"]["muster"]["command"],
-            "/bin/muster"
+            MUSTER_BINARY
         );
-        let removed = edit_json(
-            Some(theirs),
-            &at,
-            &muster(),
-            &entry(false),
-            EntryChange::Remove,
-            true,
-        )
-        .unwrap();
+        let removed = edited(Some(theirs), &at, EntryChange::Remove, true).unwrap();
         assert_eq!(
             parsed(removed.text().as_ref().unwrap()),
-            json!({"mcpServers": {}})
+            json!({"mcpServers": {"x": {}}})
         );
+    }
+
+    /// muster's entry from an older install's path is pointed at this
+    /// binary without force, its other keys kept, and removed as muster's.
+    #[test]
+    fn an_older_muster_entry_is_updated_in_place() {
+        let path = file();
+        let at = place(&path, &["mcpServers"], JsonDialect::Strict);
+        let older = r#"{"mcpServers": {"muster": {"command": "/old/0.9.0/bin/muster", "args": ["mcp"], "env": {"A": "1"}}}}"#;
+
+        let updated = edited(Some(older), &at, EntryChange::Add, false).unwrap();
+        assert_eq!(updated.outcome(), EditOutcome::Updated);
+        assert_eq!(
+            parsed(updated.text().as_ref().unwrap())["mcpServers"]["muster"],
+            json!({"command": MUSTER_BINARY, "args": ["mcp"], "env": {"A": "1"}})
+        );
+        let removed = edited(Some(older), &at, EntryChange::Remove, false).unwrap();
+        assert_eq!(removed.outcome(), EditOutcome::Removed);
+    }
+
+    /// A turned-off entry of muster's is reported as such and left off
+    /// without force, and turned back on with it.
+    #[test]
+    fn a_turned_off_entry_is_reported_not_added() {
+        let path = file();
+        let at = place(&path, &["context_servers"], JsonDialect::WithComments);
+        let off = r#"{"context_servers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "enabled": false}}}"#;
+
+        let kept = edited(Some(off), &at, EntryChange::Add, false).unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::Disabled);
+        assert!(kept.text().is_none());
+        let forced = edited(Some(off), &at, EntryChange::Add, true).unwrap();
+        assert_eq!(forced.outcome(), EditOutcome::Replaced);
+        let value = loosely_parsed(forced.text().as_ref().unwrap());
+        assert!(value["context_servers"]["muster"].get("enabled").is_none());
     }
 
     /// An entry Claude Code wrote itself, with `type` and `env`, is muster's
@@ -483,16 +494,49 @@ mod tests {
         let at = place(&path, &["mcpServers"], JsonDialect::Strict);
         let own = r#"{"mcpServers": {"muster": {"type": "stdio", "command": "/bin/muster", "args": ["mcp"], "env": {}}}}"#;
 
-        let again = edit_json(
-            Some(own),
-            &at,
-            &muster(),
-            &entry(false),
-            EntryChange::Add,
-            false,
-        )
-        .unwrap();
+        let again = edited(Some(own), &at, EntryChange::Add, false).unwrap();
         assert_eq!(again.outcome(), EditOutcome::AlreadyAdded);
+    }
+
+    /// A key repeated in the table, its entry or any object on the way to
+    /// it is refused for add and remove alike, since agents read the last
+    /// copy and an edit would act on another.
+    #[test]
+    fn a_repeated_key_on_the_way_is_refused() {
+        let path = file();
+        let local = place(
+            &path,
+            &["projects", "/work/shop", "mcpServers"],
+            JsonDialect::Strict,
+        );
+        for (repeated, key) in [
+            (
+                r#"{"projects": {"/work/shop": {"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"]}, "muster": {"command": "/tmp/evil", "args": []}}}}}"#,
+                "muster",
+            ),
+            (
+                r#"{"projects": {"/work/shop": {"mcpServers": {}}, "/work/shop": {}}}"#,
+                "/work/shop",
+            ),
+            (r#"{"projects": {}, "projects": {}}"#, "projects"),
+            (
+                r#"{"projects": {"/work/shop": {"mcpServers": {"muster": {"command": "/bin/muster", "command": "/tmp/evil", "args": ["mcp"]}}}}}"#,
+                "command",
+            ),
+        ] {
+            for change in [EntryChange::Add, EntryChange::Remove] {
+                let refused = edited(Some(repeated), &local, change, true);
+                assert!(
+                    matches!(
+                        &refused,
+                        Err(AgentConfigError::DuplicateKey { key: found, .. }) if found == key
+                    ),
+                    "{repeated} {change}: {refused:?}"
+                );
+            }
+        }
+        let elsewhere = r#"{"other": {"a": 1, "a": 2}, "projects": {}}"#;
+        assert!(edited(Some(elsewhere), &local, EntryChange::Add, false).is_ok());
     }
 
     /// A file that does not parse, or whose table is not an object, is
@@ -502,32 +546,27 @@ mod tests {
         let path = file();
         let strict = place(&path, &["mcpServers"], JsonDialect::Strict);
         let loose = place(&path, &["mcpServers"], JsonDialect::WithComments);
-        for broken in ["{\"mcpServers\": {", "[1, 2]", "// note\n{}"] {
+        for broken in ["{\"mcpServers\": {", "// note\n{}"] {
             assert!(
                 matches!(
-                    edit_json(
-                        Some(broken),
-                        &strict,
-                        &muster(),
-                        &entry(false),
-                        EntryChange::Add,
-                        false
-                    ),
-                    Err(AgentConfigError::Unparseable { .. } | AgentConfigError::NotATable { .. })
+                    edited(Some(broken), &strict, EntryChange::Add, false),
+                    Err(AgentConfigError::Unparseable { .. })
                 ),
                 "{broken}"
             );
         }
         assert!(matches!(
-            edit_json(Some("{\"mcpServers\": []}"), &loose, &muster(), &entry(false), EntryChange::Add, false),
+            edited(Some("[1, 2]"), &strict, EntryChange::Add, false),
+            Err(AgentConfigError::NotAnObject(_))
+        ));
+        assert!(matches!(
+            edited(Some("{\"mcpServers\": []}"), &loose, EntryChange::Add, false),
             Err(AgentConfigError::NotATable { key, .. }) if key == "mcpServers"
         ));
         assert!(matches!(
-            edit_json(
+            edited(
                 Some("{\"mcpServers\": 3}"),
                 &loose,
-                &muster(),
-                &entry(false),
                 EntryChange::Remove,
                 false
             ),

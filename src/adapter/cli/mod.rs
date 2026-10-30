@@ -61,6 +61,7 @@ mod lock_command;
 mod log_filter_args;
 mod log_follower;
 mod mcp_command;
+mod mcp_config_edit;
 mod mcp_edit_view;
 mod mcp_entries;
 mod mcp_entry_args;

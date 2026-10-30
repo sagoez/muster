@@ -1,11 +1,25 @@
+use std::sync::LazyLock;
+
 use nutype::nutype;
 
 /// Most characters a server name holds, as Claude Code allows.
-pub const SERVER_NAME_MAX_CHARS: usize = 64;
-/// The name muster's entry takes unless another is asked for.
+const SERVER_NAME_MAX_CHARS: usize = 64;
+/// The name muster's entry takes unless another is asked for, and the key
+/// `muster mcp --print-config` writes.
 pub const DEFAULT_SERVER_NAME: &str = "muster";
 /// The punctuation a server name may hold besides ASCII letters and digits.
 const NAME_PUNCTUATION: [char; 2] = ['-', '_'];
+/// Between the last two kinds of character a server name takes.
+const LAST_SEPARATOR: &str = " and ";
+
+/// The form a server name takes, for a refusal of one that does not.
+pub static SERVER_NAME_FORM: LazyLock<String> = LazyLock::new(|| {
+    let punctuation: Vec<String> = NAME_PUNCTUATION.iter().map(|c| format!("'{c}'")).collect();
+    format!(
+        "use 1 to {SERVER_NAME_MAX_CHARS} ASCII letters, digits, {}",
+        punctuation.join(LAST_SEPARATOR)
+    )
+});
 
 /// Whether `name` is a key every supported agent accepts for a server.
 fn is_server_name(name: &str) -> bool {
@@ -15,11 +29,11 @@ fn is_server_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || NAME_PUNCTUATION.contains(&c))
 }
 
-/// The key an MCP server entry goes under: 1 to [`SERVER_NAME_MAX_CHARS`]
-/// ASCII letters, digits, `-` and `_`.
+/// The key an MCP server entry goes under, in the form
+/// [`SERVER_NAME_FORM`] describes.
 #[nutype(
     validate(predicate = is_server_name),
-    derive(Debug, Clone, PartialEq, Eq, Hash, AsRef, Display, FromStr, Serialize)
+    derive(Debug, Clone, PartialEq, Eq, Hash, AsRef, Display, Serialize)
 )]
 pub struct McpServerName(String);
 
@@ -37,5 +51,9 @@ mod tests {
         for bad in ["", "a b", "a.b", "a/b", "ü", long.as_str()] {
             assert!(McpServerName::try_new(bad).is_err(), "{bad}");
         }
+        assert_eq!(
+            *SERVER_NAME_FORM,
+            "use 1 to 64 ASCII letters, digits, '-' and '_'"
+        );
     }
 }

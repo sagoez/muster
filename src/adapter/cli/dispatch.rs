@@ -106,7 +106,7 @@ use crate::{
         shell::HookShell,
         terminal::{colouring::Colouring, log_renderer::LogRenderer},
     },
-    constants::{APP_NAME, MUSTER_SHELL_ENV},
+    constants::{APP_NAME, DOT_CONFIG, MUSTER_SHELL_ENV, XDG_CONFIG_HOME_ENV},
     domain::{
         config::{ImportMode, Stack},
         coordination::Author,
@@ -137,10 +137,6 @@ const NO_SERVICE_NOTICES: &str = "the service is not running; showing the stored
 const PROJECTS_RM_WORDS: &str = "projects rm";
 /// Environment variable naming the user's shell, for the completions probe.
 const SHELL_ENV: &str = "SHELL";
-/// Environment variable controlling the XDG configuration root.
-const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
-/// XDG configuration root under home when the environment does not override.
-const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
 /// What `muster mcp --print-config` adds for a person at a terminal.
@@ -1454,7 +1450,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
     let xdg_config = env::var_os(XDG_CONFIG_HOME_ENV)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
+        .unwrap_or_else(|| home.join(DOT_CONFIG));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),

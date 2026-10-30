@@ -6,12 +6,14 @@
 use std::{
     error::Error,
     io::{self, Write},
+    sync::LazyLock,
 };
 
 use cliclack::{
     ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,
 };
 use console::{Term, style};
+use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -53,12 +55,30 @@ const CHOOSE_AGENTS_TO_ADD: &str = "Which agents should run muster's MCP server?
 const CHOOSE_AGENTS_TO_REMOVE: &str = "Which agents should no longer run muster's MCP server?";
 /// What the plain fallback says it could not ask, choosing agents.
 const CHOOSE_AGENTS_ASKED: &str = "which agents to change";
-/// The argument that answers it up front.
-pub(super) const CHOOSE_AGENTS_ARGUMENT: &str = "--client claude, codex or zed";
-/// The hint of an agent found installed.
+/// The flag that names the agents up front.
+const CLIENT_FLAG: &str = "--client";
+/// Between the agents the flag takes, but the last two.
+const AGENT_SEPARATOR: &str = ", ";
+/// Between the last two agents the flag takes.
+const LAST_AGENT_SEPARATOR: &str = " or ";
+/// The argument that answers it up front, naming every agent.
+pub(super) static CHOOSE_AGENTS_ARGUMENT: LazyLock<String> = LazyLock::new(|| {
+    let names: Vec<String> = Agent::iter().map(|agent| agent.to_string()).collect();
+    let listed = match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{}{LAST_AGENT_SEPARATOR}{last}", rest.join(AGENT_SEPARATOR)),
+        None => String::new(),
+    };
+    format!("{CLIENT_FLAG} {listed}")
+});
+/// The hint of an agent found installed, offered to add to.
 const AGENT_FOUND: &str = "installed";
 /// The hint of an agent not found.
 const AGENT_NOT_FOUND: &str = "not found";
+/// The hint of an agent whose config holds the entry, offered to remove.
+const AGENT_HOLDING: &str = "has the entry";
+/// The hint of an agent whose config does not.
+const AGENT_NOT_HOLDING: &str = "no entry";
 /// Between the parts of a choice's hint.
 const HINT_SEPARATOR: &str = " · ";
 /// Between a padded label and its detail in a framed line.
@@ -290,46 +310,41 @@ impl Presenter {
         })
     }
 
-    /// Checks that the agents `muster mcp` changes can be asked for, before
-    /// anything else is done to ask.
+    /// Asks which of `offered` to make `change` to, those `chosen` names
+    /// ticked to begin with: for an add the agents installed, for a removal
+    /// those whose config holds the entry. `chosen` runs only once the
+    /// person can be asked.
     ///
     /// # Errors
-    /// Returns [`CliError::CannotAsk`] naming `--client` in the plain layout.
-    pub fn can_choose_agents(self) -> Result<(), CliError> {
-        self.can_confirm(CHOOSE_AGENTS_ASKED, CHOOSE_AGENTS_ARGUMENT)
-    }
-
-    /// Asks which of `offered` to make `change` to, those in `present`
-    /// chosen to begin with and hinted as installed.
-    ///
-    /// # Errors
-    /// Returns [`CliError::CannotAsk`] in the plain layout, or
-    /// [`CliError::Cancelled`] when the person cancels.
+    /// Returns [`CliError::CannotAsk`] naming `--client` in the plain
+    /// layout, the failure of `chosen`, or [`CliError::Cancelled`] when the
+    /// person cancels.
     pub fn choose_agents(
         self,
         change: EntryChange,
         offered: &[Agent],
-        present: &[Agent],
+        chosen: impl FnOnce() -> Result<Vec<Agent>, CliError>,
     ) -> Result<Vec<Agent>, CliError> {
-        self.can_choose_agents()?;
+        self.can_confirm(CHOOSE_AGENTS_ASKED, CHOOSE_AGENTS_ARGUMENT.as_str())?;
+        let chosen = chosen()?;
+        let (question, ticked, unticked) = match change {
+            EntryChange::Add => (CHOOSE_AGENTS_TO_ADD, AGENT_FOUND, AGENT_NOT_FOUND),
+            EntryChange::Remove => (CHOOSE_AGENTS_TO_REMOVE, AGENT_HOLDING, AGENT_NOT_HOLDING),
+        };
         let items: Vec<(Agent, &str, &str)> = offered
             .iter()
             .map(|agent| {
-                let hint = if present.contains(agent) {
-                    AGENT_FOUND
+                let hint = if chosen.contains(agent) {
+                    ticked
                 } else {
-                    AGENT_NOT_FOUND
+                    unticked
                 };
                 (*agent, agent.title(), hint)
             })
             .collect();
-        let question = match change {
-            EntryChange::Add => CHOOSE_AGENTS_TO_ADD,
-            EntryChange::Remove => CHOOSE_AGENTS_TO_REMOVE,
-        };
         let initial: Vec<Agent> = offered
             .iter()
-            .filter(|agent| present.contains(agent))
+            .filter(|agent| chosen.contains(agent))
             .copied()
             .collect();
         asked(|| {
@@ -526,14 +541,14 @@ mod tests {
             })
         ));
         assert!(matches!(
-            Presenter::Plain.choose_agents(EntryChange::Add, &[Agent::Claude], &[]),
-            Err(CliError::CannotAsk {
-                argument: CHOOSE_AGENTS_ARGUMENT,
-                ..
-            })
+            Presenter::Plain.choose_agents(EntryChange::Add, &[Agent::Claude], || {
+                unreachable!("nothing is read for a question never put")
+            }),
+            Err(CliError::CannotAsk { argument, .. })
+                if argument == CHOOSE_AGENTS_ARGUMENT.as_str()
         ));
+        assert_eq!(*CHOOSE_AGENTS_ARGUMENT, "--client claude, codex or zed");
         assert!(Presenter::Interactive.can_choose_process().is_ok());
-        assert!(Presenter::Interactive.can_choose_agents().is_ok());
     }
 
     /// The project every fixture belongs to.

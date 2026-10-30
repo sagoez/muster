@@ -9,12 +9,13 @@ pub enum McpCommand {
     ///
     /// Writes an entry launching this muster binary into Claude Code's,
     /// Codex's or Zed's own config, keeping everything else in the file.
-    /// An identical entry is left alone; a different one under the name is
+    /// An identical entry is left alone and one an older muster wrote is
+    /// updated; another server's under the name, or a turned-off one, is
     /// replaced only with --force.
     Add(McpEntryArgs),
     /// Remove muster's MCP server from agents' configs.
     ///
-    /// Removes only the entry under the name, and only when it launches
-    /// this muster unless --force is given.
+    /// Removes only the entry under the name, and only when it launches a
+    /// muster binary unless --force is given.
     Remove(McpEntryArgs),
 }

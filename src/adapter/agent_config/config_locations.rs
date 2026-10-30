@@ -1,54 +1,52 @@
 use std::{
-    env,
     ffi::OsString,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-/// The variable that moves Claude Code's config folder away from home.
-const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
-/// The variable that moves Codex's home folder.
-const CODEX_HOME_ENV: &str = "CODEX_HOME";
-/// The variable naming the XDG config root, which Zed reads on Linux.
 #[cfg(not(target_os = "macos"))]
-const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
-/// The variable listing the folders binaries are looked up in.
-const PATH_ENV: &str = "PATH";
+use crate::constants::XDG_CONFIG_HOME_ENV;
+use crate::{
+    adapter::client::first_on_path,
+    constants::{DOT_CONFIG, PATH_ENV},
+};
+
+/// The variable that moves Claude Code's config folder away from home.
+pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+/// The variable that moves Codex's home folder.
+pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// Claude Code's own file of settings, user servers and local servers.
 const CLAUDE_JSON: &str = ".claude.json";
 /// Claude Code's folder under home, present once it has run.
 const CLAUDE_DIR: &str = ".claude";
 /// Codex's home folder under the user's home.
 const CODEX_DIR: &str = ".codex";
-/// The conventional config root under home.
-const DOT_CONFIG: &str = ".config";
 /// Zed's folder in the config root.
 const ZED_DIR: &str = "zed";
 /// Zed's user settings file.
 const ZED_SETTINGS: &str = "settings.json";
-/// Any execute bit of a file's mode.
-const EXECUTE_BITS: u32 = 0o111;
 
 /// Where each agent keeps the configs muster edits for the user, and the
 /// folders their binaries are looked up in. Built from the environment by
 /// the composition root, or from a scratch folder by a test.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
-#[getset(get = "pub")]
 pub struct ConfigLocations {
     /// Claude Code's `.claude.json`, which holds its user and local servers.
+    #[getset(get = "pub")]
     claude_json: PathBuf,
-    /// Claude Code's folder, whose presence says it is installed.
+    /// Claude Code's config folder, whose presence says it is installed.
+    #[getset(get = "pub")]
     claude_dir: PathBuf,
     /// Codex's home folder, holding `config.toml`.
+    #[getset(get = "pub")]
     codex_home: PathBuf,
-    /// Zed's user `settings.json`.
+    /// Zed's user settings file.
+    #[getset(get = "pub")]
     zed_settings: PathBuf,
-    /// The folders of `PATH`, in order.
-    #[builder(default)]
-    path: Vec<PathBuf>,
+    /// The `PATH` value binaries are looked up in, if any.
+    path: Option<OsString>,
 }
 
 impl ConfigLocations {
@@ -60,61 +58,49 @@ impl ConfigLocations {
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
         };
-        let claude_json = absolute(CLAUDE_CONFIG_DIR_ENV)
-            .unwrap_or_else(|| home.to_path_buf())
-            .join(CLAUDE_JSON);
+        let claude_config = absolute(CLAUDE_CONFIG_DIR_ENV);
         Self::builder()
-            .claude_json(claude_json)
-            .claude_dir(home.join(CLAUDE_DIR))
+            .claude_json(claude_config.as_deref().unwrap_or(home).join(CLAUDE_JSON))
+            .claude_dir(claude_config.unwrap_or_else(|| home.join(CLAUDE_DIR)))
             .codex_home(absolute(CODEX_HOME_ENV).unwrap_or_else(|| home.join(CODEX_DIR)))
-            .zed_settings(
-                zed_config_root(home, &absolute)
-                    .join(ZED_DIR)
-                    .join(ZED_SETTINGS),
-            )
-            .path(
-                var(PATH_ENV)
-                    .map(|path| env::split_paths(&path).collect())
-                    .unwrap_or_default(),
-            )
+            .zed_settings(zed_settings(home, &absolute))
+            .path(var(PATH_ENV))
             .build()
     }
 
-    /// Whether one of `names` is an executable file in a `PATH` folder.
+    /// Whether one of `names` is a runnable file in an absolute `PATH`
+    /// folder.
     pub fn on_path(&self, names: &[&str]) -> bool {
         self.path
-            .iter()
-            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-            .any(|candidate| is_executable(&candidate))
+            .as_deref()
+            .is_some_and(|path| names.iter().any(|name| first_on_path(path, name).is_some()))
     }
 }
 
-/// The config root Zed reads its folder from: on Linux the absolute
-/// `XDG_CONFIG_HOME`, else `~/.config`.
+/// Zed's settings file under `home`: in the config root, on Linux the
+/// absolute `XDG_CONFIG_HOME`, else `~/.config`.
 #[cfg(not(target_os = "macos"))]
-fn zed_config_root(home: &Path, absolute: &impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
-    absolute(XDG_CONFIG_HOME_ENV).unwrap_or_else(|| home.join(DOT_CONFIG))
+fn zed_settings(home: &Path, absolute: &impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
+    absolute(XDG_CONFIG_HOME_ENV)
+        .unwrap_or_else(|| home.join(DOT_CONFIG))
+        .join(ZED_DIR)
+        .join(ZED_SETTINGS)
 }
 
-/// The config root Zed reads its folder from: on macOS always `~/.config`.
+/// Zed's settings file under `home`: on macOS always in `~/.config`.
 #[cfg(target_os = "macos")]
-fn zed_config_root(home: &Path, _absolute: &impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
-    home.join(DOT_CONFIG)
-}
-
-/// Whether `path` is a file someone may execute.
-fn is_executable(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & EXECUTE_BITS != 0)
+fn zed_settings(home: &Path, _absolute: &impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
+    home.join(DOT_CONFIG).join(ZED_DIR).join(ZED_SETTINGS)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     use tempfile::TempDir;
 
     use super::*;
+    use crate::constants::XDG_CONFIG_HOME_ENV;
 
     /// A mode anyone may execute.
     const EXECUTABLE_MODE: u32 = 0o755;
@@ -125,6 +111,7 @@ mod tests {
         let home = Path::new("/h");
         let plain = ConfigLocations::from_env(home, |_| None);
         assert_eq!(plain.claude_json(), Path::new("/h/.claude.json"));
+        assert_eq!(plain.claude_dir(), Path::new("/h/.claude"));
         assert_eq!(plain.codex_home(), Path::new("/h/.codex"));
         assert_eq!(
             plain.zed_settings(),
@@ -134,14 +121,22 @@ mod tests {
         let moved = ConfigLocations::from_env(home, |name| match name {
             CLAUDE_CONFIG_DIR_ENV => Some("/c".into()),
             CODEX_HOME_ENV => Some("/x".into()),
-            "XDG_CONFIG_HOME" => Some("/cfg".into()),
+            XDG_CONFIG_HOME_ENV => Some("/cfg".into()),
             _ => None,
         });
         assert_eq!(moved.claude_json(), Path::new("/c/.claude.json"));
+        assert_eq!(
+            moved.claude_dir(),
+            Path::new("/c"),
+            "Claude Code's folder moves with its config"
+        );
         assert_eq!(moved.codex_home(), Path::new("/x"));
-        if cfg!(not(target_os = "macos")) {
-            assert_eq!(moved.zed_settings(), Path::new("/cfg/zed/settings.json"));
-        }
+        let zed = if cfg!(target_os = "macos") {
+            "/h/.config/zed/settings.json"
+        } else {
+            "/cfg/zed/settings.json"
+        };
+        assert_eq!(moved.zed_settings(), Path::new(zed));
 
         let relative = ConfigLocations::from_env(home, |_| Some("rel".into()));
         assert_eq!(
@@ -151,7 +146,8 @@ mod tests {
         );
     }
 
-    /// A binary counts as on `PATH` only as an executable file.
+    /// A binary counts as on `PATH` only as an executable file in an
+    /// absolute folder.
     #[test]
     fn a_binary_is_found_only_when_executable() {
         let scratch = TempDir::new().unwrap();
@@ -165,5 +161,6 @@ mod tests {
         fs::set_permissions(&bin, fs::Permissions::from_mode(EXECUTABLE_MODE)).unwrap();
         assert!(locations.on_path(&["codex"]));
         assert!(!locations.on_path(&["claude"]));
+        assert!(!ConfigLocations::from_env(Path::new("/h"), |_| None).on_path(&["codex"]));
     }
 }

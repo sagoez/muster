@@ -1,19 +1,27 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use strum::IntoEnumIterator;
 
 use super::{
     agent::Agent,
     agent_config_error::AgentConfigError,
+    claude_project_key::claude_project_key,
+    config_file::{confine, followed, is_read_only, read_text},
+    config_format::ConfigFormat,
     config_locations::ConfigLocations,
+    config_lock::ConfigLock,
+    config_place::ConfigPlace,
     config_target::ConfigTarget,
     edit_outcome::EditOutcome,
+    edit_plan::EditPlan,
+    edited::Edited,
     entry_change::EntryChange,
-    json_document::{JsonDialect, JsonPlace, edit_json},
+    json_dialect::JsonDialect,
+    json_document::edit_json,
+    json_place::JsonPlace,
     mcp_registry::McpRegistry,
     mcp_scope::McpScope,
-    planned_edit::{PlannedEdit, followed, read_text},
-    server_entry::ServerEntry,
+    planned_edit::PlannedEdit,
     server_launch::ServerLaunch,
     server_name::McpServerName,
     toml_document::edit_toml,
@@ -37,24 +45,8 @@ const CLAUDE_PROJECT_NOTE: &str =
 /// What a person should know about a project's Codex config.
 const CODEX_PROJECT_NOTE: &str =
     "Codex reads a project's .codex/config.toml only once the project is trusted";
-
-/// How an agent's config file is written.
-enum Format {
-    /// JSON, the table of servers under these keys.
-    Json(Vec<String>, JsonDialect),
-    /// Codex's TOML.
-    Toml,
-}
-
-/// Where one config lives and how it is edited.
-struct Place {
-    /// The file.
-    path: PathBuf,
-    /// How it is written.
-    format: Format,
-    /// Whether its folder is made when missing.
-    makes_folder: bool,
-}
+/// What a person should know about muster's entry turned off.
+const DISABLED_NOTE: &str = "the entry is turned off; pass --force to turn it back on";
 
 /// The agent configs on disk, at the locations the composition root found
 /// for this user, adding entries that launch muster as `launch` says.
@@ -75,10 +67,12 @@ impl AgentConfigFiles {
     /// Where `target`'s config lives and how it is edited.
     ///
     /// # Errors
-    /// Returns [`AgentConfigError::NoProject`] for a project's config with
-    /// no project, and [`AgentConfigError::NoHome`] for a user's with no
-    /// home folder.
-    fn place(&self, target: &ConfigTarget) -> Result<Place, AgentConfigError> {
+    /// Returns [`AgentConfigError::UnsupportedScope`] for a scope the agent
+    /// lacks, [`AgentConfigError::NoProject`] for a project's config with no
+    /// project, [`AgentConfigError::ProjectNotUtf8`] for a project Claude
+    /// Code's config cannot name, and [`AgentConfigError::NoHome`] for a
+    /// user's config with no home folder.
+    fn place(&self, target: &ConfigTarget) -> Result<ConfigPlace, AgentConfigError> {
         let agent = target.agent();
         let scope = target.scope();
         let root = || {
@@ -93,53 +87,144 @@ impl AgentConfigFiles {
                 .as_ref()
                 .ok_or(AgentConfigError::NoHome(agent))
         };
-        let place = |path, format, makes_folder| Place {
-            path,
-            format,
-            makes_folder,
-        };
         let json = |keys: &[&str], dialect| {
-            Format::Json(keys.iter().map(ToString::to_string).collect(), dialect)
+            ConfigFormat::Json(keys.iter().map(ToString::to_string).collect(), dialect)
+        };
+        let user_file = |path: PathBuf, format| {
+            ConfigPlace::builder()
+                .path(path)
+                .format(format)
+                .makes_folder(true)
+                .locked(agent == Agent::Claude)
+                .confined_to(None)
+                .build()
+        };
+        let project_file = |root: PathBuf, path: PathBuf, format| {
+            ConfigPlace::builder()
+                .path(path)
+                .format(format)
+                .makes_folder(agent == Agent::Codex)
+                .locked(false)
+                .confined_to(Some(root))
+                .build()
         };
         Ok(match (agent, scope) {
             (Agent::Claude, McpScope::Local) => {
-                let project = root()?.display().to_string();
-                place(
+                let key = claude_project_key(&root()?);
+                let key = key
+                    .to_str()
+                    .ok_or_else(|| AgentConfigError::ProjectNotUtf8(key.clone()))?;
+                user_file(
                     home()?.claude_json().clone(),
-                    json(
-                        &[CLAUDE_PROJECTS, &project, CLAUDE_SERVERS],
-                        JsonDialect::Strict,
-                    ),
-                    false,
+                    json(&[CLAUDE_PROJECTS, key, CLAUDE_SERVERS], JsonDialect::Strict),
                 )
             },
-            (Agent::Claude, McpScope::Project) => place(
-                root()?.join(CLAUDE_PROJECT_FILE),
-                json(&[CLAUDE_SERVERS], JsonDialect::Strict),
-                false,
-            ),
-            (Agent::Claude, McpScope::User) => place(
+            (Agent::Claude, McpScope::Project) => {
+                let root = root()?;
+                let path = root.join(CLAUDE_PROJECT_FILE);
+                project_file(root, path, json(&[CLAUDE_SERVERS], JsonDialect::Strict))
+            },
+            (Agent::Claude, McpScope::User) => user_file(
                 home()?.claude_json().clone(),
                 json(&[CLAUDE_SERVERS], JsonDialect::Strict),
-                false,
             ),
             (Agent::Codex, McpScope::User) => {
-                place(home()?.codex_home().join(CODEX_CONFIG), Format::Toml, true)
+                user_file(home()?.codex_home().join(CODEX_CONFIG), ConfigFormat::Toml)
             },
-            (Agent::Codex, McpScope::Project) => place(
-                root()?.join(CODEX_PROJECT_DIR).join(CODEX_CONFIG),
-                Format::Toml,
-                true,
-            ),
-            (Agent::Zed, McpScope::User) => place(
+            (Agent::Codex, McpScope::Project) => {
+                let root = root()?;
+                let path = root.join(CODEX_PROJECT_DIR).join(CODEX_CONFIG);
+                project_file(root, path, ConfigFormat::Toml)
+            },
+            (Agent::Zed, McpScope::User) => user_file(
                 home()?.zed_settings().clone(),
                 json(&[ZED_SERVERS], JsonDialect::WithComments),
-                true,
             ),
             (Agent::Codex | Agent::Zed, _) => {
                 return Err(AgentConfigError::UnsupportedScope { agent, scope });
             },
         })
+    }
+
+    /// Reads the config at `place` and works out `change` to the entry
+    /// `name` in it, for `target`: the file written once its links are
+    /// followed, its text, and the edit.
+    ///
+    /// # Errors
+    /// Returns the [`AgentConfigError`] of a file that is not a regular
+    /// file, leads out of its project, cannot be read or parsed, or holds an
+    /// entry muster must not touch.
+    fn read_edit(
+        &self,
+        target: &ConfigTarget,
+        place: &ConfigPlace,
+        name: &McpServerName,
+        change: EntryChange,
+        force: bool,
+    ) -> Result<(PathBuf, Option<String>, Edited), AgentConfigError> {
+        let entry = self
+            .launch
+            .entry(target.scope(), target.agent() == Agent::Zed)?;
+        let path = place.path();
+        let written = followed(path)?;
+        if let Some(root) = place.confined_to() {
+            confine(&written, root, path)?;
+        }
+        let original = read_text(&written, path)?;
+        let edited = match place.format() {
+            ConfigFormat::Json(table, dialect) => edit_json(
+                original.as_deref(),
+                &JsonPlace::builder()
+                    .path(path)
+                    .table(table.clone())
+                    .dialect(*dialect)
+                    .build(),
+                name,
+                &entry,
+                change,
+                force,
+            ),
+            ConfigFormat::Toml => edit_toml(original.as_deref(), path, name, &entry, change, force),
+        }?;
+        Ok((written, original, edited))
+    }
+
+    /// The edit of `target`'s config at `place`, checked to be one muster
+    /// may write.
+    ///
+    /// # Errors
+    /// As [`Self::read_edit`], or [`AgentConfigError::ReadOnly`] for a
+    /// read-only file the edit would replace.
+    fn plan_one(
+        &self,
+        target: &ConfigTarget,
+        place: &ConfigPlace,
+        name: &McpServerName,
+        change: EntryChange,
+        force: bool,
+    ) -> Result<PlannedEdit, AgentConfigError> {
+        let (written, original, edited) = self.read_edit(target, place, name, change, force)?;
+        let outcome = edited.outcome();
+        if outcome.writes() && is_read_only(&written) {
+            return Err(AgentConfigError::ReadOnly(place.path().clone()));
+        }
+        let note = match (target.agent(), target.scope(), outcome) {
+            (_, _, EditOutcome::Disabled) => Some(DISABLED_NOTE),
+            (_, _, EditOutcome::Removed | EditOutcome::Absent) => None,
+            (Agent::Claude, McpScope::Project, _) => Some(CLAUDE_PROJECT_NOTE),
+            (Agent::Codex, McpScope::Project, _) => Some(CODEX_PROJECT_NOTE),
+            _ => None,
+        };
+        Ok(PlannedEdit::builder()
+            .target(target.clone())
+            .path(place.path().clone())
+            .written(written)
+            .outcome(outcome)
+            .original(original)
+            .text(edited.text().clone())
+            .makes_folder(place.makes_folder())
+            .note(note)
+            .build())
     }
 
     /// Whether `agent`'s config or binary is found.
@@ -163,154 +248,122 @@ impl McpRegistry for AgentConfigFiles {
             .collect()
     }
 
+    fn holding(&self, targets: &[ConfigTarget], name: &McpServerName) -> Vec<Agent> {
+        targets
+            .iter()
+            .filter(|target| {
+                self.place(target)
+                    .and_then(|place| {
+                        self.read_edit(target, &place, name, EntryChange::Remove, true)
+                    })
+                    .is_ok_and(|(_, _, edited)| edited.outcome() == EditOutcome::Removed)
+            })
+            .map(ConfigTarget::agent)
+            .collect()
+    }
+
     fn plan(
         &self,
-        target: &ConfigTarget,
+        targets: &[ConfigTarget],
         name: &McpServerName,
         change: EntryChange,
         force: bool,
-    ) -> Result<PlannedEdit, AgentConfigError> {
-        let agent = target.agent();
-        let scope = target.scope();
-        if !agent.supports(scope) {
-            return Err(AgentConfigError::UnsupportedScope { agent, scope });
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<EditPlan, AgentConfigError> {
+        let places = targets
+            .iter()
+            .map(|target| self.place(target))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut locked: Vec<&Path> = places
+            .iter()
+            .filter(|place| place.locked())
+            .map(|place| place.path().as_path())
+            .collect();
+        locked.sort_unstable();
+        locked.dedup();
+        let mut locks = Vec::with_capacity(locked.len());
+        for path in locked {
+            locks.extend(ConfigLock::take(path, cancelled)?);
         }
-        let place = self.place(target)?;
-        let entry = ServerEntry::builder()
-            .command(self.launch.command_text()?.to_owned())
-            .args(self.launch.args().clone())
-            .with_env(agent == Agent::Zed)
-            .build();
-        let written = followed(&place.path)?;
-        let original = read_text(&written)?;
-        let edited = match &place.format {
-            Format::Json(table, dialect) => edit_json(
-                original.as_deref(),
-                &JsonPlace::builder()
-                    .path(&place.path)
-                    .table(table.clone())
-                    .dialect(*dialect)
-                    .build(),
-                name,
-                &entry,
-                change,
-                force,
-            ),
-            Format::Toml => edit_toml(
-                original.as_deref(),
-                &place.path,
-                name,
-                &entry,
-                change,
-                force,
-            ),
-        }?;
-        let note = match (agent, scope, edited.outcome()) {
-            (_, _, EditOutcome::Removed | EditOutcome::Absent) => None,
-            (Agent::Claude, McpScope::Project, _) => Some(CLAUDE_PROJECT_NOTE),
-            (Agent::Codex, McpScope::Project, _) => Some(CODEX_PROJECT_NOTE),
-            _ => None,
-        };
-        Ok(PlannedEdit::builder()
-            .target(target.clone())
-            .path(place.path)
-            .written(written)
-            .outcome(edited.outcome())
-            .original(original)
-            .text(edited.text().clone())
-            .makes_folder(place.makes_folder)
-            .note(note)
-            .build())
+        let edits = targets
+            .iter()
+            .zip(&places)
+            .map(|(target, place)| self.plan_one(target, place, name, change, force))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EditPlan::builder().edits(edits).locks(locks).build())
+    }
+
+    fn commit(&self, plan: EditPlan, cancelled: &dyn Fn() -> bool) -> Result<(), AgentConfigError> {
+        plan.commit(cancelled)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsStr,
         fs::{self, Permissions},
-        os::unix::fs::{PermissionsExt, symlink},
-        path::Path,
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{PermissionsExt, symlink},
+        },
+        thread,
+        time::Duration,
     };
 
-    use serde_json::{Value, json};
-    use tempfile::TempDir;
+    use serde_json::json;
 
     use super::*;
-    use crate::{adapter::agent_config::DEFAULT_SERVER_NAME, domain::value::ProjectRoot};
+    use crate::{
+        adapter::{
+            agent_config::{
+                CLAUDE_CONFIG_DIR_ENV,
+                testing::{Home, MUSTER_BINARY, json_at, muster, uncancelled},
+            },
+            test_fifo::make_fifo,
+        },
+        domain::value::ProjectRoot,
+    };
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
     /// A private file's mode, as Claude Code keeps `.claude.json`.
     const PRIVATE_MODE: u32 = 0o600;
+    /// A mode anyone may read.
+    const SHARED_MODE: u32 = 0o644;
+    /// A mode nobody may write.
+    const READ_ONLY_MODE: u32 = 0o444;
+    /// A folder's mode nobody may write into.
+    const SEALED_FOLDER_MODE: u32 = 0o555;
+    /// A folder's usual mode.
+    const OPEN_FOLDER_MODE: u32 = 0o755;
     /// A mode anyone may execute.
     const EXECUTABLE_MODE: u32 = 0o755;
+    /// How long a test holds Claude Code's lock before letting it go.
+    const LOCK_HELD_FOR: Duration = Duration::from_millis(300);
 
-    /// A scratch home with a project folder, and the configs under it.
-    struct Home {
-        /// The scratch folder.
-        dir: TempDir,
+    /// The permission bits of the file at `path`.
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & PERMISSION_BITS
     }
 
-    impl Home {
-        /// A fresh scratch home holding `project/`.
-        fn new() -> Self {
-            let dir = TempDir::new().unwrap();
-            fs::create_dir(dir.path().join("project")).unwrap();
-            Self { dir }
-        }
-
-        /// A path under the scratch home.
-        fn at(&self, relative: &str) -> PathBuf {
-            self.dir.path().join(relative)
-        }
-
-        /// The configs of this home, launching `/bin/muster mcp`.
-        fn files(&self) -> AgentConfigFiles {
-            let locations = ConfigLocations::from_env(self.dir.path(), |name| {
-                (name == "PATH").then(|| self.at("bin").into_os_string())
-            });
-            AgentConfigFiles::new(
-                Some(locations),
-                ServerLaunch::builder()
-                    .command(PathBuf::from("/bin/muster"))
-                    .args(vec!["mcp".to_owned()])
-                    .build(),
-            )
-        }
-
-        /// `agent`'s config of `scope`, for the scratch project.
-        fn target(&self, agent: Agent, scope: McpScope) -> ConfigTarget {
-            ConfigTarget::builder()
-                .agent(agent)
-                .scope(scope)
-                .root(Some(ProjectRoot::try_new(self.at("project")).unwrap()))
-                .build()
-        }
-
-        /// Plans `change` to `agent`'s `scope` config and commits it.
-        fn apply(
-            &self,
-            agent: Agent,
-            scope: McpScope,
-            change: EntryChange,
-            force: bool,
-        ) -> Result<PlannedEdit, AgentConfigError> {
-            let edit = self
-                .files()
-                .plan(&self.target(agent, scope), &muster(), change, force)?;
-            edit.commit()?;
-            Ok(edit)
-        }
+    /// Plans `change` without force for each of `targets` in `home`.
+    fn planned(
+        home: &Home,
+        targets: &[ConfigTarget],
+        change: EntryChange,
+    ) -> Result<EditPlan, AgentConfigError> {
+        home.files()
+            .plan(targets, &muster(), change, false, &uncancelled)
     }
 
-    /// The default server name.
-    fn muster() -> McpServerName {
-        McpServerName::try_new(DEFAULT_SERVER_NAME).unwrap()
-    }
-
-    /// The JSON file at `path`.
-    fn json_at(path: &Path) -> Value {
-        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    /// The names in `folder` besides `kept`.
+    fn strays(folder: &Path, kept: &[&str]) -> Vec<String> {
+        fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !kept.contains(&name.as_str()))
+            .collect()
     }
 
     /// Each agent and scope lands in the file its docs name, at the key they
@@ -320,7 +373,7 @@ mod tests {
         let home = Home::new();
         fs::write(home.at(".claude.json"), "{\"numStartups\": 3}\n").unwrap();
         let project = home.at("project").display().to_string();
-        let ours = json!({"command": "/bin/muster", "args": ["mcp"]});
+        let ours = json!({"command": MUSTER_BINARY, "args": ["mcp"]});
 
         for scope in [McpScope::Local, McpScope::Project, McpScope::User] {
             let edit = home
@@ -338,7 +391,8 @@ mod tests {
         assert_eq!(claude["numStartups"], 3);
         assert_eq!(
             json_at(&home.at("project/.mcp.json"))["mcpServers"]["muster"],
-            ours
+            json!({"command": "muster", "args": ["mcp"]}),
+            "a file shared with the project names muster for each person's PATH"
         );
 
         home.apply(Agent::Codex, McpScope::User, EntryChange::Add, false)
@@ -347,21 +401,58 @@ mod tests {
             .apply(Agent::Codex, McpScope::Project, EntryChange::Add, false)
             .unwrap();
         assert_eq!(codex.note(), Some(CODEX_PROJECT_NOTE));
-        for config in [".codex/config.toml", "project/.codex/config.toml"] {
-            assert!(
-                fs::read_to_string(home.at(config))
-                    .unwrap()
-                    .contains("[mcp_servers.muster]"),
-                "{config}"
-            );
-        }
+        assert!(
+            fs::read_to_string(home.at(".codex/config.toml"))
+                .unwrap()
+                .contains(&format!("command = \"{MUSTER_BINARY}\""))
+        );
+        assert!(
+            fs::read_to_string(home.at("project/.codex/config.toml"))
+                .unwrap()
+                .contains("[mcp_servers.muster]\ncommand = \"muster\"\n")
+        );
 
         home.apply(Agent::Zed, McpScope::User, EntryChange::Add, false)
             .unwrap();
         assert_eq!(
-            json_at(&home.at(".config/zed/settings.json"))["context_servers"]["muster"],
-            json!({"command": "/bin/muster", "args": ["mcp"], "env": {}})
+            json_at(home.locations().zed_settings())["context_servers"]["muster"],
+            json!({"command": MUSTER_BINARY, "args": ["mcp"], "env": {}})
         );
+    }
+
+    /// A project in a git repository is keyed in `.claude.json` by the
+    /// repository's root, as Claude Code reads it from anywhere inside.
+    #[test]
+    fn a_local_entry_is_keyed_by_the_repository_root() {
+        let home = Home::new();
+        fs::create_dir_all(home.at(".git")).unwrap();
+        home.apply(Agent::Claude, McpScope::Local, EntryChange::Add, false)
+            .unwrap();
+        let claude = json_at(&home.at(".claude.json"));
+        let repository = home.root().to_str().unwrap();
+        assert!(
+            claude["projects"][repository]["mcpServers"]["muster"].is_object(),
+            "{claude}"
+        );
+    }
+
+    /// A project folder that is not UTF-8 is refused as the key of a local
+    /// entry rather than written lossily, and nothing is written.
+    #[test]
+    fn a_project_folder_that_is_not_utf8_is_refused() {
+        let home = Home::new();
+        fs::write(home.at(".claude.json"), "{}\n").unwrap();
+        let folder = home.root().join(OsStr::from_bytes(b"shop-\xff"));
+        let target = ConfigTarget::builder()
+            .agent(Agent::Claude)
+            .scope(McpScope::Local)
+            .root(Some(ProjectRoot::try_new(folder).unwrap()))
+            .build();
+        assert!(matches!(
+            planned(&home, &[target], EntryChange::Add),
+            Err(AgentConfigError::ProjectNotUtf8(_))
+        ));
+        assert_eq!(fs::read_to_string(home.at(".claude.json")).unwrap(), "{}\n");
     }
 
     /// Codex and Zed refuse the scopes their docs do not give them, before
@@ -386,72 +477,326 @@ mod tests {
             .root(None)
             .build();
         assert!(matches!(
-            home.files()
-                .plan(&unrooted, &muster(), EntryChange::Add, false),
+            planned(&home, &[unrooted], EntryChange::Add),
             Err(AgentConfigError::NoProject { .. })
         ));
     }
 
-    /// A rewrite keeps the file's mode, and a linked dotfile stays a link
-    /// with its target rewritten.
+    /// A rewrite keeps the file's mode, a linked dotfile stays a link with
+    /// its target rewritten, and a link that leads nowhere yet is written at
+    /// its target.
     #[test]
     fn a_rewrite_keeps_the_mode_and_the_link() {
         let home = Home::new();
         let claude = home.at(".claude.json");
         fs::write(&claude, "{}\n").unwrap();
-        fs::set_permissions(&claude, Permissions::from_mode(PRIVATE_MODE)).unwrap();
+        fs::set_permissions(&claude, Permissions::from_mode(SHARED_MODE)).unwrap();
+        let zed = home.locations().zed_settings().clone();
         fs::create_dir_all(home.at("dotfiles/zed")).unwrap();
-        fs::create_dir_all(home.at(".config/zed")).unwrap();
+        fs::create_dir_all(zed.parent().unwrap()).unwrap();
         fs::write(home.at("dotfiles/zed/settings.json"), "// mine\n{}\n").unwrap();
+        symlink(home.at("dotfiles/zed/settings.json"), &zed).unwrap();
+        fs::create_dir_all(home.at("dotfiles/codex")).unwrap();
+        fs::create_dir_all(home.at(".codex")).unwrap();
         symlink(
-            home.at("dotfiles/zed/settings.json"),
-            home.at(".config/zed/settings.json"),
+            home.at("dotfiles/codex/config.toml"),
+            home.at(".codex/config.toml"),
         )
         .unwrap();
 
-        home.apply(Agent::Claude, McpScope::User, EntryChange::Add, false)
-            .unwrap();
-        home.apply(Agent::Zed, McpScope::User, EntryChange::Add, false)
-            .unwrap();
+        for agent in [Agent::Claude, Agent::Zed, Agent::Codex] {
+            home.apply(agent, McpScope::User, EntryChange::Add, false)
+                .unwrap();
+        }
 
-        let mode = fs::metadata(&claude).unwrap().permissions().mode() & PERMISSION_BITS;
-        assert_eq!(mode, PRIVATE_MODE);
+        assert_eq!(
+            mode(&claude),
+            SHARED_MODE,
+            "an existing file keeps its mode"
+        );
+        assert!(fs::symlink_metadata(&zed).unwrap().file_type().is_symlink());
+        let target = fs::read_to_string(home.at("dotfiles/zed/settings.json")).unwrap();
         assert!(
-            fs::symlink_metadata(home.at(".config/zed/settings.json"))
+            target.starts_with("// mine\n") && target.contains(MUSTER_BINARY),
+            "{target}"
+        );
+        assert!(
+            fs::symlink_metadata(home.at(".codex/config.toml"))
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-        let target = fs::read_to_string(home.at("dotfiles/zed/settings.json")).unwrap();
         assert!(
-            target.starts_with("// mine\n") && target.contains("/bin/muster"),
-            "{target}"
+            fs::read_to_string(home.at("dotfiles/codex/config.toml"))
+                .unwrap()
+                .contains("[mcp_servers.muster]")
+        );
+    }
+
+    /// A config muster creates is readable by its owner alone, for Claude
+    /// Code's account details and every other agent's file alike.
+    #[test]
+    fn a_created_config_is_private() {
+        let home = Home::new();
+        for agent in [Agent::Claude, Agent::Codex, Agent::Zed] {
+            home.apply(agent, McpScope::User, EntryChange::Add, false)
+                .unwrap();
+        }
+        home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, false)
+            .unwrap();
+        for created in [
+            home.at(".claude.json"),
+            home.at(".codex/config.toml"),
+            home.locations().zed_settings().clone(),
+            home.at("project/.mcp.json"),
+        ] {
+            assert_eq!(mode(&created), PRIVATE_MODE, "{}", created.display());
+        }
+    }
+
+    /// A read-only config is refused, not replaced, unless the edit would
+    /// write nothing.
+    #[test]
+    fn a_read_only_config_is_refused() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        fs::write(&claude, "{}\n").unwrap();
+        fs::set_permissions(&claude, Permissions::from_mode(READ_ONLY_MODE)).unwrap();
+        assert!(matches!(
+            home.apply(Agent::Claude, McpScope::User, EntryChange::Add, false),
+            Err(AgentConfigError::ReadOnly(_))
+        ));
+        assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+        assert_eq!(
+            home.apply(Agent::Claude, McpScope::User, EntryChange::Remove, false)
+                .unwrap()
+                .outcome(),
+            EditOutcome::Absent
         );
     }
 
     /// A file changed between the plan and the write is left as the other
-    /// writer left it.
+    /// writer left it, and so is every other config of the run.
     #[test]
-    fn a_file_changed_after_planning_is_not_overwritten() {
+    fn a_file_changed_after_planning_stops_every_write() {
         let home = Home::new();
         let claude = home.at(".claude.json");
         fs::write(&claude, "{}\n").unwrap();
-        let edit = home
-            .files()
-            .plan(
-                &home.target(Agent::Claude, McpScope::User),
-                &muster(),
-                EntryChange::Add,
-                false,
-            )
-            .unwrap();
+        let plan = planned(
+            &home,
+            &[
+                home.target(Agent::Codex, McpScope::User),
+                home.target(Agent::Claude, McpScope::User),
+            ],
+            EntryChange::Add,
+        )
+        .unwrap();
         fs::write(&claude, "{\"numStartups\": 4}\n").unwrap();
 
-        assert!(matches!(edit.commit(), Err(AgentConfigError::Changed(_))));
+        assert!(matches!(
+            home.files().commit(plan, &uncancelled),
+            Err(AgentConfigError::Changed(_))
+        ));
         assert_eq!(
             fs::read_to_string(&claude).unwrap(),
             "{\"numStartups\": 4}\n"
         );
+        assert!(
+            !home.at(".codex").exists(),
+            "no folder is made before the check"
+        );
+    }
+
+    /// A config that cannot be written stops the run before any other is
+    /// written, and leaves no temporary file behind.
+    #[test]
+    fn a_write_that_fails_leaves_every_config_as_it_was() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        fs::write(&claude, "{}\n").unwrap();
+        let zed = home.locations().zed_settings().clone();
+        let folder = zed.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(&zed, "{}\n").unwrap();
+        fs::set_permissions(&folder, Permissions::from_mode(SEALED_FOLDER_MODE)).unwrap();
+
+        let plan = planned(
+            &home,
+            &[
+                home.target(Agent::Claude, McpScope::User),
+                home.target(Agent::Zed, McpScope::User),
+            ],
+            EntryChange::Add,
+        )
+        .unwrap();
+        let failed = home.files().commit(plan, &uncancelled);
+        fs::set_permissions(&folder, Permissions::from_mode(OPEN_FOLDER_MODE)).unwrap();
+
+        assert!(
+            matches!(failed, Err(AgentConfigError::Io { .. })),
+            "{failed:?}"
+        );
+        assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+        assert!(
+            strays(home.root(), &[".claude.json", "project", ".config"]).is_empty(),
+            "{:?}",
+            strays(home.root(), &[])
+        );
+    }
+
+    /// A rename that fails after another config was put in place names the
+    /// config already written.
+    #[test]
+    fn a_partial_write_names_what_was_written() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        let codex = home.at(".codex/config.toml");
+        fs::write(&claude, "{}\n").unwrap();
+        fs::create_dir_all(home.at(".codex")).unwrap();
+        fs::write(&codex, "").unwrap();
+        let plan = planned(
+            &home,
+            &[
+                home.target(Agent::Claude, McpScope::User),
+                home.target(Agent::Codex, McpScope::User),
+            ],
+            EntryChange::Add,
+        )
+        .unwrap();
+        // Codex's file turns into a folder once both are checked, so its
+        // rename fails after Claude Code's.
+        let blocking = || {
+            fs::remove_file(&codex).unwrap();
+            fs::create_dir(&codex).unwrap();
+            fs::write(codex.join("keep"), "").unwrap();
+            false
+        };
+
+        let failed = home.files().commit(plan, &blocking).unwrap_err();
+        let AgentConfigError::PartlyWritten { written, source } = &failed else {
+            panic!("{failed:?}");
+        };
+        assert_eq!(written.as_slice(), [claude.as_path()]);
+        assert!(source.is_io(), "{source}");
+        assert!(failed.is_io());
+        assert!(
+            failed.to_string().contains(&claude.display().to_string()),
+            "{failed}"
+        );
+        assert!(json_at(&claude)["mcpServers"]["muster"].is_object());
+    }
+
+    /// An interrupt before the first write leaves every config as it was
+    /// and no temporary file behind.
+    #[test]
+    fn an_interrupt_before_writing_changes_nothing() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        fs::write(&claude, "{}\n").unwrap();
+        let plan = planned(
+            &home,
+            &[home.target(Agent::Claude, McpScope::User)],
+            EntryChange::Add,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            home.files().commit(plan, &|| true),
+            Err(AgentConfigError::Interrupted)
+        ));
+        assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+        assert!(strays(home.root(), &[".claude.json", "project"]).is_empty());
+    }
+
+    /// Claude Code's lock is held from the read to the write, a held one
+    /// is waited for, and a stale one is taken over.
+    #[test]
+    fn claude_codes_lock_guards_the_edit() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        let lock = home.at(".claude.json.lock");
+        fs::write(&claude, "{}\n").unwrap();
+
+        let plan = planned(
+            &home,
+            &[home.target(Agent::Claude, McpScope::User)],
+            EntryChange::Add,
+        )
+        .unwrap();
+        assert!(lock.is_dir(), "held from the read");
+        home.files().commit(plan, &uncancelled).unwrap();
+        assert!(!lock.exists(), "let go after the write");
+
+        fs::create_dir(&lock).unwrap();
+        let held = lock.clone();
+        let release = thread::spawn(move || {
+            thread::sleep(LOCK_HELD_FOR);
+            fs::remove_dir(held).unwrap();
+        });
+        let removed = home
+            .apply(Agent::Claude, McpScope::User, EntryChange::Remove, false)
+            .unwrap();
+        release.join().unwrap();
+        assert_eq!(removed.outcome(), EditOutcome::Removed);
+        assert!(!lock.exists());
+    }
+
+    /// A project's file that is a pipe, a device or a link out of the
+    /// project is refused without being read or written.
+    #[test]
+    fn a_project_file_must_be_a_regular_file_inside_it() {
+        let home = Home::new();
+        let mcp_json = home.at("project/.mcp.json");
+        make_fifo(&mcp_json);
+        assert!(matches!(
+            home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, false),
+            Err(AgentConfigError::NotAFile(_))
+        ));
+        fs::remove_file(&mcp_json).unwrap();
+        symlink("/dev/zero", &mcp_json).unwrap();
+        assert!(matches!(
+            home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, false),
+            Err(AgentConfigError::OutsideProject { .. })
+        ));
+        fs::remove_file(&mcp_json).unwrap();
+
+        let outside = home.at("outside.json");
+        fs::write(&outside, "{}\n").unwrap();
+        symlink("../outside.json", &mcp_json).unwrap();
+        assert!(matches!(
+            home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, false),
+            Err(AgentConfigError::OutsideProject { .. })
+        ));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "{}\n");
+
+        fs::create_dir_all(home.at("elsewhere")).unwrap();
+        symlink("../elsewhere", home.at("project/.codex")).unwrap();
+        assert!(matches!(
+            home.apply(Agent::Codex, McpScope::Project, EntryChange::Add, false),
+            Err(AgentConfigError::OutsideProject { .. })
+        ));
+        assert!(!home.at("elsewhere/config.toml").exists());
+    }
+
+    /// The remove picker's agents are those whose config holds an entry
+    /// under the name, of muster's or not.
+    #[test]
+    fn only_configs_with_an_entry_are_holding() {
+        let home = Home::new();
+        home.apply(Agent::Codex, McpScope::User, EntryChange::Add, false)
+            .unwrap();
+        fs::write(
+            home.at(".claude.json"),
+            "{\"mcpServers\": {\"muster\": {\"command\": \"other\"}}}",
+        )
+        .unwrap();
+        let targets: Vec<ConfigTarget> = Agent::iter()
+            .map(|agent| home.target(agent, McpScope::User))
+            .collect();
+        assert_eq!(home.files().holding(&targets, &muster()), [
+            Agent::Claude,
+            Agent::Codex
+        ]);
     }
 
     /// A Claude Code file with a comment is not JSON Claude Code reads, so
@@ -503,12 +848,38 @@ mod tests {
         assert!(homeless.present().is_empty());
         assert!(matches!(
             homeless.plan(
-                &home.target(Agent::Zed, McpScope::User),
+                &[home.target(Agent::Zed, McpScope::User)],
                 &muster(),
                 EntryChange::Add,
-                false
+                false,
+                &uncancelled
             ),
             Err(AgentConfigError::NoHome(Agent::Zed))
         ));
+    }
+
+    /// Claude Code's config folder moved by `CLAUDE_CONFIG_DIR` counts it
+    /// as present, and is made when missing, as Codex's and Zed's are.
+    #[test]
+    fn a_moved_claude_config_folder_is_found_and_made() {
+        let home = Home::new();
+        let moved = home.at("claude-config");
+        let locations = ConfigLocations::from_env(home.root(), |name| {
+            (name == CLAUDE_CONFIG_DIR_ENV).then(|| moved.clone().into_os_string())
+        });
+        let files = AgentConfigFiles::new(Some(locations), home.files().launch.clone());
+        assert!(files.present().is_empty());
+        let plan = files
+            .plan(
+                &[home.target(Agent::Claude, McpScope::User)],
+                &muster(),
+                EntryChange::Add,
+                false,
+                &uncancelled,
+            )
+            .unwrap();
+        files.commit(plan, &uncancelled).unwrap();
+        assert!(json_at(&moved.join(".claude.json"))["mcpServers"]["muster"].is_object());
+        assert_eq!(files.present(), [Agent::Claude]);
     }
 }

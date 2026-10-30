@@ -20,10 +20,10 @@ pub struct McpEntryArgs {
     )]
     #[getset(get = "pub")]
     client: Vec<Agent>,
-    /// Which config: local (this project, in your own Claude Code config),
-    /// project (a file in this project, .mcp.json or .codex/config.toml) or
-    /// user (every project). Defaults to local for Claude Code and user for
-    /// Codex and Zed; Zed has only user.
+    /// Which config: user (every project, the default), local (this
+    /// project, in your own Claude Code config) or project (a file in this
+    /// project, .mcp.json or .codex/config.toml, shared with whoever
+    /// clones it). Zed has only user.
     #[arg(long, value_parser = mcp_scope_parser())]
     #[getset(get_copy = "pub")]
     scope: Option<McpScope>,

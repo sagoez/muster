@@ -354,11 +354,16 @@ command = "muster attach web"
 
 Each process's raw output goes to a log under the state directory, across
 restarts and after it exits, rotating at `log-max-size` and keeping one older
-file. To a pipe or file, `muster logs` writes it byte for byte. On a terminal
-it keeps text, colors and cursor moves but drops queries, terminal strings and
-other controls, so a log cannot retitle your terminal or write its clipboard.
-If output rotates away before `muster logs -f` reads it, the follow says how
-many bytes it lost and carries on.
+file. `muster logs` and `logs -f` print it as the lines a log reader expects:
+a carriage return or erase that rewrites a line leaves only its last state, so
+a progress bar shows once, finished, and output that only redraws the screen,
+such as `docker compose up`'s footer and the blank rows it makes room with,
+is left out. Nothing that moves the cursor, erases, changes a mode or retitles
+your terminal reaches it; on a terminal that draws color, and without
+`NO_COLOR`, each line keeps its colors, reset at its end. A pipe and `--json`
+get the same lines without color, and `--screen` shows the live screen
+instead. If output rotates away before `muster logs -f` reads it, the follow
+says how many bytes it lost and carries on.
 
 Every byte has an offset that runs on across restarts and rotations, written
 as a cursor such as `o:18234`. `-n N` (100 by default, at most 2000), `--since

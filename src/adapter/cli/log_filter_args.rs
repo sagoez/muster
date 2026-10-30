@@ -9,8 +9,9 @@ use crate::{
     domain::{process::PatternKind, value::OutputCursor},
 };
 
-/// `muster logs` flags that read the log as stripped, filtered lines rather
-/// than the raw bytes; any one of them switches to that read.
+/// `muster logs` flags that read the log as stripped, filtered lines through
+/// the reader agents use rather than the whole log; any one of them switches
+/// to that read.
 #[derive(clap::Args, Getters, CopyGetters)]
 pub struct LogFilterArgs {
     /// Print only the newest N lines, escapes removed (at most 2000).

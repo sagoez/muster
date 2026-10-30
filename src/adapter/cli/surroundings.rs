@@ -56,6 +56,12 @@ impl Surroundings {
             && !self.no_color
             && !self.dumb_terminal
     }
+
+    /// Whether what is printed on stdout may carry colour: it is a terminal
+    /// that draws colour, no JSON was asked for, and `NO_COLOR` is not set.
+    pub fn colour(self) -> bool {
+        !self.json && self.stdout_terminal && !self.no_color && !self.dumb_terminal
+    }
 }
 
 /// Whether `NO_COLOR` set to `value` asks for output without color: only a
@@ -122,6 +128,43 @@ mod tests {
         ];
         for fallback in fallbacks {
             assert!(!fallback.interactive(), "{fallback:?}");
+        }
+    }
+
+    /// Colour on stdout needs only stdout to be a terminal that draws it,
+    /// with neither JSON nor `NO_COLOR` asked for.
+    #[test]
+    fn colour_needs_a_colour_terminal_on_stdout() {
+        let terminal = at_a_terminal();
+        assert!(terminal.colour());
+        assert!(
+            Surroundings {
+                stdin_terminal: false,
+                stderr_terminal: false,
+                ..terminal
+            }
+            .colour()
+        );
+        let plain = [
+            Surroundings {
+                json: true,
+                ..terminal
+            },
+            Surroundings {
+                stdout_terminal: false,
+                ..terminal
+            },
+            Surroundings {
+                no_color: true,
+                ..terminal
+            },
+            Surroundings {
+                dumb_terminal: true,
+                ..terminal
+            },
+        ];
+        for surroundings in plain {
+            assert!(!surroundings.colour(), "{surroundings:?}");
         }
     }
 }

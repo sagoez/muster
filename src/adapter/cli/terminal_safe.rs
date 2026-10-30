@@ -87,6 +87,17 @@ mod tests {
         assert_eq!(safe(&[b"\x1b[38:2:255:0:0mx"]), "\x1b[38:2:255:0:0mx");
     }
 
+    /// A C1 control split across writes, which the parser hands over as a
+    /// printed character, does not pass either.
+    #[test]
+    fn a_split_c1_control_does_not_pass() {
+        assert_eq!(safe(&[b"a\xC2", b"\x9B2Jb"]), "a2Jb");
+        assert_eq!(
+            safe(&[b"a\xC2", b"\x9D52;c;aGk=\xC2", b"\x9Cb"]),
+            "a52;c;aGk=b"
+        );
+    }
+
     /// A progress bar's carriage returns, cursor moves and erases pass, so it
     /// redraws in place.
     #[test]

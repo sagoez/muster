@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{generation::Generation, log_base::LogBase};
+use super::{generation::Generation, log_base::LogBase, run_starts::record_run_start};
 use crate::{
     adapter::private_dir::create_private_dir_all,
     domain::value::{ByteSize, OutputCursor},
@@ -76,6 +76,14 @@ impl RotatingLog {
     /// lands in the output stream.
     pub fn end(&self) -> OutputCursor {
         OutputCursor::new(self.base.saturating_add(self.written))
+    }
+
+    /// Records that a run begins at the log's end, before it writes anything.
+    ///
+    /// # Errors
+    /// Returns an [`io::Error`] when the run sidecar cannot be written.
+    pub fn record_run_start(&self) -> io::Result<()> {
+        record_run_start(&self.path, self.end())
     }
 
     /// Appends `bytes`, rotating first when they would carry a non-empty live

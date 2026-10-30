@@ -62,6 +62,7 @@ mod recording_input;
 mod reject_reason;
 mod replay_request;
 mod resolved;
+mod run_starts;
 mod runner;
 #[cfg(test)]
 mod runner_fixture;
@@ -114,6 +115,7 @@ pub use pattern_error::*;
 pub use protocol::*;
 pub use record::*;
 pub use reject_reason::*;
+pub use run_starts::run_starts;
 pub use runner::*;
 pub use served_screen::*;
 pub use server::*;

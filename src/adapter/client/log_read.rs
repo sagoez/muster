@@ -1,11 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
 use crate::{
-    adapter::terminal::{colouring::Colouring, log_renderer::LogRenderer},
+    adapter::{
+        holder::run_starts,
+        terminal::{
+            bounded_parser::char_chunks, escape::LINE_FEED, log_line::LogLine,
+            log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
+        },
+    },
     domain::{
         project::Project,
         value::{OutputCursor, ProcessName},
@@ -31,13 +37,20 @@ pub struct LogRead {
 }
 
 impl LogRead {
+    /// Where the first byte read sits in the process's output, for a read
+    /// of the log.
+    pub fn start(&self) -> Option<OutputCursor> {
+        self.end
+            .map(|end| OutputCursor::new(end.offset().saturating_sub(self.bytes.len() as u64)))
+    }
+
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
     /// replaced and the cursor just past it: a log as the lines `muster logs`
-    /// prints, without colour, and a screen without the blank rows below its
+    /// prints, without color, and a screen without the blank rows below its
     /// last text.
     pub fn text_in(&self, project: &Project) -> LogText {
-        let text = match self.log {
-            Some(_) => LogRenderer::text_of(&self.bytes, Colouring::Plain),
+        let text = match &self.log {
+            Some(log) => self.rendered_text(log),
             None => String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
         };
         LogText::builder()
@@ -47,6 +60,28 @@ impl LogRead {
             .text(text)
             .cursor(self.end)
             .build()
+    }
+
+    /// Every line read of the log at `log`, rendered as `muster logs` prints
+    /// it without color and restarted at each run start the log records,
+    /// each ending in a line break, the unfinished last one too.
+    fn rendered_text(&self, log: &Path) -> String {
+        let mut renderer = PlacedRenderer::new(self.start().unwrap_or(OutputCursor::new(0)));
+        renderer.restart_at(run_starts(log));
+        let mut text = String::new();
+        let mut append = |lines: Vec<LogLine>| {
+            for line in lines {
+                text.push_str(&line.plain());
+                text.push(char::from(LINE_FEED));
+            }
+        };
+        for chunk in char_chunks(&self.bytes, RENDER_CHUNK_BYTES) {
+            renderer.advance(chunk);
+            append(renderer.take_lines());
+        }
+        renderer.finish();
+        append(renderer.take_lines());
+        text
     }
 }
 

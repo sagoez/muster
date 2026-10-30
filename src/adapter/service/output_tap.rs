@@ -2,28 +2,33 @@ use std::collections::VecDeque;
 
 use super::tap_line::TapLine;
 use crate::{
-    adapter::holder::{LINE_MAX_BYTES, strip_line},
+    adapter::terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
     domain::value::OutputCursor,
 };
 
-/// Bytes of stripped lines a tap keeps, newest last.
+/// Bytes of rendered lines a tap keeps, newest last.
 pub const TAP_RING_BYTES: usize = 256 * 1024;
 
 /// The output stream of one process as lines, for waits and readiness to be
-/// tested against: strips each chunk, assembles lines, and keeps the newest
-/// [`TAP_RING_BYTES`] of them with the offset each began at. It outlives each
-/// run, so the last lines of a run that ended stay readable.
+/// tested against: renders each chunk as the next piece of one stream,
+/// restarted at each run, and keeps the newest [`TAP_RING_BYTES`] of the
+/// lines with the offset each began at. It outlives each run, so the last
+/// lines of a run that ended stay readable.
+///
+/// Each byte is rendered once, as it arrives: a chunk costs time in
+/// proportion to its own length, never to the length of the line it lands
+/// on, so a line that never ends cannot make the service loop render it
+/// again for every chunk. Only [`OutputTap::unfinished`] renders the line
+/// in progress whole, for a caller that has a pattern to test it against.
 pub struct OutputTap {
     /// The newest complete lines, oldest first.
     ring: VecDeque<TapLine>,
     /// The bytes of text the ring holds.
     ring_bytes: usize,
-    /// Raw bytes of the line still being written.
-    partial: Vec<u8>,
+    /// The rendering of the stream, which knows where the next byte goes.
+    renderer: PlacedRenderer,
     /// Where the line still being written began.
     partial_at: OutputCursor,
-    /// Where the next byte goes.
-    next: OutputCursor,
     /// Where the current run began, once one has.
     run_start: Option<OutputCursor>,
     /// Whether the cursor stands where the output really ends: a run began
@@ -37,9 +42,8 @@ impl OutputTap {
         Self {
             ring: VecDeque::new(),
             ring_bytes: 0,
-            partial: Vec::new(),
+            renderer: PlacedRenderer::new(start),
             partial_at: start,
-            next: start,
             run_start: None,
             placed: false,
         }
@@ -47,7 +51,7 @@ impl OutputTap {
 
     /// Where the next byte goes: the end of the output seen.
     pub fn cursor(&self) -> OutputCursor {
-        self.next
+        self.renderer.next()
     }
 
     /// Where the current run began, once one has.
@@ -69,10 +73,13 @@ impl OutputTap {
         self.placed = true;
     }
 
-    /// Starts a new run here: the previous run's unfinished line ends.
+    /// Starts a new run here: the previous run's unfinished line ends, and
+    /// the new run renders as on a fresh terminal.
     pub fn begin_run(&mut self) {
-        self.flush_partial();
-        self.run_start = Some(self.next);
+        self.renderer.restart();
+        self.keep_finished();
+        self.partial_at = self.cursor();
+        self.run_start = Some(self.cursor());
         self.placed = true;
     }
 
@@ -84,49 +91,53 @@ impl OutputTap {
         if self.run_start == Some(start) {
             return;
         }
-        self.flush_partial();
-        if start > self.next {
-            self.next = start;
-            self.partial_at = start;
-        }
+        self.renderer.restart();
+        self.keep_finished();
+        self.renderer.skip_to(start);
+        self.partial_at = self.cursor();
         self.run_start = Some(start);
         self.placed = true;
     }
 
     /// Takes one chunk of raw output, whose first byte is at `at` when the
-    /// sender says so, and returns the lines to test: every line it
-    /// completed, then the unfinished line, if any, so a prompt with no
-    /// newline can match. A chunk past the end of what was seen leaves a gap;
-    /// one overlapping it has its repeated bytes skipped.
+    /// sender says so, and returns every line it completed. A chunk past the
+    /// end of what was seen leaves a gap, which the rendering starts over
+    /// after; one overlapping it has its repeated bytes skipped.
     pub fn feed(&mut self, at: Option<OutputCursor>, bytes: &[u8]) -> Vec<TapLine> {
+        let next = self.cursor();
         let bytes = match at {
-            Some(at) if at > self.next => {
-                self.flush_partial();
-                self.next = at;
+            Some(at) if at > next => {
+                self.renderer.finish();
+                self.keep_finished();
+                self.renderer.skip_to(at);
                 self.partial_at = at;
                 bytes
             },
-            Some(at) if at < self.next => {
-                let seen = usize::try_from(self.next.bytes_since(at)).unwrap_or(usize::MAX);
+            Some(at) if at < next => {
+                let seen = usize::try_from(next.bytes_since(at)).unwrap_or(usize::MAX);
                 bytes.get(seen..).unwrap_or_default()
             },
             _ => bytes,
         };
         let mut completed = Vec::new();
-        for piece in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if self.partial.is_empty() {
-                self.partial_at = self.next;
+        for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
+            self.renderer.advance(piece);
+            let lines = self.keep_finished();
+            if piece.ends_with(&[LINE_FEED]) || !lines.is_empty() {
+                self.partial_at = self.cursor();
             }
-            self.partial.extend_from_slice(piece);
-            self.next = self.next.advanced(piece.len() as u64);
-            if (piece.ends_with(b"\n") || self.partial.len() >= LINE_MAX_BYTES)
-                && let Some(line) = self.flush_partial()
-            {
-                completed.push(line);
-            }
+            completed.extend(lines);
         }
-        completed.extend(self.unfinished());
         completed
+    }
+
+    /// The line still being written, if any, unless it only redrew the
+    /// screen, so a prompt with no newline can match. It renders that line
+    /// whole, so a caller asks only when it has a pattern to test.
+    pub fn unfinished(&self) -> Option<TapLine> {
+        self.renderer
+            .peek_partial()
+            .map(|line| self.tap_line(&line, self.partial_at))
     }
 
     /// The held lines that began at or after `since`, with the unfinished
@@ -150,6 +161,26 @@ impl OutputTap {
         self.ring.front().map_or(self.partial_at, TapLine::at)
     }
 
+    /// Keeps the lines the rendering finished, each as beginning where the
+    /// line being written began, and returns them.
+    fn keep_finished(&mut self) -> Vec<TapLine> {
+        let lines: Vec<TapLine> = self
+            .renderer
+            .take_lines()
+            .iter()
+            .map(|line| self.tap_line(line, self.partial_at))
+            .collect();
+        for line in &lines {
+            self.keep(line.clone());
+        }
+        lines
+    }
+
+    /// `line` as a tap line beginning at `at`.
+    fn tap_line(&self, line: &LogLine, at: OutputCursor) -> TapLine {
+        TapLine::builder().at(at).text(line.plain()).build()
+    }
+
     /// The last `count` lines of the current run, oldest first, the
     /// unfinished one included.
     pub fn tail(&self, count: usize) -> Vec<String> {
@@ -171,31 +202,6 @@ impl OutputTap {
         lines
     }
 
-    /// The line still being written, if any, unless it only redrew the
-    /// screen.
-    fn unfinished(&self) -> Option<TapLine> {
-        if self.partial.is_empty() {
-            return None;
-        }
-        strip_line(&self.partial)
-            .map(|text| TapLine::builder().at(self.partial_at).text(text).build())
-    }
-
-    /// Ends the line still being written and returns it, keeping it in the
-    /// ring unless it only redrew the screen.
-    fn flush_partial(&mut self) -> Option<TapLine> {
-        if self.partial.is_empty() {
-            return None;
-        }
-        let line = self.unfinished();
-        self.partial.clear();
-        self.partial_at = self.next;
-        if let Some(line) = &line {
-            self.keep(line.clone());
-        }
-        line
-    }
-
     /// Adds `line` to the ring, dropping the oldest lines past
     /// [`TAP_RING_BYTES`].
     fn keep(&mut self, line: TapLine) {
@@ -212,29 +218,90 @@ impl OutputTap {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::adapter::terminal::line_drawing::MAX_LINE_CELLS;
+
+    /// Chunks of 1024 erases the endless-erase test feeds: a megabyte.
+    const ERASE_CHUNKS: usize = 256;
+    /// How long those chunks may take, many times what they need even in a
+    /// debug build; the stream once took seconds per chunk.
+    const ERASE_BOUND: Duration = Duration::from_secs(2);
 
     /// The text of each of `lines`.
     fn texts(lines: &[TapLine]) -> Vec<&str> {
         lines.iter().map(|line| line.text().as_str()).collect()
     }
 
+    /// Lines are assembled across chunks with the offset each began at, and
+    /// the unfinished one is there to test when asked for.
     #[test]
-    fn assembles_stripped_lines_across_chunks_with_their_offsets() {
+    fn assembles_rendered_lines_across_chunks_with_their_offsets() {
         let mut tap = OutputTap::new(OutputCursor::new(100));
 
         let first = tap.feed(None, b"\x1b[32mstart");
+        let unfinished = tap.unfinished();
         let second = tap.feed(None, b"ing\r\nListening on :3000\nprompt> ");
 
-        assert_eq!(texts(&first), ["start"]);
-        assert_eq!(texts(&second), [
-            "starting",
-            "Listening on :3000",
-            "prompt>"
-        ]);
+        assert!(first.is_empty());
+        assert_eq!(
+            unfinished.map(|line| line.text().clone()).as_deref(),
+            Some("start")
+        );
+        assert_eq!(texts(&second), ["starting", "Listening on :3000"]);
         assert_eq!(second[0].at(), OutputCursor::new(100));
         assert_eq!(second[1].at(), OutputCursor::new(115));
+        let prompt = tap.unfinished().unwrap();
+        assert_eq!(
+            (prompt.text().as_str(), prompt.at()),
+            ("prompt>", OutputCursor::new(134))
+        );
         assert_eq!(tap.cursor(), OutputCursor::new(142));
+    }
+
+    /// A run that ends on the alternate screen, mid-color or mid-escape
+    /// leaves nothing of that to the next run, which renders from a fresh
+    /// terminal; so does a gap.
+    #[test]
+    fn each_run_and_gap_starts_from_a_fresh_terminal() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.begin_run();
+        tap.feed(None, b"run 1\n\x1b[?1049hTUI\n");
+
+        tap.begin_run();
+        let next_run = tap.feed(None, b"run 2\n");
+        tap.feed(None, b"\x1b[?1049h\x1b]0;cut");
+        let after_gap = tap.feed(Some(OutputCursor::new(1000)), b"resumed\n");
+
+        assert_eq!(texts(&next_run), ["run 2"]);
+        assert_eq!(texts(&after_gap), ["resumed"]);
+        assert_eq!(after_gap[0].at(), OutputCursor::new(1000));
+    }
+
+    /// A line that never ends while it is erased to the cursor again and
+    /// again costs each chunk only its own bytes: this stream of 32 KiB of
+    /// text followed by megabytes of `ESC [ 1 K` once kept the service loop
+    /// busy for minutes, rendering the whole line again for every chunk and
+    /// filling every column it erased. Its time is linear in the bytes fed,
+    /// so the bound below is generous for any machine.
+    #[test]
+    fn an_endlessly_erased_line_costs_each_chunk_only_its_bytes() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.feed(None, &vec![b'x'; 32 * 1024]);
+        let erases = b"\x1b[1K".repeat(1024);
+        let started = Instant::now();
+
+        for _ in 0..ERASE_CHUNKS {
+            assert!(tap.feed(None, &erases).is_empty());
+        }
+
+        assert!(
+            started.elapsed() < ERASE_BOUND,
+            "{:?} for {ERASE_CHUNKS} chunks",
+            started.elapsed()
+        );
+        assert_eq!(tap.unfinished(), None, "the line reads as erased");
     }
 
     #[test]
@@ -343,10 +410,14 @@ mod tests {
             tap.feed(None, &line);
             tap.feed(None, b"\n");
         }
-        let endless = vec![b'y'; LINE_MAX_BYTES * 2];
-        tap.feed(None, &endless);
+        let endless = vec![b'y'; MAX_LINE_CELLS * 2 + 1];
+        let cut = tap.feed(None, &endless);
 
         assert!(tap.ring_bytes <= TAP_RING_BYTES);
-        assert!(tap.partial.len() < LINE_MAX_BYTES);
+        assert_eq!(
+            cut.iter().map(|line| line.text().len()).collect::<Vec<_>>(),
+            [MAX_LINE_CELLS, MAX_LINE_CELLS]
+        );
+        assert_eq!(tap.unfinished().map(|line| line.text().len()), Some(1));
     }
 }

@@ -21,7 +21,7 @@ use crate::{
         },
         holder::read_log_stream,
         service::{ProcessStatus, ProjectStatus},
-        terminal::colouring::Colouring,
+        terminal::coloring::Coloring,
     },
     domain::{
         process::ProcessState,
@@ -36,7 +36,7 @@ const FOLLOW_POLL: Duration = Duration::from_millis(200);
 /// Copies the log of the process `pick` picks into `out`, the older
 /// generation first, then follows it across rotations and restarts until the
 /// command is interrupted, waiting for a process that is not running to
-/// write. Each log line is written rendered, coloured as `colouring` asks,
+/// write. Each log line is written rendered, colored as `coloring` asks,
 /// or with `json` as one JSON line.
 ///
 /// # Errors
@@ -47,14 +47,15 @@ pub fn follow_logs(
     project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     json: bool,
-    colouring: Colouring,
+    coloring: Coloring,
     out: &mut dyn Write,
 ) -> Result<Infallible, CliError> {
     let name = pick(&status(client, project)?)?;
     let log = log_path(client, project, &name)?;
     let (start, kept) = read_log_stream(&log).map_err(|error| log_read_error(&log, error))?;
     if !json {
-        return follow(&log, start, &kept, &mut RenderedLog::new(out, colouring));
+        let mut rendered = RenderedLog::new(out, coloring, start, Some(log.clone()));
+        return follow(&log, start, &kept, &mut rendered);
     }
     let template = LogRead::builder()
         .name(name)

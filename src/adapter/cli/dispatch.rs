@@ -12,6 +12,7 @@ use std::{
     time::SystemTime,
 };
 
+use anstream::{AutoStream, ColorChoice};
 use clap::{
     Parser,
     error::{Error as ParseError, ErrorKind},
@@ -70,6 +71,7 @@ use super::{
         remove_unreadable, set_idle_stop, unreadable_named,
     },
     projects_command::ProjectsCommand,
+    rendered_log::RenderedLog,
     report::{Report, print_error, print_note},
     rm::{removable, remove as remove_processes, rm_rows},
     row::Row,
@@ -83,7 +85,6 @@ use super::{
     shell_init::shell_init,
     shell_report::shell_report,
     start_args::StartArgs,
-    surroundings::Surroundings,
     terminal_safe::TerminalSafe,
     todo::todo,
     wait::{condition, wait_text, wait_through},
@@ -92,15 +93,15 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
-            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
-            resolve_project, this_binary,
+            Action, ActionReport, ClientError, LogRead, NoticeView, ProjectIdentityView,
+            ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch,
+            WaitView, process, resolve_project, this_binary,
         },
         private_dir::state_dir,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
-        terminal::{colouring::Colouring, log_renderer::LogRenderer},
+        terminal::coloring::Coloring,
     },
     constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
@@ -109,7 +110,7 @@ use crate::{
         occupancy::{LoadId, ReportStamp},
         port::LocalState,
         project::Project,
-        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, OutputCursor, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -658,15 +659,11 @@ fn logs(
         Ok::<_, CliError>(chosen)
     };
     let on_terminal = !json && io::stdout().is_terminal();
-    let colouring = if Surroundings::current(json).colour() {
-        Colouring::Coloured
-    } else {
-        Colouring::Plain
-    };
+    let coloring = log_coloring(json);
     let result = invocation.connect().and_then(|client| {
         if follow {
             let mut out = io::stdout().lock();
-            match follow_logs(&client, &project, pick, json, colouring, &mut out)? {}
+            match follow_logs(&client, &project, pick, json, coloring, &mut out)? {}
         }
         process::logs(&client, &project, pick, screen)
     });
@@ -677,13 +674,36 @@ fn logs(
     };
     match result {
         Ok(read) if json => print_result(json, &read.text_in(&project), |_| {}),
-        Ok(read) if read.log().is_some() => {
-            emit_bytes(LogRenderer::text_of(read.bytes(), colouring).as_bytes());
-        },
+        Ok(read) if read.log().is_some() => written(print_log(&read, coloring)),
         Ok(read) if on_terminal => written(print_safely(read.bytes())),
         Ok(read) => emit_bytes(read.bytes()),
         Err(error) => fail_framed(framing, json, &error),
     }
+}
+
+/// How `muster logs` colors a log: as anstream colors every other command's
+/// output, so `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM` and whether
+/// stdout is a terminal count the same; JSON is never colored.
+fn log_coloring(json: bool) -> Coloring {
+    if json || AutoStream::choice(&io::stdout()) == ColorChoice::Never {
+        Coloring::Plain
+    } else {
+        Coloring::Colored
+    }
+}
+
+/// Prints the log `read` holds as the lines a log reader shows, colored as
+/// `coloring` asks, a piece at a time rather than built whole first.
+///
+/// # Errors
+/// Returns the [`io::Error`] of a failed write.
+fn print_log(read: &LogRead, coloring: Coloring) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let start = read.start().unwrap_or(OutputCursor::new(0));
+    let mut out = RenderedLog::new(&mut stdout, coloring, start, read.log().clone());
+    out.write_all(read.bytes())?;
+    out.finish()?;
+    stdout.flush()
 }
 
 /// Prints `bytes` on this terminal through [`TerminalSafe`], ending on a

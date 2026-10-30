@@ -2,6 +2,8 @@
 //! OSC payload in full until its terminator, so a child that opens one and
 //! never ends it would grow every parser on its stream without limit.
 
+use std::iter;
+
 use alacritty_terminal::vte::{Parser, Perform};
 
 use super::{
@@ -115,11 +117,31 @@ fn ends_a_sequence(byte: u8) -> bool {
 /// Where the first slice of `bytes` ends: after [`SLICE`] bytes, moved on
 /// past any UTF-8 continuation bytes so no character is split.
 fn slice_end(bytes: &[u8]) -> usize {
-    let mut end = bytes.len().min(SLICE);
+    char_end(bytes, SLICE)
+}
+
+/// Where a piece of `bytes` at most about `size` long ends: after `size`
+/// bytes, moved on past any UTF-8 continuation bytes so no character is
+/// split.
+fn char_end(bytes: &[u8], size: usize) -> usize {
+    let mut end = bytes.len().min(size);
     while end < bytes.len() && is_continuation(bytes[end]) {
         end += 1;
     }
     end
+}
+
+/// `bytes` in pieces of about `size` bytes, each ending between characters,
+/// so a parser fed them one at a time never sees a character split.
+pub fn char_chunks(mut bytes: &[u8], size: usize) -> impl Iterator<Item = &[u8]> {
+    iter::from_fn(move || {
+        if bytes.is_empty() {
+            return None;
+        }
+        let (piece, rest) = bytes.split_at(char_end(bytes, size.max(1)));
+        bytes = rest;
+        Some(piece)
+    })
 }
 
 /// Whether `byte` continues a UTF-8 character rather than starting one.

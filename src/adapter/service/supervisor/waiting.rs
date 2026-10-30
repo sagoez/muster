@@ -733,10 +733,27 @@ impl Supervisor {
     }
 
     /// Feeds one chunk of `pane`'s output to its tap and tests what it
-    /// completed against the pane's readiness pattern and log waits.
+    /// completed against the pane's readiness pattern and log waits, and the
+    /// line still being written too, so a prompt with no newline can match.
+    /// That line is rendered whole only while a pattern waits on the pane;
+    /// otherwise a chunk costs only its own bytes.
     pub(super) fn tap_output(&mut self, pane: PaneId, at: Option<OutputCursor>, bytes: &[u8]) {
-        let lines = self.tap(pane).feed(at, bytes);
+        let mut lines = self.tap(pane).feed(at, bytes);
+        if self.awaits_a_pattern(pane) {
+            lines.extend(self.tap(pane).unfinished());
+        }
         self.test_lines(pane, &lines);
+    }
+
+    /// Whether a readiness pattern or a log wait still waits on `pane`'s
+    /// output.
+    fn awaits_a_pattern(&self, pane: PaneId) -> bool {
+        let generation = self.current_generation(pane);
+        self.readiness.get(&pane).is_some_and(|readiness| {
+            readiness.state().is_waiting() && readiness.matcher().is_some()
+        }) || self.waiters.iter().any(|waiter| {
+            waiter.pane() == pane && waiter.pin().counts(generation) && waiter.matcher().is_some()
+        })
     }
 
     /// Tests `lines` of `pane`'s current run against its readiness pattern

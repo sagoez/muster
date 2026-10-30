@@ -1,6 +1,5 @@
 use std::{
     io::{self, Write},
-    mem, str,
     time::Instant,
 };
 
@@ -11,76 +10,61 @@ use super::{
 use crate::{
     adapter::{
         client::LogText,
-        terminal::{log_line::LogLine, log_renderer::LogRenderer},
+        holder::run_starts,
+        terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
     },
     domain::value::OutputCursor,
 };
 
-/// End of a log line.
-const NEWLINE: u8 = b'\n';
-/// Longest a line is held back waiting for its newline; a longer one is
-/// written in pieces, each ending on a whole character.
-const MAX_PENDING_LINE: usize = 64 * 1024;
-/// Most bytes one UTF-8 character takes.
-const MAX_CHAR_BYTES: usize = 4;
-/// The bits of a byte that tell a UTF-8 continuation byte apart.
-const CONTINUATION_MASK: u8 = 0b1100_0000;
-/// Those bits in a continuation byte.
-const CONTINUATION_BITS: u8 = 0b1000_0000;
-
 /// A writer that turns a followed log's bytes into one JSON [`LogText`] line
 /// per log line, for `muster logs -f --json`, each carrying the cursor just
-/// past it and the line's text as `muster logs` renders it, without colour;
+/// past it and the line's text as `muster logs` renders it, without color;
 /// a line that only redrew the screen moves the cursor on and writes nothing.
-/// A line is held back until its newline arrives, so no object carries part
-/// of a line or of a character.
+/// A line is written once its newline arrives, or early, as `logs -f` shows
+/// it, once nothing arrived for [`PENDING_LINE_IDLE`] and nothing redrew it
+/// in place; the rest of it then follows in an object of its own.
 pub struct JsonLogLines<'a> {
     /// Where each JSON line goes.
     out: &'a mut dyn Write,
     /// The object every line is built from; its text is replaced per line.
     template: LogText,
-    /// Bytes of a line whose newline has not arrived yet.
-    pending: Vec<u8>,
-    /// Where the first pending byte sits in the process's output.
-    next: OutputCursor,
+    /// The rendering, kept across lines, placed in the process's output.
+    renderer: PlacedRenderer,
     /// When bytes last arrived.
     last_write: Instant,
-    /// The rendering, kept across lines.
-    renderer: LogRenderer,
 }
 
 impl<'a> JsonLogLines<'a> {
     /// A writer of lines shaped like `template` into `out`, whose first byte
-    /// sits at `start` in the process's output.
+    /// sits at `start` in the process's output; the rendering restarts at
+    /// the run starts the template's log records.
     pub fn new(out: &'a mut dyn Write, template: LogText, start: OutputCursor) -> Self {
         Self {
             out,
             template,
-            pending: Vec::new(),
-            next: start,
+            renderer: PlacedRenderer::new(start),
             last_write: Instant::now(),
-            renderer: LogRenderer::new(),
         }
     }
 
-    /// Writes `piece` of output as one JSON object of its rendered text: a
-    /// whole line with its line feed, or, unless `ends_line`, a part of one
-    /// written out early, which what follows on that line does not repeat.
+    /// Writes one object for each line the rendering finished.
+    ///
+    /// # Errors
+    /// Returns an [`io::Error`] when an object cannot be written.
+    fn write_lines(&mut self) -> io::Result<()> {
+        for line in self.renderer.take_lines() {
+            self.write_line(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `line` as one object carrying the cursor where the rendering
+    /// stands.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when the object cannot be written.
-    fn emit(&mut self, piece: &[u8], ends_line: bool) -> io::Result<()> {
-        self.next = self.next.advanced(piece.len() as u64);
-        self.renderer.advance(piece);
-        let mut lines = self.renderer.take_lines();
-        if !ends_line {
-            lines.extend(self.renderer.take_partial());
-        }
-        if lines.is_empty() {
-            return Ok(());
-        }
-        let text = lines.iter().map(LogLine::plain).collect();
-        let object = self.object(text, self.next, None);
+    fn write_line(&mut self, line: &LogLine) -> io::Result<()> {
+        let object = self.object(line.plain(), self.renderer.next(), None);
         self.write_object(&object)
     }
 
@@ -103,35 +87,37 @@ impl<'a> JsonLogLines<'a> {
     /// Returns an [`io::Error`] when the object cannot be written.
     fn write_object(&mut self, object: &LogText) -> io::Result<()> {
         serde_json::to_writer(&mut *self.out, object).map_err(io::Error::other)?;
-        self.out.write_all(&[NEWLINE])
+        self.out.write_all(&[LINE_FEED])
     }
 }
 
 impl Write for JsonLogLines<'_> {
+    /// Renders `bytes` a line at a time, so each object carries the cursor
+    /// just past the line it ends. The run starts are read after the bytes,
+    /// and a run's start is recorded before its first byte, so every run
+    /// start among them is known.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.pending.extend_from_slice(bytes);
-        while let Some(end) = self.pending.iter().position(|byte| *byte == NEWLINE) {
-            let line: Vec<u8> = self.pending.drain(..=end).collect();
-            self.emit(&line, true)?;
+        if let Some(log) = self.template.log() {
+            self.renderer.restart_at(run_starts(log));
         }
-        if self.pending.len() > MAX_PENDING_LINE {
-            // Only a character cut short at the end waits for its last bytes;
-            // invalid bytes never become valid, so they go out replaced.
-            let whole = self.pending.len() - incomplete_tail(&self.pending);
-            let piece: Vec<u8> = self.pending.drain(..whole).collect();
-            self.emit(&piece, false)?;
+        for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
+            self.renderer.advance(piece);
+            self.write_lines()?;
         }
         self.last_write = Instant::now();
         Ok(bytes.len())
     }
 
-    /// Writes out a held-back line once nothing has arrived for
-    /// half a second, so a prompt that waits for input, such as
-    /// `Password: `, is shown though no newline ends it.
+    /// Writes out what a line still being drawn shows once nothing has
+    /// arrived for [`PENDING_LINE_IDLE`] and nothing redrew it in place, so
+    /// a prompt that waits for input, such as `Password: `, is shown though
+    /// no newline ends it, while a progress bar is not.
     fn flush(&mut self) -> io::Result<()> {
-        if !self.pending.is_empty() && self.last_write.elapsed() >= PENDING_LINE_IDLE {
-            let line = mem::take(&mut self.pending);
-            self.emit(&line, false)?;
+        if self.last_write.elapsed() >= PENDING_LINE_IDLE
+            && self.renderer.is_settled()
+            && let Some(line) = self.renderer.take_partial()
+        {
+            self.write_line(&line)?;
         }
         self.out.flush()
     }
@@ -139,31 +125,15 @@ impl Write for JsonLogLines<'_> {
 
 impl FollowedOutput for JsonLogLines<'_> {
     /// Writes out the line the gap cut short, then one object naming the
-    /// bytes lost, carrying the cursor the output resumes at.
+    /// bytes lost, carrying the cursor the output resumes at; the rendering
+    /// starts over there.
     fn gap(&mut self, skipped: u64, resumed: OutputCursor) -> io::Result<()> {
-        if !self.pending.is_empty() {
-            let line = mem::take(&mut self.pending);
-            self.emit(&line, false)?;
-        }
-        self.next = resumed;
+        self.renderer.finish();
+        self.write_lines()?;
+        self.renderer.skip_to(resumed);
         let object = self.object(gap_line(skipped), resumed, Some(skipped));
         self.write_object(&object)
     }
-}
-
-/// How many bytes at the end of `bytes` are the start of a character whose
-/// remaining bytes have not arrived, wherever any invalid byte sits before.
-fn incomplete_tail(bytes: &[u8]) -> usize {
-    for back in 1..MAX_CHAR_BYTES.min(bytes.len() + 1) {
-        let start = bytes.len() - back;
-        if bytes[start] & CONTINUATION_MASK != CONTINUATION_BITS {
-            return match str::from_utf8(&bytes[start..]) {
-                Err(error) if error.error_len().is_none() => back,
-                _ => 0,
-            };
-        }
-    }
-    0
 }
 
 #[cfg(test)]
@@ -174,11 +144,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::client::ProjectIdentityView,
+        adapter::{client::ProjectIdentityView, terminal::line_drawing::MAX_LINE_CELLS},
         domain::value::{ProcessName, ProjectName},
     };
 
-    /// How far past the idle wait the prompt test looks.
+    /// How far past the idle wait the prompt tests look.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);
 
     /// The project every template names.
@@ -186,6 +156,17 @@ mod tests {
         ProjectIdentityView::builder()
             .name(ProjectName::try_new("shop").unwrap())
             .root(PathBuf::from("/p"))
+            .build()
+    }
+
+    /// The template of process `name`'s lines, whose log records no run
+    /// starts.
+    fn template(name: &str) -> LogText {
+        LogText::builder()
+            .project(shop())
+            .process(ProcessName::try_new(name).unwrap())
+            .log(Some(PathBuf::from("/nonexistent/muster/api.log")))
+            .text(String::new())
             .build()
     }
 
@@ -202,14 +183,20 @@ mod tests {
         texts_of(out)
     }
 
-    /// The template of process `name`'s lines.
-    fn template(name: &str) -> LogText {
-        LogText::builder()
-            .project(shop())
-            .process(ProcessName::try_new(name).unwrap())
-            .log(Some(PathBuf::from("/s/api.log")))
-            .text(String::new())
-            .build()
+    /// The texts of the JSON lines `writes` produce, flushing past the idle
+    /// wait after each, as `logs -f --json` does.
+    fn followed(writes: &[&[u8]]) -> Vec<String> {
+        let mut out = Vec::new();
+        {
+            let mut lines = JsonLogLines::new(&mut out, template("db"), OutputCursor::new(0));
+            for write in writes {
+                lines.write_all(write).unwrap();
+                lines.flush().unwrap();
+                thread::sleep(PENDING_LINE_IDLE + IDLE_MARGIN);
+                lines.flush().unwrap();
+            }
+        }
+        texts_of(out)
     }
 
     /// The JSON lines in `out`.
@@ -273,75 +260,50 @@ mod tests {
         assert_eq!(texts(&[b"a\nb\n\n"]), vec!["a", "b", ""]);
     }
 
-    /// A line longer than the hold-back limit is written in pieces rather
-    /// than held without bound.
+    /// A line longer than a line holds is written in pieces rather than held
+    /// without bound.
     #[test]
     fn an_endless_line_is_written_in_pieces() {
-        let long = vec![b'x'; MAX_PENDING_LINE + 1];
+        let long = vec![b'x'; MAX_LINE_CELLS + 1];
 
-        let pieces = texts(&[&long]);
-
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].len(), MAX_PENDING_LINE + 1);
+        assert_eq!(texts(&[&long]), vec!["x".repeat(MAX_LINE_CELLS)]);
     }
 
-    /// Invalid bytes in an over-long line go out replaced with the rest of
-    /// it, not one byte at a time; only a character cut short at the end is
-    /// held back for its last bytes.
+    /// A prompt is held while the line may go on, then written once nothing
+    /// more has arrived for the idle wait; its newline adds no empty line of
+    /// its own, while a later blank line still shows.
     #[test]
-    fn an_over_long_line_with_invalid_bytes_is_written_whole() {
-        let mut invalid = vec![0xFF];
-        invalid.extend(vec![b'x'; MAX_PENDING_LINE]);
-
-        let pieces = texts(&[&invalid]);
-
-        assert_eq!(pieces.len(), 1, "one piece, not one per invalid byte");
-        assert!(pieces[0].starts_with('\u{FFFD}'));
-        assert_eq!(pieces[0].chars().count(), MAX_PENDING_LINE + 1);
-
-        let mut cut = vec![b'x'; MAX_PENDING_LINE];
-        cut.push("é".as_bytes()[0]);
-        let pieces = texts(&[&cut]);
-        assert_eq!(pieces, vec!["x".repeat(MAX_PENDING_LINE)]);
-    }
-
-    /// An invalid byte before a character cut short at the end does not
-    /// stop that character being held back for its last bytes.
-    #[test]
-    fn an_invalid_byte_does_not_cut_a_trailing_character() {
-        let accented = "é".as_bytes();
-        let mut both = vec![0xFF];
-        both.extend(vec![b'x'; MAX_PENDING_LINE]);
-        both.push(accented[0]);
-        let mut rest = accented[1..].to_vec();
-        rest.push(NEWLINE);
-
-        let pieces = texts(&[&both, &rest]);
-
-        assert_eq!(pieces, vec![
-            format!("\u{FFFD}{}", "x".repeat(MAX_PENDING_LINE)),
-            "é".to_string()
-        ]);
-    }
-
-    /// The newline that ends a prompt already written after the idle wait
-    /// adds no empty line of its own, while a later blank line still shows.
-    #[test]
-    fn a_flushed_prompt_ending_adds_no_empty_line() {
+    fn a_prompt_is_written_after_the_idle_wait() {
         let mut out = Vec::new();
         {
             let mut lines = JsonLogLines::new(&mut out, template("db"), OutputCursor::new(0));
             lines.write_all(b"Password: ").unwrap();
-            thread::sleep(PENDING_LINE_IDLE + IDLE_MARGIN);
             lines.flush().unwrap();
-            lines.write_all(b"\r\nnext\n\n").unwrap();
         }
+        assert!(out.is_empty(), "held while the line may go on");
+        assert_eq!(followed(&[b"Password: ", b"\r\nnext\n\n"]), vec![
+            "Password:",
+            "next",
+            ""
+        ]);
+    }
 
-        assert_eq!(texts_of(out), vec!["Password:", "next", ""]);
+    /// A cargo-style progress bar that stalls past the idle wait is never
+    /// written as it passes: only the lines `muster logs` shows are.
+    #[test]
+    fn a_stalled_progress_bar_is_not_written() {
+        assert_eq!(
+            followed(&[
+                b"   Compiling a\n    Building [=>   ] 1/3: a\r",
+                b"\x1b[K   Compiling b\n    Building [==> ] 2/3: b\r",
+                b"\x1b[K    Finished dev\n",
+            ]),
+            vec!["   Compiling a", "   Compiling b", "    Finished dev"]
+        );
     }
 
     /// Each line's text is rendered as `muster logs` shows it, without
-    /// colour; a footer redrawn between lines and the room made for it write
+    /// color; a footer redrawn between lines and the room made for it write
     /// no object, yet the next line's cursor still counts their bytes.
     #[test]
     fn a_line_carries_its_rendered_text_and_redraws_carry_none() {
@@ -367,26 +329,13 @@ mod tests {
         );
     }
 
-    /// A prompt with no newline is written once nothing more has arrived for
-    /// the idle wait, and not before.
+    /// A C1 control split across writes, or across an idle flush, never
+    /// reaches an object's text.
     #[test]
-    fn a_prompt_is_written_after_the_idle_wait() {
-        let mut out = Vec::new();
-        {
-            let mut lines = JsonLogLines::new(&mut out, template("db"), OutputCursor::new(0));
-            lines.write_all(b"Password: ").unwrap();
-            lines.flush().unwrap();
-            assert_eq!(
-                lines.pending, b"Password: ",
-                "held while the line may go on"
-            );
-            thread::sleep(PENDING_LINE_IDLE + IDLE_MARGIN);
-            lines.flush().unwrap();
-            lines.flush().unwrap();
-        }
-
-        let objects = objects(out);
-        assert_eq!(objects.len(), 1, "written once");
-        assert_eq!(objects[0]["text"], "Password:");
+    fn a_split_c1_control_never_reaches_the_text() {
+        assert_eq!(texts(&[b"x\xC2", b"\x9B2J\n"]), vec!["x2J"]);
+        assert_eq!(followed(&[b"y\xC2", b"\x9D52;c\xC2", b"\x9C\n"]), vec![
+            "y", "52;c"
+        ]);
     }
 }

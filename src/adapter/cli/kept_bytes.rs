@@ -34,8 +34,13 @@ impl Kept {
 }
 
 impl Perform for Kept {
-    /// Keeps a printed character.
+    /// Keeps a printed character. A control character is dropped: one
+    /// reaches here only when the parser was handed it in pieces, and a C1
+    /// control would act on the terminal as the sequence it introduces.
     fn print(&mut self, character: char) {
+        if character.is_control() {
+            return;
+        }
         let mut encoded = [0; 4];
         self.bytes
             .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());

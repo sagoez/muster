@@ -14,11 +14,14 @@ use super::{
     log::rotated_path,
     log_base::LogBase,
     log_query::LogQuery,
-    log_reader::{BLOCK_BYTES, LINE_FEED, RAW_LINE_KEEP_BYTES},
+    log_reader::{BLOCK_BYTES, RAW_LINE_KEEP_BYTES},
     piece::Piece,
     strip::strip_line,
 };
-use crate::domain::value::OutputCursor;
+use crate::{
+    adapter::terminal::escape::{ESC, LINE_FEED},
+    domain::value::OutputCursor,
+};
 
 /// Times the files are opened again when a rotation moves them mid-open.
 const OPEN_ATTEMPTS: usize = 3;
@@ -167,7 +170,8 @@ impl Span {
     /// Whether the line `[start, end)` counts toward the newest lines wanted,
     /// reading its head from `block` (which starts at the given offset) when
     /// it lies there, else from the files. A line that only redrew the
-    /// screen never counts, as a read leaves it out.
+    /// screen never counts, as a read leaves it out; a line with no escape
+    /// sequence cannot have, so counting every line skips rendering it.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when a read fails.
@@ -180,14 +184,20 @@ impl Span {
     ) -> io::Result<bool> {
         let head_end = end.min(start + RAW_LINE_KEEP_BYTES as u64);
         let (block_start, bytes) = block;
-        let text = if head_end <= block_start + bytes.len() as u64 {
-            strip_line(&bytes[(start - block_start) as usize..(head_end - block_start) as usize])
+        let read;
+        let head = if head_end <= block_start + bytes.len() as u64 {
+            &bytes[(start - block_start) as usize..(head_end - block_start) as usize]
         } else {
-            let mut head = vec![0; (head_end - start) as usize];
-            let filled = self.read_full_at(start, &mut head)?;
-            strip_line(&head[..filled])
+            let mut buffer = vec![0; (head_end - start) as usize];
+            let filled = self.read_full_at(start, &mut buffer)?;
+            buffer.truncate(filled);
+            read = buffer;
+            &read
         };
-        let Some(text) = text else {
+        if matches!(query.filter(), LineFilter::All) && !head.contains(&ESC) {
+            return Ok(true);
+        }
+        let Some(text) = strip_line(head) else {
             return Ok(false);
         };
         Ok(match query.filter() {

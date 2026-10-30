@@ -29,6 +29,10 @@ pub const FULL_RESET_FINAL: u8 = b'c';
 pub const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
 /// SGR that resets every text attribute.
 pub const SGR_RESET: &str = "\x1b[0m";
+/// Final of SGR (`CSI ... m`), which sets the pen.
+pub const SGR_FINAL: char = 'm';
+/// Ends a line of output.
+pub const LINE_FEED: u8 = b'\n';
 
 /// The value of each parameter in `params`, without its sub-parameters; an
 /// omitted parameter reads as zero.

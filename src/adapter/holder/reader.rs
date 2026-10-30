@@ -19,7 +19,6 @@ use super::{
     log_reader::{read_log_range, visit_lines},
     protocol::HolderMessage,
     replay_request::ReplayRequest,
-    strip::strip_line,
 };
 use crate::{
     adapter::ipc,
@@ -95,12 +94,14 @@ impl Reader {
         if matchers.is_empty() {
             return;
         }
-        let _ = visit_lines(&log, from, until, |at, line| {
+        let _ = visit_lines(&log, from, until, |at, line, texts| {
             if self.sink.is_detached() {
                 return ControlFlow::Break(());
             }
-            if strip_line(line)
-                .is_some_and(|text| matchers.iter().any(|matcher| matcher.is_match(&text)))
+            if !line.is_empty()
+                && texts
+                    .iter()
+                    .any(|text| matchers.iter().any(|matcher| matcher.is_match(text)))
             {
                 self.forward(at, line.to_vec());
             }

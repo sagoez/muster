@@ -132,6 +132,7 @@ impl HolderServer {
             .and_then(|root| ProjectRoot::try_new(root).ok())
             .ok_or(HolderError::MissingProject)?;
         let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
+        log.record_run_start()?;
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
         let handle = runner.spawn(request.clone(), Box::new(HolderSink::new(sender.clone())))?;
         let child_started_at = SystemTime::now();

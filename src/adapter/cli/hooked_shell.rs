@@ -25,9 +25,9 @@ const SHELL_NAMES: &[&str] = &[
 /// What a login shell's name starts with.
 const LOGIN_SHELL_MARK: char = '-';
 
-/// The hooked shell this process runs straight from, as
-/// [`nearest_hooked_shell`] finds it among its own ancestors, while that
-/// shell works in `root` or a folder inside it.
+/// The hooked shell this process runs straight from, the nearest shell
+/// among its own ancestors when that is the one its hook exported, while
+/// that shell works in `root` or a folder inside it.
 pub fn hooked_shell_in(root: &ProjectRoot) -> Option<Pid> {
     nearest_hooked_shell(env::var(MUSTER_SHELL_ENV).ok().as_deref(), &own_ancestors())
         .filter(|shell| working_dir(*shell).is_some_and(|dir| root.contains(&dir)))

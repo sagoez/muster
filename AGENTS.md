@@ -93,12 +93,15 @@ plugs into a port.
     the `idle_stop_*` columns of `settings` and `projects`),
     `adapter/exchange` (the export file), `adapter/detect` (stack
     detection for `muster init`), `adapter/terminal` (the VT emulator and
-    keyboard tracker), notifier, metrics.
+    keyboard tracker), `adapter/herdr` (the `TerminalWorkspace` port over
+    the herdr CLI, each call bounded and its child killed and reaped),
+    notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs. It hands the CLI
   its ports through `CliPorts`, builds the MCP server's deps when the CLI asks
   to serve one and hands them to `adapter/mcp`'s `run_stdio`, which builds the
-  async runtime, and hands a holder `PortablePtyRunner`. No adapter builds
+  async runtime, builds the herdr workspace from the environment for the CLI
+  and the MCP server, and hands a holder `PortablePtyRunner`. No adapter builds
   another adapter's concrete type.
 
 **Dependency rule (strict):** dependencies point inward. `domain` depends on
@@ -127,7 +130,8 @@ src/
     coordination/      # shared notes, todos, key-value entries and locks
     occupancy/         # which shell is in which project: Occupancy, ShellRecord
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, Notifier, ... (traits)
+    terminal_workspace/  # SplitDirection, PaneCommand, PaneRequest, OpenedPane, WorkspaceError: what a pane beside the caller needs
+    port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
     project.rs, settings.rs, color_scheme.rs, notification.rs
   application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
@@ -138,6 +142,7 @@ src/
     service/           # the per-user service and its supervisors
     holder/            # one detached process per child, owning its PTY
     terminal/          # VT emulator, keyboard tracker, the bounded vte parser
+    herdr/             # driven: TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
     pty/               # driven: ProcessRunner via portable-pty
     store/             # driven: SqliteStore, migrations
     exchange/          # driven: the `muster export` / `muster import` file

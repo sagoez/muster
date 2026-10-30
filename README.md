@@ -236,6 +236,7 @@ changed from the CLI alone.
 | `muster kill [name]` | Kill a process at once |
 | `muster logs [name] [-f] [--screen] [-n N] [--since CURSOR] [--grep P [--regex]] [--errors]` | Print a process's log, follow it, print its current screen, or print filtered lines |
 | `muster attach [name] [--read-only]` | Show a process in this terminal and type into it |
+| `muster open [name] [--read-only] [--direction right\|down]` | Show a running process in a new pane beside this one when the shell runs in a terminal workspace; outside one, the same as `attach` |
 | `muster add <name> [options] -- <command>` | Add a process to the project, registering the folder |
 | `muster set <name> [options]` | Change a process's fields |
 | `muster rm <name>...` | Remove processes, stopping them first |
@@ -253,7 +254,7 @@ changed from the CLI alone.
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
 | `muster coordination export\|import` | Move that shared state as YAML, the export readable by its owner alone; an import reads only a regular file of at most 16 MiB and refuses a key, note body, value, todo title or dependency list longer than a write may be |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster doctor` | Diagnose the database, projects, stored processes, completions and the shell hook |
+| `muster doctor` | Diagnose the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
 A command that starts processes, and a wait for `running`, hold on until each
@@ -434,6 +435,19 @@ hint, kept in the window title while attached, names the detach key: `ctrl-\`
 by default (`muster config set detach-key`). Several clients may attach to one
 process; `--read-only` watches without typing or resizing.
 
+`muster open <name>` is `attach` for a shell that runs in a terminal workspace
+(herdr, see below). There it opens a new pane beside this one, focuses it and
+attaches to the process in it, so your own pane stays as it was. `--direction
+right|down` picks the side; without it the pane splits along its longer side.
+Detaching closes the new pane, and a failed attach leaves its message on screen
+there. If the workspace cannot be reached, `open` fails with the reason and
+names `muster attach` as the way to show the process in this pane; it never
+takes over the current pane on its own. Outside a workspace `open` is
+`attach`: the same checks, chooser, output and exit codes. Only a running
+process opens, and an unknown or ambiguous name opens no pane. `muster doctor`
+has a `workspace` row that says which case applies and whether the workspace
+answers.
+
 ## Logs
 
 Each process writes its raw output to a log under the state directory, across
@@ -501,7 +515,8 @@ only new output. The tools:
   left to the person at the CLI;
 - processes: `process_start`, `process_stop`, `process_restart`,
   `process_wait`, `process_logs`, `process_screen` (what the terminal shows
-  now), `process_send`;
+  now), `process_send`, and `process_open` (show a running process in a new
+  pane beside the agent's, without taking focus; see "Using it with herdr");
 - the stack definition: `process_add`, `process_set` and `process_remove`, which
   edit it as `muster add`, `set` and `rm` do, within the guardrails below;
   `process_add` registers the folder when it is not yet a project, `ready`
@@ -610,8 +625,36 @@ and a lock or todo someone else holds, are not errors.
 
 Agents and interactive terminals run in [herdr](https://herdr.dev) panes, each
 agent with muster's MCP server, so it can read and drive the stack its human
-sees in `muster ps`. A herdr custom command can also open a process in a pane
-of its own:
+sees in `muster ps`.
+
+From a herdr pane, `muster open web` shows the process in a new pane beside it
+and focuses that pane; detaching closes it. An agent does the same with the MCP
+tool `process_open`, which never takes focus, so the pane appears next to the
+agent without pulling the user away from what they are doing. Both take
+`read_only` / `--read-only` and a `direction` / `--direction` of `right` or
+`down`; without one the pane splits along its longer side. `process_open` is not
+a stack edit, so `mcp-stack-edits: read-only` does not refuse it.
+
+muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
+on `PATH`, or the absolute path in `HERDR_BIN_PATH`. It reaches herdr through
+that binary, so `HERDR_SOCKET_PATH` and `HERDR_SESSION` select the server as they
+do for herdr itself. Each herdr call is cut off after 5 seconds. The new pane
+is a shell that runs one typed line, so `open` supports bash, zsh and fish;
+another shell shows its own error in the pane.
+
+When herdr cannot be reached or refuses, `open` exits 1 and `process_open`
+answers `workspace-failed`, both with herdr's message. Neither falls back to
+attaching in the current pane. Outside herdr, `muster open` is `muster attach`,
+and `process_open` answers an `isError` result of kind `no-workspace` that tells
+the agent to ask the user to run `muster attach <name>` in their own terminal.
+
+herdr's `prefix` key is `ctrl+b` by default, and muster's `detach-key` must not
+be the same chord, or herdr takes it before the attach sees it; `muster doctor`
+warns when it is `ctrl-b`.
+
+A herdr custom command can also open a process in a pane of its own. Bind
+`muster attach`, not `muster open`: the pane that command creates already has
+`HERDR_PANE_ID` set, so `open` there would split a second pane.
 
 ```toml
 [[keys.command]]

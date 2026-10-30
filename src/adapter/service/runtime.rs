@@ -1817,7 +1817,7 @@ mod tests {
                 ReadyProbe, StopPolicy, StopSignal,
             },
             pty::{ProcessOutput, PtySize},
-            value::{CommandLine, LocalPort, PaneId, PositiveDuration, StopGrace},
+            value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
         },
     };
 
@@ -3343,6 +3343,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(HOOK_LOAD, seq))
             .folder(project.map_or_else(|| PathBuf::from(OUTSIDE), |root| root.as_ref().clone()))
+            .arrived(EpochNanos::new(seq))
             .project(project.cloned())
             .build()
     }
@@ -3799,6 +3800,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(HOOK_LOAD, 2))
             .folder(admin.as_ref().clone())
+            .arrived(EpochNanos::new(2))
             .project(Some(admin.clone()))
             .held(vec![shop.clone()])
             .build();

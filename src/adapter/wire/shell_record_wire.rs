@@ -7,7 +7,7 @@ use typed_builder::TypedBuilder;
 use super::WireForm;
 use crate::domain::{
     occupancy::{LoadId, LoadStart, ReportSeq, ReportStamp, ShellId, ShellRecord},
-    value::{Pid, ProjectRoot, StartToken},
+    value::{EpochNanos, Pid, ProjectRoot, StartToken},
 };
 
 /// A shell's report, as its record file and the service protocol hold it.
@@ -35,6 +35,9 @@ pub struct ShellRecordWire {
     /// UTF-8 travels whole.
     #[getset(get = "pub")]
     folder: Vec<u8>,
+    /// When the shell was first seen in that folder, in nanoseconds.
+    #[getset(get_copy = "pub")]
+    arrived: EpochNanos,
     /// The project its folder was in, or `null` outside every project.
     #[getset(get = "pub")]
     project: Option<ProjectRoot>,
@@ -54,6 +57,7 @@ impl WireForm for ShellRecord {
             load_pid: self.stamp().load().pid(),
             seq: self.stamp().seq(),
             folder: self.folder().clone().into_os_string().into_vec(),
+            arrived: *self.arrived(),
             project: self.project().clone(),
             held: self.held().clone(),
         }
@@ -68,6 +72,7 @@ impl WireForm for ShellRecord {
             .shell(ShellId::builder().pid(wire.pid).start(wire.start).build())
             .stamp(ReportStamp::builder().load(load).seq(wire.seq).build())
             .folder(PathBuf::from(OsString::from_vec(wire.folder)))
+            .arrived(wire.arrived)
             .project(wire.project)
             .held(wire.held)
             .build())
@@ -99,6 +104,7 @@ mod tests {
                 .shell(shell())
                 .stamp(stamp(9, 3))
                 .folder(PathBuf::from("/a"))
+                .arrived(EpochNanos::new(5))
                 .project(project.map(root))
                 .held(held.iter().map(|path| root(path)).collect())
                 .build()
@@ -107,12 +113,12 @@ mod tests {
             (
                 Some("/home/me/shop/admin"),
                 &["/home/me/shop"][..],
-                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,97],"project":"/home/me/shop/admin","held":["/home/me/shop"]}"#,
+                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,97],"arrived":5,"project":"/home/me/shop/admin","held":["/home/me/shop"]}"#,
             ),
             (
                 None,
                 &[][..],
-                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,97],"project":null,"held":[]}"#,
+                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,97],"arrived":5,"project":null,"held":[]}"#,
             ),
         ] {
             assert_eq!(
@@ -124,7 +130,7 @@ mod tests {
         }
         assert!(
             serde_json::from_str::<ShellRecordWire>(
-                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47],"project":null,"held":[],"cwd":"/"}"#
+                r#"{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47],"arrived":5,"project":null,"held":[],"cwd":"/"}"#
             )
             .is_err()
         );
@@ -139,6 +145,7 @@ mod tests {
             .shell(shell())
             .stamp(stamp(9, 3))
             .folder(folder.clone())
+            .arrived(EpochNanos::new(5))
             .build();
 
         let json = serde_json::to_string(&record.to_wire()).unwrap();

@@ -5,7 +5,18 @@ use nutype::nutype;
 /// A moment as nanoseconds since the Unix epoch, as precise as its clock
 /// reads: when a project was registered, or when a shell drew a prompt.
 #[nutype(derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, FromStr
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    FromStr,
+    Serialize,
+    Deserialize
 ))]
 pub struct EpochNanos(u64);
 

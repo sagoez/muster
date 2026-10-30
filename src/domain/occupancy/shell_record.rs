@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use super::{ReportStamp, ShellId};
-use crate::domain::value::ProjectRoot;
+use crate::domain::value::{EpochNanos, ProjectRoot};
 
 /// A shell's report, as the service is told it and as it is kept between
 /// services: which shell, which hook load and prompt, its folder, and the
@@ -18,6 +18,8 @@ pub struct ShellRecord {
     stamp: ReportStamp,
     /// The folder the shell was in.
     folder: PathBuf,
+    /// When the shell was first seen in that folder, at a prompt.
+    arrived: EpochNanos,
     /// The project its folder was in, or `None` outside every project.
     #[builder(default)]
     project: Option<ProjectRoot>,
@@ -90,12 +92,14 @@ mod tests {
     };
 
     /// The report of prompt `seq` from the folder of the test project
-    /// `folder` would name, in the project `project` names.
+    /// `folder` would name, in the project `project` names, arriving there
+    /// at that prompt.
     fn at(seq: u64, folder: &str, project: Option<&str>) -> ShellRecord {
         ShellRecord::builder()
             .shell(test_shell(100, 1))
             .stamp(stamp(1, seq))
             .folder(test_root(folder).as_ref().to_path_buf())
+            .arrived(EpochNanos::new(seq))
             .project(project.map(test_root))
             .build()
     }

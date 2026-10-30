@@ -443,10 +443,13 @@ fn a_late_report_of_a_move_into_a_folder_registered_since_starts_nothing() {
 /// `x` from the shell that typed it, so that shell's first prompt there is
 /// no entering and nothing starts, though the prompt comes after the
 /// registration. Once that shell has left, a second shell that moves into
-/// `x` enters it and starts `web`, and the first coming back counts in it.
+/// `x` enters it and starts `web`; once that one has left too and the idle
+/// stop has stopped `web`, the first coming back enters `x` like any other
+/// shell and starts `web` again.
 #[test]
-fn cd_and_add_on_one_line_starts_nothing_until_another_shell_enters() {
+fn cd_and_add_on_one_line_starts_nothing_until_the_shell_leaves_and_returns() {
     each_shell("cd && add", |scratch, shell, program| {
+        succeeded(&scratch.muster(&["config", "set", "idle-stop", SHORT_IDLE_STOP]));
         let fresh = scratch.path().join("fresh");
         fs::create_dir_all(&fresh).unwrap();
         let registrant = ShellSession::start(scratch, shell, program);
@@ -467,9 +470,18 @@ fn cd_and_add_on_one_line_starts_nothing_until_another_shell_enters() {
         walker.cd(&fresh);
         wait_until("entering to start web", || running(scratch, &fresh, "web"));
         wait_recorded_in(&walker, &fresh);
+
+        cd_reported(&walker, scratch.path().as_path());
+        wait_until("idle stop to end web", || {
+            let state = row(scratch, &fresh, "web")["state"].clone();
+            state != "running" && state != "stopping"
+        });
         registrant.cd(&fresh);
+        wait_until("coming back to start web", || {
+            running(scratch, &fresh, "web")
+        });
         wait_recorded_in(&registrant, &fresh);
-        assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 2, "{shell}");
+        assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 1, "{shell}");
     });
 }
 

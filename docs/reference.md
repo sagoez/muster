@@ -263,9 +263,10 @@ Entering a registered project's folder starts its autostart processes, as
 `muster up` would, and the next prompt prints a `muster:` line saying what
 happened. Registering a project around a shell that is already in it does not
 count as entering. A project registered by a muster command run from a hooked
-shell, as `cd x && muster add --autostart web -- npm run dev` does, is never
-entered by that shell, which counts in it from its next prompt; other shells
-enter it as usual. For other shells, the hook passes the time of the first
+shell, as `cd x && muster add --autostart web -- npm run dev` does, is not
+entered by that shell, which counts in it from its next prompt; once that shell
+has left, coming back is an ordinary entering, and other shells enter it as
+usual. For other shells, the hook passes the time of the first
 prompt it drew in its folder, and a project registered later was registered
 around the shell, even when the report of the `cd` reads the projects only
 after the registration. bash 5 and zsh read that time from their own clock and

@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         occupancy::testing::stamp,
-        value::{ProjectRoot, StartToken},
+        value::{EpochNanos, ProjectRoot, StartToken},
     };
 
     /// The permission bits of a mode.
@@ -309,6 +309,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(load, seq))
             .folder(PathBuf::from(project.unwrap_or(OUTSIDE)))
+            .arrived(EpochNanos::new(seq))
             .project(project.map(|root| ProjectRoot::try_new(PathBuf::from(root)).unwrap()))
             .build()
     }
@@ -459,7 +460,7 @@ mod tests {
         fs::write(files.notes_dir().join("7.json"), b"{not json").unwrap();
         fs::write(
             files.notes_dir().join("8.json"),
-            br#"{"pid":8,"start":3,"load":1,"load-pid":2,"seq":1,"folder":[47],"project":null,"held":[],"extra":true}"#,
+            br#"{"pid":8,"start":3,"load":1,"load-pid":2,"seq":1,"folder":[47],"arrived":1,"project":null,"held":[],"extra":true}"#,
         )
         .unwrap();
 

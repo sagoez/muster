@@ -31,7 +31,7 @@ fn not_opened(
                 read_only: request.read_only(),
                 source: Box::new(error),
             }
-        }
+        },
         other => other.into(),
     }
 }

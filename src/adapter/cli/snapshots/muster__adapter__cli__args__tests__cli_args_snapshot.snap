@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 256
+assertion_line: 318
 expression: "helps.join(\"\\n\\n\")"
 ---
 $ muster --help
@@ -8,96 +8,152 @@ Run a project's dev processes in the background, and control them from any shell
 
 Usage: muster [OPTIONS] [COMMAND]
 
-Commands:
-  ps            List this project's processes: state, pid, uptime, restarts and usage
-  up            Start this project's processes that autostart
-  down          Stop every process of this project
+Processes:
+  ps            List this project's processes
+  up            Start the processes that autostart
+  down          Stop every process
   start         Start a process
-  stop          Stop a process through its stop policy
+  stop          Stop a process
   restart       Restart a process
-  wait          Wait until a process prints a line, accepts a connection, answers a URL, reaches a state, or passes its readiness check
   pause         Suspend a process, leaving it alive
   resume        Resume a paused process
-  kill          Kill a process at once, skipping its graceful stop
-  logs          Print a process's output log, kept across its runs and after it exits
-  attach        Show a running process in this terminal and type into it
-  open          Show a running process in a new pane of the terminal workspace this shell runs in, beside this one; outside one, attach to it here, as `muster attach` does
-  notices       Show this project's notices: the stack edits agents made, and failed starts, forced stops and crashes when the service runs. Never starts it
-  service       Show or stop the muster service. Processes keep running either way
-  add           Add a process to this project, registering the folder as a project when it is not one yet. Nothing is started
-  set           Change a process's definition; a running process takes it at its next start
-  rm            Remove processes from this project, stopping those that run
-  config        Show or change muster's settings
+  kill          Kill a process at once
+  wait          Wait until a process is ready or prints a line
+  logs          Print or follow a process's log
+  attach        Show a process in this terminal and type into it
+  open          Show a process in a new terminal pane beside this one
+  run           Add a command, start it and attach to it
+
+Stack:
+  add           Add a process to this project
+  set           Change a process's definition
+  rm            Remove processes from this project
+  import        Load processes from a stack file
   export        Write this project's processes to a stack file
-  import        Load processes from a stack file into this project, registering the folder when it is not a project yet
-  init          Find processes in this folder's package.json, Procfile, justfile, Makefile or Compose file and add the ones chosen
-  run           Add a command to this project, start it and attach to it
-  projects      List registered projects, or remove one
-  note          Read or write shared scratchpad notes for the current project
-  todo          List or manage the current project's shared todos
-  kv            Read or write the current project's shared key-value state
-  lock          List the locks agents hold on the current project, or release one
-  coordination  Export or restore this project's coordination state as portable YAML
-  mcp           Serve muster to agents as an MCP server over stdio (spawned as a child process by a connecting agent). Each call acts on the project containing this folder, or the one --project or $MUSTER_PROJECT names, unless it names another
-  doctor        Diagnose muster's database, projects, completions, shell hook and terminal workspace
+  init          Detect processes in this folder and add them
+  projects      List and manage registered projects
+
+Agents and coordination:
+  mcp           Serve muster to an agent over MCP
+  note          Read or write shared notes
+  todo          List or manage shared todos
+  kv            Read or write shared key-value state
+  lock          List agents' locks, or release one
+  coordination  Export or restore the shared coordination state
+  notices       Show agents' stack edits and recent failures
+
+Setup:
+  config        Show or change muster's settings
+  shell-init    Print the shell hook that starts projects you enter
   completions   Print the shell hook that enables completions
-  shell-init    Print the shell hook that starts a project's processes when a shell enters it
-  help          Print this message or the help of the given subcommand(s)
+  doctor        Check muster's setup for problems
+  service       Show or stop the muster service
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>
+          The project to act on, by name or folder.
+          
+          A registered project's name, or a folder when the value contains `/` or starts with `.` or `~`. Defaults to $MUSTER_PROJECT, then the registered project containing the current folder.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Exit codes and JSON output: https://github.com/sagoez/muster/blob/main/docs/reference.md
+
+
+$ muster -h
+Run a project's dev processes in the background, and control them from any shell
+
+Usage: muster [OPTIONS] [COMMAND]
+
+Processes:
+  ps            List this project's processes
+  up            Start the processes that autostart
+  down          Stop every process
+  start         Start a process
+  stop          Stop a process
+  restart       Restart a process
+  pause         Suspend a process, leaving it alive
+  resume        Resume a paused process
+  kill          Kill a process at once
+  wait          Wait until a process is ready or prints a line
+  logs          Print or follow a process's log
+  attach        Show a process in this terminal and type into it
+  open          Show a process in a new terminal pane beside this one
+  run           Add a command, start it and attach to it
+
+Stack:
+  add           Add a process to this project
+  set           Change a process's definition
+  rm            Remove processes from this project
+  import        Load processes from a stack file
+  export        Write this project's processes to a stack file
+  init          Detect processes in this folder and add them
+  projects      List and manage registered projects
+
+Agents and coordination:
+  mcp           Serve muster to an agent over MCP
+  note          Read or write shared notes
+  todo          List or manage shared todos
+  kv            Read or write shared key-value state
+  lock          List agents' locks, or release one
+  coordination  Export or restore the shared coordination state
+  notices       Show agents' stack edits and recent failures
+
+Setup:
+  config        Show or change muster's settings
+  shell-init    Print the shell hook that starts projects you enter
+  completions   Print the shell hook that enables completions
+  doctor        Check muster's setup for problems
+  service       Show or stop the muster service
+
+Options:
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
   -V, --version            Print version
 
-Exit codes:
-    0  success
-    1  a process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds)
-    2  the command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled
-    3  the muster service is unavailable or runs a newer version
-    4  an invalid value: not a project, an unknown project or process, a refused argument, or an unusable file
-  130  interrupted with Ctrl-C while it waited at a terminal
-
-With --json, results and failures print as JSON on stdout. Object keys are
-snake_case, enum values are kebab-case, durations are seconds (an idle_stop
-that never comes is null), and times are RFC 3339 in UTC.
+Exit codes and JSON output: https://github.com/sagoez/muster/blob/main/docs/reference.md
 
 
-$ muster ps --help
-List this project's processes: state, pid, uptime, restarts and usage
+$ muster ps -h
+List this project's processes
 
 Usage: muster ps [OPTIONS]
 
 Options:
       --all                List every project the muster service has loaded
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --commands           Add a COMMAND column with each process's stored command, so an edit made by an agent shows
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster up --help
-Start this project's processes that autostart
+$ muster up -h
+Start the processes that autostart
 
 Usage: muster up [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster down --help
-Stop every process of this project
+$ muster down -h
+Stop every process
 
 Usage: muster down [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster start --help
+$ muster start -h
 Start a process
 
 Usage: muster start [OPTIONS] [NAME]
@@ -107,14 +163,14 @@ Arguments:
 
 Options:
       --json                Print the result as JSON
-  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>   The project to act on, by name or folder
       --wait                Wait until its new run passes its readiness check, or runs when it has none
       --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
-  -h, --help                Print help
+  -h, --help                Print help (see more with '--help')
 
 
-$ muster stop --help
-Stop a process through its stop policy
+$ muster stop -h
+Stop a process
 
 Usage: muster stop [OPTIONS] [NAME]
 
@@ -123,11 +179,11 @@ Arguments:
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster restart --help
+$ muster restart -h
 Restart a process
 
 Usage: muster restart [OPTIONS] [NAME]
@@ -137,14 +193,14 @@ Arguments:
 
 Options:
       --json                Print the result as JSON
-  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>   The project to act on, by name or folder
       --wait                Wait until its new run passes its readiness check, or runs when it has none
       --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
-  -h, --help                Print help
+  -h, --help                Print help (see more with '--help')
 
 
-$ muster wait --help
-Wait until a process prints a line, accepts a connection, answers a URL, reaches a state, or passes its readiness check
+$ muster wait -h
+Wait until a process is ready or prints a line
 
 Usage: muster wait [OPTIONS] [NAME]
 
@@ -153,7 +209,7 @@ Arguments:
 
 Options:
       --log <TEXT>          Wait for an output line containing this text
-  -p, --project <PROJECT>   The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>   The project to act on, by name or folder
       --regex               Read --log as a regular expression
       --port <PORT>         Wait until a TCP connection to this localhost port succeeds
       --http <URL>          Wait until this localhost URL answers below 500
@@ -165,7 +221,7 @@ Options:
   -h, --help                Print help (see more with '--help')
 
 
-$ muster pause --help
+$ muster pause -h
 Suspend a process, leaving it alive
 
 Usage: muster pause [OPTIONS] [NAME]
@@ -175,11 +231,11 @@ Arguments:
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster resume --help
+$ muster resume -h
 Resume a paused process
 
 Usage: muster resume [OPTIONS] [NAME]
@@ -189,12 +245,12 @@ Arguments:
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster kill --help
-Kill a process at once, skipping its graceful stop
+$ muster kill -h
+Kill a process at once
 
 Usage: muster kill [OPTIONS] [NAME]
 
@@ -203,12 +259,12 @@ Arguments:
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster logs --help
-Print a process's output log, kept across its runs and after it exits
+$ muster logs -h
+Print or follow a process's log
 
 Usage: muster logs [OPTIONS] [NAME]
 
@@ -217,7 +273,7 @@ Arguments:
 
 Options:
   -f, --follow             Keep printing what the process writes, across restarts, until interrupted
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --screen             Print the process's current terminal screen instead of its log
   -n, --lines <N>          Print only the newest N lines, escapes removed (at most 2000)
       --since <CURSOR>     Print only output after this cursor, from an earlier `muster wait` or `muster logs --json`
@@ -225,11 +281,11 @@ Options:
       --regex              Read --grep as a regular expression
       --errors             Print only error lines, each with its stack trace
       --json               Print the result as JSON; with --follow, one JSON object per log line
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster attach --help
-Show a running process in this terminal and type into it
+$ muster attach -h
+Show a process in this terminal and type into it
 
 Usage: muster attach [OPTIONS] [NAME]
 
@@ -237,14 +293,14 @@ Arguments:
   [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --read-only          Watch without typing into the process or resizing it
       --json               Print a refusal or failure as JSON; an attach prints nothing else
   -h, --help               Print help (see more with '--help')
 
 
-$ muster open --help
-Show a running process in a new pane of the terminal workspace this shell runs in, beside this one; outside one, attach to it here, as `muster attach` does
+$ muster open -h
+Show a process in a new terminal pane beside this one
 
 Usage: muster open [OPTIONS] [NAME]
 
@@ -252,26 +308,26 @@ Arguments:
   [NAME]  The process, as `muster ps` lists it; quote a name with spaces. Chosen from a list at a terminal when absent
 
 Options:
-  -p, --project <PROJECT>      The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>      The project to act on, by name or folder
       --read-only              Watch without typing into the process or resizing it
       --direction <DIRECTION>  Which side of this pane the new one opens on; without it, right when the pane is wider than tall and each half keeps at least 40 columns, and down otherwise [possible values: right, down]
       --json                   Print the opened pane, or a refusal or failure, as JSON
   -h, --help                   Print help (see more with '--help')
 
 
-$ muster notices --help
-Show this project's notices: the stack edits agents made, and failed starts, forced stops and crashes when the service runs. Never starts it
+$ muster notices -h
+Show agents' stack edits and recent failures
 
 Usage: muster notices [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster service --help
-Show or stop the muster service. Processes keep running either way
+$ muster service -h
+Show or stop the muster service
 
 Usage: muster service [OPTIONS] <COMMAND>
 
@@ -281,34 +337,34 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster service status --help
+$ muster service status -h
 Show whether the service runs, its version and what it has loaded, without starting it
 
 Usage: muster service status [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster service stop --help
+$ muster service stop -h
 Stop the service. Every process keeps running under its holder, and the next muster command starts the service again
 
 Usage: muster service stop [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster add --help
-Add a process to this project, registering the folder as a project when it is not one yet. Nothing is started
+$ muster add -h
+Add a process to this project
 
 Usage: muster add [OPTIONS] <NAME> -- <COMMAND>...
 
@@ -318,7 +374,7 @@ Arguments:
 
 Options:
       --cwd <DIR>                 Its working directory, read from the current folder; stored relative to the project when inside it. Defaults to the project's folder
-  -p, --project <PROJECT>         The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>         The project to act on, by name or folder
       --description <TEXT>        A one-line description
       --env <KEY=VALUE>           Set an environment variable, `KEY=VALUE` (repeatable)
       --autostart                 Start it with `muster up`
@@ -333,11 +389,11 @@ Options:
       --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
       --port <PORT>               A TCP port it listens on, checked free before each start (repeatable); on `set`, the ports given replace the stored ones
       --json                      Print the result as JSON
-  -h, --help                      Print help
+  -h, --help                      Print help (see more with '--help')
 
 
-$ muster set --help
-Change a process's definition; a running process takes it at its next start
+$ muster set -h
+Change a process's definition
 
 Usage: muster set [OPTIONS] <NAME> [-- <COMMAND>...]
 
@@ -347,7 +403,7 @@ Arguments:
 
 Options:
       --command <CMD>             A new command, as one shell expression
-  -p, --project <PROJECT>         The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>         The project to act on, by name or folder
       --cwd <DIR>                 A new working directory, read from the current folder
       --no-cwd                    Run in the project's folder again
       --description <TEXT>        A new one-line description
@@ -368,11 +424,11 @@ Options:
       --ready-timeout <DURATION>  How long each run may take to become ready, such as `60s`
       --port <PORT>               A TCP port it listens on, checked free before each start (repeatable); on `set`, the ports given replace the stored ones
       --json                      Print the result as JSON
-  -h, --help                      Print help
+  -h, --help                      Print help (see more with '--help')
 
 
-$ muster rm --help
-Remove processes from this project, stopping those that run
+$ muster rm -h
+Remove processes from this project
 
 Usage: muster rm [OPTIONS] <NAMES>...
 
@@ -381,11 +437,11 @@ Arguments:
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster config --help
+$ muster config -h
 Show or change muster's settings
 
 Usage: muster config [OPTIONS] [COMMAND]
@@ -397,23 +453,23 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster config list --help
+$ muster config list -h
 List every setting and its value
 
 Usage: muster config list [OPTIONS]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster config get --help
+$ muster config get -h
 Print one setting's value
 
 Usage: muster config get [OPTIONS] <KEY>
@@ -422,12 +478,12 @@ Arguments:
   <KEY>  The setting [possible values: desktop-notifications, default-size, detach-key, log-max-size, scrollback, color-scheme, default-autostart, default-restart, default-stop-signal, default-stop-grace, mcp-stack-edits, idle-stop]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster config set --help
+$ muster config set -h
 Change one setting
 
 Usage: muster config set [OPTIONS] <KEY> <VALUE>
@@ -437,12 +493,12 @@ Arguments:
   <VALUE>  Its new value, in the form `muster config get` prints
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster export --help
+$ muster export -h
 Write this project's processes to a stack file
 
 Usage: muster export [OPTIONS] [FILE]
@@ -452,14 +508,14 @@ Arguments:
 
 Options:
       --force              Overwrite an existing file
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --with-env           Write environment values too; without it each variable is written with no value, to be filled in before importing
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster import --help
-Load processes from a stack file into this project, registering the folder when it is not a project yet
+$ muster import -h
+Load processes from a stack file
 
 Usage: muster import [OPTIONS] [FILE]
 
@@ -468,27 +524,27 @@ Arguments:
 
 Options:
       --merge              Replace same-named processes and keep the others
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --replace            Make the project's processes exactly the file's, stopping and removing the others
       --dry-run            Print what would change and change nothing
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster init --help
-Find processes in this folder's package.json, Procfile, justfile, Makefile or Compose file and add the ones chosen
+$ muster init -h
+Detect processes in this folder and add them
 
 Usage: muster init [OPTIONS]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
   -y, --yes                Add the suggested processes without asking
       --json               Print the result as JSON
   -h, --help               Print help (see more with '--help')
 
 
-$ muster run --help
-Add a command to this project, start it and attach to it
+$ muster run -h
+Add a command, start it and attach to it
 
 Usage: muster run [OPTIONS] <COMMAND>...
 
@@ -497,13 +553,13 @@ Arguments:
 
 Options:
   -n, --name <NAME>        Its name. Defaults to the command's first word
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the report as JSON
   -h, --help               Print help (see more with '--help')
 
 
-$ muster projects --help
-List registered projects, or remove one
+$ muster projects -h
+List and manage registered projects
 
 Usage: muster projects [OPTIONS] [COMMAND]
 
@@ -513,12 +569,12 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster projects rm --help
+$ muster projects rm -h
 Stop a project's processes and forget it with its processes and coordination state; its folder is untouched
 
 Usage: muster projects rm [OPTIONS] <PROJECT>
@@ -532,7 +588,7 @@ Options:
   -h, --help  Print help
 
 
-$ muster projects set --help
+$ muster projects set -h
 Change a project's own settings
 
 Usage: muster projects set [OPTIONS] --idle-stop <DURATION> [PROJECT]
@@ -546,8 +602,8 @@ Options:
   -h, --help                  Print help
 
 
-$ muster note --help
-Read or write shared scratchpad notes for the current project
+$ muster note -h
+Read or write shared notes
 
 Usage: muster note [OPTIONS] [COMMAND]
 
@@ -558,14 +614,14 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --limit <LIMIT>      Notes one page of the listing shows, by key; `note get` shows a body [default: 50]
       --cursor <CURSOR>    List from after this cursor, the one an earlier page printed
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster note get --help
+$ muster note get -h
 Print a note's body by key
 
 Usage: muster note get [OPTIONS] <KEY>
@@ -574,12 +630,12 @@ Arguments:
   <KEY>  Note key
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster note set --help
+$ muster note set -h
 Create or replace a note
 
 Usage: muster note set [OPTIONS] <KEY> <BODY>
@@ -589,12 +645,12 @@ Arguments:
   <BODY>  Markdown body
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster note rm --help
+$ muster note rm -h
 Delete a note by key
 
 Usage: muster note rm [OPTIONS] <KEY>
@@ -603,13 +659,13 @@ Arguments:
   <KEY>  Note key
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster todo --help
-List or manage the current project's shared todos
+$ muster todo -h
+List or manage shared todos
 
 Usage: muster todo [OPTIONS] [COMMAND]
 
@@ -620,14 +676,14 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --limit <LIMIT>      Todos one page of the listing shows [default: 50]
       --cursor <CURSOR>    List from after this cursor, the one an earlier page printed
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster todo add --help
+$ muster todo add -h
 Add a new pending todo
 
 Usage: muster todo add [OPTIONS] <TITLE>
@@ -637,12 +693,12 @@ Arguments:
 
 Options:
       --dep <DEPS>         Id of a todo this one depends on (repeatable)
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster todo status --help
+$ muster todo status -h
 Set a todo's status: pending, in-progress, or done
 
 Usage: muster todo status [OPTIONS] <ID> <STATUS>
@@ -653,12 +709,12 @@ Arguments:
 
 Options:
       --force              Change it even though an agent holds it
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster todo rm --help
+$ muster todo rm -h
 Delete a todo by id
 
 Usage: muster todo rm [OPTIONS] <ID>
@@ -667,13 +723,13 @@ Arguments:
   <ID>  Todo id
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster kv --help
-Read or write the current project's shared key-value state
+$ muster kv -h
+Read or write shared key-value state
 
 Usage: muster kv [OPTIONS] [COMMAND]
 
@@ -684,14 +740,14 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --limit <LIMIT>      Entries one page of the listing shows, each value cut short; `kv get` shows a value whole [default: 50]
       --cursor <CURSOR>    List from after this cursor, the one an earlier page printed
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster kv get --help
+$ muster kv get -h
 Print a value by key
 
 Usage: muster kv get [OPTIONS] <KEY>
@@ -700,12 +756,12 @@ Arguments:
   <KEY>  Entry key
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster kv set --help
+$ muster kv set -h
 Create or replace a value
 
 Usage: muster kv set [OPTIONS] <KEY> <VALUE>
@@ -715,12 +771,12 @@ Arguments:
   <VALUE>  Value to store
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster kv rm --help
+$ muster kv rm -h
 Delete an entry by key
 
 Usage: muster kv rm [OPTIONS] <KEY>
@@ -729,13 +785,13 @@ Arguments:
   <KEY>  Entry key
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster lock --help
-List the locks agents hold on the current project, or release one
+$ muster lock -h
+List agents' locks, or release one
 
 Usage: muster lock [OPTIONS] [COMMAND]
 
@@ -744,12 +800,12 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster lock release --help
+$ muster lock release -h
 Release a lock whoever holds it, to clear one an agent left behind
 
 Usage: muster lock release [OPTIONS] <NAME>
@@ -758,13 +814,13 @@ Arguments:
   <NAME>  Lock name
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster coordination --help
-Export or restore this project's coordination state as portable YAML
+$ muster coordination -h
+Export or restore the shared coordination state
 
 Usage: muster coordination [OPTIONS] <COMMAND>
 
@@ -774,12 +830,12 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster coordination export --help
+$ muster coordination export -h
 Write this project's scratchpads, todos, and key-values to a YAML file
 
 Usage: muster coordination export [OPTIONS] <FILE>
@@ -788,12 +844,12 @@ Arguments:
   <FILE>  File to write
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster coordination import --help
+$ muster coordination import -h
 Restore entries from a YAML file, preserving ids, authors, and timestamps. Entries merge; those absent from the file are left alone
 
 Usage: muster coordination import [OPTIONS] <FILE>
@@ -802,35 +858,35 @@ Arguments:
   <FILE>  File to read
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster mcp --help
-Serve muster to agents as an MCP server over stdio (spawned as a child process by a connecting agent). Each call acts on the project containing this folder, or the one --project or $MUSTER_PROJECT names, unless it names another
+$ muster mcp -h
+Serve muster to an agent over MCP
 
 Usage: muster mcp [OPTIONS]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
       --print-config       Print the JSON config snippet to add muster to an agent's MCP servers, then exit instead of serving
       --as <NAME>          The agent's id on coordination writes and locks; defaults to MUSTER_AGENT, then herdr's pane, then a random session id
-  -h, --help               Print help
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster doctor --help
-Diagnose muster's database, projects, completions, shell hook and terminal workspace
+$ muster doctor -h
+Check muster's setup for problems
 
 Usage: muster doctor [OPTIONS]
 
 Options:
       --json               Print the result as JSON
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster completions --help
+$ muster completions -h
 Print the shell hook that enables completions
 
 Usage: muster completions [OPTIONS] <SHELL>
@@ -839,12 +895,12 @@ Arguments:
   <SHELL>  Shell to print the hook for [possible values: bash, zsh, fish, elvish, powershell]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
-  -h, --help               Print help
+  -p, --project <PROJECT>  The project to act on, by name or folder
+  -h, --help               Print help (see more with '--help')
 
 
-$ muster shell-init --help
-Print the shell hook that starts a project's processes when a shell enters it
+$ muster shell-init -h
+Print the shell hook that starts projects you enter
 
 Usage: muster shell-init [OPTIONS] <SHELL>
 
@@ -852,5 +908,5 @@ Arguments:
   <SHELL>  Shell to print the hook for [possible values: bash, zsh, fish]
 
 Options:
-  -p, --project <PROJECT>  The project: a registered project's name, or a folder (a value with `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then the registered project containing the current folder
+  -p, --project <PROJECT>  The project to act on, by name or folder
   -h, --help               Print help (see more with '--help')

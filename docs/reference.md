@@ -227,8 +227,8 @@ a question it would have asked fails with exit 4 naming the argument, and
 
 Every command but `mcp`, `completions` and `shell-init` takes `--json` and
 prints results and failures as JSON on stdout. Keys are snake_case, enum values kebab-case
-(`on-failure`, `in-progress`), durations are seconds, and times are RFC 3339
-in UTC to the second. A setting's `value` is the text `config set` takes, such
+(`on-failure`, `in-progress`), durations are seconds (an `idle_stop` that
+never comes is `null`), and times are RFC 3339 in UTC to the second. A setting's `value` is the text `config set` takes, such
 as `"5s"`. A process definition:
 
 ```json

@@ -438,10 +438,12 @@ process; `--read-only` watches without typing or resizing.
 `muster open <name>` is `attach` for a shell that runs in a terminal workspace
 (herdr, see below). There it opens a new pane beside this one, focuses it and
 attaches to the process in it, so your own pane stays as it was. `--direction
-right|down` picks the side; without it the pane splits along its longer side.
-Detaching closes the new pane, and a failed attach leaves its message on screen
-there. If the workspace cannot be reached, `open` fails with the reason and
-names `muster attach` as the way to show the process in this pane; it never
+right|down` picks the side; without it the pane splits to the right when it
+is at least twice as many columns as rows and at least 80 columns wide, so each
+half keeps 40, and down otherwise. Detaching closes the new pane, and a failed
+attach leaves its message on screen there. If the workspace cannot be reached,
+`open` fails with the reason and names the `muster --project <root> attach --
+<name>` that shows the process in this pane; it never
 takes over the current pane on its own. Outside a workspace `open` is
 `attach`: the same checks, chooser, output and exit codes. Only a running
 process opens, and an unknown or ambiguous name opens no pane. `muster doctor`
@@ -632,8 +634,11 @@ and focuses that pane; detaching closes it. An agent does the same with the MCP
 tool `process_open`, which never takes focus, so the pane appears next to the
 agent without pulling the user away from what they are doing. Both take
 `read_only` / `--read-only` and a `direction` / `--direction` of `right` or
-`down`; without one the pane splits along its longer side. `process_open` is not
-a stack edit, so `mcp-stack-edits: read-only` does not refuse it.
+`down`; without one the pane splits right when it is at least twice as many
+columns as rows and 80 columns wide, and down otherwise. `process_open` is not
+a stack edit, so `mcp-stack-edits: read-only` does not refuse it. The new pane's
+shell skips the shell hook, so it never occupies the project or holds off its
+idle stop.
 
 muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
 on `PATH`, or the absolute path in `HERDR_BIN_PATH`. It reaches herdr through
@@ -647,13 +652,17 @@ pane's own variables are set, so a copy recalled from history elsewhere does
 nothing. The pane runs the muster binary as it is at each open: once an
 upgrade has replaced the binary a `muster mcp` server started from, its
 `process_open` answers `workspace-failed` naming it, and restarting the server
-fixes it.
+fixes it. The processes muster starts never inherit the pane identity
+(`HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`), so a script among them
+is never mistaken for the pane it was started from.
 
 When herdr cannot be reached or refuses, `open` exits 1 and `process_open`
 answers `workspace-failed`, both with herdr's message. Neither falls back to
-attaching in the current pane. Outside herdr, `muster open` is `muster attach`,
-and `process_open` answers an `isError` result of kind `no-workspace` that tells
-the agent to ask the user to run `muster attach <name>` in their own terminal.
+attaching in the current pane. Outside herdr, `muster open` is `muster attach`.
+`process_open` first resolves the process as usual, so an unknown or stopped one
+gets its own answer; a running one gets an `isError` result of kind
+`no-workspace` that tells the agent to ask the user to run `muster --project
+<root> attach -- <name>` in their own terminal.
 
 herdr's `prefix` key is `ctrl+b` by default, and muster's `detach-key` must not
 be the same chord, or herdr takes it before the attach sees it; `muster doctor`

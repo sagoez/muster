@@ -100,9 +100,9 @@ plugs into a port.
   adapter; it constructs them, wires them to ports, and runs. It hands the CLI
   its ports through `CliPorts`, builds the MCP server's deps when the CLI asks
   to serve one and hands them to `adapter/mcp`'s `run_stdio`, which builds the
-  async runtime, builds the herdr workspace from the environment for the CLI
-  and the MCP server, and hands a holder `PortablePtyRunner`. No adapter builds
-  another adapter's concrete type.
+  async runtime, and hands a holder `PortablePtyRunner`. It builds the herdr
+  workspace from the environment once per CLI call and once per MCP server. No
+  adapter builds another adapter's concrete type.
 
 **Dependency rule (strict):** dependencies point inward. `domain` depends on
 nothing internal. `application` depends on `domain`. `adapter` depends on
@@ -130,7 +130,7 @@ src/
     coordination/      # shared notes, todos, key-value entries and locks
     occupancy/         # which shell is in which project: Occupancy, ShellRecord
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    terminal_workspace/  # SplitDirection, PaneCommand, PaneRequest, OpenedPane, WorkspaceError: what a pane beside the caller needs
+    terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
     port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
     project.rs, settings.rs, color_scheme.rs, notification.rs

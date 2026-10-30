@@ -1,19 +1,15 @@
+use getset::Getters;
 use serde::Deserialize;
+use typed_builder::TypedBuilder;
 
 use super::error_body::ErrorBody;
 
 /// herdr's refusal, as it prints it on stderr:
 /// `{"error": {"code", "message"}}`. Only the fields muster reads; herdr
 /// may add others.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 pub struct ErrorReply {
     /// The refusal itself.
     error: ErrorBody,
-}
-
-impl ErrorReply {
-    /// The refusal's code and message, as herdr wrote them.
-    pub fn into_parts(self) -> (String, String) {
-        self.error.into_parts()
-    }
 }

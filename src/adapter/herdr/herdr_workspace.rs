@@ -66,6 +66,13 @@ const FOCUS_ACTION: &str = "focus the new pane beside pane";
 const SPLIT_MAY_HAVE_OPENED: &str = "; a pane may have opened that muster never learned of";
 /// Why a blank pane id cannot be used.
 const BLANK_PANE_ID: &str = "the pane id is blank";
+/// Leads the pane id herdr answered with, in an error.
+const PANE_ID: &str = "the pane id";
+/// Why a pane id cannot address its pane.
+const UNUSABLE_PANE_ID: &str =
+    "cannot address the pane: it is empty, starts with '-' or holds a control character";
+/// Starts an argument herdr reads as a flag.
+const FLAG_LEAD: char = '-';
 
 /// The herdr the caller's pane runs in, driven through its CLI.
 #[derive(Debug)]
@@ -136,22 +143,29 @@ impl HerdrWorkspace {
     }
 
     /// Which way to split, from the caller's size in its tab's layout; when
-    /// the layout cannot be read, does not list the caller or gives it a
-    /// size out of bounds, the split for an unknown size.
-    fn direction_from_layout(&self) -> SplitDirection {
+    /// the answer is malformed, does not list the caller or gives it a size
+    /// out of bounds, the split for an unknown size.
+    ///
+    /// # Errors
+    /// Returns the layout call's failure when herdr could not be reached,
+    /// timed out or refused, so nothing is split after it.
+    fn direction_from_layout(&self) -> Result<SplitDirection, WorkspaceError> {
         let action = format!("{LAYOUT_ACTION} {}", self.caller);
-        let size = self
-            .ask::<LayoutReply>(
-                &words(&[PANE, LAYOUT, PANE_FLAG, self.caller.as_ref()]),
-                &action,
-                None,
-            )
-            .ok()
-            .and_then(|layout| layout.size_of(self.caller.as_ref()));
-        match size.map(|(width, height)| (Cols::try_new(width), Rows::try_new(height))) {
-            Some((Ok(cols), Ok(rows))) => SplitDirection::for_area(cols, rows),
-            _ => SplitDirection::FOR_UNKNOWN_AREA,
-        }
+        let size = match self.ask::<LayoutReply>(
+            &words(&[PANE, LAYOUT, PANE_FLAG, self.caller.as_ref()]),
+            &action,
+            None,
+        ) {
+            Ok(layout) => layout.size_of(self.caller.as_ref()),
+            Err(WorkspaceError::Unreadable { .. }) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(
+            match size.map(|(width, height)| (Cols::try_new(width), Rows::try_new(height))) {
+                Some((Ok(cols), Ok(rows))) => SplitDirection::for_area(cols, rows),
+                _ => SplitDirection::FOR_UNKNOWN_AREA,
+            },
+        )
     }
 
     /// Splits the caller's pane `direction`-wise into a shell in `request`'s
@@ -161,8 +175,8 @@ impl HerdrWorkspace {
     ///
     /// # Errors
     /// Returns the split call's failure, or [`WorkspaceError::Unreadable`]
-    /// for an answer naming no pane; a timeout or an unreadable answer notes
-    /// that a pane may have opened.
+    /// for an answer naming no pane or a pane id that cannot address it; a
+    /// timeout or an unreadable answer notes that a pane may have opened.
     fn split(
         &self,
         request: &PaneRequest,
@@ -189,9 +203,9 @@ impl HerdrWorkspace {
         args.push(OsString::from(NO_FOCUS_FLAG));
         self.ask::<PaneReply>(&args, &action, Some(SPLIT_MAY_HAVE_OPENED))
             .and_then(|reply| {
-                let pane = reply.into_pane_id();
-                let shown = shown_pane(&action, &pane)?;
-                Ok((pane, shown))
+                let pane = reply.pane_id();
+                let shown = addressable_pane(&action, pane)?;
+                Ok((pane.to_string(), shown))
             })
             .map_err(|error| match error {
                 WorkspaceError::Unreadable {
@@ -264,9 +278,10 @@ impl TerminalWorkspace for HerdrWorkspace {
     /// focus is asked for, so no key the user types in between reaches the
     /// new shell ahead of the line.
     fn open_beside(&self, request: &PaneRequest) -> Result<OpenedPane, WorkspaceError> {
-        let direction = request
-            .direction()
-            .unwrap_or_else(|| self.direction_from_layout());
+        let direction = match request.direction() {
+            Some(direction) => direction,
+            None => self.direction_from_layout()?,
+        };
         let (env, line) = typed_line(request.command());
         let (pane, shown) = self.split(request, direction, env)?;
         self.type_line(&pane, &shown, line)?;
@@ -282,7 +297,7 @@ impl TerminalWorkspace for HerdrWorkspace {
             self.ask(&words(&[PANE, GET, self.caller.as_ref()]), &action, None)?;
         Ok(WorkspaceProbe::builder()
             .workspace(WORKSPACE_NAME.to_string())
-            .pane(shown_pane(&action, &reply.into_pane_id())?)
+            .pane(shown_pane(&action, reply.pane_id())?)
             .build())
     }
 }
@@ -299,6 +314,23 @@ fn words(args: &[&str]) -> Vec<OsString> {
 /// Returns [`WorkspaceError::Unreadable`] for a blank id.
 fn shown_pane(action: &str, id: &str) -> Result<WorkspacePaneId, WorkspaceError> {
     WorkspacePaneId::try_new(herdr_text(id)).map_err(|_| unreadable(action, BLANK_PANE_ID))
+}
+
+/// The id herdr gave a new pane, which muster addresses the pane by, made
+/// safe to print to show it.
+///
+/// # Errors
+/// Returns [`WorkspaceError::Unreadable`] naming an id that is empty, starts
+/// with `-`, which herdr would read as a flag, or holds a control
+/// character, or that is blank.
+fn addressable_pane(action: &str, id: &str) -> Result<WorkspacePaneId, WorkspaceError> {
+    if id.is_empty() || id.starts_with(FLAG_LEAD) || id.chars().any(char::is_control) {
+        return Err(unreadable(
+            action,
+            &format!("{PANE_ID} '{id}' {UNUSABLE_PANE_ID}"),
+        ));
+    }
+    shown_pane(action, id)
 }
 
 /// herdr's answer to `action` could not be used, for `reason`.
@@ -319,6 +351,7 @@ mod tests {
         adapter::{
             herdr::fake_herdr::{CALLER, FakeHerdr},
             signal_target::SignalTarget,
+            test_wait::wait_until,
         },
         domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection},
     };
@@ -505,20 +538,16 @@ mod tests {
         let not_listed = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p9","rect":{"width":200,"height":10}}]}}}"#;
         let zero_rows = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":200,"height":0}}]}}}"#;
         let too_wide = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":70000,"height":10}}]}}}"#;
-        let cases: [(&str, Option<&str>); 5] = [
-            ("refused", None),
-            ("not json", Some("not json")),
-            ("not listed", Some(not_listed)),
-            ("zero rows", Some(zero_rows)),
-            ("too wide", Some(too_wide)),
+        let cases = [
+            ("not json", "not json"),
+            ("not listed", not_listed),
+            ("zero rows", zero_rows),
+            ("too wide", too_wide),
         ];
         for (case, layout) in cases {
             let herdr = FakeHerdr::new();
             herdr.answer("split", SPLIT_REPLY);
-            match layout {
-                Some(layout) => herdr.answer("layout", layout),
-                None => herdr.refuse("layout", REFUSAL, 1),
-            }
+            herdr.answer("layout", layout);
             let opened = herdr
                 .workspace(AMPLE)
                 .open_beside(&attach_request(None))
@@ -532,6 +561,48 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// A layout call herdr refuses, that cannot reach herdr or that times
+    /// out fails the open with its own error at once: nothing is split.
+    #[test]
+    fn a_layout_call_that_fails_opens_nothing() {
+        let refused = FakeHerdr::new();
+        refused.answer("split", SPLIT_REPLY);
+        refused.refuse("layout", REFUSAL, 1);
+        let error = refused
+            .workspace(AMPLE)
+            .open_beside(&attach_request(None))
+            .unwrap_err();
+        assert!(
+            matches!(&error, WorkspaceError::Refused { code, .. } if code == "pane_not_found"),
+            "{error}"
+        );
+        assert_eq!(refused.calls().len(), 1);
+
+        let hung = FakeHerdr::new();
+        hung.answer("split", SPLIT_REPLY);
+        hung.hang("layout");
+        let error = hung
+            .workspace(SHORT)
+            .open_beside(&attach_request(None))
+            .unwrap_err();
+        assert!(
+            matches!(error, WorkspaceError::Unreachable { .. }),
+            "{error}"
+        );
+        assert_eq!(hung.calls().len(), 1);
+
+        let missing = HerdrWorkspace::with(
+            hung.program().with_file_name("no-such-herdr"),
+            WorkspacePaneId::try_new(CALLER).unwrap(),
+            AMPLE,
+        );
+        let error = missing.open_beside(&attach_request(None)).unwrap_err();
+        assert!(
+            matches!(error, WorkspaceError::Unreachable { .. }),
+            "{error}"
+        );
     }
 
     /// A direction asked for is used as is, without reading the layout.
@@ -596,19 +667,18 @@ mod tests {
     }
 
     /// herdr's own id addresses the new pane when typing into and closing
-    /// it, even when it holds a character that is not printable; only the
-    /// id muster shows is made safe to print.
+    /// it; only the id muster shows is trimmed.
     #[test]
-    fn the_new_pane_is_addressed_by_herdr_s_own_id_and_shown_safe() {
-        let raw = "w1:p2\u{7}";
-        let reply = r#"{"result":{"pane":{"pane_id":"w1:p2\u0007"}}}"#;
+    fn the_new_pane_is_addressed_by_herdr_s_own_id() {
+        let raw = "w1:p2 ";
+        let reply = r#"{"result":{"pane":{"pane_id":"w1:p2 "}}}"#;
         let herdr = FakeHerdr::new();
         herdr.answer("split", reply);
         let opened = herdr
             .workspace(AMPLE)
             .open_beside(&attach_request(Some(SplitDirection::Right)))
             .unwrap();
-        assert_eq!(opened.pane().as_ref(), "w1:p2\\u{7}");
+        assert_eq!(opened.pane().as_ref(), "w1:p2");
         assert_eq!(herdr.calls()[1], argv(&["pane", "run", raw, &line_of(6)]));
 
         let herdr = FakeHerdr::new();
@@ -622,8 +692,58 @@ mod tests {
         let WorkspaceError::RunFailed { pane, .. } = &error else {
             panic!("{error}");
         };
-        assert_eq!(pane.as_ref(), "w1:p2\\u{7}");
-        assert!(!error.to_string().chars().any(char::is_control), "{error}");
+        assert_eq!(pane.as_ref(), "w1:p2");
+    }
+
+    /// A new pane's id that is empty, starts with `-` or holds a control
+    /// character cannot be passed back to herdr: the open fails naming it,
+    /// made printable, and nothing is typed or closed.
+    #[test]
+    fn a_pane_id_that_cannot_address_the_pane_is_refused() {
+        for (id, shown) in [
+            ("", "''"),
+            ("-x", "'-x'"),
+            ("--help", "'--help'"),
+            ("w1:\\u0007p2", "'w1:\\u{7}p2'"),
+            ("w1:p2\\u0000", "'w1:p2\\u{0}'"),
+            ("w1:\\np2", "'w1:\\np2'"),
+        ] {
+            let herdr = FakeHerdr::new();
+            herdr.answer(
+                "split",
+                &format!(r#"{{"result":{{"pane":{{"pane_id":"{id}"}}}}}}"#),
+            );
+            let error = herdr
+                .workspace(AMPLE)
+                .open_beside(&attach_request(Some(SplitDirection::Right)))
+                .unwrap_err();
+            let WorkspaceError::Unreadable { reason, .. } = &error else {
+                panic!("{id}: {error}");
+            };
+            assert!(
+                reason.contains(&format!("the pane id {shown}")),
+                "{id}: {reason}"
+            );
+            assert!(reason.contains("may have opened"), "{id}: {reason}");
+            assert!(!error.to_string().chars().any(char::is_control), "{error}");
+            assert_eq!(herdr.calls().len(), 1, "{id}");
+        }
+    }
+
+    /// A call that times out has its whole process group killed, so a child
+    /// it started, as a wrapper around herdr might, does not outlive it.
+    #[test]
+    fn a_timeout_kills_what_the_herdr_call_started() {
+        let herdr = FakeHerdr::new();
+        herdr.fork_and_hang("get");
+        let error = herdr.workspace(SHORT).check().unwrap_err();
+        assert!(
+            matches!(error, WorkspaceError::Unreachable { .. }),
+            "{error}"
+        );
+        let grandchild = SignalTarget::Process(herdr.grandchild("get"));
+        wait_until("the herdr call's child to die", || !grandchild.is_alive());
+        assert!(!SignalTarget::Process(herdr.pid("get")).is_alive());
     }
 
     /// Names and paths that would each break a typed line reach herdr only

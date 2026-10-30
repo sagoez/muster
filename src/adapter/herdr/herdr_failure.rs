@@ -70,7 +70,10 @@ impl HerdrFailure {
             },
             Self::Exited { status, stderr } => {
                 let (code, message) = match serde_json::from_str::<ErrorReply>(&stderr) {
-                    Ok(reply) => reply.into_parts(),
+                    Ok(reply) => (
+                        reply.error().code().clone(),
+                        reply.error().message().clone(),
+                    ),
                     Err(_) => (status.to_string(), stderr),
                 };
                 let message = if message.trim().is_empty() {

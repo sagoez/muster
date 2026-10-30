@@ -1,17 +1,13 @@
+use getset::Getters;
 use serde::Deserialize;
+use typed_builder::TypedBuilder;
 
 /// The body of an [`ErrorReply`](super::ErrorReply).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 pub struct ErrorBody {
     /// herdr's code for the refusal.
     code: String,
     /// herdr's own words.
     message: String,
-}
-
-impl ErrorBody {
-    /// The code and the message, as herdr wrote them.
-    pub fn into_parts(self) -> (String, String) {
-        (self.code, self.message)
-    }
 }

@@ -1,4 +1,6 @@
+use getset::Getters;
 use serde::Deserialize;
+use typed_builder::TypedBuilder;
 
 use super::layout_result::LayoutResult;
 
@@ -6,7 +8,8 @@ use super::layout_result::LayoutResult;
 /// `{"result": {"layout": {"panes": [{"pane_id", "rect": {"width",
 /// "height"}}]}}}`, sizes in cells. Only the fields muster reads; herdr may
 /// add others.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 pub struct LayoutReply {
     /// The answer.
     result: LayoutResult,
@@ -15,7 +18,7 @@ pub struct LayoutReply {
 impl LayoutReply {
     /// The width and height of `pane`, in cells, when the layout lists it.
     pub fn size_of(&self, pane: &str) -> Option<(u16, u16)> {
-        self.result
+        self.result()
             .layout()
             .panes()
             .iter()

@@ -26,6 +26,7 @@ use super::{
 };
 use crate::{
     adapter::{
+        agent_config::{Agent, EntryChange},
         detect::Candidate,
         sanitize::{printable, printable_lines},
         service::ProcessStatus,
@@ -46,6 +47,18 @@ const CHOOSE_CANDIDATES: &str = "Which processes should muster run?";
 const CHOOSE_CANDIDATES_ASKED: &str = "which processes to add";
 /// The argument that answers it up front.
 const CHOOSE_CANDIDATES_ARGUMENT: &str = "--yes to add the suggested ones";
+/// The question that picks the agents `muster mcp add` writes to.
+const CHOOSE_AGENTS_TO_ADD: &str = "Which agents should run muster's MCP server?";
+/// The question that picks the agents `muster mcp remove` edits.
+const CHOOSE_AGENTS_TO_REMOVE: &str = "Which agents should no longer run muster's MCP server?";
+/// What the plain fallback says it could not ask, choosing agents.
+const CHOOSE_AGENTS_ASKED: &str = "which agents to change";
+/// The argument that answers it up front.
+pub(super) const CHOOSE_AGENTS_ARGUMENT: &str = "--client claude, codex or zed";
+/// The hint of an agent found installed.
+const AGENT_FOUND: &str = "installed";
+/// The hint of an agent not found.
+const AGENT_NOT_FOUND: &str = "not found";
 /// Between the parts of a choice's hint.
 const HINT_SEPARATOR: &str = " · ";
 /// Between a padded label and its detail in a framed line.
@@ -277,6 +290,57 @@ impl Presenter {
         })
     }
 
+    /// Checks that the agents `muster mcp` changes can be asked for, before
+    /// anything else is done to ask.
+    ///
+    /// # Errors
+    /// Returns [`CliError::CannotAsk`] naming `--client` in the plain layout.
+    pub fn can_choose_agents(self) -> Result<(), CliError> {
+        self.can_confirm(CHOOSE_AGENTS_ASKED, CHOOSE_AGENTS_ARGUMENT)
+    }
+
+    /// Asks which of `offered` to make `change` to, those in `present`
+    /// chosen to begin with and hinted as installed.
+    ///
+    /// # Errors
+    /// Returns [`CliError::CannotAsk`] in the plain layout, or
+    /// [`CliError::Cancelled`] when the person cancels.
+    pub fn choose_agents(
+        self,
+        change: EntryChange,
+        offered: &[Agent],
+        present: &[Agent],
+    ) -> Result<Vec<Agent>, CliError> {
+        self.can_choose_agents()?;
+        let items: Vec<(Agent, &str, &str)> = offered
+            .iter()
+            .map(|agent| {
+                let hint = if present.contains(agent) {
+                    AGENT_FOUND
+                } else {
+                    AGENT_NOT_FOUND
+                };
+                (*agent, agent.title(), hint)
+            })
+            .collect();
+        let question = match change {
+            EntryChange::Add => CHOOSE_AGENTS_TO_ADD,
+            EntryChange::Remove => CHOOSE_AGENTS_TO_REMOVE,
+        };
+        let initial: Vec<Agent> = offered
+            .iter()
+            .filter(|agent| present.contains(agent))
+            .copied()
+            .collect();
+        asked(|| {
+            multiselect(question)
+                .items(&items)
+                .initial_values(initial)
+                .required(false)
+                .interact()
+        })
+    }
+
     /// Asks `question`, which `argument` answers up front, offering
     /// `initial`, and answers whether the person agreed.
     ///
@@ -461,7 +525,15 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            Presenter::Plain.choose_agents(EntryChange::Add, &[Agent::Claude], &[]),
+            Err(CliError::CannotAsk {
+                argument: CHOOSE_AGENTS_ARGUMENT,
+                ..
+            })
+        ));
         assert!(Presenter::Interactive.can_choose_process().is_ok());
+        assert!(Presenter::Interactive.can_choose_agents().is_ok());
     }
 
     /// The project every fixture belongs to.

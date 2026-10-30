@@ -42,6 +42,7 @@ directories = "6.0.0"
 getset = "0.1.7"
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
+jsonc-parser = { version = "0.34.0", features = ["cst", "serde_json"] }
 libc = "0.2.186"
 listeners = "0.6.1"
 notify-rust = "4.11.7"
@@ -62,6 +63,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
+toml_edit = "0.25.17"
 typed-builder = "0.23.2"
 unicode-normalization = "0.1.25"
 unicode-properties = "0.1.4"

@@ -92,7 +92,9 @@ plugs into a port.
     port; its schema holds the `process_ports` table of declared ports and
     the `idle_stop_*` columns of `settings` and `projects`),
     `adapter/exchange` (the export file), `adapter/detect` (stack
-    detection for `muster init`), `adapter/terminal` (the VT emulator,
+    detection for `muster init`), `adapter/agent_config` (the MCP server
+    entries `muster mcp add` and `remove` edit in Claude Code's, Codex's and
+    Zed's own configs, at locations the composition root finds), `adapter/terminal` (the VT emulator,
     keyboard tracker and log line renderer), `adapter/herdr` (the `TerminalWorkspace` port over
     the herdr CLI, each call bounded and its child killed and reaped),
     notifier, metrics.
@@ -112,7 +114,7 @@ is a trait defined in `domain`; an adapter is an `impl` of that trait living in
 
 Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
 `HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts`,
-`SettleWatch` and `FollowedStream`. Each abstracts one adapter's call into
+`SettleWatch`, `FollowedStream` and `McpRegistry`. Each abstracts one adapter's call into
 another, or what the composition root hands an adapter, and carries adapter
 types (service requests, holder records, clap launches), so it has no place
 in `domain`. A seam the core itself needs, with only domain types in its
@@ -148,6 +150,7 @@ src/
     exchange/          # driven: the `muster export` / `muster import` file
     shell/             # driven: the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # driven: stack detection for `muster init`
+    agent_config/      # driven: muster's MCP entry in Claude Code's, Codex's and Zed's configs
     wire/              # the DTOs domain values travel as, and their serde with-modules
     workspace_request.rs  # the MCP-to-service requests the service protocol lacks
     sanitize.rs        # control characters made safe to print, for the service and the CLI
@@ -201,6 +204,8 @@ Chosen libraries (extend deliberately, same rules apply):
 | Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |
 | State: projects, stacks, settings, coordination, the edit log | `rusqlite` |
 | Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
+| Agents' JSON and JSONC configs, edited with comments and formatting kept | `jsonc-parser` (its `cst`) |
+| Codex's TOML config, edited with comments and formatting kept | `toml_edit` |
 | Durations | `humantime` + `humantime-serde` |
 | Atomic file writes | `atomic-write-file` |
 | Errors | `thiserror` |

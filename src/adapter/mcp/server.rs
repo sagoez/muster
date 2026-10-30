@@ -34,7 +34,7 @@ const MCP_SERVER_NAME: &str = "muster";
 /// namespaces the tools an agent sees.
 const MCP_CONNECTION_KEY: &str = "muster";
 /// Subcommand an agent invokes to start the server.
-const MCP_SUBCOMMAND: &str = "mcp";
+pub const MCP_SUBCOMMAND: &str = "mcp";
 /// Server version reported to connecting agents.
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Guidance shown to agents that connect to the server.

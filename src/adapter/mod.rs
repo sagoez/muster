@@ -1,3 +1,4 @@
+pub mod agent_config;
 pub mod bounded_read;
 #[cfg(test)]
 pub(crate) mod channel_sink;

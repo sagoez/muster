@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
+        agent_config::AgentConfigError,
         client::{
             ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError,
             open::attach_hint,
@@ -242,6 +243,10 @@ pub enum CliError {
     /// in a shell script.
     #[error(transparent)]
     Unhookable(#[from] HookScriptError),
+    /// An agent's MCP config could not be changed; nothing was written to
+    /// it.
+    #[error(transparent)]
+    AgentConfig(#[from] AgentConfigError),
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -385,6 +390,9 @@ impl CliError {
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
+            Self::AgentConfig(error) if error.is_conflict() => FailureKind::Conflict,
+            Self::AgentConfig(error) if error.is_io() => FailureKind::Io,
+            Self::AgentConfig(_) => FailureKind::InvalidInput,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -473,7 +481,8 @@ impl CliError {
             | Self::SnapshotFile { .. }
             | Self::FileExists(_)
             | Self::Unexportable { .. }
-            | Self::Unhookable(_) => &[],
+            | Self::Unhookable(_)
+            | Self::AgentConfig(_) => &[],
         }
     }
 

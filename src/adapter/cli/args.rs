@@ -14,6 +14,7 @@ use strum::IntoEnumIterator;
 use super::{cli_ports::CliPorts, command::Command, shell_init::SHELL_INIT_SUBCOMMAND};
 use crate::{
     adapter::{
+        agent_config::{Agent, McpScope, McpServerName, SERVER_NAME_MAX_CHARS},
         holder::{LineLimit, MAX_LOG_LINES},
         sanitize::printable,
         service::StateGoal,
@@ -133,6 +134,12 @@ static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateG
 pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
 /// The names `muster open --direction` accepts.
 static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
+/// The agents `muster mcp add --client` accepts.
+static AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<Agent>);
+/// The scopes `muster mcp add --scope` accepts.
+static MCP_SCOPES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpScope>);
+/// What a server name takes, followed by its most characters and the rest.
+const SERVER_NAME_FORM: &str = "use 1 to ";
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -168,6 +175,16 @@ pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> 
 /// Parses a `muster wait --state`.
 pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
     one_of(&STATE_GOALS)
+}
+
+/// Parses a `muster mcp add --client`.
+pub(super) fn agent_parser() -> impl TypedValueParser<Value = Agent> {
+    one_of(&AGENTS)
+}
+
+/// Parses a `muster mcp add --scope`.
+pub(super) fn mcp_scope_parser() -> impl TypedValueParser<Value = McpScope> {
+    one_of(&MCP_SCOPES)
 }
 
 /// Parses a positive duration such as `5s` or `1m 30s`.
@@ -210,6 +227,16 @@ pub(super) fn pid(raw: &str) -> Result<Pid, String> {
         .ok()
         .and_then(|pid| Pid::try_new(pid).ok())
         .ok_or_else(|| PID_FORM.to_string())
+}
+
+/// Parses a `muster mcp add --name`.
+///
+/// # Errors
+/// Returns the form expected for a name no agent takes as a server key.
+pub(super) fn server_name(raw: &str) -> Result<McpServerName, String> {
+    McpServerName::try_new(raw).map_err(|_| {
+        format!("{SERVER_NAME_FORM}{SERVER_NAME_MAX_CHARS} ASCII letters, digits, '-' and '_'")
+    })
 }
 
 /// The command line's definition, with `--project` completing the projects

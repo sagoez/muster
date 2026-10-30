@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 325
+assertion_line: 340
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -34,7 +34,7 @@ Stack:
   projects      List and manage registered projects
 
 Agents and coordination:
-  mcp           Serve muster to an agent over MCP
+  mcp           Serve muster to agents over MCP, or add it to their configs
   note          Read or write shared notes
   todo          List or manage shared todos
   kv            Read or write shared key-value state
@@ -805,14 +805,50 @@ Options:
 
 
 $ muster mcp -h
-Serve muster to an agent over MCP
+Serve muster to agents over MCP, or add it to their configs
 
 Usage: muster mcp [OPTIONS]
+       muster mcp <COMMAND>
+
+Commands:
+  add     Add muster's MCP server to agents' configs
+  remove  Remove muster's MCP server from agents' configs
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --print-config       Print the JSON config snippet to add muster to an agent's MCP servers, then exit instead of serving
+      --print-config       Print the JSON config snippet to paste into an agent's MCP servers, then exit instead of serving; `muster mcp add` writes it for Claude Code, Codex and Zed
       --as <NAME>          The agent's id on coordination writes and locks; defaults to MUSTER_AGENT, then herdr's pane, then a random session id
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster mcp add -h
+Add muster's MCP server to agents' configs
+
+Usage: muster mcp add [OPTIONS]
+
+Options:
+      --client <AGENT>     The agent: claude (Claude Code), codex or zed. Repeat it or separate with commas for several. At a terminal, chosen from a list of those installed when absent; required elsewhere [possible values: claude, codex, zed]
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --scope <SCOPE>      Which config: local (this project, in your own Claude Code config), project (a file in this project, .mcp.json or .codex/config.toml) or user (every project). Defaults to local for Claude Code and user for Codex and Zed; Zed has only user [possible values: local, project, user]
+      --name <NAME>        The server's name in the agent's config [default: muster]
+      --force              Replace or remove a server under the name that runs something else
+      --json               Print the result as JSON
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster mcp remove -h
+Remove muster's MCP server from agents' configs
+
+Usage: muster mcp remove [OPTIONS]
+
+Options:
+      --client <AGENT>     The agent: claude (Claude Code), codex or zed. Repeat it or separate with commas for several. At a terminal, chosen from a list of those installed when absent; required elsewhere [possible values: claude, codex, zed]
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --scope <SCOPE>      Which config: local (this project, in your own Claude Code config), project (a file in this project, .mcp.json or .codex/config.toml) or user (every project). Defaults to local for Claude Code and user for Codex and Zed; Zed has only user [possible values: local, project, user]
+      --name <NAME>        The server's name in the agent's config [default: muster]
+      --force              Replace or remove a server under the name that runs something else
+      --json               Print the result as JSON
   -h, --help               Print help (see more with '--help')
 
 

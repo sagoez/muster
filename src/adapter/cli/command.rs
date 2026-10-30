@@ -11,6 +11,7 @@ use super::{
     kv_command::KvCommand,
     lock_command::LockCommand,
     log_filter_args::LogFilterArgs,
+    mcp_command::McpCommand,
     note_command::NoteCommand,
     open_args::OpenArgs,
     process_args::ProcessArgs,
@@ -312,15 +313,20 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Serve muster to an agent over MCP.
+    /// Serve muster to agents over MCP, or add it to their configs.
     ///
     /// Runs an MCP server over stdio, spawned as a child process by a
     /// connecting agent. Each call acts on the project containing this
     /// folder, or the one --project or $MUSTER_PROJECT names, unless it names
-    /// another.
+    /// another. `muster mcp add` registers the server with Claude Code, Codex
+    /// or Zed; --print-config prints the entry for any other agent.
+    #[command(args_conflicts_with_subcommands = true)]
     Mcp {
-        /// Print the JSON config snippet to add muster to an agent's MCP
-        /// servers, then exit instead of serving.
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+        /// Print the JSON config snippet to paste into an agent's MCP
+        /// servers, then exit instead of serving; `muster mcp add` writes it
+        /// for Claude Code, Codex and Zed.
         #[arg(long)]
         print_config: bool,
         /// The agent's id on coordination writes and locks; defaults to

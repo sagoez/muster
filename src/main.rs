@@ -2,13 +2,14 @@ use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
+        agent_config::{AgentConfigFiles, ConfigLocations, McpRegistry, ServerLaunch},
         child_group,
         cli::{self, CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
-        mcp::{McpDeps, Scope, connection_config, run_stdio},
+        mcp::{MCP_SUBCOMMAND, McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
         no_state_dir::NoStateDir,
         notifier::DesktopNotifier,
@@ -118,6 +119,16 @@ impl CliPorts for LocalPorts {
 
     fn mcp_config(&self, executable: &Path) -> String {
         connection_config(executable)
+    }
+
+    fn mcp_registry(&self) -> Arc<dyn McpRegistry> {
+        let locations =
+            home_dir().map(|home| ConfigLocations::from_env(&home, |name| env::var_os(name)));
+        let launch = ServerLaunch::builder()
+            .command(this_binary())
+            .args(vec![MCP_SUBCOMMAND.to_owned()])
+            .build();
+        Arc::new(AgentConfigFiles::new(locations, launch))
     }
 
     fn run_service(&self) -> Result<(), MusterError> {

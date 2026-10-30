@@ -56,6 +56,9 @@ use super::{
     kv::kv,
     lock::lock,
     log_filter_args::LogFilterArgs,
+    mcp_command::McpCommand,
+    mcp_entries::{mcp_entries, mcp_rows},
+    mcp_entry_args::McpEntryArgs,
     mcp_launch::McpLaunch,
     note::note,
     open::open_here,
@@ -91,6 +94,7 @@ use super::{
 };
 use crate::{
     adapter::{
+        agent_config::EntryChange,
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
             ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
@@ -139,6 +143,9 @@ const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
+/// What `muster mcp --print-config` adds for a person at a terminal.
+const PRINT_CONFIG_NOTE: &str =
+    "`muster mcp add` writes this into Claude Code's, Codex's or Zed's config for you";
 
 /// The command line, parsed. A shell's completion hook is answered here from
 /// `ports` and the process exits; a command line that does not parse exits
@@ -333,6 +340,15 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
+            command: Some(McpCommand::Add(args)),
+            ..
+        }) => change_mcp_entries(invocation, EntryChange::Add, &args),
+        Some(Command::Mcp {
+            command: Some(McpCommand::Remove(args)),
+            ..
+        }) => change_mcp_entries(invocation, EntryChange::Remove, &args),
+        Some(Command::Mcp {
+            command: None,
             print_config,
             agent,
         }) => serve_mcp(invocation, print_config, agent),
@@ -1363,6 +1379,17 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
         .unwrap_or_else(|error| fail_command(json, &error))
 }
 
+/// `muster mcp add` or `remove`: makes `change` to muster's entry in the
+/// agents' configs `args` names, and says what it wrote where.
+fn change_mcp_entries(invocation: &Invocation<'_>, change: EntryChange, args: &McpEntryArgs) {
+    let json = args.json();
+    let presenter = Presenter::detect(json);
+    match mcp_entries(invocation, presenter, change, args) {
+        Ok(view) => print_result(json, &view, |view| written(presenter.show(&mcp_rows(view)))),
+        Err(error) => fail_command(json, &error),
+    }
+}
+
 /// Serves muster to agents as an MCP server over stdio, blocking until the
 /// connecting agent disconnects; with `print_config`, prints the paste-in
 /// config snippet, which names no project, instead. Each call resolves its
@@ -1371,6 +1398,11 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
     if print_config {
         emit_line(&invocation.ports().mcp_config(&this_binary()));
+        // Only a person reading it is told; a script piping it gets the
+        // snippet alone.
+        if io::stdout().is_terminal() {
+            print_note(APP_NAME, PRINT_CONFIG_NOTE);
+        }
         return;
     }
     let launch = invocation.store().and_then(|store| {

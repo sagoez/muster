@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use super::mcp_launch::McpLaunch;
 use crate::{
-    adapter::{client::ServiceAccess, no_state_dir::NoStateDir},
+    adapter::{agent_config::McpRegistry, client::ServiceAccess, no_state_dir::NoStateDir},
     domain::{
         config::ConfigError,
         port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
@@ -65,6 +65,10 @@ pub trait CliPorts: Sync {
     /// The config snippet an agent pastes in to run `executable` as its MCP
     /// server.
     fn mcp_config(&self, executable: &Path) -> String;
+
+    /// The agents' own MCP configs, which `muster mcp add` and `remove`
+    /// edit to launch this binary.
+    fn mcp_registry(&self) -> Arc<dyn McpRegistry>;
 
     /// Runs this user's service until a client stops or replaces it.
     ///

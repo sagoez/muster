@@ -194,7 +194,8 @@ settings.
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state, paged with `--limit` (50 by default, at most 200) and `--cursor` |
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
-| `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
+| `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP, or print the config snippet |
+| `muster mcp add\|remove [--client AGENT] [--scope local\|project\|user] [--name NAME] [--force]` | Add muster's MCP server to Claude Code's, Codex's or Zed's config, or remove it |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -389,7 +390,42 @@ on `start` or `restart`.
 
 ## MCP
 
-`muster mcp --print-config` prints the config snippet. Each tool call acts on
+`muster mcp add` registers the server with an agent: it writes an entry that
+runs this muster binary with the argument `mcp` into the agent's own config,
+keeping every other key, server and comment in the file. Where it goes:
+
+| `--client` | `--scope` | File and key |
+|---|---|---|
+| `claude` | `local` (default) | `~/.claude.json`, `projects["<project folder>"].mcpServers` |
+| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it |
+| `claude` | `user` | `~/.claude.json`, `mcpServers` |
+| `codex` | `user` (default) | `~/.codex/config.toml` (`$CODEX_HOME`), `[mcp_servers.<name>]` |
+| `codex` | `project` | `.codex/config.toml` in the project; Codex reads it only for trusted projects |
+| `zed` | `user` (only) | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux), `context_servers` |
+
+These follow each agent's docs: Claude Code at
+<https://code.claude.com/docs/en/mcp>, Codex at
+<https://learn.chatgpt.com/docs/extend/mcp>, Zed at
+<https://zed.dev/docs/ai/mcp>. `$CLAUDE_CONFIG_DIR` moves `.claude.json`.
+The local and project scopes need a registered project: the one containing
+the current folder, or `--project`.
+
+Without `--client`, a terminal offers the agents with those installed (a
+config or a binary on `PATH`) chosen; elsewhere `--client` is required, and
+it takes several, comma-separated or repeated. An identical entry reports
+`already-added` and writes nothing; a different one under the name is
+refused unless `--force` replaces it. Every config is read and checked before
+any is written, so a refusal changes nothing; a file that does not parse
+(Claude Code's files must be plain JSON, Zed's may hold comments) is left
+untouched. Writes are atomic, keep the file's mode, and follow a symlinked
+file to its target. `muster mcp remove` takes the same flags and removes the
+entry under the name only when it runs this muster, unless `--force`.
+With `--json` each config is reported as `{agent, scope, name, path,
+outcome, note}`, `outcome` one of `added`, `already-added`, `replaced`,
+`removed` or `absent`.
+
+`muster mcp --print-config` prints the config snippet for any other agent.
+Each tool call acts on
 the project its `project` argument names, else the one the server's folder,
 `--project` or `$MUSTER_PROJECT` resolves to, worked out per call. Every
 result about a project names it.

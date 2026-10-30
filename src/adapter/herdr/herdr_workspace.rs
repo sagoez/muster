@@ -344,14 +344,18 @@ fn unreadable(action: &str, reason: &str) -> WorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Instant};
+    use std::{collections::HashMap, thread, time::Instant};
+
+    use signal_hook::{consts::SIGINT, low_level::raise};
 
     use super::*;
     use crate::{
         adapter::{
+            child_group,
             herdr::fake_herdr::{CALLER, FakeHerdr},
+            signal_hold::SignalHold,
             signal_target::SignalTarget,
-            test_wait::wait_until,
+            test_wait::{POLL, WAIT, wait_until},
         },
         domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection},
     };
@@ -901,6 +905,42 @@ mod tests {
             !SignalTarget::Process(herdr.pid("get")).is_alive(),
             "herdr was left a zombie or running"
         );
+    }
+
+    /// A Ctrl-C taken while a spinner or prompt holds `SIGINT` still kills
+    /// the herdr call in flight and what it started, so the call ends at
+    /// once instead of at its bound, and the command lives on to close its
+    /// frame.
+    #[test]
+    fn a_held_interrupt_kills_the_herdr_call_in_flight() {
+        let _alone = child_group::sweep_alone();
+        let herdr = FakeHerdr::for_a_sweep();
+        herdr.fork_and_hang("get");
+        let workspace = herdr.workspace(AMPLE);
+        let hold = SignalHold::take(SIGINT).unwrap();
+        let started = Instant::now();
+        let call = thread::spawn(move || workspace.check());
+
+        wait_until("the herdr call to start its child", || {
+            herdr.grandchild_started("get")
+        });
+        while !call.is_finished() && started.elapsed() < WAIT {
+            raise(SIGINT).unwrap();
+            thread::sleep(POLL);
+        }
+        assert!(
+            started.elapsed() < WAIT,
+            "the call ran on towards its bound"
+        );
+        assert!(
+            call.join().unwrap().is_err(),
+            "a killed call answers nothing"
+        );
+        drop(hold);
+
+        let grandchild = SignalTarget::Process(herdr.grandchild("get"));
+        wait_until("the herdr call's child to die", || !grandchild.is_alive());
+        assert!(!SignalTarget::Process(herdr.pid("get")).is_alive());
     }
 
     /// A split that timed out, or succeeded with an answer naming no pane,

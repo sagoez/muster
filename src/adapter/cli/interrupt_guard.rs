@@ -78,13 +78,17 @@ mod tests {
     use signal_hook::low_level::raise;
 
     use super::*;
-    use crate::adapter::cli::{error::CliError, presenter::asked};
+    use crate::adapter::{
+        child_group,
+        cli::{error::CliError, presenter::asked},
+    };
 
     /// A `SIGINT` while armed only sets the flag, a new guard starts clear,
     /// a nested guard leaves the outer one armed and interrupted, and a
     /// question is not put once an interrupt is pending.
     #[test]
     fn an_armed_guard_turns_sigint_into_a_flag() {
+        let _alone = child_group::sweep_alone();
         let guard = InterruptGuard::arm();
         assert!(!guard.interrupted());
         raise(SIGINT).unwrap();

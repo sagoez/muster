@@ -304,8 +304,9 @@ muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
 on `PATH`, or the one in `HERDR_BIN_PATH` when that path is absolute, so
 `HERDR_SOCKET_PATH` and `HERDR_SESSION` work as they do for herdr. Each herdr
 call runs in a process group of its own and times out after 5 seconds; at the
-timeout, on a Ctrl-C, hangup or terminate that ends muster, and when the client
-of a `muster mcp` server disconnects, the whole group is killed. When no
+timeout, on a Ctrl-C, hangup or terminate, including a Ctrl-C taken while a
+spinner or prompt is on screen, and when the client of a `muster mcp` server
+disconnects, the whole group is killed. When no
 direction is given and herdr's layout is malformed or does not list the pane,
 the pane splits down; when herdr cannot be reached, times out or refuses the
 layout, nothing is split. The new pane runs one typed line, so `open` supports

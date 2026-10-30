@@ -1,8 +1,8 @@
 //! The signals that end a muster command: `SIGINT`, `SIGHUP` and `SIGTERM`.
-//! Once caught, each still ends it as by default, first killing the child
-//! groups [`super::child_group`] tracks, unless something
-//! holds the signal to handle it itself. One handler decides, so no other
-//! may end the process on these signals.
+//! Once caught, each kills the child groups [`super::child_group`] tracks,
+//! then still ends the command as by default, unless something holds the
+//! signal to handle it itself. One handler decides, so no other may end the
+//! process on these signals.
 
 use std::{
     ffi::c_int,
@@ -52,11 +52,13 @@ fn register_all() -> io::Result<()> {
     Ok(())
 }
 
-/// Ends the process by `signal`, at `index` of [`ENDING_SIGNALS`], after
-/// killing every tracked child group, unless it is held.
+/// Kills every tracked child group, then ends the process by `signal`, at
+/// `index` of [`ENDING_SIGNALS`], unless it is held. A held signal still
+/// ends the helper calls in flight: what holds it ends the command its own
+/// way, and a call it waits on must not run on to its bound first.
 fn end_unless_held(index: usize, signal: c_int) {
+    child_group::kill_all();
     if HOLDS[index].load(Ordering::SeqCst) == 0 {
-        child_group::kill_all();
         let _ = emulate_default_handler(signal);
     }
 }

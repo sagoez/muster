@@ -178,7 +178,7 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(
             json,
-            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"seq":3,"folder":"/home/me/shop","project":"/home/me/shop","held":[]},"environment":{"PATH":"/usr/bin"}}}"#
+            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,104,111,109,101,47,109,101,47,115,104,111,112],"project":"/home/me/shop","held":[]},"environment":{"PATH":"/usr/bin"}}}"#
         );
         assert_eq!(
             serde_json::from_str::<ServiceRequest>(&json).unwrap(),

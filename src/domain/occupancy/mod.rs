@@ -1,4 +1,5 @@
 mod load_id;
+mod load_start;
 mod occupancy_change;
 mod report_seq;
 mod report_stamp;
@@ -11,6 +12,7 @@ mod table;
 pub(crate) mod testing;
 
 pub use load_id::*;
+pub use load_start::*;
 pub use occupancy_change::*;
 pub use report_seq::*;
 pub use report_stamp::*;

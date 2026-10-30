@@ -207,7 +207,7 @@ mod tests {
             holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
             shell::SHELL_REPORT_SUBCOMMAND,
         },
-        domain::occupancy::{LoadId, ReportSeq},
+        domain::occupancy::{LoadStart, ReportSeq},
     };
 
     /// Completions and usage must register the binary name, not the package
@@ -397,12 +397,12 @@ mod tests {
         assert!(bare.command.is_none());
     }
 
-    /// The hidden shell report takes the `--pid`, `--load` and `--seq` the
-    /// hook passes, and refuses a pid no shell could have or a load that is
-    /// no number.
+    /// The hidden shell report takes the `--pid`, `--load`, `--load-pid`
+    /// and `--seq` the hook passes, and refuses a pid no shell could have or
+    /// a load that is no number.
     #[test]
     fn the_shell_report_reads_the_hook_s_pid_load_and_seq() {
-        let report = |pid: &str, load: &str| {
+        let report = |pid: &str, load: &str, load_pid: &str| {
             Args::try_parse_from([
                 "muster",
                 SHELL_REPORT_SUBCOMMAND,
@@ -410,23 +410,27 @@ mod tests {
                 pid,
                 "--load",
                 load,
+                "--load-pid",
+                load_pid,
                 "--seq",
                 "7",
             ])
         };
 
         assert!(matches!(
-            report("4242", "1793315867697448").unwrap().command,
-            Some(Command::ShellReport { pid, load, seq })
+            report("4242", "1793315867697448123", "5150").unwrap().command,
+            Some(Command::ShellReport { pid, load, load_pid, seq })
                 if pid.into_inner() == 4242
-                    && load == LoadId::new(1_793_315_867_697_448)
+                    && load == LoadStart::new(1_793_315_867_697_448_123)
+                    && load_pid.into_inner() == 5150
                     && seq == ReportSeq::new(7)
         ));
         for refused in ["1", "0", "-3", "shell"] {
-            assert!(report(refused, "1").is_err(), "{refused}");
+            assert!(report(refused, "1", "5150").is_err(), "{refused}");
+            assert!(report("4242", "1", refused).is_err(), "{refused}");
         }
         for refused in ["-1", "", "1.5", "load"] {
-            assert!(report("4242", refused).is_err(), "{refused:?}");
+            assert!(report("4242", refused, "5150").is_err(), "{refused:?}");
         }
     }
 

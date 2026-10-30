@@ -4,9 +4,23 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
     __muster_hook=1
     __muster_bin=@MUSTER_BIN@
     __muster_notes=@MUSTER_NOTES@
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
     __muster_load=${EPOCHREALTIME-}
     __muster_load=${__muster_load//[!0-9]/}
-    __muster_load=${__muster_load:-$RANDOM$RANDOM$RANDOM}
+    if [[ $__muster_load =~ ^[0-9]{1,16}$ ]]; then
+        __muster_load=${__muster_load}000
+    else
+        __muster_load=$(command date +%s 2>/dev/null)
+        if [[ $__muster_load =~ ^[0-9]{1,10}$ ]]; then
+            __muster_load=${__muster_load}000000000
+        else
+            __muster_load=0
+        fi
+    fi
+    __muster_load_pid=$(command sh -c 'echo "$$"' 2>/dev/null)
+    [[ $__muster_load_pid =~ ^[0-9]{1,10}$ ]] || __muster_load_pid=$$
     __muster_seq=0
     export @MUSTER_SHELL_ENV@=$$
 
@@ -28,7 +42,7 @@ if [[ $- == *i* && -z ${__muster_hook-} ]]; then
             shopt -s failglob
         fi
         (command "$__muster_bin" @MUSTER_REPORT@ --pid "$$" --load "$__muster_load" \
-            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
         return "$status"
     }
 

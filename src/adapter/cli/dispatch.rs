@@ -104,7 +104,7 @@ use crate::{
     domain::{
         config::{ImportMode, Stack},
         coordination::Author,
-        occupancy::ReportStamp,
+        occupancy::{LoadId, ReportStamp},
         port::LocalState,
         project::Project,
         value::{DetachKey, Pid, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
@@ -336,10 +336,16 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Doctor { json }) => doctor(invocation, json),
         Some(Command::Completions { shell }) => completions(shell),
         Some(Command::ShellInit { shell }) => print_hook(ports, shell),
-        Some(Command::ShellReport { pid, load, seq }) => {
+        Some(Command::ShellReport {
+            pid,
+            load,
+            load_pid,
+            seq,
+        }) => {
             // A skipped report is retried at the next prompt; the hook shows
             // nothing either way.
             if let Ok(cwd) = invocation.cwd() {
+                let load = LoadId::builder().started(load).pid(load_pid).build();
                 let stamp = ReportStamp::builder().load(load).seq(seq).build();
                 let _ = shell_report(ports, pid, stamp, &cwd);
             }

@@ -47,7 +47,7 @@ impl Occupancy {
         let before = self
             .shells
             .remove(shell)
-            .map(|seen| seen.projects)
+            .map(|seen| seen.projects().clone())
             .unwrap_or_default();
         self.recount(&before, &BTreeSet::new())
     }
@@ -55,6 +55,18 @@ impl Occupancy {
     /// How many shells are in `project`.
     pub fn occupants(&self, project: &ProjectRoot) -> usize {
         self.counts.get(project).copied().unwrap_or_default()
+    }
+
+    /// Every shell that counts in `project`, in order.
+    pub fn shells_in(&self, project: &ProjectRoot) -> Vec<ShellId> {
+        let mut shells: Vec<ShellId> = self
+            .shells
+            .iter()
+            .filter(|(_, seen)| seen.projects().contains(project))
+            .map(|(shell, _)| *shell)
+            .collect();
+        shells.sort_unstable();
+        shells
     }
 
     /// Every shell the table knows, in order.
@@ -84,18 +96,18 @@ impl Occupancy {
     fn is_newer(&self, record: &ShellRecord) -> bool {
         self.shells
             .get(record.shell())
-            .is_none_or(|seen| record.stamp().supersedes(&seen.stamp))
+            .is_none_or(|seen| record.stamp().supersedes(seen.stamp()))
     }
 
     /// Keeps `record` as what the table knows of its shell, returning the
     /// projects that move made lose their last shell or gain their first.
     fn put(&mut self, record: &ShellRecord) -> Vec<OccupancyChange> {
         let seen = Seen::of(record);
-        let after = seen.projects.clone();
+        let after = seen.projects().clone();
         let before = self
             .shells
             .insert(*record.shell(), seen)
-            .map(|seen| seen.projects)
+            .map(|seen| seen.projects().clone())
             .unwrap_or_default();
         self.recount(&before, &after)
     }
@@ -243,6 +255,41 @@ mod tests {
         assert_eq!(table.report(&loaded(test_shell(100, 1), 8, 2, None)), [
             OccupancyChange::Left(test_root("shop"))
         ]);
+    }
+
+    /// CR-1: a report of the older load that arrives after the newer load's
+    /// is dropped, so a late prompt from before an `exec` never moves the
+    /// shell back.
+    #[test]
+    fn a_late_report_of_an_older_hook_load_changes_nothing() {
+        let mut table = Occupancy::new();
+        table.report(&loaded(test_shell(100, 1), 8, 1, Some("shop")));
+
+        assert!(
+            table
+                .report(&loaded(test_shell(100, 1), 7, 50, Some("blog")))
+                .is_empty()
+        );
+        table.restore(&loaded(test_shell(100, 1), 7, 51, None));
+
+        assert_eq!(table.occupants(&test_root("shop")), 1);
+        assert_eq!(table.occupants(&test_root("blog")), 0);
+    }
+
+    /// The shells counting in a project are those in it and those holding
+    /// it, in order.
+    #[test]
+    fn shells_in_names_every_shell_counting_in_a_project() {
+        let mut table = Occupancy::new();
+        table.report(&at(test_shell(200, 1), 1, Some("shop")));
+        table.report(&at(test_shell(100, 1), 1, Some("shop")));
+        table.report(&at(test_shell(300, 1), 1, Some("blog")));
+
+        assert_eq!(table.shells_in(&test_root("shop")), [
+            test_shell(100, 1),
+            test_shell(200, 1)
+        ]);
+        assert!(table.shells_in(&test_root("elsewhere")).is_empty());
     }
 
     #[test]

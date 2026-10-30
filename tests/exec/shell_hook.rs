@@ -178,7 +178,8 @@ fn entering_a_project_starts_autostart_and_the_next_prompt_says_so() {
 /// for the shell `session`: what every prompt would cost a hook that waited.
 fn blocked_report(scratch: &Scratch, session: &ShellSession) -> Duration {
     let pid = session.pid().to_string();
-    let load = session.record().unwrap().stamp().load().to_string();
+    let load = session.record().unwrap().stamp().load();
+    let (started_at, load_pid) = (load.started().to_string(), load.pid().to_string());
     let seq = BLOCKED_REPORT_SEQ.to_string();
     let started = Instant::now();
     scratch.muster(&[
@@ -186,7 +187,9 @@ fn blocked_report(scratch: &Scratch, session: &ShellSession) -> Duration {
         "--pid",
         &pid,
         "--load",
-        &load,
+        &started_at,
+        "--load-pid",
+        &load_pid,
         "--seq",
         &seq,
     ]);
@@ -315,6 +318,10 @@ fn a_shell_that_execs_itself_still_enters_a_project() {
         assert!(
             reloaded.seq() < before.seq(),
             "{shell}: the new load counts from one: {before:?} then {reloaded:?}"
+        );
+        assert!(
+            reloaded.load() > before.load(),
+            "{shell}: the new load is the later one: {before:?} then {reloaded:?}"
         );
         enter(scratch, &session, &shop);
         session.settle();

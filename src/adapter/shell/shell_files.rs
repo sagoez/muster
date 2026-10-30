@@ -30,9 +30,12 @@ const RECORD_SUFFIX: &str = ".json";
 const NOTE_SUFFIX: &str = ".note";
 /// Between the parts of a note file's name.
 const NOTE_SEPARATOR: char = '-';
-/// Digits a note file's load and seq are each padded to, so the files of
-/// one load sort by seq.
+/// Digits a note file's load start and seq are each padded to, so the files
+/// of one load sort by seq.
 const STAMP_WIDTH: usize = 20;
+/// Digits the pid a load spawned is padded to, so a note file's name sorts
+/// by its whole stamp.
+const PID_WIDTH: usize = 10;
 /// Most note files one shell may have waiting; a delivery beyond it is
 /// dropped whole, so a hook that stopped printing cannot fill the disk.
 const MAX_NOTE_FILES: usize = 16;
@@ -42,7 +45,7 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// The shells running muster's hook, kept as files under
 /// `<state dir>/shells/`: `<pid>.json` holds a shell's last report, and
-/// `<pid>-<start>-<load>-<seq>.note` the lines its hook prints at its next
+/// `<pid>-<start>-<load>-<load pid>-<seq>.note` the lines its hook prints at its next
 /// prompt, named by the whole shell so a later shell on a reused pid never
 /// has its notes taken for an earlier one's.
 #[derive(Debug, Clone)]
@@ -67,11 +70,13 @@ impl ShellFiles {
     /// The note file of `shell` for the report stamped `stamp`.
     fn note_path(&self, shell: &ShellId, stamp: ReportStamp) -> PathBuf {
         self.dir.join(format!(
-            "{}{:0width$}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
+            "{}{:0width$}{NOTE_SEPARATOR}{:0pid_width$}{NOTE_SEPARATOR}{:0width$}{NOTE_SUFFIX}",
             note_prefix(shell),
-            stamp.load().into_inner(),
+            stamp.load().started().into_inner(),
+            stamp.load().pid().into_inner(),
             stamp.seq().into_inner(),
-            width = STAMP_WIDTH
+            width = STAMP_WIDTH,
+            pid_width = PID_WIDTH
         ))
     }
 
@@ -398,6 +403,28 @@ mod tests {
         );
     }
 
+    /// CR-1: a report of the older load landing after the newer load's
+    /// record is never saved over it.
+    #[test]
+    fn a_late_record_of_an_older_hook_load_is_not_saved() {
+        let (_scratch, files) = files();
+        let shell = this_shell(&files);
+        files
+            .save_if_newer(&loaded(shell, LOAD + 1, 1, Some("/new")))
+            .unwrap();
+
+        assert!(
+            !files
+                .save_if_newer(&loaded(shell, LOAD, 50, Some("/old")))
+                .unwrap()
+        );
+
+        assert_eq!(
+            files.record(&shell),
+            Some(loaded(shell, LOAD + 1, 1, Some("/new")))
+        );
+    }
+
     /// CR-5: an older report's save waits while another writer holds the
     /// records lock, then finds the newer record that writer stored, and
     /// leaves it.
@@ -432,7 +459,7 @@ mod tests {
         fs::write(files.notes_dir().join("7.json"), b"{not json").unwrap();
         fs::write(
             files.notes_dir().join("8.json"),
-            br#"{"pid":8,"start":3,"load":1,"seq":1,"folder":"/","project":null,"held":[],"extra":true}"#,
+            br#"{"pid":8,"start":3,"load":1,"load-pid":2,"seq":1,"folder":[47],"project":null,"held":[],"extra":true}"#,
         )
         .unwrap();
 
@@ -494,7 +521,7 @@ mod tests {
         assert_eq!(
             first.file_name().unwrap().to_string_lossy(),
             format!(
-                "{}-{}-00000000000000000007-00000000000000000003.note",
+                "{}-{}-00000000000000000007-0000000002-00000000000000000003.note",
                 shell.pid(),
                 shell.start()
             )

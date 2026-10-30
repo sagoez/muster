@@ -4,13 +4,22 @@ if status is-interactive; and not set -q __muster_hook
     set -g __muster_hook 1
     set -g __muster_bin @MUSTER_BIN@
     set -g __muster_notes @MUSTER_NOTES@
-    # The exported count survives an exec, so a reload never reuses a load id.
-    set -l loads 0
-    string match -qr '^[0-9]{1,9}$' -- "$@MUSTER_LOADS_ENV@"; and set loads $@MUSTER_LOADS_ENV@
-    set -gx @MUSTER_LOADS_ENV@ (math $loads + 1)
-    set -l tick (command date +%N 2>/dev/null)
-    string match -qr '^[0-9]{9}$' -- "$tick"; or set tick (random 100000000 999999999)
-    set -g __muster_load $@MUSTER_LOADS_ENV@$tick
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
+    set -l now (command date +%s%N 2>/dev/null)
+    if not string match -qr '^[0-9]{19}$' -- "$now"
+        set now (command date +%s 2>/dev/null)
+        if string match -qr '^[0-9]{1,10}$' -- "$now"
+            set now "$now"000000000
+        else
+            set now 0
+        end
+    end
+    set -g __muster_load $now
+    set -l spawned (command sh -c 'echo "$$"' 2>/dev/null)
+    string match -qr '^[0-9]{1,10}$' -- "$spawned"; or set spawned $fish_pid
+    set -g __muster_load_pid $spawned
     set -g __muster_seq 0
     set -gx @MUSTER_SHELL_ENV@ $fish_pid
 
@@ -26,7 +35,7 @@ if status is-interactive; and not set -q __muster_hook
         end
         if test -x $__muster_bin
             command $__muster_bin @MUSTER_REPORT@ --pid $fish_pid --load $__muster_load \
-                --seq $__muster_seq </dev/null >/dev/null 2>&1 &
+                --load-pid $__muster_load_pid --seq $__muster_seq </dev/null >/dev/null 2>&1 &
             disown 2>/dev/null
         end
         return $status_kept

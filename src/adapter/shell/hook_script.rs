@@ -16,11 +16,6 @@ const NOTES_DIR_PLACEHOLDER: &str = "@MUSTER_NOTES@";
 const SHELL_ENV_PLACEHOLDER: &str = "@MUSTER_SHELL_ENV@";
 /// Where a template takes the report subcommand.
 const REPORT_PLACEHOLDER: &str = "@MUSTER_REPORT@";
-/// Where the fish template takes the variable counting hook loads.
-const LOADS_ENV_PLACEHOLDER: &str = "@MUSTER_LOADS_ENV@";
-/// The variable the fish hook exports counting its loads along an `exec`
-/// chain, so each load's id leads with a count no earlier load had.
-const HOOK_LOADS_ENV: &str = "MUSTER_HOOK_LOADS";
 
 /// Punctuation every hooked shell reads bare in a word, besides letters and
 /// digits.
@@ -62,7 +57,6 @@ pub fn hook_script(
         .replace(MUSTER_BIN_PLACEHOLDER, &quoted(shell, binary)?)
         .replace(NOTES_DIR_PLACEHOLDER, &quoted(shell, notes_dir)?)
         .replace(SHELL_ENV_PLACEHOLDER, MUSTER_SHELL_ENV)
-        .replace(LOADS_ENV_PLACEHOLDER, HOOK_LOADS_ENV)
         .replace(REPORT_PLACEHOLDER, SHELL_REPORT_SUBCOMMAND))
 }
 
@@ -144,7 +138,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::occupancy::LoadId;
+    use crate::domain::{
+        occupancy::{LoadId, LoadStart},
+        value::Pid,
+    };
 
     /// The binary path the snapshots are taken with.
     const SNAPSHOT_BINARY: &str = "/usr/local/bin/muster";
@@ -185,17 +182,16 @@ mod tests {
     const ONE_HOOK: &str = "hooks=1";
     /// What starts the line a driver prints the exported shell pid on.
     const PID_PREFIX: &str = "pid=";
-    /// What starts the line a driver prints the hook's load id on.
+    /// What starts the line a driver prints the hook's load start and the
+    /// pid it spawned on.
     const LOAD_PREFIX: &str = "load=";
     /// Lines the drivers leave as two note files, in seq order; the second
     /// holds what a shell could expand and an escape sanitizing writes.
     const NOTE_LINES: [&str; 2] = ["first line", "second $line \\x1b"];
     /// What a probe runs to learn whether a shell runs here.
     const PROBE_SCRIPT: &str = "exit 0";
-    /// The most digits of a load count the fish hook takes up.
-    const FISH_COUNT_DIGITS: usize = 9;
-    /// The digits of the tick that follows the count in a fish load id.
-    const FISH_TICK_DIGITS: usize = 9;
+    /// Digits of a load start in nanoseconds from 2001 to 2286.
+    const NANOSECOND_DIGITS: usize = 19;
 
     /// Each shell's driver: loads the hook twice, leaves two notes for this
     /// shell, fails a command, runs one prompt, then prints the status the
@@ -213,7 +209,7 @@ mod tests {
                 "  [[ $hook == __muster_prompt ]] && hooks=$((hooks + 1))\n",
                 "done; echo \"hooks=$hooks\"\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
-                "echo \"load=$__muster_load\"\n",
+                "echo \"load=$__muster_load $__muster_load_pid\"\n",
             ),
             HookShell::Zsh => concat!(
                 ". \"$1\"; . \"$1\"\n",
@@ -224,7 +220,7 @@ mod tests {
                 "echo \"status=$?\"\n",
                 "hooks=(${(M)precmd_functions:#__muster_precmd}); echo \"hooks=${#hooks}\"\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
-                "echo \"load=$__muster_load\"\n",
+                "echo \"load=$__muster_load $__muster_load_pid\"\n",
             ),
             HookShell::Fish => concat!(
                 "source $argv[1]; source $argv[1]\n",
@@ -235,7 +231,7 @@ mod tests {
                 "echo \"status=$status\"\n",
                 "echo hooks=(functions --handlers-type generic | string match -e __muster_prompt | count)\n",
                 "echo \"pid=$MUSTER_SHELL_PID\"\n",
-                "echo \"load=$__muster_load\"\n",
+                "echo \"load=$__muster_load $__muster_load_pid\"\n",
             ),
         }
     }
@@ -257,10 +253,7 @@ mod tests {
         if shell != HookShell::Fish {
             command.arg(shell.to_string());
         }
-        command
-            .args(args)
-            .env_remove(MUSTER_SHELL_ENV)
-            .env_remove(HOOK_LOADS_ENV);
+        command.args(args).env_remove(MUSTER_SHELL_ENV);
         shell_runs(shell, "check").then(|| {
             command
                 .output()
@@ -401,66 +394,47 @@ mod tests {
         );
     }
 
-    /// The fish hook's load id is its exported load count, at most
-    /// [`FISH_COUNT_DIGITS`] digits before it adds one, then a tick of
-    /// [`FISH_TICK_DIGITS`] digits: an `exec` keeps the count, so a reload
-    /// within the same second still leads with a count no load before had,
-    /// and the largest id still fits a [`LoadId`].
-    #[test]
-    fn the_fish_load_id_leads_with_its_exported_load_count() {
-        let script = hook_script(
-            HookShell::Fish,
-            Path::new(SNAPSHOT_BINARY),
-            Path::new(SNAPSHOT_NOTES),
-        )
-        .unwrap();
-
-        for part in [
-            format!("set -gx {HOOK_LOADS_ENV} (math $loads + 1)"),
-            format!("set -g __muster_load ${HOOK_LOADS_ENV}$tick"),
-            format!("'^[0-9]{{1,{FISH_COUNT_DIGITS}}}$' -- \"${HOOK_LOADS_ENV}\""),
-            format!("'^[0-9]{{{FISH_TICK_DIGITS}}}$' -- \"$tick\""),
-        ] {
-            assert!(script.contains(&part), "{part}: {script}");
-        }
-        let largest_count = "9".repeat(FISH_COUNT_DIGITS).parse::<u64>().unwrap() + 1;
-        let largest_tick = "9".repeat(FISH_TICK_DIGITS);
-        assert!(
-            format!("{largest_count}{largest_tick}")
-                .parse::<LoadId>()
-                .is_ok()
-        );
+    /// The load id a driver printed as its start and the pid it spawned.
+    fn load_id(printed: &str) -> LoadId {
+        let (started, pid) = printed
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("no load pid in {printed:?}"));
+        assert_eq!(started.len(), NANOSECOND_DIGITS, "{printed:?}");
+        LoadId::builder()
+            .started(started.parse::<LoadStart>().unwrap())
+            .pid(Pid::try_new(pid.parse().unwrap()).unwrap())
+            .build()
     }
 
-    /// The fish hook loaded again in the same shell, as an `exec` that
-    /// keeps its environment does, takes the next count and a new id.
+    /// CR-1: each shell's hook loaded again in the same shell, as an `exec`
+    /// does, takes a load id greater than the one before: its start in
+    /// nanoseconds, then the pid it spawned.
     #[test]
-    fn a_fish_reload_takes_the_next_load_count() {
-        let scratch = TempDir::new().unwrap();
-        let (script, ..) = installed_hook(HookShell::Fish, scratch.path());
-        let reload = format!(
-            "source $argv[1]; echo ${HOOK_LOADS_ENV} $__muster_load\nset -e __muster_hook\nsource \
-             $argv[1]; echo ${HOOK_LOADS_ENV} $__muster_load\n"
-        );
+    fn a_reload_in_the_same_shell_takes_a_greater_load_id() {
+        for shell in HookShell::iter() {
+            let scratch = TempDir::new().unwrap();
+            let (script, ..) = installed_hook(shell, scratch.path());
+            let reload = match shell {
+                HookShell::Bash | HookShell::Zsh => concat!(
+                    ". \"$1\"; echo \"$__muster_load $__muster_load_pid\"\n",
+                    "unset __muster_hook\n",
+                    ". \"$1\"; echo \"$__muster_load $__muster_load_pid\"\n",
+                ),
+                HookShell::Fish => concat!(
+                    "source $argv[1]; echo \"$__muster_load $__muster_load_pid\"\n",
+                    "set -e __muster_hook\n",
+                    "source $argv[1]; echo \"$__muster_load $__muster_load_pid\"\n",
+                ),
+            };
 
-        let Some(output) = run(HookShell::Fish, true, &reload, &[&script]) else {
-            return;
-        };
+            let Some(output) = run(shell, true, reload, &[&script]) else {
+                continue;
+            };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let loads: Vec<(u64, &str)> = stdout
-            .lines()
-            .map(|line| {
-                let (count, load) = line.split_once(' ').unwrap();
-                (count.parse().unwrap(), load)
-            })
-            .collect();
-        assert_eq!(loads.len(), 2, "{output:?}");
-        assert_eq!(loads[1].0, loads[0].0 + 1, "{output:?}");
-        assert_ne!(loads[0].1, loads[1].1);
-        for (count, load) in loads {
-            assert!(load.starts_with(&count.to_string()), "{load}");
-            assert!(load.parse::<LoadId>().is_ok(), "{load}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let loads: Vec<LoadId> = stdout.lines().map(load_id).collect();
+            assert_eq!(loads.len(), 2, "{shell}: {output:?}");
+            assert!(loads[1] > loads[0], "{shell}: {loads:?}");
         }
     }
 
@@ -509,7 +483,7 @@ mod tests {
                 .iter()
                 .find_map(|line| line.strip_prefix(LOAD_PREFIX))
                 .unwrap_or_else(|| panic!("{shell}: {output:?}"));
-            assert!(load.parse::<LoadId>().is_ok(), "{shell}: load {load:?}");
+            let id = load_id(load);
             assert_eq!(
                 lines,
                 [
@@ -526,7 +500,9 @@ mod tests {
             assert_eq!(
                 calls(&calls_file),
                 [format!(
-                    "{SHELL_REPORT_SUBCOMMAND} --pid {pid} --load {load} --seq 1"
+                    "{SHELL_REPORT_SUBCOMMAND} --pid {pid} --load {} --load-pid {} --seq 1",
+                    id.started(),
+                    id.pid()
                 )],
                 "{shell}"
             );

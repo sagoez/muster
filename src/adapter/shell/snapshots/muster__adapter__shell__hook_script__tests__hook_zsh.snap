@@ -1,6 +1,5 @@
 ---
 source: src/adapter/shell/hook_script.rs
-assertion_line: 245
 expression: script
 ---
 # muster's prompt hook for zsh. Load it from ~/.zshrc with:
@@ -9,19 +8,30 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
     typeset -g __muster_hook=1
     typeset -g __muster_bin=/usr/local/bin/muster
     typeset -g __muster_notes=/home/user/.local/state/muster/shells
-    typeset -g __muster_load
+    typeset -g __muster_load __muster_load_pid
     typeset -gi __muster_seq=0
     export MUSTER_SHELL_PID=$$
 
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
     __muster_load_id() {
         emulate -L zsh
-        local now
+        local now fraction
         zmodload -F zsh/datetime p:EPOCHREALTIME 2>/dev/null && now=$EPOCHREALTIME
-        if [[ $now == <->.<-> ]]; then
-            __muster_load=${now%.*}${${now#*.}[1,6]}
+        if [[ $now == <->.<-> && ${#${now%.*}} -le 10 ]]; then
+            fraction=${now#*.}
+            __muster_load=${now%.*}${(r:9::0:)fraction}
         else
-            __muster_load=$RANDOM$RANDOM$RANDOM
+            now=$(command date +%s 2>/dev/null)
+            if [[ $now == <-> && ${#now} -le 10 ]]; then
+                __muster_load=${now}000000000
+            else
+                __muster_load=0
+            fi
         fi
+        __muster_load_pid=$(command sh -c 'echo "$$"' 2>/dev/null)
+        [[ $__muster_load_pid == <-> && ${#__muster_load_pid} -le 10 ]] || __muster_load_pid=$$
     }
     __muster_load_id
     unfunction __muster_load_id
@@ -38,7 +48,7 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
             command rm -f -- "$note"
         done
         (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
-            --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &!)
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &!)
         return status_kept
     }
 

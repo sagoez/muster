@@ -14,6 +14,7 @@ use std::{
 use crossbeam_channel::Receiver;
 
 use super::{
+    detachable_sink::DetachableSink,
     line_matcher::LineMatcher,
     log_reader::{read_log_range, visit_lines},
     protocol::HolderMessage,
@@ -22,7 +23,7 @@ use super::{
 };
 use crate::{
     adapter::ipc,
-    domain::{port::OutputSink, pty::ProcessOutput, value::OutputCursor},
+    domain::{pty::ProcessOutput, value::OutputCursor},
 };
 
 /// Reported when the holder closed the connection without an exit and no
@@ -45,10 +46,9 @@ pub(super) struct Reader {
     pub(super) log: Option<PathBuf>,
     /// Where the output forwarded so far ends.
     pub(super) delivered: OutputCursor,
-    /// Where the child's screen, output and exit go.
-    pub(super) sink: Arc<dyn OutputSink>,
-    /// Set when the handle was dropped.
-    pub(super) detached: Arc<AtomicBool>,
+    /// Where the child's screen, output and exit go, until the handle is
+    /// dropped.
+    pub(super) sink: Arc<DetachableSink>,
     /// Set when the holder reports the exit.
     pub(super) exit_held: Arc<AtomicBool>,
     /// Holds the reader back until its handle says what to replay from the
@@ -67,7 +67,7 @@ impl Reader {
         let Ok(request) = self.replay.recv() else {
             return;
         };
-        if self.detached.load(Ordering::SeqCst) || *request.from() >= self.delivered {
+        if self.sink.is_detached() || *request.from() >= self.delivered {
             return;
         }
         let matchers: Vec<LineMatcher> = request
@@ -81,7 +81,8 @@ impl Reader {
     }
 
     /// Reads the log from `from` up to `until` in pieces and forwards each
-    /// line one of `matchers` matches, as [`visit_lines`] hands it.
+    /// line one of `matchers` matches, as [`visit_lines`] hands it, stopping
+    /// once the handle is dropped.
     fn forward_matching(
         &mut self,
         from: OutputCursor,
@@ -95,6 +96,9 @@ impl Reader {
             return;
         }
         let _ = visit_lines(&log, from, until, |at, line| {
+            if self.sink.is_detached() {
+                return ControlFlow::Break(());
+            }
             let text = strip_line(line);
             if matchers.iter().any(|matcher| matcher.is_match(&text)) {
                 self.forward(at, line.to_vec());
@@ -115,12 +119,12 @@ impl Reader {
     /// the oldest byte the log still holds when rotation discarded more, so
     /// however far it rotated the rest is still replayed, and the piece
     /// placed past what was forwarded shows the tap the gap, as `logs -f`
-    /// reports the bytes it skipped.
+    /// reports the bytes it skipped. A dropped handle ends it.
     fn catch_up(&mut self, log_end: OutputCursor) {
         let Some(log) = self.log.clone() else {
             return;
         };
-        while self.delivered < log_end {
+        while self.delivered < log_end && !self.sink.is_detached() {
             match read_log_range(&log, self.delivered, log_end, CATCH_UP_CHUNK_BYTES) {
                 Ok((at, bytes)) if !bytes.is_empty() => self.forward(at, bytes),
                 Ok(_) | Err(_) => return,
@@ -142,7 +146,8 @@ impl Reader {
 /// as unreadable too, when the handle was not dropped and the holder no
 /// longer serves its socket, so the supervisor's reconnect decides whether
 /// the child outlived its holder; a holder that still serves has handed the
-/// child to another supervisor, which is reported as nothing.
+/// child to another supervisor, which is reported as nothing. Once the handle
+/// is dropped nothing is forwarded, though the thread may still be probing.
 pub(super) fn spawn_reader(mut reader: Reader) {
     thread::spawn(move || {
         reader.replay();
@@ -174,17 +179,15 @@ pub(super) fn spawn_reader(mut reader: Reader) {
                 },
                 Ok(HolderMessage::Rejected(_)) => {},
                 Err(error) if error.is_undecodable() => {
-                    if !reader.detached.load(Ordering::SeqCst) {
-                        reader
-                            .sink
-                            .send(ProcessOutput::Unreadable(error.to_string()));
-                    }
+                    reader
+                        .sink
+                        .send(ProcessOutput::Unreadable(error.to_string()));
                     return;
                 },
                 Err(_) => break,
             }
         }
-        if !reader.detached.load(Ordering::SeqCst) && !holder_serves(&reader.socket) {
+        if !reader.sink.is_detached() && !holder_serves(&reader.socket) {
             reader
                 .sink
                 .send(ProcessOutput::Unreadable(HOLDER_LOST.to_string()));

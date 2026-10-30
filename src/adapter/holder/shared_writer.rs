@@ -8,9 +8,9 @@ use std::{
     thread,
 };
 
-use super::{client_message::ClientMessage, error::HolderError};
+use super::{client_message::ClientMessage, detachable_sink::DetachableSink, error::HolderError};
 use crate::domain::{
-    port::{OutputSink, ProcessInput},
+    port::ProcessInput,
     pty::{ProcessOutput, PtyError},
 };
 
@@ -34,10 +34,8 @@ pub(super) struct SharedWriter {
     pub(super) stream: Arc<Mutex<UnixStream>>,
     /// Set once a write timed out, leaving the stream mid-frame.
     pub(super) broken: Arc<AtomicBool>,
-    /// Where the broken stream is reported.
-    pub(super) sink: Arc<dyn OutputSink>,
-    /// Set when the handle was dropped, so nothing is reported.
-    pub(super) detached: Arc<AtomicBool>,
+    /// Where the broken stream is reported, until the handle is dropped.
+    pub(super) sink: Arc<DetachableSink>,
 }
 
 impl SharedWriter {
@@ -71,7 +69,7 @@ impl SharedWriter {
     /// Marks the connection broken and reports it, off the caller's thread,
     /// since the sink may be the very queue the caller drains.
     fn break_connection(&self) {
-        if self.broken.swap(true, Ordering::SeqCst) || self.detached.load(Ordering::SeqCst) {
+        if self.broken.swap(true, Ordering::SeqCst) || self.sink.is_detached() {
             return;
         }
         let sink = Arc::clone(&self.sink);

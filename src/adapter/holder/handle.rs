@@ -16,6 +16,7 @@ use super::{
     client::greet,
     client_message::ClientMessage,
     client_role::ClientRole,
+    detachable_sink::DetachableSink,
     error::HolderError,
     holder_control::HolderControl,
     log_reader::{log_end, read_log_range},
@@ -89,8 +90,9 @@ pub struct HolderHandle {
     replay_from: Option<OutputCursor>,
     /// The child's log, once known.
     log: Option<PathBuf>,
-    /// Set when this handle is dropped, so the reader reports no exit.
-    detached: Arc<AtomicBool>,
+    /// The sink the reader and writers forward to, detached as this handle
+    /// is dropped, whatever the reader is still doing.
+    sink: Arc<DetachableSink>,
     /// Set once the holder reported the exit, which it then holds until
     /// collected.
     exit_held: Arc<AtomicBool>,
@@ -160,15 +162,13 @@ impl HolderHandle {
         let greeting = greet(&mut stream, socket, ClientRole::Supervisor, timeout)?;
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(Some(HOLDER_WRITE_TIMEOUT))?;
-        let sink: Arc<dyn OutputSink> = Arc::from(sink);
+        let sink = Arc::new(DetachableSink::new(sink));
         let closer = stream.try_clone()?;
-        let detached = Arc::new(AtomicBool::new(false));
         let exit_held = Arc::new(AtomicBool::new(false));
         let writer = SharedWriter {
             stream: Arc::new(Mutex::new(stream.try_clone()?)),
             broken: Arc::new(AtomicBool::new(false)),
             sink: Arc::clone(&sink),
-            detached: Arc::clone(&detached),
         };
         let (replay, held) = bounded(1);
         spawn_reader(Reader {
@@ -176,8 +176,7 @@ impl HolderHandle {
             socket: socket.to_path_buf(),
             log: log.map(Path::to_path_buf),
             delivered: greeting.log_end(),
-            sink,
-            detached: Arc::clone(&detached),
+            sink: Arc::clone(&sink),
             exit_held: Arc::clone(&exit_held),
             replay: held,
         });
@@ -196,7 +195,7 @@ impl HolderHandle {
             backlog: None,
             log: log.map(Path::to_path_buf),
             initial_screen: Some(greeting.into_repaint()),
-            detached,
+            sink,
             exit_held,
         })
     }
@@ -348,9 +347,10 @@ impl ProcessHandle for HolderHandle {
 
 impl Drop for HolderHandle {
     /// Disconnects from the holder, which keeps the child running for a later
-    /// adoption, and ends the reader without reporting an exit.
+    /// adoption, and drops the sink at once rather than when the reader
+    /// ends, which may still be probing the holder or reading its log.
     fn drop(&mut self) {
-        self.detached.store(true, Ordering::SeqCst);
+        self.sink.detach();
         let _ = self.closer.shutdown(Shutdown::Both);
     }
 }
@@ -365,7 +365,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crossbeam_channel::{RecvTimeoutError, unbounded};
+    use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
 
     use super::*;
     use crate::{
@@ -656,7 +656,9 @@ mod tests {
     }
 
     /// A supervisor evicted by a holder that still serves its socket reports
-    /// nothing: the process lives on under its new supervisor.
+    /// nothing: the process lives on under its new supervisor. Dropping the
+    /// handle releases the sink at once, while the reader is still probing
+    /// whether the holder serves and an input writer is still held.
     #[test]
     fn an_evicted_supervisor_reports_nothing() {
         let scratch = short_scratch(SCRATCH_PREFIX);
@@ -693,11 +695,9 @@ mod tests {
             Err(RecvTimeoutError::Timeout),
             "the reader ends without an exit or an unreadable report"
         );
+        let _input = handle.input();
         drop(handle);
-        assert_eq!(
-            outputs.recv_timeout(WAIT),
-            Err(RecvTimeoutError::Disconnected)
-        );
+        assert_eq!(outputs.try_recv(), Err(TryRecvError::Disconnected));
     }
 
     /// A holder that stops reading fails the write after the write timeout

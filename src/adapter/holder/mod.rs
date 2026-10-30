@@ -11,6 +11,7 @@ mod client_message;
 mod client_role;
 mod config;
 mod connected_client;
+mod detachable_sink;
 mod dirs;
 mod error;
 mod error_line;

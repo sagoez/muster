@@ -49,8 +49,8 @@ plugs into a port.
   `StackStore`, `Notifier`). `LocalState` is the state a driver reads and
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
-  `CoordinationStore`, `StackEditLog`). `RunHistory` and `RaisedEdits` stay
-  out of it: only the service writes them. The domain has no I/O, no
+  `CoordinationStore`, `StackEditLog`). `RunHistory`, `RaisedEdits` and
+  `PendingIdleStops` stay out of it: only the service writes them. The domain has no I/O, no
   framework types and no `async`, and is fully unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
@@ -71,8 +71,9 @@ plugs into a port.
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,
     `StackEditLog`); writers tell it what changed. What it writes, through
-    `RunHistory` and `RaisedEdits` from a thread of its own, is how each
-    process last ended and which agent edits it raised; through
+    `RunHistory`, `RaisedEdits` and `PendingIdleStops` from a thread of its
+    own, is how each process last ended, which agent edits it raised and
+    when each project's last shell left; through
     `ShellRegistry` it deletes the record and notes of each shell that has
     ended. Shell occupancy lives in the loop (`Occupancy`, in
     `domain/occupancy`); a `ShellSweeper` thread checks that reported shells

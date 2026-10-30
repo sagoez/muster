@@ -38,8 +38,8 @@ pub struct Waiter {
     /// Where its answer goes.
     #[getset(get = "pub")]
     reply: WaitReply,
-    /// Where scanning began, when the asked cursor was older than the output
-    /// held.
+    /// Where the output tested without a gap began, when the asked cursor
+    /// was older than that.
     #[getset(get_copy = "pub")]
     #[builder(default)]
     scanned_from: Option<OutputCursor>,

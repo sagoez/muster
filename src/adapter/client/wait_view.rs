@@ -37,8 +37,8 @@ pub struct WaitView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[getset(get = "pub")]
     tail: Vec<String>,
-    /// Where scanning began, when the cursor asked for was older than the
-    /// output still held.
+    /// Where the output tested without a gap began, when the cursor asked
+    /// for was older than that.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[getset(get_copy = "pub")]
     scanned_from: Option<OutputCursor>,

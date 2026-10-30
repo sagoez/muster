@@ -931,8 +931,8 @@ mod tests {
         adapter::{
             holder::{HolderId, LoggedLine},
             service::{
-                LaunchEnvironment, ServiceEvent, ServiceResponse, WaitCondition, WaitOutcome,
-                WaitSpec, WaitStatus,
+                LaunchEnvironment, ServiceEvent, ServiceResponse, TAP_RING_BYTES, WaitCondition,
+                WaitOutcome, WaitSpec, WaitStatus,
                 supervisor::{
                     ConfigMembership, SpawnGeneration,
                     lifecycle::FORCE_STOP_NOTICE,
@@ -956,6 +956,8 @@ mod tests {
     };
 
     const PANE: u64 = 0;
+    /// Bytes of each line of a flood, newline included.
+    const FLOOD_LINE_BYTES: usize = 1024;
     /// A pid that always runs and is never a holder, standing in for one.
     const KERNEL_THREAD_PID: u32 = 2;
     /// The command a stack change replaces the test command with.
@@ -1229,6 +1231,40 @@ mod tests {
             *outcome.matched().clone().unwrap().at(),
             OutputCursor::new(0)
         );
+    }
+
+    /// More output than the tap keeps, arriving while a wait's scan of the
+    /// log is in flight, leaves a gap between where the scan stopped and the
+    /// tap's oldest line: the wait is answered by a later line, and its
+    /// `scanned_from` says where the tested output resumed after the gap.
+    #[test]
+    fn a_flood_during_a_held_scan_reports_the_gap_it_left() {
+        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        let answers = wait_for_line(&mut harness, "ready", Some(OutputCursor::new(0)));
+
+        let line = [vec![b'x'; FLOOD_LINE_BYTES - 1], b"\n".to_vec()].concat();
+        let flood = line.repeat(TAP_RING_BYTES / FLOOD_LINE_BYTES * 2);
+        run_output(&mut harness, ProcessOutput::Chunk(flood));
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        assert!(waited(&answers).is_none(), "nothing matched yet");
+        run_output(&mut harness, ProcessOutput::Chunk(b"ready\n".to_vec()));
+
+        let outcome = waited(&answers).expect("the streamed line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        let resumed = outcome.scanned_from().expect("the gap is reported");
+        assert!(
+            resumed > OutputCursor::new(REPLAY_STREAM_START),
+            "{resumed} is past where the scan stopped"
+        );
+        assert!(resumed <= *outcome.matched().clone().unwrap().at());
     }
 
     /// A crash after an adoption answers a wait with its run's last lines

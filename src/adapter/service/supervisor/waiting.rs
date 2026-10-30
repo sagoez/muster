@@ -927,7 +927,9 @@ impl Supervisor {
     /// Registers `prepared` as [`Self::register`] does, after the scan of its
     /// log it was held on, when it was: a line that scan found matches it,
     /// otherwise the tap is tested from where the scan stopped, and a run
-    /// that ended meanwhile answers it as it ended.
+    /// that ended meanwhile answers it as it ended. When the tap no longer
+    /// holds where the scan stopped, its answer's `scanned_from` says where
+    /// the tested output resumes, as for a rotated log.
     pub(super) fn register_held(
         &mut self,
         prepared: PreparedWait,
@@ -971,10 +973,10 @@ impl Supervisor {
                 None => since,
             };
             if matched.is_none() {
+                // Output past the tap's window while the scan was in flight
+                // left a gap after it, so the answer counts from the tap.
                 let (lines, from) = self.tap(pane).scan_from(tapped_since);
-                if logged.is_none() {
-                    scanned_from = from;
-                }
+                scanned_from = from.or(scanned_from);
                 matched = lines
                     .into_iter()
                     .find(|line| matcher.is_match(line.text()))

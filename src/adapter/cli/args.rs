@@ -215,7 +215,10 @@ mod tests {
             holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
             shell::SHELL_REPORT_SUBCOMMAND,
         },
-        domain::occupancy::{LoadStart, ReportSeq},
+        domain::{
+            occupancy::{LoadStart, ReportSeq},
+            value::EpochNanos,
+        },
     };
 
     /// Completions and usage must register the binary name, not the package
@@ -404,9 +407,9 @@ mod tests {
         assert!(bare.command.is_none());
     }
 
-    /// The hidden shell report takes the `--pid`, `--load`, `--load-pid`
-    /// and `--seq` the hook passes, and refuses a pid no shell could have or
-    /// a load that is no number.
+    /// The hidden shell report takes the `--pid`, `--load`, `--load-pid`,
+    /// `--seq` and optional `--arrived` the hook passes, and refuses a pid
+    /// no shell could have or a load or arrival time that is no number.
     #[test]
     fn the_shell_report_reads_the_hook_s_pid_load_and_seq() {
         let report = |pid: &str, load: &str, load_pid: &str| {
@@ -426,12 +429,36 @@ mod tests {
 
         assert!(matches!(
             report("4242", "1793315867697448123", "5150").unwrap().command,
-            Some(Command::ShellReport { pid, load, load_pid, seq })
+            Some(Command::ShellReport { pid, load, load_pid, seq, arrived: None })
                 if pid.into_inner() == 4242
                     && load == LoadStart::new(1_793_315_867_697_448_123)
                     && load_pid.into_inner() == 5150
                     && seq == ReportSeq::new(7)
         ));
+        let timed = |arrived: &str| {
+            Args::try_parse_from([
+                "muster",
+                SHELL_REPORT_SUBCOMMAND,
+                "--pid",
+                "4242",
+                "--load",
+                "1",
+                "--load-pid",
+                "5150",
+                "--seq",
+                "7",
+                "--arrived",
+                arrived,
+            ])
+        };
+        assert!(matches!(
+            timed("1793315867697448999").unwrap().command,
+            Some(Command::ShellReport { arrived: Some(arrived), .. })
+                if arrived == EpochNanos::new(1_793_315_867_697_448_999)
+        ));
+        for refused in ["-1", "", "1.5", "now"] {
+            assert!(timed(refused).is_err(), "{refused:?}");
+        }
         for refused in ["1", "0", "-3", "shell"] {
             assert!(report(refused, "1", "5150").is_err(), "{refused}");
             assert!(report("4242", "1", refused).is_err(), "{refused}");

@@ -4,7 +4,7 @@ use crate::domain::{
     config::{ConfigError, UnreadableProject},
     port::ProjectStore,
     project::Project,
-    value::{ProjectName, ProjectRoot},
+    value::{EpochNanos, ProjectName, ProjectRoot},
 };
 
 /// A store holding a fixed set of projects, looked up as the database would.
@@ -40,6 +40,11 @@ impl ProjectStore for FixedProjects {
             .iter()
             .find(|project| project.name() == name)
             .cloned())
+    }
+
+    /// Every fixed project was registered at the epoch.
+    fn registered_at(&self, root: &ProjectRoot) -> Result<Option<EpochNanos>, ConfigError> {
+        Ok(self.project_at(root)?.map(|_| EpochNanos::new(0)))
     }
 
     fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {

@@ -262,7 +262,12 @@ occupies the project or holds off its idle stop.
 Entering a registered project's folder starts its autostart processes, as
 `muster up` would, and the next prompt prints a `muster:` line saying what
 happened. Registering a project around a shell that is already in it does not
-count as entering. A process you stopped yourself stays stopped.
+count as entering, even when the report of the `cd` that took the shell there
+reads the projects only after the registration: the hook passes the time of
+the first prompt it drew in that folder, and a project registered later was
+registered around the shell. bash 5 and zsh read that time from their own
+clock and fish from `date`; a shell that cannot read it falls back to when the
+report starts. A process you stopped yourself stays stopped.
 
 Leaving is noticed at that shell's next report, and a shell that ends within a
 few seconds. Once no shell has been in the project for `idle-stop`, muster

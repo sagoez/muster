@@ -97,6 +97,17 @@ impl ShellSession {
         self.run(&line);
     }
 
+    /// Makes the hook run `binary` for its reports from the next prompt on,
+    /// as a slow wrapper around muster would be.
+    pub fn report_through(&self, binary: &Path) {
+        let binary = shlex::try_quote(binary.to_str().unwrap()).unwrap();
+        let line = match self.shell {
+            HookShell::Bash | HookShell::Zsh => format!("__muster_bin={binary}"),
+            HookShell::Fish => format!("set -g __muster_bin {binary}"),
+        };
+        self.run(&line);
+    }
+
     /// Replaces the shell with a fresh one of the same program on the same
     /// pid, as `exec $SHELL` does, and loads the hook in it as its rc file
     /// would.

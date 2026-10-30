@@ -23,10 +23,22 @@ if status is-interactive; and not set -q __muster_hook; and not set -q @MUSTER_O
     string match -qr '^[0-9]{1,10}$' -- "$spawned"; or set spawned $fish_pid
     set -g __muster_load_pid $spawned
     set -g __muster_seq 0
+    # The folder of the last prompt, and the first prompt's time, in
+    # nanoseconds, at which the shell was seen in it: a project registered
+    # after that was registered around the shell, not walked into.
+    set -g __muster_pwd
+    set -g __muster_arrived
     set -gx @MUSTER_SHELL_ENV@ $fish_pid
 
     function __muster_prompt --on-event fish_prompt
         set -l status_kept $status
+        if test "$PWD" != "$__muster_pwd"
+            set -g __muster_pwd $PWD
+            set -g __muster_arrived (command date +%s%N 2>/dev/null)
+            string match -qr '^[0-9]{19}$' -- "$__muster_arrived"; or set -g __muster_arrived
+        end
+        set -l arrived
+        test -n "$__muster_arrived"; and set arrived --arrived $__muster_arrived
         set __muster_seq (math $__muster_seq + 1)
         for note in $__muster_notes/$fish_pid-*.note
             test -f $note; or continue
@@ -37,7 +49,7 @@ if status is-interactive; and not set -q __muster_hook; and not set -q @MUSTER_O
         end
         if test -x $__muster_bin
             command $__muster_bin @MUSTER_REPORT@ --pid $fish_pid --load $__muster_load \
-                --load-pid $__muster_load_pid --seq $__muster_seq </dev/null >/dev/null 2>&1 &
+                --load-pid $__muster_load_pid --seq $__muster_seq $arrived </dev/null >/dev/null 2>&1 &
             disown 2>/dev/null
         end
         return $status_kept

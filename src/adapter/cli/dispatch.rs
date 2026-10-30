@@ -96,6 +96,7 @@ use crate::{
             ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
             resolve_project, this_binary,
         },
+        clock::nanos_now,
         private_dir::state_dir,
         process_tree::named_ancestors,
         sanitize::printable_lines,
@@ -344,13 +345,15 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             load,
             load_pid,
             seq,
+            arrived,
         }) => {
+            let arrived = arrived.unwrap_or_else(nanos_now);
             // A skipped report is retried at the next prompt; the hook shows
             // nothing either way.
             if let Ok(cwd) = invocation.cwd() {
                 let load = LoadId::builder().started(load).pid(load_pid).build();
                 let stamp = ReportStamp::builder().load(load).seq(seq).build();
-                let _ = shell_report(ports, pid, stamp, &cwd);
+                let _ = shell_report(ports, pid, stamp, arrived, &cwd);
             }
         },
         Some(Command::Holder { spec }) => internal(ports.run_holder(&spec)),

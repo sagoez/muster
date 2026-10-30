@@ -1,19 +1,21 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, Params, Row, params};
+use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use super::{
     idle_stop_refusal::IdleStopRefusal,
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
-    sqlite_store::{SqliteStore, corrupt, db_error, epoch_param},
+    sqlite_store::{SqliteStore, corrupt, db_error, nanos_from, nanos_param},
 };
 use crate::{
-    adapter::{clock::epoch_now, sanitize::printable},
+    adapter::{clock::nanos_now, sanitize::printable},
     domain::{
         config::{ConfigError, Registration, UnreadableProject},
         port::ProjectStore,
         project::Project,
-        value::{IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
+        value::{
+            EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError,
+        },
     },
 };
 
@@ -21,6 +23,8 @@ use crate::{
 const SELECT_PROJECT: &str = "SELECT id, root, name, idle_stop_kind, idle_stop_ms FROM projects";
 /// What an unreadable project's refusal calls it, before its folder.
 const PROJECT_AT: &str = "project at ";
+/// What a refusal of a stored registration time calls it.
+const REGISTERED_AT: &str = "project registration time";
 /// Why a stored folder that is not absolute is refused.
 const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
 /// Why a blank stored name is refused.
@@ -249,8 +253,8 @@ pub(super) fn register(
     let name = name.ok_or_else(|| corrupt("project names", "every candidate is taken"))?;
     let id = conn
         .query_row(
-            "INSERT INTO projects (root, name, created_at) VALUES (?1, ?2, ?3) RETURNING id",
-            params![root_text(root)?, name.as_ref(), epoch_param(epoch_now())],
+            "INSERT INTO projects (root, name, registered_ns) VALUES (?1, ?2, ?3) RETURNING id",
+            params![root_text(root)?, name.as_ref(), nanos_param(nanos_now())],
             |row| row.get(0),
         )
         .map_err(db_error)?;
@@ -299,6 +303,22 @@ impl ProjectStore for SqliteStore {
                 ])?
                 .map(|(_, project)| project),
             )
+        })
+    }
+
+    fn registered_at(&self, root: &ProjectRoot) -> Result<Option<EpochNanos>, ConfigError> {
+        self.read(|conn| {
+            let stored: Option<i64> = conn
+                .query_row(
+                    "SELECT registered_ns FROM projects WHERE root = ?1",
+                    params![root_text(root)?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_error)?;
+            stored
+                .map(|nanos| nanos_from(REGISTERED_AT, nanos))
+                .transpose()
         })
     }
 
@@ -616,6 +636,27 @@ mod tests {
                 assert!(matches!(outer_added, Err(ConfigError::HoldsProject { .. })));
             }
         }
+    }
+
+    /// A project is stamped, to the nanosecond, with when it was
+    /// registered; a folder never registered has no time.
+    #[test]
+    fn registering_stamps_the_project_with_its_time() {
+        let (store, scratch) = fresh_store();
+        let shop = folder(&scratch, "shop");
+        let before = nanos_now();
+        store
+            .add_process(&shop, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let after = nanos_now();
+
+        let registered = store.registered_at(&shop).unwrap().unwrap();
+
+        assert!((before..=after).contains(&registered), "{registered}");
+        assert_eq!(
+            store.registered_at(&folder(&scratch, "blog")).unwrap(),
+            None
+        );
     }
 
     /// The deepest registered ancestor wins, and containment is by whole

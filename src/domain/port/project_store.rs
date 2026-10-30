@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
     project::Project,
-    value::{ProjectName, ProjectRoot},
+    value::{EpochNanos, ProjectName, ProjectRoot},
 };
 
 /// Driven port: the registered projects. A project whose stored row does not
@@ -35,6 +35,13 @@ pub trait ProjectStore {
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be read.
     fn project_named(&self, name: &ProjectName) -> Result<Option<Project>, ConfigError>;
+
+    /// When the project at `root` was registered, if it is.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be read or holds a
+    /// time before the epoch.
+    fn registered_at(&self, root: &ProjectRoot) -> Result<Option<EpochNanos>, ConfigError>;
 
     /// The registered project whose root is `dir` or its nearest ancestor,
     /// among those that read.

@@ -6,6 +6,7 @@
 use std::{
     fs,
     net::{TcpListener, TcpStream},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Output,
     time::{Duration, Instant},
@@ -58,6 +59,13 @@ const PERL: &str = "perl";
 const PROC_ROOT: &str = "/proc";
 /// The link in a process's entry naming its working folder.
 const PROC_CWD: &str = "cwd";
+/// How late the slowed hook runs each report, long past what `muster add`
+/// takes to register a folder.
+const SLOW_REPORT: Duration = Duration::from_secs(2);
+/// The program that runs muster late.
+const SLOW_MUSTER: &str = "slow-muster";
+/// Mode of that program: runnable by its owner.
+const SCRIPT_MODE: u32 = 0o700;
 
 /// Runs `body` once for each shell installed, printing which are skipped.
 fn each_shell(test: &str, body: impl Fn(&mut Scratch, HookShell, &Path)) {
@@ -389,6 +397,45 @@ fn registering_a_project_from_inside_a_shell_starts_nothing() {
             !left[0]["occupancy"]["stops_in"].is_null(),
             "{shell}: {left}"
         );
+    });
+}
+
+/// A program in `scratch` that runs muster [`SLOW_REPORT`] late, as a hook's
+/// report slowed by a loaded box would.
+fn slow_muster(scratch: &Scratch) -> PathBuf {
+    let path = scratch.path().join(SLOW_MUSTER);
+    let binary = shlex::try_quote(BINARY).unwrap();
+    let delay = SLOW_REPORT.as_secs();
+    fs::write(
+        &path,
+        format!("#!/bin/sh\nsleep {delay}\nexec {binary} \"$@\"\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(SCRIPT_MODE)).unwrap();
+    path
+}
+
+/// A move whose report is still on its way when `muster add` registers the
+/// folder, as `cd fresh` then a quick `muster add --autostart`, is no
+/// entry: the shell was in the folder before it became a project, though
+/// the late report reads it as one, so nothing starts, yet the shell counts
+/// in the new project.
+#[test]
+fn a_late_report_of_a_move_into_a_folder_registered_since_starts_nothing() {
+    each_shell("late report", |scratch, shell, program| {
+        let fresh = scratch.path().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        let session = ShellSession::start(scratch, shell, program);
+        session.report_through(&slow_muster(scratch));
+
+        let quoted = shlex::try_quote(fresh.to_str().unwrap()).unwrap();
+        session.type_line(&format!("cd {quoted}"));
+        session.run(&add_autostart(&fresh, "dev"));
+        wait_recorded_in(&session, &fresh);
+        session.wait_reports_done();
+
+        assert!(!running(scratch, &fresh, "dev"), "{shell}: dev started");
+        assert_eq!(ps(scratch, &fresh)[0]["occupancy"]["shells"], 1, "{shell}");
     });
 }
 

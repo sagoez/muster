@@ -141,9 +141,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{
-        occupancy::{LoadId, LoadStart},
-        value::Pid,
+    use crate::{
+        adapter::clock::nanos_now,
+        domain::{
+            occupancy::{LoadId, LoadStart},
+            value::{EpochNanos, Pid},
+        },
     };
 
     /// The binary path the snapshots are taken with.
@@ -185,6 +188,9 @@ mod tests {
     const ONE_HOOK: &str = "hooks=1";
     /// What starts the line a driver prints the exported shell pid on.
     const PID_PREFIX: &str = "pid=";
+    /// What the time the shell arrived in its folder follows, when the shell
+    /// can read its clock.
+    const ARRIVED_FLAG: &str = " --arrived ";
     /// What starts the line a driver prints the hook's load start and the
     /// pid it spawned on.
     const LOAD_PREFIX: &str = "load=";
@@ -492,9 +498,11 @@ mod tests {
         for shell in HookShell::iter() {
             let scratch = TempDir::new().unwrap();
             let (script, notes, calls_file) = installed_hook(shell, scratch.path());
+            let before = nanos_now();
             let Some(output) = run(shell, true, driver(shell), &[&script, &notes]) else {
                 continue;
             };
+            let after = nanos_now();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let lines: Vec<&str> = stdout.lines().collect();
             let pid = lines
@@ -519,14 +527,28 @@ mod tests {
                 "{shell}: {output:?}"
             );
             assert_eq!(fs::read_dir(&notes).unwrap().count(), 0, "{shell}");
-            assert_eq!(
-                calls(&calls_file),
-                [format!(
-                    "{SHELL_REPORT_SUBCOMMAND} --pid {pid} --load {} --load-pid {} --seq 1",
-                    id.started(),
-                    id.pid()
-                )],
-                "{shell}"
+            let made = calls(&calls_file);
+            let [call] = &made[..] else {
+                panic!("{shell}: one report: {made:?}");
+            };
+            let reported = format!(
+                "{SHELL_REPORT_SUBCOMMAND} --pid {pid} --load {} --load-pid {} --seq 1",
+                id.started(),
+                id.pid()
+            );
+            let timed = call
+                .strip_prefix(&reported)
+                .unwrap_or_else(|| panic!("{shell}: {call}"));
+            let arrived = timed
+                .strip_prefix(ARRIVED_FLAG)
+                .map(|arrived| arrived.parse::<EpochNanos>().unwrap());
+            assert!(
+                arrived.is_some() || shell != HookShell::Zsh,
+                "{shell}: zsh reads its clock: {call}"
+            );
+            assert!(
+                arrived.is_none_or(|arrived| (before..=after).contains(&arrived)),
+                "{shell}: the first prompt's time: {call}"
             );
         }
     }

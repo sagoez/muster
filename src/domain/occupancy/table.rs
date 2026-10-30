@@ -172,7 +172,10 @@ mod tests {
             OccupancyChange::Left(test_root("shop"))
         ]);
         assert_eq!(table.occupants(&test_root("shop")), 0);
-        assert!(table.knows(&test_shell(100, 1)), "a shell outside every project");
+        assert!(
+            table.knows(&test_shell(100, 1)),
+            "a shell outside every project"
+        );
         assert_eq!(table.len(), 1);
     }
 
@@ -188,7 +191,9 @@ mod tests {
             OccupancyChange::Entered(test_root("blog"))
         ]);
         assert!(
-            table.report(&at(test_shell(100, 1), 3, Some("blog"))).is_empty(),
+            table
+                .report(&at(test_shell(100, 1), 3, Some("blog")))
+                .is_empty(),
             "a prompt in the same project changes nothing"
         );
     }
@@ -200,7 +205,11 @@ mod tests {
         let mut table = Occupancy::new();
         table.report(&at(test_shell(100, 1), 5, Some("blog")));
 
-        assert!(table.report(&at(test_shell(100, 1), 4, Some("shop"))).is_empty());
+        assert!(
+            table
+                .report(&at(test_shell(100, 1), 4, Some("shop")))
+                .is_empty()
+        );
         assert!(
             table.report(&at(test_shell(100, 1), 5, None)).is_empty(),
             "the same seq again"
@@ -218,12 +227,17 @@ mod tests {
         let mut table = Occupancy::new();
         table.report(&loaded(test_shell(100, 1), 7, 50, Some("blog")));
 
-        assert_eq!(table.report(&loaded(test_shell(100, 1), 8, 1, Some("shop"))), [
-            OccupancyChange::Left(test_root("blog")),
-            OccupancyChange::Entered(test_root("shop"))
-        ]);
+        assert_eq!(
+            table.report(&loaded(test_shell(100, 1), 8, 1, Some("shop"))),
+            [
+                OccupancyChange::Left(test_root("blog")),
+                OccupancyChange::Entered(test_root("shop"))
+            ]
+        );
         assert!(
-            table.report(&loaded(test_shell(100, 1), 8, 1, None)).is_empty(),
+            table
+                .report(&loaded(test_shell(100, 1), 8, 1, None))
+                .is_empty(),
             "the same prompt of the new load again"
         );
         assert_eq!(table.report(&loaded(test_shell(100, 1), 8, 2, None)), [
@@ -236,12 +250,16 @@ mod tests {
         let mut table = Occupancy::new();
         table.report(&at(test_shell(100, 1), 1, Some("shop")));
 
-        assert!(table.report(&at(test_shell(200, 1), 1, Some("shop"))).is_empty());
+        assert!(
+            table
+                .report(&at(test_shell(200, 1), 1, Some("shop")))
+                .is_empty()
+        );
         assert_eq!(table.occupants(&test_root("shop")), 2);
         assert!(table.report(&at(test_shell(100, 1), 2, None)).is_empty());
-        assert_eq!(table.remove(&test_shell(200, 1)), [OccupancyChange::Left(test_root(
-            "shop"
-        ))]);
+        assert_eq!(table.remove(&test_shell(200, 1)), [OccupancyChange::Left(
+            test_root("shop")
+        )]);
     }
 
     #[test]
@@ -252,11 +270,15 @@ mod tests {
 
         assert_eq!(table.occupants(&test_root("shop")), 1);
         assert!(
-            table.report(&at(test_shell(100, 1), 7, Some("blog"))).is_empty(),
+            table
+                .report(&at(test_shell(100, 1), 7, Some("blog")))
+                .is_empty(),
             "a report not newer than the record"
         );
         assert!(
-            table.report(&at(test_shell(200, 1), 1, Some("shop"))).is_empty(),
+            table
+                .report(&at(test_shell(200, 1), 1, Some("shop")))
+                .is_empty(),
             "the restored shell already occupies shop"
         );
         table.restore(&at(test_shell(100, 1), 6, None));
@@ -273,11 +295,14 @@ mod tests {
         table.report(&at(test_shell(100, 1), 1, Some("shop")));
         table.report(&at(test_shell(200, 1), 1, None));
 
-        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(test_root(
-            "shop"
-        ))]);
+        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(
+            test_root("shop")
+        )]);
         assert!(table.remove(&test_shell(200, 1)).is_empty());
-        assert!(table.remove(&test_shell(300, 1)).is_empty(), "an unknown shell");
+        assert!(
+            table.remove(&test_shell(300, 1)).is_empty(),
+            "an unknown shell"
+        );
         assert!(table.is_empty());
     }
 
@@ -316,9 +341,9 @@ mod tests {
             .project(Some(test_root("shop/admin")))
             .held(vec![test_root("shop")])
             .build();
-        assert_eq!(table.report(&nested), [OccupancyChange::Entered(test_root(
-            "shop/admin"
-        ))]);
+        assert_eq!(table.report(&nested), [OccupancyChange::Entered(
+            test_root("shop/admin")
+        )]);
         assert_eq!(table.occupants(&test_root("shop")), 1, "shop is held");
 
         assert_eq!(table.report(&at(test_shell(100, 1), 3, None)), [
@@ -336,9 +361,9 @@ mod tests {
         table.restore(&at(test_shell(200, 1), 1, Some("blog")));
         table.restore(&at(test_shell(300, 1), 1, Some("blog")));
 
-        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(test_root(
-            "shop"
-        ))]);
+        assert_eq!(table.remove(&test_shell(100, 1)), [OccupancyChange::Left(
+            test_root("shop")
+        )]);
         assert!(
             table.remove(&test_shell(200, 1)).is_empty(),
             "blog still has one"
@@ -351,7 +376,11 @@ mod tests {
         let mut table = Occupancy::new();
         table.report(&at(test_shell(100, 1), 9, Some("shop")));
 
-        assert!(table.report(&at(test_shell(100, 2), 1, Some("shop"))).is_empty());
+        assert!(
+            table
+                .report(&at(test_shell(100, 2), 1, Some("shop")))
+                .is_empty()
+        );
 
         assert_eq!(table.occupants(&test_root("shop")), 2);
         assert_eq!(table.shells(), [test_shell(100, 1), test_shell(100, 2)]);

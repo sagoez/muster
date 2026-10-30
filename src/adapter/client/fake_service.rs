@@ -4,13 +4,8 @@ use std::sync::{
 };
 
 use super::{
-    asked::Asked,
-    client_error::ClientError,
-    connector::Connector,
-    served_service::ServedService,
-    service_access::ServiceAccess,
-    service_client::ServiceClient,
-    service_status::ServiceStatus,
+    asked::Asked, client_error::ClientError, connector::Connector, served_service::ServedService,
+    service_access::ServiceAccess, service_client::ServiceClient, service_status::ServiceStatus,
 };
 use crate::{
     adapter::{

@@ -130,7 +130,7 @@ src/
     coordination/      # shared notes, todos, key-value entries and locks
     occupancy/         # which shell is in which project: Occupancy, ShellRecord
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
+    terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
     port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
     project.rs, settings.rs, color_scheme.rs, notification.rs

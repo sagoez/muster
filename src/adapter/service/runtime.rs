@@ -719,12 +719,10 @@ impl ServiceRuntime {
     ) -> Result<Reply, ServiceErrorBody> {
         match &request {
             ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } => {
-                self.client_acts_on(project);
                 self.refresh_stack(project)?;
                 self.supervisor(project)?;
                 self.share_held_ports();
             },
-            ServiceRequest::Down { project } => self.client_acts_on(project),
             ServiceRequest::Ps {
                 project: Some(project),
             }
@@ -736,6 +734,7 @@ impl ServiceRuntime {
                 }
             },
             ServiceRequest::Hello { .. }
+            | ServiceRequest::Down { .. }
             | ServiceRequest::Wait { .. }
             | ServiceRequest::Locate { .. }
             | ServiceRequest::Log { .. }
@@ -784,6 +783,7 @@ impl ServiceRuntime {
                 wait: None,
             } => {
                 let outcome = self.supervisor(&project)?.up(&environment);
+                self.client_acts_on(&project);
                 self.hold_up(&project);
                 ServiceResponse::Batch(outcome)
             },
@@ -794,6 +794,7 @@ impl ServiceRuntime {
             } => {
                 self.supervisor(&project)?
                     .up_waiting(&environment, &wait, reply.clone())?;
+                self.client_acts_on(&project);
                 self.hold_up(&project);
                 return Ok(Reply::Held);
             },
@@ -814,7 +815,9 @@ impl ServiceRuntime {
                 wait,
             } => return self.events_after(project, since, kinds, wait, reply),
             ServiceRequest::Down { project } => {
-                ServiceResponse::Batch(self.supervisor(&project)?.down())
+                let outcome = self.supervisor(&project)?.down();
+                self.client_acts_on(&project);
+                ServiceResponse::Batch(outcome)
             },
             ServiceRequest::Log { project, name } => {
                 self.process(&project, &name)?;
@@ -840,6 +843,7 @@ impl ServiceRuntime {
                 if held {
                     self.entering.forget_project(&project);
                 }
+                self.client_acts_on(&project);
                 ServiceResponse::Ok
             },
             ServiceRequest::Control {
@@ -872,6 +876,7 @@ impl ServiceRuntime {
                 if held {
                     self.entering.forget_project(&project);
                 }
+                self.client_acts_on(&project);
                 return Ok(Reply::Held);
             },
             ServiceRequest::Locate { project, name } => {
@@ -999,9 +1004,10 @@ impl ServiceRuntime {
         }
     }
 
-    /// Hands `project` to a client acting on it: an entering waiting there
-    /// is dropped, and nothing its last idle stop stopped starts again
-    /// because a shell came back.
+    /// Hands `project` to a client whose request to act on it was accepted:
+    /// an entering waiting there is dropped, and nothing its last idle stop
+    /// stopped starts again because a shell came back. A refused request
+    /// hands over nothing.
     fn client_acts_on(&mut self, project: &ProjectRoot) {
         self.stopping_entries.forget_project(project);
         if let Some(supervisor) = self.supervisors.get_mut(project) {
@@ -3484,6 +3490,45 @@ mod tests {
     fn a_client_stop_during_an_idle_stop_keeps_it_stopped_when_a_shell_comes_back() {
         assert_a_client_stop_outlasts_a_return(client_stop, true);
         assert_a_client_stop_outlasts_a_return(client_down, true);
+    }
+
+    /// CR-5: a client request the service refuses, here a stop of a process
+    /// the project lacks, takes nothing over: the shell back while the idle
+    /// stop runs still finds `api` started again once it has stopped.
+    #[test]
+    fn a_refused_client_request_keeps_the_pending_re_entry() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(vec![stubborn("api")]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        let first = service.wait_for(&project, "api", ProcessState::Running);
+        let first_pid = process(&first, "api").pid().unwrap();
+        report(&service, shell, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(report(&service, shell, 3, Some(&project)).is_empty());
+
+        let refused = service.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("nope").unwrap(),
+            action: ProcessAction::Stop,
+            environment: no_env(),
+            wait: None,
+        });
+        assert!(
+            matches!(&refused, ServiceResponse::Error(body)
+                if body.kind() == &ServiceErrorKind::UnknownProcess),
+            "{refused:?}"
+        );
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != first_pid)
+        });
+        service.stop();
     }
 
     /// CR-3: a report that arrives after its shell ended, its pid gone or

@@ -11,9 +11,10 @@ use crate::domain::{
         ProcessSpec, RecordedEdit, Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
+    occupancy::PendingIdleStop,
     port::{
-        RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog, StackReader,
-        StackStore,
+        PendingIdleStops, RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog,
+        StackReader, StackStore,
     },
     process::EndedRun,
     project::Project,
@@ -37,6 +38,8 @@ pub(super) struct MemoryStore {
     raised: Arc<Mutex<HashMap<ProjectRoot, EditId>>>,
     /// Each project's own idle stop, when it sets one.
     idle_stops: Arc<Mutex<HashMap<ProjectRoot, IdleStop>>>,
+    /// When the last shell left each project whose idle stop is pending.
+    pending_idle: Arc<Mutex<HashMap<ProjectRoot, SystemTime>>>,
 }
 
 impl MemoryStore {
@@ -50,6 +53,7 @@ impl MemoryStore {
             runs: Arc::default(),
             raised: Arc::default(),
             idle_stops: Arc::default(),
+            pending_idle: Arc::default(),
         }
     }
 
@@ -257,6 +261,40 @@ impl RaisedEdits for MemoryStore {
         let mut raised = self.raised.lock().unwrap();
         let mark = raised.entry(root.clone()).or_insert(edit);
         *mark = (*mark).max(edit);
+        Ok(())
+    }
+}
+
+impl PendingIdleStops for MemoryStore {
+    fn pending_idle_stops(&self) -> Result<Vec<PendingIdleStop>, ConfigError> {
+        let mut stops: Vec<PendingIdleStop> = self
+            .pending_idle
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(project, left_at)| {
+                PendingIdleStop::builder()
+                    .project(project.clone())
+                    .left_at(*left_at)
+                    .build()
+            })
+            .collect();
+        stops.sort_by(|a, b| a.project().cmp(b.project()));
+        Ok(stops)
+    }
+
+    fn arm_idle_stop(&self, stop: &PendingIdleStop) -> Result<(), ConfigError> {
+        if self.stacks.lock().unwrap().contains_key(stop.project()) {
+            self.pending_idle
+                .lock()
+                .unwrap()
+                .insert(stop.project().clone(), *stop.left_at());
+        }
+        Ok(())
+    }
+
+    fn clear_idle_stop(&self, root: &ProjectRoot) -> Result<(), ConfigError> {
+        self.pending_idle.lock().unwrap().remove(root);
         Ok(())
     }
 }

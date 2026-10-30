@@ -40,6 +40,7 @@ use super::{
     project_status::ProjectStatus,
     protocol,
     record_retry::{RECORD_DRAIN_BOUND, RECORD_FLUSH_SETTLE, RecordRetry},
+    recorder_stores::RecorderStores,
     refusal::Refusal,
     reply::Reply,
     service_deps::ServiceDeps,
@@ -67,10 +68,10 @@ use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        occupancy::{Occupancy, OccupancyChange, ShellId, ShellRecord},
+        occupancy::{Occupancy, OccupancyChange, PendingIdleStop, ShellId, ShellRecord},
         port::{
-            ProcessHandle, RaisedEdits, RunHistory, SettingsReader, ShellRegistry, StackEditLog,
-            StackReader,
+            PendingIdleStops, ProcessHandle, RaisedEdits, RunHistory, SettingsReader,
+            ShellRegistry, StackEditLog, StackReader,
         },
         project::Project,
         pty::PtyError,
@@ -130,6 +131,9 @@ const IDLE_STOPPED: &str = "stopped";
 const NO_SHELL_FOR: &str = "no shell in it for";
 /// Joins the names an idle stop stopped.
 const NAME_SEPARATOR: &str = ", ";
+/// Prefix of the notice for pending idle stops an earlier service left that
+/// cannot be read; the store's error follows.
+const IDLE_STOPS_UNREADABLE_NOTICE: &str = "could not read the idle stops pending when the service last ran; they arm again at the next leave";
 
 /// The one service of a user: owns every loaded project's supervisor on a
 /// single thread, which every other thread only sends events to. Clients
@@ -156,6 +160,11 @@ pub struct ServiceRuntime {
     /// Reads the newest agent edit an earlier service raised, as a project
     /// loads.
     raised: Box<dyn RaisedEdits>,
+    /// Reads the idle stops an earlier service left pending, at start.
+    idle_stops: Box<dyn PendingIdleStops>,
+    /// When each project's pending idle stop was armed, as last handed to
+    /// the store, so only a change is written.
+    recorded_idle: HashMap<ProjectRoot, Instant>,
     /// Stores run ends and raised edits off the loop; every supervisor shares
     /// it.
     store_recorder: StoreRecorder,
@@ -239,6 +248,7 @@ impl ServiceRuntime {
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
         runtime.restore_shells(Instant::now());
+        runtime.restore_idle_stops(Instant::now(), SystemTime::now());
         let exit = runtime.serve(&events);
         runtime.shutdown();
         acceptor.close();
@@ -286,6 +296,8 @@ impl ServiceRuntime {
             raised,
             run_writes,
             raised_writes,
+            idle_stops,
+            idle_stop_writes,
             listening,
             shells,
             exit_signals: _,
@@ -300,13 +312,18 @@ impl ServiceRuntime {
             settings_store,
             edits,
             store_recorder: StoreRecorder::spawn(
-                run_writes,
-                raised_writes,
+                RecorderStores::builder()
+                    .runs(run_writes)
+                    .raised(raised_writes)
+                    .idle_stops(idle_stop_writes)
+                    .build(),
                 Arc::clone(&notices),
                 RecordRetry::service(),
             ),
             runs,
             raised,
+            idle_stops,
+            recorded_idle: HashMap::new(),
             settings,
             probes: ProbeWorker::spawn(events.clone()),
             port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
@@ -440,6 +457,67 @@ impl ServiceRuntime {
         }
     }
 
+    /// Takes over the idle stops an earlier service left pending, read at
+    /// `now`, which is `wall` on the clock they were stored by: each loaded
+    /// project no shell is in arms again from when its last shell left, so
+    /// it stops on time, at once when that time has passed. A project a
+    /// shell is in, or one running nothing and so not loaded, has its
+    /// record cleared. A project no record names arms nothing.
+    fn restore_idle_stops(&mut self, now: Instant, wall: SystemTime) {
+        let stored = self
+            .idle_stops
+            .pending_idle_stops()
+            .unwrap_or_else(|error| {
+                self.notify(
+                    None,
+                    NoticeLevel::Warning,
+                    format!("{IDLE_STOPS_UNREADABLE_NOTICE}: {error}"),
+                );
+                Vec::new()
+            });
+        for stop in stored {
+            let ago = wall.duration_since(*stop.left_at()).unwrap_or_default();
+            let left = now.checked_sub(ago).unwrap_or(now);
+            self.recorded_idle.insert(stop.project().clone(), left);
+            if self.occupancy.occupants(stop.project()) == 0
+                && let Some(supervisor) = self.supervisors.get_mut(stop.project())
+            {
+                supervisor.arm_idle(left);
+            }
+        }
+        self.record_idle_stops(now, wall);
+    }
+
+    /// Hands the store each change to the projects' pending idle stops since
+    /// it was last told, read at `now`, which is `wall` on the store's
+    /// clock: an armed or re-armed stop is written with when its last shell
+    /// left, and one no longer pending, as a shell entered, a client brought
+    /// the project up, the stop ran or the project was let go, is cleared.
+    fn record_idle_stops(&mut self, now: Instant, wall: SystemTime) {
+        let armed: HashMap<ProjectRoot, Instant> = self
+            .supervisors
+            .iter()
+            .filter_map(|(root, supervisor)| Some((root.clone(), supervisor.left_at()?)))
+            .collect();
+        for (root, left) in &armed {
+            if self.recorded_idle.get(root) != Some(left) {
+                let ago = now.saturating_duration_since(*left);
+                self.store_recorder.idle_armed(
+                    PendingIdleStop::builder()
+                        .project(root.clone())
+                        .left_at(wall.checked_sub(ago).unwrap_or(wall))
+                        .build(),
+                );
+            }
+        }
+        for root in self.recorded_idle.keys() {
+            if !armed.contains_key(root) {
+                self.store_recorder.idle_cleared(root);
+            }
+        }
+        self.recorded_idle = armed;
+    }
+
     /// Handles events until a client asks the service to exit, waking for the
     /// supervisors' metrics deadlines in between. Returns where to answer
     /// that client.
@@ -521,6 +599,7 @@ impl ServiceRuntime {
             self.stack_revisions.remove(&root);
             self.raised_edits.remove(&root);
         }
+        self.record_idle_stops(now, SystemTime::now());
     }
 
     /// Applies one event.
@@ -3211,6 +3290,12 @@ mod tests {
     const SHORT_IDLE: Duration = Duration::from_millis(300);
     /// An idle stop no test outlasts.
     const LONG_IDLE: Duration = Duration::from_secs(60 * 60);
+    /// An idle stop that outlasts a service restart and still fires within
+    /// a test.
+    const RESTART_IDLE: Duration = Duration::from_secs(3);
+    /// How far a stored leave time may sit past the real one: it is kept to
+    /// the millisecond, rounded up.
+    const STORED_PRECISION: Duration = Duration::from_millis(2);
     /// How long past [`SHELL_SWEEP_INTERVAL`] a test waits for a sweep to
     /// land, so a loaded machine never fails one that is merely late.
     const SWEEP_MARGIN: Duration = WAIT;
@@ -4027,6 +4112,73 @@ mod tests {
         let adopted = occupancy(&second, &project);
         assert_eq!(adopted.shells(), 0);
         assert_eq!(adopted.stops_in(), None, "no leave was seen");
+        second.stop();
+    }
+
+    /// CR-2: an idle stop pending when the service stops survives the
+    /// restart: the next service arms it from the original leave, not
+    /// afresh, and stops the project on time. Once it ran, nothing is left
+    /// pending.
+    #[test]
+    fn a_pending_idle_stop_survives_a_service_restart() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(RESTART_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, shell, 1, Some(&project));
+        first.wait_for(&project, "api", ProcessState::Running);
+        report(&first, shell, 2, None);
+        let left = Instant::now();
+        assert!(occupancy(&first, &project).stops_in().is_some());
+        first.stop();
+        fixture.shells().put(shell_record(shell, 2, None));
+        assert_eq!(fixture.store().pending_idle_stops().unwrap().len(), 1);
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        let elapsed = left.elapsed();
+        let stops_in = occupancy(&second, &project)
+            .stops_in()
+            .expect("the idle stop is still pending");
+        assert!(
+            stops_in <= RESTART_IDLE.saturating_sub(elapsed) + STORED_PRECISION,
+            "armed afresh: {stops_in:?} left after {elapsed:?}"
+        );
+        wait_stopped(&second, &project);
+        assert_eq!(idle_stopped_events(&second, &project).len(), 1);
+        wait_until("the ran stop to be cleared", || {
+            fixture.store().pending_idle_stops().unwrap().is_empty()
+        });
+        second.stop();
+    }
+
+    /// CR-2: an idle stop a client cancelled by bringing the project up
+    /// after the leave is no longer pending, so the next service arms
+    /// nothing for it.
+    #[test]
+    fn an_idle_stop_a_client_cancelled_is_not_restored() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, shell, 1, Some(&project));
+        first.wait_for(&project, "api", ProcessState::Running);
+        report(&first, shell, 2, None);
+        wait_until("the leave to be recorded", || {
+            !fixture.store().pending_idle_stops().unwrap().is_empty()
+        });
+        first.up(&project);
+        first.stop();
+        fixture.shells().put(shell_record(shell, 2, None));
+
+        assert!(fixture.store().pending_idle_stops().unwrap().is_empty());
+        let second = fixture.start(Arc::new(fixture.runner()));
+        second.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(occupancy(&second, &project).stops_in(), None);
         second.stop();
     }
 

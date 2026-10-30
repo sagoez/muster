@@ -68,6 +68,11 @@ impl Supervisor {
         self.project.idle_stop_or(*self.settings.idle_stop())
     }
 
+    /// When the last shell left, while the idle stop is pending.
+    pub fn left_at(&self) -> Option<Instant> {
+        self.left_at
+    }
+
     /// When the pending idle stop fires under the current effective idle
     /// stop; none when no shell left it or it never stops.
     pub fn idle_deadline(&self) -> Option<Instant> {

@@ -3,6 +3,7 @@ use std::time::Instant;
 use crossbeam_channel::Sender;
 
 use crate::domain::{
+    occupancy::PendingIdleStop,
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
@@ -31,6 +32,10 @@ pub enum StoreRecord {
         /// The newest edit raised.
         through: EditId,
     },
+    /// A project's last shell left, arming its idle stop.
+    IdleArmed(PendingIdleStop),
+    /// A project's idle stop is no longer pending.
+    IdleCleared(ProjectRoot),
     /// Answers once every earlier write was applied or given up.
     Flush {
         /// Where the answer goes.

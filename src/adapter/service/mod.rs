@@ -59,6 +59,7 @@ mod project_ports;
 mod project_status;
 pub mod protocol;
 mod record_retry;
+mod recorder_stores;
 mod refusal;
 mod reply;
 mod run_pin;

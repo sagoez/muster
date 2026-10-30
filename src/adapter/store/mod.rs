@@ -3,6 +3,7 @@ mod edit_log_rows;
 mod idle_stop_kind;
 mod idle_stop_refusal;
 mod lock_rows;
+mod pending_idle_stop_rows;
 mod project_rows;
 mod refusal;
 mod run_rows;

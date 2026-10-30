@@ -7,7 +7,8 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::domain::{
     config::ConfigError,
-    port::{RaisedEdits, RunHistory},
+    occupancy::PendingIdleStop,
+    port::{PendingIdleStops, RaisedEdits, RunHistory},
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
@@ -123,6 +124,20 @@ impl RaisedEdits for FailingHistory {
     }
 
     fn mark_raised(&self, _root: &ProjectRoot, _edit: EditId) -> Result<(), ConfigError> {
+        self.attempt(None)
+    }
+}
+
+impl PendingIdleStops for FailingHistory {
+    fn pending_idle_stops(&self) -> Result<Vec<PendingIdleStop>, ConfigError> {
+        Ok(Vec::new())
+    }
+
+    fn arm_idle_stop(&self, _stop: &PendingIdleStop) -> Result<(), ConfigError> {
+        self.attempt(None)
+    }
+
+    fn clear_idle_stop(&self, _root: &ProjectRoot) -> Result<(), ConfigError> {
         self.attempt(None)
     }
 }

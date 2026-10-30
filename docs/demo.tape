@@ -10,13 +10,15 @@
 Output docs/muster-demo.gif
 
 Set Shell bash
+Set FontFamily "iA Writer Mono S"
 Set FontSize 15
 Set Width 1200
 Set Height 640
 Set Padding 16
 Set Framerate 20
 Set TypingSpeed 35ms
-Set Theme "GruvboxDark"
+# Flexoki Light
+Set Theme { "name": "Flexoki Light", "background": "#FFFCF0", "foreground": "#100F0F", "cursor": "#100F0F", "selection": "#CECDC3", "black": "#FFFCF0", "red": "#D14D41", "green": "#879A39", "yellow": "#D0A215", "blue": "#205EA6", "magenta": "#CE5D97", "cyan": "#3AA99F", "white": "#100F0F", "brightBlack": "#B7B5AC", "brightRed": "#D14D41", "brightGreen": "#879A39", "brightYellow": "#D0A215", "brightBlue": "#4385BE", "brightMagenta": "#CE5D97", "brightCyan": "#3AA99F", "brightWhite": "#100F0F" }
 
 Hide
 Type `export PATH="${MUSTER_BIN_DIR:-$PWD/target/debug}:$PATH" TERM=xterm-256color D="${DEMO_DIR:-$(mktemp -d)}"`

@@ -17,6 +17,20 @@ const SHELL_ENV_PLACEHOLDER: &str = "@MUSTER_SHELL_ENV@";
 /// Where a template takes the report subcommand.
 const REPORT_PLACEHOLDER: &str = "@MUSTER_REPORT@";
 
+/// Punctuation every hooked shell reads bare in a word, besides letters and
+/// digits.
+const BARE_SAFE: &str = "_-./:@+=,";
+/// The single quote that opens and closes a quoted run.
+const QUOTE: char = '\'';
+/// A single quote escaped, outside quotes in bash and zsh, inside in fish.
+const ESCAPED_QUOTE: &str = "\\'";
+/// A backslash, which fish reads as an escape inside single quotes.
+const BACKSLASH: char = '\\';
+/// A backslash escaped inside fish single quotes.
+const ESCAPED_BACKSLASH: &str = "\\\\";
+/// The character no shell word can carry.
+const NUL: char = '\0';
+
 /// The bash hook, before its placeholders are filled.
 const BASH_TEMPLATE: &str = include_str!("scripts/muster.bash");
 /// The zsh hook, before its placeholders are filled.
@@ -40,27 +54,72 @@ pub fn hook_script(
         HookShell::Fish => FISH_TEMPLATE,
     };
     Ok(template
-        .replace(MUSTER_BIN_PLACEHOLDER, &quoted(binary)?)
-        .replace(NOTES_DIR_PLACEHOLDER, &quoted(notes_dir)?)
+        .replace(MUSTER_BIN_PLACEHOLDER, &quoted(shell, binary)?)
+        .replace(NOTES_DIR_PLACEHOLDER, &quoted(shell, notes_dir)?)
         .replace(SHELL_ENV_PLACEHOLDER, MUSTER_SHELL_ENV)
         .replace(REPORT_PLACEHOLDER, SHELL_REPORT_SUBCOMMAND))
 }
 
-/// `path` as one shell word. shlex quotes for bash, zsh and fish alike: it
-/// never puts a backslash in single quotes, nor `$` or a backtick in double
-/// quotes.
+/// `path` as one word of `shell`, as it is when every character is safe
+/// bare.
 ///
 /// # Errors
 /// Returns [`HookScriptError`] when `path` is not UTF-8 or holds a nul byte.
-fn quoted(path: &Path) -> Result<String, HookScriptError> {
+fn quoted(shell: HookShell, path: &Path) -> Result<String, HookScriptError> {
     let text = path.to_str().ok_or_else(|| HookScriptError::NotUtf8 {
         path: path.to_path_buf(),
     })?;
-    shlex::try_quote(text)
-        .map(|quoted| quoted.into_owned())
-        .map_err(|_| HookScriptError::Unquotable {
+    if text.contains(NUL) {
+        return Err(HookScriptError::Unquotable {
             path: path.to_path_buf(),
-        })
+        });
+    }
+    if text
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || BARE_SAFE.contains(c))
+    {
+        return Ok(text.to_string());
+    }
+    Ok(match shell {
+        HookShell::Bash | HookShell::Zsh => posix_quoted(text),
+        HookShell::Fish => fish_quoted(text),
+    })
+}
+
+/// `text` in POSIX single quotes for bash and zsh, each quote in it written
+/// outside them as `\'`. Two quotes never meet inside a quoted run, so zsh
+/// with `RC_QUOTES` reads it the same.
+fn posix_quoted(text: &str) -> String {
+    let mut word = String::new();
+    let mut open = false;
+    for c in text.chars() {
+        if c == QUOTE {
+            if open {
+                word.push(QUOTE);
+                open = false;
+            }
+            word.push_str(ESCAPED_QUOTE);
+        } else {
+            if !open {
+                word.push(QUOTE);
+                open = true;
+            }
+            word.push(c);
+        }
+    }
+    if open {
+        word.push(QUOTE);
+    }
+    word
+}
+
+/// `text` in fish single quotes, where a backslash and a quote are the only
+/// characters escaped.
+fn fish_quoted(text: &str) -> String {
+    let escaped = text
+        .replace(BACKSLASH, ESCAPED_BACKSLASH)
+        .replace(QUOTE, ESCAPED_QUOTE);
+    format!("{QUOTE}{escaped}{QUOTE}")
 }
 
 #[cfg(test)]
@@ -85,12 +144,17 @@ mod tests {
     const SNAPSHOT_BINARY: &str = "/usr/local/bin/muster";
     /// The notes folder the snapshots are taken with.
     const SNAPSHOT_NOTES: &str = "/home/user/.local/state/muster/shells";
-    /// A binary path no shell word can carry unquoted.
-    const AWKWARD_BINARY: &str = "/tmp/a b/it's/muster";
+    /// A binary path no shell word can carry unquoted, with a caret, two
+    /// quotes in a row and a backslash besides.
+    const AWKWARD_BINARY: &str = "/tmp/a b^x/it's ''q\\/muster";
     /// What every placeholder starts with.
     const PLACEHOLDER_MARK: &str = "@MUSTER_";
     /// The folder, under a scratch dir, a test's fake muster binary lives in.
-    const AWKWARD_DIR: &str = "a b/it's \"q\" $x";
+    const AWKWARD_DIR: &str = "a b^c/it's \"q\" $x";
+    /// What a zsh test runs first, on a line of its own so it holds before
+    /// the next line is read, to read words as a user with `RC_QUOTES`
+    /// would.
+    const RC_QUOTES_ON: &str = "setopt rc_quotes\n";
     /// The fake muster binary's file name.
     const FAKE_BINARY: &str = "muster";
     /// The file the fake binary appends each call's arguments to.
@@ -260,24 +324,68 @@ mod tests {
 
     #[test]
     fn the_names_filled_in_as_is_need_no_quoting() {
-        for name in [MUSTER_SHELL_ENV, SHELL_REPORT_SUBCOMMAND] {
-            assert_eq!(shlex::try_quote(name).unwrap(), name);
+        for shell in HookShell::iter() {
+            for name in [MUSTER_SHELL_ENV, SHELL_REPORT_SUBCOMMAND] {
+                assert_eq!(quoted(shell, Path::new(name)).unwrap(), name, "{shell}");
+            }
         }
     }
 
+    /// Security M1: an awkward path, with a caret and quotes, reads back
+    /// whole in each shell, and in zsh with `RC_QUOTES` set too.
     #[test]
     fn a_binary_path_with_spaces_and_quotes_is_quoted_for_each_shell() {
         for shell in HookShell::iter() {
-            let word = quoted(Path::new(AWKWARD_BINARY)).unwrap();
+            let word = quoted(shell, Path::new(AWKWARD_BINARY)).unwrap();
             let script =
                 hook_script(shell, Path::new(AWKWARD_BINARY), Path::new(SNAPSHOT_NOTES)).unwrap();
             assert!(script.contains(&word), "{shell}: {script}");
-            let Some(output) = run(shell, false, &format!("printf '%s' {word}"), &[]) else {
-                continue;
-            };
-            assert!(output.status.success(), "{shell}: {output:?}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout), AWKWARD_BINARY);
+            let mut readings = vec![format!("printf '%s' {word}")];
+            if shell == HookShell::Zsh {
+                readings.push(format!("{RC_QUOTES_ON}x={word}; printf '%s' \"$x\""));
+            }
+            for reading in readings {
+                let Some(output) = run(shell, false, &reading, &[]) else {
+                    continue;
+                };
+                assert!(output.status.success(), "{shell}: {reading}: {output:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    AWKWARD_BINARY,
+                    "{shell}: {reading}"
+                );
+            }
         }
+    }
+
+    /// The zsh hook loaded with `RC_QUOTES` set, from an awkward binary and
+    /// notes folder, keeps both paths whole.
+    #[test]
+    fn the_zsh_hook_keeps_awkward_paths_under_rc_quotes() {
+        let scratch = TempDir::new().unwrap();
+        let script = scratch.path().join(SCRIPT_FILE);
+        fs::write(
+            &script,
+            hook_script(
+                HookShell::Zsh,
+                Path::new(AWKWARD_BINARY),
+                Path::new(AWKWARD_BINARY),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let probe =
+            format!("{RC_QUOTES_ON}. \"$1\"; printf '%s\\n' \"$__muster_bin\" \"$__muster_notes\"");
+
+        let Some(output) = run(HookShell::Zsh, true, &probe, &[&script]) else {
+            return;
+        };
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{AWKWARD_BINARY}\n{AWKWARD_BINARY}\n")
+        );
     }
 
     #[test]

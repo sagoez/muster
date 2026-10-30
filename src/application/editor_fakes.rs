@@ -27,16 +27,29 @@ pub(super) struct EditorFakes {
     added: RefCell<Vec<ProcessSpec>>,
     settings: RefCell<Settings>,
     fail: bool,
+    /// Whether the project every write lands in is registered already.
+    known: bool,
 }
 
 impl EditorFakes {
-    /// Fakes over [`settings`], refusing every write when `fail`.
+    /// Fakes over [`settings`], refusing every write when `fail`, each
+    /// stack write registering its project.
     pub(super) fn new(fail: bool) -> Self {
         Self {
             log: RefCell::new(Vec::new()),
             added: RefCell::new(Vec::new()),
             settings: RefCell::new(settings()),
             fail,
+            known: false,
+        }
+    }
+
+    /// These fakes with the project every write lands in registered
+    /// already.
+    pub(super) fn over_known_project(self) -> Self {
+        Self {
+            known: true,
+            ..self
         }
     }
 
@@ -98,7 +111,7 @@ impl StackStore for EditorFakes {
     ) -> Result<Registration, ConfigError> {
         self.write_for(author)?;
         self.added.borrow_mut().push(spec.clone());
-        Ok(registration())
+        Ok(registration(!self.known))
     }
 
     fn change_process(
@@ -134,10 +147,13 @@ impl StackStore for EditorFakes {
     ) -> Result<(Registration, ImportPlan), ConfigError> {
         self.write()?;
         let stack = Stack::builder()
-            .project(registration().project().clone())
+            .project(registration(!self.known).project().clone())
             .processes(Vec::new())
             .build();
-        Ok((registration(), stack.plan_import(processes, mode)?))
+        Ok((
+            registration(!self.known),
+            stack.plan_import(processes, mode)?,
+        ))
     }
 
     fn set_idle_stop(
@@ -146,7 +162,7 @@ impl StackStore for EditorFakes {
         idle_stop: Option<IdleStop>,
     ) -> Result<Project, ConfigError> {
         self.write()?;
-        let project = registration().project().clone();
+        let project = registration(!self.known).project().clone();
         Ok(Project::builder()
             .root(project.root().clone())
             .name(project.name().clone())
@@ -179,6 +195,12 @@ impl SettingsStore for EditorFakes {
 }
 
 impl StateChangeNotifier for EditorFakes {
+    fn project_registered(&self, root: &ProjectRoot) {
+        self.log
+            .borrow_mut()
+            .push(EditorStep::ProjectRegistered(root.clone()));
+    }
+
     fn stack_changed(&self, root: &ProjectRoot) {
         self.log
             .borrow_mut()

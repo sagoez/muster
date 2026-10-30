@@ -30,6 +30,7 @@ use muster::{
             LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier,
             TerminalWorkspace,
         },
+        value::{Pid, ProjectRoot},
     },
     error::MusterError,
 };
@@ -97,6 +98,10 @@ impl CliPorts for LocalPorts {
 
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
         Ok(Arc::new(ShellFiles::under(&state_dir()?)))
+    }
+
+    fn hooked_shell_in(&self, root: &ProjectRoot) -> Option<Pid> {
+        cli::hooked_shell_in(root)
     }
 
     fn claim_state_dir(&self) -> bool {

@@ -150,6 +150,7 @@ mod tests {
         super::testing::{stamp, test_root, test_shell},
         *,
     };
+    use crate::domain::value::EpochNanos;
 
     /// The hook load most tests report from.
     const LOAD: u64 = 1;
@@ -163,6 +164,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(load, seq))
             .folder(PathBuf::from(FOLDER))
+            .arrived(EpochNanos::new(seq))
             .project(project.map(test_root))
             .build()
     }
@@ -385,6 +387,7 @@ mod tests {
             .shell(test_shell(100, 1))
             .stamp(stamp(LOAD, 2))
             .folder(PathBuf::from(FOLDER))
+            .arrived(EpochNanos::new(2))
             .project(Some(test_root("shop/admin")))
             .held(vec![test_root("shop")])
             .build();

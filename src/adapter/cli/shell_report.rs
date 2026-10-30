@@ -9,26 +9,20 @@ use super::{cli_ports::CliPorts, shell_note_text::note_lines, shell_report_skip:
 use crate::{
     adapter::{
         client::{Asked, ClientError},
+        clock::nanos_now,
         service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
     },
     domain::{
         occupancy::{ReportStamp, ShellRecord},
-        value::Pid,
+        value::{EpochNanos, Pid},
     },
 };
 
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
-/// gives, in the folder `cwd`, sending its environment only when it may
-/// enter its project. A service of this version is told, one of another
-/// version replaced and one being started waited for. With none, one is
-/// started only when `cwd` is in a registered project; otherwise the record
-/// is kept and the service asked again, so one that started meanwhile from
-/// the old records still hears it. The answered notes are left for the
-/// hook, then the record is written; a report that fails writes neither, so
-/// the next prompt reports the same move again. A state directory not made
-/// yet is made first when its parent is this user's, so a fresh install
-/// keeps the record a later registration around the shell is told apart by.
-/// It never prints.
+/// gives, in `cwd`, which it arrived in at `arrived`, sending its environment
+/// only when it walked into its project rather than had it registered
+/// around it. The record is written once the service, started when needed,
+/// has answered; a report that fails writes nothing. It never prints.
 ///
 /// # Errors
 /// Returns the [`ShellReportSkip`] saying why nothing was written: the state
@@ -39,6 +33,7 @@ pub fn shell_report(
     ports: &dyn CliPorts,
     pid: Pid,
     stamp: ReportStamp,
+    arrived: Option<EpochNanos>,
     cwd: &Path,
 ) -> Result<(), ShellReportSkip> {
     if !ports.claim_state_dir() {
@@ -55,23 +50,29 @@ pub fn shell_report(
     {
         return Err(ShellReportSkip::Stale);
     }
-    let project = match ports.existing_state()? {
-        Some(state) => state
-            .project_containing(cwd)?
-            .map(|project| project.root().clone()),
-        None => None,
+    let arrived = arrived.unwrap_or_else(|| arrival(previous.as_ref(), cwd));
+    let (project, around) = match ports.existing_state()? {
+        Some(state) => match state.registered_project_containing(cwd)? {
+            Some(found) => (
+                Some(found.project().root().clone()),
+                found.registered_after(arrived),
+            ),
+            None => (None, false),
+        },
+        None => (None, false),
     };
     let in_project = project.is_some();
     let record = ShellRecord::builder()
         .shell(shell)
         .stamp(stamp)
         .folder(cwd.to_path_buf())
+        .arrived(arrived)
         .project(project)
         .build()
-        .following(previous.as_ref());
+        .following(previous.as_ref(), around);
     let request = ServiceRequest::ShellReport {
         environment: record
-            .may_enter(previous.as_ref())
+            .may_enter(previous.as_ref(), around)
             .then(LaunchEnvironment::current),
         record: record.clone(),
     };
@@ -83,10 +84,10 @@ pub fn shell_report(
             match service.ask_if_running(&request)? {
                 Asked::Answered(answer) => answer,
                 Asked::Absent => return Ok(()),
-                Asked::OtherVersion | Asked::Starting => service.connect()?.send(&request)?,
+                Asked::OtherVersion(_) | Asked::Starting => service.connect()?.send(&request)?,
             }
         },
-        Asked::Absent | Asked::OtherVersion | Asked::Starting => {
+        Asked::Absent | Asked::OtherVersion(_) | Asked::Starting => {
             service.connect()?.send(&request)?
         },
     };
@@ -96,6 +97,15 @@ pub fn shell_report(
     shells.deliver(&shell, stamp, &note_lines(&notes))?;
     shells.save_if_newer(&record)?;
     Ok(())
+}
+
+/// When a shell whose hook could not read its own clock arrived in `cwd`:
+/// as `previous`, its last stored report, says when that was made from the
+/// same folder, else now.
+fn arrival(previous: Option<&ShellRecord>, cwd: &Path) -> EpochNanos {
+    previous
+        .filter(|previous| previous.folder() == cwd)
+        .map_or_else(nanos_now, |previous| *previous.arrived())
 }
 
 #[cfg(test)]
@@ -108,15 +118,19 @@ mod tests {
         process::{self, Command},
     };
 
+    use rusqlite::Connection;
     use rustix::process::geteuid;
     use tempfile::TempDir;
 
-    use super::{super::fake_ports::FakePorts, *};
+    use super::{
+        super::{fake_ports::FakePorts, shell_registration::name_in_hooked_shell},
+        *,
+    };
     use crate::{
         adapter::{
-            client::{fake_service::FakeService, served_service::ServedService},
+            client::{RunningService, fake_service::FakeService, served_service::ServedService},
             service::ShellNote,
-            store::test_support::{fresh_store, spec},
+            store::test_support::{database, fresh_store, spec},
         },
         domain::{
             config::ImportMode,
@@ -173,6 +187,22 @@ mod tests {
         shells.record(&shells.identify(this_shell()).unwrap())
     }
 
+    /// Whether each report the service was asked sent the environment, so
+    /// may enter its project.
+    fn entering(ports: &FakePorts) -> Vec<bool> {
+        ports
+            .fake_service()
+            .asked()
+            .iter()
+            .map(|request| {
+                matches!(request, ServiceRequest::ShellReport {
+                    environment: Some(_),
+                    ..
+                })
+            })
+            .collect()
+    }
+
     /// The text of every note left for the hook, in name order.
     fn notes(ports: &FakePorts) -> Vec<String> {
         let dir = ports.shell_registry().unwrap().notes_dir();
@@ -204,8 +234,9 @@ mod tests {
     #[test]
     fn outside_any_project_with_no_service_only_the_record_is_written() {
         let (ports, _shop, scratch) = shop_ports(FakeService::default());
+        let arrived = nanos_now();
 
-        shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
+        shell_report(&ports, this_shell(), seq(1), Some(arrived), scratch.path()).unwrap();
 
         let service = ports.fake_service();
         assert_eq!(service.asked().len(), 2);
@@ -217,6 +248,7 @@ mod tests {
                     .shell(identified(&ports))
                     .stamp(seq(1))
                     .folder(scratch.path().to_path_buf())
+                    .arrived(arrived)
                     .project(None)
                     .build()
             )
@@ -234,7 +266,7 @@ mod tests {
         let inside = shop.join("src");
         fs::create_dir_all(&inside).unwrap();
 
-        shell_report(&ports, this_shell(), seq(4), &inside).unwrap();
+        shell_report(&ports, this_shell(), seq(4), Some(nanos_now()), &inside).unwrap();
 
         let root = ProjectRoot::try_new(shop).unwrap();
         assert_eq!(ports.fake_service().connects(), 1);
@@ -259,7 +291,7 @@ mod tests {
     fn a_running_service_is_told_without_starting_one() {
         let (ports, shop, _scratch) = shop_ports(FakeService::default().answering(started()));
 
-        shell_report(&ports, this_shell(), seq(2), &shop).unwrap();
+        shell_report(&ports, this_shell(), seq(2), Some(nanos_now()), &shop).unwrap();
 
         assert_eq!(ports.fake_service().asked().len(), 1);
         assert_eq!(ports.fake_service().connects(), 0);
@@ -274,11 +306,20 @@ mod tests {
         let served = ServedService::answering(ServiceResponse::ShellNotes(Vec::new()));
         let (ports, _shop, scratch) = shop_ports(
             FakeService::default()
-                .asked_in_turn(vec![Asked::OtherVersion])
+                .asked_in_turn(vec![Asked::OtherVersion(
+                    RunningService::builder().version(None).binary(None).build(),
+                )])
                 .starting(&served),
         );
 
-        shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
+        shell_report(
+            &ports,
+            this_shell(),
+            seq(1),
+            Some(nanos_now()),
+            scratch.path(),
+        )
+        .unwrap();
 
         assert_eq!(ports.fake_service().connects(), 1);
         let told = served.asked();
@@ -308,7 +349,14 @@ mod tests {
                     .starting(&served),
             );
 
-            shell_report(&ports, this_shell(), seq(1), scratch.path()).unwrap();
+            shell_report(
+                &ports,
+                this_shell(),
+                seq(1),
+                Some(nanos_now()),
+                scratch.path(),
+            )
+            .unwrap();
 
             let service = ports.fake_service();
             assert_eq!(service.asked().len(), asks.len(), "{asks:?}");
@@ -329,7 +377,7 @@ mod tests {
         let (unreachable, shop, _scratch) = shop_ports(FakeService::default());
 
         assert!(matches!(
-            shell_report(&unreachable, this_shell(), seq(1), &shop),
+            shell_report(&unreachable, this_shell(), seq(1), Some(nanos_now()), &shop),
             Err(ShellReportSkip::Service(_))
         ));
         assert_eq!(unreachable.fake_service().connects(), 1);
@@ -340,7 +388,7 @@ mod tests {
             shop_ports(FakeService::default().answering(ServiceResponse::Ok));
 
         assert!(matches!(
-            shell_report(&refusing, this_shell(), seq(1), &shop),
+            shell_report(&refusing, this_shell(), seq(1), Some(nanos_now()), &shop),
             Err(ShellReportSkip::Service(ClientError::UnexpectedAnswer(_)))
         ));
         assert_eq!(record(&refusing), None);
@@ -360,13 +408,14 @@ mod tests {
                     .shell(identified(&ports))
                     .stamp(seq(5))
                     .folder(shop.clone())
+                    .arrived(nanos_now())
                     .build(),
             )
             .unwrap();
 
         for stale in [seq(5), seq(3)] {
             assert!(matches!(
-                shell_report(&ports, this_shell(), stale, &shop),
+                shell_report(&ports, this_shell(), stale, Some(nanos_now()), &shop),
                 Err(ShellReportSkip::Stale)
             ));
         }
@@ -390,11 +439,19 @@ mod tests {
                     .shell(identified(&ports))
                     .stamp(stamp(LOAD, 500))
                     .folder(shop.clone())
+                    .arrived(nanos_now())
                     .build(),
             )
             .unwrap();
 
-        shell_report(&ports, this_shell(), stamp(LOAD + 1, 1), &shop).unwrap();
+        shell_report(
+            &ports,
+            this_shell(),
+            stamp(LOAD + 1, 1),
+            Some(nanos_now()),
+            &shop,
+        )
+        .unwrap();
 
         assert_eq!(ports.fake_service().asked().len(), 1);
         assert_eq!(
@@ -412,7 +469,14 @@ mod tests {
         let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
 
         for (seq, folder) in [(1, &shop), (2, &shop), (3, &scratch.path().to_path_buf())] {
-            shell_report(&ports, this_shell(), stamp(LOAD, seq), folder).unwrap();
+            shell_report(
+                &ports,
+                this_shell(),
+                stamp(LOAD, seq),
+                Some(nanos_now()),
+                folder,
+            )
+            .unwrap();
         }
 
         let sent: Vec<bool> = ports
@@ -440,12 +504,12 @@ mod tests {
         let shop_root = ProjectRoot::try_new(shop).unwrap();
         let admin_root = ProjectRoot::try_new(admin.clone()).unwrap();
 
-        shell_report(&ports, this_shell(), seq(1), &admin).unwrap();
+        shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &admin).unwrap();
         ports
             .store()
             .import(&admin_root, &[spec("panel", "true")], ImportMode::Strict)
             .unwrap();
-        shell_report(&ports, this_shell(), seq(2), &admin).unwrap();
+        shell_report(&ports, this_shell(), seq(2), Some(nanos_now()), &admin).unwrap();
 
         let asked = ports.fake_service().asked();
         let [
@@ -467,6 +531,106 @@ mod tests {
         assert_eq!(record(&ports).as_ref(), Some(registered));
     }
 
+    /// A report from a folder the shell arrived in before it was
+    /// registered, as `cd fresh` then `muster add` before the move's report
+    /// read the projects, is told with no environment, so nothing starts;
+    /// one that arrived after the registration walked in and may enter.
+    #[test]
+    fn a_project_registered_after_the_shell_arrived_is_not_entered() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        let fresh = scratch.path().canonicalize().unwrap().join("fresh");
+        fs::create_dir_all(&fresh).unwrap();
+        shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &shop).unwrap();
+
+        let arrived = nanos_now();
+        ports
+            .store()
+            .import(
+                &ProjectRoot::try_new(fresh.clone()).unwrap(),
+                &[spec("dev", "true")],
+                ImportMode::Strict,
+            )
+            .unwrap();
+        shell_report(&ports, this_shell(), seq(2), Some(arrived), &fresh).unwrap();
+        shell_report(&ports, this_shell(), seq(3), Some(nanos_now()), &shop).unwrap();
+        shell_report(&ports, this_shell(), seq(4), Some(nanos_now()), &fresh).unwrap();
+
+        assert_eq!(entering(&ports), [true, false, true, true]);
+    }
+
+    /// R-I1: a project registered from inside it, straight from the hooked
+    /// shell, as `cd fresh && muster add` does on one line, is not entered
+    /// by that shell, though its first prompt there comes after the
+    /// registration; leaving and coming back enters it. One the same shell
+    /// registered from elsewhere, as `muster -p ../other add` does, is
+    /// entered on the first walk in.
+    #[test]
+    fn a_project_registered_from_inside_it_is_not_entered_until_the_shell_leaves() {
+        let (mut ports, _shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        let home = scratch.path().canonicalize().unwrap();
+        let (fresh, other) = (home.join("fresh"), home.join("other"));
+        shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &home).unwrap();
+        for (folder, shell_in) in [(&fresh, &fresh), (&other, &home)] {
+            fs::create_dir_all(folder).unwrap();
+            let root = ProjectRoot::try_new(folder.clone()).unwrap();
+            ports
+                .store()
+                .import(&root, &[spec("dev", "true")], ImportMode::Strict)
+                .unwrap();
+            ports = ports.hooked_from(this_shell(), shell_in);
+            name_in_hooked_shell(&ports, &root, shell_in);
+        }
+
+        for (n, folder) in [(2, &fresh), (3, &home), (4, &fresh), (5, &other)] {
+            shell_report(&ports, this_shell(), seq(n), Some(nanos_now()), folder).unwrap();
+        }
+
+        assert_eq!(entering(&ports), [false, false, false, true, true]);
+    }
+
+    /// CR-4: a project whose registration time does not read is reported
+    /// as any other, exempting no shell from entering it.
+    #[test]
+    fn a_project_with_an_unreadable_registration_time_is_still_reported() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        Connection::open(database(&scratch))
+            .unwrap()
+            .execute("UPDATE projects SET registered_ns = 'soon'", [])
+            .unwrap();
+
+        shell_report(
+            &ports,
+            this_shell(),
+            seq(1),
+            Some(EpochNanos::new(0)),
+            &shop,
+        )
+        .unwrap();
+
+        assert_eq!(entering(&ports), [true]);
+        assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(1)));
+    }
+
+    /// CR-6: a report with no arrival time keeps the one of the shell's last
+    /// report from the same folder, and takes its own start in a new folder.
+    #[test]
+    fn a_report_without_an_arrival_keeps_the_one_of_its_folder() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        let arrived = nanos_now();
+
+        shell_report(&ports, this_shell(), seq(1), Some(arrived), &shop).unwrap();
+        shell_report(&ports, this_shell(), seq(2), None, &shop).unwrap();
+        assert_eq!(
+            record(&ports).map(|record| *record.arrived()),
+            Some(arrived)
+        );
+
+        let moved = nanos_now();
+        shell_report(&ports, this_shell(), seq(3), None, scratch.path()).unwrap();
+        let since = record(&ports).map(|record| *record.arrived()).unwrap();
+        assert!(since >= moved, "{since} before {moved}");
+    }
+
     /// A report run as a user that does not own the state directory, as in
     /// a root shell that kept this user's home, opens and writes nothing
     /// there: no database read, no service asked, no shells folder made.
@@ -477,7 +641,7 @@ mod tests {
         let shells_dir = ports.shell_registry().unwrap().notes_dir();
 
         assert!(matches!(
-            shell_report(&ports, this_shell(), seq(1), &shop),
+            shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &shop),
             Err(ShellReportSkip::NotOwnState)
         ));
 
@@ -498,7 +662,7 @@ mod tests {
         let folder = scratch.path().canonicalize().unwrap().join("shop");
         fs::create_dir_all(&folder).unwrap();
 
-        shell_report(&ports, this_shell(), seq(1), &folder).unwrap();
+        shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &folder).unwrap();
         assert!(ports.state_dir().is_dir(), "the state directory is made");
         assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(1)));
 
@@ -510,7 +674,7 @@ mod tests {
                 ImportMode::Strict,
             )
             .unwrap();
-        shell_report(&ports, this_shell(), seq(2), &folder).unwrap();
+        shell_report(&ports, this_shell(), seq(2), Some(nanos_now()), &folder).unwrap();
 
         let asked = ports.fake_service().asked();
         assert!(
@@ -530,7 +694,7 @@ mod tests {
         let ports = ports.fresh_install().running_as(geteuid().as_raw() + 1);
 
         assert!(matches!(
-            shell_report(&ports, this_shell(), seq(1), &shop),
+            shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &shop),
             Err(ShellReportSkip::NotOwnState)
         ));
 
@@ -549,8 +713,8 @@ mod tests {
         let odd = scratch.path().join(OsStr::from_bytes(b"bad\xffdir"));
         fs::create_dir_all(&odd).unwrap();
 
-        shell_report(&ports, this_shell(), seq(1), &shop).unwrap();
-        shell_report(&ports, this_shell(), seq(2), &odd).unwrap();
+        shell_report(&ports, this_shell(), seq(1), Some(nanos_now()), &shop).unwrap();
+        shell_report(&ports, this_shell(), seq(2), Some(nanos_now()), &odd).unwrap();
 
         let asked = ports.fake_service().asked();
         let Some(leave @ ServiceRequest::ShellReport { record: told, .. }) = asked.last() else {
@@ -576,7 +740,7 @@ mod tests {
         child.wait().unwrap();
 
         assert!(matches!(
-            shell_report(&ports, gone, seq(1), &shop),
+            shell_report(&ports, gone, seq(1), Some(nanos_now()), &shop),
             Err(ShellReportSkip::UnknownShell(pid)) if pid == gone
         ));
 

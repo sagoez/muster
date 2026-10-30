@@ -509,6 +509,7 @@ fn client_message(error: &ClientError) -> String {
         | ClientError::SocketPathTooLong { .. }
         | ClientError::ServiceUnavailable { .. }
         | ClientError::ServiceIo { .. }
+        | ClientError::ServiceOlder { .. }
         | ClientError::UnknownProcess { .. }
         | ClientError::AmbiguousProcess { .. }
         | ClientError::Config(_)

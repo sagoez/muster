@@ -262,7 +262,19 @@ occupies the project or holds off its idle stop.
 Entering a registered project's folder starts its autostart processes, as
 `muster up` would, and the next prompt prints a `muster:` line saying what
 happened. Registering a project around a shell that is already in it does not
-count as entering. A process you stopped yourself stays stopped.
+count as entering. The hook passes the time of the first prompt it drew in its
+folder, and a project registered later was registered around the shell, even
+when the report of the `cd` reads the projects only after the registration.
+bash 5 and zsh read that time from their own clock and fish from `date`; a
+shell that cannot read it keeps the time of its first report in that folder.
+A muster command that registers a project, run straight from a hooked shell
+with both inside the new project, as
+`cd x && muster add --autostart web -- npm run dev` is, also tells that
+shell's record it is there, so the prompt after it is not an entering either;
+once that shell has left, coming back is an ordinary entering. A registration
+from elsewhere, as `muster -p x add`, or run by anything but the shell
+itself, as a child shell, a script or `npm` is, gives the shell no such
+pass. A process you stopped yourself stays stopped.
 
 Leaving is noticed at that shell's next report, and a shell that ends within a
 few seconds. Once no shell has been in the project for `idle-stop`, muster
@@ -304,8 +316,9 @@ muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
 on `PATH`, or the one in `HERDR_BIN_PATH` when that path is absolute, so
 `HERDR_SOCKET_PATH` and `HERDR_SESSION` work as they do for herdr. Each herdr
 call runs in a process group of its own and times out after 5 seconds; at the
-timeout, on a Ctrl-C, hangup or terminate that ends muster, and when the client
-of a `muster mcp` server disconnects, the whole group is killed. When no
+timeout, on a Ctrl-C, hangup or terminate, including a Ctrl-C taken while a
+spinner or prompt is on screen, and when the client of a `muster mcp` server
+disconnects, the whole group is killed. When no
 direction is given and herdr's layout is malformed or does not list the pane,
 the pane splits down; when herdr cannot be reached, times out or refuses the
 layout, nothing is split. The new pane runs one typed line, so `open` supports
@@ -443,8 +456,10 @@ names its `kind` and up to 20 `candidates`. A wait ended by an exit or crash
 does the same, with the run's last lines. A wait that ran out of time, and a
 lock or todo someone else holds, are not errors. `process_open` resolves the
 process first, so an unknown or stopped one gets its own answer. Outside herdr
-it resolves the name against the stored stack and never starts the service:
-with no service running the process is `not-running`, and for a running one it
+it resolves the name against the stored stack and never starts or replaces the
+service: with no service running the process is `not-running`, with one of
+another version running it answers kind `version-mismatch` naming both
+versions, and for a running process it
 answers kind `no-workspace`, telling the agent to ask you to run
 `muster --project <root> attach -- <name>` in your own terminal, and
 when herdr cannot be reached or refuses it answers `workspace-failed` with

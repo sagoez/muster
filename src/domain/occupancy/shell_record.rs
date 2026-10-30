@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use super::{ReportStamp, ShellId};
-use crate::domain::value::ProjectRoot;
+use crate::domain::value::{EpochNanos, ProjectRoot};
 
 /// A shell's report, as the service is told it and as it is kept between
 /// services: which shell, which hook load and prompt, its folder, and the
@@ -18,6 +18,8 @@ pub struct ShellRecord {
     stamp: ReportStamp,
     /// The folder the shell was in.
     folder: PathBuf,
+    /// When the shell was first seen in that folder, at a prompt.
+    arrived: EpochNanos,
     /// The project its folder was in, or `None` outside every project.
     #[builder(default)]
     project: Option<ProjectRoot>,
@@ -33,12 +35,13 @@ impl ShellRecord {
     /// a project registered around the shell nests it in a new project
     /// without it leaving the one it was in, which it holds, as it holds
     /// what `previous` held, for as long as its project stays nested inside.
-    pub fn following(self, previous: Option<&Self>) -> Self {
+    /// `around` says its project was registered around the shell.
+    pub fn following(self, previous: Option<&Self>, around: bool) -> Self {
         let Some(previous) = previous else {
             return self;
         };
         let mut held = previous.held.clone();
-        if self.registered_since(previous) {
+        if self.registered_since(previous, around) {
             held.extend(previous.project.clone());
         }
         held.retain(|root| {
@@ -51,24 +54,40 @@ impl ShellRecord {
         Self { held, ..self }
     }
 
+    /// This record once `root`, a project registered around the shell where
+    /// it is, names it, as [`Self::following`] makes a report of it: the
+    /// shell's next report there finds it already in, not entering.
+    #[must_use]
+    pub fn registered_around(self, root: ProjectRoot) -> Self {
+        let previous = self.clone();
+        Self {
+            project: Some(root),
+            ..self
+        }
+        .following(Some(&previous), true)
+    }
+
     /// Whether this report may enter its project and start it: it names a
     /// project `previous`, the shell's last stored report, did not, and that
-    /// project was not registered around the shell since.
-    pub fn may_enter(&self, previous: Option<&Self>) -> bool {
+    /// project was not registered around the shell, as `around` says, nor
+    /// since `previous` was made from inside its folder.
+    pub fn may_enter(&self, previous: Option<&Self>, around: bool) -> bool {
         self.project.is_some()
+            && !around
             && previous.is_none_or(|previous| {
-                previous.project != self.project && !self.registered_since(previous)
+                previous.project != self.project && !self.registered_since(previous, around)
             })
     }
 
     /// Whether this report's project was registered while the shell was
-    /// already inside it: `previous` was made from a folder inside it, yet
-    /// named no project or only one this project is nested in.
-    fn registered_since(&self, previous: &Self) -> bool {
+    /// already inside it: around it, as `around` says, or since `previous`,
+    /// made from a folder inside it; and `previous` named no project or
+    /// only one this project is nested in.
+    fn registered_since(&self, previous: &Self, around: bool) -> bool {
         let Some(project) = &self.project else {
             return false;
         };
-        project.contains(&previous.folder)
+        (around || project.contains(&previous.folder))
             && previous
                 .project
                 .as_ref()
@@ -84,12 +103,14 @@ mod tests {
     };
 
     /// The report of prompt `seq` from the folder of the test project
-    /// `folder` would name, in the project `project` names.
+    /// `folder` would name, in the project `project` names, arriving there
+    /// at that prompt.
     fn at(seq: u64, folder: &str, project: Option<&str>) -> ShellRecord {
         ShellRecord::builder()
             .shell(test_shell(100, 1))
             .stamp(stamp(1, seq))
             .folder(test_root(folder).as_ref().to_path_buf())
+            .arrived(EpochNanos::new(seq))
             .project(project.map(test_root))
             .build()
     }
@@ -101,12 +122,12 @@ mod tests {
         let outside = at(1, "elsewhere", None);
         let in_shop = at(1, "shop", Some("shop"));
 
-        assert!(at(1, "shop", Some("shop")).may_enter(None));
-        assert!(at(2, "shop", Some("shop")).may_enter(Some(&outside)));
-        assert!(at(2, "blog", Some("blog")).may_enter(Some(&in_shop)));
-        assert!(!at(2, "shop/src", Some("shop")).may_enter(Some(&in_shop)));
-        assert!(!at(2, "elsewhere", None).may_enter(Some(&in_shop)));
-        assert!(!outside.may_enter(None));
+        assert!(at(1, "shop", Some("shop")).may_enter(None, false));
+        assert!(at(2, "shop", Some("shop")).may_enter(Some(&outside), false));
+        assert!(at(2, "blog", Some("blog")).may_enter(Some(&in_shop), false));
+        assert!(!at(2, "shop/src", Some("shop")).may_enter(Some(&in_shop), false));
+        assert!(!at(2, "elsewhere", None).may_enter(Some(&in_shop), false));
+        assert!(!outside.may_enter(None, false));
     }
 
     /// Correctness M1: a project registered around a shell already in its
@@ -115,13 +136,74 @@ mod tests {
     fn a_project_registered_around_the_shell_is_not_entered() {
         let before = at(1, "fresh", None);
 
-        let registered = at(2, "fresh", Some("fresh")).following(Some(&before));
+        let registered = at(2, "fresh", Some("fresh")).following(Some(&before), false);
 
-        assert!(!registered.may_enter(Some(&before)));
+        assert!(!registered.may_enter(Some(&before), false));
         assert!(registered.held().is_empty());
         assert!(
-            at(2, "fresh/src", Some("fresh")).may_enter(Some(&at(1, "elsewhere", None))),
+            at(2, "fresh/src", Some("fresh")).may_enter(Some(&at(1, "elsewhere", None)), false),
             "walking in from outside is an entry"
+        );
+    }
+
+    /// A project registered after the shell arrived in its folder, as
+    /// `cd fresh` then `muster add` before the move's report read the
+    /// projects, was registered around the shell: no entry, from outside
+    /// or from a project it nests in, which the shell keeps holding.
+    #[test]
+    fn a_project_registered_after_the_shell_arrived_is_not_entered() {
+        let outside = at(1, "elsewhere", None);
+        let moved = at(2, "fresh", Some("fresh")).following(Some(&outside), true);
+        assert!(!moved.may_enter(Some(&outside), true));
+        assert!(
+            !moved.may_enter(None, true),
+            "nor as the shell's first report"
+        );
+        assert!(moved.held().is_empty());
+
+        let in_shop = at(1, "shop", Some("shop"));
+        let nested = at(2, "shop/admin", Some("shop/admin")).following(Some(&in_shop), true);
+        assert!(!nested.may_enter(Some(&in_shop), true));
+        assert_eq!(nested.held(), &[test_root("shop")]);
+
+        let walked = at(2, "shop/admin", Some("shop/admin")).following(Some(&in_shop), false);
+        assert!(
+            walked.may_enter(Some(&in_shop), false),
+            "registered before it"
+        );
+        assert!(walked.held().is_empty());
+    }
+
+    /// A record named for a project registered around the shell keeps its
+    /// stamp, folder and arrival, holds the project it was in when that one
+    /// holds the new one, and lets the next report there stay rather than
+    /// enter; leaving and coming back enters it.
+    #[test]
+    fn a_record_named_for_a_project_registered_around_it_stays_there() {
+        let outside = at(1, "elsewhere", None);
+        let named = outside.clone().registered_around(test_root("fresh"));
+        assert_eq!(named.project(), &Some(test_root("fresh")));
+        assert_eq!(
+            (named.stamp(), named.folder(), named.arrived()),
+            (outside.stamp(), outside.folder(), outside.arrived())
+        );
+        assert!(named.held().is_empty());
+        let next = at(2, "fresh", Some("fresh")).following(Some(&named), false);
+        assert!(!next.may_enter(Some(&named), false));
+
+        let left = at(3, "elsewhere", None).following(Some(&next), false);
+        assert!(at(4, "fresh", Some("fresh")).may_enter(Some(&left), false));
+
+        let in_shop = at(1, "shop/admin", Some("shop"));
+        let nested = in_shop.registered_around(test_root("shop/admin"));
+        assert_eq!(nested.held(), &[test_root("shop")]);
+        let elsewhere = at(1, "elsewhere", Some("blog"));
+        assert!(
+            elsewhere
+                .registered_around(test_root("fresh"))
+                .held()
+                .is_empty(),
+            "a project that does not hold it is left"
         );
     }
 
@@ -132,18 +214,18 @@ mod tests {
     fn a_nested_registration_holds_the_outer_project_while_the_shell_stays() {
         let in_outer = at(1, "shop/admin", Some("shop"));
 
-        let nested = at(2, "shop/admin", Some("shop/admin")).following(Some(&in_outer));
-        assert!(!nested.may_enter(Some(&in_outer)));
+        let nested = at(2, "shop/admin", Some("shop/admin")).following(Some(&in_outer), false);
+        assert!(!nested.may_enter(Some(&in_outer), false));
         assert_eq!(nested.held(), &[test_root("shop")]);
 
-        let deeper = at(3, "shop/admin/src", Some("shop/admin")).following(Some(&nested));
+        let deeper = at(3, "shop/admin/src", Some("shop/admin")).following(Some(&nested), false);
         assert_eq!(deeper.held(), &[test_root("shop")], "still in its tree");
 
-        let back = at(4, "shop", Some("shop")).following(Some(&deeper));
-        assert!(back.may_enter(Some(&deeper)));
+        let back = at(4, "shop", Some("shop")).following(Some(&deeper), false);
+        assert!(back.may_enter(Some(&deeper), false));
         assert!(back.held().is_empty(), "the shell counts in shop directly");
 
-        let out = at(4, "elsewhere", None).following(Some(&deeper));
+        let out = at(4, "elsewhere", None).following(Some(&deeper), false);
         assert!(out.held().is_empty());
     }
 
@@ -153,9 +235,9 @@ mod tests {
     fn moving_from_a_nested_project_to_its_outer_one_is_an_entry() {
         let in_inner = at(1, "shop/admin", Some("shop/admin"));
 
-        let moved = at(2, "shop", Some("shop")).following(Some(&in_inner));
+        let moved = at(2, "shop", Some("shop")).following(Some(&in_inner), false);
 
-        assert!(moved.may_enter(Some(&in_inner)));
+        assert!(moved.may_enter(Some(&in_inner), false));
         assert!(moved.held().is_empty());
     }
 }

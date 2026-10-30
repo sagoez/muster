@@ -18,8 +18,6 @@ use clap::{
 };
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
-use rustix::process::getpid;
-use sysinfo::System;
 
 use super::{
     add::{add, add_rows},
@@ -37,14 +35,15 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        HOOK_SEARCH_DEPTH, any_failed, completions_probe, database_probe, doctor_report,
-        error_chain, legacy_probe, processes_probe, project_probe, projects_probe,
-        shell_hook_probe, socket_probe, workspace_probe,
+        any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
+        processes_probe, project_probe, projects_probe, shell_hook_probe, socket_probe,
+        workspace_probe,
     },
     doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
     export::{Exported, export, export_rows},
+    hooked_shell::own_ancestors,
     host_terminal::HostTerminal,
     idle_stop_override::IdleStopOverride,
     import::{apply, dry_run_view, import_mode, import_rows, plan, read},
@@ -97,7 +96,6 @@ use crate::{
             resolve_project, this_binary,
         },
         private_dir::state_dir,
-        process_tree::named_ancestors,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
@@ -109,7 +107,7 @@ use crate::{
         occupancy::{LoadId, ReportStamp},
         port::LocalState,
         project::Project,
-        value::{DetachKey, Pid, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -344,13 +342,14 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             load,
             load_pid,
             seq,
+            arrived,
         }) => {
             // A skipped report is retried at the next prompt; the hook shows
             // nothing either way.
             if let Ok(cwd) = invocation.cwd() {
                 let load = LoadId::builder().started(load).pid(load_pid).build();
                 let stamp = ReportStamp::builder().load(load).seq(seq).build();
-                let _ = shell_report(ports, pid, stamp, &cwd);
+                let _ = shell_report(ports, pid, stamp, arrived, &cwd);
             }
         },
         Some(Command::Holder { spec }) => internal(ports.run_holder(&spec)),
@@ -1418,14 +1417,9 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
-    let ancestors = u32::try_from(getpid().as_raw_nonzero().get())
-        .ok()
-        .and_then(|this| Pid::try_new(this).ok())
-        .map(|this| named_ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
-        .unwrap_or_default();
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),
-        &ancestors,
+        &own_ancestors(),
         shell.as_deref(),
     ));
     let detach = opened

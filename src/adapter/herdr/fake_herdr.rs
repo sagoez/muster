@@ -16,7 +16,10 @@ use tempfile::TempDir;
 
 use super::herdr_workspace::HerdrWorkspace;
 use crate::{
-    adapter::test_wait::{POLL, WAIT},
+    adapter::{
+        child_group,
+        test_wait::{POLL, WAIT},
+    },
     domain::value::{Pid, WorkspacePaneId},
 };
 
@@ -79,12 +82,29 @@ exit 0
 pub struct FakeHerdr {
     /// The folder holding the script, its answers and its log.
     dir: TempDir,
+    /// Whether it counts among the live fakes a test raising an ending
+    /// signal waits out.
+    counted: bool,
 }
 
 impl FakeHerdr {
-    /// Writes the fake and waits until it can be run: a script just written
-    /// cannot be run while another test's fork still holds it open.
+    /// Writes the fake and waits until it can be run, holding off any test
+    /// that raises an ending signal while it lives.
     pub fn new() -> Self {
+        child_group::fake_lives();
+        Self::written(true)
+    }
+
+    /// A fake for a test that raises an ending signal itself, under
+    /// [`child_group::sweep_alone`].
+    pub fn for_a_sweep() -> Self {
+        Self::written(false)
+    }
+
+    /// Writes the fake, `counted` among the live ones or not, and waits
+    /// until it can be run: a script just written cannot be run while
+    /// another test's fork still holds it open.
+    fn written(counted: bool) -> Self {
         let dir = TempDir::new().unwrap();
         let script = dir.path().join(SCRIPT);
         fs::write(&script, SCRIPT_BODY).unwrap();
@@ -103,7 +123,7 @@ impl FakeHerdr {
                 Err(error) => panic!("the fake herdr does not run: {error}"),
             }
         }
-        Self { dir }
+        Self { dir, counted }
     }
 
     /// The fake's path.
@@ -143,6 +163,11 @@ impl FakeHerdr {
         fs::write(self.file(verb, FORK), HANG_SECONDS).unwrap();
     }
 
+    /// Whether `herdr pane <verb>` has started its child.
+    pub fn grandchild_started(&self, verb: &str) -> bool {
+        self.file(verb, GRANDCHILD).exists()
+    }
+
     /// The pid `herdr pane <verb>` last ran as.
     pub fn pid(&self, verb: &str) -> Pid {
         self.recorded(verb, PID)
@@ -180,5 +205,14 @@ impl FakeHerdr {
     /// The canned file of `kind` for `herdr pane <verb>`.
     fn file(&self, verb: &str, kind: &str) -> PathBuf {
         self.dir.path().join(format!("pane-{verb}.{kind}"))
+    }
+}
+
+impl Drop for FakeHerdr {
+    /// Counts the fake out, so a test raising an ending signal may run.
+    fn drop(&mut self) {
+        if self.counted {
+            child_group::fake_gone();
+        }
     }
 }

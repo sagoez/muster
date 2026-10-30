@@ -4,7 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use super::{cli_ports::CliPorts, error::CliError, report::print_note};
+use super::{
+    cli_ports::CliPorts, error::CliError, report::print_note,
+    shell_registration::name_in_hooked_shell,
+};
 use crate::{
     adapter::{
         client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project},
@@ -15,6 +18,7 @@ use crate::{
     domain::{
         port::{LocalState, StateChangeNotifier},
         project::Project,
+        value::ProjectRoot,
     },
 };
 
@@ -93,12 +97,13 @@ impl<'a> Invocation<'a> {
     }
 
     /// The use case an edit goes through: writes to `store`, then tells a
-    /// running service.
+    /// running service, and names a project it registers in the hooked
+    /// shell's record.
     pub fn editor<'s>(&'s self, store: &'s dyn LocalState) -> StackEditor<'s> {
         StackEditor::builder()
             .stacks(store)
             .settings(store)
-            .notifier(self.notifier.as_ref())
+            .notifier(self)
             .build()
     }
 
@@ -224,6 +229,25 @@ impl<'a> Invocation<'a> {
     }
 }
 
+impl StateChangeNotifier for Invocation<'_> {
+    /// Also names the project in the record of the hooked shell this
+    /// command runs straight from, as [`name_in_hooked_shell`] allows.
+    fn project_registered(&self, root: &ProjectRoot) {
+        self.notifier.project_registered(root);
+        if let Ok(cwd) = self.cwd() {
+            name_in_hooked_shell(self.ports, root, &cwd);
+        }
+    }
+
+    fn stack_changed(&self, root: &ProjectRoot) {
+        self.notifier.stack_changed(root);
+    }
+
+    fn settings_changed(&self) {
+        self.notifier.settings_changed();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -264,6 +288,9 @@ mod tests {
             .unwrap();
 
         assert!(ports.store().stack(&root).unwrap().is_some());
+        assert_eq!(*ports.notifier().registered().lock().unwrap(), vec![
+            root.clone()
+        ]);
         assert_eq!(*ports.notifier().stacks().lock().unwrap(), vec![root]);
         assert!(ports.fake_service().told().is_empty());
         assert!(matches!(

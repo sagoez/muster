@@ -19,7 +19,7 @@ use crate::{
     adapter::private_dir::{prepare_state_dir, state_dir},
     domain::{
         config::ConfigError,
-        value::{EpochSeconds, PositiveDuration, StopGrace},
+        value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
     },
 };
 
@@ -57,6 +57,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_ended_sessions.sql"),
     include_str!("migrations/0009_idle_stop_and_ports.sql"),
     include_str!("migrations/0010_pending_idle_stops.sql"),
+    include_str!("migrations/0011_registered_ns.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and
@@ -355,6 +356,12 @@ pub(super) fn epoch_from_secs(what: &str, secs: i64) -> Result<EpochSeconds, Con
         .map_err(|error| refused(what, &error))
 }
 
+/// `at` as a nanoseconds column holds it, held at the latest nanosecond
+/// SQLite can store.
+pub(super) fn nanos_param(at: EpochNanos) -> i64 {
+    i64::try_from(at.into_inner()).unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, thread};
@@ -384,6 +391,9 @@ mod tests {
     /// The schema version the ended sessions shipped at, the last before idle
     /// stop and declared ports.
     const ENDED_SESSIONS_SCHEMA: usize = 8;
+    /// The schema version the pending idle stops shipped at, the last before
+    /// registration times in nanoseconds.
+    const PENDING_IDLE_STOPS_SCHEMA: usize = 10;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -580,6 +590,40 @@ mod tests {
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(stack.processes().len(), 1);
         assert!(stack.processes()[0].ports().is_empty());
+    }
+
+    /// The registration time migration keeps each project's registration
+    /// second, now counted in nanoseconds.
+    #[test]
+    fn the_registration_time_migration_keeps_each_project_s_second() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        let dir = scratch.path().join("shop");
+        fs::create_dir(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        let shipped = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..PENDING_IDLE_STOPS_SCHEMA] {
+            shipped.execute_batch(migration).unwrap();
+        }
+        shipped
+            .pragma_update(None, USER_VERSION, PENDING_IDLE_STOPS_SCHEMA as u32)
+            .unwrap();
+        shipped
+            .execute(
+                "INSERT INTO projects (root, name, created_at) VALUES (?1, 'shop', 7)",
+                [root.as_ref().to_str().unwrap()],
+            )
+            .unwrap();
+        drop(shipped);
+
+        let store = SqliteStore::open(&path).unwrap();
+
+        assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
+        let found = store
+            .registered_project_containing(root.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.registered(), Some(EpochNanos::new(7_000_000_000)));
     }
 
     /// A database a newer muster wrote is refused, and left untouched.

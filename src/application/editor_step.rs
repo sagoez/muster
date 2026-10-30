@@ -8,6 +8,8 @@ pub(super) enum EditorStep {
     Wrote,
     /// The stack store committed a write for this author.
     WroteFor(Author),
+    /// The notifier heard a folder registered as a project.
+    ProjectRegistered(ProjectRoot),
     /// The notifier heard a stack change.
     StackChanged(ProjectRoot),
     /// The notifier heard a settings change.

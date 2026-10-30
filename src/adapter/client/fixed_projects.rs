@@ -2,9 +2,10 @@ use std::path::Path;
 
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
+    occupancy::RegisteredProject,
     port::ProjectStore,
     project::Project,
-    value::{ProjectName, ProjectRoot},
+    value::{EpochNanos, ProjectName, ProjectRoot},
 };
 
 /// A store holding a fixed set of projects, looked up as the database would.
@@ -42,13 +43,22 @@ impl ProjectStore for FixedProjects {
             .cloned())
     }
 
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
+    /// Every fixed project was registered at the epoch.
+    fn registered_project_containing(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<RegisteredProject>, ConfigError> {
         Ok(self
             .0
             .iter()
             .filter(|project| project.root().contains(dir))
             .max_by_key(|project| project.root().as_ref().components().count())
-            .cloned())
+            .map(|project| {
+                RegisteredProject::builder()
+                    .project(project.clone())
+                    .registered(Some(EpochNanos::new(0)))
+                    .build()
+            }))
     }
 
     fn remove_project(&self, _root: &ProjectRoot) -> Result<bool, ConfigError> {

@@ -12,7 +12,7 @@ use super::{
     open_view::OpenView,
     process::{locate, unexpected},
     service_access::ServiceAccess,
-    service_client::ServiceClient,
+    service_client::{ServiceClient, other_version},
     this_binary::runnable,
 };
 use crate::{
@@ -113,9 +113,11 @@ pub fn open_beside(
 
 /// Why the process `name` of `project` cannot be opened with no terminal
 /// workspace to open it in: [`ClientError::NoWorkspace`] for a running
-/// process, [`ClientError::NotRunning`] when no service of this version runs
-/// it, or the running service's refusal or failure to answer. Only a service
-/// that already runs, reached through `service`, is asked; none is started.
+/// process, [`ClientError::NotRunning`] when no service runs, the version
+/// mismatch when a service of another version runs, which may well run it,
+/// or the running service's refusal or failure to answer. Only a service
+/// that already runs, reached through `service`, is asked; none is started
+/// or replaced.
 pub fn unopenable_here(
     service: &dyn ServiceAccess,
     project: &Project,
@@ -128,9 +130,8 @@ pub fn unopenable_here(
     match service.ask_if_running(&request) {
         Ok(Asked::Answered(ServiceResponse::Located(_))) => ClientError::NoWorkspace,
         Ok(Asked::Answered(other)) => unexpected(other, project, Some(name)),
-        Ok(Asked::OtherVersion | Asked::Starting | Asked::Absent) => {
-            ClientError::NotRunning(name.clone())
-        },
+        Ok(Asked::OtherVersion(running)) => other_version(running),
+        Ok(Asked::Starting | Asked::Absent) => ClientError::NotRunning(name.clone()),
         Err(error) => error,
     }
 }
@@ -143,11 +144,13 @@ mod tests {
     use crate::{
         adapter::{
             client::{
-                FailureKind, fake_service::FakeService, recording_workspace::RecordingWorkspace,
-                served_service::ServedService, this_binary,
+                FailureKind, RunningService, fake_service::FakeService,
+                recording_workspace::RecordingWorkspace, served_service::ServedService,
+                this_binary,
             },
             service::{
                 Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+                ServiceVersion,
             },
         },
         domain::{
@@ -162,6 +165,21 @@ mod tests {
     const ROOT: &str = "/home/me/my shop";
     /// The pane a workspace opens.
     const OPENED: &str = "w1:p4";
+    /// A version older than this muster.
+    const OLDER: &str = "0.0.1";
+    /// A version newer than this muster.
+    const NEWER: &str = "999.0.0";
+    /// The binary a service of another version runs.
+    const SERVICE_BINARY: &str = "/opt/other/muster";
+
+    /// A service of `version` that greeted with [`SERVICE_BINARY`], or one
+    /// too old to say either.
+    fn running(version: Option<&str>) -> RunningService {
+        RunningService::builder()
+            .version(version.map(|version| version.parse().unwrap()))
+            .binary(version.map(|_| PathBuf::from(SERVICE_BINARY)))
+            .build()
+    }
 
     /// The project `shop` at [`ROOT`].
     fn shop() -> Project {
@@ -355,8 +373,9 @@ mod tests {
 
     /// Without a workspace, a process a running service locates is
     /// `no-workspace` and one it refuses fails as the refusal says; with no
-    /// service of this version running, it is not running. The service is
-    /// only asked, never started.
+    /// service running, it is not running, and with one of another version,
+    /// which may run it, the versions do not match. The service is only
+    /// asked, never started or replaced.
     #[test]
     fn without_a_workspace_only_a_running_service_is_asked() {
         let located = ServiceResponse::Located(
@@ -376,7 +395,18 @@ mod tests {
             (Asked::Answered(refused), FailureKind::NotRunning),
             (Asked::Absent, FailureKind::NotRunning),
             (Asked::Starting, FailureKind::NotRunning),
-            (Asked::OtherVersion, FailureKind::NotRunning),
+            (
+                Asked::OtherVersion(running(Some(OLDER))),
+                FailureKind::VersionMismatch,
+            ),
+            (
+                Asked::OtherVersion(running(Some(NEWER))),
+                FailureKind::VersionMismatch,
+            ),
+            (
+                Asked::OtherVersion(running(None)),
+                FailureKind::VersionMismatch,
+            ),
         ] {
             let service = FakeService::default().asked_in_turn(vec![asked.clone()]);
 
@@ -388,6 +418,45 @@ mod tests {
                 &service.asked()[..],
                 [ServiceRequest::Locate { name, .. }] if name.as_ref() == "web"
             ));
+        }
+    }
+
+    /// A service of another version found without a workspace is named as
+    /// `connect` names a newer one, or as older, with both versions, and is
+    /// left running.
+    #[test]
+    fn another_version_without_a_workspace_names_both_versions() {
+        let ours = ServiceVersion::current().to_string();
+        for (theirs, message) in [
+            (
+                Some(NEWER),
+                format!(
+                    "the running muster service is version {NEWER} from {SERVICE_BINARY}, \
+                     newer than this muster ({ours})"
+                ),
+            ),
+            (
+                Some(OLDER),
+                format!(
+                    "the running muster service is version {OLDER}, older than this muster \
+                     ({ours})"
+                ),
+            ),
+            (
+                None,
+                format!(
+                    "the running muster service is a version too old to say which, older than \
+                     this muster ({ours})"
+                ),
+            ),
+        ] {
+            let service =
+                FakeService::default().asked_in_turn(vec![Asked::OtherVersion(running(theirs))]);
+
+            let error = unopenable_here(&service, &shop(), &name("web"));
+
+            assert_eq!(error.to_string(), message);
+            assert_eq!(service.connects(), 0);
         }
     }
 

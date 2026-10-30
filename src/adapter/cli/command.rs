@@ -32,7 +32,7 @@ use crate::{
     },
     domain::{
         occupancy::{LoadStart, ReportSeq},
-        value::{Pid, ProcessRef},
+        value::{EpochNanos, Pid, ProcessRef},
     },
 };
 
@@ -334,6 +334,12 @@ pub enum Command {
         /// The prompt's number, rising within that load.
         #[arg(long)]
         seq: ReportSeq,
+        /// When the shell was first seen, at a prompt, in the folder it is
+        /// in, in nanoseconds since the epoch; when the shell cannot read its
+        /// clock, its last report's from the same folder stands in, or the
+        /// report's own start.
+        #[arg(long)]
+        arrived: Option<EpochNanos>,
     },
     /// Internal: runs one process holder from the spec file it is handed.
     #[command(name = HOLDER_SUBCOMMAND, hide = true)]

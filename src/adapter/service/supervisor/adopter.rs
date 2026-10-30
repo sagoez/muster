@@ -223,7 +223,8 @@ impl Supervisor {
     /// Settles an adoption a worker finished on the loop: supervises the
     /// holder, or leaves its child unsupervised when it still runs. A result
     /// a later action superseded is never installed; its process is detached
-    /// when a shutdown superseded it and stopped otherwise.
+    /// when a shutdown superseded it and stopped otherwise. The waits held on
+    /// it then go on to scan its log.
     pub fn handle_adopted(
         &mut self,
         pane: PaneId,
@@ -232,6 +233,7 @@ impl Supervisor {
         result: Result<Box<dyn ProcessHandle>, PtyError>,
     ) {
         self.settle_adoption(pane, generation, record, result);
+        self.release_adoption_waits();
     }
 
     /// Reconnects to the holder of `pane`'s process after its output stream
@@ -931,14 +933,15 @@ mod tests {
         adapter::{
             holder::{HolderId, LoggedLine},
             service::{
-                LaunchEnvironment, ServiceEvent, ServiceResponse, WaitCondition, WaitOutcome,
-                WaitSpec, WaitStatus,
+                LaunchEnvironment, ServiceEvent, ServiceResponse, TAP_RING_BYTES, WaitCondition,
+                WaitOutcome, WaitSpec, WaitStatus,
                 supervisor::{
                     ConfigMembership, SpawnGeneration,
                     lifecycle::FORCE_STOP_NOTICE,
                     testing::*,
                     unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
                     unsupervised_child::UnsupervisedChild,
+                    waiting::LOG_TAIL_TIMEOUT,
                 },
             },
         },
@@ -956,6 +959,8 @@ mod tests {
     };
 
     const PANE: u64 = 0;
+    /// Bytes of each line of a flood, newline included.
+    const FLOOD_LINE_BYTES: usize = 1024;
     /// A pid that always runs and is never a holder, standing in for one.
     const KERNEL_THREAD_PID: u32 = 2;
     /// The command a stack change replaces the test command with.
@@ -966,6 +971,10 @@ mod tests {
     const EARLIER: Duration = Duration::from_secs(3600);
     /// Longest a test waits for a scheduled respawn to arrive.
     const RESPAWN_WAIT: Duration = Duration::from_secs(5);
+    /// How long a test keeps a wait held on an adoption before it settles.
+    const ADOPTION_HOLD: Duration = Duration::from_millis(300);
+    /// A cursor inside the logged output, where a held wait is asked from.
+    const HELD_SINCE: u64 = 4;
     /// A socket path nothing serves.
     const UNSERVED_SOCKET: &str = "/nonexistent/holder.sock";
     /// Grace the graceful stop policy gives before the kill.
@@ -1229,6 +1238,174 @@ mod tests {
             *outcome.matched().clone().unwrap().at(),
             OutputCursor::new(0)
         );
+    }
+
+    /// A wait from a cursor asked while its process is still being adopted
+    /// is held until the adoption settles, then scans the log from that
+    /// cursor, so a line the replay never forwards, as this one replays
+    /// nothing, still matches it at its offset.
+    #[test]
+    fn a_wait_asked_mid_adoption_sees_the_whole_replay_range_from_its_cursor() {
+        let mut harness = logging(
+            vec![logged_line(0, "booting"), logged_line(8, "compiled")],
+            true,
+        );
+        harness.supervisor_mut().adopt(record("p"));
+
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        assert!(waited(&answers).is_none(), "held while the adoption runs");
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        assert!(waited(&answers).is_none(), "held while its log is scanned");
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+
+        let outcome = waited(&answers).expect("the logged line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        let matched = outcome.matched().clone().unwrap();
+        assert_eq!(*matched.at(), OutputCursor::new(8));
+        assert_eq!(matched.line(), "compiled");
+        assert_eq!(*outcome.scanned_from(), None);
+    }
+
+    /// R-M3: a wait held on an adoption that does not settle within the
+    /// wait's own timeout times out as any wait does, its cursor still the
+    /// one it was asked from, since nothing after it was tested; with no tap
+    /// holding the run yet, its tail is the end of the log, read off the
+    /// loop before it is answered.
+    #[test]
+    fn a_wait_held_on_an_adoption_that_never_settles_times_out_from_its_cursor() {
+        let mut harness = logging(
+            vec![logged_line(0, "booting"), logged_line(8, "listening")],
+            true,
+        );
+        harness.supervisor_mut().adopt(record("p"));
+        let since = OutputCursor::new(HELD_SINCE);
+        let answers = wait_for_line(&mut harness, "compiled", Some(since));
+
+        harness
+            .supervisor_mut()
+            .settle_waits(Instant::now() + RESPAWN_WAIT);
+        assert!(
+            waited(&answers).is_none(),
+            "held while its log's end is read"
+        );
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+
+        let outcome = waited(&answers).expect("the held wait is answered");
+        assert_eq!(outcome.status(), WaitStatus::Waiting);
+        assert_eq!(*outcome.cursor(), since);
+        assert_eq!(*outcome.matched(), None);
+        assert_eq!(outcome.tail(), &vec![
+            "booting".to_string(),
+            "listening".to_string()
+        ]);
+    }
+
+    /// A wait timed out on an adoption whose log's end cannot be read, or
+    /// is not read in time, is still answered timed out from the cursor it
+    /// was asked from, with no tail rather than a made-up one.
+    #[test]
+    fn a_wait_timed_out_on_an_adoption_keeps_its_cursor_when_its_log_cannot_be_read() {
+        let since = OutputCursor::new(HELD_SINCE);
+        for lands in [true, false] {
+            let mut harness = logging(Vec::new(), true);
+            harness.supervisor_mut().adopt(record("p"));
+            let answers = wait_for_line(&mut harness, "compiled", Some(since));
+            let timed_out = Instant::now() + RESPAWN_WAIT;
+            harness.supervisor_mut().settle_waits(timed_out);
+            assert!(
+                waited(&answers).is_none(),
+                "held while its log's end is read"
+            );
+
+            if lands {
+                let (landed, read, result) = harness.landed_log_read();
+                harness
+                    .supervisor_mut()
+                    .handle_log_read(landed, read, result);
+            } else {
+                harness
+                    .supervisor_mut()
+                    .settle_waits(timed_out + LOG_TAIL_TIMEOUT);
+            }
+
+            let outcome = waited(&answers).expect("the held wait is answered");
+            assert_eq!(outcome.status(), WaitStatus::Waiting, "lands: {lands}");
+            assert_eq!(*outcome.cursor(), since, "lands: {lands}");
+            assert!(outcome.tail().is_empty(), "lands: {lands}");
+        }
+    }
+
+    /// R-M2: a wait held on an adoption keeps the deadline it was asked
+    /// with: the time it spent held counts against its timeout once the
+    /// adoption settles and its log is scanned.
+    #[test]
+    fn a_wait_held_on_an_adoption_keeps_its_deadline_once_released() {
+        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let asked = Instant::now();
+        let answers = wait_for_line(&mut harness, "compiled", Some(OutputCursor::new(0)));
+        thread::sleep(ADOPTION_HOLD);
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        assert!(waited(&answers).is_none(), "nothing matched yet");
+
+        let [waiter] = &harness.supervisor().waiters[..] else {
+            panic!("the released wait is registered");
+        };
+        assert!(
+            waiter.deadline() < asked + RESPAWN_WAIT + ADOPTION_HOLD / 2,
+            "its timeout counts from when it was asked"
+        );
+        assert!(waiter.started() >= asked);
+    }
+
+    /// More output than the tap keeps, arriving while a wait's scan of the
+    /// log is in flight, leaves a gap between where the scan stopped and the
+    /// tap's oldest line: the wait is answered by a later line, and its
+    /// `scanned_from` says where the tested output resumed after the gap.
+    #[test]
+    fn a_flood_during_a_held_scan_reports_the_gap_it_left() {
+        let mut harness = logging(vec![logged_line(0, "booting")], true);
+        harness.supervisor_mut().adopt(record("p"));
+        let (pane, generation, record, result) = adopted(&harness);
+        harness
+            .supervisor_mut()
+            .handle_adopted(pane, generation, &record, result);
+        let answers = wait_for_line(&mut harness, "ready", Some(OutputCursor::new(0)));
+
+        let line = [vec![b'x'; FLOOD_LINE_BYTES - 1], b"\n".to_vec()].concat();
+        let flood = line.repeat(TAP_RING_BYTES / FLOOD_LINE_BYTES * 2);
+        run_output(&mut harness, ProcessOutput::Chunk(flood));
+        let (landed, read, result) = harness.landed_log_read();
+        harness
+            .supervisor_mut()
+            .handle_log_read(landed, read, result);
+        assert!(waited(&answers).is_none(), "nothing matched yet");
+        run_output(&mut harness, ProcessOutput::Chunk(b"ready\n".to_vec()));
+
+        let outcome = waited(&answers).expect("the streamed line answers the wait");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        let resumed = outcome.scanned_from().expect("the gap is reported");
+        assert!(
+            resumed > OutputCursor::new(REPLAY_STREAM_START),
+            "{resumed} is past where the scan stopped"
+        );
+        assert!(resumed <= *outcome.matched().clone().unwrap().at());
     }
 
     /// A crash after an adoption answers a wait with its run's last lines

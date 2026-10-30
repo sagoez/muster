@@ -3,6 +3,8 @@
 //! signal or an MCP client closing stdio.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(test)]
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use rustix::process::{Pid as RawPid, Signal, kill_process_group};
 
@@ -17,6 +19,41 @@ const FREE: u32 = 0;
 static GROUPS: [AtomicU32; MAX_GROUPS] = [const { AtomicU32::new(FREE) }; MAX_GROUPS];
 /// Set once muster is ending, after which no group is tracked.
 static ENDED: AtomicBool = AtomicBool::new(false);
+/// How many fake herdrs live in the test process, whose calls a test
+/// raising an ending signal would kill; that test holds it while it raises.
+#[cfg(test)]
+static LIVE_FAKES: Mutex<usize> = Mutex::new(0);
+/// Signalled each time the last live fake herdr goes.
+#[cfg(test)]
+static NO_FAKES: Condvar = Condvar::new();
+
+/// Counts a fake herdr in, waiting while a test that raises an ending
+/// signal runs.
+#[cfg(test)]
+pub fn fake_lives() {
+    *LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+}
+
+/// Counts a fake herdr out.
+#[cfg(test)]
+pub fn fake_gone() {
+    let mut live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    *live = live.saturating_sub(1);
+    if *live == 0 {
+        NO_FAKES.notify_all();
+    }
+}
+
+/// Waits until no fake herdr lives and keeps new ones from starting while
+/// the returned guard lives, for a test that raises an ending signal and so
+/// kills every group the test process tracks. Its own fake is made after.
+#[cfg(test)]
+pub fn sweep_alone() -> MutexGuard<'static, usize> {
+    let live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    NO_FAKES
+        .wait_while(live, |live| *live > 0)
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// One call's process group, tracked until dropped. An RAII guard, so it
 /// has a hand-written constructor.

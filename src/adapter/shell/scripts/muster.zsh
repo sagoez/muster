@@ -8,6 +8,10 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} && ! ${+@MUSTER_OPEN_ENV@} ));
     typeset -g __muster_notes=@MUSTER_NOTES@
     typeset -g __muster_load __muster_load_pid
     typeset -gi __muster_seq=0
+    # The folder of the last prompt, and the first prompt's time, in
+    # nanoseconds, at which the shell was seen in it: a project registered
+    # after that was registered around the shell, not walked into.
+    typeset -g __muster_pwd= __muster_arrived=
     export @MUSTER_SHELL_ENV@=$$
 
     # The load's start in nanoseconds, then the pid of a process it spawns,
@@ -37,7 +41,16 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} && ! ${+@MUSTER_OPEN_ENV@} ));
     __muster_precmd() {
         local -i status_kept=$?
         emulate -L zsh
-        local note line
+        local note line now=${EPOCHREALTIME-}
+        local -a arrived
+        if [[ $PWD != "$__muster_pwd" ]]; then
+            __muster_pwd=$PWD
+            __muster_arrived=
+            if [[ $now == <->.<-> && ${#${now%.*}} -le 10 ]]; then
+                __muster_arrived=${now%.*}${(r:9::0:)${now#*.}}
+            fi
+        fi
+        [[ -n $__muster_arrived ]] && arrived=(--arrived $__muster_arrived)
         (( __muster_seq += 1 ))
         for note in "$__muster_notes"/"$$"-*.note(N.on); do
             while IFS= read -r line || [[ -n $line ]]; do
@@ -46,7 +59,8 @@ if [[ -o interactive ]] && (( ! ${+__muster_hook} && ! ${+@MUSTER_OPEN_ENV@} ));
             command rm -f -- "$note"
         done
         (command "$__muster_bin" @MUSTER_REPORT@ --pid "$$" --load "$__muster_load" \
-            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &!)
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" "${arrived[@]}" \
+            < /dev/null > /dev/null 2>&1 &!)
         return status_kept
     }
 

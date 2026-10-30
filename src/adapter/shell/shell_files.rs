@@ -200,6 +200,28 @@ impl ShellRegistry for ShellFiles {
         Ok(true)
     }
 
+    /// The read, the change and the write all hold the records lock.
+    fn amend(
+        &self,
+        shell: &ShellId,
+        change: &dyn Fn(ShellRecord) -> ShellRecord,
+    ) -> Result<bool, ShellRegistryError> {
+        let pid = shell.pid();
+        let failed = |error: &dyn ToString| ShellRegistryError::Write {
+            pid,
+            reason: error.to_string(),
+        };
+        create_private_dir_all(&self.dir).map_err(|error| failed(&error))?;
+        let _lock = self.lock_records().map_err(|error| failed(&error))?;
+        let Some(stored) = self.record(shell) else {
+            return Ok(false);
+        };
+        let bytes =
+            serde_json::to_vec(&change(stored).to_wire()).map_err(|error| failed(&error))?;
+        self.write(pid, &self.record_path(pid), &bytes)?;
+        Ok(true)
+    }
+
     /// Writes nothing for no lines, and drops the batch whole once the shell
     /// has `MAX_NOTE_FILES` waiting.
     fn deliver(
@@ -257,7 +279,7 @@ fn read_record(path: &Path) -> Option<ShellRecord> {
 #[cfg(test)]
 mod tests {
     use std::{
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{PermissionsExt, symlink},
         process::{self, Command, Stdio},
         thread,
         time::Duration,
@@ -268,7 +290,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         occupancy::testing::stamp,
-        value::{ProjectRoot, StartToken},
+        value::{EpochNanos, ProjectRoot, StartToken},
     };
 
     /// The permission bits of a mode.
@@ -309,6 +331,7 @@ mod tests {
             .shell(shell)
             .stamp(stamp(load, seq))
             .folder(PathBuf::from(project.unwrap_or(OUTSIDE)))
+            .arrived(EpochNanos::new(seq))
             .project(project.map(|root| ProjectRoot::try_new(PathBuf::from(root)).unwrap()))
             .build()
     }
@@ -379,6 +402,99 @@ mod tests {
         assert_eq!(files.record(&shell), Some(record(shell, 5, Some("/new"))));
         assert!(files.save_if_newer(&record(shell, 6, None)).unwrap());
         assert_eq!(files.record(&shell), Some(record(shell, 6, None)));
+    }
+
+    /// The project `root` names, for a record's change.
+    fn root(root: &str) -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from(root)).unwrap()
+    }
+
+    /// A record is amended only when one of its own shell is stored: never
+    /// with none, nor one a reused pid's earlier shell left. A link standing
+    /// in for the record is replaced, never written through.
+    #[test]
+    fn a_record_is_amended_only_when_its_shell_has_one() {
+        let (scratch, files) = files();
+        let shell = this_shell(&files);
+        let earlier = ShellId::builder()
+            .pid(shell.pid())
+            .start(StartToken::try_new(WRONG_START).unwrap())
+            .build();
+        let named = |stored: ShellRecord| stored.registered_around(root("/new"));
+
+        assert!(!files.amend(&shell, &named).unwrap());
+        assert_eq!(files.record(&shell), None);
+
+        files.save_if_newer(&record(earlier, 5, None)).unwrap();
+        assert!(!files.amend(&shell, &named).unwrap());
+        assert_eq!(files.record(&earlier), Some(record(earlier, 5, None)));
+
+        files.save_if_newer(&record(shell, 5, None)).unwrap();
+        assert!(files.amend(&shell, &named).unwrap());
+        assert_eq!(files.record(&shell), Some(named(record(shell, 5, None))));
+
+        let path = files.record_path(shell.pid());
+        let target = scratch.path().join("elsewhere.json");
+        fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        let moved = |stored: ShellRecord| stored.registered_around(root("/moved"));
+        assert!(files.amend(&shell, &moved).unwrap());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+        assert_eq!(
+            read_record(&target),
+            Some(named(record(shell, 5, None))),
+            "the link's target was written through"
+        );
+    }
+
+    /// Two registrations amending one shell's record at once each change
+    /// the record the other left: the later one, held at the records lock
+    /// while the first changes it, nests its project inside the first's
+    /// rather than overwriting it.
+    #[test]
+    fn concurrent_amends_of_one_record_each_build_on_the_other() {
+        let (_scratch, files) = files();
+        let shell = this_shell(&files);
+        let start = record(shell, 5, None);
+        files.save_if_newer(&start).unwrap();
+        let (changing, changed) = crossbeam_channel::bounded(0);
+
+        let outer = thread::spawn({
+            let files = files.clone();
+            move || {
+                files.amend(&shell, &|stored| {
+                    changing.send(()).unwrap();
+                    thread::sleep(INTERLEAVE);
+                    stored.registered_around(root("/x"))
+                })
+            }
+        });
+        changed.recv().unwrap();
+        let inner = files.amend(&shell, &|stored| stored.registered_around(root("/x/sub")));
+
+        assert!(outer.join().unwrap().unwrap());
+        assert!(inner.unwrap());
+        let both = start
+            .registered_around(root("/x"))
+            .registered_around(root("/x/sub"));
+        assert_eq!(both.held(), &vec![root("/x")]);
+        assert_eq!(files.record(&shell), Some(both));
+    }
+
+    /// An amend whose shells folder cannot be opened or locked fails as a
+    /// write, as a save does, rather than reading as no record.
+    #[test]
+    fn an_amend_that_cannot_lock_the_records_fails_as_a_write() {
+        let (_scratch, files) = files();
+        let shell = this_shell(&files);
+        fs::write(files.notes_dir(), b"not a folder").unwrap();
+
+        let amended = files.amend(&shell, &|stored| stored);
+
+        assert!(
+            matches!(amended, Err(ShellRegistryError::Write { pid, .. }) if pid == shell.pid()),
+            "{amended:?}"
+        );
     }
 
     /// A shell that `exec`s itself loads the hook again and counts from one:
@@ -459,7 +575,7 @@ mod tests {
         fs::write(files.notes_dir().join("7.json"), b"{not json").unwrap();
         fs::write(
             files.notes_dir().join("8.json"),
-            br#"{"pid":8,"start":3,"load":1,"load-pid":2,"seq":1,"folder":[47],"project":null,"held":[],"extra":true}"#,
+            br#"{"pid":8,"start":3,"load":1,"load-pid":2,"seq":1,"folder":[47],"arrived":1,"project":null,"held":[],"extra":true}"#,
         )
         .unwrap();
 

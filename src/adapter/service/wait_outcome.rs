@@ -37,8 +37,8 @@ pub struct WaitOutcome {
     #[getset(get = "pub")]
     #[builder(default)]
     tail: Vec<String>,
-    /// Where scanning began, when the asked cursor was older than the output
-    /// still held.
+    /// Where the output tested without a gap began, when the asked cursor
+    /// was older than that: the log rotated, or more arrived than was held.
     #[getset(get = "pub")]
     #[builder(default)]
     scanned_from: Option<OutputCursor>,

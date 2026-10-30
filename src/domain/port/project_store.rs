@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::domain::{
     config::{ConfigError, UnreadableProject},
+    occupancy::RegisteredProject,
     project::Project,
     value::{ProjectName, ProjectRoot},
 };
@@ -41,7 +42,21 @@ pub trait ProjectStore {
     ///
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be read.
-    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError>;
+    fn project_containing(&self, dir: &Path) -> Result<Option<Project>, ConfigError> {
+        Ok(self
+            .registered_project_containing(dir)?
+            .map(|found| found.project().clone()))
+    }
+
+    /// The project [`ProjectStore::project_containing`] finds for `dir`,
+    /// with when it was registered, read with it.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be read.
+    fn registered_project_containing(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<RegisteredProject>, ConfigError>;
 
     /// Deletes the project registered at `root`, readable or not, with its
     /// processes and coordination. Returns whether it existed.

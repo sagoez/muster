@@ -17,6 +17,8 @@ use crate::{
 
 /// Shown in place of the valid names when a project has no processes.
 const NO_PROCESSES: &str = "the project has no processes";
+/// What an older service is called when it is too old to say its version.
+const TOO_OLD_TO_SAY: &str = "a version too old to say which";
 
 /// A failure talking to the muster service or reading what it reports. Its
 /// messages name no command or tool; the CLI and the MCP server each add
@@ -74,6 +76,21 @@ pub enum ClientError {
         theirs: String,
         /// The binary the service runs.
         binary: Option<PathBuf>,
+    },
+    /// The running service is an older muster than this binary, found by a
+    /// call that never replaces one, so it was left running.
+    #[error(
+        "the running muster service is {}, older than this muster ({ours})",
+        theirs.as_ref().map_or_else(
+            || TOO_OLD_TO_SAY.to_string(),
+            |theirs| format!("version {theirs}")
+        )
+    )]
+    ServiceOlder {
+        /// This binary's version.
+        ours: String,
+        /// The service's version, when it is new enough to say.
+        theirs: Option<String>,
     },
     /// A replacement service still runs another version than this binary.
     #[error(
@@ -171,7 +188,8 @@ impl ClientError {
             | Self::ServiceIo { .. } => FailureKind::ServiceUnavailable,
             Self::UnexpectedAnswer(_)
             | Self::VersionMismatch { .. }
-            | Self::ServiceNewer { .. } => FailureKind::VersionMismatch,
+            | Self::ServiceNewer { .. }
+            | Self::ServiceOlder { .. } => FailureKind::VersionMismatch,
             Self::UnknownProcess { .. } => FailureKind::UnknownProcess,
             Self::AmbiguousProcess { .. } => FailureKind::Ambiguous,
             Self::NotRunning(_) => FailureKind::NotRunning,
@@ -197,6 +215,7 @@ impl ClientError {
             | Self::ServiceIo { .. }
             | Self::UnexpectedAnswer(_)
             | Self::ServiceNewer { .. }
+            | Self::ServiceOlder { .. }
             | Self::VersionMismatch { .. }
             | Self::NotRunning(_)
             | Self::Refused { .. }
@@ -287,6 +306,10 @@ mod tests {
                 ours: "0.9.1".to_string(),
                 theirs: "9.0.0".to_string(),
                 binary: None,
+            },
+            ClientError::ServiceOlder {
+                ours: "0.9.1".to_string(),
+                theirs: Some("0.9.0".to_string()),
             },
             ClientError::VersionMismatch {
                 ours: "0.9.1".to_string(),

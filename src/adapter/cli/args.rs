@@ -244,11 +244,8 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
 )]
 pub struct Args {
     /// The project to act on, by name or folder.
-    ///
-    /// A registered project's name, or a folder when the value contains `/`
-    /// or starts with `.` or `~`. Defaults to $MUSTER_PROJECT, then the
-    /// registered project containing the current folder.
-    // Global, so it is recognized before or after a subcommand rather than
+    // How a value resolves is in docs/reference.md, kept out of the help so
+    // `muster --help` lists it on one line. Global, so it is recognized before or after a subcommand rather than
     // being swallowed by `run`'s command words.
     #[arg(short, long, global = true, value_name = "PROJECT")]
     #[getset(get = "pub")]
@@ -307,16 +304,13 @@ mod tests {
         }
     }
 
-    /// The main help in full and every visible command's short help, so a
-    /// changed flag, name or description shows up in review.
+    /// Every visible command's short help, so a changed flag, name or
+    /// description shows up in review.
     #[test]
     fn cli_args_snapshot() {
         let mut command = Args::command();
         command.build();
-        let mut helps = vec![format!(
-            "$ {APP_NAME} --help\n{}",
-            command.render_long_help()
-        )];
+        let mut helps = Vec::new();
         collect_help(&mut command, APP_NAME, &mut helps);
 
         insta::assert_snapshot!(helps.join("\n\n"));
@@ -470,25 +464,28 @@ mod tests {
         assert_eq!(grouped, visible);
     }
 
-    /// Every way of asking prints help: `-h` the grouped summary, `--help`
-    /// and `muster help` the same with `--project`'s resolution rules, and a
-    /// command's own help its detail.
-    #[test]
-    fn every_way_of_asking_prints_help() {
-        /// Words only `--project`'s long help says.
-        const RESOLUTION_RULES: &str = "Defaults to $MUSTER_PROJECT";
-        let help = |line: &[&str]| match Args::try_parse_from(line) {
+    /// Renders the help `line` asks for.
+    fn help(line: &[&str]) -> String {
+        match Args::try_parse_from(line) {
             Err(error) if error.kind() == ErrorKind::DisplayHelp => error.render().to_string(),
             _ => panic!("{line:?} prints help"),
-        };
+        }
+    }
 
-        let summary = help(&["muster", "-h"]);
-        assert!(summary.contains(REFERENCE_LEAD), "{summary}");
-        assert!(!summary.contains(RESOLUTION_RULES), "{summary}");
-        for line in [&["muster", "--help"][..], &["muster", "help"]] {
+    /// Every way of asking prints help: the main help, whichever way it is
+    /// asked for, lists `--project` on one line and ends at the reference;
+    /// a command's `--help` adds its detail.
+    #[test]
+    fn every_way_of_asking_prints_help() {
+        /// `--project` with its summary on the same line.
+        const PROJECT_LINE: &str = "-p, --project <PROJECT>  The project to act on";
+
+        for line in [&["muster", "-h"][..], &["muster", "--help"], &[
+            "muster", "help",
+        ]] {
             let main = help(line);
-            assert!(main.contains(REFERENCE_LEAD), "{main}");
-            assert!(main.contains(RESOLUTION_RULES), "{main}");
+            assert!(main.contains(PROJECT_LINE), "{main}");
+            assert!(main.trim_end().ends_with(REFERENCE_PATH), "{main}");
         }
         for line in [
             &["muster", "ps", "--help"][..],
@@ -496,10 +493,11 @@ mod tests {
             &["muster", "service", "stop", "--help"],
         ] {
             let command = help(line);
-            assert!(command.contains(RESOLUTION_RULES), "{command}");
+            assert!(command.contains("--project"), "{command}");
             assert!(!command.contains(REFERENCE_LEAD), "{command}");
         }
-        assert!(help(&["muster", "ps", "-h"]).contains("List this project's processes"));
+        assert!(help(&["muster", "ps", "--help"]).contains("Shows each process's state"));
+        assert!(!help(&["muster", "ps", "-h"]).contains("Shows each process's state"));
     }
 
     /// Each command's summary in the main help is one short line; the detail

@@ -1,69 +1,8 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 318
+assertion_line: 316
 expression: "helps.join(\"\\n\\n\")"
 ---
-$ muster --help
-Run a project's dev processes in the background, and control them from any shell
-
-Usage: muster [OPTIONS] [COMMAND]
-
-Processes:
-  ps            List this project's processes
-  up            Start the processes that autostart
-  down          Stop every process
-  start         Start a process
-  stop          Stop a process
-  restart       Restart a process
-  pause         Suspend a process, leaving it alive
-  resume        Resume a paused process
-  kill          Kill a process at once
-  wait          Wait until a process is ready or prints a line
-  logs          Print or follow a process's log
-  attach        Show a process in this terminal and type into it
-  open          Show a process in a new terminal pane beside this one
-  run           Add a command, start it and attach to it
-
-Stack:
-  add           Add a process to this project
-  set           Change a process's definition
-  rm            Remove processes from this project
-  import        Load processes from a stack file
-  export        Write this project's processes to a stack file
-  init          Detect processes in this folder and add them
-  projects      List and manage registered projects
-
-Agents and coordination:
-  mcp           Serve muster to an agent over MCP
-  note          Read or write shared notes
-  todo          List or manage shared todos
-  kv            Read or write shared key-value state
-  lock          List agents' locks, or release one
-  coordination  Export or restore the shared coordination state
-  notices       Show agents' stack edits and recent failures
-
-Setup:
-  config        Show or change muster's settings
-  shell-init    Print the shell hook that starts projects you enter
-  completions   Print the shell hook that enables completions
-  doctor        Check muster's setup for problems
-  service       Show or stop the muster service
-
-Options:
-  -p, --project <PROJECT>
-          The project to act on, by name or folder.
-          
-          A registered project's name, or a folder when the value contains `/` or starts with `.` or `~`. Defaults to $MUSTER_PROJECT, then the registered project containing the current folder.
-
-  -h, --help
-          Print help (see a summary with '-h')
-
-  -V, --version
-          Print version
-
-Exit codes and JSON output: https://github.com/sagoez/muster/blob/main/docs/reference.md
-
-
 $ muster -h
 Run a project's dev processes in the background, and control them from any shell
 
@@ -112,7 +51,7 @@ Setup:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
   -V, --version            Print version
 
 Exit codes and JSON output: https://github.com/sagoez/muster/blob/main/docs/reference.md
@@ -139,7 +78,7 @@ Usage: muster up [OPTIONS]
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster down -h
@@ -150,7 +89,7 @@ Usage: muster down [OPTIONS]
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster start -h
@@ -166,7 +105,7 @@ Options:
   -p, --project <PROJECT>   The project to act on, by name or folder
       --wait                Wait until its new run passes its readiness check, or runs when it has none
       --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
-  -h, --help                Print help (see more with '--help')
+  -h, --help                Print help
 
 
 $ muster stop -h
@@ -196,7 +135,7 @@ Options:
   -p, --project <PROJECT>   The project to act on, by name or folder
       --wait                Wait until its new run passes its readiness check, or runs when it has none
       --timeout <DURATION>  With --wait, the longest to wait, such as 60s; unbounded when absent
-  -h, --help                Print help (see more with '--help')
+  -h, --help                Print help
 
 
 $ muster wait -h
@@ -232,7 +171,7 @@ Arguments:
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster resume -h
@@ -246,7 +185,7 @@ Arguments:
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster kill -h
@@ -349,7 +288,7 @@ Usage: muster service status [OPTIONS]
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster service stop -h
@@ -360,7 +299,7 @@ Usage: muster service stop [OPTIONS]
 Options:
       --json               Print the result as JSON
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster add -h
@@ -455,7 +394,7 @@ Commands:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster config list -h
@@ -466,7 +405,7 @@ Usage: muster config list [OPTIONS]
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster config get -h
@@ -480,7 +419,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster config set -h
@@ -495,7 +434,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster export -h
@@ -511,7 +450,7 @@ Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --with-env           Write environment values too; without it each variable is written with no value, to be filled in before importing
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster import -h
@@ -571,7 +510,7 @@ Commands:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster projects rm -h
@@ -632,7 +571,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster note set -h
@@ -647,7 +586,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster note rm -h
@@ -661,7 +600,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster todo -h
@@ -695,7 +634,7 @@ Options:
       --dep <DEPS>         Id of a todo this one depends on (repeatable)
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster todo status -h
@@ -711,7 +650,7 @@ Options:
       --force              Change it even though an agent holds it
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster todo rm -h
@@ -725,7 +664,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster kv -h
@@ -758,7 +697,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster kv set -h
@@ -773,7 +712,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster kv rm -h
@@ -787,7 +726,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster lock -h
@@ -816,7 +755,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster coordination -h
@@ -846,7 +785,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster coordination import -h
@@ -860,7 +799,7 @@ Arguments:
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the result as JSON
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster mcp -h
@@ -896,7 +835,7 @@ Arguments:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-  -h, --help               Print help (see more with '--help')
+  -h, --help               Print help
 
 
 $ muster shell-init -h

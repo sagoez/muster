@@ -6,9 +6,7 @@ mod fake_herdr;
 mod herdr_call;
 mod herdr_failure;
 mod herdr_workspace;
-mod pane_identity;
 mod reply;
 mod typed_line;
 
 pub use herdr_workspace::*;
-pub use pane_identity::*;

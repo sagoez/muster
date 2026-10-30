@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, env, ffi::OsString};
 
 use nutype::nutype;
 
-use crate::{
-    adapter::herdr::PANE_IDENTITY_ENV,
-    domain::value::{EnvName, EnvValue},
+use crate::domain::{
+    coordination::PANE_IDENTITY_ENV,
+    value::{EnvName, EnvValue},
 };
 
 /// The environment of the command that asked the service to launch a process,

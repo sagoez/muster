@@ -767,7 +767,7 @@ fn a_stop_waits_for_a_slow_process() {
 
 /// `logs -f` of a stopped process shows its log and then follows it when it
 /// starts again; a reader that goes away ends it quietly. Plain `logs` into
-/// a pipe writes the log byte for byte.
+/// a pipe writes the log's lines.
 #[test]
 fn logs_follow_waits_for_a_stopped_process_and_a_closed_pipe_ends_it() {
     let scratch = Scratch::new();
@@ -3880,64 +3880,96 @@ fn init_offers_what_the_folder_defines() {
     assert!(exported.contains("autostart: true"), "{exported}");
 }
 
-/// A process that prints colour, a window title, a clipboard write, a
-/// device query, a window report query and a DCS, redraws a progress line,
-/// then prints `done`.
-const NOISY: &str = "printf '\\033[31mred\\033[0m \\033]0;pwned\\007 \\033]52;c;aGk=\\007 \\033[6n \\033[18t \\033P1$qm\\033\\\\ 10%%\\r\\033[2K50%%\\033[1A done\\n'; sleep 600";
-/// The progress redraw [`NOISY`] prints, which a terminal still receives.
-const PROGRESS_REDRAW: &str = "10%\r\x1b[2K50%\x1b[1A";
+/// The footer `docker compose up` redraws after every log line on a
+/// terminal, as a `printf` format: it clears the rows below, makes room for
+/// the footer, climbs back and draws it at the bottom of the screen between
+/// a saved and a restored cursor.
+const COMPOSE_FOOTER: &str = "\\033[0G\\033[s\\0337\\033[1B\\033[0K\\033[1B\\033[0K\\033[u\\0338\\033[0K\\n\\033[0G\\033[0K\\n\\033[0G\\033[2A\\033[0G\\033[s\\0337\\033[30;0H\\033[0K\\033[1mw\\033[0m Enable Watch   \\033[1md\\033[0m Detach\\033[0G\\033[u\\0338";
 
-/// Whether `haystack` holds `needle`.
-fn holds(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+/// A process whose output steers the terminal the way a full-screen tool
+/// does: a title, a scroll region, colour, a carriage-return progress bar,
+/// a clipboard write, a trip to the alternate screen and a compose footer
+/// redrawn after each line, around four real lines.
+fn steering() -> String {
+    format!(
+        "printf '\\033]0;pwned\\007\\033[1;20rfirst line\\n{COMPOSE_FOOTER}\\033[31mred\\033[0m ok\\n{COMPOSE_FOOTER}10%%\\r\\033[2K50%%\\r\\033[2K100%% done\\n{COMPOSE_FOOTER}\\033]52;c;aGk=\\007\\033[?1049h\\033[Hscreen\\033[?1049llast line\\n{COMPOSE_FOOTER}'; sleep 600"
+    )
 }
 
-/// On a terminal, `logs` and `logs -f` show a process's text, colours and
-/// progress redraws but nothing that could retitle the terminal, write its
-/// clipboard or query it; a pipe still receives every byte the process wrote.
+/// The lines [`steering`] leaves for a log reader.
+const STEERING_LINES: [&str; 4] = ["first line", "red ok", "100% done", "last line"];
+
+/// Every escape sequence in `raw` that is not a colour (SGR), and every
+/// control character but a line feed, carriage return or tab.
+fn steering_bytes(raw: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find(|c: char| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        let tail = &rest[at..];
+        let sgr = tail.strip_prefix("\x1b[").and_then(|params| {
+            let end = params.find(|c: char| !(c.is_ascii_digit() || c == ';' || c == ':'))?;
+            params[end..].starts_with('m').then_some(2 + end + 1)
+        });
+        match sgr {
+            Some(length) => rest = &tail[length..],
+            None => {
+                found.push(tail.chars().take(8).collect());
+                rest = &tail[tail.chars().next().map_or(1, char::len_utf8)..];
+            },
+        }
+    }
+    found
+}
+
+/// `logs` and `logs -f` print only the lines a log reader expects, on a
+/// terminal or a pipe: a footer redraw, a title, a scroll region, the
+/// alternate screen or a progress bar's earlier states never reach the
+/// person's terminal, only
+/// text, line breaks and colours reset at each line's end, and every real
+/// line is there. A pipe and `--json` get the same lines without colour.
 #[test]
-fn logs_on_a_terminal_drop_what_could_drive_it() {
+fn logs_print_only_the_lines_a_reader_expects() {
     let mut scratch = Scratch::new();
-    let project = scratch.project("shop", &stack(&[entry("noisy", NOISY, true)]));
+    let command = steering();
+    let project = scratch.project("shop", &stack(&[entry("infra", &command, true)]));
     let up = scratch.on(&project, &["up"]);
     assert!(up.status.success(), "{}", shown(&up));
-    wait_until("the noisy output to be logged", || {
-        stdout(&scratch.on(&project, &["logs", "noisy"])).contains("done")
+    wait_until("the steering output to be logged", || {
+        stdout(&scratch.on(&project, &["logs", "infra"])).contains("last line")
     });
+    let expected = format!("{}\n", STEERING_LINES.join("\n"));
 
-    let piped = scratch.on(&project, &["logs", "noisy"]);
-    assert!(
-        holds(&piped.stdout, b"\x1b]0;pwned\x07"),
-        "{}",
-        shown(&piped)
-    );
-    assert!(holds(&piped.stdout, b"\x1b[6n"), "{}", shown(&piped));
-    assert!(holds(&piped.stdout, b"\x1b[18t"), "{}", shown(&piped));
-    assert!(
-        holds(&piped.stdout, PROGRESS_REDRAW.as_bytes()),
-        "{}",
-        shown(&piped)
-    );
+    let piped = scratch.on(&project, &["logs", "infra"]);
+    assert_eq!(stdout(&piped), expected, "{}", shown(&piped));
+    let json = scratch.on(&project, &["logs", "infra", "--json"]);
+    let read: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(read["text"], expected.as_str(), "{}", shown(&json));
 
-    for args in [&["logs", "noisy"][..], &["logs", "-f", "noisy"][..]] {
+    for args in [&["logs", "infra"][..], &["logs", "-f", "infra"][..]] {
         let pty = Pty::open();
         let mut logs = pty.spawn(&mut scratch, &project, args);
-        pty.wait_for("done", 1);
+        pty.wait_for("last line", 1);
         let _ = logs.kill();
         let _ = logs.wait();
         let raw = pty.raw();
-        assert!(raw.contains("\x1b[31mred\x1b[0m"), "{args:?}: {raw:?}");
-        assert!(raw.contains(PROGRESS_REDRAW), "{args:?}: {raw:?}");
-        for driving in [
-            "pwned", "\x1b]", "aGk=", "\x1b[6n", "\x1b[18t", "\x1bP", "1$qm",
-        ] {
-            assert!(
-                !raw.contains(driving),
-                "{args:?} let {driving:?} through: {raw:?}"
-            );
-        }
+        assert_eq!(
+            steering_bytes(&raw),
+            Vec::<String>::new(),
+            "{args:?}: {raw:?}"
+        );
+        assert!(
+            raw.contains("\x1b[31mred\x1b[0m ok\r\n"),
+            "{args:?}: {raw:?}"
+        );
+        assert!(
+            !raw.contains("\r\n\r\n"),
+            "{args:?} printed blank lines: {raw:?}"
+        );
+        assert_eq!(
+            pty.drawn().lines().collect::<Vec<_>>(),
+            STEERING_LINES,
+            "{args:?}: {raw:?}"
+        );
     }
 }
 

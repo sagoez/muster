@@ -76,7 +76,9 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
     let mut lines = BufReader::with_capacity(BLOCK_BYTES, SpanReader::new(&span, start));
     let mut at = start;
     while let Some((line, consumed)) = next_line(&mut lines)? {
-        filter.offer(line, at, &mut kept);
+        if let Some(line) = line {
+            filter.offer(line, at, &mut kept);
+        }
         at = at.advanced(consumed);
     }
     let from = match kept.first_at() {
@@ -169,10 +171,9 @@ pub fn first_match(
 ) -> Result<LogScan, HolderError> {
     let mut matched = None;
     let began = visit_lines(log, from, until, |at, line| {
-        let text = strip_line(line);
-        if !matcher.is_match(&text) {
+        let Some(text) = strip_line(line).filter(|text| matcher.is_match(text)) else {
             return ControlFlow::Continue(());
-        }
+        };
         matched = Some(LoggedLine::builder().at(at).text(text).build());
         ControlFlow::Break(())
     })?;
@@ -207,10 +208,13 @@ pub fn last_lines(
         if mem::take(&mut cut) {
             return ControlFlow::Continue(());
         }
+        let Some(text) = strip_line(line) else {
+            return ControlFlow::Continue(());
+        };
         if lines.len() == count {
             lines.pop_front();
         }
-        lines.push_back(strip_line(line));
+        lines.push_back(text);
         ControlFlow::Continue(())
     })?;
     Ok(lines.into())
@@ -284,12 +288,13 @@ fn hand_line(
 
 /// Reads the next line from `reader`, stripped, keeping at most
 /// [`RAW_LINE_KEEP_BYTES`] of it and cutting what strips past
-/// [`LINE_MAX_CHARS`], with the raw bytes it took. A final line with no line
-/// feed is returned too.
+/// [`LINE_MAX_CHARS`], with the raw bytes it took; the text is none for a
+/// line that only redrew the screen. A final line with no line feed is
+/// returned too.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when the read fails.
-fn next_line(reader: &mut impl BufRead) -> io::Result<Option<(String, u64)>> {
+fn next_line(reader: &mut impl BufRead) -> io::Result<Option<(Option<String>, u64)>> {
     let mut head = Vec::new();
     let mut skipped = 0usize;
     let mut consumed = 0u64;
@@ -317,7 +322,10 @@ fn next_line(reader: &mut impl BufRead) -> io::Result<Option<(String, u64)>> {
     if !read_any {
         return Ok(None);
     }
-    Ok(Some((cut(strip_line(&head), skipped), consumed)))
+    Ok(Some((
+        strip_line(&head).map(|text| cut(text, skipped)),
+        consumed,
+    )))
 }
 
 /// `text` cut to [`LINE_MAX_CHARS`] with a note of how much went, counting
@@ -426,6 +434,27 @@ mod tests {
         fixture.write(b"\x1b[32mready\x1b[0m\r\n10%\r50%\r100%\r\n");
         let slice = fixture.read(&LogQuery::builder().build());
         assert_eq!(slice.lines(), &["ready", "100%"]);
+    }
+
+    /// A status footer redrawn after every line and the room made for it
+    /// read as nothing, so the newest lines asked for are all real ones.
+    #[test]
+    fn footer_redraws_are_left_out_of_the_newest_lines() {
+        let mut fixture = Fixture::new();
+        let footer = b"\x1b[0K\r\n\x1b[0G\x1b[0K\r\n\x1b[0G\x1b[2A\x1b[s\x1b7\x1b[30;0H\
+            \x1b[0Kw Enable Watch   d Detach\x1b[u\x1b8";
+        for line in ["one", "two", "three", "four"] {
+            fixture.write(format!("web-1  | {line}\r\n").as_bytes());
+            fixture.write(footer);
+        }
+
+        let slice = fixture.read(&LogQuery::builder().lines(lines(3)).build());
+
+        assert_eq!(slice.lines(), &[
+            "web-1  | two",
+            "web-1  | three",
+            "web-1  | four"
+        ]);
     }
 
     /// A cursor keeps working across rotations; one older than the oldest

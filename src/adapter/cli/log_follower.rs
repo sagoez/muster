@@ -139,8 +139,9 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
-            cli::gap_marked::{GapMarked, gap_line},
+            cli::rendered_log::{RenderedLog, gap_line},
             holder::RotatingLog,
+            terminal::colouring::Colouring,
         },
         domain::value::ByteSize,
     };
@@ -162,7 +163,9 @@ mod tests {
     /// What one pump of `follower` copies, as text.
     fn pump(follower: &mut LogFollower) -> String {
         let mut bytes = Vec::new();
-        follower.pump(&mut GapMarked::new(&mut bytes)).unwrap();
+        follower
+            .pump(&mut RenderedLog::new(&mut bytes, Colouring::Plain))
+            .unwrap();
         String::from_utf8(bytes).unwrap()
     }
 

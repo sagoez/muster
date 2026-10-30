@@ -83,6 +83,7 @@ use super::{
     shell_init::shell_init,
     shell_report::shell_report,
     start_args::StartArgs,
+    surroundings::Surroundings,
     terminal_safe::TerminalSafe,
     todo::todo,
     wait::{condition, wait_text, wait_through},
@@ -99,6 +100,7 @@ use crate::{
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
+        terminal::{colouring::Colouring, log_renderer::LogRenderer},
     },
     constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
@@ -624,9 +626,11 @@ fn finish_wait(json: bool, result: Result<WaitOutcome, CliError>) {
 }
 
 /// Prints a process's log or screen, or follows its log until interrupted;
-/// the process is chosen at a terminal when `name` names none. A log printed
-/// to anything but a terminal is written byte for byte; on a terminal only
-/// its text, layout and colours are.
+/// the process is chosen at a terminal when `name` names none. A log is
+/// printed as the lines a log reader shows, with nothing that moves the
+/// cursor or changes the terminal, coloured only on a terminal that draws
+/// colour. A screen printed to anything but a terminal is written byte for
+/// byte; on a terminal only its text, layout and colours are.
 fn logs(
     invocation: &Invocation<'_>,
     name: Option<ProcessRef>,
@@ -654,15 +658,15 @@ fn logs(
         Ok::<_, CliError>(chosen)
     };
     let on_terminal = !json && io::stdout().is_terminal();
+    let colouring = if Surroundings::current(json).colour() {
+        Colouring::Coloured
+    } else {
+        Colouring::Plain
+    };
     let result = invocation.connect().and_then(|client| {
         if follow {
-            let followed = if on_terminal {
-                let mut out = TerminalSafe::new(anstream::stdout());
-                follow_logs(&client, &project, pick, json, &mut out)
-            } else {
-                follow_logs(&client, &project, pick, json, &mut io::stdout().lock())
-            };
-            match followed? {}
+            let mut out = io::stdout().lock();
+            match follow_logs(&client, &project, pick, json, colouring, &mut out)? {}
         }
         process::logs(&client, &project, pick, screen)
     });
@@ -673,6 +677,9 @@ fn logs(
     };
     match result {
         Ok(read) if json => print_result(json, &read.text_in(&project), |_| {}),
+        Ok(read) if read.log().is_some() => {
+            emit_bytes(LogRenderer::text_of(read.bytes(), colouring).as_bytes());
+        },
         Ok(read) if on_terminal => written(print_safely(read.bytes())),
         Ok(read) => emit_bytes(read.bytes()),
         Err(error) => fail_framed(framing, json, &error),

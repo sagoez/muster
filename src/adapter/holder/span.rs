@@ -166,7 +166,8 @@ impl Span {
 
     /// Whether the line `[start, end)` counts toward the newest lines wanted,
     /// reading its head from `block` (which starts at the given offset) when
-    /// it lies there, else from the files.
+    /// it lies there, else from the files. A line that only redrew the
+    /// screen never counts, as a read leaves it out.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when a read fails.
@@ -177,9 +178,6 @@ impl Span {
         end: u64,
         block: (u64, &[u8]),
     ) -> io::Result<bool> {
-        if matches!(query.filter(), LineFilter::All) {
-            return Ok(true);
-        }
         let head_end = end.min(start + RAW_LINE_KEEP_BYTES as u64);
         let (block_start, bytes) = block;
         let text = if head_end <= block_start + bytes.len() as u64 {
@@ -188,6 +186,9 @@ impl Span {
             let mut head = vec![0; (head_end - start) as usize];
             let filled = self.read_full_at(start, &mut head)?;
             strip_line(&head[..filled])
+        };
+        let Some(text) = text else {
+            return Ok(false);
         };
         Ok(match query.filter() {
             LineFilter::All => true,

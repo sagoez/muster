@@ -92,8 +92,8 @@ plugs into a port.
     port; its schema holds the `process_ports` table of declared ports and
     the `idle_stop_*` columns of `settings` and `projects`),
     `adapter/exchange` (the export file), `adapter/detect` (stack
-    detection for `muster init`), `adapter/terminal` (the VT emulator and
-    keyboard tracker), `adapter/herdr` (the `TerminalWorkspace` port over
+    detection for `muster init`), `adapter/terminal` (the VT emulator,
+    keyboard tracker and log line renderer), `adapter/herdr` (the `TerminalWorkspace` port over
     the herdr CLI, each call bounded and its child killed and reaped),
     notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
@@ -141,7 +141,7 @@ src/
     client/            # what both drivers share: ServiceAccess, process use cases, reports
     service/           # the per-user service and its supervisors
     holder/            # one detached process per child, owning its PTY
-    terminal/          # VT emulator, keyboard tracker, the bounded vte parser
+    terminal/          # VT emulator, keyboard tracker, the bounded vte parser, log line renderer
     herdr/             # driven: TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
     pty/               # driven: ProcessRunner via portable-pty
     store/             # driven: SqliteStore, migrations

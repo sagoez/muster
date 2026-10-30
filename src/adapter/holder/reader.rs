@@ -99,8 +99,9 @@ impl Reader {
             if self.sink.is_detached() {
                 return ControlFlow::Break(());
             }
-            let text = strip_line(line);
-            if matchers.iter().any(|matcher| matcher.is_match(&text)) {
+            if strip_line(line)
+                .is_some_and(|text| matchers.iter().any(|matcher| matcher.is_match(&text)))
+            {
                 self.forward(at, line.to_vec());
             }
             ControlFlow::Continue(())

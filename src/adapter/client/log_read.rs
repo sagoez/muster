@@ -4,13 +4,16 @@ use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
-use crate::domain::{
-    project::Project,
-    value::{OutputCursor, ProcessName},
+use crate::{
+    adapter::terminal::{colouring::Colouring, log_renderer::LogRenderer},
+    domain::{
+        project::Project,
+        value::{OutputCursor, ProcessName},
+    },
 };
 
 /// What `muster logs` read of one process: its bytes exactly as written,
-/// for a pipe to receive unchanged.
+/// for the command to render.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
 pub struct LogRead {
     /// The process.
@@ -29,19 +32,19 @@ pub struct LogRead {
 
 impl LogRead {
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
-    /// replaced and the cursor just past it; a screen loses the blank rows
-    /// below its last text.
+    /// replaced and the cursor just past it: a log as the lines `muster logs`
+    /// prints, without colour, and a screen without the blank rows below its
+    /// last text.
     pub fn text_in(&self, project: &Project) -> LogText {
-        let text = String::from_utf8_lossy(&self.bytes);
         let text = match self.log {
-            Some(_) => text.as_ref(),
-            None => text.trim_end(),
+            Some(_) => LogRenderer::text_of(&self.bytes, Colouring::Plain),
+            None => String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
         };
         LogText::builder()
             .project(ProjectIdentityView::from(project))
             .process(self.name.clone())
             .log(self.log.clone())
-            .text(text.to_string())
+            .text(text)
             .cursor(self.end)
             .build()
     }
@@ -94,5 +97,27 @@ mod tests {
             .build();
 
         assert_eq!(screen.text_in(&project).text(), "$ ready\n  indented");
+    }
+
+    /// A log read carries the text `muster logs` prints, without colour: a
+    /// progress bar at its last state, no title and no footer redraw.
+    #[test]
+    fn a_log_read_carries_its_rendered_text() {
+        let project = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/p/shop")).unwrap())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let read = LogRead::builder()
+            .name(ProcessName::try_new("api").unwrap())
+            .log(Some(PathBuf::from("/p/shop/api.log")))
+            .end(None)
+            .bytes(
+                b"\x1b]0;title\x07\x1b[32mready\x1b[0m\r\n10%\r\x1b[2K100%\r\n\x1b[0K\r\n\
+                  \x1b[1A\x1b[s\x1b7\x1b[40;0Hw Enable Watch\x1b[u\x1b8"
+                    .to_vec(),
+            )
+            .build();
+
+        assert_eq!(read.text_in(&project).text(), "ready\n100%\n");
     }
 }

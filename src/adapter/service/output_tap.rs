@@ -125,14 +125,7 @@ impl OutputTap {
                 completed.push(line);
             }
         }
-        if !self.partial.is_empty() {
-            completed.push(
-                TapLine::builder()
-                    .at(self.partial_at)
-                    .text(strip_line(&self.partial))
-                    .build(),
-            );
-        }
+        completed.extend(self.unfinished());
         completed
     }
 
@@ -178,30 +171,29 @@ impl OutputTap {
         lines
     }
 
-    /// The line still being written, if any.
+    /// The line still being written, if any, unless it only redrew the
+    /// screen.
     fn unfinished(&self) -> Option<TapLine> {
-        (!self.partial.is_empty()).then(|| {
-            TapLine::builder()
-                .at(self.partial_at)
-                .text(strip_line(&self.partial))
-                .build()
-        })
+        if self.partial.is_empty() {
+            return None;
+        }
+        strip_line(&self.partial)
+            .map(|text| TapLine::builder().at(self.partial_at).text(text).build())
     }
 
-    /// Ends the line still being written, keeping it in the ring, and returns
-    /// it.
+    /// Ends the line still being written and returns it, keeping it in the
+    /// ring unless it only redrew the screen.
     fn flush_partial(&mut self) -> Option<TapLine> {
         if self.partial.is_empty() {
             return None;
         }
-        let line = TapLine::builder()
-            .at(self.partial_at)
-            .text(strip_line(&self.partial))
-            .build();
+        let line = self.unfinished();
         self.partial.clear();
         self.partial_at = self.next;
-        self.keep(line.clone());
-        Some(line)
+        if let Some(line) = &line {
+            self.keep(line.clone());
+        }
+        line
     }
 
     /// Adds `line` to the ring, dropping the oldest lines past

@@ -10,8 +10,8 @@ use std::{
 };
 
 use super::{
-    error::CliError, followed_output::FollowedOutput, gap_marked::GapMarked,
-    json_log_lines::JsonLogLines, log_follower::LogFollower, presenter::Presenter,
+    error::CliError, followed_output::FollowedOutput, json_log_lines::JsonLogLines,
+    log_follower::LogFollower, presenter::Presenter, rendered_log::RenderedLog,
 };
 use crate::{
     adapter::{
@@ -21,6 +21,7 @@ use crate::{
         },
         holder::read_log_stream,
         service::{ProcessStatus, ProjectStatus},
+        terminal::colouring::Colouring,
     },
     domain::{
         process::ProcessState,
@@ -35,7 +36,8 @@ const FOLLOW_POLL: Duration = Duration::from_millis(200);
 /// Copies the log of the process `pick` picks into `out`, the older
 /// generation first, then follows it across rotations and restarts until the
 /// command is interrupted, waiting for a process that is not running to
-/// write. With `json`, each log line is written as one JSON line.
+/// write. Each log line is written rendered, coloured as `colouring` asks,
+/// or with `json` as one JSON line.
 ///
 /// # Errors
 /// Returns a [`CliError`] when `pick` finds no process, or the log cannot be
@@ -45,13 +47,14 @@ pub fn follow_logs(
     project: &Project,
     pick: impl FnOnce(&ProjectStatus) -> Result<ProcessName, CliError>,
     json: bool,
+    colouring: Colouring,
     out: &mut dyn Write,
 ) -> Result<Infallible, CliError> {
     let name = pick(&status(client, project)?)?;
     let log = log_path(client, project, &name)?;
     let (start, kept) = read_log_stream(&log).map_err(|error| log_read_error(&log, error))?;
     if !json {
-        return follow(&log, start, &kept, &mut GapMarked::new(out));
+        return follow(&log, start, &kept, &mut RenderedLog::new(out, colouring));
     }
     let template = LogRead::builder()
         .name(name)

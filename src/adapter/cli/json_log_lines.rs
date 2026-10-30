@@ -1,24 +1,26 @@
 use std::{
     io::{self, Write},
     mem, str,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use super::{followed_output::FollowedOutput, gap_marked::gap_line};
-use crate::{adapter::client::LogText, domain::value::OutputCursor};
+use super::{
+    followed_output::FollowedOutput,
+    rendered_log::{PENDING_LINE_IDLE, gap_line},
+};
+use crate::{
+    adapter::{
+        client::LogText,
+        terminal::{log_line::LogLine, log_renderer::LogRenderer},
+    },
+    domain::value::OutputCursor,
+};
 
 /// End of a log line.
 const NEWLINE: u8 = b'\n';
-/// Carriage return a terminal writes before each newline, dropped from the
-/// end of a line.
-const CARRIAGE_RETURN: u8 = b'\r';
 /// Longest a line is held back waiting for its newline; a longer one is
 /// written in pieces, each ending on a whole character.
 const MAX_PENDING_LINE: usize = 64 * 1024;
-/// How long a line without its newline is held back once nothing more
-/// arrives: long enough to join a line written in pieces, short enough that a
-/// prompt shows while it waits.
-const PENDING_LINE_IDLE: Duration = Duration::from_millis(500);
 /// Most bytes one UTF-8 character takes.
 const MAX_CHAR_BYTES: usize = 4;
 /// The bits of a byte that tell a UTF-8 continuation byte apart.
@@ -28,8 +30,10 @@ const CONTINUATION_BITS: u8 = 0b1000_0000;
 
 /// A writer that turns a followed log's bytes into one JSON [`LogText`] line
 /// per log line, for `muster logs -f --json`, each carrying the cursor just
-/// past it. A line is held back until its newline arrives, so no object
-/// carries part of a line or of a character.
+/// past it and the line's text as `muster logs` renders it, without colour;
+/// a line that only redrew the screen moves the cursor on and writes nothing.
+/// A line is held back until its newline arrives, so no object carries part
+/// of a line or of a character.
 pub struct JsonLogLines<'a> {
     /// Where each JSON line goes.
     out: &'a mut dyn Write,
@@ -41,9 +45,8 @@ pub struct JsonLogLines<'a> {
     next: OutputCursor,
     /// When bytes last arrived.
     last_write: Instant,
-    /// Whether the line written last was a partial one the idle wait wrote
-    /// out, whose newline may still arrive.
-    flushed_partial: bool,
+    /// The rendering, kept across lines.
+    renderer: LogRenderer,
 }
 
 impl<'a> JsonLogLines<'a> {
@@ -56,19 +59,28 @@ impl<'a> JsonLogLines<'a> {
             pending: Vec::new(),
             next: start,
             last_write: Instant::now(),
-            flushed_partial: false,
+            renderer: LogRenderer::new(),
         }
     }
 
-    /// Writes `line`, which took `consumed` bytes of output with its line
-    /// ending, as one JSON object without that ending.
+    /// Writes `piece` of output as one JSON object of its rendered text: a
+    /// whole line with its line feed, or, unless `ends_line`, a part of one
+    /// written out early, which what follows on that line does not repeat.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when the object cannot be written.
-    fn emit(&mut self, line: &[u8], consumed: usize) -> io::Result<()> {
-        self.next = self.next.advanced(consumed as u64);
-        let line = line.strip_suffix(&[CARRIAGE_RETURN]).unwrap_or(line);
-        let object = self.object(String::from_utf8_lossy(line).into_owned(), self.next, None);
+    fn emit(&mut self, piece: &[u8], ends_line: bool) -> io::Result<()> {
+        self.next = self.next.advanced(piece.len() as u64);
+        self.renderer.advance(piece);
+        let mut lines = self.renderer.take_lines();
+        if !ends_line {
+            lines.extend(self.renderer.take_partial());
+        }
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let text = lines.iter().map(LogLine::plain).collect();
+        let object = self.object(text, self.next, None);
         self.write_object(&object)
     }
 
@@ -100,29 +112,14 @@ impl Write for JsonLogLines<'_> {
         self.pending.extend_from_slice(bytes);
         while let Some(end) = self.pending.iter().position(|byte| *byte == NEWLINE) {
             let line: Vec<u8> = self.pending.drain(..=end).collect();
-            let consumed = line.len();
-            let line = &line[..end];
-            // The newline that ends a line already written out after the
-            // idle wait carries nothing of its own.
-            let ends_flushed = self.flushed_partial
-                && line
-                    .strip_suffix(&[CARRIAGE_RETURN])
-                    .unwrap_or(line)
-                    .is_empty();
-            self.flushed_partial = false;
-            if ends_flushed {
-                self.next = self.next.advanced(consumed as u64);
-            } else {
-                self.emit(line, consumed)?;
-            }
+            self.emit(&line, true)?;
         }
         if self.pending.len() > MAX_PENDING_LINE {
             // Only a character cut short at the end waits for its last bytes;
             // invalid bytes never become valid, so they go out replaced.
             let whole = self.pending.len() - incomplete_tail(&self.pending);
             let piece: Vec<u8> = self.pending.drain(..whole).collect();
-            self.flushed_partial = false;
-            self.emit(&piece, whole)?;
+            self.emit(&piece, false)?;
         }
         self.last_write = Instant::now();
         Ok(bytes.len())
@@ -134,8 +131,7 @@ impl Write for JsonLogLines<'_> {
     fn flush(&mut self) -> io::Result<()> {
         if !self.pending.is_empty() && self.last_write.elapsed() >= PENDING_LINE_IDLE {
             let line = mem::take(&mut self.pending);
-            self.emit(&line, line.len())?;
-            self.flushed_partial = true;
+            self.emit(&line, false)?;
         }
         self.out.flush()
     }
@@ -147,9 +143,8 @@ impl FollowedOutput for JsonLogLines<'_> {
     fn gap(&mut self, skipped: u64, resumed: OutputCursor) -> io::Result<()> {
         if !self.pending.is_empty() {
             let line = mem::take(&mut self.pending);
-            self.emit(&line, line.len())?;
+            self.emit(&line, false)?;
         }
-        self.flushed_partial = false;
         self.next = resumed;
         let object = self.object(gap_line(skipped), resumed, Some(skipped));
         self.write_object(&object)
@@ -173,7 +168,7 @@ fn incomplete_tail(bytes: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, thread};
+    use std::{path::PathBuf, thread, time::Duration};
 
     use serde_json::Value;
 
@@ -342,7 +337,34 @@ mod tests {
             lines.write_all(b"\r\nnext\n\n").unwrap();
         }
 
-        assert_eq!(texts_of(out), vec!["Password: ", "next", ""]);
+        assert_eq!(texts_of(out), vec!["Password:", "next", ""]);
+    }
+
+    /// Each line's text is rendered as `muster logs` shows it, without
+    /// colour; a footer redrawn between lines and the room made for it write
+    /// no object, yet the next line's cursor still counts their bytes.
+    #[test]
+    fn a_line_carries_its_rendered_text_and_redraws_carry_none() {
+        let footer = b"\x1b[0K\r\n\x1b[2A\x1b[s\x1b7\x1b[40;0Hw Enable Watch\x1b[u\x1b8";
+        let mut stream = b"\x1b[36mweb-1  | \x1b[0mhello\r\n".to_vec();
+        stream.extend_from_slice(footer);
+        stream.extend_from_slice(b"10%\r\x1b[2K100% done\r\n");
+        let mut out = Vec::new();
+        {
+            let mut lines = JsonLogLines::new(&mut out, template("web"), OutputCursor::new(0));
+            lines.write_all(&stream).unwrap();
+        }
+
+        let objects = objects(out);
+        let texts: Vec<&str> = objects
+            .iter()
+            .map(|object| object["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["web-1  | hello", "100% done"]);
+        assert_eq!(
+            objects[1]["cursor"].as_str().unwrap(),
+            format!("o:{}", stream.len())
+        );
     }
 
     /// A prompt with no newline is written once nothing more has arrived for
@@ -365,6 +387,6 @@ mod tests {
 
         let objects = objects(out);
         assert_eq!(objects.len(), 1, "written once");
-        assert_eq!(objects[0]["text"], "Password: ");
+        assert_eq!(objects[0]["text"], "Password:");
     }
 }

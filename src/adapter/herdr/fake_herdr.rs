@@ -35,8 +35,19 @@ const HANG_SECONDS: &str = "30";
 pub const CALLER: &str = "w1:p1";
 /// Mode of the fake script: owner may run it.
 const SCRIPT_MODE: u32 = 0o700;
+/// The answer file's kind for what a call prints.
+const OUT: &str = "out";
+/// The answer file's kind for what a call prints on stderr.
+const ERR: &str = "err";
+/// The answer file's kind for a call's exit status.
+const STATUS: &str = "status";
+/// The answer file's kind for how long a call sleeps instead of answering.
+const SLEEP: &str = "sleep";
+/// The file kind a call records its pid in.
+const PID: &str = "pid";
 /// The fake itself. Each call is answered from `<pane>-<verb>.out`, `.err`,
-/// `.status` and `.sleep`, and records its pid in `.pid`.
+/// `.status` and `.sleep`, and records its pid in `.pid`; a call that
+/// sleeps becomes the sleep, so it starts nothing that outlives it.
 const SCRIPT_BODY: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 [ "$1" = settle ] && exit 0
@@ -44,11 +55,7 @@ printf '%s\0' "$@" >> "$dir/argv.log"
 printf '\036' >> "$dir/argv.log"
 key="$1-$2"
 echo $$ > "$dir/$key.pid"
-if [ -f "$dir/$key.sleep" ]; then
-  sleep "$(cat "$dir/$key.sleep")" &
-  echo $! > "$dir/$key.sleeper"
-  wait
-fi
+[ -f "$dir/$key.sleep" ] && exec sleep "$(cat "$dir/$key.sleep")"
 [ -f "$dir/$key.out" ] && cat "$dir/$key.out"
 [ -f "$dir/$key.err" ] && cat "$dir/$key.err" >&2
 [ -f "$dir/$key.status" ] && exit "$(cat "$dir/$key.status")"
@@ -103,33 +110,24 @@ impl FakeHerdr {
 
     /// Makes `herdr pane <verb>` print `stdout` and exit 0.
     pub fn answer(&self, verb: &str, stdout: &str) {
-        fs::write(self.file(verb, "out"), stdout).unwrap();
+        fs::write(self.file(verb, OUT), stdout).unwrap();
     }
 
     /// Makes `herdr pane <verb>` print `stderr` and exit with `status`.
     pub fn refuse(&self, verb: &str, stderr: &str, status: u8) {
-        fs::write(self.file(verb, "err"), stderr).unwrap();
-        fs::write(self.file(verb, "status"), status.to_string()).unwrap();
+        fs::write(self.file(verb, ERR), stderr).unwrap();
+        fs::write(self.file(verb, STATUS), status.to_string()).unwrap();
     }
 
-    /// Makes `herdr pane <verb>` sleep far past any test's timeout, in a
-    /// child of its own.
+    /// Makes `herdr pane <verb>` sleep far past any test's timeout.
     pub fn hang(&self, verb: &str) {
-        fs::write(self.file(verb, "sleep"), HANG_SECONDS).unwrap();
+        fs::write(self.file(verb, SLEEP), HANG_SECONDS).unwrap();
     }
 
-    /// The pid `herdr pane <verb>` ran as, and that of the sleep it
-    /// started, if it hung.
-    pub fn pids(&self, verb: &str) -> (Pid, Option<Pid>) {
-        let read = |kind: &str| {
-            fs::read_to_string(self.file(verb, kind))
-                .ok()
-                .map(|pid| Pid::try_new(pid.trim().parse().unwrap()).unwrap())
-        };
-        (
-            read("pid").expect("the fake herdr never ran"),
-            read("sleeper"),
-        )
+    /// The pid `herdr pane <verb>` last ran as.
+    pub fn pid(&self, verb: &str) -> Pid {
+        let pid = fs::read_to_string(self.file(verb, PID)).expect("the fake herdr never ran");
+        Pid::try_new(pid.trim().parse().unwrap()).unwrap()
     }
 
     /// Every call's arguments, in order.

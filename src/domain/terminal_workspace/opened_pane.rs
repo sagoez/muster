@@ -1,16 +1,12 @@
-use getset::{CopyGetters, Getters};
+use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::split_direction::SplitDirection;
 use crate::domain::value::WorkspacePaneId;
 
-/// A pane a terminal workspace opened, and the way it split.
-#[derive(Clone, Debug, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
+/// A pane a terminal workspace opened.
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 pub struct OpenedPane {
-    /// The new pane.
+    /// The new pane, made safe to print.
     #[getset(get = "pub")]
     pane: WorkspacePaneId,
-    /// Which side of the caller's pane it opened on.
-    #[getset(get_copy = "pub")]
-    direction: SplitDirection,
 }

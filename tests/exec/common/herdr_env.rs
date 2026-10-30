@@ -2,6 +2,10 @@ use std::{env, ffi::OsString, process::Command};
 
 /// What every variable herdr sets in its panes starts with.
 const HERDR_ENV_PREFIX: &str = "HERDR_";
+/// The variable naming the herdr pane a command runs in.
+pub const HERDR_PANE_ENV: &str = "HERDR_PANE_ID";
+/// The variable naming the herdr binary.
+pub const HERDR_BIN_ENV: &str = "HERDR_BIN_PATH";
 
 /// Strips from `command` every herdr variable this test's environment holds,
 /// so a suite run inside a herdr pane never opens a pane in it.

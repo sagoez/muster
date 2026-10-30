@@ -11,6 +11,7 @@ use std::{
 use serde_json::Value;
 
 use super::{
+    herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV},
     scratch::Scratch,
     shell_session::on_path,
     wait::{POLL, WAIT, wait_until},
@@ -36,10 +37,6 @@ const CONFIG: &str = "config/herdr/config.toml";
 const SOCKET_ENV: &str = "HERDR_SOCKET_PATH";
 /// The variable naming herdr's config file.
 const CONFIG_ENV: &str = "HERDR_CONFIG_PATH";
-/// The variable naming the pane a command runs in.
-const PANE_ENV: &str = "HERDR_PANE_ID";
-/// The variable naming the herdr binary.
-const BIN_ENV: &str = "HERDR_BIN_PATH";
 /// The variable naming the home folder.
 const HOME_ENV: &str = "HOME";
 /// The variable naming the shell a pane runs.
@@ -171,7 +168,9 @@ impl HerdrServer {
                 command.env(name, value);
             }
         }
-        command.env(PANE_ENV, pane).env(BIN_ENV, &self.program)
+        command
+            .env(HERDR_PANE_ENV, pane)
+            .env(HERDR_BIN_ENV, &self.program)
     }
 
     /// Runs `herdr <args>`, failing the test unless it succeeds.

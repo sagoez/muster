@@ -12,7 +12,8 @@ use crate::domain::{
     coordination::HERDR_PANE_ENV,
     port::TerminalWorkspace,
     terminal_workspace::{
-        OpenedPane, PaneFocus, PaneRequest, SplitDirection, WorkspaceError, WorkspaceProbe,
+        OpenedPane, PaneFocus, PaneLeft, PaneRequest, SplitDirection, WorkspaceError,
+        WorkspaceProbe,
     },
     value::{Cols, Rows, WorkspacePaneId},
 };
@@ -35,6 +36,8 @@ const RUN: &str = "run";
 const CLOSE: &str = "close";
 /// Describes a pane.
 const GET: &str = "get";
+/// Focuses the pane on one side of another.
+const FOCUS: &str = "focus";
 /// Names the pane whose layout is read.
 const PANE_FLAG: &str = "--pane";
 /// Names the side a split opens on.
@@ -45,8 +48,6 @@ const CWD_FLAG: &str = "--cwd";
 const ENV_FLAG: &str = "--env";
 /// Joins a variable's name to its value in [`ENV_FLAG`]'s argument.
 const ENV_JOIN: &str = "=";
-/// Focuses the new pane.
-const FOCUS_FLAG: &str = "--focus";
 /// Leaves the focus where it is.
 const NO_FOCUS_FLAG: &str = "--no-focus";
 /// What reading the layout is called in an error, before the pane.
@@ -59,18 +60,12 @@ const RUN_ACTION: &str = "run muster in pane";
 const CLOSE_ACTION: &str = "close pane";
 /// What describing is called in an error, before the pane.
 const GET_ACTION: &str = "describe pane";
+/// What focusing is called in an error, before the pane it splits from.
+const FOCUS_ACTION: &str = "focus the new pane beside pane";
 /// Appended to a split that timed out.
 const SPLIT_MAY_HAVE_OPENED: &str = "; a pane may have opened that muster never learned of";
-/// Why a layout that does not list the caller cannot be used.
-const CALLER_NOT_IN_LAYOUT: &str = "the layout does not list the pane";
-/// Why a pane size outside a terminal's bounds cannot be used.
-const SIZE_OUT_OF_BOUNDS: &str = "the pane's size is out of bounds";
 /// Why a blank pane id cannot be used.
 const BLANK_PANE_ID: &str = "the pane id is blank";
-/// Appended when the pane muster could not run in was closed.
-const PANE_CLOSED: &str = "; the pane was closed";
-/// Appended, before the close's failure, when it was not.
-const PANE_LEFT_OPEN: &str = "; the pane is left open, as closing it failed too:";
 
 /// The herdr the caller's pane runs in, driven through its CLI.
 #[derive(Debug)]
@@ -140,29 +135,29 @@ impl HerdrWorkspace {
             .map_err(|failure: HerdrFailure| failure.into_workspace_error(action, unanswered))
     }
 
-    /// Which way to split, from the caller's size in its tab's layout.
-    ///
-    /// # Errors
-    /// Returns the layout call's failure, or [`WorkspaceError::Unreadable`]
-    /// when the layout does not list the caller at a usable size.
-    fn direction_from_layout(&self) -> Result<SplitDirection, WorkspaceError> {
+    /// Which way to split, from the caller's size in its tab's layout; when
+    /// the layout cannot be read, does not list the caller or gives it a
+    /// size out of bounds, the split for an unknown size.
+    fn direction_from_layout(&self) -> SplitDirection {
         let action = format!("{LAYOUT_ACTION} {}", self.caller);
-        let layout: LayoutReply = self.ask(
-            &words(&[PANE, LAYOUT, PANE_FLAG, self.caller.as_ref()]),
-            &action,
-            None,
-        )?;
-        let (width, height) = layout
-            .size_of(self.caller.as_ref())
-            .ok_or_else(|| unreadable(&action, CALLER_NOT_IN_LAYOUT))?;
-        match (Cols::try_new(width), Rows::try_new(height)) {
-            (Ok(cols), Ok(rows)) => Ok(SplitDirection::for_area(cols, rows)),
-            _ => Err(unreadable(&action, SIZE_OUT_OF_BOUNDS)),
+        let size = self
+            .ask::<LayoutReply>(
+                &words(&[PANE, LAYOUT, PANE_FLAG, self.caller.as_ref()]),
+                &action,
+                None,
+            )
+            .ok()
+            .and_then(|layout| layout.size_of(self.caller.as_ref()));
+        match size.map(|(width, height)| (Cols::try_new(width), Rows::try_new(height))) {
+            Some((Ok(cols), Ok(rows))) => SplitDirection::for_area(cols, rows),
+            _ => SplitDirection::FOR_UNKNOWN_AREA,
         }
     }
 
     /// Splits the caller's pane `direction`-wise into a shell in `request`'s
-    /// folder holding its command's words, returning the new pane.
+    /// folder holding its command's words, leaving the focus where it is.
+    /// Returns the new pane's id as herdr wrote it, to address it by, and
+    /// made safe to print, to show.
     ///
     /// # Errors
     /// Returns the split call's failure, or [`WorkspaceError::Unreadable`]
@@ -173,7 +168,7 @@ impl HerdrWorkspace {
         request: &PaneRequest,
         direction: SplitDirection,
         env: Vec<(String, OsString)>,
-    ) -> Result<WorkspacePaneId, WorkspaceError> {
+    ) -> Result<(String, WorkspacePaneId), WorkspaceError> {
         let action = format!("{SPLIT_ACTION} {}", self.caller);
         let mut args = words(&[
             PANE,
@@ -191,12 +186,13 @@ impl HerdrWorkspace {
             args.push(OsString::from(ENV_FLAG));
             args.push(pair);
         }
-        args.push(OsString::from(match request.focus() {
-            PaneFocus::Take => FOCUS_FLAG,
-            PaneFocus::Keep => NO_FOCUS_FLAG,
-        }));
+        args.push(OsString::from(NO_FOCUS_FLAG));
         self.ask::<PaneReply>(&args, &action, Some(SPLIT_MAY_HAVE_OPENED))
-            .and_then(|reply| pane_id(&action, &reply.into_pane_id()))
+            .and_then(|reply| {
+                let pane = reply.into_pane_id();
+                let shown = shown_pane(&action, &pane)?;
+                Ok((pane, shown))
+            })
             .map_err(|error| match error {
                 WorkspaceError::Unreadable {
                     workspace,
@@ -211,45 +207,73 @@ impl HerdrWorkspace {
             })
     }
 
-    /// Types `line` into `pane`; when that fails, closes `pane`.
+    /// Types `line` into `pane`, the id herdr gave it, shown as `shown`;
+    /// when that fails, closes `pane`.
     ///
     /// # Errors
     /// Returns [`WorkspaceError::RunFailed`], saying whether the pane was
     /// closed.
-    fn type_line(&self, pane: &WorkspacePaneId, line: String) -> Result<(), WorkspaceError> {
-        let action = format!("{RUN_ACTION} {pane}");
-        let mut args = words(&[PANE, RUN, pane.as_ref()]);
+    fn type_line(
+        &self,
+        pane: &str,
+        shown: &WorkspacePaneId,
+        line: String,
+    ) -> Result<(), WorkspaceError> {
+        let action = format!("{RUN_ACTION} {shown}");
+        let mut args = words(&[PANE, RUN, pane]);
         args.push(OsString::from(line));
         let Err(cause) = self.run(&args, &action, None) else {
             return Ok(());
         };
-        let close_action = format!("{CLOSE_ACTION} {pane}");
-        let closed = match self.run(&words(&[PANE, CLOSE, pane.as_ref()]), &close_action, None) {
-            Ok(_) => PANE_CLOSED.to_string(),
-            Err(error) => format!("{PANE_LEFT_OPEN} {error}"),
+        let close_action = format!("{CLOSE_ACTION} {shown}");
+        let left = match self.run(&words(&[PANE, CLOSE, pane]), &close_action, None) {
+            Ok(_) => PaneLeft::Closed,
+            Err(error) => PaneLeft::Open(Box::new(error)),
         };
         Err(WorkspaceError::RunFailed {
             workspace: WORKSPACE_NAME.to_string(),
-            pane: pane.clone(),
+            pane: shown.clone(),
             cause: Box::new(cause),
-            closed,
+            left,
         })
+    }
+
+    /// Moves the user's focus to the pane just split off the caller
+    /// `direction`-wise. herdr's CLI focuses only by side, and the new pane
+    /// is the caller's sole neighbour on that side. A failure is let go: the
+    /// pane is open and shows the process either way.
+    fn focus(&self, direction: SplitDirection) {
+        let action = format!("{FOCUS_ACTION} {}", self.caller);
+        let _ = self.run(
+            &words(&[
+                PANE,
+                FOCUS,
+                PANE_FLAG,
+                self.caller.as_ref(),
+                DIRECTION_FLAG,
+                direction.into(),
+            ]),
+            &action,
+            None,
+        );
     }
 }
 
 impl TerminalWorkspace for HerdrWorkspace {
+    /// Splits without the focus and types the line before focusing when the
+    /// focus is asked for, so no key the user types in between reaches the
+    /// new shell ahead of the line.
     fn open_beside(&self, request: &PaneRequest) -> Result<OpenedPane, WorkspaceError> {
-        let direction = match request.direction() {
-            Some(direction) => direction,
-            None => self.direction_from_layout()?,
-        };
+        let direction = request
+            .direction()
+            .unwrap_or_else(|| self.direction_from_layout());
         let (env, line) = typed_line(request.command());
-        let pane = self.split(request, direction, env)?;
-        self.type_line(&pane, line)?;
-        Ok(OpenedPane::builder()
-            .pane(pane)
-            .direction(direction)
-            .build())
+        let (pane, shown) = self.split(request, direction, env)?;
+        self.type_line(&pane, &shown, line)?;
+        if request.focus() == PaneFocus::Take {
+            self.focus(direction);
+        }
+        Ok(OpenedPane::builder().pane(shown).build())
     }
 
     fn check(&self) -> Result<WorkspaceProbe, WorkspaceError> {
@@ -258,7 +282,7 @@ impl TerminalWorkspace for HerdrWorkspace {
             self.ask(&words(&[PANE, GET, self.caller.as_ref()]), &action, None)?;
         Ok(WorkspaceProbe::builder()
             .workspace(WORKSPACE_NAME.to_string())
-            .pane(pane_id(&action, &reply.into_pane_id())?)
+            .pane(shown_pane(&action, &reply.into_pane_id())?)
             .build())
     }
 }
@@ -268,11 +292,12 @@ fn words(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
-/// The pane `id` herdr answered `action` with, made safe to print.
+/// The pane `id` herdr answered `action` with, made safe to print; only
+/// ever shown, never used to address the pane.
 ///
 /// # Errors
 /// Returns [`WorkspaceError::Unreadable`] for a blank id.
-fn pane_id(action: &str, id: &str) -> Result<WorkspacePaneId, WorkspaceError> {
+fn shown_pane(action: &str, id: &str) -> Result<WorkspacePaneId, WorkspaceError> {
     WorkspacePaneId::try_new(herdr_text(id)).map_err(|_| unreadable(action, BLANK_PANE_ID))
 }
 
@@ -294,7 +319,6 @@ mod tests {
         adapter::{
             herdr::fake_herdr::{CALLER, FakeHerdr},
             signal_target::SignalTarget,
-            test_wait::wait_until,
         },
         domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection},
     };
@@ -367,7 +391,16 @@ mod tests {
         let refs: Vec<String> = (0..words)
             .map(|index| format!("\"$MUSTER_OPEN_ARG_{index}\""))
             .collect();
-        format!(" {} && exit", refs.join(" "))
+        format!(
+            " [ -n \"$MUSTER_OPEN_ARG_0\" ] && {} && exit",
+            refs.join(" ")
+        )
+    }
+
+    /// The focus call that moves to the pane split off the caller
+    /// `direction`-wise.
+    fn focus_call(direction: &str) -> Vec<OsString> {
+        argv(&["pane", "focus", "--pane", CALLER, "--direction", direction])
     }
 
     /// A fake that splits and runs successfully.
@@ -410,8 +443,8 @@ mod tests {
     }
 
     /// Without a direction, the caller's size picks it, the split names the
-    /// caller, the folder and each word, and the line is typed into the new
-    /// pane.
+    /// caller, the folder and each word without taking the focus, the line
+    /// is typed into the new pane, and only then is the focus moved to it.
     #[test]
     fn open_reads_the_layout_splits_beside_the_caller_and_types_the_line() {
         let herdr = splitting();
@@ -420,7 +453,6 @@ mod tests {
             .open_beside(&attach_request(None))
             .unwrap();
         assert_eq!(opened.pane().as_ref(), NEW_PANE);
-        assert_eq!(opened.direction(), SplitDirection::Right);
         assert_eq!(herdr.calls(), [
             argv(&["pane", "layout", "--pane", CALLER]),
             argv(&[
@@ -443,9 +475,10 @@ mod tests {
                 "MUSTER_OPEN_ARG_4=--",
                 "--env",
                 "MUSTER_OPEN_ARG_5=api",
-                "--focus",
+                "--no-focus",
             ]),
             argv(&["pane", "run", NEW_PANE, &line_of(6)]),
+            focus_call("right"),
         ]);
     }
 
@@ -457,57 +490,73 @@ mod tests {
             "layout",
             r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":79,"height":10}}]}}}"#,
         );
-        let opened = herdr
+        herdr
             .workspace(AMPLE)
             .open_beside(&attach_request(None))
             .unwrap();
-        assert_eq!(opened.direction(), SplitDirection::Down);
         assert_eq!(herdr.calls()[1][4], "down");
     }
 
-    /// A layout that does not list the caller cannot place the pane.
+    /// Without a direction, a layout that cannot be read, does not list the
+    /// caller or gives it a size out of bounds splits down, and the pane
+    /// still opens.
     #[test]
-    fn a_layout_without_the_caller_is_unreadable() {
-        let herdr = splitting();
-        herdr.answer(
-            "layout",
-            r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p9","rect":{"width":79,"height":10}}]}}}"#,
-        );
-        let error = herdr
-            .workspace(AMPLE)
-            .open_beside(&attach_request(None))
-            .unwrap_err();
-        assert!(
-            matches!(error, WorkspaceError::Unreadable { .. }),
-            "{error}"
-        );
-        assert_eq!(herdr.calls().len(), 1);
+    fn a_layout_that_cannot_place_the_pane_splits_down() {
+        let not_listed = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p9","rect":{"width":200,"height":10}}]}}}"#;
+        let zero_rows = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":200,"height":0}}]}}}"#;
+        let too_wide = r#"{"result":{"layout":{"panes":[{"pane_id":"w1:p1","rect":{"width":70000,"height":10}}]}}}"#;
+        let cases: [(&str, Option<&str>); 5] = [
+            ("refused", None),
+            ("not json", Some("not json")),
+            ("not listed", Some(not_listed)),
+            ("zero rows", Some(zero_rows)),
+            ("too wide", Some(too_wide)),
+        ];
+        for (case, layout) in cases {
+            let herdr = FakeHerdr::new();
+            herdr.answer("split", SPLIT_REPLY);
+            match layout {
+                Some(layout) => herdr.answer("layout", layout),
+                None => herdr.refuse("layout", REFUSAL, 1),
+            }
+            let opened = herdr
+                .workspace(AMPLE)
+                .open_beside(&attach_request(None))
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert_eq!(opened.pane().as_ref(), NEW_PANE, "{case}");
+            let calls = herdr.calls();
+            assert_eq!(calls[0][1], "layout", "{case}");
+            assert_eq!(
+                calls[1][..5],
+                argv(&["pane", "split", CALLER, "--direction", "down"]),
+                "{case}"
+            );
+        }
     }
 
     /// A direction asked for is used as is, without reading the layout.
     #[test]
     fn a_given_direction_skips_the_layout_call() {
         let herdr = splitting();
-        let opened = herdr
+        herdr
             .workspace(AMPLE)
             .open_beside(&attach_request(Some(SplitDirection::Down)))
             .unwrap();
-        assert_eq!(opened.direction(), SplitDirection::Down);
         let calls = herdr.calls();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert_eq!(
             calls[0][..5],
             argv(&["pane", "split", CALLER, "--direction", "down"])
         );
+        assert_eq!(calls[2], focus_call("down"));
     }
 
-    /// Taking the focus passes `--focus`; keeping it passes `--no-focus`.
+    /// Every split leaves the focus where it is. Taking the focus moves it
+    /// only after the line is typed, so no key typed in between reaches the
+    /// new shell ahead of the line; keeping it never moves it.
     #[test]
-    fn take_focus_passes_focus_and_keep_passes_no_focus() {
-        for (focus, flag) in [
-            (PaneFocus::Take, "--focus"),
-            (PaneFocus::Keep, "--no-focus"),
-        ] {
+    fn the_focus_moves_only_after_the_line_is_typed() {
+        for focus in [PaneFocus::Take, PaneFocus::Keep] {
             let herdr = splitting();
             let asked = request(
                 "/srv",
@@ -517,17 +566,64 @@ mod tests {
                 Some(SplitDirection::Right),
             );
             herdr.workspace(AMPLE).open_beside(&asked).unwrap();
-            let split = &herdr.calls()[0];
-            assert_eq!(split.last().unwrap(), flag);
-            let flags = ["--focus", "--no-focus"];
-            assert_eq!(
-                split
-                    .iter()
-                    .filter(|arg| flags.contains(&arg.to_str().unwrap()))
-                    .count(),
-                1
-            );
+            let calls = herdr.calls();
+            let verbs: Vec<&OsString> = calls.iter().map(|call| &call[1]).collect();
+            let split = &calls[0];
+            assert_eq!(split.last().unwrap(), "--no-focus", "{focus}");
+            assert!(!split.contains(&OsString::from("--focus")), "{focus}");
+            match focus {
+                PaneFocus::Take => {
+                    assert_eq!(verbs, ["split", "run", "focus"]);
+                    assert_eq!(calls[2], focus_call("right"));
+                },
+                PaneFocus::Keep => assert_eq!(verbs, ["split", "run"]),
+            }
         }
+    }
+
+    /// A focus herdr refuses does not fail an open whose pane is already
+    /// open and running.
+    #[test]
+    fn a_refused_focus_still_opens_the_pane() {
+        let herdr = splitting();
+        herdr.refuse("focus", REFUSAL, 1);
+        let opened = herdr
+            .workspace(AMPLE)
+            .open_beside(&attach_request(Some(SplitDirection::Right)))
+            .unwrap();
+        assert_eq!(opened.pane().as_ref(), NEW_PANE);
+        assert_eq!(herdr.calls().last().unwrap(), &focus_call("right"));
+    }
+
+    /// herdr's own id addresses the new pane when typing into and closing
+    /// it, even when it holds a character that is not printable; only the
+    /// id muster shows is made safe to print.
+    #[test]
+    fn the_new_pane_is_addressed_by_herdr_s_own_id_and_shown_safe() {
+        let raw = "w1:p2\u{7}";
+        let reply = r#"{"result":{"pane":{"pane_id":"w1:p2\u0007"}}}"#;
+        let herdr = FakeHerdr::new();
+        herdr.answer("split", reply);
+        let opened = herdr
+            .workspace(AMPLE)
+            .open_beside(&attach_request(Some(SplitDirection::Right)))
+            .unwrap();
+        assert_eq!(opened.pane().as_ref(), "w1:p2\\u{7}");
+        assert_eq!(herdr.calls()[1], argv(&["pane", "run", raw, &line_of(6)]));
+
+        let herdr = FakeHerdr::new();
+        herdr.answer("split", reply);
+        herdr.refuse("run", REFUSAL, 1);
+        let error = herdr
+            .workspace(AMPLE)
+            .open_beside(&attach_request(Some(SplitDirection::Right)))
+            .unwrap_err();
+        assert_eq!(herdr.calls()[2], argv(&["pane", "close", raw]));
+        let WorkspaceError::RunFailed { pane, .. } = &error else {
+            panic!("{error}");
+        };
+        assert_eq!(pane.as_ref(), "w1:p2\\u{7}");
+        assert!(!error.to_string().chars().any(char::is_control), "{error}");
     }
 
     /// Names and paths that would each break a typed line reach herdr only
@@ -632,17 +728,14 @@ mod tests {
             .open_beside(&attach_request(Some(SplitDirection::Right)))
             .unwrap_err();
         let WorkspaceError::RunFailed {
-            pane,
-            cause,
-            closed,
-            ..
+            pane, cause, left, ..
         } = &error
         else {
             panic!("{error}");
         };
         assert_eq!(pane.as_ref(), NEW_PANE);
         assert!(matches!(**cause, WorkspaceError::Refused { .. }), "{cause}");
-        assert!(closed.contains("closed"), "{closed}");
+        assert_eq!(*left, PaneLeft::Closed);
         assert_eq!(
             herdr.calls().last().unwrap(),
             &argv(&["pane", "close", NEW_PANE])
@@ -659,15 +752,20 @@ mod tests {
             .workspace(AMPLE)
             .open_beside(&attach_request(Some(SplitDirection::Right)))
             .unwrap_err();
-        let WorkspaceError::RunFailed { closed, .. } = &error else {
+        let WorkspaceError::RunFailed { left, .. } = &error else {
             panic!("{error}");
         };
-        assert!(closed.contains("left open"), "{closed}");
-        assert!(closed.contains("pane_not_found"), "{closed}");
+        let PaneLeft::Open(close) = left else {
+            panic!("{left}");
+        };
+        assert!(
+            matches!(&**close, WorkspaceError::Refused { code, .. } if code == "pane_not_found"),
+            "{close}"
+        );
     }
 
-    /// A herdr that never answers is killed with what it started and reaped
-    /// at the timeout, and reported unreachable.
+    /// A herdr that never answers is killed and reaped at the timeout, and
+    /// reported unreachable.
     #[test]
     fn a_hung_herdr_is_killed_and_reaped_at_the_timeout() {
         let herdr = FakeHerdr::new();
@@ -679,15 +777,10 @@ mod tests {
             matches!(error, WorkspaceError::Unreachable { .. }),
             "{error}"
         );
-        let (pid, sleeper) = herdr.pids("get");
         assert!(
-            !SignalTarget::Process(pid).is_alive(),
+            !SignalTarget::Process(herdr.pid("get")).is_alive(),
             "herdr was left a zombie or running"
         );
-        let sleeper = sleeper.expect("the fake herdr never started its sleep");
-        wait_until("the sleep herdr started to die", || {
-            !SignalTarget::Process(sleeper).is_alive()
-        });
     }
 
     /// A split that timed out, or succeeded with an answer naming no pane,
@@ -718,19 +811,24 @@ mod tests {
         }
     }
 
-    /// A binary that does not exist is unreachable.
+    /// A binary that does not exist is unreachable, and the error names the
+    /// path muster tried.
     #[test]
-    fn a_missing_herdr_binary_is_unreachable() {
+    fn a_missing_herdr_binary_is_unreachable_and_named() {
         let herdr = FakeHerdr::new();
+        let program = herdr.program().with_file_name("no-such-herdr");
         let missing = HerdrWorkspace::with(
-            herdr.program().with_file_name("no-such-herdr"),
+            program.clone(),
             WorkspacePaneId::try_new(CALLER).unwrap(),
             AMPLE,
         );
         let error = missing.check().unwrap_err();
+        let WorkspaceError::Unreachable { reason, .. } = &error else {
+            panic!("{error}");
+        };
         assert!(
-            matches!(error, WorkspaceError::Unreachable { .. }),
-            "{error}"
+            reason.contains(&format!("could not start {}", program.display())),
+            "{reason}"
         );
     }
 

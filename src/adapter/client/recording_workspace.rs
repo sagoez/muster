@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use crate::domain::{
     port::TerminalWorkspace,
-    terminal_workspace::{OpenedPane, PaneRequest, SplitDirection, WorkspaceError, WorkspaceProbe},
+    terminal_workspace::{OpenedPane, PaneRequest, WorkspaceError, WorkspaceProbe},
     value::WorkspacePaneId,
 };
 
@@ -21,8 +21,7 @@ pub(crate) struct RecordingWorkspace {
 }
 
 impl RecordingWorkspace {
-    /// A workspace that opens the pane `pane` for every ask, split as asked
-    /// or right.
+    /// A workspace that opens the pane `pane` for every ask.
     pub(crate) fn opening(pane: &str) -> Self {
         Self {
             requests: Mutex::default(),
@@ -48,10 +47,7 @@ impl TerminalWorkspace for RecordingWorkspace {
     fn open_beside(&self, request: &PaneRequest) -> Result<OpenedPane, WorkspaceError> {
         self.requests.lock().unwrap().push(request.clone());
         let pane = self.answer.clone()?;
-        Ok(OpenedPane::builder()
-            .pane(pane)
-            .direction(request.direction().unwrap_or(SplitDirection::Right))
-            .build())
+        Ok(OpenedPane::builder().pane(pane).build())
     }
 
     fn check(&self) -> Result<WorkspaceProbe, WorkspaceError> {

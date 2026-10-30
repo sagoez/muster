@@ -20,6 +20,9 @@ pub enum SplitDirection {
 }
 
 impl SplitDirection {
+    /// The split for a pane whose size cannot be learned.
+    pub const FOR_UNKNOWN_AREA: Self = Self::Down;
+
     /// The split for a pane `cols` wide and `rows` tall: right when it looks
     /// wider than tall and halves into two columns of at least
     /// `MIN_HALF_COLS`, down otherwise.

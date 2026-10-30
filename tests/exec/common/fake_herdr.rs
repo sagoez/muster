@@ -13,14 +13,11 @@ use std::{
 };
 
 use super::{
+    herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV},
     scratch::Scratch,
     wait::{POLL, WAIT},
 };
 
-/// The variable naming the pane a command runs in.
-const PANE_ENV: &str = "HERDR_PANE_ID";
-/// The variable naming the herdr binary.
-const BIN_ENV: &str = "HERDR_BIN_PATH";
 /// The folder inside the scratch the fake lives in.
 const FAKE_DIR: &str = "fake-herdr";
 /// The fake's file name.
@@ -39,13 +36,16 @@ pub const CALLER: &str = "w1:p1";
 /// The pane the fake's split opens.
 pub const OPENED: &str = "w1:p2";
 /// The fake itself. Each `<group> <verb>` call is answered from
-/// `<group>-<verb>.out`, `.err` and `.status`.
+/// `<group>-<verb>.out`, `.err` and `.status`, or sleeps as `.sleep` says,
+/// and records its pid in `.pid`.
 const SCRIPT_BODY: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 [ "$1" = settle ] && exit 0
 printf '%s\0' "$@" >> "$dir/argv.log"
 printf '\036' >> "$dir/argv.log"
 key="$1-$2"
+echo $$ > "$dir/$key.pid"
+[ -f "$dir/$key.sleep" ] && exec sleep "$(cat "$dir/$key.sleep")"
 [ -f "$dir/$key.out" ] && cat "$dir/$key.out"
 [ -f "$dir/$key.err" ] && cat "$dir/$key.err" >&2
 [ -f "$dir/$key.status" ] && exit "$(cat "$dir/$key.status")"
@@ -75,6 +75,13 @@ const OUT: &str = "out";
 const ERR: &str = "err";
 /// The answer file's extension for a call's exit status.
 const STATUS: &str = "status";
+/// The answer file's extension for how long a call sleeps instead of
+/// answering.
+const SLEEP: &str = "sleep";
+/// The file extension a call records its pid in.
+const PID: &str = "pid";
+/// How long a hung call sleeps, far past any test.
+const HANG_SECONDS: &str = "300";
 /// Joins a variable's name to its value in a split's `--env`.
 const ENV_JOIN: u8 = b'=';
 /// The split's flag naming a variable of the new pane's shell.
@@ -133,7 +140,9 @@ impl FakeHerdr {
     /// Runs `command` as if in the pane [`CALLER`] of a herdr whose binary
     /// is `program`.
     pub fn place<'a>(command: &'a mut Command, program: &Path) -> &'a mut Command {
-        command.env(PANE_ENV, CALLER).env(BIN_ENV, program)
+        command
+            .env(HERDR_PANE_ENV, CALLER)
+            .env(HERDR_BIN_ENV, program)
     }
 
     /// Makes the `call` (`pane-run`, ...) fail with `stderr` and `status`.
@@ -141,6 +150,21 @@ impl FakeHerdr {
         fs::remove_file(self.file(call, OUT)).unwrap();
         fs::write(self.file(call, ERR), stderr).unwrap();
         fs::write(self.file(call, STATUS), status.to_string()).unwrap();
+    }
+
+    /// Makes the `call` sleep far past any test instead of answering, as
+    /// the process it ran as, which starts nothing of its own.
+    pub fn hang(&self, call: &str) {
+        fs::write(self.file(call, SLEEP), HANG_SECONDS).unwrap();
+    }
+
+    /// The pid the `call` last ran as, once it has run.
+    pub fn pid(&self, call: &str) -> Option<u32> {
+        fs::read_to_string(self.file(call, PID))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     /// Every call's arguments, in order.

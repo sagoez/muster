@@ -16,6 +16,7 @@ pub use channel_sink::*;
 pub use entry::*;
 pub use fake_herdr::*;
 pub use held_launcher::*;
+pub use herdr_env::HERDR_PANE_ENV;
 pub use herdr_server::*;
 pub use mcp_session::*;
 pub use processes::*;

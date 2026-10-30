@@ -248,7 +248,7 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// The arguments that start `shell` interactive with no rc file.
-fn no_rc_args(shell: HookShell) -> &'static [&'static str] {
+pub fn no_rc_args(shell: HookShell) -> &'static [&'static str] {
     match shell {
         HookShell::Bash => &["--norc", "--noprofile", "-i"],
         HookShell::Zsh => &["-f", "-i"],

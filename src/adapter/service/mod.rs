@@ -4,6 +4,7 @@
 
 mod acceptor;
 mod batch_outcome;
+mod entering_launches;
 mod event;
 mod event_draft;
 mod event_kind;
@@ -18,6 +19,8 @@ mod failing_history;
 mod fake_metrics;
 #[cfg(test)]
 mod fake_pool;
+#[cfg(test)]
+mod fake_shells;
 #[cfg(test)]
 mod fixed_listening_ports;
 mod flow;
@@ -37,6 +40,9 @@ mod notice_mirror;
 mod notices;
 #[cfg(test)]
 mod null_sink;
+mod occupancy_status;
+#[cfg(test)]
+mod occupied_ports;
 mod output_tap;
 mod port_block;
 mod port_holder;
@@ -53,6 +59,7 @@ mod project_ports;
 mod project_status;
 pub mod protocol;
 mod record_retry;
+mod recorder_stores;
 mod refusal;
 mod reply;
 mod run_pin;
@@ -77,6 +84,9 @@ mod shared_event_log;
 mod shared_fd;
 mod shared_holders;
 mod shared_notices;
+mod shell_note;
+mod shell_notes;
+mod shell_sweeper;
 mod singleton;
 mod stack_event;
 mod stack_url;
@@ -84,6 +94,7 @@ mod stack_url;
 mod stalled_handle;
 mod state_dir;
 mod state_goal;
+mod stopping_entries;
 mod store_record;
 mod store_recorder;
 pub mod supervisor;
@@ -101,6 +112,7 @@ mod wait_status;
 mod waiter;
 
 pub use batch_outcome::*;
+pub use entering_launches::*;
 pub use event::*;
 pub use event_draft::*;
 pub use event_kind::*;
@@ -116,6 +128,7 @@ pub use matched_line::*;
 pub use notice::*;
 pub use notice_level::*;
 pub use notices::*;
+pub use occupancy_status::*;
 pub use output_tap::*;
 pub use port_block::*;
 pub use port_holder::*;
@@ -142,11 +155,15 @@ pub use service_version::*;
 pub use shared_event_log::*;
 pub use shared_holders::*;
 pub use shared_notices::*;
+pub use shell_note::*;
+pub use shell_notes::*;
+pub use shell_sweeper::*;
 pub use singleton::*;
 pub use stack_event::*;
 pub use stack_url::*;
 pub use state_dir::*;
 pub use state_goal::*;
+pub use stopping_entries::*;
 pub use store_recorder::*;
 pub use tap_line::*;
 pub use url_source::*;

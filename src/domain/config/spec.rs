@@ -6,12 +6,20 @@ use typed_builder::TypedBuilder;
 
 use crate::domain::{
     config::{
-        ConfigError, Environment, OverCap, ProcessChange, ProcessField, StoredProblem,
-        UnconfinedDir, stays_under_root,
+        ConfigError, DeclaredPorts, Environment, OverCap, ProcessChange, ProcessField,
+        StoredProblem, UnconfinedDir, stays_under_root,
     },
     process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, PaneId, ProcessName, ProjectRoot},
+    value::{CommandLine, Description, LocalPort, PaneId, ProcessName, ProjectRoot},
 };
+
+/// The ports a launch checks are free: `declared` and the port `ready` probes,
+/// each once, ascending.
+pub fn launch_ports(declared: &DeclaredPorts, ready: Option<&ReadyCheck>) -> Vec<LocalPort> {
+    let mut ports = declared.ports().clone();
+    ports.extend(ready.and_then(|check| check.probe().port()));
+    ports.into_iter().collect()
+}
 
 /// The stored definition of one process in a project's stack.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, WithSetters, TypedBuilder)]
@@ -47,6 +55,10 @@ pub struct ProcessSpec {
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on, checked free before each launch.
+    #[getset(get = "pub", set_with = "pub")]
+    #[builder(default)]
+    ports: DeclaredPorts,
 }
 
 impl ProcessSpec {
@@ -94,6 +106,7 @@ impl ProcessSpec {
             restart: change.restart().unwrap_or(self.restart),
             stop,
             ready: change.ready().clone().apply(self.ready),
+            ports: change.ports().clone().unwrap_or(self.ports),
         })
     }
 
@@ -110,6 +123,7 @@ impl ProcessSpec {
                 ProcessField::StopSignal => self.stop.signal() != after.stop.signal(),
                 ProcessField::StopGrace => self.stop.grace_period() != after.stop.grace_period(),
                 ProcessField::Ready => self.ready != after.ready,
+                ProcessField::Ports => self.ports != after.ports,
             })
             .collect()
     }
@@ -144,9 +158,11 @@ impl ProcessSpec {
     }
 
     /// The first cap this definition runs past: its name's, then its
-    /// environment's.
+    /// environment's, then its ports'.
     pub fn over_cap(&self) -> Option<OverCap> {
-        OverCap::of_name(&self.name).or_else(|| self.environment.over_cap())
+        OverCap::of_name(&self.name)
+            .or_else(|| self.environment.over_cap())
+            .or_else(|| OverCap::of_ports(&self.ports))
     }
 
     /// Refuses a new definition past a cap; a stored one is never refused.
@@ -189,6 +205,7 @@ impl ProcessSpec {
             .stop(self.stop)
             .autostart(self.autostart)
             .ready(self.ready.clone())
+            .ports(self.ports.clone())
             .build()
     }
 }
@@ -286,6 +303,37 @@ mod tests {
         assert_eq!(*changed.restart(), RestartPolicy::Always);
         assert_eq!(*changed.stop().signal(), StopSignal::Terminate);
         assert_eq!(*changed.stop().grace_period(), grace(9));
+    }
+
+    /// The port `raw`.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
+
+    #[test]
+    fn a_ports_change_replaces_the_set_and_an_empty_set_clears_it() {
+        let declared = spec().with_ports(DeclaredPorts::of([port(3000), port(5173)]).unwrap());
+        let replace = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::of([port(8080)]).unwrap()))
+            .build();
+        let clear = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::default()))
+            .build();
+
+        let replaced = declared.clone().with_change(&replace).unwrap();
+        let cleared = declared.clone().with_change(&clear).unwrap();
+
+        assert_eq!(replaced.ports(), &DeclaredPorts::of([port(8080)]).unwrap());
+        assert!(cleared.ports().is_empty());
+        assert_eq!(
+            declared
+                .clone()
+                .with_change(&ProcessChange::builder().build())
+                .unwrap(),
+            declared,
+            "a change naming no ports keeps them"
+        );
+        assert_eq!(declared.differing_fields(&replaced), [ProcessField::Ports]);
     }
 
     #[test]

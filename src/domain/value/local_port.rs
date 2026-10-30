@@ -4,8 +4,8 @@ use nutype::nutype;
 
 use super::ValueParseError;
 
-/// The form a port is written in.
-const PORT_FORM: &str = "a port from 1 to 65535";
+/// The form a port is written in, as every refusal of one names it.
+pub const PORT_FORM: &str = "a port from 1 to 65535";
 
 /// A TCP port on this machine that a readiness check or wait probes; zero
 /// names no port.

@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     adapter::workspace_request::WorkspaceRequest,
-    domain::value::{ProcessName, ProjectRoot},
+    domain::{
+        occupancy::ShellRecord,
+        value::{ProcessName, ProjectRoot},
+    },
 };
 
 /// One request a client sends the service, as one JSON line. A `project` is
@@ -121,8 +124,97 @@ pub enum ServiceRequest {
     },
     /// The stored settings changed; later launches use them.
     SettingsChanged,
+    /// A shell's hook reports the project its folder is in at a prompt.
+    ShellReport {
+        /// The report: which shell, at which hook load and prompt, so an
+        /// older report is dropped, and the project its folder is in.
+        #[serde(with = "crate::adapter::wire::form")]
+        record: ShellRecord,
+        /// The shell's exported environment, which what entering a project
+        /// starts runs with; sent only by a report that may enter one, and
+        /// without it entering starts nothing.
+        environment: Option<LaunchEnvironment>,
+    },
     /// Exits so a newer service can take over; every process keeps running.
     Replace,
     /// Exits; every process keeps running.
     Stop,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        adapter::service::{PortBlock, PortHolder, PortOwner, Refusal, ServiceResponse, ShellNote},
+        domain::{
+            occupancy::{ShellId, testing::stamp},
+            value::{LocalPort, Pid, ProjectName, StartToken},
+        },
+    };
+
+    #[test]
+    fn shell_report_and_notes_round_trip_as_json() {
+        let report = ServiceRequest::ShellReport {
+            record: ShellRecord::builder()
+                .shell(
+                    ShellId::builder()
+                        .pid(Pid::try_new(4242).unwrap())
+                        .start(StartToken::try_new(77).unwrap())
+                        .build(),
+                )
+                .stamp(stamp(9, 3))
+                .folder(PathBuf::from("/home/me/shop"))
+                .project(Some(
+                    ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap(),
+                ))
+                .build(),
+            environment: Some(LaunchEnvironment::from_vars([(
+                "PATH".into(),
+                "/usr/bin".into(),
+            )])),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            json,
+            r#"{"shell-report":{"record":{"pid":4242,"start":77,"load":9,"load-pid":2,"seq":3,"folder":[47,104,111,109,101,47,109,101,47,115,104,111,112],"project":"/home/me/shop","held":[]},"environment":{"PATH":"/usr/bin"}}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ServiceRequest>(&json).unwrap(),
+            report
+        );
+
+        let shop = ProjectName::try_new("shop").unwrap();
+        let block = PortBlock::builder()
+            .port(LocalPort::try_new(5173).unwrap())
+            .holder(PortOwner::Supervised(
+                PortHolder::builder()
+                    .project(ProjectName::try_new("admin").unwrap())
+                    .process(ProcessName::try_new("web").unwrap())
+                    .build(),
+            ))
+            .build();
+        let notes = ServiceResponse::ShellNotes(vec![
+            ShellNote::Started {
+                project: shop.clone(),
+                names: vec![ProcessName::try_new("api").unwrap()],
+            },
+            ShellNote::Refused {
+                project: shop,
+                refusal: Refusal::builder()
+                    .name(ProcessName::try_new("web").unwrap())
+                    .reason(block.to_string())
+                    .block(Some(block))
+                    .build(),
+            },
+        ]);
+        let json = serde_json::to_string(&notes).unwrap();
+        assert!(json.starts_with(r#"{"shell-notes":[{"started":"#), "{json}");
+        assert!(json.contains(r#"{"refused":"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ServiceResponse>(&json).unwrap(),
+            notes
+        );
+    }
 }

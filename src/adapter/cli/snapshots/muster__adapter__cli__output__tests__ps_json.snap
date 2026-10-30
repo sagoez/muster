@@ -1,5 +1,6 @@
 ---
 source: src/adapter/cli/output.rs
+assertion_line: 1204
 expression: json(&views).unwrap()
 ---
 [
@@ -7,6 +8,11 @@ expression: json(&views).unwrap()
     "project": {
       "name": "shop",
       "root": "/home/me/shop"
+    },
+    "occupancy": {
+      "shells": 2,
+      "idle_stop": 1800,
+      "stops_in": null
     },
     "processes": [
       {
@@ -20,7 +26,12 @@ expression: json(&views).unwrap()
         "memory_bytes": 134217728,
         "attached": 1,
         "last_exit": null,
-        "stop_grace": 1
+        "stop_grace": 1,
+        "ports": [
+          3000,
+          5173
+        ],
+        "blocked_on": null
       },
       {
         "name": "café",
@@ -36,7 +47,9 @@ expression: json(&views).unwrap()
           "status": 127,
           "signal": null
         },
-        "stop_grace": 5
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": null
       },
       {
         "name": "worker",
@@ -49,7 +62,9 @@ expression: json(&views).unwrap()
         "memory_bytes": null,
         "attached": 0,
         "last_exit": null,
-        "stop_grace": 5
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": null
       },
       {
         "name": "cron",
@@ -65,7 +80,75 @@ expression: json(&views).unwrap()
           "status": null,
           "signal": "sigkill"
         },
-        "stop_grace": 5
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": null
+      },
+      {
+        "name": "web",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 5173,
+          "holder": {
+            "kind": "supervised",
+            "project": "admin site",
+            "process": "web"
+          }
+        }
+      },
+      {
+        "name": "api",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 3000,
+          "holder": {
+            "kind": "supervised",
+            "project": "shop",
+            "process": "dev server"
+          }
+        }
+      },
+      {
+        "name": "docs",
+        "state": "blocked",
+        "ready": "none",
+        "pid": null,
+        "uptime": null,
+        "restarts": 0,
+        "cpu_percent": null,
+        "memory_bytes": null,
+        "attached": 0,
+        "last_exit": null,
+        "stop_grace": 5,
+        "ports": [],
+        "blocked_on": {
+          "port": 8000,
+          "holder": {
+            "kind": "other",
+            "pid": 4242,
+            "command": "python3 -m http.server 8000 \u001b[2J"
+          }
+        }
       }
     ]
   }

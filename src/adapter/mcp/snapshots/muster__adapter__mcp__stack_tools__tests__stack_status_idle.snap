@@ -1,0 +1,20 @@
+---
+source: src/adapter/mcp/stack_tools.rs
+assertion_line: 322
+expression: pending
+---
+{
+  "project": {
+    "name": "shop",
+    "root": "<root>"
+  },
+  "you": "test",
+  "occupancy": {
+    "shells": 0,
+    "idle_stop": 1800,
+    "stops_in_s": 1734
+  },
+  "processes": [],
+  "notices": [],
+  "locks": []
+}

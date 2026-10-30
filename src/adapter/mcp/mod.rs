@@ -28,6 +28,7 @@ mod mcp_deps;
 mod mcp_error;
 mod name_arg;
 mod note_write_arg;
+mod occupancy_view;
 mod process_add_arg;
 mod process_fields;
 mod process_logs_arg;

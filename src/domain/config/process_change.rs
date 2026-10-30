@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{FieldEdit, ProcessField},
+    config::{DeclaredPorts, FieldEdit, ProcessField},
     process::{ReadyCheck, RestartPolicy, StopSignal},
     value::{CommandLine, Description, EnvName, EnvValue, StopGrace},
 };
@@ -44,6 +44,9 @@ pub struct ProcessChange {
     /// An edit to the readiness check.
     #[builder(default)]
     ready: FieldEdit<ReadyCheck>,
+    /// The ports it listens on, replacing the set; an empty set clears it.
+    #[builder(default)]
+    ports: Option<DeclaredPorts>,
 }
 
 impl ProcessChange {
@@ -67,6 +70,7 @@ impl ProcessChange {
             (self.stop_signal.is_some(), ProcessField::StopSignal),
             (self.stop_grace.is_some(), ProcessField::StopGrace),
             (!self.ready.is_keep(), ProcessField::Ready),
+            (self.ports.is_some(), ProcessField::Ports),
         ]
         .into_iter()
         .filter_map(|(edited, field)| edited.then_some(field))
@@ -75,8 +79,8 @@ impl ProcessChange {
 
     /// Whether a running process only takes this change when it next starts:
     /// a new command, working directory, environment, stop policy or
-    /// readiness check. A description, autostart or restart policy needs no
-    /// restart.
+    /// readiness check. A description, autostart, restart policy or ports
+    /// need no restart.
     pub fn needs_restart(&self) -> bool {
         self.command.is_some()
             || !self.working_dir.is_keep()
@@ -91,6 +95,7 @@ impl ProcessChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::value::LocalPort;
 
     #[test]
     fn empty_only_when_nothing_changes() {
@@ -137,6 +142,29 @@ mod tests {
             ProcessField::Restart,
         ]);
         assert!(ProcessChange::builder().build().fields().is_empty());
+    }
+
+    /// Ports are checked before each launch, so changing them restarts
+    /// nothing, and the change names only the ports field.
+    #[test]
+    fn a_ports_change_needs_no_restart_and_names_the_ports_field() {
+        let change = ProcessChange::builder()
+            .ports(Some(
+                DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap(),
+            ))
+            .build();
+
+        assert!(!change.needs_restart());
+        assert!(!change.is_empty());
+        assert_eq!(change.fields(), [ProcessField::Ports]);
+        assert_eq!(
+            ProcessChange::builder()
+                .ports(Some(DeclaredPorts::default()))
+                .build()
+                .fields(),
+            [ProcessField::Ports],
+            "clearing the ports is a change too"
+        );
     }
 
     /// What a process reads at launch needs a restart; its description,

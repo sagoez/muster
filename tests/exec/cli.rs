@@ -30,15 +30,17 @@ use muster::{
         private_dir::RUNTIME_DIR_ENV,
         service::{
             BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-            ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps, ServiceError,
-            ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
+            OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
+            ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion,
+            Singleton,
             protocol::{self, SERVICE_SUBCOMMAND},
         },
+        shell::{SHELL_REPORT_SUBCOMMAND, ShellFiles},
         store::SqliteStore,
     },
-    constants::APP_NAME,
+    constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
-        config::{ENV_VARS_MAX, ProcessChange},
+        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
         coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
         port::{StackReader, StackStore},
         process::ProcessState,
@@ -46,7 +48,7 @@ use muster::{
         pty::PtySize,
         value::{
             COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
-            PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
+            IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
         },
     },
 };
@@ -61,6 +63,14 @@ use crate::common::{
 
 /// The stack file `export` and `import` use by default.
 const STACK_FILE: &str = "muster.yml";
+/// A wrapper a command can run under, between it and the shell.
+const TIMEOUT: &str = "timeout";
+/// How long that wrapper lets the command run, in seconds.
+const WRAPPER_SECONDS: &str = "60";
+/// Another wrapper, run before [`TIMEOUT`].
+const ENV_WRAPPER: &str = "env";
+/// The shell `doctor` is run in, as a hooked one and an unhooked one inside.
+const DOCTOR_SHELL: &str = "bash";
 /// Exit code of an action that failed.
 const ACTION_FAILED: i32 = 1;
 /// Exit code of a command line that does not parse.
@@ -295,10 +305,13 @@ fn in_process_service(
             .settings(Box::new(store.clone()))
             .runs(Box::new(store.clone()))
             .raised(Box::new(store.clone()))
+            .idle_stops(Box::new(store.clone()))
             .run_writes(Box::new(recorder_store.clone()))
-            .raised_writes(Box::new(recorder_store))
+            .raised_writes(Box::new(recorder_store.clone()))
+            .idle_stop_writes(Box::new(recorder_store))
             .edits(Box::new(store))
             .listening(None)
+            .shells(Arc::new(ShellFiles::under(&state_dir)))
             .exit_signals(None)
             .build();
         ServiceRuntime::run(singleton, deps)
@@ -1215,6 +1228,57 @@ fn an_export_writes_only_working_dirs_an_import_accepts() {
     );
 }
 
+/// Declared ports go in with an import and come back out of an export,
+/// ascending; a file declaring more than a process may is refused naming the
+/// limit and writes nothing.
+#[test]
+fn an_import_carries_declared_ports_and_refuses_too_many() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("muster.yml");
+    let declaring = |ports: &str| {
+        format!(
+            "version: 1\nprocesses:\n  - name: web\n    command: npm run dev\n    autostart: false\n    restart: never\n    stop:\n      signal: terminate\n      grace_period: 5s\n    ports: [{ports}]\n"
+        )
+    };
+
+    fs::write(&file, declaring("5173, 3000")).unwrap();
+    let import = scratch.on(&folder, &["import", file.to_str().unwrap()]);
+    assert!(import.status.success(), "{}", shown(&import));
+    let exported = scratch.exported(&folder);
+    assert!(
+        exported.contains("  ports:\n  - 3000\n  - 5173\n"),
+        "{exported}"
+    );
+
+    let too_many: Vec<String> = (1..=DECLARED_PORTS_MAX + 1)
+        .map(|port| port.to_string())
+        .collect();
+    fs::write(&file, declaring(&too_many.join(", "))).unwrap();
+    let refused = scratch.on(&folder, &["import", file.to_str().unwrap(), "--replace"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains(&format!(
+            "processes[0] (web): {} ports are more than the {DECLARED_PORTS_MAX} a process may \
+             declare",
+            DECLARED_PORTS_MAX + 1
+        )),
+        "{}",
+        shown(&refused)
+    );
+    assert_eq!(
+        scratch.exported(&folder),
+        exported,
+        "a refused import writes nothing"
+    );
+}
+
 /// A stack exported from one project imports into another folder,
 /// registering it; a strict import of names already there refuses and
 /// writes nothing, `--merge` updates them and `--replace` removes the rest.
@@ -1631,7 +1695,33 @@ fn a_start_on_a_held_port_says_why() {
         )),
         "{report}"
     );
-    assert_eq!(scratch.row(&project, "web")["state"], "blocked");
+    let holder = serde_json::json!({
+        "kind": "other",
+        "pid": process::id(),
+        "command": report["processes"][0]["block"]["holder"]["command"],
+    });
+    assert_eq!(
+        report["processes"][0]["block"]["holder"], holder,
+        "{report}"
+    );
+    let row = scratch.row(&project, "web");
+    assert_eq!(row["state"], "blocked");
+    assert_eq!(row["blocked_on"]["port"].to_string(), port, "{row}");
+    assert_eq!(row["blocked_on"]["holder"], holder, "{row}");
+    let (_, statuses) = scratch.json_on(&project, &["ps"]);
+    assert_eq!(statuses[0]["occupancy"]["shells"], 0, "{statuses}");
+    assert_eq!(
+        statuses[0]["occupancy"]["idle_stop"], 1800,
+        "the seeded setting: {statuses}"
+    );
+    let listed = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        listed.contains(&format!(
+            "web: port {port} is held by pid {}",
+            process::id()
+        )),
+        "ps names the holder under its table: {listed}"
+    );
     drop(listener);
 }
 
@@ -1692,6 +1782,13 @@ fn pending_api_status(project: &Path) -> ProjectStatus {
                 .stop_grace(Duration::from_secs(5))
                 .build(),
         ])
+        .occupancy(
+            OccupancyStatus::builder()
+                .shells(0)
+                .idle_stop(IdleStop::Never)
+                .stops_in(None)
+                .build(),
+        )
         .build()
 }
 
@@ -4587,4 +4684,142 @@ fn the_filesystem_root_and_home_are_never_registered() {
     }
     let (_, projects) = scratch.json(&["projects"]);
     assert_eq!(projects, serde_json::json!([]), "{projects}");
+}
+
+/// Correctness M4 and CR-3: `doctor` run from the shell whose pid the hook
+/// exported finds the hook, directly or through wrappers such as `env` and
+/// `timeout`. A shell started inside it without the hook, as `bash --norc`
+/// is, inherits the pid but is not hooked, and a pid that is no ancestor
+/// warns too.
+#[test]
+fn doctor_finds_the_hook_only_in_the_nearest_shell_it_runs_in() {
+    let scratch = Scratch::new();
+    let shell_check = |script: &str| {
+        let output = scratch
+            .isolated(Path::new(DOCTOR_SHELL))
+            .args(["--norc", "--noprofile", "-c", script, DOCTOR_SHELL, BINARY])
+            .env_remove(MUSTER_SHELL_ENV)
+            .output()
+            .unwrap();
+        parsed(&output)["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == "shell-hook")
+            .cloned()
+            .unwrap_or_else(|| panic!("no shell hook check: {script}: {}", shown(&output)))
+    };
+    let hooked = format!("export {MUSTER_SHELL_ENV}=$$;");
+
+    for wrapped in [
+        "\"$1\" doctor --json; :".to_string(),
+        format!("{ENV_WRAPPER} {TIMEOUT} {WRAPPER_SECONDS} \"$1\" doctor --json; :"),
+    ] {
+        let found = shell_check(&format!("{hooked} {wrapped}"));
+        assert_eq!(found["outcome"], "ok", "{wrapped}: {found}");
+    }
+
+    let nested = shell_check(&format!(
+        "{hooked} {DOCTOR_SHELL} --norc --noprofile -c '\"$0\" doctor --json; :' \"$1\"; :"
+    ));
+    assert_eq!(nested["outcome"], "warn", "{nested}");
+
+    let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
+    let missing = shell_check(&format!(
+        "export {MUSTER_SHELL_ENV}={}; \"$1\" doctor --json; :",
+        stranger.id()
+    ));
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+    assert_eq!(missing["outcome"], "warn", "{missing}");
+}
+
+/// The report a shell's hook runs at each prompt prints nothing and exits 0
+/// where muster keeps no database, for a live shell and a gone one alike,
+/// and creates no database and starts no service.
+#[test]
+fn shell_report_prints_nothing_and_exits_0_without_a_database() {
+    let scratch = Scratch::empty();
+    let mut gone = Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id().to_string();
+    gone.wait().unwrap();
+
+    for pid in [process::id().to_string(), gone_pid] {
+        let report = scratch.muster(&[
+            SHELL_REPORT_SUBCOMMAND,
+            "--pid",
+            &pid,
+            "--load",
+            "1",
+            "--load-pid",
+            "2",
+            "--seq",
+            "1",
+        ]);
+
+        assert_eq!(report.status.code(), Some(0), "{}", shown(&report));
+        assert!(
+            report.stdout.is_empty() && report.stderr.is_empty(),
+            "{}",
+            shown(&report)
+        );
+    }
+    assert!(!scratch.database().exists());
+    assert!(!scratch.socket().exists());
+}
+
+/// `projects set` gives a project its own idle stop, named by `--project`
+/// or by name, and back to the setting with `default`; `projects` lists it.
+/// A value it does not take, or a folder that is no project, exits 4.
+#[test]
+fn projects_set_gives_a_project_its_own_idle_stop() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+
+    let (set, own) = scratch.json_on(&shop, &["projects", "set", "--idle-stop", "10m"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert_eq!(own["idle_stop"], 600, "{own}");
+    assert_eq!(own["source"], "project", "{own}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], 600, "{listed}");
+    assert_eq!(listed[0]["source"], "project", "{listed}");
+
+    let (_, never) = scratch.json(&["projects", "set", "shop", "--idle-stop", "never"]);
+    assert_eq!(never["idle_stop"], Value::Null, "{never}");
+    assert_eq!(never["source"], "project", "{never}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], Value::Null, "{listed}");
+    assert_eq!(listed[0]["source"], "project", "{listed}");
+
+    let (_, inherited) = scratch.json(&["projects", "set", "shop", "--idle-stop", "default"]);
+    assert_eq!(inherited["idle_stop"], 1800, "{inherited}");
+    assert_eq!(inherited["source"], "setting", "{inherited}");
+    let (_, listed) = scratch.json(&["projects"]);
+    assert_eq!(listed[0]["idle_stop"], 1800, "{listed}");
+    assert_eq!(listed[0]["source"], "setting", "{listed}");
+
+    let invalid = scratch.on(&shop, &["projects", "set", "--idle-stop", "soon"]);
+    assert_eq!(
+        invalid.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&invalid)
+    );
+    assert!(
+        stderr(&invalid).contains("a duration such as 30m, or never"),
+        "{}",
+        shown(&invalid)
+    );
+    let elsewhere = scratch.muster(&["projects", "set", "--idle-stop", "10m"]);
+    assert_eq!(
+        elsewhere.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&elsewhere)
+    );
+    assert!(
+        stderr(&elsewhere).contains("no muster project"),
+        "{}",
+        shown(&elsewhere)
+    );
 }

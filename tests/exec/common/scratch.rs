@@ -140,9 +140,15 @@ impl Scratch {
 
     /// `muster <args>` over this scratch's XDG roots, run from its root.
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(BINARY);
+        let mut command = self.isolated(Path::new(BINARY));
+        command.args(args);
         command
-            .args(args)
+    }
+
+    /// `program` over this scratch's XDG roots, run from its root.
+    pub fn isolated(&self, program: &Path) -> Command {
+        let mut command = Command::new(program);
+        command
             .current_dir(self.root())
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))

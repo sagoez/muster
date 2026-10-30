@@ -1,0 +1,58 @@
+---
+source: src/adapter/shell/hook_script.rs
+expression: script
+---
+# muster's prompt hook for bash. Load it from ~/.bashrc with:
+#   eval "$(muster shell-init bash)"
+if [[ $- == *i* && -z ${__muster_hook-} ]]; then
+    __muster_hook=1
+    __muster_bin=/usr/local/bin/muster
+    __muster_notes=/home/user/.local/state/muster/shells
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
+    __muster_load=${EPOCHREALTIME-}
+    __muster_load=${__muster_load//[!0-9]/}
+    if [[ $__muster_load =~ ^[0-9]{1,16}$ ]]; then
+        __muster_load=${__muster_load}000
+    else
+        __muster_load=$(command date +%s 2>/dev/null)
+        if [[ $__muster_load =~ ^[0-9]{1,10}$ ]]; then
+            __muster_load=${__muster_load}000000000
+        else
+            __muster_load=0
+        fi
+    fi
+    __muster_load_pid=$(command sh -c 'echo "$$"' 2>/dev/null)
+    [[ $__muster_load_pid =~ ^[0-9]{1,10}$ ]] || __muster_load_pid=$$
+    __muster_seq=0
+    export MUSTER_SHELL_PID=$$
+
+    __muster_prompt() {
+        local status=$? note line failglob=
+        __muster_seq=$((__muster_seq + 1))
+        if shopt -q failglob; then
+            failglob=1
+            shopt -u failglob
+        fi
+        for note in "$__muster_notes"/"$$"-*.note; do
+            [[ -f $note ]] || continue
+            while IFS= read -r line || [[ -n $line ]]; do
+                printf '%s\n' "$line"
+            done < "$note"
+            command rm -f -- "$note"
+        done
+        if [[ -n $failglob ]]; then
+            shopt -s failglob
+        fi
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
+        return "$status"
+    }
+
+    if ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
+        PROMPT_COMMAND=(__muster_prompt "${PROMPT_COMMAND[@]}")
+    else
+        PROMPT_COMMAND="__muster_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+    fi
+fi

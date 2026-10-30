@@ -6,14 +6,14 @@ use serde::{
     Deserialize, Deserializer,
     de::{DeserializeOwned, Error as DeError},
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
         COMMAND_FIELD, DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD,
-        RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice, command,
-        description, env_name, env_vars, stop_grace, working_dir,
+        PORTS_FIELD, RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice,
+        command, description, env_name, env_vars, ports, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
@@ -49,6 +49,7 @@ const FIELDS: &[&str] = &[
     STOP_SIGNAL_FIELD,
     STOP_GRACE_FIELD,
     READY_FIELD,
+    PORTS_FIELD,
 ];
 
 /// The changes to make to one process of the project's stack. Fields left
@@ -98,6 +99,11 @@ pub struct ProcessSetArg {
     /// A readiness check as process_add takes; null removes it.
     #[builder(default)]
     ready: Option<Option<ReadyArg>>,
+    /// The TCP ports it listens on, replacing the ones declared, each once
+    /// and at most <declared-ports-max>; [] clears them.
+    #[builder(default)]
+    #[schemars(with = "Option<Vec<u16>>")]
+    ports: Option<Vec<Number>>,
 }
 
 impl<'de> Deserialize<'de> for ProcessSetArg {
@@ -120,6 +126,7 @@ impl<'de> Deserialize<'de> for ProcessSetArg {
             stop_signal: given(&mut fields, STOP_SIGNAL_FIELD)?,
             stop_grace: given(&mut fields, STOP_GRACE_FIELD)?,
             ready: nullable(&mut fields, READY_FIELD)?,
+            ports: given(&mut fields, PORTS_FIELD)?,
         };
         match fields.keys().next() {
             Some(unknown) => Err(D::Error::unknown_field(unknown, FIELDS)),
@@ -196,6 +203,7 @@ impl ProcessSetArg {
             )
             .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)
             .ready(self.ready_edit()?)
+            .ports(self.ports.as_deref().map(ports).transpose()?)
             .build())
     }
 

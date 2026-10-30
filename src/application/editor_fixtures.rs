@@ -49,6 +49,7 @@ pub(super) fn settings() -> Settings {
         .default_stop_signal(StopSignal::Interrupt)
         .default_stop_grace(grace(7))
         .mcp_stack_edits(McpStackEdits::Allow)
+        .idle_stop("30m".parse().unwrap())
         .build()
 }
 

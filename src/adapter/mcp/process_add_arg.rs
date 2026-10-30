@@ -3,12 +3,13 @@ use std::collections::BTreeMap;
 use getset::Getters;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Number;
 use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
         ENVIRONMENT_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command, description,
-        environment, process_name, stop_grace, working_dir,
+        environment, ports, process_name, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
@@ -67,6 +68,12 @@ pub struct ProcessAddArg {
     /// "http://localhost:3000/health", "timeout": 30}.
     #[builder(default)]
     ready: Option<ReadyArg>,
+    /// The TCP ports it listens on, such as [3000, 5173], each once and
+    /// at most <declared-ports-max>. A start is refused, naming who holds
+    /// it, while one of them is taken.
+    #[builder(default)]
+    #[schemars(with = "Option<Vec<u16>>")]
+    ports: Option<Vec<Number>>,
 }
 
 impl ProcessAddArg {
@@ -104,6 +111,13 @@ impl ProcessAddArg {
             )
             .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)
             .ready(self.ready.as_ref().map(ReadyArg::check).transpose()?)
+            .ports(
+                self.ports
+                    .as_deref()
+                    .map(ports)
+                    .transpose()?
+                    .unwrap_or_default(),
+            )
             .build())
     }
 }

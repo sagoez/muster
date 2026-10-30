@@ -1,0 +1,159 @@
+---
+source: src/adapter/cli/shell_init.rs
+expression: "hooks.join(\"\\n\")"
+---
+# bash
+# muster's prompt hook for bash. Load it from ~/.bashrc with:
+#   eval "$(muster shell-init bash)"
+if [[ $- == *i* && -z ${__muster_hook-} ]]; then
+    __muster_hook=1
+    __muster_bin='/opt/muster bin/muster'
+    __muster_notes=<notes>
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
+    __muster_load=${EPOCHREALTIME-}
+    __muster_load=${__muster_load//[!0-9]/}
+    if [[ $__muster_load =~ ^[0-9]{1,16}$ ]]; then
+        __muster_load=${__muster_load}000
+    else
+        __muster_load=$(command date +%s 2>/dev/null)
+        if [[ $__muster_load =~ ^[0-9]{1,10}$ ]]; then
+            __muster_load=${__muster_load}000000000
+        else
+            __muster_load=0
+        fi
+    fi
+    __muster_load_pid=$(command sh -c 'echo "$$"' 2>/dev/null)
+    [[ $__muster_load_pid =~ ^[0-9]{1,10}$ ]] || __muster_load_pid=$$
+    __muster_seq=0
+    export MUSTER_SHELL_PID=$$
+
+    __muster_prompt() {
+        local status=$? note line failglob=
+        __muster_seq=$((__muster_seq + 1))
+        if shopt -q failglob; then
+            failglob=1
+            shopt -u failglob
+        fi
+        for note in "$__muster_notes"/"$$"-*.note; do
+            [[ -f $note ]] || continue
+            while IFS= read -r line || [[ -n $line ]]; do
+                printf '%s\n' "$line"
+            done < "$note"
+            command rm -f -- "$note"
+        done
+        if [[ -n $failglob ]]; then
+            shopt -s failglob
+        fi
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &)
+        return "$status"
+    }
+
+    if ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
+        PROMPT_COMMAND=(__muster_prompt "${PROMPT_COMMAND[@]}")
+    else
+        PROMPT_COMMAND="__muster_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+    fi
+fi
+
+# zsh
+# muster's prompt hook for zsh. Load it from ~/.zshrc with:
+#   eval "$(muster shell-init zsh)"
+if [[ -o interactive ]] && (( ! ${+__muster_hook} )); then
+    typeset -g __muster_hook=1
+    typeset -g __muster_bin='/opt/muster bin/muster'
+    typeset -g __muster_notes=<notes>
+    typeset -g __muster_load __muster_load_pid
+    typeset -gi __muster_seq=0
+    export MUSTER_SHELL_PID=$$
+
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
+    __muster_load_id() {
+        emulate -L zsh
+        local now fraction
+        zmodload -F zsh/datetime p:EPOCHREALTIME 2>/dev/null && now=$EPOCHREALTIME
+        if [[ $now == <->.<-> && ${#${now%.*}} -le 10 ]]; then
+            fraction=${now#*.}
+            __muster_load=${now%.*}${(r:9::0:)fraction}
+        else
+            now=$(command date +%s 2>/dev/null)
+            if [[ $now == <-> && ${#now} -le 10 ]]; then
+                __muster_load=${now}000000000
+            else
+                __muster_load=0
+            fi
+        fi
+        __muster_load_pid=$(command sh -c 'echo "$$"' 2>/dev/null)
+        [[ $__muster_load_pid == <-> && ${#__muster_load_pid} -le 10 ]] || __muster_load_pid=$$
+    }
+    __muster_load_id
+    unfunction __muster_load_id
+
+    __muster_precmd() {
+        local -i status_kept=$?
+        emulate -L zsh
+        local note line
+        (( __muster_seq += 1 ))
+        for note in "$__muster_notes"/"$$"-*.note(N.on); do
+            while IFS= read -r line || [[ -n $line ]]; do
+                printf '%s\n' "$line"
+            done < "$note"
+            command rm -f -- "$note"
+        done
+        (command "$__muster_bin" __shell-report --pid "$$" --load "$__muster_load" \
+            --load-pid "$__muster_load_pid" --seq "$__muster_seq" < /dev/null > /dev/null 2>&1 &!)
+        return status_kept
+    }
+
+    autoload -Uz add-zsh-hook
+    add-zsh-hook precmd __muster_precmd
+fi
+
+# fish
+# muster's prompt hook for fish. Load it from ~/.config/fish/config.fish with:
+#   muster shell-init fish | source
+if status is-interactive; and not set -q __muster_hook
+    set -g __muster_hook 1
+    set -g __muster_bin '/opt/muster bin/muster'
+    set -g __muster_notes <notes>
+    # The load's start in nanoseconds, then the pid of a process it spawns,
+    # which breaks a tie of a coarse clock: a later load always compares
+    # greater, so a late report from before an exec is told apart.
+    set -l now (command date +%s%N 2>/dev/null)
+    if not string match -qr '^[0-9]{19}$' -- "$now"
+        set now (command date +%s 2>/dev/null)
+        if string match -qr '^[0-9]{1,10}$' -- "$now"
+            set now "$now"000000000
+        else
+            set now 0
+        end
+    end
+    set -g __muster_load $now
+    set -l spawned (command sh -c 'echo "$$"' 2>/dev/null)
+    string match -qr '^[0-9]{1,10}$' -- "$spawned"; or set spawned $fish_pid
+    set -g __muster_load_pid $spawned
+    set -g __muster_seq 0
+    set -gx MUSTER_SHELL_PID $fish_pid
+
+    function __muster_prompt --on-event fish_prompt
+        set -l status_kept $status
+        set __muster_seq (math $__muster_seq + 1)
+        for note in $__muster_notes/$fish_pid-*.note
+            test -f $note; or continue
+            while read -l line
+                printf '%s\n' "$line"
+            end <$note
+            command rm -f -- $note
+        end
+        if test -x $__muster_bin
+            command $__muster_bin __shell-report --pid $fish_pid --load $__muster_load \
+                --load-pid $__muster_load_pid --seq $__muster_seq </dev/null >/dev/null 2>&1 &
+            disown 2>/dev/null
+        end
+        return $status_kept
+    end
+end

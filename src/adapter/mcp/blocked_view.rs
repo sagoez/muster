@@ -15,7 +15,7 @@ const HINT_CLOSE: &str = "'}";
 /// needs, who holds it, and the call that frees it when muster can.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct BlockedView {
-    /// The port its readiness check names.
+    /// The first port it needs that was held.
     #[getset(get_copy = "pub")]
     port: u16,
     /// The process listening on it.
@@ -42,5 +42,42 @@ impl From<&PortBlock> for BlockedView {
             holder: block.holder().to_string(),
             hint,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
+        value::{LocalPort, Pid},
+    };
+
+    /// A program holding the port with a huge command line is named by it
+    /// cut to the cap and marked, never the whole argv.
+    #[test]
+    fn a_huge_holder_command_line_is_cut() {
+        let block = PortBlock::builder()
+            .port(LocalPort::try_new(5173).unwrap())
+            .holder(PortOwner::Other(
+                PortOccupant::builder()
+                    .pid(Pid::try_new(4242).unwrap())
+                    .command("z".repeat(OCCUPANT_COMMAND_MAX_CHARS * 1000))
+                    .build(),
+            ))
+            .build();
+
+        let view = BlockedView::from(&block);
+
+        let shown = format!(
+            "{}{OCCUPANT_COMMAND_CUT}",
+            "z".repeat(OCCUPANT_COMMAND_MAX_CHARS)
+        );
+        assert!(view.holder().contains(&shown), "{}", view.holder());
+        assert!(
+            view.holder().chars().count() < OCCUPANT_COMMAND_MAX_CHARS * 2,
+            "{}",
+            view.holder()
+        );
     }
 }

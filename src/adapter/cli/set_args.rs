@@ -40,6 +40,10 @@ pub struct SetArgs {
     #[arg(long, conflicts_with = READY_GROUP)]
     #[getset(get_copy = "pub")]
     no_ready: bool,
+    /// Remove every declared port.
+    #[arg(long, conflicts_with = "port")]
+    #[getset(get_copy = "pub")]
+    no_ports: bool,
     #[command(flatten)]
     #[getset(get = "pub")]
     flags: ProcessFlags,

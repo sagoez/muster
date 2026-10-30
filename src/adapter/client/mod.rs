@@ -4,8 +4,11 @@
 
 mod action;
 mod action_report;
+mod asked;
 mod client_error;
 mod condition_view;
+#[cfg(test)]
+mod connector;
 mod definition_view;
 mod elapsed_seconds;
 mod environment_view;
@@ -17,6 +20,7 @@ mod failure_view;
 pub(crate) mod fake_service;
 #[cfg(test)]
 pub(crate) mod fixed_projects;
+pub mod idle_stop_seconds;
 mod listed_value;
 mod lock_view;
 mod log_read;
@@ -26,8 +30,11 @@ mod match_view;
 mod note_entry;
 mod notice_log;
 mod notice_view;
+mod occupancy_view;
 mod outcome;
 mod page_size;
+mod port_block_view;
+mod port_owner_view;
 mod probe;
 pub mod process;
 mod process_outcome;
@@ -43,6 +50,8 @@ mod removed_view;
 mod resolve_error;
 mod running_service;
 mod running_service_notifier;
+#[cfg(test)]
+pub(crate) mod served_service;
 mod service_access;
 mod service_client;
 mod service_log;
@@ -66,6 +75,7 @@ mod working_dir_place;
 
 pub use action::*;
 pub use action_report::*;
+pub use asked::*;
 pub use client_error::*;
 pub use condition_view::*;
 pub use definition_view::*;
@@ -83,8 +93,11 @@ pub use match_view::*;
 pub use note_entry::*;
 pub use notice_log::*;
 pub use notice_view::*;
+pub use occupancy_view::*;
 pub use outcome::*;
 pub use page_size::*;
+pub use port_block_view::*;
+pub use port_owner_view::*;
 pub use process_outcome::*;
 pub use process_view::*;
 pub use project_identity_view::*;

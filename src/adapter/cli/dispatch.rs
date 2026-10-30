@@ -18,6 +18,8 @@ use clap::{
 };
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
+use rustix::process::getpid;
+use sysinfo::System;
 
 use super::{
     add::{add, add_rows},
@@ -35,14 +37,16 @@ use super::{
     coordination::coordination,
     coordination_command::CoordinationCommand,
     doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
-        processes_probe, project_probe, projects_probe, socket_probe,
+        HOOK_SEARCH_DEPTH, any_failed, completions_probe, database_probe, doctor_report,
+        error_chain, legacy_probe, processes_probe, project_probe, projects_probe,
+        shell_hook_probe, socket_probe,
     },
     doctor_view::DoctorView,
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
     export::{Exported, export, export_rows},
     host_terminal::HostTerminal,
+    idle_stop_override::IdleStopOverride,
     import::{apply, dry_run_view, import_mode, import_rows, plan, read},
     init::{
         AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, INIT_TITLE, InitView, NOTHING_ADDED,
@@ -61,8 +65,8 @@ use super::{
     process_args::ProcessArgs,
     project_log_slice::ProjectLogSlice,
     projects::{
-        REMOVE_ASKED, REMOVE_QUESTION, list, list_rows, removal_rows, remove, remove_unreadable,
-        unreadable_named,
+        REMOVE_ASKED, REMOVE_QUESTION, idle_stop_rows, list, list_rows, removal_rows, remove,
+        remove_unreadable, set_idle_stop, unreadable_named,
     },
     projects_command::ProjectsCommand,
     report::{Report, print_error, print_note},
@@ -75,6 +79,8 @@ use super::{
     service_stopped::ServiceStopped,
     set::{set, set_rows},
     set_args::SetArgs,
+    shell_init::shell_init,
+    shell_report::shell_report,
     start_args::StartArgs,
     terminal_safe::TerminalSafe,
     todo::todo,
@@ -89,16 +95,19 @@ use crate::{
             resolve_project,
         },
         private_dir::state_dir,
+        process_tree::named_ancestors,
         sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
+        shell::HookShell,
     },
-    constants::APP_NAME,
+    constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
         config::{ImportMode, Stack},
         coordination::Author,
+        occupancy::{LoadId, ReportStamp},
         port::LocalState,
         project::Project,
-        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, Pid, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -153,7 +162,7 @@ pub fn parse_args(ports: &'static dyn CliPorts) -> Args {
 
 /// The failure a parse `error` reports: an invalid value when an argument
 /// refused the value given, else a usage error.
-fn parse_failure(error: &ParseError) -> CliError {
+pub(super) fn parse_failure(error: &ParseError) -> CliError {
     let message = error.render().to_string();
     match error.kind() {
         ErrorKind::InvalidValue | ErrorKind::ValueValidation => CliError::InvalidArgument(message),
@@ -326,6 +335,21 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         }) => serve_mcp(invocation, print_config, agent),
         Some(Command::Doctor { json }) => doctor(invocation, json),
         Some(Command::Completions { shell }) => completions(shell),
+        Some(Command::ShellInit { shell }) => print_hook(ports, shell),
+        Some(Command::ShellReport {
+            pid,
+            load,
+            load_pid,
+            seq,
+        }) => {
+            // A skipped report is retried at the next prompt; the hook shows
+            // nothing either way.
+            if let Ok(cwd) = invocation.cwd() {
+                let load = LoadId::builder().started(load).pid(load_pid).build();
+                let stamp = ReportStamp::builder().load(load).seq(seq).build();
+                let _ = shell_report(ports, pid, stamp, &cwd);
+            }
+        },
         Some(Command::Holder { spec }) => internal(ports.run_holder(&spec)),
         Some(Command::RunService) => internal(ports.run_service()),
         None => bare(invocation),
@@ -1138,6 +1162,39 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
         Some(ProjectsCommand::Rm { project, yes }) => {
             remove_project(invocation, &project, yes, json)
         },
+        Some(ProjectsCommand::Set { project, idle_stop }) => {
+            set_project(invocation, project.as_deref(), idle_stop, json)
+        },
+    }
+}
+
+/// `muster projects set`: the project `named`, or the current one, given
+/// the idle stop `choice` names.
+fn set_project(
+    invocation: &Invocation<'_>,
+    named: Option<&str>,
+    choice: IdleStopOverride,
+    json: bool,
+) {
+    let presenter = Presenter::detect(json);
+    let result = invocation.store().and_then(|store| {
+        let project = match named {
+            Some(named) => resolve_project(Some(named), None, &invocation.cwd()?, store.as_ref())?
+                .registered()?,
+            None => invocation.editing_project(store.as_ref())?,
+        };
+        set_idle_stop(
+            store.as_ref(),
+            &invocation.editor(store.as_ref()),
+            &project,
+            choice,
+        )
+    });
+    match result {
+        Ok(view) => print_result(json, &view, |view| {
+            written(presenter.show(&idle_stop_rows(view)));
+        }),
+        Err(error) => fail_command(json, &error),
     }
 }
 
@@ -1305,6 +1362,16 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
+    let ancestors = u32::try_from(getpid().as_raw_nonzero().get())
+        .ok()
+        .and_then(|this| Pid::try_new(this).ok())
+        .map(|this| named_ancestors(&mut System::new(), this, HOOK_SEARCH_DEPTH))
+        .unwrap_or_default();
+    probes.push(shell_hook_probe(
+        env::var(MUSTER_SHELL_ENV).ok().as_deref(),
+        &ancestors,
+        shell.as_deref(),
+    ));
     let view = DoctorView::builder()
         .checks(&probes)
         .failed(any_failed(&probes))
@@ -1314,6 +1381,15 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
     });
     if view.failed() {
         exit(CliExit::ActionFailed.code());
+    }
+}
+
+/// Prints the prompt hook for `shell`, running this binary.
+fn print_hook(ports: &dyn CliPorts, shell: HookShell) {
+    let binary = env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_NAME));
+    match shell_init(ports, shell, &binary) {
+        Ok(script) => emit_bytes(script.as_bytes()),
+        Err(error) => fail_command(false, &error),
     }
 }
 

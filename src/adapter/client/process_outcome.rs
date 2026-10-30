@@ -2,7 +2,7 @@ use getset::{CopyGetters, Getters};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{outcome::Outcome, process_view::ProcessView};
+use super::{outcome::Outcome, port_block_view::PortBlockView, process_view::ProcessView};
 use crate::domain::value::ProcessName;
 
 /// One process a command acted on: what became of it and how it is listed
@@ -20,6 +20,10 @@ pub struct ProcessOutcome {
     #[builder(default)]
     #[getset(get = "pub")]
     reason: Option<String>,
+    /// The held port that kept it from starting, when that was why.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    block: Option<PortBlockView>,
     /// How `ps` lists it now, unless it is no longer listed.
     #[getset(get = "pub")]
     status: Option<ProcessView>,

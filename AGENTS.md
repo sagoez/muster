@@ -15,8 +15,12 @@ every project's stack, the machine's settings, the shared coordination state
 made, and how each process last ended. A project is a folder, registered by
 the first
 process added to it. Users and agents drive muster through the CLI and an MCP
-server; `muster attach` shows a process in the user's own terminal. muster draws
-no panes, and agents and interactive terminals live in herdr.
+server; `muster attach` shows a process in the user's own terminal. A prompt
+hook (`muster shell-init`) in the user's shell reports which project each shell
+is in: entering one starts its autostart processes, and a project no shell has
+been in for the `idle-stop` time is stopped. A process may declare the TCP
+ports it listens on, which a launch checks are free. muster draws no panes, and
+agents and interactive terminals live in herdr.
 
 > Architecture and the database schema are agreed in discussion before
 > implementation. This file governs *how* we write the code, not *what* it does.
@@ -45,8 +49,8 @@ plugs into a port.
   `StackStore`, `Notifier`). `LocalState` is the state a driver reads and
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
-  `CoordinationStore`, `StackEditLog`). `RunHistory` and `RaisedEdits` stay
-  out of it: only the service writes them. The domain has no I/O, no
+  `CoordinationStore`, `StackEditLog`). `RunHistory`, `RaisedEdits` and
+  `PendingIdleStops` stay out of it: only the service writes them. The domain has no I/O, no
   framework types and no `async`, and is fully unit-testable in isolation.
 - **`application`** - use-cases that orchestrate the domain through ports
   (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
@@ -60,19 +64,34 @@ plugs into a port.
     imports the other. Each takes its state, the service and what tells the
     service of a stored change as ports (`LocalState`, `ServiceAccess`,
     `StateChangeNotifier`) from the composition root, so a test injects fakes
-    and never reaches the user's real database or socket.
+    and never reaches the user's real database or socket. The CLI also takes
+    the `ShellRegistry` port, for the shell records and notes its hidden
+    `__shell-report` command keeps.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,
     `StackEditLog`); writers tell it what changed. What it writes, through
-    `RunHistory` and `RaisedEdits` from a thread of its own, is how each
-    process last ended and which agent edits it raised.
+    `RunHistory`, `RaisedEdits` and `PendingIdleStops` from a thread of its
+    own, is how each process last ended, which agent edits it raised and
+    when each project's last shell left; through
+    `ShellRegistry` it deletes the record and notes of each shell that has
+    ended. Shell occupancy lives in the loop (`Occupancy`, in
+    `domain/occupancy`); a `ShellSweeper` thread checks that reported shells
+    are alive, deletes the files of the ended ones and posts them back as an
+    event, and the loop starts an entered project and stops an idle one.
+  - **`adapter/shell`** - the hook each shell loads (`hook_script`, over the
+    scripts in `adapter/shell/scripts`) and `ShellFiles`, the shell records
+    and pending notes kept under `shells/` in the state directory, behind the
+    `ShellRegistry` port. `muster __shell-report` is the hidden command the
+    hook runs.
   - **`adapter/holder`** - the detached process that owns one child's PTY,
     emulator and log, and outlives the service. It spawns its child through
     the `ProcessRunner` the composition root hands it.
   - **driven adapters** `adapter/pty` (portable-pty implements
     `ProcessRunner`), `adapter/store` (one `SqliteStore` implements every store
-    port), `adapter/exchange` (the export file), `adapter/detect` (stack
+    port; its schema holds the `process_ports` table of declared ports and
+    the `idle_stop_*` columns of `settings` and `projects`),
+    `adapter/exchange` (the export file), `adapter/detect` (stack
     detection for `muster init`), `adapter/terminal` (the VT emulator and
     keyboard tracker), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
@@ -106,8 +125,9 @@ src/
     process/           # Process, ProcessState, restart and stop policies, readiness checks
     config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
     coordination/      # shared notes, todos, key-value entries and locks
+    occupancy/         # which shell is in which project: Occupancy, ShellRecord
     pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    port/              # ProcessRunner, StackStore, StackReader, LocalState, Notifier, ... (traits)
+    port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, Notifier, ... (traits)
     value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
     project.rs, settings.rs, color_scheme.rs, notification.rs
   application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
@@ -121,6 +141,7 @@ src/
     pty/               # driven: ProcessRunner via portable-pty
     store/             # driven: SqliteStore, migrations
     exchange/          # driven: the `muster export` / `muster import` file
+    shell/             # driven: the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # driven: stack detection for `muster init`
     wire/              # the DTOs domain values travel as, and their serde with-modules
     workspace_request.rs  # the MCP-to-service requests the service protocol lacks

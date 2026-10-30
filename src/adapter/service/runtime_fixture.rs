@@ -6,8 +6,11 @@ use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::{
+    fake_shells::FakeShells,
     holder_pool::HolderPool,
     memory_store::MemoryStore,
+    occupied_ports::OccupiedPorts,
+    project_ports::ProjectPorts,
     protocol,
     running::Running,
     runtime::ServiceRuntime,
@@ -27,7 +30,7 @@ use crate::{
         test_scratch::short_scratch,
         test_wait::REPLY,
     },
-    domain::{config::ProcessSpec, pty::SpawnRequest, value::ProjectRoot},
+    domain::{config::ProcessSpec, port::PortOccupant, pty::SpawnRequest, value::ProjectRoot},
 };
 
 /// A scratch state directory, holder dirs, projects and their store, plus
@@ -41,6 +44,8 @@ pub(super) struct Fixture {
     holders: Holders,
     #[getset(get = "pub(super)", get_mut = "pub(super)")]
     store: MemoryStore,
+    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    shells: FakeShells,
 }
 
 impl Fixture {
@@ -50,6 +55,7 @@ impl Fixture {
             scratch: short_scratch(SCRATCH_PREFIX),
             holders: Arc::default(),
             store: MemoryStore::new(),
+            shells: FakeShells::default(),
         }
     }
 
@@ -126,29 +132,47 @@ impl Fixture {
     /// which its loop does only once it has taken over what an earlier
     /// service left; a socket that merely accepts may still be sweeping.
     pub(super) fn start(&self, pool: Arc<dyn HolderPool>) -> Running {
+        self.start_occupied(pool, None)
+    }
+
+    /// As [`Self::start`], and when `occupant` is given every port a launch
+    /// looks up is found held by it.
+    pub(super) fn start_occupied(
+        &self,
+        pool: Arc<dyn HolderPool>,
+        occupant: Option<PortOccupant>,
+    ) -> Running {
         let state_dir = self.state_dir();
         let socket = protocol::socket_path(&self.scratch.path().join("run"), &state_dir);
         let store = self.store.clone();
+        let shells = self.shells.clone();
         let bound = socket.clone();
         let thread = thread::spawn(move || {
             let Some(singleton) = Singleton::acquire(&state_dir)? else {
                 return Ok(());
+            };
+            let ports: Box<dyn ProjectPorts> = match occupant {
+                Some(occupant) => Box::new(OccupiedPorts::by(occupant)),
+                None => Box::new(TestPorts),
             };
             let deps = ServiceDeps::builder()
                 .version(VERSION.parse().unwrap())
                 .binary(PathBuf::from(TEST_BINARY))
                 .socket(bound)
                 .holders(pool)
-                .ports(Box::new(TestPorts))
+                .ports(ports)
                 .metrics(None)
                 .stacks(Box::new(store.clone()))
                 .settings(Box::new(store.clone()))
                 .runs(Box::new(store.clone()))
                 .raised(Box::new(store.clone()))
+                .idle_stops(Box::new(store.clone()))
                 .run_writes(Box::new(store.clone()))
                 .raised_writes(Box::new(store.clone()))
+                .idle_stop_writes(Box::new(store.clone()))
                 .edits(Box::new(store))
                 .listening(None)
+                .shells(Arc::new(shells))
                 .exit_signals(None)
                 .build();
             ServiceRuntime::run(singleton, deps)

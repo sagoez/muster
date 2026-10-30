@@ -1,7 +1,8 @@
-use std::num::TryFromIntError;
+use std::{num::TryFromIntError, sync::LazyLock};
 
 use strum::ParseError;
 
+use super::idle_stop_refusal::IdleStopRefusal;
 use crate::domain::{
     coordination::{
         EntryPositionError, KvKeyError, LockNameError, LockNoteError, ScratchpadKeyError,
@@ -10,8 +11,8 @@ use crate::domain::{
     pty::SignalNameError,
     value::{
         ByteSizeError, CommandLineError, DescriptionError, DetachKeyError, EnvNameError,
-        EnvValueError, LogMaxSizeError, PositiveDurationError, ProcessNameError,
-        ScrollbackLinesError, StopGraceError,
+        EnvValueError, LocalPortError, LogMaxSizeError, PORT_FORM, PositiveDurationError,
+        ProcessNameError, ScrollbackLinesError, StopGraceError,
     },
 };
 
@@ -38,7 +39,7 @@ const LOG_SIZE_OUT_OF_BOUNDS: &str = "it is outside the log sizes muster allows"
 /// Why a stored detach key is refused.
 const NOT_A_CHORD: &str = "it is not a Control chord muster knows";
 /// Why a stored duration is refused.
-const NOT_POSITIVE_MILLIS: &str = "it is not a positive whole number of milliseconds";
+pub(super) const NOT_POSITIVE_MILLIS: &str = "it is not a positive whole number of milliseconds";
 /// Why a stored stop grace is refused.
 const NOT_A_GRACE: &str =
     "it is not a positive whole number of milliseconds up to the longest grace";
@@ -46,6 +47,11 @@ const NOT_A_GRACE: &str =
 const NOT_AN_ENV_NAME: &str = "it is empty, holds '=' or NUL, or starts with MUSTER_";
 /// Why a stored variable value is refused.
 const HOLDS_NUL: &str = "it holds a NUL character";
+/// Why a stored port is refused, naming [`PORT_FORM`].
+static NOT_A_PORT: LazyLock<String> = LazyLock::new(|| format!("it is not {PORT_FORM}"));
+/// Why stored idle-stop columns that do not go together are refused.
+pub(super) const IDLE_STOP_MISMATCHED: &str =
+    "it names a kind muster does not know, or milliseconds that kind does not take";
 
 /// A refusal of a stored value, read as the sentence that follows the field
 /// it names.
@@ -159,6 +165,25 @@ impl Refusal for PositiveDurationError {
     fn reason(&self) -> &'static str {
         match self {
             Self::PredicateViolated => NOT_POSITIVE_MILLIS,
+        }
+    }
+}
+
+impl Refusal for LocalPortError {
+    /// The reason a stored port is refused.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::GreaterViolated => NOT_A_PORT.as_str(),
+        }
+    }
+}
+
+impl Refusal for IdleStopRefusal {
+    /// The reason stored idle-stop columns are refused.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Mismatched => IDLE_STOP_MISMATCHED,
+            Self::NotPositive => NOT_POSITIVE_MILLIS,
         }
     }
 }

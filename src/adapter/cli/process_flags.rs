@@ -7,6 +7,7 @@ use super::{
 use crate::{
     adapter::holder::LineMatcher,
     domain::{
+        config::{ConfigError, DeclaredPorts},
         process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
         value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
     },
@@ -61,6 +62,10 @@ pub struct ProcessFlags {
     /// How long each run may take to become ready, such as `60s`.
     #[arg(long, requires = READY_GROUP, value_name = "DURATION", value_parser = positive_duration)]
     ready_timeout: Option<PositiveDuration>,
+    /// A TCP port it listens on, checked free before each start
+    /// (repeatable); on `set`, the ports given replace the stored ones.
+    #[arg(long = "port", value_name = "PORT")]
+    port: Vec<LocalPort>,
 }
 
 impl ProcessFlags {
@@ -106,9 +111,23 @@ impl ProcessFlags {
         ))
     }
 
+    /// The `--port` ports, when any was given.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::RepeatedPort`] for a port given twice, and
+    /// [`ConfigError::TooManyPorts`] past
+    /// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
+    pub fn ports(&self) -> Result<Option<DeclaredPorts>, ConfigError> {
+        if self.port.is_empty() {
+            return Ok(None);
+        }
+        DeclaredPorts::listed(self.port.iter().copied()).map(Some)
+    }
+
     /// Whether no flag was given.
     pub fn is_empty(&self) -> bool {
-        self.env.is_empty()
+        self.port.is_empty()
+            && self.env.is_empty()
             && self.autostart().is_none()
             && self.restart.is_none()
             && self.stop_signal.is_none()

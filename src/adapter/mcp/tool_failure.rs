@@ -184,6 +184,8 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::CorruptRow { .. }
         | ConfigError::TooLarge { .. }
         | ConfigError::OverCap { .. }
+        | ConfigError::TooManyPorts(_)
+        | ConfigError::RepeatedPort(_)
         | ConfigError::TooManyProcesses { .. }
         | ConfigError::TooManyLocks
         | ConfigError::UnsupportedSchema { .. }

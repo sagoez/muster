@@ -94,6 +94,7 @@ pub fn attach_named(
         | ServiceResponse::Log(_)
         | ServiceResponse::Status(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)

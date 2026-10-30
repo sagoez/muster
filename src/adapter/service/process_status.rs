@@ -56,7 +56,7 @@ pub struct ProcessStatus {
     #[serde(with = "humantime_serde")]
     stop_grace: Duration,
     /// Why its last start was refused, while it is not running: another
-    /// process holds the port its readiness check names.
+    /// process holds a port it needs.
     #[builder(default)]
     blocked_on: Option<PortBlock>,
 }

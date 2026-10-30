@@ -7,8 +7,8 @@ use super::{
     holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
 };
 use crate::domain::port::{
-    ListeningPorts, ProcessMetrics, RaisedEdits, RunHistory, SettingsReader, StackEditLog,
-    StackReader,
+    ListeningPorts, PendingIdleStops, ProcessMetrics, RaisedEdits, RunHistory, SettingsReader,
+    ShellRegistry, StackEditLog, StackReader,
 };
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
@@ -45,9 +45,17 @@ pub struct ServiceDeps {
     /// Writes which agent edits were raised, on the same connection as
     /// `run_writes`.
     pub(super) raised_writes: Box<dyn RaisedEdits>,
+    /// Reads the idle stops pending when a service last ran, at start.
+    pub(super) idle_stops: Box<dyn PendingIdleStops>,
+    /// Writes which idle stops are pending, on the same connection as
+    /// `run_writes`.
+    pub(super) idle_stop_writes: Box<dyn PendingIdleStops>,
     /// Finds the ports running process trees listen on; absent where ports
     /// are not reported.
     pub(super) listening: Option<Box<dyn ListeningPorts + Send>>,
+    /// The shells running muster's hook and the last report each made, read
+    /// at start to know who is in which project; ended ones are forgotten.
+    pub(super) shells: Arc<dyn ShellRegistry>,
     /// The signals that stop the service as a client's stop does; absent
     /// for a service run inside another program, such as a test.
     pub(super) exit_signals: Option<Signals>,

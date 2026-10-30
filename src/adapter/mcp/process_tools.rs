@@ -318,7 +318,10 @@ impl MusterMcp {
             seconds, at most <max-stop-grace-s>) and ready, a readiness check whose timeout is \
             a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
             {\"port\": 3000, \"timeout\": 30} or {\"http\": \
-            \"http://localhost:3000/health\", \"timeout\": 30}. Durations are numbers of \
+            \"http://localhost:3000/health\", \"timeout\": 30}, and ports, the TCP ports it \
+            listens on, such as [3000, 5173], each once and at most <declared-ports-max> of \
+            them: a start is refused, naming who holds it, while \
+            one of them or the readiness port is taken. Durations are numbers of \
             seconds in both directions, as results report them, in whole milliseconds: \
             text such as \"30s\" and a fraction such as 0.0004 are refused. Fields left out \
             take the \
@@ -365,9 +368,12 @@ impl MusterMcp {
             environment_set (an object of variables to add or replace), environment_unset (an \
             array of names to remove), autostart, restart, stop_signal, stop_grace (a number \
             of seconds, at most <max-stop-grace-s>) and ready (as process_add takes it, its \
-            timeout in seconds; null removes the readiness check). The change is shown \
+            timeout in seconds; null removes the readiness check) and ports (the TCP ports it \
+            listens on, each once and at most <declared-ports-max>, replacing the ones \
+            declared; [] clears them). The change is shown \
             to the human as a notice naming the fields changed. A running process keeps its \
-            current run: restart it to apply the change. Returns {project, process: the \
+            current run: restart it to apply the change; a ports change applies to its next \
+            start without one. Returns {project, process: the \
             stored definition, its environment as variable names only, changed, running}; \
             changed is false, and nothing is recorded, when every field already held the \
             value given. An unknown name, an invalid value, a working_dir outside the \
@@ -645,10 +651,13 @@ mod tests {
         adapter::mcp::{
             config_set_arg::ConfigSetArg,
             config_tools::CONFIG_SET,
-            test_support::{AGENT, add, content, edits, fixture, refusal, register, runtime},
+            test_support::{
+                AGENT, Fixture, add, answered, content, edits, fixture, refusal, register,
+                result_text, runtime,
+            },
         },
         domain::{
-            config::{McpStackEdits, SettingChange},
+            config::{DECLARED_PORTS_MAX, McpStackEdits, SettingChange},
             coordination::Author,
             port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
             value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
@@ -1257,6 +1266,153 @@ mod tests {
             );
             assert!(empty.contains("is empty"), "{empty}");
         });
+    }
+
+    /// The ports stored for `web` in the fixture's project.
+    fn stored_ports(fixture: &Fixture) -> Vec<u16> {
+        let stack = fixture
+            .store()
+            .stack(fixture.root())
+            .unwrap()
+            .expect("a stack");
+        stack.processes()[0]
+            .ports()
+            .iter()
+            .map(|port| port.into_inner())
+            .collect()
+    }
+
+    /// `process_add` stores the ports it is given, `process_set` replaces
+    /// them and an empty list clears them; each result shows the stored set
+    /// in ascending order.
+    #[test]
+    fn process_add_and_set_take_ports_and_an_empty_list_clears() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let added = content(
+                fixture
+                    .server()
+                    .process_add(Parameters(
+                        serde_json::from_value(serde_json::json!({
+                            "name": "web",
+                            "command": "npm run dev",
+                            "ports": [5173, 3000],
+                        }))
+                        .unwrap(),
+                    ))
+                    .await,
+            );
+            assert_eq!(added[PROCESS]["ports"], serde_json::json!([3000, 5173]));
+            assert_eq!(stored_ports(&fixture), [3000, 5173]);
+
+            let replaced = content(
+                fixture
+                    .server()
+                    .process_set(set(serde_json::json!({ "name": "web", "ports": [8080] })))
+                    .await,
+            );
+            assert_eq!(replaced[PROCESS]["ports"], serde_json::json!([8080]));
+            assert_eq!(replaced[CHANGED], true);
+            assert_eq!(stored_ports(&fixture), [8080]);
+
+            let kept = content(
+                fixture
+                    .server()
+                    .process_set(set(
+                        serde_json::json!({ "name": "web", "command": "npm start" }),
+                    ))
+                    .await,
+            );
+            assert_eq!(kept[PROCESS]["ports"], serde_json::json!([8080]));
+
+            let cleared = content(
+                fixture
+                    .server()
+                    .process_set(set(serde_json::json!({ "name": "web", "ports": [] })))
+                    .await,
+            );
+            assert_eq!(cleared[PROCESS]["ports"], serde_json::json!([]));
+            assert_eq!(cleared[CHANGED], true);
+        });
+        assert!(stored_ports(&fixture).is_empty());
+        assert_eq!(
+            edits(&fixture).last().map(String::as_str),
+            Some(format!("agent {AGENT} changed ports of 'web'").as_str())
+        );
+    }
+
+    /// Asserts that `ports` is refused `invalid-input` saying `says`, on
+    /// `process_add` of a new `api` and on `process_set` of `web`, and that
+    /// neither wrote anything.
+    fn assert_ports_refused(fixture: &Fixture, ports: &Value, says: &str) {
+        runtime().block_on(async {
+            let added = fixture
+                .server()
+                .process_add(Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "api",
+                        "command": "npm start",
+                        "ports": ports,
+                    }))
+                    .unwrap(),
+                ))
+                .await;
+            let set = fixture
+                .server()
+                .process_set(set(serde_json::json!({ "name": "web", "ports": ports })))
+                .await;
+            for refused in [added, set] {
+                let answer = answered(refused).expect("a result, not a protocol error");
+                assert_eq!(answer.is_error, Some(true), "{ports}");
+                let error = &answer.structured_content.clone().expect("structured")["error"];
+                assert_eq!(error["kind"], "invalid-input", "{ports}: {error}");
+                let text = result_text(&answer);
+                assert!(text.contains(says), "{ports}: {text}");
+            }
+        });
+        let stack = fixture
+            .store()
+            .stack(fixture.root())
+            .unwrap()
+            .expect("a stack");
+        assert_eq!(stack.names().len(), 1);
+        assert!(stored_ports(fixture).is_empty());
+    }
+
+    /// A zero, a value past 65535, a fraction or a negative number is the
+    /// caller's mistake, `invalid-input` naming ports, on add and on set,
+    /// and nothing is written.
+    #[test]
+    fn a_bad_port_is_invalid_input_naming_ports() {
+        let fixture = fixture();
+        register(&fixture);
+        for bad in [
+            serde_json::json!([0]),
+            serde_json::json!([65536]),
+            serde_json::json!([3000.5]),
+            serde_json::json!([-1]),
+        ] {
+            assert_ports_refused(&fixture, &bad, "invalid ports");
+        }
+    }
+
+    /// A port given twice is refused as an import refuses it, and more ports
+    /// than a process may declare name the limit, on add and on set.
+    #[test]
+    fn a_repeated_port_or_one_past_the_limit_is_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        assert_ports_refused(
+            &fixture,
+            &serde_json::json!([3000, 5173, 3000]),
+            "port 3000 is listed twice",
+        );
+        let past_the_limit: Vec<usize> = (1..=DECLARED_PORTS_MAX + 1).collect();
+        assert_ports_refused(
+            &fixture,
+            &serde_json::json!(past_the_limit),
+            &format!("the {DECLARED_PORTS_MAX} a process may declare"),
+        );
     }
 
     /// A timeout past the call bound is refused naming the field, never cut

@@ -2,6 +2,7 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
+use super::port_block::PortBlock;
 use crate::domain::value::ProcessName;
 
 /// One process a project-wide request left alone, and why.
@@ -13,4 +14,7 @@ pub struct Refusal {
     name: ProcessName,
     /// Why it was left alone, for a person to read.
     reason: String,
+    /// The held port that kept it from starting, when that was why.
+    #[builder(default)]
+    block: Option<PortBlock>,
 }

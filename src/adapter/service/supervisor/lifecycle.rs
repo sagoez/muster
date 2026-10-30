@@ -590,7 +590,12 @@ impl Supervisor {
             PendingLaunch::new(generation, prior_state, LaunchPurpose::Spawn { restarting }),
         );
         self.workspace.set_state(pane, ProcessState::Starting);
-        let needed = self.launch_port(pane).zip(self.metrics.port_occupants());
+        let ports = self.launch_ports(pane);
+        let needed = self
+            .metrics
+            .port_occupants()
+            .filter(|_| !ports.is_empty())
+            .map(|occupants| (ports, occupants));
         match self.runner.detached() {
             Some(runner) => {
                 let events = self.events.clone();
@@ -1332,16 +1337,15 @@ fn instant_of(started: SystemTime) -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
-/// Who listens on the port a launch needs, asked of `occupants`, with that
-/// port; none while it is free.
+/// The first of the ports a launch needs that a process listens on, with
+/// that process, asked of `occupants` in one scan; none while all are free.
 fn occupied(
-    (port, occupants): (LocalPort, SharedPortOccupants),
+    (ports, occupants): (Vec<LocalPort>, SharedPortOccupants),
 ) -> Option<(LocalPort, PortOccupant)> {
-    let occupant = occupants
+    occupants
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .occupant(port.into_inner())?;
-    Some((port, occupant))
+        .first_occupied(&ports)
 }
 
 #[cfg(test)]

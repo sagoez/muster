@@ -5,7 +5,8 @@ use crate::domain::{
         Registration,
     },
     coordination::Author,
-    value::{ProcessName, ProjectRoot},
+    project::Project,
+    value::{IdleStop, ProcessName, ProjectRoot},
 };
 
 /// Driven port: each project's process definitions, read and written. Every
@@ -68,4 +69,16 @@ pub trait StackStore: StackReader {
         processes: &[ProcessSpec],
         mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError>;
+
+    /// Sets or clears (`None`) the project's idle-stop override, bumping its
+    /// stack revision, and returns the project as stored.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::UnknownProject`] when `root` is not registered,
+    /// or another [`ConfigError`] when the store cannot be written.
+    fn set_idle_stop(
+        &self,
+        root: &ProjectRoot,
+        idle_stop: Option<IdleStop>,
+    ) -> Result<Project, ConfigError>;
 }

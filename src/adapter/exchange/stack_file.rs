@@ -144,12 +144,12 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        config::{ENV_VARS_MAX, Environment, OverCap},
+        config::{DECLARED_PORTS_MAX, DeclaredPorts, ENV_VARS_MAX, Environment, OverCap},
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
             COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, ENV_NAME_MAX_CHARS,
-            ENV_VALUE_MAX_CHARS, EnvName, EnvValue, PROCESS_NAME_MAX_CHARS, PositiveDuration,
-            ProcessName, StopGrace,
+            ENV_VALUE_MAX_CHARS, EnvName, EnvValue, LocalPort, PROCESS_NAME_MAX_CHARS,
+            PositiveDuration, ProcessName, StopGrace,
         },
     };
 
@@ -173,6 +173,9 @@ processes:
     log: ready in \\d+ms
     regex: true
     timeout: 1m
+  ports:
+  - 3000
+  - 8080
 - name: worker
   command: bin/worker
   autostart: false
@@ -193,6 +196,11 @@ processes:
     /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
         StopGrace::try_new(Duration::from_secs(seconds)).unwrap()
+    }
+
+    /// The declared ports `raw`.
+    fn ports(raw: &[u16]) -> DeclaredPorts {
+        DeclaredPorts::of(raw.iter().map(|port| LocalPort::try_new(*port).unwrap())).unwrap()
     }
 
     /// A stack exercising every field the file carries.
@@ -221,6 +229,7 @@ processes:
                         .timeout(PositiveDuration::try_new(Duration::from_secs(60)).unwrap())
                         .build(),
                 ))
+                .ports(ports(&[8080, 3000]))
                 .build(),
             ProcessSpec::builder()
                 .name(ProcessName::try_new("worker").unwrap())
@@ -333,9 +342,9 @@ processes:
     /// Every entry error names the entry by index and name.
     #[test]
     fn entry_errors_name_the_entry() {
-        let unknown = refusal(&entry_with("ports: [3000]"));
+        let unknown = refusal(&entry_with("listen: [3000]"));
         assert!(
-            unknown.starts_with("processes[0] (web): unknown field `ports`"),
+            unknown.starts_with("processes[0] (web): unknown field `listen`"),
             "{unknown}"
         );
 
@@ -446,6 +455,87 @@ processes:
             over(&vars(ENV_VARS_MAX + 1, 4, 1)),
             Some(OverCap::Vars { .. })
         ));
+    }
+
+    /// Declared ports are written ascending and read back as the same set,
+    /// whatever order the file lists them in.
+    #[test]
+    fn ports_round_trip_through_the_stack_file() {
+        let written = write_stack_file(&root(), &example(), EnvExport::Values).unwrap();
+
+        assert!(
+            written.contains("  ports:\n  - 3000\n  - 8080\n"),
+            "{written}"
+        );
+        assert_eq!(
+            read_stack_file(&written).unwrap()[0].ports(),
+            &ports(&[3000, 8080])
+        );
+        assert_eq!(
+            read_stack_file(&entry_with("ports: [5173, 4000]")).unwrap()[0].ports(),
+            &ports(&[4000, 5173])
+        );
+    }
+
+    /// A process declaring no port writes no `ports` key, and an empty list
+    /// reads as no ports.
+    #[test]
+    fn an_empty_port_set_writes_no_ports_key() {
+        let written = write_stack_file(&root(), &example()[1..], EnvExport::Values).unwrap();
+
+        assert!(!written.contains("ports"), "{written}");
+        assert!(
+            read_stack_file(&entry_with("ports: []")).unwrap()[0]
+                .ports()
+                .is_empty()
+        );
+    }
+
+    /// A zero port and a port listed twice are each refused naming the entry.
+    #[test]
+    fn a_zero_or_duplicate_port_names_the_entry() {
+        let second = |ports: &str| {
+            format!(
+                "{}{}",
+                entry_with("").replace("name: web", "name: api"),
+                entry_with(ports).replace("version: 1\nprocesses:\n", "")
+            )
+        };
+
+        assert_eq!(
+            refusal(&second("ports: [3000, 3000]")),
+            "processes[1] (web): port 3000 is listed twice"
+        );
+        assert_eq!(
+            refusal(&second("ports: [3000, 0]")),
+            "processes[1] (web): ports: 0 is not a port from 1 to 65535"
+        );
+        let past = refusal(&second("ports: [70000]"));
+        assert!(
+            past.starts_with("processes[1] (web): ") && past.contains("70000"),
+            "a port past u16 is a shape error naming the value: {past}"
+        );
+    }
+
+    /// Up to the most ports a process may declare are read; one more is
+    /// refused naming the limit.
+    #[test]
+    fn more_ports_than_a_process_may_declare_names_the_limit() {
+        let listing = |count: u16| {
+            let ports: Vec<String> = (1..=count).map(|port| port.to_string()).collect();
+            entry_with(&format!("ports: [{}]", ports.join(", ")))
+        };
+        let max = u16::try_from(DECLARED_PORTS_MAX).unwrap();
+
+        assert!(read_stack_file(&listing(max)).is_ok());
+        assert_eq!(
+            refusal(&listing(max + 1)),
+            format!(
+                "processes[0] (web): {} ports are more than the {DECLARED_PORTS_MAX} a \
+                 process may declare",
+                max + 1
+            )
+        );
     }
 
     /// The example the README points at reads as a stack.

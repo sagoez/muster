@@ -3,17 +3,18 @@
 
 use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
+use serde_json::Number;
 use strum::IntoEnumIterator;
 
 use super::{seconds_arg::SecondsArg, tool_error::ToolError};
 use crate::{
     adapter::client::WorkingDirPlace,
     domain::{
-        config::Environment,
+        config::{DeclaredPorts, Environment},
         value::{
             COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-            DescriptionError, EnvName, EnvValue, MAX_STOP_GRACE, ProcessName, ProjectRoot,
-            StopGrace, ValueParseError, parse_choice, refused_name,
+            DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, PORT_FORM, ProcessName,
+            ProjectRoot, StopGrace, ValueParseError, parse_choice, refused_name,
         },
     },
 };
@@ -50,6 +51,8 @@ const DESCRIPTION_FORM: &str = "non-blank text";
 const ENV_NAME_FORM: &str = "a non-empty name without '=' that does not start with MUSTER_";
 /// The form an environment variable value is written in.
 const ENV_VALUE_FORM: &str = "text without NUL bytes";
+/// The `ports` field.
+pub(super) const PORTS_FIELD: &str = "ports";
 
 /// The refusal of `found` as the field `field`, which accepts `expected`.
 pub(super) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolError {
@@ -149,6 +152,25 @@ pub(super) fn environment(
     vars: &BTreeMap<String, String>,
 ) -> Result<Environment, ToolError> {
     Ok(Environment::of(env_vars(field, vars)?))
+}
+
+/// The ports an agent declared as `raw`.
+///
+/// # Errors
+/// Returns the refusal naming [`PORTS_FIELD`] of a value that is not a port
+/// from 1 to 65535, and the refusals of [`DeclaredPorts::listed`].
+pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
+    let ports = raw
+        .iter()
+        .map(|number| {
+            number
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .and_then(|port| LocalPort::try_new(port).ok())
+                .ok_or_else(|| invalid(PORTS_FIELD, PORT_FORM, &number.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeclaredPorts::listed(ports)?)
 }
 
 /// `raw` read as one of `T`'s kebab-case names in `field`.

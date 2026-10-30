@@ -8,21 +8,23 @@ use muster::{
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
+        no_state_dir::NoStateDir,
         notifier::DesktopNotifier,
         open_files::OpenFilesLimit,
         path::home_dir,
         port_occupants::OsPortOccupants,
-        private_dir::{prepare_state_dir, socket_dir, state_dir},
+        private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
         pty::PortablePtyRunner,
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
             protocol, redirect_stderr,
         },
+        shell::ShellFiles,
         store::SqliteStore,
     },
     domain::{
         config::ConfigError,
-        port::{LocalState, Notifier, PortOccupants, StateChangeNotifier},
+        port::{LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier},
     },
     error::MusterError,
 };
@@ -86,6 +88,14 @@ impl CliPorts for LocalPorts {
 
     fn change_notifier(&self) -> Arc<dyn StateChangeNotifier> {
         Arc::new(RunningServiceNotifier::new(CliPorts::service(self)))
+    }
+
+    fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
+        Ok(Arc::new(ShellFiles::under(&state_dir()?)))
+    }
+
+    fn claim_state_dir(&self) -> bool {
+        state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
     }
 
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {
@@ -184,10 +194,13 @@ fn run_service() -> Result<(), MusterError> {
         .settings(Box::new(store.clone()))
         .runs(Box::new(store.clone()))
         .raised(Box::new(store.clone()))
+        .idle_stops(Box::new(store.clone()))
         .run_writes(Box::new(recorder_store.clone()))
-        .raised_writes(Box::new(recorder_store))
+        .raised_writes(Box::new(recorder_store.clone()))
+        .idle_stop_writes(Box::new(recorder_store))
         .edits(Box::new(store))
         .listening(Some(Box::new(OsListeningPorts::default())))
+        .shells(Arc::new(ShellFiles::under(&state_dir)))
         .exit_signals(Some(Signals::new(SERVICE_EXIT_SIGNALS)?))
         .build();
     Ok(ServiceRuntime::run(singleton, deps)?)

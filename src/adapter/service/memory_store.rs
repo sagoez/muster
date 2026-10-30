@@ -11,14 +11,15 @@ use crate::domain::{
         ProcessSpec, RecordedEdit, Registration, SettingChange, Stack, StackEdit,
     },
     coordination::Author,
+    occupancy::PendingIdleStop,
     port::{
-        RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog, StackReader,
-        StackStore,
+        PendingIdleStops, RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog,
+        StackReader, StackStore,
     },
     process::EndedRun,
     project::Project,
     settings::Settings,
-    value::{EditId, ProcessName, ProjectName, ProjectRoot, StackRevision},
+    value::{EditId, IdleStop, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
 
 /// Stacks and settings held in memory and shared with the test, which
@@ -35,6 +36,10 @@ pub(super) struct MemoryStore {
     runs: Arc<Mutex<HashMap<(ProjectRoot, ProcessName), EndedRun>>>,
     /// The newest agent edit of each project a service raised.
     raised: Arc<Mutex<HashMap<ProjectRoot, EditId>>>,
+    /// Each project's own idle stop, when it sets one.
+    idle_stops: Arc<Mutex<HashMap<ProjectRoot, IdleStop>>>,
+    /// When the last shell left each project whose idle stop is pending.
+    pending_idle: Arc<Mutex<HashMap<ProjectRoot, SystemTime>>>,
 }
 
 impl MemoryStore {
@@ -47,6 +52,8 @@ impl MemoryStore {
             edits: Arc::default(),
             runs: Arc::default(),
             raised: Arc::default(),
+            idle_stops: Arc::default(),
+            pending_idle: Arc::default(),
         }
     }
 
@@ -79,6 +86,7 @@ impl MemoryStore {
     pub(super) fn forget(&self, root: &ProjectRoot) {
         self.stacks.lock().unwrap().remove(root);
         self.revisions.lock().unwrap().1.remove(root);
+        self.idle_stops.lock().unwrap().remove(root);
     }
 
     /// Moves `root`'s stack to the next revision, as every write does.
@@ -89,11 +97,12 @@ impl MemoryStore {
         revisions.1.insert(root.clone(), next);
     }
 
-    /// The project at `root`, named for its folder.
-    fn project(root: &ProjectRoot) -> Project {
+    /// The project at `root`, named for its folder, with its own idle stop.
+    fn project(&self, root: &ProjectRoot) -> Project {
         Project::builder()
             .root(root.clone())
             .name(ProjectName::candidates(root).next().unwrap())
+            .idle_stop(self.idle_stops.lock().unwrap().get(root).copied())
             .build()
     }
 }
@@ -102,7 +111,7 @@ impl StackReader for MemoryStore {
     fn stack(&self, root: &ProjectRoot) -> Result<Option<Stack>, ConfigError> {
         Ok(self.stacks.lock().unwrap().get(root).map(|processes| {
             Stack::builder()
-                .project(Self::project(root))
+                .project(self.project(root))
                 .processes(processes.clone())
                 .build()
         }))
@@ -125,7 +134,7 @@ impl StackStore for MemoryStore {
         stacks.entry(root.clone()).or_default().push(spec.clone());
         self.bump(root);
         Ok(Registration::builder()
-            .project(Self::project(root))
+            .project(self.project(root))
             .newly_registered(newly_registered)
             .build())
     }
@@ -178,6 +187,26 @@ impl StackStore for MemoryStore {
         _mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError> {
         Err(ConfigError::Storage("not used by these tests".into()))
+    }
+
+    fn set_idle_stop(
+        &self,
+        root: &ProjectRoot,
+        idle_stop: Option<IdleStop>,
+    ) -> Result<Project, ConfigError> {
+        if !self.stacks.lock().unwrap().contains_key(root) {
+            return Err(ConfigError::UnknownProject {
+                root: root.as_ref().clone(),
+            });
+        }
+        let mut idle_stops = self.idle_stops.lock().unwrap();
+        match idle_stop {
+            Some(idle_stop) => idle_stops.insert(root.clone(), idle_stop),
+            None => idle_stops.remove(root),
+        };
+        drop(idle_stops);
+        self.bump(root);
+        Ok(self.project(root))
     }
 }
 
@@ -232,6 +261,40 @@ impl RaisedEdits for MemoryStore {
         let mut raised = self.raised.lock().unwrap();
         let mark = raised.entry(root.clone()).or_insert(edit);
         *mark = (*mark).max(edit);
+        Ok(())
+    }
+}
+
+impl PendingIdleStops for MemoryStore {
+    fn pending_idle_stops(&self) -> Result<Vec<PendingIdleStop>, ConfigError> {
+        let mut stops: Vec<PendingIdleStop> = self
+            .pending_idle
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(project, left_at)| {
+                PendingIdleStop::builder()
+                    .project(project.clone())
+                    .left_at(*left_at)
+                    .build()
+            })
+            .collect();
+        stops.sort_by(|a, b| a.project().cmp(b.project()));
+        Ok(stops)
+    }
+
+    fn arm_idle_stop(&self, stop: &PendingIdleStop) -> Result<(), ConfigError> {
+        if self.stacks.lock().unwrap().contains_key(stop.project()) {
+            self.pending_idle
+                .lock()
+                .unwrap()
+                .insert(stop.project().clone(), *stop.left_at());
+        }
+        Ok(())
+    }
+
+    fn clear_idle_stop(&self, root: &ProjectRoot) -> Result<(), ConfigError> {
+        self.pending_idle.lock().unwrap().remove(root);
         Ok(())
     }
 }

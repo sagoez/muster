@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use super::environment::ENV_VARS_MAX;
+use super::{
+    declared_ports::{DECLARED_PORTS_MAX, DeclaredPorts},
+    environment::ENV_VARS_MAX,
+};
 use crate::domain::value::{
     ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS, EnvName, EnvValue, PROCESS_NAME_MAX_CHARS,
     ProcessName, refused_name,
@@ -41,6 +44,12 @@ pub enum OverCap {
         /// How many it has.
         found: usize,
     },
+    /// The process declares too many ports.
+    #[error("{found} ports are more than the {DECLARED_PORTS_MAX} a process may declare")]
+    Ports {
+        /// How many it declares.
+        found: usize,
+    },
 }
 
 impl OverCap {
@@ -71,11 +80,18 @@ impl OverCap {
     pub fn of_var_count(count: usize) -> Option<Self> {
         (count > ENV_VARS_MAX).then_some(Self::Vars { found: count })
     }
+
+    /// The cap `ports` runs past, if any.
+    pub fn of_ports(ports: &DeclaredPorts) -> Option<Self> {
+        let found = ports.len();
+        (found > DECLARED_PORTS_MAX).then_some(Self::Ports { found })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::value::LocalPort;
 
     /// The variable name `raw`.
     fn name(raw: &str) -> EnvName {
@@ -118,6 +134,21 @@ mod tests {
             OverCap::of_var_count(ENV_VARS_MAX + 1),
             Some(OverCap::Vars {
                 found: ENV_VARS_MAX + 1
+            })
+        );
+
+        let ports = |count: usize| {
+            DeclaredPorts::stored(
+                (1..=count)
+                    .map(|port| LocalPort::try_new(u16::try_from(port).unwrap()).unwrap())
+                    .collect(),
+            )
+        };
+        assert_eq!(OverCap::of_ports(&ports(DECLARED_PORTS_MAX)), None);
+        assert_eq!(
+            OverCap::of_ports(&ports(DECLARED_PORTS_MAX + 1)),
+            Some(OverCap::Ports {
+                found: DECLARED_PORTS_MAX + 1
             })
         );
     }

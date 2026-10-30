@@ -23,6 +23,7 @@ mod held_answer;
 mod held_scan;
 mod held_wait;
 mod holder_screen;
+mod idle;
 mod launch_book;
 mod launch_purpose;
 mod lifecycle;

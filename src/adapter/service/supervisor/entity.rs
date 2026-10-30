@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    time::Instant,
 };
 
 use crossbeam_channel::Sender;
@@ -20,7 +21,7 @@ use crate::{
         port::ProcessRunner,
         project::Project,
         settings::Settings,
-        value::{OutputCursor, PaneId, ProjectRoot},
+        value::{OutputCursor, PaneId, ProcessName, ProjectRoot},
     },
 };
 
@@ -97,6 +98,13 @@ pub struct Supervisor {
     /// Stores how each run ends, so a later service shows it; absent where
     /// nothing is stored.
     pub(super) runs: Option<StoreRecorder>,
+    /// Live shells whose folder is in the project.
+    pub(super) occupants: u32,
+    /// When its last shell left, while its idle stop is pending.
+    pub(super) left_at: Option<Instant>,
+    /// What the last idle stop stopped, until a client acts on the project:
+    /// only these may start again once stopped when a shell comes back.
+    pub(super) idle_stopping: HashSet<ProcessName>,
 }
 
 impl Supervisor {
@@ -144,6 +152,9 @@ impl Supervisor {
             next_wait_group: 0,
             readiness: HashMap::new(),
             runs,
+            occupants: 0,
+            left_at: None,
+            idle_stopping: HashSet::new(),
         }
     }
 

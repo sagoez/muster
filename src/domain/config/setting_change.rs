@@ -4,7 +4,8 @@ use crate::domain::{
     process::{RestartPolicy, StopSignal},
     pty::PtySize,
     value::{
-        DetachKey, LogMaxSize, ScrollbackLines, StopGrace, ValueParseError, parse_as, parse_choice,
+        DetachKey, IdleStop, LogMaxSize, ScrollbackLines, StopGrace, ValueParseError, parse_as,
+        parse_choice,
     },
 };
 
@@ -40,6 +41,8 @@ pub enum SettingChange {
     DefaultStopGrace(StopGrace),
     /// Whether an agent over MCP may edit the stack.
     McpStackEdits(McpStackEdits),
+    /// How long a project with no shell in it keeps running.
+    IdleStop(IdleStop),
 }
 
 impl SettingChange {
@@ -65,6 +68,7 @@ impl SettingChange {
             SettingKey::DefaultStopSignal => parse_choice(raw).map(Self::DefaultStopSignal),
             SettingKey::DefaultStopGrace => raw.parse().map(Self::DefaultStopGrace),
             SettingKey::McpStackEdits => parse_choice(raw).map(Self::McpStackEdits),
+            SettingKey::IdleStop => raw.parse().map(Self::IdleStop),
         };
         change.map_err(|error| invalid(key, &error))
     }
@@ -96,6 +100,7 @@ impl SettingChange {
             Self::DefaultStopSignal(_) => SettingKey::DefaultStopSignal,
             Self::DefaultStopGrace(_) => SettingKey::DefaultStopGrace,
             Self::McpStackEdits(_) => SettingKey::McpStackEdits,
+            Self::IdleStop(_) => SettingKey::IdleStop,
         }
     }
 }
@@ -215,6 +220,23 @@ mod tests {
         refusal(SettingKey::DefaultStopGrace, "0s");
         refusal(SettingKey::DefaultStopGrace, "2h");
         refusal(SettingKey::DefaultStopGrace, "300000000y");
+    }
+
+    /// An idle stop reads a duration or `never`, and prints back the same.
+    #[test]
+    fn idle_stop_parses_and_value_text_reads_back() {
+        for raw in ["45m", "never"] {
+            let change = parse(SettingKey::IdleStop, raw);
+
+            assert_eq!(change, SettingChange::IdleStop(raw.parse().unwrap()));
+            assert_eq!(change.key(), SettingKey::IdleStop);
+            let SettingChange::IdleStop(idle_stop) = change else {
+                unreachable!()
+            };
+            assert_eq!(idle_stop.to_string(), raw);
+        }
+        assert!(refusal(SettingKey::IdleStop, "0s").contains("or never"));
+        assert!(refusal(SettingKey::IdleStop, "soon").contains("idle-stop"));
     }
 
     /// The error names the key so a caller can tell which setting refused.

@@ -2,10 +2,10 @@ use std::{path::Path, sync::Arc};
 
 use super::mcp_launch::McpLaunch;
 use crate::{
-    adapter::client::ServiceAccess,
+    adapter::{client::ServiceAccess, no_state_dir::NoStateDir},
     domain::{
         config::ConfigError,
-        port::{LocalState, StateChangeNotifier},
+        port::{LocalState, ShellRegistry, StateChangeNotifier},
     },
     error::MusterError,
 };
@@ -33,6 +33,18 @@ pub trait CliPorts: Sync {
 
     /// What tells a running service of each change the CLI stores.
     fn change_notifier(&self) -> Arc<dyn StateChangeNotifier>;
+
+    /// The shells running muster's hook: their records and notes.
+    ///
+    /// # Errors
+    /// Returns [`NoStateDir`] when the platform offers no state directory to
+    /// keep them in.
+    fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir>;
+
+    /// Whether this process's effective user owns muster's state directory,
+    /// which is made owner-only first when absent and its parent is that
+    /// user's.
+    fn claim_state_dir(&self) -> bool;
 
     /// Serves muster over MCP on stdio as `launch` describes, until the
     /// connecting agent disconnects.

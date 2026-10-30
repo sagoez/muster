@@ -6,7 +6,7 @@ use crate::domain::{
     config::{McpStackEdits, ProcessDefaults, SettingChange, SettingKey},
     process::{RestartPolicy, StopPolicy, StopSignal},
     pty::PtySize,
-    value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
+    value::{DetachKey, IdleStop, LogMaxSize, ScrollbackLines, StopGrace},
 };
 
 /// User settings that apply across every project, stored per machine.
@@ -46,6 +46,10 @@ pub struct Settings {
     /// Whether an agent over MCP may edit the stack.
     #[getset(get = "pub", set_with = "pub")]
     mcp_stack_edits: McpStackEdits,
+    /// How long a project with no shell in it keeps running, unless it sets
+    /// its own.
+    #[getset(get = "pub", set_with = "pub")]
+    idle_stop: IdleStop,
 }
 
 impl Settings {
@@ -63,6 +67,7 @@ impl Settings {
             SettingChange::DefaultStopSignal(signal) => self.with_default_stop_signal(*signal),
             SettingChange::DefaultStopGrace(grace) => self.with_default_stop_grace(*grace),
             SettingChange::McpStackEdits(edits) => self.with_mcp_stack_edits(*edits),
+            SettingChange::IdleStop(idle_stop) => self.with_idle_stop(*idle_stop),
         }
     }
 
@@ -81,6 +86,7 @@ impl Settings {
             SettingKey::DefaultStopSignal => self.default_stop_signal.to_string(),
             SettingKey::DefaultStopGrace => self.default_stop_grace.to_string(),
             SettingKey::McpStackEdits => self.mcp_stack_edits.to_string(),
+            SettingKey::IdleStop => self.idle_stop.to_string(),
         }
     }
 
@@ -122,6 +128,7 @@ mod tests {
             .default_stop_signal(StopSignal::Terminate)
             .default_stop_grace(StopGrace::try_new(Duration::from_secs(5)).unwrap())
             .mcp_stack_edits(McpStackEdits::Allow)
+            .idle_stop("30m".parse().unwrap())
             .build()
     }
 
@@ -167,6 +174,18 @@ mod tests {
         }
         assert_eq!(settings().value_text(SettingKey::DefaultSize), "24x80");
         assert_eq!(settings().value_text(SettingKey::DefaultStopGrace), "5s");
+        assert_eq!(settings().value_text(SettingKey::IdleStop), "30m");
+    }
+
+    /// An idle stop of `never` is set and printed back like a duration.
+    #[test]
+    fn idle_stop_parses_and_value_text_reads_back() {
+        let never = SettingChange::parse(SettingKey::IdleStop, "never").unwrap();
+
+        let changed = settings().with_change(&never);
+
+        assert_eq!(*changed.idle_stop(), IdleStop::Never);
+        assert_eq!(changed.value_text(SettingKey::IdleStop), "never");
     }
 
     /// A log size no binary unit divides shows in bytes and sets back to the

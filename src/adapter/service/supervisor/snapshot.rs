@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Instant};
 
 use super::{config_membership::ConfigMembership, entity::Supervisor};
 use crate::{
@@ -13,7 +13,8 @@ use crate::{
 const DETECTED_URL_PREFIX: &str = "http://localhost:";
 
 impl Supervisor {
-    /// A point-in-time view of every process, for `ps`. An unsupervised child
+    /// A point-in-time view of every process and of the shells in the
+    /// project, for `ps`. An unsupervised child
     /// found gone is shown as it will settle: exited, or no row at all when its
     /// row was removed from the stack, so `ps` never shows an unsupervised
     /// process with no pid.
@@ -86,6 +87,7 @@ impl Supervisor {
         ProjectStatus::builder()
             .project(self.project.clone())
             .processes(processes)
+            .occupancy(self.occupancy_status(Instant::now()))
             .build()
     }
 }

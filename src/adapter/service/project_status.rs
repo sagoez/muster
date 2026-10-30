@@ -2,7 +2,7 @@ use getset::Getters;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use super::process_status::ProcessStatus;
+use super::{occupancy_status::OccupancyStatus, process_status::ProcessStatus};
 use crate::domain::project::Project;
 
 /// A point-in-time view of one project's supervised processes.
@@ -15,4 +15,6 @@ pub struct ProjectStatus {
     project: Project,
     /// Every process, in stack order.
     processes: Vec<ProcessStatus>,
+    /// The shells in it and its idle stop.
+    occupancy: OccupancyStatus,
 }

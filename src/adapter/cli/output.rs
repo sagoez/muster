@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{
     attach_end::AttachEnd,
+    block_hint::{block_hint, block_view_hint},
     error::CliError,
     report::{Report, tally},
     row::Row,
@@ -23,8 +24,8 @@ use super::{
 use crate::{
     adapter::{
         client::{
-            Action, ActionReport, FailureView, NoticeView, Outcome, ProcessOutcome, RunningService,
-            ServiceStatus,
+            Action, ActionReport, FailureView, NoticeView, OccupancyView, Outcome, ProcessOutcome,
+            RunningService, ServiceStatus, listening_ports,
         },
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
@@ -40,10 +41,11 @@ use crate::{
 };
 
 /// Column headers of the `ps` table, in order.
-const PS_HEADERS: [&str; 10] = [
+const PS_HEADERS: [&str; 11] = [
     "NAME",
     "STATE",
     "READY",
+    "PORTS",
     "PID",
     "UPTIME",
     "RESTARTS",
@@ -67,6 +69,20 @@ const READY_YES: &str = "yes";
 const READY_WAITING: &str = "waiting";
 /// The READY cell of a run that did not pass its readiness check in time.
 const READY_TIMEOUT: &str = "timeout";
+/// Between the ports in a PORTS cell.
+const PORT_LIST_SEPARATOR: &str = ",";
+/// Follows the count in a project heading with one shell in it.
+const ONE_SHELL: &str = "shell";
+/// Follows the count in a project heading with several shells in it.
+const SHELLS: &str = "shells";
+/// Opens a project heading's note of a pending idle stop, before how long.
+const IDLE_STOPS_IN: &str = "idle, stops in";
+/// Opens the line under a `ps` table naming a held port, before the port.
+const BLOCKED_PORT: &str = "port";
+/// Between that port and who holds it.
+const HELD_BY: &str = "is held by";
+/// Between a held port's holder and the hint that frees it.
+const HINT_SEPARATOR: &str = "; ";
 /// Gap between two table columns, and between a project's name and folder.
 pub(super) const COLUMN_GAP: &str = "  ";
 /// Shown in a table cell with nothing to show.
@@ -169,12 +185,13 @@ const FALLBACK_FAILURE_JSON: &str =
     r#"{"error":{"kind":"io","message":"the failure could not be described","candidates":[]}}"#;
 
 /// The human `ps` table of `statuses`, each project's table under a heading
-/// naming the project and its folder; with `all`, the tables are indented
-/// under their headings. With `commands`, each row ends in the process's
-/// command as its project's stored stack in `stacks` holds it. Each process
-/// never started for a stored problem is named below its table, with the fix,
-/// and a project whose stack is in `unread` says below its table why it
-/// could not be read, so a missing command or problem is never silent.
+/// naming the project, its folder and who is in it; with `all`, the tables
+/// are indented under their headings. With `commands`, each row ends in the
+/// process's command as its project's stored stack in `stacks` holds it.
+/// Each process a held port kept from starting, and each never started for a
+/// stored problem, is named below its table with the fix, and a project whose
+/// stack is in `unread` says below its table why it could not be read, so a
+/// missing command or problem is never silent.
 pub fn render_status(
     statuses: &[ProjectStatus],
     all: bool,
@@ -193,9 +210,12 @@ pub fn render_status(
             let stack = stacks.iter().find(|stack| stack.project().root() == root);
             let mut rendered = format!(
                 "{}\n{}",
-                project_heading(status.project()),
+                project_heading(status),
                 project_table(status, indent, commands.then_some(stack))
             );
+            for blocked in blocked_lines(status) {
+                rendered.push_str(&format!("\n{indent}{blocked}"));
+            }
             for (_, why) in unread.iter().filter(|(unread, _)| unread == root) {
                 rendered.push_str(&format!(
                     "\n{indent}{NEVER_STARTED_MARK}{}",
@@ -218,13 +238,49 @@ pub fn render_status(
         .join("\n\n")
 }
 
-/// The line naming `project` and its folder.
-fn project_heading(project: &Project) -> String {
-    printable(&format!(
+/// The line naming `status`'s project, its folder, and how many shells are
+/// in it or when it stops for want of any.
+fn project_heading(status: &ProjectStatus) -> String {
+    let project = status.project();
+    let named = printable(&format!(
         "{}{COLUMN_GAP}{}",
         project.name(),
         project.root().as_ref().display()
-    ))
+    ));
+    let occupancy = OccupancyView::from(status.occupancy());
+    match (occupancy.shells(), occupancy.stops_in()) {
+        (0, None) => named,
+        (0, Some(seconds)) => format!(
+            "{named}{TITLE_SEPARATOR}{IDLE_STOPS_IN} {}",
+            short_duration(Duration::from_secs(seconds))
+        ),
+        (1, _) => format!("{named}{TITLE_SEPARATOR}1 {ONE_SHELL}"),
+        (shells, _) => format!("{named}{TITLE_SEPARATOR}{shells} {SHELLS}"),
+    }
+}
+
+/// One line per process of `status` a held port kept from starting: the
+/// port, who holds it and, when muster runs the holder, what frees it.
+fn blocked_lines(status: &ProjectStatus) -> Vec<String> {
+    status
+        .processes()
+        .iter()
+        .filter_map(|process| {
+            let block = process.blocked_on().as_ref()?;
+            let held = format!(
+                "{}{DETAIL_SEPARATOR}{BLOCKED_PORT} {} {HELD_BY} {}",
+                process.name(),
+                block.port(),
+                block.holder()
+            );
+            Some(printable(
+                &match block_hint(block, status.project().name()) {
+                    Some(hint) => format!("{held}{HINT_SEPARATOR}{hint}"),
+                    None => held,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The table of one project's processes, each line indented by `indent`.
@@ -260,6 +316,7 @@ fn process_cells(process: &ProcessStatus) -> Vec<String> {
         printable(process.name().as_ref()),
         process.state().to_string(),
         cell(ready_cell(*process.ready())),
+        cell(ports_cell(process)),
         cell(process.pid().map(|pid| pid.to_string())),
         cell(process.uptime().map(short_duration)),
         process.restarts().to_string(),
@@ -284,6 +341,19 @@ fn ready_cell(ready: Readiness) -> Option<String> {
         Readiness::Ready => Some(READY_YES.to_string()),
         Readiness::TimedOut => Some(READY_TIMEOUT.to_string()),
     }
+}
+
+/// The ports a process tree listens on, in a `ps` cell: `3000,5173`, or
+/// nothing when it listens on none.
+fn ports_cell(process: &ProcessStatus) -> Option<String> {
+    let ports = listening_ports(process);
+    (!ports.is_empty()).then(|| {
+        ports
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(PORT_LIST_SEPARATOR)
+    })
 }
 
 /// How a process last ended, in a `ps` cell: `status 1`, `signal SIGKILL`.
@@ -479,9 +549,10 @@ fn unchanged_words(action: Action) -> Option<&'static str> {
 }
 
 /// What became of `process` in `report`, in words: the outcome's message,
-/// how its child last ended or why it was left alone, then each thing
-/// supervision said about it that the words so far do not already say, and
-/// the pid of any child that runs.
+/// how its child last ended or why it was left alone or not started, then
+/// each thing supervision said about it that the words so far do not
+/// already say, what frees a port that kept it from starting, and the pid
+/// of any child that runs.
 fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
     let outcome = process.outcome();
     let status = process.status().as_ref();
@@ -505,7 +576,7 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
         Outcome::StillStarting | Outcome::StillStopping => {
             parts[0] = format!("{} {PS_FOLLOW_UP}", parts[0]);
         },
-        Outcome::Refused => {
+        Outcome::Refused | Outcome::NotStarted => {
             if let Some(reason) = process.reason() {
                 parts[0].clone_from(reason);
             }
@@ -514,7 +585,6 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
         | Outcome::Restarted
         | Outcome::AlreadyRunning
         | Outcome::Unsupervised
-        | Outcome::NotStarted
         | Outcome::Stopped
         | Outcome::WasNotRunning
         | Outcome::StillRunning
@@ -537,7 +607,14 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
             parts.push(notice.message().clone());
         }
     }
-    let detail = parts.join(DETAIL_SEPARATOR);
+    let mut detail = parts.join(DETAIL_SEPARATOR);
+    if let Some(hint) = process
+        .block()
+        .as_ref()
+        .and_then(|block| block_view_hint(block, report.project().name()))
+    {
+        detail = format!("{detail}{HINT_SEPARATOR}{hint}");
+    }
     match status.and_then(|status| status.pid()) {
         Some(pid) => format!("{detail} (pid {pid})"),
         None => detail,
@@ -705,19 +782,31 @@ pub fn failure_json(error: &CliError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        path::PathBuf,
+    };
 
     use super::*;
     use crate::{
         adapter::{
             cli::{ending_signal::EndingSignal, report::plain},
-            client::{ClientError, FailureKind, ProcessView, ProjectIdentityView, ProjectView},
-            service::{ExitReason, LastExit, ProcessUsage, ServiceErrorKind},
+            client::{
+                ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView,
+                ProjectView,
+            },
+            service::{
+                ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner,
+                ProcessUsage, ServiceErrorKind,
+            },
         },
         domain::{
             config::{Environment, ProcessSpec},
+            port::{ListeningSocket, PortOccupant},
             process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, Pid, ProjectRoot, StopGrace},
+            value::{
+                CommandLine, IdleStop, LocalPort, Pid, PositiveDuration, ProjectRoot, StopGrace,
+            },
         },
     };
 
@@ -786,10 +875,66 @@ mod tests {
             .build()
     }
 
-    /// A project with an attached process that restarted, a crashed one,
-    /// a starting one and one killed by a signal.
+    /// A socket of `pid` listening on `port` at `address`.
+    fn listening(port: u16, address: IpAddr, pid: Pid) -> ListeningSocket {
+        ListeningSocket::builder()
+            .port(port)
+            .address(address)
+            .pid(pid)
+            .build()
+    }
+
+    /// Process `named`, blocked from starting by `holder` on port `port`.
+    fn blocked(named: &str, port: u16, holder: PortOwner) -> ProcessStatus {
+        let idle = process(named, ProcessState::Blocked, None, None);
+        ProcessStatus::builder()
+            .name(idle.name().clone())
+            .state(*idle.state())
+            .pid(None)
+            .uptime(None)
+            .restarts(0)
+            .usage(None)
+            .attached(0)
+            .last_exit(None)
+            .stop_grace(GRACE)
+            .blocked_on(Some(
+                PortBlock::builder()
+                    .port(LocalPort::try_new(port).unwrap())
+                    .holder(holder)
+                    .build(),
+            ))
+            .build()
+    }
+
+    /// Port `port` held by process `process` of project `project`.
+    fn held_by(project: &str, process: &str) -> PortOwner {
+        PortOwner::Supervised(
+            PortHolder::builder()
+                .project(ProjectName::try_new(project).unwrap())
+                .process(name(process))
+                .build(),
+        )
+    }
+
+    /// A port held by pid 4242, which muster does not run, whose command
+    /// line carries an escape sequence.
+    fn held_outside() -> PortOwner {
+        PortOwner::Other(
+            PortOccupant::builder()
+                .pid(Pid::try_new(4242).unwrap())
+                .command("python3 -m http.server 8000 \u{1b}[2J".to_string())
+                .build(),
+        )
+    }
+
+    /// A project two shells are in, with an attached process that restarted
+    /// and listens on two ports, a crashed one, a starting one, one killed
+    /// by a signal, and three a held port kept from starting: by another
+    /// project, by a process of its own, and by a process muster does not
+    /// run.
     fn shop() -> ProjectStatus {
         let dev = process("dev server", ProcessState::Running, Some(4123), None);
+        let child = Pid::try_new(4124).unwrap();
         let dev = ProcessStatus::builder()
             .name(dev.name().clone())
             .state(*dev.state())
@@ -799,11 +944,17 @@ mod tests {
             .restarts(2)
             .usage(*dev.usage())
             .attached(1)
+            .ports(vec![
+                listening(5173, IpAddr::V6(Ipv6Addr::LOCALHOST), child),
+                listening(3000, IpAddr::V4(Ipv4Addr::LOCALHOST), child),
+                listening(5173, IpAddr::V4(Ipv4Addr::LOCALHOST), child),
+            ])
             .last_exit(None)
             .stop_grace(Duration::from_millis(500))
             .build();
         ProjectStatus::builder()
             .project(shop_project())
+            .occupancy(occupancy(2, None))
             .processes(vec![
                 dev,
                 process(
@@ -821,15 +972,32 @@ mod tests {
                         SignalName::try_new("sigkill").unwrap(),
                     ))),
                 ),
+                blocked("web", 5173, held_by("admin site", "web")),
+                blocked("api", 3000, held_by("shop", "dev server")),
+                blocked("docs", 8000, held_outside()),
             ])
             .build()
     }
 
-    /// A project with no processes.
+    /// A project with no processes and no shell in it, which stops in
+    /// 1733.4s.
     fn blog() -> ProjectStatus {
         ProjectStatus::builder()
             .project(project_at("blog", OTHER_PROJECT))
             .processes(vec![])
+            .occupancy(occupancy(0, Some(Duration::from_millis(1_733_400))))
+            .build()
+    }
+
+    /// `shells` in a project that stops after 30m alone, `stops_in` from
+    /// now when its idle stop is pending.
+    fn occupancy(shells: u32, stops_in: Option<Duration>) -> OccupancyStatus {
+        OccupancyStatus::builder()
+            .shells(shells)
+            .idle_stop(IdleStop::After(
+                PositiveDuration::try_new(Duration::from_secs(1800)).unwrap(),
+            ))
+            .stops_in(stops_in)
             .build()
     }
 
@@ -904,7 +1072,64 @@ mod tests {
     fn plain_ps_names_its_project() {
         let rendered = render_status(&[shop()], false, &[], &[], false);
 
-        assert_eq!(rendered.lines().next(), Some("shop  /home/me/shop"));
+        assert_eq!(
+            rendered.lines().next(),
+            Some("shop  /home/me/shop · 2 shells")
+        );
+    }
+
+    /// The heading counts the shells in a project, or says when it stops
+    /// for want of any, rounded up to the second, and says nothing when
+    /// neither applies.
+    #[test]
+    fn the_heading_names_the_shells_or_the_pending_idle_stop() {
+        let heading = |occupancy: OccupancyStatus| {
+            let status = ProjectStatus::builder()
+                .project(shop_project())
+                .processes(vec![])
+                .occupancy(occupancy)
+                .build();
+            project_heading(&status)
+        };
+
+        assert_eq!(heading(occupancy(1, None)), "shop  /home/me/shop · 1 shell");
+        assert_eq!(
+            heading(occupancy(3, None)),
+            "shop  /home/me/shop · 3 shells"
+        );
+        assert_eq!(
+            heading(occupancy(0, Some(Duration::from_millis(1_739_001)))),
+            "shop  /home/me/shop · idle, stops in 29m"
+        );
+        assert_eq!(heading(occupancy(0, None)), "shop  /home/me/shop");
+    }
+
+    /// Each process a held port kept from starting is named under its table
+    /// with who holds the port and what frees it, the holder's command line
+    /// made printable.
+    #[test]
+    fn ps_names_each_blocked_process_and_what_frees_its_port() {
+        let rendered = render_status(&[shop(), blog()], true, &[], &[], false);
+        let lines: Vec<&str> = rendered.lines().map(str::trim_start).collect();
+
+        assert!(
+            lines.contains(
+                &"web: port 5173 is held by project 'admin site', process 'web'; `muster down -p 'admin site'` frees it"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            lines.contains(
+                &"api: port 3000 is held by project 'shop', process 'dev server'; `muster stop 'dev server'` frees it"
+            ),
+            "{rendered}"
+        );
+        let outside = lines
+            .iter()
+            .find(|line| line.starts_with("docs: port 8000 is held by pid 4242 (python3"))
+            .expect("the outside holder is named");
+        assert!(!outside.contains("muster"), "{outside}");
+        assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
 
     /// A process whose stored directory leaves the root is named under the
@@ -987,11 +1212,13 @@ mod tests {
         let state_column: Vec<usize> = rendered
             .lines()
             .skip(1)
+            .take(1 + shop().processes().len())
             .map(|line| {
                 let byte = line
                     .find("running")
                     .or_else(|| line.find("crashed"))
                     .or_else(|| line.find("starting"))
+                    .or_else(|| line.find("blocked"))
                     .or_else(|| line.find("STATE"))
                     .unwrap();
                 UnicodeWidthStr::width(&line[..byte])
@@ -1071,6 +1298,48 @@ mod tests {
         assert!(rows.failed(), "the frame closes as a failure");
         insta::assert_snapshot!("up_report_plain", plain(&rows));
         insta::assert_snapshot!("up_report_json", json(&report).unwrap());
+    }
+
+    /// What became of `named`, which the held port in `status` kept from
+    /// starting, as `outcome`; a refusal carries the block's words as its
+    /// reason, as the service gives them.
+    fn blocked_outcome(outcome: Outcome, status: ProcessStatus) -> ProcessOutcome {
+        let block = status.blocked_on().clone().unwrap();
+        ProcessOutcome::builder()
+            .name(status.name().clone())
+            .outcome(outcome)
+            .reason(Some(block.to_string()))
+            .block(Some(PortBlockView::from(&block)))
+            .status(Some(ProcessView::from(&status)))
+            .build()
+    }
+
+    /// An `up` names what frees each held port that kept a process from
+    /// starting, after why it did not start; a port held outside muster gets
+    /// no hint.
+    #[test]
+    fn up_report_with_a_block_shows_the_hint() {
+        let report = ActionReport::builder()
+            .project(shop_view())
+            .action(Action::Up)
+            .processes(vec![
+                blocked_outcome(
+                    Outcome::NotStarted,
+                    blocked("web", 5173, held_by("admin site", "web")),
+                ),
+                blocked_outcome(
+                    Outcome::Refused,
+                    blocked("api", 3000, held_by("shop", "dev server")),
+                ),
+                blocked_outcome(Outcome::NotStarted, blocked("docs", 8000, held_outside())),
+            ])
+            .notices(vec![])
+            .other_notices(vec![])
+            .build();
+
+        assert!(report.failed());
+        insta::assert_snapshot!("up_report_blocked_plain", plain(&action_rows(&report)));
+        insta::assert_snapshot!("up_report_blocked_json", json(&report).unwrap());
     }
 
     /// Every framed command's plain fallback, which a pipe, `NO_COLOR` or a

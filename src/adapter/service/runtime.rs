@@ -14,6 +14,8 @@ use signal_hook::{
 
 use super::{
     acceptor::Acceptor,
+    batch_outcome::BatchOutcome,
+    entering_launches::EnteringLaunches,
     event::ServiceEvent,
     event_draft::EventDraft,
     event_kind::EventKind,
@@ -38,6 +40,8 @@ use super::{
     project_status::ProjectStatus,
     protocol,
     record_retry::{RECORD_DRAIN_BOUND, RECORD_FLUSH_SETTLE, RecordRetry},
+    recorder_stores::RecorderStores,
+    refusal::Refusal,
     reply::Reply,
     service_deps::ServiceDeps,
     service_error::ServiceError,
@@ -49,22 +53,38 @@ use super::{
     shared_event_log::SharedEventLog,
     shared_holders::SharedHolders,
     shared_notices::SharedNotices,
+    shell_note::ShellNote,
+    shell_notes::ShellNotes,
+    shell_sweeper::{SHELL_SWEEP_INTERVAL, ShellSweeper},
     singleton::Singleton,
+    stopping_entries::{StoppingEntries, StoppingEntry},
     store_recorder::StoreRecorder,
-    supervisor::{HolderScreen, ScreenReply, StaleRelease, Supervisor, SupervisorDeps},
+    supervisor::{
+        HolderScreen, ScreenReply, SpawnGeneration, StaleRelease, Supervisor, SupervisorDeps,
+    },
     usage_sampler::UsageSampler,
 };
 use crate::{
     adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
     domain::{
         config::{ConfigError, Stack},
-        port::{ProcessHandle, RaisedEdits, RunHistory, SettingsReader, StackEditLog, StackReader},
+        occupancy::{Occupancy, OccupancyChange, PendingIdleStop, ShellId, ShellRecord},
+        port::{
+            PendingIdleStops, ProcessHandle, RaisedEdits, RunHistory, SettingsReader,
+            ShellRegistry, StackEditLog, StackReader,
+        },
         project::Project,
         pty::PtyError,
         settings::Settings,
-        value::{EditId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
+        value::{
+            EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision,
+        },
     },
 };
+
+/// Most shells the service keeps track of; a report from a new shell past it
+/// is refused as busy until a sweep finds some ended.
+pub const MAX_SHELLS: usize = 4096;
 
 /// Most events waiting for the loop. Process output is most of them: a holder
 /// connection whose output finds the queue full waits, so the holder's own
@@ -103,6 +123,17 @@ const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running 
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
 const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
+/// Refusal of a report from a new shell while [`MAX_SHELLS`] are known.
+const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it can";
+/// Says what an idle stop stopped, before the process names.
+const IDLE_STOPPED: &str = "stopped";
+/// Says why an idle stop stopped them, before how long nobody was in it.
+const NO_SHELL_FOR: &str = "no shell in it for";
+/// Joins the names an idle stop stopped.
+const NAME_SEPARATOR: &str = ", ";
+/// Prefix of the notice for pending idle stops an earlier service left that
+/// cannot be read; the store's error follows.
+const IDLE_STOPS_UNREADABLE_NOTICE: &str = "could not read the idle stops pending when the service last ran; they arm again at the next leave";
 
 /// The one service of a user: owns every loaded project's supervisor on a
 /// single thread, which every other thread only sends events to. Clients
@@ -129,6 +160,11 @@ pub struct ServiceRuntime {
     /// Reads the newest agent edit an earlier service raised, as a project
     /// loads.
     raised: Box<dyn RaisedEdits>,
+    /// Reads the idle stops an earlier service left pending, at start.
+    idle_stops: Box<dyn PendingIdleStops>,
+    /// When each project's pending idle stop was armed, as last handed to
+    /// the store, so only a change is written.
+    recorded_idle: HashMap<ProjectRoot, Instant>,
     /// Stores run ends and raised edits off the loop; every supervisor shares
     /// it.
     store_recorder: StoreRecorder,
@@ -161,6 +197,24 @@ pub struct ServiceRuntime {
     ports_deadline: Instant,
     /// Samples every project's resource usage, when wired.
     usage_sampler: Option<UsageSampler>,
+    /// The shells running muster's hook, read at start.
+    shells: Arc<dyn ShellRegistry>,
+    /// Which live shell is in which project.
+    occupancy: Occupancy,
+    /// Finds ended shells off the loop.
+    shell_sweeper: ShellSweeper,
+    /// When the known shells are next checked.
+    sweep_deadline: Instant,
+    /// Notes for each shell found after its report was answered.
+    shell_notes: ShellNotes,
+    /// Which shell's entering started each launch still in flight.
+    entering: EnteringLaunches,
+    /// Enterings that found autostart processes still stopping, to enter
+    /// again once they have stopped.
+    stopping_entries: StoppingEntries,
+    /// The environment each known shell last entered a project with, so an
+    /// entering whose shell left is made again as another still inside.
+    shell_environments: HashMap<ShellId, LaunchEnvironment>,
 }
 
 impl ServiceRuntime {
@@ -193,6 +247,8 @@ impl ServiceRuntime {
             .map(|signals| relay_exit_signals(signals, sender.clone(), exit_at_once));
         let mut runtime = Self::new(deps, settings, sender, &state_dir);
         runtime.adopt_running();
+        runtime.restore_shells(Instant::now());
+        runtime.restore_idle_stops(Instant::now(), SystemTime::now());
         let exit = runtime.serve(&events);
         runtime.shutdown();
         acceptor.close();
@@ -240,7 +296,10 @@ impl ServiceRuntime {
             raised,
             run_writes,
             raised_writes,
+            idle_stops,
+            idle_stop_writes,
             listening,
+            shells,
             exit_signals: _,
         } = deps;
         let notices = Notices::shared(Some(protocol::log_path(state_dir)));
@@ -253,18 +312,31 @@ impl ServiceRuntime {
             settings_store,
             edits,
             store_recorder: StoreRecorder::spawn(
-                run_writes,
-                raised_writes,
+                RecorderStores::builder()
+                    .runs(run_writes)
+                    .raised(raised_writes)
+                    .idle_stops(idle_stop_writes)
+                    .build(),
                 Arc::clone(&notices),
                 RecordRetry::service(),
             ),
             runs,
             raised,
+            idle_stops,
+            recorded_idle: HashMap::new(),
             settings,
             probes: ProbeWorker::spawn(events.clone()),
             port_sampler: listening.map(|listening| PortSampler::spawn(listening, events.clone())),
             ports_deadline: Instant::now(),
             usage_sampler: metrics.map(UsageSampler::new),
+            shell_sweeper: ShellSweeper::spawn(Arc::clone(&shells), events.clone()),
+            shells,
+            occupancy: Occupancy::new(),
+            sweep_deadline: Instant::now() + SHELL_SWEEP_INTERVAL,
+            shell_notes: ShellNotes::default(),
+            entering: EnteringLaunches::default(),
+            stopping_entries: StoppingEntries::default(),
+            shell_environments: HashMap::new(),
             events,
             notices,
             supervisors: HashMap::new(),
@@ -333,6 +405,119 @@ impl ServiceRuntime {
         }
     }
 
+    /// Takes over the shells an earlier service knew from their records, as
+    /// they stand at start, before any client is served: a live shell is put
+    /// back where it was, never as an entering. An ended one is put back and
+    /// removed, its record forgotten, so a project it was the last shell in
+    /// sees it leave and arms its idle stop at `now`. A project no record
+    /// names arms nothing, so what a client brought up without the hook keeps
+    /// running across a restart or an upgrade.
+    fn restore_shells(&mut self, now: Instant) {
+        let (live, ended): (Vec<ShellRecord>, Vec<ShellRecord>) = self
+            .shells
+            .records()
+            .into_iter()
+            .partition(|record| self.shells.is_live(record.shell()));
+        for record in &live {
+            if self.occupancy.len() < MAX_SHELLS {
+                self.occupancy.restore(record);
+            }
+        }
+        let mut changes = Vec::new();
+        for record in &ended {
+            self.shells.forget(record.shell());
+            self.occupancy.restore(record);
+            changes.extend(self.occupancy.remove(record.shell()));
+        }
+        self.occupancy_changed(&changes, now);
+    }
+
+    /// Takes what a change to the shell table did: every loaded project
+    /// counts its shells as the table now has them, a project its last shell
+    /// left arms its idle stop at `now`, and one a shell entered holds it
+    /// off. These changes are the only leaves and entries there are.
+    fn occupancy_changed(&mut self, changes: &[OccupancyChange], now: Instant) {
+        for (root, supervisor) in &mut self.supervisors {
+            supervisor.set_shells(occupants(&self.occupancy, root));
+        }
+        for change in changes {
+            match change {
+                OccupancyChange::Left(root) => {
+                    self.stopping_entries.forget_project(root);
+                    if let Some(supervisor) = self.supervisors.get_mut(root) {
+                        supervisor.arm_idle(now);
+                    }
+                },
+                OccupancyChange::Entered(root) => {
+                    if let Some(supervisor) = self.supervisors.get_mut(root) {
+                        supervisor.hold_up();
+                    }
+                },
+            }
+        }
+    }
+
+    /// Takes over the idle stops an earlier service left pending, read at
+    /// `now`, which is `wall` on the clock they were stored by: each loaded
+    /// project no shell is in arms again from when its last shell left, so
+    /// it stops on time, at once when that time has passed. A project a
+    /// shell is in, or one running nothing and so not loaded, has its
+    /// record cleared. A project no record names arms nothing.
+    fn restore_idle_stops(&mut self, now: Instant, wall: SystemTime) {
+        let stored = self
+            .idle_stops
+            .pending_idle_stops()
+            .unwrap_or_else(|error| {
+                self.notify(
+                    None,
+                    NoticeLevel::Warning,
+                    format!("{IDLE_STOPS_UNREADABLE_NOTICE}: {error}"),
+                );
+                Vec::new()
+            });
+        for stop in stored {
+            let ago = wall.duration_since(*stop.left_at()).unwrap_or_default();
+            let left = now.checked_sub(ago).unwrap_or(now);
+            self.recorded_idle.insert(stop.project().clone(), left);
+            if self.occupancy.occupants(stop.project()) == 0
+                && let Some(supervisor) = self.supervisors.get_mut(stop.project())
+            {
+                supervisor.arm_idle(left);
+            }
+        }
+        self.record_idle_stops(now, wall);
+    }
+
+    /// Hands the store each change to the projects' pending idle stops since
+    /// it was last told, read at `now`, which is `wall` on the store's
+    /// clock: an armed or re-armed stop is written with when its last shell
+    /// left, and one no longer pending, as a shell entered, a client brought
+    /// the project up, the stop ran or the project was let go, is cleared.
+    fn record_idle_stops(&mut self, now: Instant, wall: SystemTime) {
+        let armed: HashMap<ProjectRoot, Instant> = self
+            .supervisors
+            .iter()
+            .filter_map(|(root, supervisor)| Some((root.clone(), supervisor.left_at()?)))
+            .collect();
+        for (root, left) in &armed {
+            if self.recorded_idle.get(root) != Some(left) {
+                let ago = now.saturating_duration_since(*left);
+                self.store_recorder.idle_armed(
+                    PendingIdleStop::builder()
+                        .project(root.clone())
+                        .left_at(wall.checked_sub(ago).unwrap_or(wall))
+                        .build(),
+                );
+            }
+        }
+        for root in self.recorded_idle.keys() {
+            if !armed.contains_key(root) {
+                self.store_recorder.idle_cleared(root);
+            }
+        }
+        self.recorded_idle = armed;
+    }
+
     /// Handles events until a client asks the service to exit, waking for the
     /// supervisors' metrics deadlines in between. Returns where to answer
     /// that client.
@@ -355,13 +540,15 @@ impl ServiceRuntime {
         }
     }
 
-    /// The earliest deadline of any supervisor's waits or readiness checks, of
-    /// any client waiting for events, and of the next usage and port sample.
+    /// The earliest deadline of any supervisor's waits, readiness checks or
+    /// idle stop, of any client waiting for events, of the next usage and
+    /// port sample, and of the next shell sweep while any shell is known.
     fn next_deadline(&self) -> Option<Instant> {
         let supervisors = self
             .supervisors
             .values()
-            .map(Supervisor::next_wait_deadline);
+            .flat_map(|supervisor| [supervisor.next_wait_deadline(), supervisor.idle_deadline()]);
+        let sweep = (!self.occupancy.is_empty()).then_some(self.sweep_deadline);
         let usage = self
             .usage_sampler
             .as_ref()
@@ -377,23 +564,27 @@ impl ServiceRuntime {
             .map(|_| self.ports_deadline);
         supervisors
             .chain(events)
-            .chain([usage, ports])
+            .chain([usage, ports, sweep])
             .flatten()
             .min()
     }
 
     /// Acknowledges the held exits whose restart settled, samples usage and
-    /// ports where due, settles waits, answers clients waiting for events,
-    /// and lets go of an unregistered project once it runs nothing.
+    /// ports where due, sweeps the shells and stops idle projects when due,
+    /// settles waits, answers clients waiting for events, and lets go of an
+    /// unregistered project once it runs nothing.
     fn tick(&mut self, now: Instant) {
         for supervisor in self.supervisors.values_mut() {
             supervisor.release_settled_exits();
             supervisor.settle_waits(now);
         }
+        self.enter_stopped();
         if let Some(sampler) = &mut self.usage_sampler {
             sampler.sample(now, self.supervisors.values_mut());
         }
         self.sample_ports(now);
+        self.sweep_shells(now);
+        self.stop_idle(now);
         self.answer_event_waiters(now);
         let finished: Vec<ProjectRoot> = self
             .unregistered
@@ -402,11 +593,13 @@ impl ServiceRuntime {
             .cloned()
             .collect();
         for root in finished {
+            self.stopping_entries.forget_project(&root);
             self.unregistered.remove(&root);
             self.supervisors.remove(&root);
             self.stack_revisions.remove(&root);
             self.raised_edits.remove(&root);
         }
+        self.record_idle_stops(now, SystemTime::now());
     }
 
     /// Applies one event.
@@ -446,9 +639,12 @@ impl ServiceRuntime {
                 pane,
                 generation,
                 result,
-            } => match self.supervisors.get_mut(&project) {
-                Some(supervisor) => supervisor.handle_spawned(pane, generation, result),
-                None => release_unrecorded(result),
+            } => {
+                self.settle_entering(&project, pane, generation);
+                match self.supervisors.get_mut(&project) {
+                    Some(supervisor) => supervisor.handle_spawned(pane, generation, result),
+                    None => release_unrecorded(result),
+                }
             },
             ServiceEvent::LaunchBlocked {
                 project,
@@ -463,10 +659,30 @@ impl ServiceRuntime {
                     .values()
                     .find_map(|supervisor| supervisor.holder_of_pids(&lineage))
                     .map_or(PortOwner::Other(occupant), PortOwner::Supervised);
+                let block = PortBlock::builder().port(port).holder(holder).build();
+                let entering = self.settle_entering(&project, pane, generation);
                 if let Some(supervisor) = self.supervisors.get_mut(&project) {
-                    let block = PortBlock::builder().port(port).holder(holder).build();
-                    supervisor.handle_launch_blocked(pane, generation, block);
+                    supervisor.handle_launch_blocked(pane, generation, block.clone());
                 }
+                if let Some((shell, project, name)) = entering {
+                    let refusal = Refusal::builder()
+                        .name(name)
+                        .reason(block.to_string())
+                        .block(Some(block))
+                        .build();
+                    self.shell_notes
+                        .queue(shell, ShellNote::Refused { project, refusal });
+                }
+            },
+            ServiceEvent::ShellsGone { shells } => {
+                let mut changes = Vec::new();
+                for shell in shells {
+                    self.shell_notes.forget(&shell);
+                    self.entering.forget_shell(&shell);
+                    self.shell_environments.remove(&shell);
+                    changes.extend(self.occupancy.remove(&shell));
+                }
+                self.occupancy_changed(&changes, Instant::now());
             },
             ServiceEvent::Adopted {
                 project,
@@ -610,6 +826,7 @@ impl ServiceRuntime {
             | ServiceRequest::Workspace { .. }
             | ServiceRequest::StackChanged { .. }
             | ServiceRequest::SettingsChanged
+            | ServiceRequest::ShellReport { .. }
             | ServiceRequest::Replace
             | ServiceRequest::Stop => {},
         }
@@ -647,7 +864,12 @@ impl ServiceRuntime {
                 project,
                 environment,
                 wait: None,
-            } => ServiceResponse::Batch(self.supervisor(&project)?.up(&environment)),
+            } => {
+                let outcome = self.supervisor(&project)?.up(&environment);
+                self.client_acts_on(&project);
+                self.hold_up(&project);
+                ServiceResponse::Batch(outcome)
+            },
             ServiceRequest::Up {
                 project,
                 environment,
@@ -655,6 +877,8 @@ impl ServiceRuntime {
             } => {
                 self.supervisor(&project)?
                     .up_waiting(&environment, &wait, reply.clone())?;
+                self.client_acts_on(&project);
+                self.hold_up(&project);
                 return Ok(Reply::Held);
             },
             ServiceRequest::Wait {
@@ -674,7 +898,9 @@ impl ServiceRuntime {
                 wait,
             } => return self.events_after(project, since, kinds, wait, reply),
             ServiceRequest::Down { project } => {
-                ServiceResponse::Batch(self.supervisor(&project)?.down())
+                let outcome = self.supervisor(&project)?.down();
+                self.client_acts_on(&project);
+                ServiceResponse::Batch(outcome)
             },
             ServiceRequest::Log { project, name } => {
                 self.process(&project, &name)?;
@@ -691,7 +917,16 @@ impl ServiceRuntime {
                 environment,
                 wait: None,
             } => {
-                control(self.process(&project, &name)?, &name, action, &environment);
+                let supervisor = self.process(&project, &name)?;
+                let held = brings_up(action);
+                if held {
+                    supervisor.hold_up();
+                }
+                control(supervisor, &name, action, &environment);
+                if held {
+                    self.entering.forget_project(&project);
+                }
+                self.client_acts_on(&project);
                 ServiceResponse::Ok
             },
             ServiceRequest::Control {
@@ -703,6 +938,10 @@ impl ServiceRuntime {
             } => {
                 let supervisor = self.process(&project, &name)?;
                 let mut prepared = supervisor.prepare_wait(&name, &wait)?;
+                let held = brings_up(action);
+                if held {
+                    supervisor.hold_up();
+                }
                 let fresh = match action {
                     ProcessAction::Start if supervisor.runs_or_starts(&name) => {
                         prepared = prepared.on_a_running_process();
@@ -717,6 +956,10 @@ impl ServiceRuntime {
                 let before = supervisor.generation_of(&name);
                 control(supervisor, &name, action, &environment);
                 supervisor.begin_wait(prepared, fresh.then_some(before), reply.clone());
+                if held {
+                    self.entering.forget_project(&project);
+                }
+                self.client_acts_on(&project);
                 return Ok(Reply::Held);
             },
             ServiceRequest::Locate { project, name } => {
@@ -737,8 +980,220 @@ impl ServiceRuntime {
                 self.settings_changed()?;
                 ServiceResponse::Ok
             },
+            ServiceRequest::ShellReport {
+                record,
+                environment,
+            } => ServiceResponse::ShellNotes(self.shell_report(&record, environment.as_ref())?),
         };
         Ok(Reply::Now(response))
+    }
+
+    /// Applies `record`, a shell's report that its folder is in its project:
+    /// a project it left counts one shell fewer, and its project, when the
+    /// shell is the first in it, starts its autostart set with
+    /// `environment`, the shell's own. A report sent with no environment is
+    /// no entering and starts nothing. Returns the notes kept for the shell,
+    /// then what entering started or refused. A report older than the
+    /// shell's last, or from a shell no longer running as it was, changes
+    /// nothing: one that arrives late, after the sweep found its shell gone,
+    /// never brings it back or starts its project.
+    ///
+    /// # Errors
+    /// Returns a busy refusal for a new shell while [`MAX_SHELLS`] are known.
+    fn shell_report(
+        &mut self,
+        record: &ShellRecord,
+        environment: Option<&LaunchEnvironment>,
+    ) -> Result<Vec<ShellNote>, ServiceErrorBody> {
+        let shell = *record.shell();
+        if !self.shells.is_live(&shell) {
+            return Ok(Vec::new());
+        }
+        if !self.occupancy.knows(&shell) && self.occupancy.len() >= MAX_SHELLS {
+            return Err(refused(
+                ServiceErrorKind::Busy,
+                SHELL_TABLE_FULL.to_string(),
+            ));
+        }
+        let fresh = self.occupancy.is_newer(record);
+        let changes = self.occupancy.report(record);
+        self.occupancy_changed(&changes, Instant::now());
+        let mut notes = self.shell_notes.take(&shell);
+        let Some(environment) = environment else {
+            return Ok(notes);
+        };
+        if fresh {
+            self.shell_environments.insert(shell, environment.clone());
+        }
+        for change in changes {
+            if let OccupancyChange::Entered(root) = change
+                && record.project().as_ref() == Some(&root)
+            {
+                notes.extend(self.enter(&root, shell, environment));
+            }
+        }
+        Ok(notes)
+    }
+
+    /// Starts the autostart set of `project`, which `shell` is the first to
+    /// enter, with the shell's `environment`, and remembers that shell for
+    /// each launch it began. Autostart processes its last idle stop is still
+    /// stopping are started once they have stopped, and the shell told then;
+    /// one a client stopped stays stopped. Returns what started and what was refused. A
+    /// project that cannot be loaded, being unregistered or unreadable,
+    /// starts nothing.
+    fn enter(
+        &mut self,
+        project: &ProjectRoot,
+        shell: ShellId,
+        environment: &LaunchEnvironment,
+    ) -> Vec<ShellNote> {
+        if self.refresh_stack(project).is_err() || self.supervisor(project).is_err() {
+            return Vec::new();
+        }
+        self.share_held_ports();
+        let Some(supervisor) = self.supervisors.get_mut(project) else {
+            return Vec::new();
+        };
+        let outcome = supervisor.up(environment);
+        let name = supervisor.project().name().clone();
+        let idle_stopping = supervisor.idle_stopping(outcome.stopping());
+        self.entering.begin(project, outcome.acted(), shell);
+        if !idle_stopping.is_empty() {
+            self.stopping_entries.wait(
+                project,
+                StoppingEntry::builder()
+                    .shell(shell)
+                    .environment(environment.clone())
+                    .names(idle_stopping)
+                    .build(),
+            );
+        }
+        let started = (!outcome.acted().is_empty()).then(|| ShellNote::Started {
+            project: name.clone(),
+            names: outcome.acted().clone(),
+        });
+        started
+            .into_iter()
+            .chain(outcome.refused().iter().map(|refusal| ShellNote::Refused {
+                project: name.clone(),
+                refusal: refusal.clone(),
+            }))
+            .collect()
+    }
+
+    /// Cancels `project`'s pending idle stop, as a client brings it up, and
+    /// takes over the launches an entering shell has in flight there.
+    fn hold_up(&mut self, project: &ProjectRoot) {
+        self.entering.forget_project(project);
+        if let Some(supervisor) = self.supervisors.get_mut(project) {
+            supervisor.hold_up();
+        }
+    }
+
+    /// Hands `project` to a client whose request to act on it was accepted:
+    /// an entering waiting there is dropped, and nothing its last idle stop
+    /// stopped starts again because a shell came back. A refused request
+    /// hands over nothing.
+    fn client_acts_on(&mut self, project: &ProjectRoot) {
+        self.stopping_entries.forget_project(project);
+        if let Some(supervisor) = self.supervisors.get_mut(project) {
+            supervisor.forget_idle_stopping();
+        }
+    }
+
+    /// Enters again each project an entering found still stopping, now that
+    /// what it waited on has stopped, as the shell that entered or, once it
+    /// has left, as another shell still inside, leaving what that starts or
+    /// refuses for that shell's next report. An entering with no such shell
+    /// left is dropped.
+    fn enter_stopped(&mut self) {
+        if self.stopping_entries.is_empty() {
+            return;
+        }
+        let supervisors = &self.supervisors;
+        let stopped = self.stopping_entries.take_stopped(|project, name| {
+            supervisors
+                .get(project)
+                .is_some_and(|supervisor| supervisor.runs_or_starts(name))
+        });
+        for (project, entry) in stopped {
+            let Some((shell, environment)) = self.entering_shell(&project, &entry) else {
+                continue;
+            };
+            for note in self.enter(&project, shell, &environment) {
+                self.shell_notes.queue(shell, note);
+            }
+        }
+    }
+
+    /// The shell, with its environment, that enters `project` again for
+    /// `entry`: the one that entered while it still counts there, else the
+    /// first other shell inside whose entering environment is known.
+    fn entering_shell(
+        &self,
+        project: &ProjectRoot,
+        entry: &StoppingEntry,
+    ) -> Option<(ShellId, LaunchEnvironment)> {
+        let inside = self.occupancy.shells_in(project);
+        if inside.contains(entry.shell()) {
+            return Some((*entry.shell(), entry.environment().clone()));
+        }
+        inside.into_iter().find_map(|shell| {
+            self.shell_environments
+                .get(&shell)
+                .map(|environment| (shell, environment.clone()))
+        })
+    }
+
+    /// Ends the entering launch of `pane` of `project`, if a shell's
+    /// entering began it. Returns that shell, with the project's and the
+    /// process's names, when the launch at `generation` is still current, so
+    /// what it found is news for the shell.
+    fn settle_entering(
+        &mut self,
+        project: &ProjectRoot,
+        pane: PaneId,
+        generation: SpawnGeneration,
+    ) -> Option<(ShellId, ProjectName, ProcessName)> {
+        let supervisor = self.supervisors.get(project)?;
+        let name = supervisor.workspace().process(pane)?.name().clone();
+        let shell = self.entering.settle(project, &name)?;
+        (supervisor.generations().get(&pane) == Some(&generation))
+            .then(|| (shell, supervisor.project().name().clone(), name))
+    }
+
+    /// Asks the sweeper which known shells ended once the sweep interval
+    /// passed.
+    fn sweep_shells(&mut self, now: Instant) {
+        if self.occupancy.is_empty() || now < self.sweep_deadline {
+            return;
+        }
+        self.sweep_deadline = now + SHELL_SWEEP_INTERVAL;
+        self.shell_sweeper.sweep(self.occupancy.shells());
+    }
+
+    /// Stops every project whose idle stop is due, raising a warning notice
+    /// and an `idle-stopped` event naming what stopped.
+    fn stop_idle(&mut self, now: Instant) {
+        let stopped: Vec<(ProjectRoot, String)> = self
+            .supervisors
+            .values_mut()
+            .filter_map(|supervisor| {
+                let idle_stop = supervisor.idle_stop();
+                let outcome = supervisor.idle_stop_if_due(now)?;
+                idle_stop_message(supervisor.project().name(), &outcome, idle_stop)
+                    .map(|message| (supervisor.root().clone(), message))
+            })
+            .collect();
+        for (root, message) in stopped {
+            self.raise(
+                Some(root),
+                NoticeLevel::Warning,
+                EventKind::IdleStopped,
+                message,
+            );
+        }
     }
 
     /// Applies `project`'s stored stack to its supervisor when it is loaded;
@@ -1019,6 +1474,7 @@ impl ServiceRuntime {
         let mut supervisor =
             Supervisor::new(stack.project().clone(), &stack, deps).with_adopter(Box::new(shared));
         supervisor.restore_ends(&ended);
+        supervisor.set_shells(occupants(&self.occupancy, project));
         for record in held {
             supervisor.adopt(record.clone());
         }
@@ -1146,6 +1602,18 @@ impl ServiceRuntime {
 
     /// Records a notice about `project`, or the service as a whole.
     fn notify(&self, project: Option<ProjectRoot>, level: NoticeLevel, message: String) {
+        self.raise(project, level, EventKind::Notice, message);
+    }
+
+    /// Records `message` about `project`, or the service as a whole, as a
+    /// notice at `level` and as an event of `kind`.
+    fn raise(
+        &self,
+        project: Option<ProjectRoot>,
+        level: NoticeLevel,
+        kind: EventKind,
+        message: String,
+    ) {
         self.event_log
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1153,7 +1621,7 @@ impl ServiceRuntime {
                 EventDraft::builder()
                     .project(project.clone())
                     .process(None)
-                    .kind(EventKind::Notice)
+                    .kind(kind)
                     .detail(message.clone())
                     .build(),
             );
@@ -1232,6 +1700,41 @@ fn control(
     }
 }
 
+/// How many shells of `occupancy` are in `project`.
+fn occupants(occupancy: &Occupancy, project: &ProjectRoot) -> u32 {
+    u32::try_from(occupancy.occupants(project)).unwrap_or(u32::MAX)
+}
+
+/// Whether `action` brings a process up, as a client asking holds a
+/// project's idle stop off.
+fn brings_up(action: ProcessAction) -> bool {
+    match action {
+        ProcessAction::Start | ProcessAction::Restart => true,
+        ProcessAction::Stop
+        | ProcessAction::Pause
+        | ProcessAction::Resume
+        | ProcessAction::Kill => false,
+    }
+}
+
+/// What an idle stop of `project` after `idle_stop` did, as its notice
+/// says it: `shop: stopped api, worker: no shell in it for 30m`. None when it
+/// stopped nothing.
+fn idle_stop_message(
+    project: &ProjectName,
+    outcome: &BatchOutcome,
+    idle_stop: IdleStop,
+) -> Option<String> {
+    if outcome.acted().is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = outcome.acted().iter().map(AsRef::as_ref).collect();
+    Some(format!(
+        "{project}: {IDLE_STOPPED} {}: {NO_SHELL_FOR} {idle_stop}",
+        names.join(NAME_SEPARATOR)
+    ))
+}
+
 /// The stack of `project` with no process in it.
 fn empty_stack(project: Project) -> Stack {
     Stack::builder()
@@ -1285,14 +1788,15 @@ mod tests {
             holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
             ipc,
             service::{
-                BatchOutcome, EventPage, StateGoal, WaitCondition, WaitSpec, WaitStatus,
+                BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
+                WaitStatus,
                 fake_pool::{BROKEN_STREAM, FakePool},
                 null_sink::NullSink,
                 running::Running,
                 runtime_fixture::Fixture,
                 runtime_testing::{
                     POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process,
-                    sleeper, wait_until,
+                    sleeper, test_shell, wait_until,
                 },
                 supervisor::{
                     ChannelOutputSink, SpawnGeneration,
@@ -1300,18 +1804,19 @@ mod tests {
                 },
             },
             signal_target::SignalTarget,
-            test_wait::REPLY,
+            test_wait::{REPLY, wait_within},
         },
         domain::{
-            config::SettingChange,
+            config::{ProcessSpec, SettingChange},
             coordination::Author,
-            port::{ProcessRunner, SettingsStore},
+            occupancy::testing::stamp,
+            port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
             process::{
                 LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
-                ReadyProbe,
+                ReadyProbe, StopPolicy, StopSignal,
             },
             pty::{ProcessOutput, PtySize},
-            value::{CommandLine, PaneId, PositiveDuration},
+            value::{CommandLine, LocalPort, PaneId, PositiveDuration, StopGrace},
         },
     };
 
@@ -2779,5 +3284,1162 @@ mod tests {
         )));
 
         assert_eq!(kills.load(Ordering::SeqCst), 1);
+    }
+
+    /// An idle stop short enough for a test to see it fire.
+    const SHORT_IDLE: Duration = Duration::from_millis(300);
+    /// An idle stop no test outlasts.
+    const LONG_IDLE: Duration = Duration::from_secs(60 * 60);
+    /// An idle stop that outlasts a service restart and still fires within
+    /// a test.
+    const RESTART_IDLE: Duration = Duration::from_secs(3);
+    /// How far a stored leave time may sit past the real one: it is kept to
+    /// the millisecond, rounded up.
+    const STORED_PRECISION: Duration = Duration::from_millis(2);
+    /// How long past [`SHELL_SWEEP_INTERVAL`] a test waits for a sweep to
+    /// land, so a loaded machine never fails one that is merely late.
+    const SWEEP_MARGIN: Duration = WAIT;
+    /// The bound on a wait for a sweep: its interval plus the margin.
+    const SWEEP_WAIT: Duration = SHELL_SWEEP_INTERVAL.saturating_add(SWEEP_MARGIN);
+    /// The port the blocked process checks for readiness.
+    const BLOCKED_PORT: u16 = 3000;
+    /// The pid of the program muster does not run that holds every port.
+    const OUTSIDER_PID: u32 = 777;
+    /// Its command line.
+    const OUTSIDER_COMMAND: &str = "python3 -m http.server 3000";
+    /// The variable a shell exports that its entering launches carry.
+    const SHELL_VAR: &str = "SHELL_ONLY_VAR";
+    /// Its value.
+    const SHELL_VALUE: &str = "from-the-shell";
+    /// The hook load every test shell reports from.
+    const HOOK_LOAD: u64 = 1;
+    /// The folder a test shell outside every project reports from.
+    const OUTSIDE: &str = "/";
+    /// A child that ignores the signals that ask it to stop, so stopping it
+    /// takes its whole grace.
+    const STUBBORN: &str = "trap '' INT TERM; sleep 600";
+    /// How long a stop waits on that child before killing it.
+    const STUBBORN_GRACE: Duration = Duration::from_secs(1);
+
+    /// Sends `shell`'s report at prompt `seq` that its folder is in
+    /// `project`, as one that may enter it with an empty environment, and
+    /// returns the notes answered.
+    fn report(
+        service: &Running,
+        shell: ShellId,
+        seq: u64,
+        project: Option<&ProjectRoot>,
+    ) -> Vec<ShellNote> {
+        report_with(service, shell, seq, project, Some(no_env()))
+    }
+
+    /// `shell`'s report at prompt `seq` of [`HOOK_LOAD`] that its folder is
+    /// `project`'s, or [`OUTSIDE`] with none.
+    fn shell_record(shell: ShellId, seq: u64, project: Option<&ProjectRoot>) -> ShellRecord {
+        ShellRecord::builder()
+            .shell(shell)
+            .stamp(stamp(HOOK_LOAD, seq))
+            .folder(project.map_or_else(|| PathBuf::from(OUTSIDE), |root| root.as_ref().clone()))
+            .project(project.cloned())
+            .build()
+    }
+
+    /// As [`report`], the shell exporting `environment`, or sending none as
+    /// a report that may enter no project does.
+    fn report_with(
+        service: &Running,
+        shell: ShellId,
+        seq: u64,
+        project: Option<&ProjectRoot>,
+        environment: Option<LaunchEnvironment>,
+    ) -> Vec<ShellNote> {
+        let response = service.send(ServiceRequest::ShellReport {
+            record: shell_record(shell, seq, project),
+            environment,
+        });
+        let ServiceResponse::ShellNotes(notes) = response else {
+            panic!("a shell report answers notes, got {response:?}");
+        };
+        notes
+    }
+
+    /// An idle stop of `duration`.
+    fn idle_after(duration: Duration) -> IdleStop {
+        IdleStop::After(PositiveDuration::try_new(duration).unwrap())
+    }
+
+    /// Stores `idle_stop` as the setting, as `muster config set` would.
+    fn set_idle_stop(fixture: &Fixture, idle_stop: IdleStop) {
+        fixture
+            .store()
+            .apply(&SettingChange::IdleStop(idle_stop), &Author::human())
+            .unwrap();
+    }
+
+    /// The name the store gives the project in `root`.
+    fn name_of(root: &ProjectRoot) -> ProjectName {
+        ProjectName::candidates(root).next().unwrap()
+    }
+
+    /// The note that entering `root` started `names`.
+    fn started(root: &ProjectRoot, names: &[&str]) -> ShellNote {
+        ShellNote::Started {
+            project: name_of(root),
+            names: names
+                .iter()
+                .map(|name| ProcessName::try_new(*name).unwrap())
+                .collect(),
+        }
+    }
+
+    /// Who is in `project` and when it stops, as `ps` reports it.
+    fn occupancy(service: &Running, project: &ProjectRoot) -> OccupancyStatus {
+        *service.status(project).occupancy()
+    }
+
+    /// The detail of every `idle-stopped` event of `project`.
+    fn idle_stopped_events(service: &Running, project: &ProjectRoot) -> Vec<String> {
+        let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+            project: project.clone(),
+            since: None,
+            kinds: vec![EventKind::IdleStopped],
+            wait: Duration::ZERO,
+        }) else {
+            panic!("events answer a page");
+        };
+        page.events()
+            .iter()
+            .map(|event| event.detail().clone())
+            .collect()
+    }
+
+    /// Waits until no process of `project` may be running.
+    fn wait_stopped(service: &Running, project: &ProjectRoot) {
+        wait_until("the project to stop", || {
+            service
+                .status(project)
+                .processes()
+                .iter()
+                .all(|process| !process.state().may_be_running())
+        });
+    }
+
+    #[test]
+    fn entering_an_unoccupied_project_starts_autostart_and_answers_started() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("eager", true), ("lazy", false)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let notes = report(&service, shell, 1, Some(&project));
+
+        assert_eq!(notes, [started(&project, &["eager"])]);
+        let status = service.wait_for(&project, "eager", ProcessState::Running);
+        assert_eq!(*process(&status, "lazy").state(), ProcessState::Pending);
+        assert_eq!(status.occupancy().shells(), 1);
+        assert_eq!(status.occupancy().stops_in(), None);
+        service.stop();
+    }
+
+    #[test]
+    fn entering_with_the_shell_s_environment_launches_with_it() {
+        let fixture = Fixture::new();
+        let echo = sleeper("env", true).with_command(
+            CommandLine::try_new(format!("echo seen-${SHELL_VAR}; {SLEEPER}")).unwrap(),
+        );
+        let project = fixture.project(vec![echo]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        report_with(
+            &service,
+            shell,
+            1,
+            Some(&project),
+            Some(LaunchEnvironment::from_vars([(
+                SHELL_VAR.into(),
+                SHELL_VALUE.into(),
+            )])),
+        );
+
+        let seen = format!("seen-{SHELL_VALUE}");
+        wait_until("the shell's variable on screen", || {
+            let ServiceResponse::Screen(screen) = service.send(ServiceRequest::Screen {
+                project: project.clone(),
+                name: ProcessName::try_new("env").unwrap(),
+            }) else {
+                return false;
+            };
+            screen.contains(&seen)
+        });
+        service.stop();
+    }
+
+    /// Concurrency M1: a shell back in a project its idle stop is still
+    /// stopping finds its autostart processes started again once they have
+    /// stopped, and its next report says so.
+    #[test]
+    fn re_entering_a_project_its_idle_stop_is_stopping_starts_it_once_stopped() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(vec![stubborn("api")]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        let first = service.wait_for(&project, "api", ProcessState::Running);
+        let first_pid = process(&first, "api").pid().unwrap();
+        report(&service, shell, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+
+        assert!(
+            report(&service, shell, 3, Some(&project)).is_empty(),
+            "nothing starts while api stops"
+        );
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != first_pid)
+        });
+        assert_eq!(report(&service, shell, 4, Some(&project)), [started(
+            &project,
+            &["api"]
+        )]);
+        service.stop();
+    }
+
+    /// The autostart process `name`, which takes its whole stop grace to
+    /// stop.
+    fn stubborn(name: &str) -> ProcessSpec {
+        sleeper(name, true)
+            .with_command(CommandLine::try_new(STUBBORN).unwrap())
+            .with_stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
+                    .build(),
+            )
+    }
+
+    /// A stop of `api` in `project` a client asks for, as `muster stop`
+    /// and MCP send it.
+    fn client_stop(project: &ProjectRoot) -> ServiceRequest {
+        ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action: ProcessAction::Stop,
+            environment: no_env(),
+            wait: None,
+        }
+    }
+
+    /// `muster down` of `project`.
+    fn client_down(project: &ProjectRoot) -> ServiceRequest {
+        ServiceRequest::Down {
+            project: project.clone(),
+        }
+    }
+
+    /// Brings the stubborn `api` up through a shell that then leaves, has
+    /// `stop` stop it, after the idle stop when `idle_first`, and brings the
+    /// shell back while it stops: `api` stops and stays stopped.
+    fn assert_a_client_stop_outlasts_a_return(
+        stop: fn(&ProjectRoot) -> ServiceRequest,
+        idle_first: bool,
+    ) {
+        let fixture = Fixture::new();
+        let idle = if idle_first { SHORT_IDLE } else { LONG_IDLE };
+        set_idle_stop(&fixture, idle_after(idle));
+        let project = fixture.project(vec![stubborn("api")]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        report(&service, shell, 2, None);
+        if idle_first {
+            service.wait_for(&project, "api", ProcessState::Stopping);
+        }
+
+        service.send(stop(&project));
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(
+            report(&service, shell, 3, Some(&project)).is_empty(),
+            "nothing starts while api stops"
+        );
+
+        wait_until("api to stop", || {
+            !process(&service.status(&project), "api")
+                .state()
+                .may_be_running()
+        });
+        assert!(report(&service, shell, 4, Some(&project)).is_empty());
+        let api = process(&service.status(&project), "api").clone();
+        assert!(
+            !api.state().may_be_running(),
+            "a stop a client asked for is never undone by a shell: {:?}",
+            api.state()
+        );
+        service.stop();
+    }
+
+    /// A process `muster stop` or MCP stopped stays stopped when a shell
+    /// comes back while it stops.
+    #[test]
+    fn a_process_a_client_stops_stays_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_stop, false);
+    }
+
+    /// A project `muster down` stopped stays stopped when a shell comes
+    /// back while it stops.
+    #[test]
+    fn a_project_a_client_downs_stays_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_down, false);
+    }
+
+    /// A client stopping what an idle stop is already stopping takes it
+    /// over: a shell coming back does not start it again.
+    #[test]
+    fn a_client_stop_during_an_idle_stop_keeps_it_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_stop, true);
+        assert_a_client_stop_outlasts_a_return(client_down, true);
+    }
+
+    /// Brings the stubborn `api` up through shell `first`, which then
+    /// leaves; the idle stop stops `api`, `first` comes back while it stops
+    /// and `second` enters too, sending `second_environment`, then `first`
+    /// leaves again. Returns the running service, the project and `api`'s
+    /// pid before the idle stop.
+    fn re_entry_after_its_shell_left(
+        fixture: &Fixture,
+        first: ShellId,
+        second: ShellId,
+        second_environment: Option<LaunchEnvironment>,
+    ) -> (Running, ProjectRoot, Pid) {
+        set_idle_stop(fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(vec![stubborn("api")]);
+        fixture.shells().open(first);
+        fixture.shells().open(second);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, first, 1, Some(&project));
+        let running = service.wait_for(&project, "api", ProcessState::Running);
+        let pid = *process(&running, "api").pid().as_ref().unwrap();
+        report(&service, first, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(report(&service, first, 3, Some(&project)).is_empty());
+        report_with(&service, second, 1, Some(&project), second_environment);
+        report(&service, first, 4, None);
+        (service, project, pid)
+    }
+
+    /// CR-7: an entering whose shell left while the idle stop ran, with
+    /// another shell still inside, is made as that shell once `api` has
+    /// stopped: `api` starts again and the note goes to the shell inside.
+    #[test]
+    fn a_re_entry_whose_shell_left_enters_as_a_shell_still_inside() {
+        let fixture = Fixture::new();
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        let (service, project, before) =
+            re_entry_after_its_shell_left(&fixture, first, second, Some(no_env()));
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != before)
+        });
+        assert_eq!(report(&service, second, 2, Some(&project)), [started(
+            &project,
+            &["api"]
+        )]);
+        assert!(report(&service, first, 5, None).is_empty());
+        service.stop();
+    }
+
+    /// CR-7: with no shell left inside whose environment is known, the
+    /// entering is dropped and `api` stays stopped.
+    #[test]
+    fn a_re_entry_with_no_shell_to_enter_as_is_dropped() {
+        let fixture = Fixture::new();
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        let (service, project, _) = re_entry_after_its_shell_left(&fixture, first, second, None);
+
+        wait_stopped(&service, &project);
+        thread::sleep(SHORT_IDLE);
+
+        assert!(
+            !process(&service.status(&project), "api")
+                .state()
+                .may_be_running()
+        );
+        assert!(report(&service, second, 2, Some(&project)).is_empty());
+        service.stop();
+    }
+
+    /// CR-5: a client request the service refuses, here a stop of a process
+    /// the project lacks, takes nothing over: the shell back while the idle
+    /// stop runs still finds `api` started again once it has stopped.
+    #[test]
+    fn a_refused_client_request_keeps_the_pending_re_entry() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(vec![stubborn("api")]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        let first = service.wait_for(&project, "api", ProcessState::Running);
+        let first_pid = process(&first, "api").pid().unwrap();
+        report(&service, shell, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(report(&service, shell, 3, Some(&project)).is_empty());
+
+        let refused = service.send(ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("nope").unwrap(),
+            action: ProcessAction::Stop,
+            environment: no_env(),
+            wait: None,
+        });
+        assert!(
+            matches!(&refused, ServiceResponse::Error(body)
+                if body.kind() == &ServiceErrorKind::UnknownProcess),
+            "{refused:?}"
+        );
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != first_pid)
+        });
+        service.stop();
+    }
+
+    /// CR-3: a report that arrives after its shell ended, its pid gone or
+    /// run by another process, is dropped: the shell is not brought back,
+    /// counted, or let start its project.
+    #[test]
+    fn a_report_from_a_shell_no_longer_running_is_dropped() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let (ended, reused) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(test_shell(501, 2));
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        for gone in [ended, reused] {
+            assert!(report(&service, gone, 1, Some(&project)).is_empty());
+        }
+
+        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
+        else {
+            panic!("ps answers a status");
+        };
+        assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
+        assert!(fixture.runner().live_records().is_empty());
+        service.stop();
+    }
+
+    /// A report sent with no environment, as one whose project matches the
+    /// shell's record, counts the shell but is no entering: nothing starts.
+    #[test]
+    fn a_report_without_an_environment_counts_the_shell_and_starts_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        assert!(report_with(&service, shell, 1, Some(&project), None).is_empty());
+
+        let status = service.status(&project);
+        assert_eq!(status.occupancy().shells(), 1);
+        assert!(!process(&status, "api").state().may_be_running());
+        assert!(fixture.runner().live_records().is_empty());
+        service.stop();
+    }
+
+    /// Correctness M1: a project registered inside the one a shell is in
+    /// counts the shell from its next report on, starts nothing, and leaves
+    /// the outer project occupied, holding off its idle stop, until the
+    /// shell leaves its tree.
+    #[test]
+    fn a_project_registered_under_a_shell_starts_nothing_and_keeps_the_outer_one() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", false)]));
+        let admin = fixture.project_in("shop/admin", commands(&[("panel", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&shop));
+
+        let registered = ShellRecord::builder()
+            .shell(shell)
+            .stamp(stamp(HOOK_LOAD, 2))
+            .folder(admin.as_ref().clone())
+            .project(Some(admin.clone()))
+            .held(vec![shop.clone()])
+            .build();
+        let response = service.send(ServiceRequest::ShellReport {
+            record: registered,
+            environment: None,
+        });
+
+        assert_eq!(response, ServiceResponse::ShellNotes(Vec::new()));
+        let nested = service.status(&admin);
+        assert_eq!(nested.occupancy().shells(), 1);
+        assert!(!process(&nested, "panel").state().may_be_running());
+        let outer = occupancy(&service, &shop);
+        assert_eq!((outer.shells(), outer.stops_in()), (1, None));
+
+        report(&service, shell, 3, None);
+        assert!(occupancy(&service, &shop).stops_in().is_some(), "left");
+        service.stop();
+    }
+
+    #[test]
+    fn a_second_shell_entering_starts_nothing_and_answers_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(first);
+        fixture.shells().open(second);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, first, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        service.control(&project, "api", ProcessAction::Stop);
+        service.wait_for(&project, "api", ProcessState::Exited);
+
+        assert!(report(&service, second, 1, Some(&project)).is_empty());
+
+        assert_eq!(occupancy(&service, &project).shells(), 2);
+        assert_eq!(
+            *process(&service.status(&project), "api").state(),
+            ProcessState::Exited,
+            "a project already occupied is not brought up again"
+        );
+        service.stop();
+    }
+
+    #[test]
+    fn entering_a_project_whose_stack_is_up_answers_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+
+        assert!(report(&service, shell, 1, Some(&project)).is_empty());
+        assert_eq!(fixture.runner().live_records().len(), 1);
+        service.stop();
+    }
+
+    #[test]
+    fn leaving_arms_idle_stop_and_the_project_stops_when_due() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(commands(&[("api", true), ("worker", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        service.wait_for(&project, "worker", ProcessState::Running);
+
+        assert!(report(&service, shell, 2, None).is_empty());
+        wait_stopped(&service, &project);
+
+        let message = format!(
+            "{}: stopped api, worker: no shell in it for {}",
+            name_of(&project),
+            idle_after(SHORT_IDLE)
+        );
+        let notices = service.notices(&project);
+        assert!(
+            notices
+                .iter()
+                .any(|notice| *notice.level() == NoticeLevel::Warning
+                    && *notice.message() == message),
+            "{notices:?}"
+        );
+        assert_eq!(idle_stopped_events(&service, &project), [message]);
+        assert_eq!(occupancy(&service, &project).stops_in(), None, "it fired");
+        service.stop();
+    }
+
+    #[test]
+    fn re_entering_before_the_deadline_cancels_it() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE * 3));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+
+        report(&service, shell, 2, None);
+        assert!(
+            report(&service, shell, 3, Some(&project)).is_empty(),
+            "api already runs"
+        );
+
+        assert_eq!(occupancy(&service, &project).stops_in(), None);
+        thread::sleep(SHORT_IDLE * 4);
+        assert_eq!(
+            *process(&service.status(&project), "api").state(),
+            ProcessState::Running
+        );
+        assert!(idle_stopped_events(&service, &project).is_empty());
+        service.stop();
+    }
+
+    #[test]
+    fn idle_stop_never_arms_nothing() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        fixture
+            .store()
+            .set_idle_stop(&project, Some(IdleStop::Never))
+            .unwrap();
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+
+        report(&service, shell, 2, None);
+
+        let left = occupancy(&service, &project);
+        assert_eq!(left.shells(), 0);
+        assert_eq!(left.idle_stop(), IdleStop::Never);
+        assert_eq!(left.stops_in(), None);
+        service.stop();
+    }
+
+    #[test]
+    fn a_project_override_beats_the_setting() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        fixture
+            .store()
+            .set_idle_stop(&project, Some(idle_after(SHORT_IDLE)))
+            .unwrap();
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(
+            occupancy(&service, &project).idle_stop(),
+            idle_after(SHORT_IDLE)
+        );
+
+        report(&service, shell, 2, None);
+
+        wait_stopped(&service, &project);
+        service.stop();
+    }
+
+    /// Review Focus 6: a shorter setting stops a project already waiting at
+    /// the new deadline, with nobody entering again.
+    #[test]
+    fn a_settings_change_moves_a_pending_deadline() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        report(&service, shell, 2, None);
+        assert!(occupancy(&service, &project).stops_in().unwrap() > SHORT_IDLE);
+
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        assert_eq!(
+            service.send(ServiceRequest::SettingsChanged),
+            ServiceResponse::Ok
+        );
+
+        wait_stopped(&service, &project);
+        service.stop();
+    }
+
+    #[test]
+    fn an_override_change_through_stack_changed_moves_a_pending_deadline() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        report(&service, shell, 2, None);
+
+        fixture
+            .store()
+            .set_idle_stop(&project, Some(idle_after(SHORT_IDLE)))
+            .unwrap();
+        assert_eq!(
+            service.send(ServiceRequest::StackChanged {
+                project: project.clone()
+            }),
+            ServiceResponse::Ok
+        );
+
+        wait_stopped(&service, &project);
+        service.stop();
+    }
+
+    /// Review Focus 7: bringing a project or one of its processes up from
+    /// outside it holds its idle stop off until the next leave; stopping
+    /// one does not.
+    #[test]
+    fn an_explicit_up_in_an_unoccupied_project_cancels_the_timer() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true), ("lazy", false)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        report(&service, shell, 2, None);
+        assert!(occupancy(&service, &project).stops_in().is_some());
+
+        service.up(&project);
+        assert_eq!(occupancy(&service, &project).stops_in(), None);
+
+        report(&service, shell, 3, Some(&project));
+        report(&service, shell, 4, None);
+        assert!(
+            occupancy(&service, &project).stops_in().is_some(),
+            "re-armed"
+        );
+        service.control(&project, "lazy", ProcessAction::Stop);
+        assert!(
+            occupancy(&service, &project).stops_in().is_some(),
+            "a stop holds nothing off"
+        );
+        service.control(&project, "lazy", ProcessAction::Start);
+        assert_eq!(occupancy(&service, &project).stops_in(), None);
+        service.stop();
+    }
+
+    #[test]
+    fn a_dead_shell_found_by_the_sweep_leaves_its_project() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        assert_eq!(occupancy(&service, &project).shells(), 1);
+
+        fixture.shells().close(&shell);
+
+        wait_within("the sweep to find the shell gone", SWEEP_WAIT, || {
+            occupancy(&service, &project).shells() == 0
+        });
+        assert!(occupancy(&service, &project).stops_in().is_some());
+        assert_eq!(fixture.shells().forgotten(), [shell]);
+        service.stop();
+    }
+
+    /// Review Focus 2: a shell inside a running project across a service
+    /// restart keeps it occupied; nothing starts and no idle stop is armed.
+    #[test]
+    fn restart_restores_live_shells_without_autostart_or_timer() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true), ("worker", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, shell, 1, Some(&project));
+        let running = first.wait_for(&project, "api", ProcessState::Running);
+        let pid = process(&running, "api").pid().unwrap();
+        first.wait_for(&project, "worker", ProcessState::Running);
+        first.control(&project, "worker", ProcessAction::Stop);
+        first.wait_for(&project, "worker", ProcessState::Exited);
+        first.stop();
+        fixture.shells().put(shell_record(shell, 1, Some(&project)));
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        let status = second.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(*process(&status, "api").pid(), Some(pid));
+        assert!(!process(&status, "worker").state().may_be_running());
+        assert_eq!(status.occupancy().shells(), 1);
+        assert_eq!(status.occupancy().stops_in(), None);
+        assert!(
+            report(&second, shell, 2, Some(&project)).is_empty(),
+            "the shell was already in it"
+        );
+        assert!(
+            !process(&second.status(&project), "worker")
+                .state()
+                .may_be_running()
+        );
+        second.stop();
+    }
+
+    /// CR-1, the upgrade case: a project a client brought up with no shell
+    /// in it, adopted by the next service, is never idle-stopped for want
+    /// of a shell no record says it had, though other shells are known.
+    #[test]
+    fn a_project_brought_up_without_the_hook_is_not_armed_across_a_restart() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let elsewhere = test_shell(500, 1);
+        fixture.shells().open(elsewhere);
+        fixture.shells().put(shell_record(elsewhere, 1, None));
+        let first = fixture.start(Arc::new(fixture.runner()));
+        first.up(&project);
+        first.wait_for(&project, "api", ProcessState::Running);
+        first.stop();
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        second.wait_for(&project, "api", ProcessState::Running);
+        let adopted = occupancy(&second, &project);
+        assert_eq!(adopted.shells(), 0);
+        assert_eq!(adopted.stops_in(), None, "no leave was seen");
+        second.stop();
+    }
+
+    /// CR-2: an idle stop pending when the service stops survives the
+    /// restart: the next service arms it from the original leave, not
+    /// afresh, and stops the project on time. Once it ran, nothing is left
+    /// pending.
+    #[test]
+    fn a_pending_idle_stop_survives_a_service_restart() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(RESTART_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, shell, 1, Some(&project));
+        first.wait_for(&project, "api", ProcessState::Running);
+        report(&first, shell, 2, None);
+        let left = Instant::now();
+        assert!(occupancy(&first, &project).stops_in().is_some());
+        first.stop();
+        fixture.shells().put(shell_record(shell, 2, None));
+        assert_eq!(fixture.store().pending_idle_stops().unwrap().len(), 1);
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        let elapsed = left.elapsed();
+        let stops_in = occupancy(&second, &project)
+            .stops_in()
+            .expect("the idle stop is still pending");
+        assert!(
+            stops_in <= RESTART_IDLE.saturating_sub(elapsed) + STORED_PRECISION,
+            "armed afresh: {stops_in:?} left after {elapsed:?}"
+        );
+        wait_stopped(&second, &project);
+        assert_eq!(idle_stopped_events(&second, &project).len(), 1);
+        wait_until("the ran stop to be cleared", || {
+            fixture.store().pending_idle_stops().unwrap().is_empty()
+        });
+        second.stop();
+    }
+
+    /// CR-2: an idle stop a client cancelled by bringing the project up
+    /// after the leave is no longer pending, so the next service arms
+    /// nothing for it.
+    #[test]
+    fn an_idle_stop_a_client_cancelled_is_not_restored() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, shell, 1, Some(&project));
+        first.wait_for(&project, "api", ProcessState::Running);
+        report(&first, shell, 2, None);
+        wait_until("the leave to be recorded", || {
+            !fixture.store().pending_idle_stops().unwrap().is_empty()
+        });
+        first.up(&project);
+        first.stop();
+        fixture.shells().put(shell_record(shell, 2, None));
+
+        assert!(fixture.store().pending_idle_stops().unwrap().is_empty());
+        let second = fixture.start(Arc::new(fixture.runner()));
+        second.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(occupancy(&second, &project).stops_in(), None);
+        second.stop();
+    }
+
+    /// A shell whose record puts it in a running project, found dead when
+    /// the next service starts, left that project: its idle stop arms. A
+    /// live shell's project and a project no record names arm nothing.
+    #[test]
+    fn a_shell_found_dead_at_service_start_arms_the_project_it_left() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", true)]));
+        let blog = fixture.project_in("blog", commands(&[("web", true)]));
+        let (closing, staying) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(closing);
+        fixture.shells().open(staying);
+        let first = fixture.start(Arc::new(fixture.runner()));
+        report(&first, closing, 1, Some(&shop));
+        report(&first, staying, 1, Some(&blog));
+        first.wait_for(&shop, "api", ProcessState::Running);
+        first.wait_for(&blog, "web", ProcessState::Running);
+        first.stop();
+        fixture.shells().put(shell_record(closing, 1, Some(&shop)));
+        fixture.shells().put(shell_record(staying, 1, Some(&blog)));
+        fixture.shells().close(&closing);
+
+        let second = fixture.start(Arc::new(fixture.runner()));
+
+        second.wait_for(&shop, "api", ProcessState::Running);
+        let left = occupancy(&second, &shop);
+        assert_eq!(left.shells(), 0);
+        assert!(left.stops_in().is_some_and(|due| due <= LONG_IDLE));
+        let occupied = occupancy(&second, &blog);
+        assert_eq!((occupied.shells(), occupied.stops_in()), (1, None));
+        assert_eq!(fixture.shells().forgotten(), [closing]);
+        second.stop();
+    }
+
+    /// Review Focus 3: a record whose pid another process now runs is
+    /// forgotten, so that process entering is a first entering.
+    #[test]
+    fn a_reused_pid_record_is_forgotten_not_restored() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let (earlier, now) = (test_shell(500, 1), test_shell(500, 2));
+        fixture
+            .shells()
+            .put(shell_record(earlier, 9, Some(&project)));
+        fixture.shells().open(now);
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        assert_eq!(fixture.shells().forgotten(), [earlier]);
+        assert_eq!(report(&service, now, 1, Some(&project)), [started(
+            &project,
+            &["api"]
+        )]);
+        assert_eq!(occupancy(&service, &project).shells(), 1);
+        service.stop();
+    }
+
+    /// Review Focus 4: a report older than the shell's last moves nothing.
+    #[test]
+    fn an_out_of_order_report_is_ignored() {
+        let fixture = Fixture::new();
+        let shop = fixture.project_in("shop", commands(&[("api", true)]));
+        let blog = fixture.project_in("blog", commands(&[("web", true)]));
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 5, Some(&shop));
+
+        assert!(report(&service, shell, 4, Some(&blog)).is_empty());
+
+        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
+        else {
+            panic!("ps answers a status");
+        };
+        assert_eq!(loaded.len(), 1, "blog was never entered");
+        assert_eq!(occupancy(&service, &shop).shells(), 1);
+        service.stop();
+    }
+
+    /// A port block a launch worker finds after the entering shell was
+    /// answered reaches that shell at its next report, once.
+    #[test]
+    fn a_block_found_after_the_answer_is_queued_for_the_entering_shell() {
+        let fixture = Fixture::new();
+        let port = LocalPort::try_new(BLOCKED_PORT).unwrap();
+        let web = sleeper("web", true).with_ready(Some(
+            ReadyCheck::builder()
+                .probe(ReadyProbe::Port(port))
+                .timeout(PositiveDuration::try_new(WAIT).unwrap())
+                .build(),
+        ));
+        let project = fixture.project(vec![web]);
+        let outsider = PortOccupant::builder()
+            .pid(Pid::try_new(OUTSIDER_PID).unwrap())
+            .command(OUTSIDER_COMMAND.to_string())
+            .build();
+        let (entering, other) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(entering);
+        fixture.shells().open(other);
+        let service = fixture.start_occupied(Arc::new(fixture.runner()), Some(outsider.clone()));
+
+        assert_eq!(report(&service, entering, 1, Some(&project)), [started(
+            &project,
+            &["web"]
+        )]);
+        service.wait_for(&project, "web", ProcessState::Blocked);
+
+        assert!(report(&service, other, 1, Some(&project)).is_empty());
+        let block = PortBlock::builder()
+            .port(port)
+            .holder(PortOwner::Other(outsider))
+            .build();
+        assert_eq!(report(&service, entering, 2, Some(&project)), [
+            ShellNote::Refused {
+                project: name_of(&project),
+                refusal: Refusal::builder()
+                    .name(ProcessName::try_new("web").unwrap())
+                    .reason(block.to_string())
+                    .block(Some(block))
+                    .build(),
+            }
+        ]);
+        assert!(report(&service, entering, 3, Some(&project)).is_empty());
+        service.stop();
+    }
+
+    #[test]
+    fn a_new_shell_past_the_table_bound_is_refused_busy() {
+        let fixture = Fixture::new();
+        let first_pid = 1000;
+        let shells: Vec<ShellId> = (0..=MAX_SHELLS)
+            .map(|index| test_shell(first_pid + u32::try_from(index).unwrap(), 1))
+            .collect();
+        for shell in &shells {
+            fixture.shells().open(*shell);
+        }
+        let service = fixture.start(Arc::new(fixture.runner()));
+        for shell in &shells[..MAX_SHELLS] {
+            report(&service, *shell, 1, None);
+        }
+
+        let response = service.send(ServiceRequest::ShellReport {
+            record: shell_record(shells[MAX_SHELLS], 1, None),
+            environment: None,
+        });
+
+        let ServiceResponse::Error(refusal) = response else {
+            panic!("a shell past the bound is refused, got {response:?}");
+        };
+        assert_eq!(*refusal.kind(), ServiceErrorKind::Busy);
+        assert!(
+            report(&service, shells[0], 2, None).is_empty(),
+            "a known shell is still answered"
+        );
+        service.stop();
+    }
+
+    #[test]
+    fn a_report_for_an_unregistered_project_starts_nothing() {
+        let fixture = Fixture::new();
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        assert!(report(&service, shell, 1, Some(&fixture.folder("elsewhere"))).is_empty());
+
+        assert_eq!(
+            service.send(ServiceRequest::Ps { project: None }),
+            ServiceResponse::Status(Vec::new())
+        );
+        assert!(fixture.runner().live_records().is_empty());
+        service.stop();
+    }
+
+    /// With no client asking anything, the loop still wakes to stop an idle
+    /// project and to sweep the shells it knows.
+    #[test]
+    fn the_loop_wakes_for_the_idle_deadline_and_the_sweep() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let (leaving, closing) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(leaving);
+        fixture.shells().open(closing);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, leaving, 1, Some(&project));
+        report(&service, closing, 1, None);
+        let running = service.wait_for(&project, "api", ProcessState::Running);
+        let pid = process(&running, "api").pid().unwrap();
+
+        report(&service, leaving, 2, None);
+        fixture.shells().close(&closing);
+
+        wait_until("the idle stop to end the child", || {
+            !SignalTarget::Process(pid).is_alive()
+        });
+        wait_within("the sweep to forget the closed shell", SWEEP_WAIT, || {
+            fixture.shells().forgotten() == [closing]
+        });
+        service.stop();
+    }
+
+    #[test]
+    fn ps_reports_shells_and_stops_in() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let project = fixture.project(commands(&[("api", true)]));
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(first);
+        fixture.shells().open(second);
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        report(&service, first, 1, Some(&project));
+        report(&service, second, 1, Some(&project));
+        assert_eq!(occupancy(&service, &project).shells(), 2);
+
+        report(&service, first, 2, None);
+        let one = occupancy(&service, &project);
+        assert_eq!((one.shells(), one.stops_in()), (1, None));
+
+        report(&service, second, 2, None);
+        let none = occupancy(&service, &project);
+        assert_eq!(none.shells(), 0);
+        assert_eq!(none.idle_stop(), idle_after(LONG_IDLE));
+        assert!(
+            none.stops_in()
+                .is_some_and(|left| left <= LONG_IDLE && left > LONG_IDLE - WAIT)
+        );
+        service.stop();
+    }
+
+    /// A shell moving between projects is counted out of the one it left
+    /// and into the one it entered, while the other shell in the first
+    /// keeps it occupied with no idle stop pending.
+    #[test]
+    fn a_shell_moving_between_projects_is_recounted_in_both() {
+        let fixture = Fixture::new();
+        set_idle_stop(&fixture, idle_after(LONG_IDLE));
+        let shop = fixture.project_in("shop", commands(&[("api", false)]));
+        let blog = fixture.project_in("blog", commands(&[("web", false)]));
+        let (moving, staying) = (test_shell(500, 1), test_shell(501, 1));
+        fixture.shells().open(moving);
+        fixture.shells().open(staying);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, moving, 1, Some(&shop));
+        report(&service, staying, 1, Some(&shop));
+        report(&service, moving, 2, Some(&blog));
+
+        let left = occupancy(&service, &shop);
+        assert_eq!((left.shells(), left.stops_in()), (1, None));
+        let entered = occupancy(&service, &blog);
+        assert_eq!((entered.shells(), entered.stops_in()), (1, None));
+
+        report(&service, staying, 2, Some(&blog));
+        let emptied = occupancy(&service, &shop);
+        assert_eq!(emptied.shells(), 0);
+        assert!(emptied.stops_in().is_some(), "the last shell out arms it");
+        assert_eq!(occupancy(&service, &blog).shells(), 2);
+        service.stop();
     }
 }

@@ -105,6 +105,8 @@ impl From<&ConfigError> for FailureKind {
             | ConfigError::InvalidDefaultSize { .. }
             | ConfigError::TooLarge { .. }
             | ConfigError::OverCap { .. }
+            | ConfigError::TooManyPorts(_)
+            | ConfigError::RepeatedPort(_)
             | ConfigError::RootNotADirectory { .. }
             | ConfigError::RootNotUtf8 { .. } => Self::InvalidInput,
             ConfigError::UnsupportedSchema { .. } => Self::InvalidConfig,
@@ -121,6 +123,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::domain::{
+        config::{DECLARED_PORTS_MAX, DeclaredPorts},
+        value::LocalPort,
+    };
 
     /// A wrong name or input is the caller's to fix; a service that cannot
     /// be reached or speaks another version is muster's.
@@ -146,5 +152,35 @@ mod tests {
         assert_eq!(FailureKind::from(&unknown), FailureKind::UnknownProject);
         assert_eq!(FailureKind::from(&broken), FailureKind::Io);
         assert!(!FailureKind::from(&broken).is_caller_fault());
+    }
+
+    /// More declared ports than a process may have is the caller's input to
+    /// fix, and the refusal names the limit.
+    #[test]
+    fn too_many_ports_is_invalid_input_naming_the_limit() {
+        let refused = ConfigError::from(
+            DeclaredPorts::of(
+                (1..=DECLARED_PORTS_MAX + 1)
+                    .map(|port| LocalPort::try_new(u16::try_from(port).unwrap()).unwrap()),
+            )
+            .unwrap_err(),
+        );
+
+        assert_eq!(FailureKind::from(&refused), FailureKind::InvalidInput);
+        assert!(
+            refused
+                .to_string()
+                .contains(&format!("the {DECLARED_PORTS_MAX} a process may declare")),
+            "{refused}"
+        );
+    }
+
+    /// A port listed twice is the caller's input to fix.
+    #[test]
+    fn a_repeated_port_is_invalid_input() {
+        let port = LocalPort::try_new(3000).unwrap();
+        let refused = DeclaredPorts::listed([port, port]).unwrap_err();
+
+        assert_eq!(FailureKind::from(&refused), FailureKind::InvalidInput);
     }
 }

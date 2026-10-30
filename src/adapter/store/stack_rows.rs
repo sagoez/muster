@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -10,7 +10,9 @@ use rusqlite::{
 
 use super::{
     edit_log_rows::record_edit,
-    project_rows::{ProjectRow, find_project, register, require_project, root_text},
+    project_rows::{
+        ProjectRow, find_project, register, require_project, root_text, store_idle_stop,
+    },
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
         refused,
@@ -19,14 +21,17 @@ use super::{
 };
 use crate::domain::{
     config::{
-        AppliedChange, ConfigError, Environment, ImportMode, ImportPlan, ProcessChange,
-        ProcessSpec, Registration, Stack, StackEdit,
+        AppliedChange, ConfigError, DeclaredPorts, Environment, ImportMode, ImportPlan,
+        ProcessChange, ProcessSpec, Registration, Stack, StackEdit,
     },
     coordination::Author,
     port::{StackReader, StackStore},
     process::{ReadyCheck, ReadyProbe, StopPolicy},
     project::Project,
-    value::{CommandLine, Description, EnvName, EnvValue, ProcessName, ProjectRoot, StackRevision},
+    value::{
+        CommandLine, Description, EnvName, EnvValue, IdleStop, LocalPort, ProcessName, ProjectRoot,
+        StackRevision,
+    },
 };
 
 /// Selects the definition columns [`process_from_row`] reads by name.
@@ -37,6 +42,8 @@ const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description
 const STOP_GRACE: &str = "stop grace";
 /// A process's readiness timeout, as its errors name it.
 const READY_TIMEOUT: &str = "readiness timeout";
+/// A port a process declares, as its errors name it.
+const DECLARED_PORT: &str = "declared port";
 
 /// The text a path column holds.
 ///
@@ -47,13 +54,15 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
         .ok_or_else(|| StoreError::NotUtf8(path.to_path_buf()).into())
 }
 
-/// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`.
-/// A working directory that leaves the root, or a name or variables past a
-/// cap, read as stored, so the process can be changed, removed or exported;
-/// [`ProcessSpec::stored_problem`] keeps it from starting.
+/// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`
+/// and its ports from `ports`. A working directory that leaves the root, or a
+/// name, variables or ports past a cap, read as stored, so the process can be
+/// changed, removed or exported; [`ProcessSpec::stored_problem`] keeps it
+/// from starting.
 fn process_from_row(
     row: &Row,
     environments: &mut HashMap<i64, Environment>,
+    ports: &mut HashMap<i64, DeclaredPorts>,
 ) -> Result<ProcessSpec, ConfigError> {
     let id: i64 = row.get("id").map_err(db_error)?;
     let name: String = row.get("name").map_err(db_error)?;
@@ -108,7 +117,51 @@ fn process_from_row(
                 .build(),
         )
         .ready(ready)
+        .ports(ports.remove(&id).unwrap_or_default())
         .build())
+}
+
+/// Every declared port of the project's processes, by process row id, read in
+/// one query; a process holding more than it may declare reads as stored.
+fn ports_of(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<HashMap<i64, DeclaredPorts>, ConfigError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT pp.process_id, pp.port FROM process_ports pp \
+             JOIN processes p ON p.id = pp.process_id WHERE p.project_id = ?1",
+        )
+        .map_err(db_error)?;
+    let mut rows = statement.query(params![project_id]).map_err(db_error)?;
+    let mut ports: HashMap<i64, BTreeSet<LocalPort>> = HashMap::new();
+    while let Some(row) = rows.next().map_err(db_error)? {
+        let process_id: i64 = row.get("process_id").map_err(db_error)?;
+        let port: i64 = row.get("port").map_err(db_error)?;
+        let port = u16::try_from(port)
+            .map_err(|error| refused(DECLARED_PORT, &error))
+            .and_then(|port| {
+                LocalPort::try_new(port).map_err(|error| refused(DECLARED_PORT, &error))
+            })?;
+        ports.entry(process_id).or_default().insert(port);
+    }
+    Ok(ports
+        .into_iter()
+        .map(|(process_id, ports)| (process_id, DeclaredPorts::stored(ports)))
+        .collect())
+}
+
+/// Writes `spec`'s declared ports for the process row `process_id`.
+fn insert_ports(conn: &Connection, process_id: i64, spec: &ProcessSpec) -> Result<(), ConfigError> {
+    let mut statement = conn
+        .prepare("INSERT INTO process_ports (process_id, port) VALUES (?1, ?2)")
+        .map_err(db_error)?;
+    for port in spec.ports() {
+        statement
+            .execute(params![process_id, port.into_inner()])
+            .map_err(db_error)?;
+    }
+    Ok(())
 }
 
 /// Every variable of the project's processes, by process row id, read in one
@@ -143,6 +196,7 @@ fn environments_of(
 /// The stack of the project `(project_id, project)`, in insertion order.
 fn stack_of(conn: &Connection, (project_id, project): ProjectRow) -> Result<Stack, ConfigError> {
     let mut environments = environments_of(conn, project_id)?;
+    let mut ports = ports_of(conn, project_id)?;
     let mut statement = conn
         .prepare(&format!(
             "{SELECT_PROCESS} WHERE project_id = ?1 ORDER BY id"
@@ -151,7 +205,7 @@ fn stack_of(conn: &Connection, (project_id, project): ProjectRow) -> Result<Stac
     let mut rows = statement.query(params![project_id]).map_err(db_error)?;
     let mut processes = Vec::new();
     while let Some(row) = rows.next().map_err(db_error)? {
-        processes.push(process_from_row(row, &mut environments)?);
+        processes.push(process_from_row(row, &mut environments, &mut ports)?);
     }
     Ok(Stack::builder()
         .project(project)
@@ -265,7 +319,8 @@ fn insert_process(
                 db_error(error)
             }
         })?;
-    insert_environment(conn, process_id, spec)
+    insert_environment(conn, process_id, spec)?;
+    insert_ports(conn, process_id, spec)
 }
 
 /// Overwrites the definition of the process whose name shares `spec`'s key,
@@ -289,7 +344,12 @@ fn update_process(
         process_id
     ])
     .map_err(db_error)?;
-    insert_environment(conn, process_id, spec)
+    conn.execute("DELETE FROM process_ports WHERE process_id = ?1", params![
+        process_id
+    ])
+    .map_err(db_error)?;
+    insert_environment(conn, process_id, spec)?;
+    insert_ports(conn, process_id, spec)
 }
 
 /// Deletes the process whose name shares `name`'s key; its variables cascade.
@@ -453,6 +513,19 @@ impl StackStore for SqliteStore {
             Ok((registration, plan))
         })
     }
+
+    fn set_idle_stop(
+        &self,
+        root: &ProjectRoot,
+        idle_stop: Option<IdleStop>,
+    ) -> Result<Project, ConfigError> {
+        self.write(|conn| {
+            let (project_id, _) = require_project(conn, root)?;
+            store_idle_stop(conn, project_id, idle_stop.as_ref())?;
+            bump_revision(conn, project_id)?;
+            Ok(require_project(conn, root)?.1)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -465,8 +538,8 @@ mod tests {
     use crate::{
         adapter::store::test_support::{fresh_store, spec},
         domain::{
-            config::{ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
-            port::{ProjectStore, StackEditLog},
+            config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
+            port::{ProjectStore, SettingsReader, StackEditLog},
             process::{RestartPolicy, StopSignal},
             value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
         },
@@ -507,6 +580,7 @@ mod tests {
             )
             .with_autostart(true)
             .with_restart(RestartPolicy::OnFailure)
+            .with_ports(DeclaredPorts::of([LocalPort::try_new(5173).unwrap()]).unwrap())
     }
 
     /// The names of `stack`'s processes, in stack order.
@@ -759,6 +833,79 @@ mod tests {
             read_after("DELETE FROM process_env; UPDATE processes SET name = 'web' || char(7)"),
             "stored process name is invalid: it holds a control or format character"
         );
+    }
+
+    /// A declared port the schema check was bypassed for is refused on read
+    /// with a sentence naming the rule.
+    #[test]
+    fn a_hand_edited_port_past_the_schema_names_the_rule() {
+        for (port, reason) in [
+            ("0", "it is not a port from 1 to 65535"),
+            ("70000", "it is out of range"),
+        ] {
+            let (store, scratch) = fresh_store();
+            let root = root(&scratch);
+            store
+                .add_process(&root, &full_spec(), &Author::human())
+                .unwrap();
+            store
+                .write(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA ignore_check_constraints = ON;
+                         UPDATE process_ports SET port = {port};
+                         PRAGMA ignore_check_constraints = OFF;"
+                    ))
+                    .map_err(db_error)
+                })
+                .unwrap();
+
+            assert_eq!(
+                store.stack(&root).unwrap_err().to_string(),
+                format!("stored declared port is invalid: {reason}"),
+                "{port}"
+            );
+        }
+    }
+
+    /// More declared ports than a process may have, written past muster,
+    /// read as stored: the project still reads, only that process names the
+    /// cap, and replacing its ports repairs it.
+    #[test]
+    fn a_hand_edited_port_count_past_the_limit_refuses_only_its_process() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        for spec in [full_spec(), spec("api", "cargo run")] {
+            store.add_process(&root, &spec, &Author::human()).unwrap();
+        }
+        let added = DECLARED_PORTS_MAX + 1;
+        store
+            .write(|conn| {
+                conn.execute(
+                    "WITH RECURSIVE n(port) AS (SELECT 1 UNION ALL SELECT port + 1 FROM n \
+                     WHERE port < ?1) INSERT INTO process_ports (process_id, port) \
+                     SELECT (SELECT id FROM processes WHERE name = 'web'), port FROM n",
+                    params![i64::try_from(added).unwrap()],
+                )
+                .map_err(db_error)
+            })
+            .unwrap();
+
+        let stack = store.stack(&root).unwrap().unwrap();
+        let over = |process: &str| stack.process(&name(process)).unwrap().over_cap();
+        assert_eq!(
+            over("web"),
+            Some(OverCap::Ports { found: added + 1 }),
+            "the full spec's own port counts too"
+        );
+        assert_eq!(over("api"), None);
+
+        let cleared = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::default()))
+            .build();
+        let repaired = store
+            .change_process(&root, &name("web"), &cleared, &Author::human())
+            .unwrap();
+        assert_eq!(repaired.spec().over_cap(), None);
     }
 
     #[test]
@@ -1152,6 +1299,172 @@ mod tests {
             store.edits(&root).unwrap().last().unwrap().message(),
             "agent claude changed autostart of 'web'"
         );
+    }
+
+    /// The port `raw`.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
+
+    /// The `process_ports` rows left in the database.
+    fn port_rows(store: &SqliteStore) -> i64 {
+        store
+            .read(|conn| {
+                conn.query_row("SELECT count(*) FROM process_ports", [], |row| row.get(0))
+                    .map_err(db_error)
+            })
+            .unwrap()
+    }
+
+    /// A project's own idle stop is set, replaced and cleared, each write
+    /// moving the revision; cleared, the project follows the setting.
+    #[test]
+    fn set_idle_stop_bumps_the_stack_revision_and_none_follows_the_setting() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let five: IdleStop = "5m".parse().unwrap();
+
+        for idle_stop in [Some(five), Some(IdleStop::Never), None] {
+            let before = store.stack_revision(&root).unwrap();
+
+            let project = store.set_idle_stop(&root, idle_stop).unwrap();
+
+            assert_eq!(*project.idle_stop(), idle_stop);
+            assert_eq!(store.project_at(&root).unwrap().unwrap(), project);
+            assert_eq!(
+                store.stack(&root).unwrap().unwrap().project(),
+                &project,
+                "the stack carries it"
+            );
+            assert_ne!(store.stack_revision(&root).unwrap(), before);
+        }
+        let setting = *store.load().unwrap().idle_stop();
+        assert_eq!(
+            store
+                .project_at(&root)
+                .unwrap()
+                .unwrap()
+                .idle_stop_or(setting),
+            setting
+        );
+    }
+
+    #[test]
+    fn set_idle_stop_on_an_unregistered_root_is_unknown_project() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+
+        let refused = store.set_idle_stop(&root, Some(IdleStop::Never));
+
+        assert!(
+            matches!(&refused, Err(ConfigError::UnknownProject { root: refused }) if refused == root.as_ref()),
+            "{refused:?}"
+        );
+        assert_eq!(store.project_at(&root).unwrap(), None);
+    }
+
+    /// Declared ports read back ascending whatever order they were given in,
+    /// and their rows go with their process, removed alone or with its
+    /// project.
+    #[test]
+    fn ports_round_trip_in_order_and_go_with_their_process() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let ports = DeclaredPorts::of([port(5173), port(3000), port(8080)]).unwrap();
+        store
+            .add_process(
+                &root,
+                &spec("web", "npm run dev").with_ports(ports.clone()),
+                &Author::human(),
+            )
+            .unwrap();
+        store
+            .add_process(
+                &root,
+                &spec("api", "cargo run").with_ports(DeclaredPorts::of([port(3000)]).unwrap()),
+                &Author::human(),
+            )
+            .unwrap();
+
+        let stack = store.stack(&root).unwrap().unwrap();
+        assert_eq!(stack.processes()[0].ports(), &ports);
+        assert_eq!(
+            stack.processes()[0]
+                .ports()
+                .iter()
+                .map(|port| port.into_inner())
+                .collect::<Vec<_>>(),
+            [3000, 5173, 8080]
+        );
+        assert_eq!(port_rows(&store), 4);
+
+        store
+            .remove_process(&root, &name("web"), &Author::human())
+            .unwrap();
+        assert_eq!(port_rows(&store), 1);
+        assert!(store.remove_project(&root).unwrap());
+        assert_eq!(port_rows(&store), 0);
+    }
+
+    /// A ports change replaces the rows and an empty set clears them, each
+    /// logged as a change to the ports field; an import carries ports in.
+    #[test]
+    fn a_ports_change_replaces_the_rows_and_an_import_carries_ports() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let agent = Author::agent("claude");
+        store
+            .add_process(
+                &root,
+                &spec("web", "npm run dev")
+                    .with_ports(DeclaredPorts::of([port(3000), port(5173)]).unwrap()),
+                &agent,
+            )
+            .unwrap();
+        let ports_of_web = |store: &SqliteStore| {
+            store.stack(&root).unwrap().unwrap().processes()[0]
+                .ports()
+                .clone()
+        };
+
+        let replace = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::of([port(8080)]).unwrap()))
+            .build();
+        store
+            .change_process(&root, &name("web"), &replace, &agent)
+            .unwrap();
+        assert_eq!(
+            ports_of_web(&store),
+            DeclaredPorts::of([port(8080)]).unwrap()
+        );
+        assert_eq!(port_rows(&store), 1);
+        assert_eq!(
+            store.edits(&root).unwrap().last().unwrap().message(),
+            "agent claude changed ports of 'web'"
+        );
+
+        let clear = ProcessChange::builder()
+            .ports(Some(DeclaredPorts::default()))
+            .build();
+        store
+            .change_process(&root, &name("web"), &clear, &agent)
+            .unwrap();
+        assert!(ports_of_web(&store).is_empty());
+        assert_eq!(port_rows(&store), 0);
+
+        let imported =
+            spec("web", "npm run dev").with_ports(DeclaredPorts::of([port(4000)]).unwrap());
+        let added =
+            spec("worker", "bin/worker").with_ports(DeclaredPorts::of([port(9000)]).unwrap());
+        store
+            .import(&root, &[imported.clone(), added.clone()], ImportMode::Merge)
+            .unwrap();
+        let stack = store.stack(&root).unwrap().unwrap();
+        assert_eq!(stack.processes(), &vec![imported, added]);
+        assert_eq!(port_rows(&store), 2);
     }
 
     #[test]

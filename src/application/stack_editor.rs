@@ -7,8 +7,9 @@ use crate::domain::{
     },
     coordination::Author,
     port::{SettingsStore, StackStore, StateChangeNotifier},
+    project::Project,
     settings::Settings,
-    value::{ProcessName, ProjectRoot},
+    value::{IdleStop, ProcessName, ProjectRoot},
 };
 
 /// The one use case the CLI and MCP drive to edit stored state: each method
@@ -97,6 +98,22 @@ impl StackEditor<'_> {
         let imported = self.stacks.import(root, processes, mode)?;
         self.notifier.stack_changed(root);
         Ok(imported)
+    }
+
+    /// Sets the project's own idle stop, or clears it (`None`) to follow the
+    /// setting, and returns the project as stored.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the project is unknown or the store
+    /// cannot be written.
+    pub fn set_idle_stop(
+        &self,
+        root: &ProjectRoot,
+        idle_stop: Option<IdleStop>,
+    ) -> Result<Project, ConfigError> {
+        let project = self.stacks.set_idle_stop(root, idle_stop)?;
+        self.notifier.stack_changed(root);
+        Ok(project)
     }
 
     /// Applies `change` for `author` to the settings and returns the result,
@@ -257,6 +274,23 @@ mod tests {
             EditorStep::SettingsChanged,
             EditorStep::Wrote
         ]);
+    }
+
+    #[test]
+    fn set_idle_stop_notifies_after_its_write_and_not_on_failure() {
+        let fakes = EditorFakes::new(false);
+        let idle_stop: IdleStop = "5m".parse().unwrap();
+
+        let project = fakes
+            .editor()
+            .set_idle_stop(&root(), Some(idle_stop))
+            .unwrap();
+
+        assert_eq!(*project.idle_stop(), Some(idle_stop));
+        assert_wrote_then_notified(&fakes, EditorStep::Wrote);
+        let failing = EditorFakes::new(true);
+        assert!(failing.editor().set_idle_stop(&root(), None).is_err());
+        assert!(failing.steps().is_empty());
     }
 
     /// A refused write is never announced.

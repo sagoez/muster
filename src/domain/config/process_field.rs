@@ -22,4 +22,6 @@ pub enum ProcessField {
     StopGrace,
     /// Its readiness check.
     Ready,
+    /// The ports it listens on.
+    Ports,
 }

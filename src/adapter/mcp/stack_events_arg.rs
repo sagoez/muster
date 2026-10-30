@@ -16,8 +16,7 @@ pub struct StackEventsArg {
     #[builder(default)]
     #[getset(get = "pub")]
     since: Option<String>,
-    /// Only these kinds: started, ready, ready-timeout, exited, crashed,
-    /// restarting, stopped, blocked, notice.
+    /// Only these kinds, each one of <event-kinds>.
     #[builder(default)]
     #[getset(get = "pub")]
     kinds: Option<Vec<String>>,

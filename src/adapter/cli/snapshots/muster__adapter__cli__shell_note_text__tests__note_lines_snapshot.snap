@@ -1,0 +1,9 @@
+---
+source: src/adapter/cli/shell_note_text.rs
+expression: "note_lines(&notes).join(\"\\n\")"
+---
+muster: shop: starting api, worker
+muster: shop: web did not start: port 5173 is held by project 'admin', process 'web'; `muster down -p admin` frees it
+muster: shop: web did not start: port 5173 is held by project 'shop', process 'dev server'; `muster stop 'dev server'` frees it
+muster: shop: web did not start: port 5173 is held by pid 4242 (python3 -m http.server 5173)
+muster: shop: db cannot start: the process was left running unsupervised as pid 77

@@ -7,16 +7,17 @@ use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
+use strum::IntoEnumIterator;
 
 use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
 use crate::{
     adapter::{
         client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
         holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
-        service::{EVENTS_WITHOUT_SINCE, supervisor::FAILURE_TAIL_LINES},
+        service::{EVENTS_WITHOUT_SINCE, EventKind, supervisor::FAILURE_TAIL_LINES},
     },
     domain::{
-        config::{ENV_VARS_MAX, PROCESSES_MAX},
+        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, PROCESSES_MAX},
         coordination::{
             KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT,
             LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
@@ -32,15 +33,26 @@ use crate::{
 /// Key of a JSON schema node's description.
 const DESCRIPTION_KEY: &str = "description";
 
+/// Separates the names in a listed choice.
+const LIST_SEPARATOR: &str = ", ";
+
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 31] {
+fn placeholders() -> [(&'static str, String); 33] {
     [
+        (
+            "<event-kinds>",
+            EventKind::iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+                .join(LIST_SEPARATOR),
+        ),
         (
             "<process-name-max-chars>",
             PROCESS_NAME_MAX_CHARS.to_string(),
         ),
         ("<processes-max>", PROCESSES_MAX.to_string()),
         ("<env-vars-max>", ENV_VARS_MAX.to_string()),
+        ("<declared-ports-max>", DECLARED_PORTS_MAX.to_string()),
         ("<env-name-max-chars>", ENV_NAME_MAX_CHARS.to_string()),
         ("<env-value-max-chars>", ENV_VALUE_MAX_CHARS.to_string()),
         ("<locks-per-session-max>", LOCKS_PER_SESSION_MAX.to_string()),
@@ -201,5 +213,29 @@ mod tests {
                 .any(|text| text.contains(&format!("at most {}", CALL_BOUND.as_secs()))),
             "{schema}"
         );
+    }
+
+    /// `process_add` and `process_set` name the declared-ports limit in
+    /// their description and in their `ports` argument.
+    #[test]
+    fn the_port_tools_state_the_declared_ports_limit() {
+        let fixture = fixture();
+        let limit = format!("at most {DECLARED_PORTS_MAX}");
+        for name in ["process_add", "process_set"] {
+            let tool = fixture
+                .server()
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .unwrap();
+            let description = tool.description.clone().unwrap_or_default();
+            assert!(description.contains(&limit), "{name}: {description}");
+            let ports = &tool.input_schema["properties"]["ports"];
+            assert!(
+                descriptions(ports).iter().any(|text| text.contains(&limit)),
+                "{name}: {ports}"
+            );
+        }
     }
 }

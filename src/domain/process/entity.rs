@@ -4,9 +4,9 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessSpec},
+    config::{DeclaredPorts, Environment, ProcessSpec, launch_ports},
     process::{ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
-    value::{CommandLine, Description, PaneId, ProcessName},
+    value::{CommandLine, Description, LocalPort, PaneId, ProcessName},
 };
 
 /// A process managed by a project's supervisor: its definition plus its pane
@@ -40,6 +40,9 @@ pub struct Process {
     /// What each run waits for before it counts as ready, when anything.
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on, checked free before each launch.
+    #[builder(default)]
+    ports: DeclaredPorts,
 }
 
 impl Process {
@@ -59,6 +62,13 @@ impl Process {
         self.stop = *spec.stop();
         self.autostart = *spec.autostart();
         self.ready = spec.ready().clone();
+        self.ports = spec.ports().clone();
+    }
+
+    /// The ports a launch checks are free: those declared and the readiness
+    /// port, each once, ascending.
+    pub fn launch_ports(&self) -> Vec<LocalPort> {
+        launch_ports(&self.ports, self.ready.as_ref())
     }
 
     /// The definition this process runs, without its pane or state.
@@ -73,6 +83,7 @@ impl Process {
             .restart(self.restart)
             .stop(self.stop)
             .ready(self.ready.clone())
+            .ports(self.ports.clone())
             .build()
     }
 }
@@ -83,7 +94,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        process::StopSignal,
+        process::{ReadyProbe, StopSignal},
         value::{EnvName, EnvValue, StopGrace},
     };
 
@@ -106,6 +117,7 @@ mod tests {
                     .grace_period(StopGrace::try_new(Duration::from_secs(3)).unwrap())
                     .build(),
             )
+            .ports(DeclaredPorts::of([LocalPort::try_new(5173).unwrap()]).unwrap())
             .build()
     }
 
@@ -118,12 +130,48 @@ mod tests {
         assert_eq!(process.spec(), original);
     }
 
+    /// The port `raw`.
+    fn port(raw: u16) -> LocalPort {
+        LocalPort::try_new(raw).unwrap()
+    }
+
+    #[test]
+    fn launch_ports_join_declared_and_readiness_ports_once_in_order() {
+        let ready = |target: &str| {
+            Some(
+                ReadyCheck::builder()
+                    .probe(ReadyProbe::from_stored("port", target).unwrap())
+                    .timeout("30s".parse().unwrap())
+                    .build(),
+            )
+        };
+        let launched = |ports: &[u16], ready: Option<ReadyCheck>| {
+            spec("npm run dev")
+                .with_ports(DeclaredPorts::of(ports.iter().copied().map(port)).unwrap())
+                .with_ready(ready)
+                .to_process(PaneId::new(4))
+                .launch_ports()
+        };
+
+        assert_eq!(launched(&[5173, 3000], ready("3000")), [
+            port(3000),
+            port(5173)
+        ]);
+        assert_eq!(launched(&[5173, 3000], ready("4000")), [
+            port(3000),
+            port(4000),
+            port(5173)
+        ]);
+        assert_eq!(launched(&[], ready("4000")), [port(4000)]);
+        assert!(launched(&[], None).is_empty());
+    }
+
     /// A changed definition keeps the pane and its state.
     #[test]
     fn set_spec_keeps_identity_and_state() {
         let mut process = spec("npm run dev").to_process(PaneId::new(4));
         process.set_state(ProcessState::Running);
-        let changed = spec("pnpm dev");
+        let changed = spec("pnpm dev").with_ports(DeclaredPorts::default());
 
         process.set_spec(&changed);
 

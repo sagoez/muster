@@ -106,19 +106,23 @@ has:
 - a readiness check, what each run waits for before it counts as ready: one of
   `--ready-log TEXT` (with `--ready-regex` for a regex), `--ready-port PORT` or
   `--ready-http URL` on localhost, and `--ready-timeout`, how long a run has to
-  pass it. A run that misses it raises a warning and keeps running. A start,
-  or a restart by policy, whose readiness port another process listens on is
-  refused, naming that process: its project and name when muster runs it,
-  otherwise its pid and command line. `muster ps` shows the process as
-  `blocked` until a later start finds the port free.
+  pass it. A run that misses it raises a warning and keeps running;
+- `--port PORT`, repeatable, a TCP port it listens on, 1 to 65535: each once,
+  at most 16. On `muster set` the ports given replace the stored set, and
+  `--no-ports` removes them all. A start, or a restart by policy, is refused
+  when another process listens on any declared port or the readiness port,
+  naming the first one held and its holder: its project and name when muster
+  runs it, otherwise its pid and command line. `muster ps` shows the process as
+  `blocked` until a later start finds the ports free, and prints under its
+  table what frees each one (see [Ports](#ports)).
 
 A field left out takes the matching `default-*` setting, and the process stores
 that value, so changing a default later changes only processes added after it.
 `muster add` never starts anything.
 
 `muster set <name>` changes the fields it is given: `--command` or a new command
-after `--`, `--no-cwd`, `--no-description` and `--no-ready` to clear, `--env` to
-add or replace a variable and `--unset-env` to remove one. A running process keeps its
+after `--`, `--no-cwd`, `--no-description`, `--no-ready` and `--no-ports` to clear,
+`--env` to add or replace a variable and `--unset-env` to remove one. A running process keeps its
 current run; `muster restart <name>` applies a change to its command, working
 directory, environment, stop policy or readiness check, and `set` says so when
 one needs it. A `set` to the values already stored succeeds and says nothing
@@ -163,10 +167,15 @@ processes:
     ready:
       log: ready in
       timeout: 60s
+    ports:
+      - 5173
 ```
 
 `ready` is optional and takes one of `log` (with `regex: true` for a regex),
-`port` or `http`, and a `timeout`.
+`port` or `http`, and a `timeout`. `ports` is optional too: a list of at most
+16 distinct ports from 1 to 65535, written in ascending order and left out when
+empty. An import refuses a zero, a repeated port or a longer list, naming the
+entry.
 [examples/muster.yml](examples/muster.yml) is a complete example. The file
 never names the project: the folder that imports it is the project.
 
@@ -198,24 +207,25 @@ one and `muster config set <key> <value>` changes it.
 | `default-stop-signal` | `terminate` or `interrupt` for a new process |
 | `default-stop-grace` | a duration up to `1h`, such as `5s`, for a new process |
 | `mcp-stack-edits` | `allow` or `read-only`: whether an agent over MCP may add, change or remove processes; `allow` by default |
+| `idle-stop` | a duration such as `30m`, or `never`: how long a project keeps running once no shell is in it (see [Shell hook](#shell-hook)); `30m` by default |
 
-`detach-key` applies at the next attach, `desktop-notifications` and
-`mcp-stack-edits` at once, the size, scrollback, log size and color scheme to
-processes started afterwards, and the `default-*` settings to processes added
-afterwards.
+`detach-key` applies at the next attach, `desktop-notifications`,
+`mcp-stack-edits` and `idle-stop` at once (a pending stop moves with it), the
+size, scrollback, log size and color scheme to processes started afterwards,
+and the `default-*` settings to processes added afterwards.
 
 With `--json`, `muster config` prints `{"settings": [{"key": "detach-key",
 "value": "ctrl-\\"}, ...]}`, and `get` and `set` print one `{"key", "value"}`;
 each value is written as `config set` reads it. The MCP server's `config_get`
 answers in the same shapes. Its `config_set` changes only the `default-*`
-settings; every other key, `mcp-stack-edits` among them, is changed from the
-CLI alone.
+settings; every other key, `mcp-stack-edits` and `idle-stop` among them, is
+changed from the CLI alone.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `muster ps [--all] [--commands]` | List processes with state, readiness, pid, uptime, restarts and usage; `--commands` adds each process's stored command |
+| `muster ps [--all] [--commands]` | List processes with state, readiness, the ports they listen on, pid, uptime, restarts and usage; the heading counts the shells in the project or the time left before it stops; `--commands` adds each process's stored command |
 | `muster up` | Start every autostart process |
 | `muster down` | Stop every process |
 | `muster start [name] [--wait [--timeout D]]` | Start a process, and with `--wait` wait until it is ready, or running when it has no readiness check |
@@ -234,14 +244,16 @@ CLI alone.
 | `muster export [FILE] [--force] [--with-env]` | Write the project's stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file into the project |
 | `muster init [--yes]` | Detect a stack in the folder and add it |
-| `muster projects` / `projects rm <project>` | List registered projects, marking any whose stored processes do not read and listing by folder any whose own stored row does not, or remove one with its processes and coordination state; a project whose row does not read is removed by the folder text it is listed under, even one that is not an absolute path, and breaks no other project |
+| `muster shell-init <bash\|zsh\|fish>` | Print the shell hook that starts a project's processes when a shell enters it |
+| `muster projects set [PROJECT] --idle-stop <DURATION\|never\|default>` | Give a project its own idle stop, or `default` to follow the `idle-stop` setting |
+| `muster projects` / `projects rm <project>` | List registered projects, marking one with its own `idle-stop`, marking any whose stored processes do not read and listing by folder any whose own stored row does not, or remove one with its processes and coordination state; a project whose row does not read is removed by the folder text it is listed under, even one that is not an absolute path, and breaks no other project |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes a running service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state; `todo` shows which agent claimed a todo and for how long. `note`, `todo` and `kv` list a page of `--limit` entries (50 by default, at most 200) as `note_read`, `todo_list` and `kv_read` do: each page ends with the `--cursor` to read on from, `--json` answers `more` and `cursor`, an entry deleted where a page ended never breaks the next page, a `note` listing shows keys alone, and a `kv` listing cuts each value to 200 characters |
 | `muster lock` / `lock release <name>` | List the locks agents hold on the project, or clear one an agent left behind |
 | `muster coordination export\|import` | Move that shared state as YAML, the export readable by its owner alone; an import reads only a regular file of at most 16 MiB and refuses a key, note body, value, todo title or dependency list longer than a write may be |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster doctor` | Diagnose the database, projects, stored processes and completions |
+| `muster doctor` | Diagnose the database, projects, stored processes, completions and the shell hook |
 | `muster completions <shell>` | Print the shell line that enables completions |
 
 A command that starts processes, and a wait for `running`, hold on until each
@@ -321,7 +333,8 @@ it is the text `config set` takes, such as `"5s"`. A process definition reads:
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
  "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
- "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": 30.0}}
+ "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": 30.0},
+ "ports": [5173]}
 ```
 
 A project is named as `{"name": "shop", "root": "/home/me/shop"}`, in the
@@ -330,6 +343,87 @@ process under `process` and carries the `cursor` just past the text, to pass
 as `--since`; `--screen` drops the blank rows below the text and has no
 cursor. `muster logs -f --json` prints one object per line, each with the
 `cursor` just past it.
+
+## Shell hook
+
+A hook in your shell tells muster which project each shell is in, so a stack
+starts when you enter its folder and stops when you have left it. Add one line
+to your shell's rc file:
+
+| Shell | File | Line |
+|---|---|---|
+| bash | `~/.bashrc` | `eval "$(muster shell-init bash)"` |
+| zsh | `~/.zshrc` | `eval "$(muster shell-init zsh)"` |
+| fish | `~/.config/fish/config.fish` | `muster shell-init fish \| source` |
+
+At each prompt the hook starts `muster __shell-report` in the background, with
+no input and no output, and carries on: the prompt never waits on muster, and a
+missing binary, a stopped service or a failed report changes nothing. It
+exports `MUSTER_SHELL_PID`, the shell's pid, and adds no alias and no exit trap.
+Only an interactive shell loads it, and `exec $SHELL` loads it afresh. A shell
+running as a user who does not own muster's state directory, such as a root
+shell that kept your home, reports nothing.
+
+- **Entering** a registered project's folder, from outside it or from another
+  project, starts the project's `autostart` processes, as `muster up` would,
+  starting the service first when it is not running. A folder that is not a
+  registered project does nothing. The next prompt prints what happened, in
+  lines that begin `muster:`, such as `muster: shop: starting api, worker`, or
+  `muster: shop: web <reason>; \`muster down -p admin\` frees it` when a start
+  was refused because a port is held. Text from a process or a refusal is
+  printed with its control characters made safe. Registering a project around
+  a shell already in its folder, with `muster add`, `init` or `import`, is not
+  entering it: nothing starts, and the shell counts in it from its next prompt.
+  A shell back in a project whose idle stop is still stopping it starts its
+  `autostart` processes again once they have stopped, or, if it has left by
+  then, another shell still in the project does. A process you stopped
+  yourself, with `muster stop`, `down` or MCP, stays stopped.
+- **Leaving** is noticed by the next report from that shell, and a shell that
+  ends is noticed within a few seconds. Once no shell has been in the project
+  for the `idle-stop` time, muster stops its running processes through their
+  stop policies, raises a warning notice and an `idle-stopped` event, and
+  leaves it stopped. A shell entering before then cancels the stop, as does a
+  start from the CLI or over MCP. Only a shell seen leaving, or found ended,
+  starts the countdown: a project brought up with no shell in it, before or
+  after a service restart or upgrade, is never stopped for want of one, while
+  a countdown under way when the service restarts carries on from the leave.
+  A project registered inside the one a shell is in keeps the outer one
+  occupied until the shell leaves its folder.
+- `muster ps` shows the count in its heading (` · 2 shells`) and, for a project
+  with none, how long is left (` · idle, stops in 29m`). `stack_status` reports
+  the same as `occupancy`.
+
+`idle-stop` is `30m` by default: `muster config set idle-stop 30m` or `never`
+changes it for every project, and `muster projects set --idle-stop 10m` gives
+one project its own value (`never` included). `muster projects set --idle-stop
+default` makes it follow the setting again. With `--json`, `muster projects`
+and `muster projects set` give each project the `idle_stop` in effect, in
+whole seconds or null for `never`, and its `source`: `project` for its own
+value or `setting` when it follows the setting. `muster doctor` has a `shell
+hook` check: it is ok when the shell it was run from, directly or through a
+wrapper such as `env` or `timeout`, loaded the hook, and otherwise warns with
+the line to add for `$SHELL`.
+
+### Ports
+
+A process declares the ports it listens on with `--port`, and the stack file
+and MCP carry them as `ports`. Before every start, muster lists the machine's
+listening sockets once and refuses the start when any declared port, or the
+readiness port, is held. The refusal names the first one held and who holds it:
+`web: port 5173 is held by project 'admin', process 'web'; \`muster down -p
+admin\` frees it` for another project (`muster stop` for this project's own
+process), and for a program muster does not run, the pid and command line, cut
+to its first 256 characters and `…` wherever it is shown. The process shows as
+`blocked` in `muster ps`, and `muster ps` prints one such line for each
+blocked process beneath its table. A start that is found blocked
+after the request was answered, such as an entering shell's, shows the same
+way. The `PORTS` column lists the ports a process's tree is listening on now,
+which need not be the declared ones. With `--json` a process carries `ports`
+(listening) and `blocked_on` (`{"port", "holder"}`, where `holder` is
+`{"kind": "supervised", "project", "process"}` or `{"kind": "other", "pid",
+"command"}`), and a project carries `occupancy`: `{"shells", "idle_stop",
+"stops_in"}`, with `idle_stop` in whole seconds or null for `never`, and
+`stops_in` in whole seconds or null.
 
 ## Attach
 
@@ -410,8 +504,10 @@ only new output. The tools:
   now), `process_send`;
 - the stack definition: `process_add`, `process_set` and `process_remove`, which
   edit it as `muster add`, `set` and `rm` do, within the guardrails below;
-  `process_add` registers the folder when it is not yet a project, and `ready`
-  stores a readiness check. It registers only the server's own folder or one
+  `process_add` registers the folder when it is not yet a project, `ready`
+  stores a readiness check and `ports` (a list of at most 16 distinct numbers
+  from 1 to 65535; on `process_set` it replaces the set and `[]` clears it)
+  declares the ports it listens on. It registers only the server's own folder or one
   inside it, under the same rule as the CLI, so a server started in `/` or your
   home folder must pass `project`;
 - settings: `config_get`, and `config_set` for the `default-*` settings;
@@ -451,12 +547,13 @@ with the user's rights at the next start:
   or `muster rm <name>` fixes it.
 - A command holds at most 8192 characters, a description 300 and a name 64; a
   process has at most 64 variables, each name at most 128 characters and
-  each value 8192; a project holds at most 100 processes. A longer or larger
-  one is refused naming the limit over MCP, the CLI and `muster import`.
-  The caps hold every write, never a read: a name or variables stored past
-  them before they existed keep the project readable and exportable, but
-  that process is never started; `muster ps` and `muster doctor` name it, and
-  `muster set <name> --unset-env <KEY>` or `muster rm <name>` fixes it.
+  each value 8192, and at most 16 declared ports; a project holds at most 100
+  processes. A longer or larger one is refused naming the limit over MCP, the
+  CLI and `muster import`. The caps hold every write, never a read: a name,
+  variables or ports stored past them keep the project readable and
+  exportable, but that process is never started; `muster ps` and
+  `muster doctor` name it, and `muster set <name> --unset-env <KEY>`,
+  `muster set <name> --no-ports` or `muster rm <name>` fixes it.
 - One MCP connection holds at most 32 live locks; the next `lock_acquire` is
   refused until it releases one or one expires.
 - A definition an agent reads back lists its `environment` by variable name
@@ -478,7 +575,11 @@ Cursors are offsets in a process's output that run on across restarts, so
 `stack_status`, returns only what followed. `stack_status` also lists each
 process's readiness, the ports its process tree listens on, its URLs, how it
 last exited and why, and `blocked_on` when its start was refused because
-another process holds its readiness port.
+another process holds a declared or readiness port (the first one held). It
+also carries `occupancy`: `{shells, idle_stop, stops_in_s}`, with `idle_stop`
+in whole seconds or null for `never`, and `stops_in_s` in whole seconds, left
+out when no stop is pending. `stack_events` lists an
+`idle-stopped` event when a project with no shell in it was stopped.
 
 Event cursors, such as `e:3141592:9921`, name the service that numbered them.
 `stack_events` with a cursor from an earlier service, after a restart, or past

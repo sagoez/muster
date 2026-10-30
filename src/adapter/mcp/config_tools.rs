@@ -213,6 +213,47 @@ mod tests {
         assert_eq!(edits(&fixture), before);
     }
 
+    /// `config_get` lists the idle stop with its seeded value, and
+    /// `config_set` refuses it as the user's to change, storing nothing.
+    #[test]
+    fn config_get_lists_idle_stop_and_config_set_refuses_it() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let all = content(
+                fixture
+                    .server()
+                    .config_get(Parameters(ConfigGetArg::builder().build()))
+                    .await,
+            );
+            assert!(
+                all["settings"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!({ "key": "idle-stop", "value": "30m" })),
+                "{all}"
+            );
+
+            let refused = refusal(
+                fixture
+                    .server()
+                    .config_set(Parameters(
+                        ConfigSetArg::builder()
+                            .key("idle-stop".to_string())
+                            .value("never".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(refused.contains("idle-stop"), "{refused}");
+            assert!(refused.contains("cannot be changed over MCP"), "{refused}");
+        });
+        assert_eq!(
+            fixture.store().load().unwrap().idle_stop().to_string(),
+            "30m"
+        );
+        assert_eq!(*fixture.notifier().settings().lock().unwrap(), 0);
+    }
+
     /// `config_set` refuses every key but the `default-*` ones, so an agent
     /// cannot lift its own guardrail, and nothing is stored.
     #[test]

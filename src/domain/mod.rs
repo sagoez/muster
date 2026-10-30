@@ -2,6 +2,7 @@ pub mod color_scheme;
 pub mod config;
 pub mod coordination;
 pub mod notification;
+pub mod occupancy;
 pub mod port;
 pub mod process;
 pub mod project;

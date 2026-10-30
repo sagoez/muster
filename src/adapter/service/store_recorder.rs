@@ -11,11 +11,11 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use super::{
     notice::Notice, notice_level::NoticeLevel, record_retry::RecordRetry,
-    shared_notices::SharedNotices, store_record::StoreRecord,
+    recorder_stores::RecorderStores, shared_notices::SharedNotices, store_record::StoreRecord,
 };
 use crate::domain::{
     config::ConfigError,
-    port::{RaisedEdits, RunHistory},
+    occupancy::PendingIdleStop,
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
@@ -44,9 +44,17 @@ const ENDED_RECORD: &str = "how a run ended for";
 const CLEARED_RECORD: &str = "that a run ended on request for";
 /// What a raised edit mark was, before the newest edit.
 const RAISED_RECORD: &str = "agent edits raised through";
+/// Prefix of the notice for a pending idle stop the store was too busy to
+/// take yet; the store's error follows.
+const IDLE_BUSY_NOTICE: &str = "could not record the project's pending idle stop yet, retrying";
+/// What an armed idle stop was.
+const IDLE_ARMED_RECORD: &str = "the project's pending idle stop";
+/// What a cleared idle stop was.
+const IDLE_CLEARED_RECORD: &str = "that the project's idle stop is no longer pending";
 
 /// Stores what the service keeps across restarts, how each process's runs
-/// end and which agent edits it raised, on a thread of its own, so a slow or
+/// end, which agent edits it raised and which idle stops are pending, on a
+/// thread of its own, so a slow or
 /// locked database never stalls the loop. Writes land in the order they are
 /// sent. One the store is only too busy for is retried under a
 /// [`RecordRetry`], its first refusal a warning notice, and given up with an
@@ -69,15 +77,10 @@ pub struct StoreRecorder {
 }
 
 impl StoreRecorder {
-    /// Starts the thread writing run ends to `runs` and raised edits to
-    /// `raised` under `retry`, telling `notices` of a write that has to wait
-    /// or was given up.
-    pub fn spawn(
-        runs: Box<dyn RunHistory>,
-        raised: Box<dyn RaisedEdits>,
-        notices: SharedNotices,
-        retry: RecordRetry,
-    ) -> Self {
+    /// Starts the thread writing each record to its store in `stores` under
+    /// `retry`, telling `notices` of a write that has to wait or was given
+    /// up.
+    pub fn spawn(stores: RecorderStores, notices: SharedNotices, retry: RecordRetry) -> Self {
         let (sender, records) = unbounded();
         let drain_by = Arc::new(Mutex::new(None));
         let pending = Arc::new(AtomicUsize::new(0));
@@ -88,15 +91,7 @@ impl StoreRecorder {
         );
         thread::spawn(move || {
             let (drain_by, pending, notices) = worker;
-            write_all(
-                &records,
-                runs.as_ref(),
-                raised.as_ref(),
-                &notices,
-                retry,
-                &drain_by,
-                &pending,
-            );
+            write_all(&records, &stores, &notices, retry, &drain_by, &pending);
         });
         Self {
             sender,
@@ -129,6 +124,16 @@ impl StoreRecorder {
             project: project.clone(),
             through,
         });
+    }
+
+    /// Records `stop`, a project's idle stop now pending.
+    pub fn idle_armed(&self, stop: PendingIdleStop) {
+        self.send(StoreRecord::IdleArmed(stop));
+    }
+
+    /// Records that `project`'s idle stop is no longer pending.
+    pub fn idle_cleared(&self, project: &ProjectRoot) {
+        self.send(StoreRecord::IdleCleared(project.clone()));
     }
 
     /// Drains every write sent before it, so a service exiting leaves its
@@ -167,8 +172,7 @@ impl StoreRecorder {
 /// flush's drain once the flush is answered.
 fn write_all(
     records: &Receiver<StoreRecord>,
-    runs: &dyn RunHistory,
-    raised: &dyn RaisedEdits,
+    stores: &RecorderStores,
     notices: &SharedNotices,
     retry: RecordRetry,
     drain_by: &Mutex<Option<Instant>>,
@@ -188,7 +192,7 @@ fn write_all(
             let _ = done.send(());
             continue;
         }
-        land(&record, runs, raised, notices, retry, drain_by);
+        land(&record, stores, notices, retry, drain_by);
         pending.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -198,8 +202,7 @@ fn write_all(
 /// busy, and when it is given up.
 fn land(
     record: &StoreRecord,
-    runs: &dyn RunHistory,
-    raised: &dyn RaisedEdits,
+    stores: &RecorderStores,
     notices: &SharedNotices,
     retry: RecordRetry,
     drain_by: &Mutex<Option<Instant>>,
@@ -212,7 +215,7 @@ fn land(
             report(notices, record, |what| format!("{STOPPED_NOTICE} {what}"));
             return;
         }
-        let Err(error) = apply(record, runs, raised) else {
+        let Err(error) = apply(record, stores) else {
             return;
         };
         if !error.is_busy() {
@@ -256,15 +259,15 @@ fn drain_passed(drain_by: &Mutex<Option<Instant>>, at: Instant) -> bool {
 ///
 /// # Errors
 /// Returns the store's error when the write fails.
-fn apply(
-    record: &StoreRecord,
-    runs: &dyn RunHistory,
-    raised: &dyn RaisedEdits,
-) -> Result<(), ConfigError> {
+fn apply(record: &StoreRecord, stores: &RecorderStores) -> Result<(), ConfigError> {
     match record {
-        StoreRecord::Ended { project, run } => runs.record_end(project, run),
-        StoreRecord::Cleared { project, process } => runs.clear_end(project, process),
-        StoreRecord::EditsRaised { project, through } => raised.mark_raised(project, *through),
+        StoreRecord::Ended { project, run } => stores.runs.record_end(project, run),
+        StoreRecord::Cleared { project, process } => stores.runs.clear_end(project, process),
+        StoreRecord::EditsRaised { project, through } => {
+            stores.raised.mark_raised(project, *through)
+        },
+        StoreRecord::IdleArmed(stop) => stores.idle_stops.arm_idle_stop(stop),
+        StoreRecord::IdleCleared(project) => stores.idle_stops.clear_idle_stop(project),
         StoreRecord::Flush { .. } => Ok(()),
     }
 }
@@ -275,6 +278,7 @@ fn tell(notices: &SharedNotices, record: &StoreRecord, error: &ConfigError) {
     let busy = match record {
         StoreRecord::Ended { .. } | StoreRecord::Cleared { .. } => RUN_BUSY_NOTICE,
         StoreRecord::EditsRaised { .. } => RAISED_BUSY_NOTICE,
+        StoreRecord::IdleArmed(_) | StoreRecord::IdleCleared(_) => IDLE_BUSY_NOTICE,
         StoreRecord::Flush { .. } => return,
     };
     push(
@@ -292,6 +296,8 @@ fn report(notices: &SharedNotices, record: &StoreRecord, say: impl FnOnce(&str) 
         StoreRecord::Ended { run, .. } => format!("{ENDED_RECORD} {}", run.process()),
         StoreRecord::Cleared { process, .. } => format!("{CLEARED_RECORD} {process}"),
         StoreRecord::EditsRaised { through, .. } => format!("{RAISED_RECORD} {through}"),
+        StoreRecord::IdleArmed(_) => IDLE_ARMED_RECORD.to_string(),
+        StoreRecord::IdleCleared(_) => IDLE_CLEARED_RECORD.to_string(),
         StoreRecord::Flush { .. } => return,
     };
     push(notices, record, NoticeLevel::Error, say(&what));
@@ -303,7 +309,10 @@ fn push(notices: &SharedNotices, record: &StoreRecord, level: NoticeLevel, messa
     let (project, process) = match record {
         StoreRecord::Ended { project, run } => (project, Some(run.process().clone())),
         StoreRecord::Cleared { project, process } => (project, Some(process.clone())),
-        StoreRecord::EditsRaised { project, .. } => (project, None),
+        StoreRecord::EditsRaised { project, .. } | StoreRecord::IdleCleared(project) => {
+            (project, None)
+        },
+        StoreRecord::IdleArmed(stop) => (stop.project(), None),
         StoreRecord::Flush { .. } => return,
     };
     notices.lock().unwrap_or_else(PoisonError::into_inner).push(
@@ -380,8 +389,11 @@ mod tests {
         retry: RecordRetry,
     ) -> StoreRecorder {
         StoreRecorder::spawn(
-            Box::new(history.clone()),
-            Box::new(history.clone()),
+            RecorderStores::builder()
+                .runs(Box::new(history.clone()))
+                .raised(Box::new(history.clone()))
+                .idle_stops(Box::new(history.clone()))
+                .build(),
             notices.clone(),
             retry,
         )

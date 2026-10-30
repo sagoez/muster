@@ -2,19 +2,23 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Params, Row, params};
 
-use super::sqlite_store::{SqliteStore, corrupt, db_error, epoch_param};
+use super::{
+    idle_stop_refusal::IdleStopRefusal,
+    settings_rows::{idle_stop_columns, idle_stop_from_columns},
+    sqlite_store::{SqliteStore, corrupt, db_error, epoch_param},
+};
 use crate::{
     adapter::{clock::epoch_now, sanitize::printable},
     domain::{
         config::{ConfigError, Registration, UnreadableProject},
         port::ProjectStore,
         project::Project,
-        value::{ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
+        value::{IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
     },
 };
 
-/// Selects a project's row id, root and name, in that order.
-const SELECT_PROJECT: &str = "SELECT id, root, name FROM projects";
+/// Selects a project's row id, root, name and idle-stop columns.
+const SELECT_PROJECT: &str = "SELECT id, root, name, idle_stop_kind, idle_stop_ms FROM projects";
 /// What an unreadable project's refusal calls it, before its folder.
 const PROJECT_AT: &str = "project at ";
 /// Why a stored folder that is not absolute is refused.
@@ -23,6 +27,11 @@ const FOLDER_NOT_ABSOLUTE: &str = "its folder is not an absolute path";
 const NAME_EMPTY: &str = "its name is empty";
 /// Why a stored name that could drive a terminal is refused.
 const NAME_UNSAFE: &str = "its name holds a control or format character";
+/// Why stored idle-stop columns that do not go together are refused.
+const IDLE_STOP_MISMATCHED: &str =
+    "its idle stop names a kind muster does not know, or milliseconds that kind does not take";
+/// Why a stored idle stop that is not a positive duration is refused.
+const IDLE_STOP_NOT_POSITIVE: &str = "its idle stop is not a positive whole number of milliseconds";
 
 /// A project with the row id other tables key it by.
 pub(super) type ProjectRow = (i64, Project);
@@ -49,6 +58,8 @@ fn project_from_row(row: &Row) -> Result<Result<ProjectRow, UnreadableProject>, 
     let id: i64 = row.get("id").map_err(db_error)?;
     let root: String = row.get("root").map_err(db_error)?;
     let name: String = row.get("name").map_err(db_error)?;
+    let idle_stop_kind: Option<String> = row.get("idle_stop_kind").map_err(db_error)?;
+    let idle_stop_ms: Option<i64> = row.get("idle_stop_ms").map_err(db_error)?;
     let unreadable = |reason: &str| {
         UnreadableProject::builder()
             .root(PathBuf::from(&root))
@@ -66,10 +77,44 @@ fn project_from_row(row: &Row) -> Result<Result<ProjectRow, UnreadableProject>, 
         Err(ProjectNameError::NotEmptyViolated) => return Ok(Err(unreadable(NAME_EMPTY))),
         Err(ProjectNameError::PredicateViolated) => return Ok(Err(unreadable(NAME_UNSAFE))),
     };
+    let idle_stop = match idle_stop_kind
+        .map(|kind| idle_stop_from_columns(&kind, idle_stop_ms))
+        .transpose()
+    {
+        Ok(idle_stop) => idle_stop,
+        Err(IdleStopRefusal::Mismatched) => return Ok(Err(unreadable(IDLE_STOP_MISMATCHED))),
+        Err(IdleStopRefusal::NotPositive) => return Ok(Err(unreadable(IDLE_STOP_NOT_POSITIVE))),
+    };
     Ok(Ok((
         id,
-        Project::builder().root(project_root).name(name).build(),
+        Project::builder()
+            .root(project_root)
+            .name(name)
+            .idle_stop(idle_stop)
+            .build(),
     )))
+}
+
+/// Writes `idle_stop` as the project `project_id`'s own, or clears it.
+///
+/// # Errors
+/// Returns [`ConfigError::TooLarge`] for a duration too long to store, or a
+/// storage failure.
+pub(super) fn store_idle_stop(
+    conn: &Connection,
+    project_id: i64,
+    idle_stop: Option<&IdleStop>,
+) -> Result<(), ConfigError> {
+    let (kind, millis) = match idle_stop.map(idle_stop_columns).transpose()? {
+        Some((kind, millis)) => (Some(kind.to_string()), millis),
+        None => (None, None),
+    };
+    conn.execute(
+        "UPDATE projects SET idle_stop_kind = ?1, idle_stop_ms = ?2 WHERE id = ?3",
+        params![kind, millis, project_id],
+    )
+    .map_err(db_error)?;
+    Ok(())
 }
 
 /// Every project row `sql` selects with `values`, each read or refused.
@@ -312,7 +357,7 @@ impl ProjectStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Barrier, thread};
+    use std::{fs, sync::Barrier, thread, time::Duration};
 
     use tempfile::TempDir;
 
@@ -323,7 +368,7 @@ mod tests {
             config::Environment,
             coordination::{Author, KvKey, KvValue},
             port::{CoordinationStore, StackReader, StackStore},
-            value::{EnvName, EnvValue},
+            value::{EnvName, EnvValue, PositiveDuration},
         },
     };
 
@@ -603,6 +648,54 @@ mod tests {
         );
         assert_eq!(found(inside("a")), Some(outer));
         assert_eq!(found(inside("z")), None);
+    }
+
+    /// A project whose idle-stop columns were left at odds past the schema
+    /// reads as unreadable, named by its folder and the idle stop; one too
+    /// long to store is refused and writes nothing.
+    #[test]
+    fn a_corrupt_or_unstorable_project_idle_stop_is_refused() {
+        let (store, scratch) = fresh_store();
+        let shop = folder(&scratch, "shop");
+        store
+            .add_process(&shop, &spec("web", "true"), &Author::human())
+            .unwrap();
+        let endless =
+            IdleStop::After(PositiveDuration::try_new(Duration::from_millis(u64::MAX)).unwrap());
+
+        let refused = store.set_idle_stop(&shop, Some(endless)).unwrap_err();
+
+        assert!(matches!(refused, ConfigError::TooLarge { .. }), "{refused}");
+        assert_eq!(*store.project_at(&shop).unwrap().unwrap().idle_stop(), None);
+        let hand_edited = |columns: &str| {
+            store
+                .write(|conn| {
+                    conn.execute_batch(&format!(
+                        "PRAGMA ignore_check_constraints = ON;
+                         UPDATE projects SET {columns};
+                         PRAGMA ignore_check_constraints = OFF;"
+                    ))
+                    .map_err(db_error)
+                })
+                .unwrap();
+            let unreadable = store.unreadable_projects().unwrap();
+            assert_eq!(unreadable.len(), 1);
+            assert_eq!(unreadable[0].root(), shop.as_ref());
+            (
+                store.project_at(&shop).unwrap_err().to_string(),
+                unreadable[0].reason().clone(),
+            )
+        };
+
+        let (message, reason) = hand_edited("idle_stop_kind = 'after', idle_stop_ms = NULL");
+        assert!(message.contains(IDLE_STOP_MISMATCHED), "{message}");
+        assert_eq!(reason, IDLE_STOP_MISMATCHED);
+        for not_positive in ["0", "-5"] {
+            let (_, reason) = hand_edited(&format!(
+                "idle_stop_kind = 'after', idle_stop_ms = {not_positive}"
+            ));
+            assert_eq!(reason, IDLE_STOP_NOT_POSITIVE, "{not_positive}");
+        }
     }
 
     /// Removing a project takes its processes, environment and coordination

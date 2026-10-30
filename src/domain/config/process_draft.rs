@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::domain::{
-    config::{Environment, ProcessDefaults, ProcessSpec},
+    config::{DeclaredPorts, Environment, ProcessDefaults, ProcessSpec},
     process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Description, ProcessName, StopGrace},
 };
@@ -42,6 +42,9 @@ pub struct ProcessDraft {
     /// What each run waits for before it counts as ready, when anything.
     #[builder(default)]
     ready: Option<ReadyCheck>,
+    /// The TCP ports it listens on.
+    #[builder(default)]
+    ports: DeclaredPorts,
 }
 
 impl ProcessDraft {
@@ -61,6 +64,7 @@ impl ProcessDraft {
             .restart(self.restart.unwrap_or(*defaults.restart()))
             .stop(stop)
             .ready(self.ready)
+            .ports(self.ports)
             .build()
     }
 }
@@ -70,6 +74,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::domain::value::LocalPort;
 
     /// A stop grace of `seconds`.
     fn grace(seconds: u64) -> StopGrace {
@@ -123,9 +128,14 @@ mod tests {
             .autostart(Some(true))
             .restart(Some(RestartPolicy::Always))
             .stop_signal(Some(StopSignal::Interrupt))
+            .ports(DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap())
             .build()
             .complete(&defaults());
 
+        assert_eq!(
+            spec.ports(),
+            &DeclaredPorts::of([LocalPort::try_new(3000).unwrap()]).unwrap()
+        );
         assert!(*spec.autostart());
         assert_eq!(*spec.restart(), RestartPolicy::Always);
         assert_eq!(*spec.stop().signal(), StopSignal::Interrupt);

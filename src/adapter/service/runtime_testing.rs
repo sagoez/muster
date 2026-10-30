@@ -5,11 +5,14 @@ use super::{
     launch_environment::LaunchEnvironment, process_status::ProcessStatus,
     project_status::ProjectStatus, supervisor::testing::test_stop,
 };
-pub(super) use crate::adapter::test_wait::{POLL, WAIT, wait_until};
 use crate::domain::{
     config::{Environment, ProcessSpec},
     process::RestartPolicy,
     value::{CommandLine, ProcessName},
+};
+pub(super) use crate::{
+    adapter::test_wait::{POLL, WAIT, wait_until},
+    domain::occupancy::testing::{test_root, test_shell},
 };
 
 /// Prefix of every test scratch directory.

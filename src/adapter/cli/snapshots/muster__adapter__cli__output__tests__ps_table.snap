@@ -1,10 +1,16 @@
 ---
 source: src/adapter/cli/output.rs
-expression: "render_status(&[shop()], false)"
+expression: "render_status(&[shop()], false, &[], false)"
 ---
-shop  /home/me/shop
-NAME        STATE     READY  PID   UPTIME  RESTARTS  CPU   MEM        ATTACHED  LAST EXIT
-dev server  running   yes    4123  1h 2m   2         2.2%  128.0 MiB  1         -
-café        crashed   -      -     -       0         -     -          -         status 127
-worker      starting  -      -     -       0         -     -          -         -
-cron        crashed   -      -     -       0         -     -          -         signal SIGKILL
+shop  /home/me/shop · 2 shells
+NAME        STATE     READY  PORTS      PID   UPTIME  RESTARTS  CPU   MEM        ATTACHED  LAST EXIT
+dev server  running   yes    3000,5173  4123  1h 2m   2         2.2%  128.0 MiB  1         -
+café        crashed   -      -          -     -       0         -     -          -         status 127
+worker      starting  -      -          -     -       0         -     -          -         -
+cron        crashed   -      -          -     -       0         -     -          -         signal SIGKILL
+web         blocked   -      -          -     -       0         -     -          -         -
+api         blocked   -      -          -     -       0         -     -          -         -
+docs        blocked   -      -          -     -       0         -     -          -         -
+web: port 5173 is held by project 'admin site', process 'web'; `muster down -p 'admin site'` frees it
+api: port 3000 is held by project 'shop', process 'dev server'; `muster stop 'dev server'` frees it
+docs: port 8000 is held by pid 4242 (python3 -m http.server 8000 \u{1b}[2J)

@@ -8,8 +8,10 @@ impl Supervisor {
     /// new one waits in `Pending`; a removed one that may still run is
     /// stopped through its stop policy and retires once it exits, and one that
     /// cannot run goes at once. A process whose name comes back while it
-    /// retires is kept again.
+    /// retires is kept again. The stack's project replaces this one, so its
+    /// own idle stop applies to a pending stop at once.
     pub fn apply_stack(&mut self, stack: &Stack) {
+        self.project = stack.project().clone();
         let sync = StackSync::apply(&self.workspace, stack.processes(), |pane| {
             self.holds_process(pane)
         });

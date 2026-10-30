@@ -21,6 +21,7 @@ use super::{
     notice_log::NoticeLog,
     notice_view::NoticeView,
     outcome::Outcome,
+    port_block_view::PortBlockView,
     process_outcome::ProcessOutcome,
     process_view::ProcessView,
     project_identity_view::ProjectIdentityView,
@@ -74,6 +75,7 @@ pub fn ps(
         | ServiceResponse::Log(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)) => Err(ClientError::UnexpectedAnswer((&other).into())),
@@ -408,6 +410,7 @@ pub fn events(
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
@@ -432,6 +435,7 @@ fn waited(
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Events(_)
         | ServiceResponse::Error(_)) => Err(unexpected(other, project, Some(name))),
@@ -551,6 +555,7 @@ fn service_notices(client: &ServiceClient, project: &Project) -> Result<Vec<Noti
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)
         | ServiceResponse::Error(_)) => Err(unexpected(other, project, None)),
@@ -586,6 +591,7 @@ pub fn logs<E: From<ClientError>>(
             | ServiceResponse::Batch(_)
             | ServiceResponse::Log(_)
             | ServiceResponse::Status(_)
+            | ServiceResponse::ShellNotes(_)
             | ServiceResponse::Located(_)
             | ServiceResponse::Notices(_)
             | ServiceResponse::Waited(_)
@@ -676,6 +682,7 @@ pub fn log_path(
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)
@@ -702,6 +709,7 @@ pub fn status(client: &ServiceClient, project: &Project) -> Result<ProjectStatus
         | ServiceResponse::Log(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)
@@ -819,6 +827,9 @@ fn report(
         .iter()
         .map(|name| {
             let now = find(&after, name);
+            let block = now
+                .and_then(|status| status.blocked_on().as_ref())
+                .filter(|_| !action.halts());
             ProcessOutcome::builder()
                 .name(name.clone())
                 .outcome(Outcome::settle(
@@ -827,11 +838,8 @@ fn report(
                     now,
                     moved.contains(name),
                 ))
-                .reason(
-                    now.and_then(|status| status.blocked_on().as_ref())
-                        .filter(|_| !action.halts())
-                        .map(ToString::to_string),
-                )
+                .reason(block.map(ToString::to_string))
+                .block(block.map(PortBlockView::from))
                 .status(now.map(ProcessView::from))
                 .build()
         })
@@ -868,8 +876,10 @@ fn wait_end_at_deadline(own: Duration, bound: Duration) -> WaitEnd {
 }
 
 /// `report` with each process `batch` left alone listed as refused, with
-/// its reason and how `ps` lists it now, and the notices about those
-/// processes counted as the report's own rather than as context.
+/// its reason, the held port that kept it (from the refusal, else from its
+/// listing, since a launch may find the port after the answer) and how `ps`
+/// lists it now, and the notices about those processes counted as the
+/// report's own rather than as context.
 ///
 /// # Errors
 /// Returns a [`ClientError`] when the service cannot be reached.
@@ -887,11 +897,17 @@ fn with_refusals(
         .refused()
         .iter()
         .map(|refusal| {
+            let listed = find(&now, refusal.name());
+            let block = refusal
+                .block()
+                .as_ref()
+                .or_else(|| listed.and_then(|status| status.blocked_on().as_ref()));
             ProcessOutcome::builder()
                 .name(refusal.name().clone())
                 .outcome(Outcome::Refused)
                 .reason(Some(refusal.reason().clone()))
-                .status(find(&now, refusal.name()).map(ProcessView::from))
+                .block(block.map(PortBlockView::from))
+                .status(listed.map(ProcessView::from))
                 .build()
         })
         .collect();
@@ -916,6 +932,7 @@ fn batch(response: ServiceResponse, project: &Project) -> Result<BatchOutcome, C
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)
@@ -949,6 +966,7 @@ pub fn expect_ok(
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)
@@ -972,6 +990,7 @@ pub fn unexpected(
         | ServiceResponse::Status(_)
         | ServiceResponse::Located(_)
         | ServiceResponse::Screen(_)
+        | ServiceResponse::ShellNotes(_)
         | ServiceResponse::Notices(_)
         | ServiceResponse::Waited(_)
         | ServiceResponse::Events(_)) => ClientError::UnexpectedAnswer((&other).into()),

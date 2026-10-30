@@ -120,6 +120,31 @@ pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
+/// Whether this process's effective user owns `dir`, creating it first as
+/// [`claimed_by`] does, so what runs as another user, root in a `sudo -s`
+/// shell that kept the user's home, leaves it alone.
+pub fn claimed_by_effective_user(dir: &Path) -> bool {
+    claimed_by(dir, geteuid().as_raw())
+}
+
+/// Whether the user `uid` owns `dir`, creating it owner-only first when it
+/// is absent and `uid` owns its parent. A missing parent is never made, and
+/// a directory another user owns, or made meanwhile, is not claimed.
+pub fn claimed_by(dir: &Path, uid: u32) -> bool {
+    if fs::symlink_metadata(dir).is_err() {
+        if !dir.parent().is_some_and(|parent| owned_by(parent, uid)) {
+            return false;
+        }
+        let _ = DirBuilder::new().mode(PRIVATE_DIR_MODE).create(dir);
+    }
+    owned_by(dir, uid)
+}
+
+/// Whether `dir` exists and the user `uid` owns it.
+fn owned_by(dir: &Path, uid: u32) -> bool {
+    fs::metadata(dir).is_ok_and(|metadata| metadata.uid() == uid)
+}
+
 /// Readies muster's state directory: creates it and any missing parents
 /// owner-only, and narrows an existing one this user owns to owner-only. One
 /// another user owns is refused, since its owner could read or replace
@@ -260,5 +285,42 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("another user"), "{error}");
+    }
+
+    /// A folder is this user's only when this user owns it; the same folder
+    /// seen as another user is not.
+    #[test]
+    fn a_dir_is_claimed_only_by_its_owner() {
+        let scratch = TempDir::new().unwrap();
+        let user = geteuid().as_raw();
+
+        assert!(claimed_by_effective_user(scratch.path()));
+        assert!(claimed_by(scratch.path(), user));
+        assert!(!claimed_by(scratch.path(), user + 1));
+        if !geteuid().is_root() {
+            assert!(!claimed_by_effective_user(Path::new(ROOT_OWNED_DIR)));
+        }
+    }
+
+    /// CR-6: an absent folder is made owner-only and claimed when this user
+    /// owns its parent; as another user, or under a missing parent, nothing
+    /// is made.
+    #[test]
+    fn an_absent_dir_is_made_only_under_a_parent_of_this_user() {
+        let scratch = TempDir::new().unwrap();
+        let user = geteuid().as_raw();
+        let absent = scratch.path().join("muster");
+
+        assert!(!claimed_by(&absent, user + 1));
+        assert!(!absent.exists(), "made as another user");
+        let orphan = scratch.path().join("missing/muster");
+        assert!(!claimed_by(&orphan, user));
+        assert!(
+            !scratch.path().join("missing").exists(),
+            "a parent was made"
+        );
+
+        assert!(claimed_by(&absent, user));
+        assert_eq!(mode_of(&absent), PRIVATE_DIR_MODE);
     }
 }

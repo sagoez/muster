@@ -375,7 +375,8 @@ shell that kept your home, reports nothing.
   a shell already in its folder, with `muster add`, `init` or `import`, is not
   entering it: nothing starts, and the shell counts in it from its next prompt.
   A shell back in a project whose idle stop is still stopping it starts its
-  `autostart` processes again once they have stopped. A process you stopped
+  `autostart` processes again once they have stopped, or, if it has left by
+  then, another shell still in the project does. A process you stopped
   yourself, with `muster stop`, `down` or MCP, stays stopped.
 - **Leaving** is noticed by the next report from that shell, and a shell that
   ends is noticed within a few seconds. Once no shell has been in the project
@@ -384,9 +385,10 @@ shell that kept your home, reports nothing.
   leaves it stopped. A shell entering before then cancels the stop, as does a
   start from the CLI or over MCP. Only a shell seen leaving, or found ended,
   starts the countdown: a project brought up with no shell in it, before or
-  after a service restart or upgrade, is never stopped for want of one. A
-  project registered inside the one a shell is in keeps the outer one occupied
-  until the shell leaves its folder.
+  after a service restart or upgrade, is never stopped for want of one, while
+  a countdown under way when the service restarts carries on from the leave.
+  A project registered inside the one a shell is in keeps the outer one
+  occupied until the shell leaves its folder.
 - `muster ps` shows the count in its heading (` · 2 shells`) and, for a project
   with none, how long is left (` · idle, stops in 29m`). `stack_status` reports
   the same as `occupancy`.

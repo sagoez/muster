@@ -5,8 +5,7 @@ use serde::de::DeserializeOwned;
 use super::{
     herdr_call::call,
     herdr_failure::{HerdrFailure, WORKSPACE_NAME, herdr_text},
-    layout_reply::LayoutReply,
-    pane_reply::PaneReply,
+    reply::{LayoutReply, PaneReply},
     typed_line::typed_line,
 };
 use crate::domain::{

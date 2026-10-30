@@ -2,7 +2,7 @@ use std::{io, process::ExitStatus, time::Duration};
 
 use humantime::format_duration;
 
-use super::error_reply::ErrorReply;
+use super::reply::ErrorReply;
 use crate::{adapter::sanitize::printable, domain::terminal_workspace::WorkspaceError};
 
 /// The name muster gives herdr in what it reports.

@@ -39,7 +39,10 @@ use crate::{
 /// Subcommands. Absent, muster prints `ps`.
 #[derive(Subcommand)]
 pub enum Command {
-    /// List this project's processes: state, pid, uptime, restarts and usage.
+    /// List this project's processes.
+    ///
+    /// Shows each process's state, readiness, listening ports, pid, uptime,
+    /// restarts and usage.
     Ps {
         /// List every project the muster service has loaded.
         #[arg(long)]
@@ -52,13 +55,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start this project's processes that autostart.
+    /// Start the processes that autostart.
     Up {
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Stop every process of this project.
+    /// Stop every process.
     Down {
         /// Print the result as JSON.
         #[arg(long)]
@@ -66,23 +69,31 @@ pub enum Command {
     },
     /// Start a process.
     Start(StartArgs),
-    /// Stop a process through its stop policy.
+    /// Stop a process.
+    ///
+    /// Sends the process its stop signal, and kills it if it is still running
+    /// once its stop grace is over.
     Stop(ProcessArgs),
     /// Restart a process.
     Restart(StartArgs),
-    /// Wait until a process prints a line, accepts a connection, answers a
-    /// URL, reaches a state, or passes its readiness check.
+    /// Wait until a process is ready or prints a line.
     ///
-    /// Without a condition, waits for its readiness check, or for it to run
+    /// Waits until the process prints a line, accepts a connection, answers
+    /// a URL, reaches a state, or passes its readiness check. Without a
+    /// condition, waits for its readiness check, or for it to run
     /// when it has none.
     Wait(WaitArgs),
     /// Suspend a process, leaving it alive.
     Pause(ProcessArgs),
     /// Resume a paused process.
     Resume(ProcessArgs),
-    /// Kill a process at once, skipping its graceful stop.
+    /// Kill a process at once.
+    ///
+    /// Skips the process's graceful stop.
     Kill(ProcessArgs),
-    /// Print a process's output log, kept across its runs and after it exits.
+    /// Print or follow a process's log.
+    ///
+    /// The log is kept across the process's runs and after it exits.
     Logs {
         /// The process, as `muster ps` lists it; quote a name with spaces.
         /// Chosen from a list at a terminal when absent.
@@ -101,7 +112,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a running process in this terminal and type into it.
+    /// Show a process in this terminal and type into it.
     ///
     /// The detach key (`muster config get detach-key`) returns to the shell
     /// and leaves the process running.
@@ -116,32 +127,41 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a running process in a new pane of the terminal workspace this
-    /// shell runs in, beside this one; outside one, attach to it here, as
-    /// `muster attach` does.
+    /// Show a process in a new terminal pane beside this one.
     ///
-    /// The new pane takes the focus, and detaching closes it; a failed attach
-    /// stays on screen there.
+    /// Opens a pane of the terminal workspace this shell runs in; outside
+    /// one, attaches to the process here, as `muster attach` does. The new
+    /// pane takes the focus, and detaching closes it; a failed attach stays
+    /// on screen there.
     Open(OpenArgs),
-    /// Show this project's notices: the stack edits agents made, and failed
-    /// starts, forced stops and crashes when the service runs. Never starts it.
+    /// Show agents' stack edits and recent failures.
+    ///
+    /// Lists the stack edits agents made, and the failed starts, forced
+    /// stops and crashes the service recorded. Never starts the service.
     Notices {
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Show or stop the muster service. Processes keep running either way.
+    /// Show or stop the muster service.
+    ///
+    /// Processes keep running either way.
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Add a process to this project, registering the folder as a project
-    /// when it is not one yet. Nothing is started.
+    /// Add a process to this project.
+    ///
+    /// Registers the folder as a project when it is not one yet. Nothing is
+    /// started.
     Add(AddArgs),
-    /// Change a process's definition; a running process takes it at its next
-    /// start.
+    /// Change a process's definition.
+    ///
+    /// A running process takes the change at its next start.
     Set(SetArgs),
-    /// Remove processes from this project, stopping those that run.
+    /// Remove processes from this project.
+    ///
+    /// Stops those that run first.
     Rm {
         /// The processes, as `muster ps` lists them.
         #[arg(required = true)]
@@ -174,8 +194,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Load processes from a stack file into this project, registering the
-    /// folder when it is not a project yet.
+    /// Load processes from a stack file.
+    ///
+    /// Loads them into this project, registering the folder when it is not
+    /// a project yet.
     Import {
         /// The file to read; `-` reads stdin. Defaults to muster.yml in the
         /// project's folder.
@@ -194,10 +216,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Find processes in this folder's package.json, Procfile, justfile,
-    /// Makefile or Compose file and add the ones chosen.
+    /// Detect processes in this folder and add them.
     ///
-    /// At a terminal it asks which to add; elsewhere it lists them and adds
+    /// Finds processes in the folder's package.json, Procfile, justfile,
+    /// Makefile or Compose file. At a terminal it asks which to add; elsewhere it lists them and adds
     /// the suggested ones with --yes.
     Init {
         /// Add the suggested processes without asking.
@@ -207,11 +229,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Add a command to this project, start it and attach to it.
+    /// Add a command, start it and attach to it.
     ///
     /// Without a terminal, or with --json, the start is reported instead.
     Run(RunArgs),
-    /// List registered projects, or remove one.
+    /// List and manage registered projects.
     Projects {
         #[command(subcommand)]
         command: Option<ProjectsCommand>,
@@ -219,7 +241,9 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Read or write shared scratchpad notes for the current project.
+    /// Read or write shared notes.
+    ///
+    /// Notes are scratchpads the current project's agents and people share.
     Note {
         #[command(subcommand)]
         command: Option<NoteCommand>,
@@ -234,7 +258,9 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// List or manage the current project's shared todos.
+    /// List or manage shared todos.
+    ///
+    /// Todos belong to the current project and are shared with its agents.
     Todo {
         #[command(subcommand)]
         command: Option<TodoCommand>,
@@ -248,7 +274,9 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Read or write the current project's shared key-value state.
+    /// Read or write shared key-value state.
+    ///
+    /// Entries belong to the current project and are shared with its agents.
     Kv {
         #[command(subcommand)]
         command: Option<KvCommand>,
@@ -263,7 +291,9 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// List the locks agents hold on the current project, or release one.
+    /// List agents' locks, or release one.
+    ///
+    /// Lists the locks agents hold on the current project.
     Lock {
         #[command(subcommand)]
         command: Option<LockCommand>,
@@ -271,7 +301,10 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Export or restore this project's coordination state as portable YAML.
+    /// Export or restore the shared coordination state.
+    ///
+    /// Moves this project's notes, todos and key-value entries as portable
+    /// YAML.
     Coordination {
         #[command(subcommand)]
         command: CoordinationCommand,
@@ -279,10 +312,12 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Serve muster to agents as an MCP server over stdio (spawned as a
-    /// child process by a connecting agent). Each call acts on the project
-    /// containing this folder, or the one --project or $MUSTER_PROJECT
-    /// names, unless it names another.
+    /// Serve muster to an agent over MCP.
+    ///
+    /// Runs an MCP server over stdio, spawned as a child process by a
+    /// connecting agent. Each call acts on the project containing this
+    /// folder, or the one --project or $MUSTER_PROJECT names, unless it names
+    /// another.
     Mcp {
         /// Print the JSON config snippet to add muster to an agent's MCP
         /// servers, then exit instead of serving.
@@ -293,8 +328,10 @@ pub enum Command {
         #[arg(long = "as", value_name = "NAME")]
         agent: Option<String>,
     },
-    /// Diagnose muster's database, projects, completions, shell hook and
-    /// terminal workspace.
+    /// Check muster's setup for problems.
+    ///
+    /// Checks the database, projects, completions, shell hook and terminal
+    /// workspace.
     Doctor {
         /// Print the result as JSON.
         #[arg(long)]
@@ -306,10 +343,10 @@ pub enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
-    /// Print the shell hook that starts a project's processes when a shell
-    /// enters it.
+    /// Print the shell hook that starts projects you enter.
     ///
-    /// They stop once no shell has been in the project for the idle-stop
+    /// The hook starts a project's processes when a shell enters it. They
+    /// stop once no shell has been in the project for the idle-stop
     /// time. Add `eval "$(muster shell-init bash)"` to ~/.bashrc, the same with zsh
     /// to ~/.zshrc, or `muster shell-init fish | source` to fish's
     /// config.fish. The prompt never waits on muster.

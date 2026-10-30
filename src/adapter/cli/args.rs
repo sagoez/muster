@@ -1,7 +1,7 @@
 use std::{error::Error, fmt::Display, str::FromStr, sync::LazyLock};
 
 use clap::{
-    Command as ClapCommand, CommandFactory, Parser,
+    Command as ClapCommand, CommandFactory, Parser, Subcommand,
     builder::{
         PossibleValuesParser, TypedValueParser,
         styling::{AnsiColor, Styles},
@@ -11,7 +11,7 @@ use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
 use strum::IntoEnumIterator;
 
-use super::{cli_ports::CliPorts, command::Command};
+use super::{cli_ports::CliPorts, command::Command, shell_init::SHELL_INIT_SUBCOMMAND};
 use crate::{
     adapter::{
         holder::{LineLimit, MAX_LOG_LINES},
@@ -38,21 +38,82 @@ const HELP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Yellow.on_default());
 
-/// What the main help says after the commands: the exit codes and the JSON
-/// conventions every command keeps. Tests pin the codes to
-/// [`CliExit`](super::CliExit) and to the reference's table.
-const AFTER_HELP: &str = "\
-Exit codes:
-    0  success
-    1  a process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds)
-    2  the command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled
-    3  the muster service is unavailable or runs a newer version
-    4  an invalid value: not a project, an unknown project or process, a refused argument, or an unusable file
-  130  interrupted with Ctrl-C while it waited at a terminal
+/// The headings the main help groups its commands under, each with its
+/// commands in the order listed. Every visible command belongs to one.
+const COMMAND_GROUPS: [(&str, &[&str]); 4] = [
+    ("Processes", &[
+        "ps", "up", "down", "start", "stop", "restart", "pause", "resume", "kill", "wait", "logs",
+        "attach", "open", "run",
+    ]),
+    ("Stack", &[
+        "add", "set", "rm", "import", "export", "init", "projects",
+    ]),
+    ("Agents and coordination", &[
+        "mcp",
+        "note",
+        "todo",
+        "kv",
+        "lock",
+        "coordination",
+        "notices",
+    ]),
+    ("Setup", &[
+        "config",
+        SHELL_INIT_SUBCOMMAND,
+        "completions",
+        "doctor",
+        "service",
+    ]),
+];
+/// The heading of the main help's options.
+const OPTIONS_HEADING: &str = "Options";
+/// What the main help's last line says before the reference's address.
+const REFERENCE_LEAD: &str = "Exit codes and JSON output:";
+/// The reference as tagged for this release, so the help never describes a
+/// newer muster than the one installed.
+const REFERENCE_URL: &str = concat!(
+    env!("CARGO_PKG_REPOSITORY"),
+    "/blob/v",
+    env!("CARGO_PKG_VERSION"),
+    "/docs/reference.md"
+);
+/// How far the main help indents a command, as clap indents its own lists.
+const COMMAND_INDENT: &str = "  ";
+/// What separates a command's name from its summary in the main help.
+const SUMMARY_GAP: &str = "  ";
 
-With --json, results and failures print as JSON on stdout. Object keys are
-snake_case, enum values are kebab-case, durations are seconds (an idle_stop
-that never comes is null), and times are RFC 3339 in UTC.";
+/// The main help's template: the usage, the commands under
+/// [`COMMAND_GROUPS`]' headings with each one's summary, the options, and a
+/// line pointing to the reference. clap cannot group subcommands itself.
+fn main_help_template() -> String {
+    let commands = Command::augment_subcommands(ClapCommand::new(APP_NAME));
+    let width = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, names)| names.iter())
+        .map(|name| name.len())
+        .max()
+        .unwrap_or_default();
+    let header = HELP_STYLES.get_header();
+    let literal = HELP_STYLES.get_literal();
+    let mut template = String::from("{about-with-newline}\n{usage-heading} {usage}\n");
+    for (heading, names) in COMMAND_GROUPS {
+        template.push_str(&format!("\n{header}{heading}:{header:#}\n"));
+        for name in names {
+            let summary = commands
+                .find_subcommand(name)
+                .and_then(ClapCommand::get_about)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            template.push_str(&format!(
+                "{COMMAND_INDENT}{literal}{name:<width$}{literal:#}{SUMMARY_GAP}{summary}\n"
+            ));
+        }
+    }
+    template.push_str(&format!(
+        "\n{header}{OPTIONS_HEADING}:{header:#}\n{{options}}\n\n{REFERENCE_LEAD} {REFERENCE_URL}"
+    ));
+    template
+}
 
 /// What `muster logs --lines` takes, followed by its maximum.
 const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";
@@ -183,14 +244,13 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
     bin_name = APP_NAME,
     version,
     about = "Run a project's dev processes in the background, and control them from any shell",
-    after_help = AFTER_HELP,
+    help_template = main_help_template(),
     styles = HELP_STYLES
 )]
 pub struct Args {
-    /// The project: a registered project's name, or a folder (a value with
-    /// `/`, or starting with `.` or `~`). Defaults to $MUSTER_PROJECT, then
-    /// the registered project containing the current folder.
-    // Global, so it is recognized before or after a subcommand rather than
+    /// The project to act on, by name or folder.
+    // How a value resolves is in docs/reference.md, kept out of the help so
+    // `muster --help` lists it on one line. Global, so it is recognized before or after a subcommand rather than
     // being swallowed by `run`'s command words.
     #[arg(short, long, global = true, value_name = "PROJECT")]
     #[getset(get = "pub")]
@@ -209,6 +269,8 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
+
     use super::*;
     use crate::{
         adapter::{
@@ -234,10 +296,10 @@ mod tests {
         );
     }
 
-    /// Appends the help of `command`, invoked as `invocation`, and of each of
-    /// its visible subcommands to `helps`.
+    /// Appends the short help of `command`, invoked as `invocation`, and of
+    /// each of its visible subcommands to `helps`.
     fn collect_help(command: &mut ClapCommand, invocation: &str, helps: &mut Vec<String>) {
-        helps.push(format!("$ {invocation} --help\n{}", command.render_help()));
+        helps.push(format!("$ {invocation} -h\n{}", command.render_help()));
         for sub in command
             .get_subcommands_mut()
             .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
@@ -247,8 +309,8 @@ mod tests {
         }
     }
 
-    /// Every visible command's help, so a changed flag, name or description
-    /// shows up in review.
+    /// Every visible command's short help, so a changed flag, name or
+    /// description shows up in review.
     #[test]
     fn cli_args_snapshot() {
         let mut command = Args::command();
@@ -256,7 +318,15 @@ mod tests {
         let mut helps = Vec::new();
         collect_help(&mut command, APP_NAME, &mut helps);
 
-        insta::assert_snapshot!(helps.join("\n\n"));
+        /// What stands in for the version, so a release bump leaves the
+        /// snapshot alone.
+        const VERSION_MARK: &str = "<version>";
+
+        insta::assert_snapshot!(
+            helps
+                .join("\n\n")
+                .replace(env!("CARGO_PKG_VERSION"), VERSION_MARK)
+        );
     }
 
     /// clap's own consistency checks pass for every command.
@@ -363,35 +433,108 @@ mod tests {
         assert!(Args::try_parse_from(["muster", "import", "-", "--replace", "--dry-run"]).is_ok());
     }
 
-    /// The exit codes the help documents are the ones commands exit with.
-    #[test]
-    fn the_documented_exit_codes_match() {
-        use crate::adapter::cli::CliExit;
-
-        for exit in CliExit::iter() {
-            assert!(
-                AFTER_HELP.contains(&format!("\n{:>5}  ", exit.code())),
-                "{exit:?} is documented, aligned with the others"
-            );
-        }
-        assert_eq!(
-            AFTER_HELP.matches("\n  ").count(),
-            CliExit::iter().count(),
-            "no undocumented code is listed"
-        );
-    }
-
-    /// The reference's exit code table says what the help says, code for code.
+    /// The reference's exit code table lists exactly the codes commands exit
+    /// with, each once.
     #[test]
     fn the_reference_documents_the_same_exit_codes() {
-        let reference = include_str!("../../../docs/reference.md");
+        use crate::adapter::cli::CliExit;
 
-        for line in AFTER_HELP.lines().filter(|line| line.starts_with("  ")) {
-            let (code, meaning) = line.trim_start().split_once("  ").unwrap();
-            let mut letters = meaning.chars();
-            let first = letters.next().unwrap().to_uppercase();
-            let row = format!("| {code} | {first}{} |", letters.as_str());
-            assert!(reference.contains(&row), "the reference lacks {row}");
+        let reference = include_str!("../../../docs/reference.md");
+        let (_, table) = reference
+            .split_once("## Exit codes\n")
+            .expect("the reference has an exit code section");
+        let mut documented: Vec<i32> = table
+            .lines()
+            .skip_while(|line| !line.starts_with('|'))
+            .take_while(|line| line.starts_with('|'))
+            .filter_map(|row| row.trim_start_matches('|').split('|').next())
+            .filter_map(|code| code.trim().parse().ok())
+            .collect();
+        documented.sort_unstable();
+        let mut codes: Vec<i32> = CliExit::iter().map(CliExit::code).collect();
+        codes.sort_unstable();
+
+        assert_eq!(documented, codes);
+    }
+
+    /// The main help lists every visible command under one heading, and
+    /// names no command that does not exist.
+    #[test]
+    fn the_main_help_groups_every_command_once() {
+        let mut grouped: Vec<&str> = COMMAND_GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        grouped.sort_unstable();
+        let command = Args::command();
+        let mut visible: Vec<&str> = command
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .map(ClapCommand::get_name)
+            .collect();
+        visible.sort_unstable();
+
+        assert_eq!(grouped, visible);
+    }
+
+    /// Renders the help `line` asks for.
+    fn help(line: &[&str]) -> String {
+        match Args::try_parse_from(line) {
+            Err(error) if error.kind() == ErrorKind::DisplayHelp => error.render().to_string(),
+            _ => panic!("{line:?} prints help"),
+        }
+    }
+
+    /// Every way of asking prints help: the main help, whichever way it is
+    /// asked for, lists `--project` on one line and ends at the reference;
+    /// a command's `--help` adds its detail.
+    #[test]
+    fn every_way_of_asking_prints_help() {
+        /// `--project` with its summary on the same line.
+        const PROJECT_LINE: &str = "-p, --project <PROJECT>  The project to act on";
+
+        for line in [&["muster", "-h"][..], &["muster", "--help"], &[
+            "muster", "help",
+        ]] {
+            let main = help(line);
+            assert!(main.contains(PROJECT_LINE), "{main}");
+            assert!(main.trim_end().ends_with(REFERENCE_URL), "{main}");
+        }
+        assert!(
+            REFERENCE_URL.contains(&format!("/blob/v{}/", env!("CARGO_PKG_VERSION"))),
+            "the main help links the reference tagged for this release: {REFERENCE_URL}"
+        );
+        for line in [
+            &["muster", "ps", "--help"][..],
+            &["muster", "help", "ps"],
+            &["muster", "service", "stop", "--help"],
+        ] {
+            let command = help(line);
+            assert!(command.contains("--project"), "{command}");
+            assert!(!command.contains(REFERENCE_LEAD), "{command}");
+        }
+        assert!(help(&["muster", "ps", "--help"]).contains("Shows each process's state"));
+        assert!(!help(&["muster", "ps", "-h"]).contains("Shows each process's state"));
+    }
+
+    /// Each command's summary in the main help is one short line; the detail
+    /// is left to the command's own help.
+    #[test]
+    fn every_command_summary_is_one_short_line() {
+        /// The widest summary the main help shows.
+        const MAX_SUMMARY_WIDTH: usize = 60;
+
+        for sub in Args::command()
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+        {
+            let summary = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            assert!(!summary.is_empty(), "{} has a summary", sub.get_name());
+            assert!(
+                summary.len() <= MAX_SUMMARY_WIDTH && !summary.contains('\n'),
+                "{}: {summary}",
+                sub.get_name()
+            );
         }
     }
 
@@ -405,6 +548,48 @@ mod tests {
         assert_eq!(after.project.as_deref(), Some("./web"));
         let bare = Args::try_parse_from(["muster"]).unwrap();
         assert!(bare.command.is_none());
+    }
+
+    /// The project a `projects rm` or `projects set` names stays apart from
+    /// the global `--project`, which both still list and take.
+    #[test]
+    fn a_projects_action_keeps_its_project_apart_from_the_flag() {
+        use crate::adapter::cli::projects_command::ProjectsCommand;
+
+        let removal = Args::try_parse_from(["muster", "-p", "x", "projects", "rm", "y"]).unwrap();
+        assert_eq!(removal.project.as_deref(), Some("x"));
+        assert!(matches!(
+            removal.command,
+            Some(Command::Projects { command: Some(ProjectsCommand::Rm { project, .. }), .. })
+                if project == "y"
+        ));
+        let alone = Args::try_parse_from(["muster", "projects", "rm", "y"]).unwrap();
+        assert_eq!(alone.project, None);
+        let set = Args::try_parse_from([
+            "muster",
+            "projects",
+            "set",
+            "y",
+            "--idle-stop",
+            "never",
+            "--project",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(set.project.as_deref(), Some("x"));
+        assert!(matches!(
+            set.command,
+            Some(Command::Projects { command: Some(ProjectsCommand::Set { project: Some(project), .. }), .. })
+                if project == "y"
+        ));
+        for action in ["rm", "set"] {
+            let shown = help(&["muster", "projects", action, "--help"]);
+            assert!(shown.contains("-p, --project <PROJECT>"), "{shown}");
+            assert!(
+                shown.contains("[PROJECT]") || shown.contains("<PROJECT>"),
+                "{shown}"
+            );
+        }
     }
 
     /// The hidden shell report takes the `--pid`, `--load`, `--load-pid`,

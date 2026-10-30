@@ -7,7 +7,7 @@ use super::cli_ports::CliPorts;
 use crate::domain::value::ProjectRoot;
 
 /// Names `root`, just registered by a command run in `cwd`, in the record of
-/// the hooked shell the command runs straight from, so that shell's next
+/// the hooked shell that is the command's direct parent, so that shell's next
 /// report there finds it already in, not entering. Only when `cwd` and that
 /// shell's own folder are inside `root`, the state directory and the record
 /// are this user's, and the record is of the live shell the hook exported;
@@ -23,10 +23,10 @@ pub fn name_in_hooked_shell(ports: &dyn CliPorts, root: &ProjectRoot, cwd: &Path
     let Ok(shells) = ports.shell_registry() else {
         return;
     };
-    let Some(record) = shells.identify(pid).and_then(|shell| shells.record(&shell)) else {
+    let Some(shell) = shells.identify(pid) else {
         return;
     };
-    let _ = shells.amend(&record.registered_around(root.clone()));
+    let _ = shells.amend(&shell, &|stored| stored.registered_around(root.clone()));
 }
 
 #[cfg(test)]

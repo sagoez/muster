@@ -85,14 +85,20 @@ impl ShellRegistry for FakeShells {
         Ok(true)
     }
 
-    fn amend(&self, record: &ShellRecord) -> Result<bool, ShellRegistryError> {
-        if self
-            .record(record.shell())
-            .is_none_or(|stored| stored.stamp() != record.stamp())
-        {
+    fn amend(
+        &self,
+        shell: &ShellId,
+        change: &dyn Fn(ShellRecord) -> ShellRecord,
+    ) -> Result<bool, ShellRegistryError> {
+        let mut records = self.records.lock().unwrap();
+        let Some(stored) = records
+            .get(&shell.pid())
+            .filter(|record| record.shell() == shell)
+            .cloned()
+        else {
             return Ok(false);
-        }
-        self.put(record.clone());
+        };
+        records.insert(shell.pid(), change(stored));
         Ok(true)
     }
 

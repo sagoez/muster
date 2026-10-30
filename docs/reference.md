@@ -14,8 +14,9 @@ adds a process to a folder registers it, named after the folder (`shop`, then
 escaped). `/`, your home folder, a folder above it and a folder holding a
 registered project are never registered.
 
-A command acts on the project given by `--project` (a registered name, or a
-folder when the value contains `/` or starts with `.` or `~`), then
+A command acts on the project given by `--project` (a registered name, trimmed,
+or a folder, taken exactly, when the value as given contains `/` or starts with
+`.` or `~`; an absolute or `~` path led by a space is refused), then
 `$MUSTER_PROJECT` (set inside every process muster runs), then the deepest
 registered folder containing the current directory. A folder inside a project
 is that project, except for `add`, `run`, `init` and `import`, which register
@@ -224,8 +225,8 @@ a question it would have asked fails with exit 4 naming the argument, and
 
 ## JSON
 
-Every command but `mcp` and `completions` takes `--json` and prints results
-and failures as JSON on stdout. Keys are snake_case, enum values kebab-case
+Every command but `mcp`, `completions` and `shell-init` takes `--json` and
+prints results and failures as JSON on stdout. Keys are snake_case, enum values kebab-case
 (`on-failure`, `in-progress`), durations are seconds, and times are RFC 3339
 in UTC to the second. A setting's `value` is the text `config set` takes, such
 as `"5s"`. A process definition:
@@ -295,23 +296,29 @@ screen at once, follows resizes and passes keys through. The detach key is
 `muster open <name>`, run from a herdr pane, opens a new pane beside it,
 focuses it and attaches there, leaving your pane as it was. `--direction
 right|down` picks the side. Without it, right when the pane is wider than tall
-and each half keeps at least 40 columns, and down otherwise. Detaching closes the pane, and a failed attach leaves its message on
-screen there. Only a running process opens.
+and each half keeps at least 40 columns, and down otherwise. Detaching closes
+the pane, and a failed attach leaves its message on screen there. Only a
+running process opens.
 
 muster knows it runs in herdr when `HERDR_PANE_ID` is set, and runs the `herdr`
-on `PATH` or the one in `HERDR_BIN_PATH`, so `HERDR_SOCKET_PATH` and
-`HERDR_SESSION` work as they do for herdr. Each herdr call times out after 5
-seconds, and a Ctrl-C or hangup that ends muster ends the call too. When no
-direction is given and herdr's layout cannot be read, the pane splits down. The
-new pane runs one typed line, so `open` supports bash, zsh and fish 3 or later;
-the line runs only where the pane's own variables are set, so a copy recalled
-from history elsewhere does nothing. The pane runs the muster binary as it is at
-each open: once an upgrade has replaced the binary a `muster mcp` server started
-from, its `process_open` answers `workspace-failed` naming it until the server
-restarts. When herdr cannot be reached or refuses, `open` exits 1 with herdr's
-message, names the `muster --project <root> attach -- <name>` that shows the
-process in this pane, and never falls back to the current pane on its own.
-Outside herdr, `open` is `attach`. `muster doctor` has a `workspace` row.
+on `PATH`, or the one in `HERDR_BIN_PATH` when that path is absolute, so
+`HERDR_SOCKET_PATH` and `HERDR_SESSION` work as they do for herdr. Each herdr
+call runs in a process group of its own and times out after 5 seconds; at the
+timeout, on a Ctrl-C, hangup or terminate that ends muster, and when the client
+of a `muster mcp` server disconnects, the whole group is killed. When no
+direction is given and herdr's layout is malformed or does not list the pane,
+the pane splits down; when herdr cannot be reached, times out or refuses the
+layout, nothing is split. The new pane runs one typed line, so `open` supports
+bash, zsh and fish 3 or later; the line runs only where the pane's own
+variables are set, so a copy recalled from history elsewhere does nothing. The
+pane runs the muster binary as it is at each open: once an upgrade has replaced
+the binary a `muster mcp` server started from, the pane runs the new file at
+the same path, and only when no file is left there does `process_open` answer
+`workspace-failed` naming it. When herdr cannot be reached or refuses, or hands
+back a pane id muster cannot pass back to it, `open` exits 1 with the reason,
+names the `muster --project <root> attach -- <name>` that shows the process in
+this pane, and never falls back to the current pane on its own. Outside herdr,
+`open` is `attach`. `muster doctor` has a `workspace` row.
 
 The processes muster starts never inherit herdr's pane identity
 (`HERDR_PANE_ID`, `HERDR_PANE_RUNTIME_ID`, `HERDR_TAB_ID`,
@@ -435,8 +442,10 @@ A mistake in a call comes back as a result flagged `isError`, whose `error`
 names its `kind` and up to 20 `candidates`. A wait ended by an exit or crash
 does the same, with the run's last lines. A wait that ran out of time, and a
 lock or todo someone else holds, are not errors. `process_open` resolves the
-process first, so an unknown or stopped one gets its own answer; for a running
-one outside herdr it answers kind `no-workspace`, telling the agent to ask you
-to run `muster --project <root> attach -- <name>` in your own terminal, and
+process first, so an unknown or stopped one gets its own answer. Outside herdr
+it resolves the name against the stored stack and never starts the service:
+with no service running the process is `not-running`, and for a running one it
+answers kind `no-workspace`, telling the agent to ask you to run
+`muster --project <root> attach -- <name>` in your own terminal, and
 when herdr cannot be reached or refuses it answers `workspace-failed` with
 herdr's message and the same command.

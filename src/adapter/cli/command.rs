@@ -293,7 +293,8 @@ pub enum Command {
         #[arg(long = "as", value_name = "NAME")]
         agent: Option<String>,
     },
-    /// Diagnose muster's database, projects, completions and shell hook.
+    /// Diagnose muster's database, projects, completions, shell hook and
+    /// terminal workspace.
     Doctor {
         /// Print the result as JSON.
         #[arg(long)]

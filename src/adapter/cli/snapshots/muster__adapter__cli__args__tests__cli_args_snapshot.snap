@@ -39,7 +39,7 @@ Commands:
   lock          List the locks agents hold on the current project, or release one
   coordination  Export or restore this project's coordination state as portable YAML
   mcp           Serve muster to agents as an MCP server over stdio (spawned as a child process by a connecting agent). Each call acts on the project containing this folder, or the one --project or $MUSTER_PROJECT names, unless it names another
-  doctor        Diagnose muster's database, projects, completions and shell hook
+  doctor        Diagnose muster's database, projects, completions, shell hook and terminal workspace
   completions   Print the shell hook that enables completions
   shell-init    Print the shell hook that starts a project's processes when a shell enters it
   help          Print this message or the help of the given subcommand(s)
@@ -820,7 +820,7 @@ Options:
 
 
 $ muster doctor --help
-Diagnose muster's database, projects, completions and shell hook
+Diagnose muster's database, projects, completions, shell hook and terminal workspace
 
 Usage: muster doctor [OPTIONS]
 

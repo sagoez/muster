@@ -407,7 +407,7 @@ mod tests {
                 &served.connector()(),
                 &shop(),
                 &name("web"),
-                &workspace,
+                Some(&workspace),
                 &asked,
             )
             .unwrap_err();

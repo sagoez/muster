@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use rustix::process::geteuid;
 use tempfile::TempDir;
@@ -8,7 +12,7 @@ use crate::{
     adapter::{
         client::{ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier},
         no_state_dir::NoStateDir,
-        private_dir::owned_by,
+        private_dir::claimed_by,
         shell::ShellFiles,
         store::SqliteStore,
     },
@@ -19,6 +23,10 @@ use crate::{
     error::MusterError,
 };
 
+/// The state directory's name under the scratch folder standing for its
+/// parent.
+const STATE_DIR: &str = "muster";
+
 /// Ports over a scratch database, a [`FakeService`], a
 /// [`RecordingNotifier`] and shell files in a scratch state directory,
 /// serving nothing, run as this process's user or another.
@@ -26,7 +34,8 @@ pub(super) struct FakePorts {
     store: SqliteStore,
     service: Arc<FakeService>,
     notifier: Arc<RecordingNotifier>,
-    state_dir: TempDir,
+    /// The scratch folder standing for the state directory's parent.
+    state_home: TempDir,
     /// The effective user the ports run as.
     user: u32,
 }
@@ -41,11 +50,13 @@ impl FakePorts {
     /// Ports over `store` and `service`, a fresh notifier and a fresh
     /// scratch state directory.
     pub(super) fn with_service(store: SqliteStore, service: FakeService) -> Self {
+        let state_home = TempDir::new().unwrap();
+        fs::create_dir(state_home.path().join(STATE_DIR)).unwrap();
         Self {
             store,
             service: Arc::new(service),
             notifier: Arc::new(RecordingNotifier::default()),
-            state_dir: TempDir::new().unwrap(),
+            state_home,
             user: geteuid().as_raw(),
         }
     }
@@ -54,6 +65,17 @@ impl FakePorts {
     /// user's home would.
     pub(super) fn running_as(self, uid: u32) -> Self {
         Self { user: uid, ..self }
+    }
+
+    /// These ports with no state directory yet, as on a fresh install.
+    pub(super) fn fresh_install(self) -> Self {
+        fs::remove_dir_all(self.state_dir()).unwrap();
+        self
+    }
+
+    /// The state directory, which may not exist yet.
+    pub(super) fn state_dir(&self) -> PathBuf {
+        self.state_home.path().join(STATE_DIR)
     }
 
     /// The notifier these ports hand out, to read what it was told.
@@ -90,11 +112,11 @@ impl CliPorts for FakePorts {
     }
 
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir> {
-        Ok(Arc::new(ShellFiles::under(self.state_dir.path())))
+        Ok(Arc::new(ShellFiles::under(&self.state_dir())))
     }
 
-    fn owns_state_dir(&self) -> bool {
-        owned_by(self.state_dir.path(), self.user)
+    fn claim_state_dir(&self) -> bool {
+        claimed_by(&self.state_dir(), self.user)
     }
 
     fn serve_mcp(&self, _launch: McpLaunch) -> Result<(), MusterError> {

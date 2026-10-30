@@ -13,7 +13,7 @@ use muster::{
         open_files::OpenFilesLimit,
         path::home_dir,
         port_occupants::OsPortOccupants,
-        private_dir::{owned_by_effective_user, prepare_state_dir, socket_dir, state_dir},
+        private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
         pty::PortablePtyRunner,
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
@@ -94,8 +94,8 @@ impl CliPorts for LocalPorts {
         Ok(Arc::new(ShellFiles::under(&state_dir()?)))
     }
 
-    fn owns_state_dir(&self) -> bool {
-        state_dir().is_ok_and(|dir| owned_by_effective_user(&dir))
+    fn claim_state_dir(&self) -> bool {
+        state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
     }
 
     fn serve_mcp(&self, launch: McpLaunch) -> Result<(), MusterError> {

@@ -25,19 +25,23 @@ use crate::{
 /// is kept and the service asked again, so one that started meanwhile from
 /// the old records still hears it. The answered notes are left for the
 /// hook, then the record is written; a report that fails writes neither, so
-/// the next prompt reports the same move again. It never prints.
+/// the next prompt reports the same move again. A state directory not made
+/// yet is made first when its parent is this user's, so a fresh install
+/// keeps the record a later registration around the shell is told apart by.
+/// It never prints.
 ///
 /// # Errors
 /// Returns the [`ShellReportSkip`] saying why nothing was written: the state
-/// directory is absent or another user's, the pid is no live shell, a
-/// report as new is stored, or the database, service or shell files failed.
+/// directory is another user's or cannot be made, the pid is no live shell,
+/// a report as new is stored, or the database, service or shell files
+/// failed.
 pub fn shell_report(
     ports: &dyn CliPorts,
     pid: Pid,
     stamp: ReportStamp,
     cwd: &Path,
 ) -> Result<(), ShellReportSkip> {
-    if !ports.owns_state_dir() {
+    if !ports.claim_state_dir() {
         return Err(ShellReportSkip::NotOwnState);
     }
     let shells = ports.shell_registry()?;
@@ -97,7 +101,9 @@ pub fn shell_report(
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsStr,
         fs,
+        os::unix::ffi::OsStrExt as _,
         path::PathBuf,
         process::{self, Command},
     };
@@ -478,6 +484,85 @@ mod tests {
         assert!(ports.fake_service().asked().is_empty());
         assert_eq!(ports.fake_service().connects(), 0);
         assert!(!shells_dir.exists(), "no shells folder is made");
+    }
+
+    /// CR-6: on a fresh install the first report makes the state directory
+    /// and keeps the record, so a project registered around the open shell
+    /// afterwards is told with no environment and starts nothing.
+    #[test]
+    fn registration_around_an_open_shell_on_a_fresh_install_starts_nothing() {
+        let (store, scratch) = fresh_store();
+        let no_notes = ServiceResponse::ShellNotes(Vec::new());
+        let ports = FakePorts::with_service(store, FakeService::default().answering(no_notes))
+            .fresh_install();
+        let folder = scratch.path().canonicalize().unwrap().join("shop");
+        fs::create_dir_all(&folder).unwrap();
+
+        shell_report(&ports, this_shell(), seq(1), &folder).unwrap();
+        assert!(ports.state_dir().is_dir(), "the state directory is made");
+        assert_eq!(record(&ports).map(|record| *record.stamp()), Some(seq(1)));
+
+        ports
+            .store()
+            .import(
+                &ProjectRoot::try_new(folder.clone()).unwrap(),
+                &[spec("api", "true")],
+                ImportMode::Strict,
+            )
+            .unwrap();
+        shell_report(&ports, this_shell(), seq(2), &folder).unwrap();
+
+        let asked = ports.fake_service().asked();
+        assert!(
+            matches!(&asked[..], [.., ServiceRequest::ShellReport {
+                record,
+                environment: None,
+            }] if record.project().is_some()),
+            "a registration, not an entering: {asked:?}"
+        );
+    }
+
+    /// CR-6: with no state directory and a parent another user owns, the
+    /// report makes and writes nothing.
+    #[test]
+    fn a_fresh_install_under_another_user_s_parent_makes_nothing() {
+        let (ports, shop, _scratch) = shop_ports(FakeService::default().answering(started()));
+        let ports = ports.fresh_install().running_as(geteuid().as_raw() + 1);
+
+        assert!(matches!(
+            shell_report(&ports, this_shell(), seq(1), &shop),
+            Err(ShellReportSkip::NotOwnState)
+        ));
+
+        assert!(!ports.state_dir().exists());
+        assert!(ports.fake_service().asked().is_empty());
+    }
+
+    /// S-M1: a shell that moves from a project into a folder whose name is
+    /// not UTF-8 reports the leave, which travels as JSON, and its record
+    /// keeps that folder whole.
+    #[test]
+    fn a_leave_into_a_folder_that_is_not_utf8_is_reported_and_kept() {
+        let (ports, shop, scratch) = shop_ports(FakeService::default().answering(started()));
+        let odd = scratch.path().join(OsStr::from_bytes(b"bad\xffdir"));
+        fs::create_dir_all(&odd).unwrap();
+
+        shell_report(&ports, this_shell(), seq(1), &shop).unwrap();
+        shell_report(&ports, this_shell(), seq(2), &odd).unwrap();
+
+        let asked = ports.fake_service().asked();
+        let Some(leave @ ServiceRequest::ShellReport { record: told, .. }) = asked.last() else {
+            panic!("a report: {asked:?}");
+        };
+        assert_eq!(told.project(), &None);
+        let json = serde_json::to_string(leave).unwrap();
+        assert_eq!(
+            &serde_json::from_str::<ServiceRequest>(&json).unwrap(),
+            leave
+        );
+        let stored = record(&ports).unwrap();
+        assert_eq!(stored.folder(), &odd);
+        assert_eq!(stored.project(), &None);
     }
 
     /// A pid no process runs as is no shell: nothing is asked or written.

@@ -41,9 +41,10 @@ pub trait CliPorts: Sync {
     /// keep them in.
     fn shell_registry(&self) -> Result<Arc<dyn ShellRegistry>, NoStateDir>;
 
-    /// Whether muster's state directory exists and this process's effective
-    /// user owns it.
-    fn owns_state_dir(&self) -> bool;
+    /// Whether this process's effective user owns muster's state directory,
+    /// which is made owner-only first when absent and its parent is that
+    /// user's.
+    fn claim_state_dir(&self) -> bool;
 
     /// Serves muster over MCP on stdio as `launch` describes, until the
     /// connecting agent disconnects.

@@ -1780,6 +1780,7 @@ mod tests {
     };
 
     use crossbeam_channel::unbounded;
+    use rustix::process::Signal;
     use signal_hook::{consts::SIGUSR2, low_level::raise};
 
     use super::*;
@@ -3318,8 +3319,10 @@ mod tests {
     /// A child that ignores the signals that ask it to stop, so stopping it
     /// takes its whole grace.
     const STUBBORN: &str = "trap '' INT TERM; sleep 600";
-    /// How long a stop waits on that child before killing it.
-    const STUBBORN_GRACE: Duration = Duration::from_secs(1);
+    /// How long a stop waits on that child before killing it: beyond any
+    /// test, so its stop lasts until [`end_stubborn`] ends it, however
+    /// loaded the machine.
+    const STUBBORN_GRACE: Duration = Duration::from_secs(600);
 
     /// Sends `shell`'s report at prompt `seq` that its folder is in
     /// `project`, as one that may enter it with an empty environment, and
@@ -3498,6 +3501,7 @@ mod tests {
             report(&service, shell, 3, Some(&project)).is_empty(),
             "nothing starts while api stops"
         );
+        end_stubborn(first_pid);
 
         wait_until("api to start again once stopped", || {
             let status = service.status(&project);
@@ -3522,6 +3526,13 @@ mod tests {
                     .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
                     .build(),
             )
+    }
+
+    /// Ends a stubborn child's stop once a test has asserted what holds
+    /// while it stops, by killing the group its `pid` leads, as its grace
+    /// running out would.
+    fn end_stubborn(pid: Pid) {
+        SignalTarget::Group(pid).send(Signal::KILL).unwrap();
     }
 
     /// A stop of `api` in `project` a client asks for, as `muster stop`
@@ -3558,7 +3569,8 @@ mod tests {
         fixture.shells().open(shell);
         let service = fixture.start(Arc::new(fixture.runner()));
         report(&service, shell, 1, Some(&project));
-        service.wait_for(&project, "api", ProcessState::Running);
+        let running = service.wait_for(&project, "api", ProcessState::Running);
+        let pid = process(&running, "api").pid().unwrap();
         report(&service, shell, 2, None);
         if idle_first {
             service.wait_for(&project, "api", ProcessState::Stopping);
@@ -3570,6 +3582,7 @@ mod tests {
             report(&service, shell, 3, Some(&project)).is_empty(),
             "nothing starts while api stops"
         );
+        end_stubborn(pid);
 
         wait_until("api to stop", || {
             !process(&service.status(&project), "api")
@@ -3632,6 +3645,12 @@ mod tests {
         assert!(report(&service, first, 3, Some(&project)).is_empty());
         report_with(&service, second, 1, Some(&project), second_environment);
         report(&service, first, 4, None);
+        assert_eq!(
+            *process(&service.status(&project), "api").state(),
+            ProcessState::Stopping,
+            "every report landed while api stopped"
+        );
+        end_stubborn(pid);
         (service, project, pid)
     }
 
@@ -3708,6 +3727,7 @@ mod tests {
                 if body.kind() == &ServiceErrorKind::UnknownProcess),
             "{refused:?}"
         );
+        end_stubborn(first_pid);
 
         wait_until("api to start again once stopped", || {
             let status = service.status(&project);

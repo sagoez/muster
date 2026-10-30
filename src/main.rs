@@ -11,6 +11,7 @@ use muster::{
     adapter::{
         cli::{self, CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService},
+        herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
@@ -171,10 +172,11 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
     Ok(run_stdio(deps)?)
 }
 
-/// The terminal workspace this process runs in. None yet: until a workspace
-/// adapter is wired here, every caller is outside one.
+/// The terminal workspace this process runs in: the herdr pane its
+/// environment names, or none outside one.
 fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
-    None
+    HerdrWorkspace::from_env(|name| env::var_os(name))
+        .map(|workspace| Arc::new(workspace) as Arc<dyn TerminalWorkspace>)
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one

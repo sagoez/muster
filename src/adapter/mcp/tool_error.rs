@@ -45,6 +45,9 @@ pub enum ToolError {
         /// The registered projects' names.
         valid: Vec<String>,
     },
+    /// The `project` given is not a value any project can be found by.
+    #[error("{0}")]
+    InvalidProject(String),
     /// The folder `process_add` would register cannot be a project.
     #[error("{} is {why}, which cannot be a muster project", dir.display())]
     Unregistrable {
@@ -213,6 +216,7 @@ impl From<ResolveError> for ToolError {
             },
             ResolveError::NotAProject { dir } => Self::NoProjectHere { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
+            error @ ResolveError::SpacedPath { .. } => Self::InvalidProject(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
         }
     }
@@ -236,6 +240,7 @@ impl ToolError {
             }
             | Self::HeldByOther { .. } => FailureKind::Conflict,
             Self::Unregistrable { .. }
+            | Self::InvalidProject(_)
             | Self::OutsideBase { .. }
             | Self::ProjectRequired { .. }
             | Self::InvalidName { .. }
@@ -274,6 +279,7 @@ impl ToolError {
             Self::Config(_)
             | Self::NoProjectHere { .. }
             | Self::Unregistrable { .. }
+            | Self::InvalidProject(_)
             | Self::OutsideBase { .. }
             | Self::ProjectRequired { .. }
             | Self::InvalidName { .. }

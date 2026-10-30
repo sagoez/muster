@@ -126,6 +126,7 @@ pub fn agent_message(error: &ToolError) -> String {
         ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
         ToolError::NoProjectHere { .. }
         | ToolError::Unregistrable { .. }
+        | ToolError::InvalidProject(_)
         | ToolError::OutsideBase { .. }
         | ToolError::ProjectRequired { .. }
         | ToolError::InvalidName { .. }

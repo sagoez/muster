@@ -17,7 +17,6 @@ use crate::{
     domain::{
         config::ConfigError,
         coordination::Author,
-        terminal_workspace::WorkspaceError,
         value::{
             COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
             NameProblem, ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
@@ -298,7 +297,8 @@ pub enum CliError {
         #[source]
         source: HolderError,
     },
-    /// The terminal workspace did not open the pane `muster open` asked for.
+    /// No pane opened for `muster open`: the terminal workspace did not open
+    /// it, or the muster binary it would run is gone.
     #[error("{source}; `{}` shows it here", attach_hint(root, name, *read_only))]
     OpenFailed {
         /// The project's folder.
@@ -307,9 +307,9 @@ pub enum CliError {
         name: ProcessName,
         /// Whether the pane was to be watch-only.
         read_only: bool,
-        /// What the workspace answered.
+        /// Why no pane opened.
         #[source]
-        source: Box<WorkspaceError>,
+        source: Box<ClientError>,
     },
 }
 
@@ -319,6 +319,7 @@ impl From<ResolveError> for CliError {
             ResolveError::UnknownProject { name, .. } => Self::UnknownProject(name),
             ResolveError::NotAProject { dir } => Self::NotAProject { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
+            error @ ResolveError::SpacedPath { .. } => Self::InvalidArgument(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
         }
     }

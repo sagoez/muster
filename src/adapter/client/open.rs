@@ -6,10 +6,17 @@ use std::{ffi::OsString, iter, path::Path};
 use shlex::Quoter;
 
 use super::{
-    client_error::ClientError, open_request::OpenRequest, open_view::OpenView, process::locate,
+    asked::Asked,
+    client_error::ClientError,
+    open_request::OpenRequest,
+    open_view::OpenView,
+    process::{locate, unexpected},
+    service_access::ServiceAccess,
     service_client::ServiceClient,
+    this_binary::runnable,
 };
 use crate::{
+    adapter::service::{ServiceRequest, ServiceResponse},
     constants::APP_NAME,
     domain::{
         port::TerminalWorkspace,
@@ -70,35 +77,28 @@ pub fn attach_hint(root: &ProjectRoot, name: &ProcessName, read_only: bool) -> S
 /// Locates the process `name` of `project`, refusing one that is unknown or
 /// not running before anything opens, then asks `workspace` for a pane
 /// beside the caller's, in the project's folder, attached to it as
-/// `request` says. A binary that no longer exists opens nothing, since the
-/// pane could not run it.
+/// `request` says. The pane runs the binary as [`runnable`] finds it, so a
+/// binary replaced since it started runs as its replacement, and one that
+/// no longer exists opens nothing, since the pane could not run it.
 ///
 /// # Errors
-/// Returns the locate's [`ClientError`], [`ClientError::NoWorkspace`] for a
-/// running process when there is no `workspace`, [`ClientError::BinaryGone`]
-/// for a binary that no longer exists, or [`ClientError::Workspace`] when the
-/// workspace did not open the pane.
+/// Returns the locate's [`ClientError`], [`ClientError::BinaryGone`] for a
+/// binary no pane can run, or [`ClientError::Workspace`] when the workspace
+/// did not open the pane.
 pub fn open_beside(
     client: &ServiceClient,
     project: &Project,
     name: &ProcessName,
-    workspace: Option<&dyn TerminalWorkspace>,
+    workspace: &dyn TerminalWorkspace,
     request: &OpenRequest,
 ) -> Result<OpenView, ClientError> {
     locate(client, project, name)?;
-    let workspace = workspace.ok_or(ClientError::NoWorkspace)?;
-    if !request.binary().is_file() {
-        return Err(ClientError::BinaryGone(request.binary().clone()));
-    }
+    let binary = runnable(request.binary())
+        .ok_or_else(|| ClientError::BinaryGone(request.binary().clone()))?;
     let root = project.root();
     let pane = PaneRequest::builder()
         .cwd(root.as_ref().clone())
-        .command(attach_command(
-            request.binary(),
-            root,
-            name,
-            request.read_only(),
-        ))
+        .command(attach_command(&binary, root, name, request.read_only()))
         .focus(request.focus())
         .direction(request.direction())
         .build();
@@ -111,6 +111,30 @@ pub fn open_beside(
         .build())
 }
 
+/// Why the process `name` of `project` cannot be opened with no terminal
+/// workspace to open it in: [`ClientError::NoWorkspace`] for a running
+/// process, [`ClientError::NotRunning`] when no service of this version runs
+/// it, or the running service's refusal or failure to answer. Only a service
+/// that already runs, reached through `service`, is asked; none is started.
+pub fn unopenable_here(
+    service: &dyn ServiceAccess,
+    project: &Project,
+    name: &ProcessName,
+) -> ClientError {
+    let request = ServiceRequest::Locate {
+        project: project.root().clone(),
+        name: name.clone(),
+    };
+    match service.ask_if_running(&request) {
+        Ok(Asked::Answered(ServiceResponse::Located(_))) => ClientError::NoWorkspace,
+        Ok(Asked::Answered(other)) => unexpected(other, project, Some(name)),
+        Ok(Asked::OtherVersion | Asked::Starting | Asked::Absent) => {
+            ClientError::NotRunning(name.clone())
+        },
+        Err(error) => error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -119,7 +143,7 @@ mod tests {
     use crate::{
         adapter::{
             client::{
-                FailureKind, recording_workspace::RecordingWorkspace,
+                FailureKind, fake_service::FakeService, recording_workspace::RecordingWorkspace,
                 served_service::ServedService, this_binary,
             },
             service::{
@@ -274,7 +298,7 @@ mod tests {
             &served.connector()(),
             &shop(),
             &name("web"),
-            Some(&workspace),
+            &workspace,
             &request(true, Some(SplitDirection::Down)),
         )
         .unwrap();
@@ -319,7 +343,7 @@ mod tests {
                 &served.connector()(),
                 &shop(),
                 &name("web"),
-                Some(&workspace),
+                &workspace,
                 &request(false, None),
             )
             .unwrap_err();
@@ -329,35 +353,42 @@ mod tests {
         }
     }
 
-    /// Without a workspace, a running process is `no-workspace` once it is
-    /// located, and an unknown or stopped one fails as the locate says.
+    /// Without a workspace, a process a running service locates is
+    /// `no-workspace` and one it refuses fails as the refusal says; with no
+    /// service of this version running, it is not running. The service is
+    /// only asked, never started.
     #[test]
-    fn without_a_workspace_a_running_process_is_no_workspace_after_the_locate() {
-        let served = locating();
+    fn without_a_workspace_only_a_running_service_is_asked() {
+        let located = ServiceResponse::Located(
+            Located::builder()
+                .socket(PathBuf::from("/run/holder.sock"))
+                .log(PathBuf::from("/state/web.log"))
+                .build(),
+        );
+        let refused = ServiceResponse::Error(
+            ServiceErrorBody::builder()
+                .kind(ServiceErrorKind::NotRunning)
+                .message("refused".to_string())
+                .build(),
+        );
+        for (asked, kind) in [
+            (Asked::Answered(located), FailureKind::NoWorkspace),
+            (Asked::Answered(refused), FailureKind::NotRunning),
+            (Asked::Absent, FailureKind::NotRunning),
+            (Asked::Starting, FailureKind::NotRunning),
+            (Asked::OtherVersion, FailureKind::NotRunning),
+        ] {
+            let service = FakeService::default().asked_in_turn(vec![asked.clone()]);
 
-        let error = open_beside(
-            &served.connector()(),
-            &shop(),
-            &name("web"),
-            None,
-            &request(false, None),
-        )
-        .unwrap_err();
+            let error = unopenable_here(&service, &shop(), &name("web"));
 
-        assert_eq!(error.kind(), FailureKind::NoWorkspace);
-        assert!(served.asked().iter().any(|asked| matches!(
-            asked,
-            ServiceRequest::Locate { name, .. } if name.as_ref() == "web"
-        )));
-        let stopped = open_beside(
-            &refusing(ServiceErrorKind::NotRunning).connector()(),
-            &shop(),
-            &name("web"),
-            None,
-            &request(false, None),
-        )
-        .unwrap_err();
-        assert_eq!(stopped.kind(), FailureKind::NotRunning);
+            assert_eq!(error.kind(), kind, "{asked:?}");
+            assert_eq!(service.connects(), 0, "{asked:?}");
+            assert!(matches!(
+                &service.asked()[..],
+                [ServiceRequest::Locate { name, .. }] if name.as_ref() == "web"
+            ));
+        }
     }
 
     /// A workspace that does not open the pane fails the open as
@@ -377,7 +408,7 @@ mod tests {
             &served.connector()(),
             &shop(),
             &name("web"),
-            Some(&workspace),
+            &workspace,
             &request(false, None),
         )
         .unwrap_err();
@@ -387,13 +418,42 @@ mod tests {
         assert_eq!(workspace.requests().len(), 1);
     }
 
-    /// A binary that no longer exists, removed or named by Linux as
-    /// replaced, fails as `workspace-failed` naming it, and no pane is
-    /// asked for.
+    /// A binary Linux names as replaced by an upgrade runs as the file now
+    /// at its path.
+    #[test]
+    fn a_replaced_binary_opens_its_replacement() {
+        let served = locating();
+        let workspace = RecordingWorkspace::opening(OPENED);
+        let replaced = OpenRequest::builder()
+            .binary(PathBuf::from(format!(
+                "{} (deleted)",
+                this_binary().display()
+            )))
+            .read_only(false)
+            .focus(PaneFocus::Take)
+            .direction(None)
+            .build();
+
+        open_beside(
+            &served.connector()(),
+            &shop(),
+            &name("web"),
+            &workspace,
+            &replaced,
+        )
+        .unwrap();
+
+        let requests = workspace.requests();
+        assert_eq!(requests[0].command().program(), &this_binary());
+    }
+
+    /// A binary that no longer exists, removed, named by Linux as replaced
+    /// with nothing at its path, or only a bare name, fails as
+    /// `workspace-failed` naming it, and no pane is asked for.
     #[test]
     fn a_binary_that_no_longer_exists_opens_no_pane() {
-        let replaced = PathBuf::from(format!("{} (deleted)", this_binary().display()));
-        for gone in [PathBuf::from(BINARY), replaced] {
+        let replaced = PathBuf::from(format!("{BINARY} (deleted)"));
+        for gone in [PathBuf::from(BINARY), replaced, PathBuf::from(APP_NAME)] {
             let served = locating();
             let workspace = RecordingWorkspace::opening(OPENED);
             let asked = OpenRequest::builder()
@@ -407,7 +467,7 @@ mod tests {
                 &served.connector()(),
                 &shop(),
                 &name("web"),
-                Some(&workspace),
+                &workspace,
                 &asked,
             )
             .unwrap_err();

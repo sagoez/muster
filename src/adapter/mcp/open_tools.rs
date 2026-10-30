@@ -1,9 +1,12 @@
 //! The open tool: a running process shown to the user in a new pane beside
 //! the agent's, in the terminal workspace the agent runs in.
 
+use std::convert::Infallible;
+
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use super::{
+    mcp_deps::McpDeps,
     process_open_arg::ProcessOpenArg,
     process_tools::{reference, resolved},
     server::{MusterMcp, json, structured, with_alerts},
@@ -11,8 +14,17 @@ use super::{
     tool_result::ToolResult,
 };
 use crate::{
-    adapter::client::{ClientError, OpenRequest, open::open_beside},
-    domain::{project::Project, terminal_workspace::PaneFocus, value::ProcessName},
+    adapter::client::{
+        ClientError, OpenRequest,
+        open::{open_beside, unopenable_here},
+        process,
+    },
+    domain::{
+        config::ConfigError,
+        project::Project,
+        terminal_workspace::PaneFocus,
+        value::{ProcessName, ProcessRef},
+    },
 };
 
 /// `error` from opening the running process `name` of `project` as
@@ -47,10 +59,12 @@ impl MusterMcp {
             half keeps at least <split-min-half-cols> columns, and down otherwise. Returns \
             {project, process, pane, read_only, alerts}. The process is resolved first: an \
             unknown name is unknown-process with candidates, and a process that is not running \
-            is not-running: start it first with process_start. Outside a terminal workspace, a \
-            running process is isError, kind no-workspace; the message names the muster attach \
-            command to ask the user to run in their own terminal. A workspace that does not open \
-            the pane is an error of kind workspace-failed naming the same command."
+            is not-running: start it first with process_start. Outside a terminal workspace, \
+            the name is resolved against the stored stack and the service is never started: \
+            with none running the process is not-running, and a running process is isError, \
+            kind no-workspace; the message names the muster attach command to ask the user to \
+            run in their own terminal. A workspace that does not open the pane is an error of \
+            kind workspace-failed naming the same command."
     )]
     pub(super) async fn process_open(
         &self,
@@ -63,11 +77,17 @@ impl MusterMcp {
             .focus(PaneFocus::Keep)
             .direction(arg.split()?)
             .build();
-        let workspace = self.deps.terminal_workspace().clone();
+        let project = arg.project().clone();
+        let Some(workspace) = self.deps.terminal_workspace().clone() else {
+            let never = self
+                .blocking(move |deps| unopenable(deps, project.as_deref(), &name, &request))
+                .await?;
+            match never {}
+        };
         let (view, alerts) = self
-            .ask(arg.project().clone(), move |client, project| {
+            .ask(project, move |client, project| {
                 let resolved = resolved(client, project, &name)?;
-                open_beside(client, project, &resolved, workspace.as_deref(), &request)
+                open_beside(client, project, &resolved, workspace.as_ref(), &request)
                     .map_err(|error| not_opened(project, &resolved, &request, error))
             })
             .await?;
@@ -75,9 +95,40 @@ impl MusterMcp {
     }
 }
 
+/// Why the process `name` of the project `project` names cannot be opened
+/// outside a terminal workspace, as `request` asked: the name is resolved
+/// against the stored stack, and only a service that already runs is asked
+/// whether the process runs.
+///
+/// # Errors
+/// Always fails: the caller's mistake in the project or name, the store's
+/// failure, or [`not_opened`]'s answer for the process.
+fn unopenable(
+    deps: &McpDeps,
+    project: Option<&str>,
+    name: &ProcessRef,
+    request: &OpenRequest,
+) -> Result<Infallible, ToolError> {
+    let project = deps.project(project)?;
+    let stack =
+        deps.stacks()
+            .stack(project.root())?
+            .ok_or_else(|| ConfigError::UnknownProject {
+                root: project.root().as_ref().clone(),
+            })?;
+    let resolved = process::resolve_among(stack.names(), &project, name)?;
+    let error = unopenable_here(deps.service().as_ref(), &project, &resolved);
+    Err(not_opened(&project, &resolved, request, error))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::Arc,
+        time::Duration,
+    };
 
     use rmcp::model::ErrorCode;
     use serde_json::Value;
@@ -86,6 +137,7 @@ mod tests {
     use crate::{
         adapter::{
             client::{
+                Asked,
                 fake_service::FakeService,
                 open::{attach_command, attach_hint},
                 recording_workspace::RecordingWorkspace,
@@ -280,11 +332,31 @@ mod tests {
         assert_eq!(answer["read_only"], true);
     }
 
-    /// A registered fixture driving `served` in no terminal workspace.
-    fn outside(served: &ServedService) -> Fixture {
-        let fixture = fixture_with(FakeService::default().starting(served), None);
-        register(&fixture);
+    /// A fixture in no terminal workspace whose stored stack holds `names`
+    /// and whose service, never started, answers `asked` when asked
+    /// whether it runs; connecting to it fails.
+    fn outside(asked: Asked, names: &[&str]) -> Fixture {
+        let fixture = fixture_with(FakeService::default().asked_in_turn(vec![asked]), None);
+        for name in names {
+            add_to(&fixture, name, None);
+        }
         fixture
+    }
+
+    /// Adds the process `name` to `project`, or the fixture's folder.
+    fn add_to(fixture: &Fixture, name: &str, project: Option<&Path>) {
+        let mut json = serde_json::json!({"name": name, "command": "npm run dev"});
+        if let Some(project) = project {
+            json["project"] = serde_json::json!(project);
+        }
+        runtime().block_on(async {
+            content(
+                fixture
+                    .server()
+                    .process_add(Parameters(serde_json::from_value(json).unwrap()))
+                    .await,
+            );
+        });
     }
 
     /// The failure `json` asks of `fixture`'s server, answered as a result.
@@ -295,31 +367,16 @@ mod tests {
         answer.structured_content.unwrap()["error"].clone()
     }
 
-    /// Outside a terminal workspace a running process is the agent's to
-    /// answer, as `no-workspace` naming the attach the user can run: the
-    /// pane's own command, with the project's root and `--` before the
-    /// name, for the project the agent named too.
+    /// Outside a terminal workspace a process a running service locates is
+    /// the agent's to answer, as `no-workspace` naming the attach the user
+    /// can run: the pane's own command, with the project's root and `--`
+    /// before the name, for the project the agent named too.
     #[test]
     fn process_open_outside_a_workspace_is_no_workspace_with_the_attach_hint() {
         for name in ["web", "-x", "$(id) x"] {
-            let served = service(&[name], located());
-            let fixture = outside(&served);
+            let fixture = outside(Asked::Answered(located()), &[name]);
             let other = fixture.root().as_ref().join("frontend");
-            runtime().block_on(async {
-                content(
-                    fixture
-                        .server()
-                        .process_add(Parameters(
-                            serde_json::from_value(serde_json::json!({
-                                "name": "web",
-                                "command": "npm run dev",
-                                "project": other,
-                            }))
-                            .unwrap(),
-                        ))
-                        .await,
-                );
-            });
+            add_to(&fixture, name, Some(&other));
             let other = ProjectRoot::try_new(other).unwrap();
 
             for (project, root) in [(None, fixture.root()), (Some(&other), &other)] {
@@ -353,18 +410,30 @@ mod tests {
         }
     }
 
-    /// Outside a terminal workspace the process is still resolved and
-    /// located first: an unknown or stopped one gets its own answer, and a
-    /// nul in a name never reaches a hint.
+    /// Outside a terminal workspace the name is resolved against the stored
+    /// stack and only a running service is asked where the process is: an
+    /// unknown name, a stopped process or no running service each gets its
+    /// own answer, a nul in a name never reaches a hint, and the service is
+    /// never started, as connecting to it would fail.
     #[test]
     fn process_open_outside_a_workspace_resolves_before_no_workspace() {
-        for (located, typed, kind) in [
-            (refused(ServiceErrorKind::NotRunning), "web", "not-running"),
-            (located(), "nope", "unknown-process"),
-            (located(), "x\u{0}; touch pwned", "unknown-process"),
+        for (asked, typed, kind) in [
+            (
+                Asked::Answered(refused(ServiceErrorKind::NotRunning)),
+                "web",
+                "not-running",
+            ),
+            (Asked::Absent, "web", "not-running"),
+            (Asked::Starting, "web", "not-running"),
+            (Asked::Answered(located()), "nope", "unknown-process"),
+            (Asked::Absent, "nope", "unknown-process"),
+            (
+                Asked::Answered(located()),
+                "x\u{0}; touch pwned",
+                "unknown-process",
+            ),
         ] {
-            let served = service(&["web"], located);
-            let fixture = outside(&served);
+            let fixture = outside(asked, &["web"]);
 
             let failure = failed_open(&fixture, serde_json::json!({"name": typed}));
 

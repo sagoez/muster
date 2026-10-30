@@ -31,6 +31,16 @@ pub enum ResolveError {
         /// Why it is refused.
         why: RefusedFolder,
     },
+    /// An absolute or `~` path led by a space, which taken as given would
+    /// name a folder inside the current one.
+    #[error(
+        "the project {value:?} starts with a space before its path, so it would name a folder \
+         inside the current one; drop the leading space"
+    )]
+    SpacedPath {
+        /// The value as given.
+        value: String,
+    },
     /// Stored state could not be read, or the folder is not usable.
     #[error(transparent)]
     Config(#[from] ConfigError),

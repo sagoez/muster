@@ -102,6 +102,7 @@ impl Scope {
                 other @ (ResolveError::Unregistrable { .. }
                 | ResolveError::UnknownProject { .. }
                 | ResolveError::NotAProject { .. }
+                | ResolveError::SpacedPath { .. }
                 | ResolveError::Config(_)) => other.into(),
             })
     }

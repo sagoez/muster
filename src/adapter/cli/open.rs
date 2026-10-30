@@ -18,7 +18,8 @@ use crate::{
 /// # Errors
 /// Returns the [`CliError`] of a process that cannot be found or chosen, or
 /// is not running, before any pane is asked for, or
-/// [`CliError::OpenFailed`] when the workspace did not open the pane.
+/// [`CliError::OpenFailed`] naming the attach hint when the workspace did
+/// not open the pane or `binary` is gone.
 pub fn open_here(
     client: &ServiceClient,
     project: &Project,
@@ -34,12 +35,12 @@ pub fn open_here(
         .focus(PaneFocus::Take)
         .direction(args.direction())
         .build();
-    open_beside(client, project, &name, Some(workspace), &request).map_err(|error| match error {
-        ClientError::Workspace(source) => CliError::OpenFailed {
+    open_beside(client, project, &name, workspace, &request).map_err(|error| match error {
+        ClientError::Workspace(_) | ClientError::BinaryGone(_) => CliError::OpenFailed {
             root: project.root().clone(),
             name,
             read_only: args.read_only(),
-            source: Box::new(source),
+            source: Box::new(error),
         },
         other => other.into(),
     })
@@ -49,7 +50,7 @@ pub fn open_here(
 mod tests {
     use std::{iter, path::PathBuf, time::Duration};
 
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
     use crate::{
@@ -69,7 +70,7 @@ mod tests {
         constants::APP_NAME,
         domain::{
             process::ProcessState,
-            terminal_workspace::{PaneRequest, SplitDirection, WorkspaceError},
+            terminal_workspace::{MIN_HALF_COLS, PaneRequest, SplitDirection, WorkspaceError},
             value::{IdleStop, PositiveDuration, ProcessName, ProjectName, ProjectRoot},
         },
     };
@@ -320,6 +321,37 @@ mod tests {
         insta::assert_snapshot!("open_workspace_failed_json", output::failure_json(&error));
     }
 
+    /// A muster binary that is gone fails the command with exit 1 naming it
+    /// and the attach that shows the process here instead, as a refusal
+    /// does, and no pane is asked for.
+    #[test]
+    fn a_gone_binary_exits_1_naming_the_attach_hint() {
+        let served = serving(located());
+        let workspace = RecordingWorkspace::opening(OPENED);
+        let gone = Path::new("/opt/muster/bin/muster (deleted)");
+
+        let error = open_here(
+            &served.connector()(),
+            &shop(),
+            &open_args(&["api"]),
+            &workspace,
+            gone,
+            Presenter::Plain,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), FailureKind::WorkspaceFailed);
+        assert_eq!(CliExit::from(error.kind()), CliExit::ActionFailed);
+        let message = error.to_string();
+        assert!(message.contains(&gone.display().to_string()), "{message}");
+        assert!(
+            message
+                .ends_with("; `muster --project '/home/me/my shop' attach -- api` shows it here"),
+            "{message}"
+        );
+        assert!(workspace.requests().is_empty());
+    }
+
     /// The hint of a failed open names the project and ends the options, so
     /// pasted anywhere it parses as an attach to that process, read-only
     /// when the open was, even for a name starting with `-`.
@@ -379,6 +411,23 @@ mod tests {
                 _ => panic!("the pane command parses as attach"),
             }
         }
+    }
+
+    /// The `--direction` help, which a doc comment can only write as a
+    /// literal, names the narrowest half the automatic split keeps.
+    #[test]
+    fn the_direction_help_names_the_narrowest_half() {
+        let mut command = Args::command();
+        let help = command
+            .find_subcommand_mut("open")
+            .unwrap()
+            .render_help()
+            .to_string();
+
+        assert!(
+            help.contains(&format!("each half keeps at least {MIN_HALF_COLS} columns")),
+            "{help}"
+        );
     }
 
     /// A direction that is not one of the split directions is refused as an

@@ -1,3 +1,4 @@
 /target
 *.log
 /SPEC.md
+/muster.yml.lock

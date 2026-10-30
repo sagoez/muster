@@ -77,23 +77,10 @@ impl StoppingEntries {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::domain::value::{Pid, StartToken};
-
-    /// The shell running as `pid`.
-    fn shell(pid: u32) -> ShellId {
-        ShellId::builder()
-            .pid(Pid::try_new(pid).unwrap())
-            .start(StartToken::try_new(1).unwrap())
-            .build()
-    }
-
-    /// The project folder `/home/me/<name>`.
-    fn root(name: &str) -> ProjectRoot {
-        ProjectRoot::try_new(PathBuf::from("/home/me").join(name)).unwrap()
-    }
+    use super::{
+        super::runtime_testing::{test_root, test_shell},
+        *,
+    };
 
     /// The process named `raw`.
     fn name(raw: &str) -> ProcessName {
@@ -112,7 +99,10 @@ mod tests {
     #[test]
     fn an_entering_is_taken_once_every_process_it_waits_on_has_stopped() {
         let mut entries = StoppingEntries::default();
-        entries.wait(&root("shop"), entry(shell(101), &["api", "web"]));
+        entries.wait(
+            &test_root("shop"),
+            entry(test_shell(101, 1), &["api", "web"]),
+        );
 
         assert!(
             entries
@@ -120,8 +110,8 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(entries.take_stopped(|_, _| false), [(
-            root("shop"),
-            entry(shell(101), &["api", "web"])
+            test_root("shop"),
+            entry(test_shell(101, 1), &["api", "web"])
         )]);
         assert!(entries.is_empty(), "taken once");
     }
@@ -129,11 +119,11 @@ mod tests {
     #[test]
     fn a_leave_an_action_or_a_gone_shell_forgets_its_entering() {
         let mut entries = StoppingEntries::default();
-        entries.wait(&root("shop"), entry(shell(101), &["api"]));
-        entries.wait(&root("blog"), entry(shell(102), &["web"]));
+        entries.wait(&test_root("shop"), entry(test_shell(101, 1), &["api"]));
+        entries.wait(&test_root("blog"), entry(test_shell(102, 1), &["web"]));
 
-        entries.forget_project(&root("shop"));
-        entries.forget_shell(&shell(102));
+        entries.forget_project(&test_root("shop"));
+        entries.forget_shell(&test_shell(102, 1));
 
         assert!(entries.is_empty());
     }

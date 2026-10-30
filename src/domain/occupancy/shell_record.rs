@@ -78,38 +78,19 @@ impl ShellRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::{
-        occupancy::testing::stamp,
-        value::{Pid, StartToken},
+    use super::{
+        super::testing::{stamp, test_root, test_shell},
+        *,
     };
 
-    /// Where every test folder lives.
-    const HOME: &str = "/home/me";
-
-    /// `<HOME>/<relative>`.
-    fn path(relative: &str) -> PathBuf {
-        PathBuf::from(HOME).join(relative)
-    }
-
-    /// The project in `<HOME>/<relative>`.
-    fn root(relative: &str) -> ProjectRoot {
-        ProjectRoot::try_new(path(relative)).unwrap()
-    }
-
-    /// The report of prompt `seq` from `<HOME>/<folder>`, in the project
-    /// `project` names.
+    /// The report of prompt `seq` from the folder of the test project
+    /// `folder` would name, in the project `project` names.
     fn at(seq: u64, folder: &str, project: Option<&str>) -> ShellRecord {
         ShellRecord::builder()
-            .shell(
-                ShellId::builder()
-                    .pid(Pid::try_new(100).unwrap())
-                    .start(StartToken::try_new(1).unwrap())
-                    .build(),
-            )
+            .shell(test_shell(100, 1))
             .stamp(stamp(1, seq))
-            .folder(path(folder))
-            .project(project.map(root))
+            .folder(test_root(folder).as_ref().to_path_buf())
+            .project(project.map(test_root))
             .build()
     }
 
@@ -153,10 +134,10 @@ mod tests {
 
         let nested = at(2, "shop/admin", Some("shop/admin")).following(Some(&in_outer));
         assert!(!nested.may_enter(Some(&in_outer)));
-        assert_eq!(nested.held(), &[root("shop")]);
+        assert_eq!(nested.held(), &[test_root("shop")]);
 
         let deeper = at(3, "shop/admin/src", Some("shop/admin")).following(Some(&nested));
-        assert_eq!(deeper.held(), &[root("shop")], "still in its tree");
+        assert_eq!(deeper.held(), &[test_root("shop")], "still in its tree");
 
         let back = at(4, "shop", Some("shop")).following(Some(&deeper));
         assert!(back.may_enter(Some(&deeper)));

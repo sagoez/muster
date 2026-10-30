@@ -1,5 +1,6 @@
 mod channel_sink;
 mod entry;
+mod fake_herdr;
 mod held_launcher;
 mod herdr_env;
 mod mcp_session;
@@ -12,6 +13,7 @@ mod wait;
 
 pub use channel_sink::*;
 pub use entry::*;
+pub use fake_herdr::*;
 pub use held_launcher::*;
 pub use mcp_session::*;
 pub use processes::*;

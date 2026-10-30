@@ -1,7 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     thread,
 };
 
@@ -29,8 +29,20 @@ pub struct McpSession {
 impl McpSession {
     /// Starts `muster mcp` for `project` over `scratch` and initializes it.
     pub fn start(scratch: &mut Scratch, project: &Path) -> Self {
-        let mut child = scratch
-            .command(&["-p", project.to_str().unwrap(), "mcp", "--as", "test-agent"])
+        Self::start_placed(scratch, project, |_| {})
+    }
+
+    /// Starts `muster mcp` for `project` over `scratch`, its command first
+    /// changed by `place`, and initializes it.
+    pub fn start_placed(
+        scratch: &mut Scratch,
+        project: &Path,
+        place: impl FnOnce(&mut Command),
+    ) -> Self {
+        let mut command =
+            scratch.command(&["-p", project.to_str().unwrap(), "mcp", "--as", "test-agent"]);
+        place(&mut command);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

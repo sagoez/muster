@@ -40,7 +40,7 @@ const HELP_STYLES: Styles = Styles::styled()
 
 /// What the main help says after the commands: the exit codes and the JSON
 /// conventions every command keeps. Tests pin the codes to
-/// [`CliExit`](super::CliExit) and to the README's table.
+/// [`CliExit`](super::CliExit) and to the reference's table.
 const AFTER_HELP: &str = "\
 Exit codes:
     0  success
@@ -378,17 +378,17 @@ mod tests {
         );
     }
 
-    /// The README's exit code table says what the help says, code for code.
+    /// The reference's exit code table says what the help says, code for code.
     #[test]
-    fn the_readme_documents_the_same_exit_codes() {
-        let readme = include_str!("../../../README.md");
+    fn the_reference_documents_the_same_exit_codes() {
+        let reference = include_str!("../../../docs/reference.md");
 
         for line in AFTER_HELP.lines().filter(|line| line.starts_with("  ")) {
             let (code, meaning) = line.trim_start().split_once("  ").unwrap();
             let mut letters = meaning.chars();
             let first = letters.next().unwrap().to_uppercase();
             let row = format!("| {code} | {first}{} |", letters.as_str());
-            assert!(readme.contains(&row), "the README lacks {row}");
+            assert!(reference.contains(&row), "the reference lacks {row}");
         }
     }
 

@@ -54,12 +54,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.version.outputs.changed == 'true'
 
-      - name: Install system dependencies
-        if: steps.version.outputs.changed == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm-dev libclang-dev
-
       - name: Authenticate with crates.io
         if: steps.version.outputs.changed == 'true'
         id: auth

@@ -3316,9 +3316,12 @@ mod tests {
     const HOOK_LOAD: u64 = 1;
     /// The folder a test shell outside every project reports from.
     const OUTSIDE: &str = "/";
-    /// A child that ignores the signals that ask it to stop, so stopping it
-    /// takes its whole grace.
-    const STUBBORN: &str = "trap '' INT TERM; sleep 600";
+    /// What a stubborn child runs first: it ignores the signals that ask it
+    /// to stop, so stopping it takes its whole grace.
+    const IGNORE_STOP_SIGNALS: &str = "trap '' INT TERM";
+    /// What a stubborn child prints once it ignores them. A run is only
+    /// stubborn from then on: a stop that lands earlier ends it at once.
+    const TRAPPED: &str = "stop-signals-ignored";
     /// How long a stop waits on that child before killing it: beyond any
     /// test, so its stop lasts until [`end_stubborn`] ends it, however
     /// loaded the machine.
@@ -3493,8 +3496,7 @@ mod tests {
         fixture.shells().open(shell);
         let service = fixture.start(Arc::new(fixture.runner()));
         report(&service, shell, 1, Some(&project));
-        let first = service.wait_for(&project, "api", ProcessState::Running);
-        let first_pid = process(&first, "api").pid().unwrap();
+        let first_pid = wait_stubborn(&fixture, &service, &project, "api");
         report(&service, shell, 2, None);
         service.wait_for(&project, "api", ProcessState::Stopping);
 
@@ -3517,16 +3519,38 @@ mod tests {
     }
 
     /// The autostart process `name`, which takes its whole stop grace to
-    /// stop.
+    /// stop once it prints [`TRAPPED`].
     fn stubborn(name: &str) -> ProcessSpec {
         sleeper(name, true)
-            .with_command(CommandLine::try_new(STUBBORN).unwrap())
+            .with_command(
+                CommandLine::try_new(format!("{IGNORE_STOP_SIGNALS}; echo {TRAPPED}; {SLEEPER}"))
+                    .unwrap(),
+            )
             .with_stop(
                 StopPolicy::builder()
                     .signal(StopSignal::Terminate)
                     .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
                     .build(),
             )
+    }
+
+    /// Waits until the stubborn `name` of `project` runs and ignores the
+    /// stop signals, as its log shows, and returns its pid. `Running` alone
+    /// only says the child spawned, not that its shell has reached the trap.
+    fn wait_stubborn(
+        fixture: &Fixture,
+        service: &Running,
+        project: &ProjectRoot,
+        name: &str,
+    ) -> Pid {
+        let running = service.wait_for(project, name, ProcessState::Running);
+        let log = fixture
+            .dirs()
+            .process_log(project, &ProcessName::try_new(name).unwrap());
+        wait_until("the child to ignore the stop signals", || {
+            fs::read_to_string(&log).is_ok_and(|text| text.contains(TRAPPED))
+        });
+        process(&running, name).pid().unwrap()
     }
 
     /// Ends a stubborn child's stop once a test has asserted what holds
@@ -3570,8 +3594,7 @@ mod tests {
         fixture.shells().open(shell);
         let service = fixture.start(Arc::new(fixture.runner()));
         report(&service, shell, 1, Some(&project));
-        let running = service.wait_for(&project, "api", ProcessState::Running);
-        let pid = process(&running, "api").pid().unwrap();
+        let pid = wait_stubborn(&fixture, &service, &project, "api");
         report(&service, shell, 2, None);
         if idle_first {
             service.wait_for(&project, "api", ProcessState::Stopping);
@@ -3639,8 +3662,7 @@ mod tests {
         fixture.shells().open(second);
         let service = fixture.start(Arc::new(fixture.runner()));
         report(&service, first, 1, Some(&project));
-        let running = service.wait_for(&project, "api", ProcessState::Running);
-        let pid = *process(&running, "api").pid().as_ref().unwrap();
+        let pid = wait_stubborn(fixture, &service, &project, "api");
         report(&service, first, 2, None);
         service.wait_for(&project, "api", ProcessState::Stopping);
         assert!(report(&service, first, 3, Some(&project)).is_empty());
@@ -3710,8 +3732,7 @@ mod tests {
         fixture.shells().open(shell);
         let service = fixture.start(Arc::new(fixture.runner()));
         report(&service, shell, 1, Some(&project));
-        let first = service.wait_for(&project, "api", ProcessState::Running);
-        let first_pid = process(&first, "api").pid().unwrap();
+        let first_pid = wait_stubborn(&fixture, &service, &project, "api");
         report(&service, shell, 2, None);
         service.wait_for(&project, "api", ProcessState::Stopping);
         assert!(report(&service, shell, 3, Some(&project)).is_empty());

@@ -92,8 +92,8 @@ impl Occupancy {
     }
 
     /// Whether `record` is newer than the last report the table took from
-    /// its shell, or the shell is unknown.
-    fn is_newer(&self, record: &ShellRecord) -> bool {
+    /// its shell, or the shell is unknown, so a report of it is applied.
+    pub fn is_newer(&self, record: &ShellRecord) -> bool {
         self.shells
             .get(record.shell())
             .is_none_or(|seen| record.stamp().supersedes(seen.stamp()))

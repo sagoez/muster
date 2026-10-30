@@ -203,6 +203,9 @@ pub struct ServiceRuntime {
     /// Enterings that found autostart processes still stopping, to enter
     /// again once they have stopped.
     stopping_entries: StoppingEntries,
+    /// The environment each known shell last entered a project with, so an
+    /// entering whose shell left is made again as another still inside.
+    shell_environments: HashMap<ShellId, LaunchEnvironment>,
 }
 
 impl ServiceRuntime {
@@ -316,6 +319,7 @@ impl ServiceRuntime {
             shell_notes: ShellNotes::default(),
             entering: EnteringLaunches::default(),
             stopping_entries: StoppingEntries::default(),
+            shell_environments: HashMap::new(),
             events,
             notices,
             supervisors: HashMap::new(),
@@ -596,7 +600,7 @@ impl ServiceRuntime {
                 for shell in shells {
                     self.shell_notes.forget(&shell);
                     self.entering.forget_shell(&shell);
-                    self.stopping_entries.forget_shell(&shell);
+                    self.shell_environments.remove(&shell);
                     changes.extend(self.occupancy.remove(&shell));
                 }
                 self.occupancy_changed(&changes, Instant::now());
@@ -932,12 +936,16 @@ impl ServiceRuntime {
                 SHELL_TABLE_FULL.to_string(),
             ));
         }
+        let fresh = self.occupancy.is_newer(record);
         let changes = self.occupancy.report(record);
         self.occupancy_changed(&changes, Instant::now());
         let mut notes = self.shell_notes.take(&shell);
         let Some(environment) = environment else {
             return Ok(notes);
         };
+        if fresh {
+            self.shell_environments.insert(shell, environment.clone());
+        }
         for change in changes {
             if let OccupancyChange::Entered(root) = change
                 && record.project().as_ref() == Some(&root)
@@ -1016,8 +1024,10 @@ impl ServiceRuntime {
     }
 
     /// Enters again each project an entering found still stopping, now that
-    /// what it waited on has stopped, leaving what that starts or refuses
-    /// for its shell's next report.
+    /// what it waited on has stopped, as the shell that entered or, once it
+    /// has left, as another shell still inside, leaving what that starts or
+    /// refuses for that shell's next report. An entering with no such shell
+    /// left is dropped.
     fn enter_stopped(&mut self) {
         if self.stopping_entries.is_empty() {
             return;
@@ -1029,11 +1039,32 @@ impl ServiceRuntime {
                 .is_some_and(|supervisor| supervisor.runs_or_starts(name))
         });
         for (project, entry) in stopped {
-            let shell = *entry.shell();
-            for note in self.enter(&project, shell, entry.environment()) {
+            let Some((shell, environment)) = self.entering_shell(&project, &entry) else {
+                continue;
+            };
+            for note in self.enter(&project, shell, &environment) {
                 self.shell_notes.queue(shell, note);
             }
         }
+    }
+
+    /// The shell, with its environment, that enters `project` again for
+    /// `entry`: the one that entered while it still counts there, else the
+    /// first other shell inside whose entering environment is known.
+    fn entering_shell(
+        &self,
+        project: &ProjectRoot,
+        entry: &StoppingEntry,
+    ) -> Option<(ShellId, LaunchEnvironment)> {
+        let inside = self.occupancy.shells_in(project);
+        if inside.contains(entry.shell()) {
+            return Some((*entry.shell(), entry.environment().clone()));
+        }
+        inside.into_iter().find_map(|shell| {
+            self.shell_environments
+                .get(&shell)
+                .map(|environment| (shell, environment.clone()))
+        })
     }
 
     /// Ends the entering launch of `pane` of `project`, if a shell's
@@ -3490,6 +3521,76 @@ mod tests {
     fn a_client_stop_during_an_idle_stop_keeps_it_stopped_when_a_shell_comes_back() {
         assert_a_client_stop_outlasts_a_return(client_stop, true);
         assert_a_client_stop_outlasts_a_return(client_down, true);
+    }
+
+    /// Brings the stubborn `api` up through shell `first`, which then
+    /// leaves; the idle stop stops `api`, `first` comes back while it stops
+    /// and `second` enters too, sending `second_environment`, then `first`
+    /// leaves again. Returns the running service, the project and `api`'s
+    /// pid before the idle stop.
+    fn re_entry_after_its_shell_left(
+        fixture: &Fixture,
+        first: ShellId,
+        second: ShellId,
+        second_environment: Option<LaunchEnvironment>,
+    ) -> (Running, ProjectRoot, Pid) {
+        set_idle_stop(fixture, idle_after(SHORT_IDLE));
+        let project = fixture.project(vec![stubborn("api")]);
+        fixture.shells().open(first);
+        fixture.shells().open(second);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, first, 1, Some(&project));
+        let running = service.wait_for(&project, "api", ProcessState::Running);
+        let pid = *process(&running, "api").pid().as_ref().unwrap();
+        report(&service, first, 2, None);
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(report(&service, first, 3, Some(&project)).is_empty());
+        report_with(&service, second, 1, Some(&project), second_environment);
+        report(&service, first, 4, None);
+        (service, project, pid)
+    }
+
+    /// CR-7: an entering whose shell left while the idle stop ran, with
+    /// another shell still inside, is made as that shell once `api` has
+    /// stopped: `api` starts again and the note goes to the shell inside.
+    #[test]
+    fn a_re_entry_whose_shell_left_enters_as_a_shell_still_inside() {
+        let fixture = Fixture::new();
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        let (service, project, before) =
+            re_entry_after_its_shell_left(&fixture, first, second, Some(no_env()));
+
+        wait_until("api to start again once stopped", || {
+            let status = service.status(&project);
+            let api = process(&status, "api");
+            *api.state() == ProcessState::Running && api.pid().is_some_and(|pid| pid != before)
+        });
+        assert_eq!(report(&service, second, 2, Some(&project)), [started(
+            &project,
+            &["api"]
+        )]);
+        assert!(report(&service, first, 5, None).is_empty());
+        service.stop();
+    }
+
+    /// CR-7: with no shell left inside whose environment is known, the
+    /// entering is dropped and `api` stays stopped.
+    #[test]
+    fn a_re_entry_with_no_shell_to_enter_as_is_dropped() {
+        let fixture = Fixture::new();
+        let (first, second) = (test_shell(500, 1), test_shell(501, 1));
+        let (service, project, _) = re_entry_after_its_shell_left(&fixture, first, second, None);
+
+        wait_stopped(&service, &project);
+        thread::sleep(SHORT_IDLE);
+
+        assert!(
+            !process(&service.status(&project), "api")
+                .state()
+                .may_be_running()
+        );
+        assert!(report(&service, second, 2, Some(&project)).is_empty());
+        service.stop();
     }
 
     /// CR-5: a client request the service refuses, here a stop of a process

@@ -375,7 +375,8 @@ shell that kept your home, reports nothing.
   a shell already in its folder, with `muster add`, `init` or `import`, is not
   entering it: nothing starts, and the shell counts in it from its next prompt.
   A shell back in a project whose idle stop is still stopping it starts its
-  `autostart` processes again once they have stopped.
+  `autostart` processes again once they have stopped. A process you stopped
+  yourself, with `muster stop`, `down` or MCP, stays stopped.
 - **Leaving** is noticed by the next report from that shell, and a shell that
   ends is noticed within a few seconds. Once no shell has been in the project
   for the `idle-stop` time, muster stops its running processes through their

@@ -21,7 +21,7 @@ use crate::{
         port::ProcessRunner,
         project::Project,
         settings::Settings,
-        value::{OutputCursor, PaneId, ProjectRoot},
+        value::{OutputCursor, PaneId, ProcessName, ProjectRoot},
     },
 };
 
@@ -102,6 +102,9 @@ pub struct Supervisor {
     pub(super) occupants: u32,
     /// When its last shell left, while its idle stop is pending.
     pub(super) left_at: Option<Instant>,
+    /// What the last idle stop stopped, until a client acts on the project:
+    /// only these may start again once stopped when a shell comes back.
+    pub(super) idle_stopping: HashSet<ProcessName>,
 }
 
 impl Supervisor {
@@ -151,6 +154,7 @@ impl Supervisor {
             runs,
             occupants: 0,
             left_at: None,
+            idle_stopping: HashSet::new(),
         }
     }
 

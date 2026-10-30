@@ -719,12 +719,12 @@ impl ServiceRuntime {
     ) -> Result<Reply, ServiceErrorBody> {
         match &request {
             ServiceRequest::Up { project, .. } | ServiceRequest::Control { project, .. } => {
-                self.stopping_entries.forget_project(project);
+                self.client_acts_on(project);
                 self.refresh_stack(project)?;
                 self.supervisor(project)?;
                 self.share_held_ports();
             },
-            ServiceRequest::Down { project } => self.stopping_entries.forget_project(project),
+            ServiceRequest::Down { project } => self.client_acts_on(project),
             ServiceRequest::Ps {
                 project: Some(project),
             }
@@ -945,9 +945,9 @@ impl ServiceRuntime {
 
     /// Starts the autostart set of `project`, which `shell` is the first to
     /// enter, with the shell's `environment`, and remembers that shell for
-    /// each launch it began. Autostart processes still stopping, as an idle
-    /// stop still running leaves them, are started once they have stopped,
-    /// and the shell told then. Returns what started and what was refused. A
+    /// each launch it began. Autostart processes its last idle stop is still
+    /// stopping are started once they have stopped, and the shell told then;
+    /// one a client stopped stays stopped. Returns what started and what was refused. A
     /// project that cannot be loaded, being unregistered or unreadable,
     /// starts nothing.
     fn enter(
@@ -965,14 +965,15 @@ impl ServiceRuntime {
         };
         let outcome = supervisor.up(environment);
         let name = supervisor.project().name().clone();
+        let idle_stopping = supervisor.idle_stopping(outcome.stopping());
         self.entering.begin(project, outcome.acted(), shell);
-        if !outcome.stopping().is_empty() {
+        if !idle_stopping.is_empty() {
             self.stopping_entries.wait(
                 project,
                 StoppingEntry::builder()
                     .shell(shell)
                     .environment(environment.clone())
-                    .names(outcome.stopping().clone())
+                    .names(idle_stopping)
                     .build(),
             );
         }
@@ -995,6 +996,16 @@ impl ServiceRuntime {
         self.entering.forget_project(project);
         if let Some(supervisor) = self.supervisors.get_mut(project) {
             supervisor.hold_up();
+        }
+    }
+
+    /// Hands `project` to a client acting on it: an entering waiting there
+    /// is dropped, and nothing its last idle stop stopped starts again
+    /// because a shell came back.
+    fn client_acts_on(&mut self, project: &ProjectRoot) {
+        self.stopping_entries.forget_project(project);
+        if let Some(supervisor) = self.supervisors.get_mut(project) {
+            supervisor.forget_idle_stopping();
         }
     }
 
@@ -1680,7 +1691,7 @@ mod tests {
             test_wait::{REPLY, wait_within},
         },
         domain::{
-            config::SettingChange,
+            config::{ProcessSpec, SettingChange},
             coordination::Author,
             occupancy::testing::stamp,
             port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
@@ -3351,15 +3362,7 @@ mod tests {
     fn re_entering_a_project_its_idle_stop_is_stopping_starts_it_once_stopped() {
         let fixture = Fixture::new();
         set_idle_stop(&fixture, idle_after(SHORT_IDLE));
-        let stubborn = sleeper("api", true)
-            .with_command(CommandLine::try_new(STUBBORN).unwrap())
-            .with_stop(
-                StopPolicy::builder()
-                    .signal(StopSignal::Terminate)
-                    .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
-                    .build(),
-            );
-        let project = fixture.project(vec![stubborn]);
+        let project = fixture.project(vec![stubborn("api")]);
         let shell = test_shell(500, 1);
         fixture.shells().open(shell);
         let service = fixture.start(Arc::new(fixture.runner()));
@@ -3384,6 +3387,103 @@ mod tests {
             &["api"]
         )]);
         service.stop();
+    }
+
+    /// The autostart process `name`, which takes its whole stop grace to
+    /// stop.
+    fn stubborn(name: &str) -> ProcessSpec {
+        sleeper(name, true)
+            .with_command(CommandLine::try_new(STUBBORN).unwrap())
+            .with_stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(StopGrace::try_new(STUBBORN_GRACE).unwrap())
+                    .build(),
+            )
+    }
+
+    /// A stop of `api` in `project` a client asks for, as `muster stop`
+    /// and MCP send it.
+    fn client_stop(project: &ProjectRoot) -> ServiceRequest {
+        ServiceRequest::Control {
+            project: project.clone(),
+            name: ProcessName::try_new("api").unwrap(),
+            action: ProcessAction::Stop,
+            environment: no_env(),
+            wait: None,
+        }
+    }
+
+    /// `muster down` of `project`.
+    fn client_down(project: &ProjectRoot) -> ServiceRequest {
+        ServiceRequest::Down {
+            project: project.clone(),
+        }
+    }
+
+    /// Brings the stubborn `api` up through a shell that then leaves, has
+    /// `stop` stop it, after the idle stop when `idle_first`, and brings the
+    /// shell back while it stops: `api` stops and stays stopped.
+    fn assert_a_client_stop_outlasts_a_return(
+        stop: fn(&ProjectRoot) -> ServiceRequest,
+        idle_first: bool,
+    ) {
+        let fixture = Fixture::new();
+        let idle = if idle_first { SHORT_IDLE } else { LONG_IDLE };
+        set_idle_stop(&fixture, idle_after(idle));
+        let project = fixture.project(vec![stubborn("api")]);
+        let shell = test_shell(500, 1);
+        fixture.shells().open(shell);
+        let service = fixture.start(Arc::new(fixture.runner()));
+        report(&service, shell, 1, Some(&project));
+        service.wait_for(&project, "api", ProcessState::Running);
+        report(&service, shell, 2, None);
+        if idle_first {
+            service.wait_for(&project, "api", ProcessState::Stopping);
+        }
+
+        service.send(stop(&project));
+        service.wait_for(&project, "api", ProcessState::Stopping);
+        assert!(
+            report(&service, shell, 3, Some(&project)).is_empty(),
+            "nothing starts while api stops"
+        );
+
+        wait_until("api to stop", || {
+            !process(&service.status(&project), "api")
+                .state()
+                .may_be_running()
+        });
+        assert!(report(&service, shell, 4, Some(&project)).is_empty());
+        let api = process(&service.status(&project), "api").clone();
+        assert!(
+            !api.state().may_be_running(),
+            "a stop a client asked for is never undone by a shell: {:?}",
+            api.state()
+        );
+        service.stop();
+    }
+
+    /// A process `muster stop` or MCP stopped stays stopped when a shell
+    /// comes back while it stops.
+    #[test]
+    fn a_process_a_client_stops_stays_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_stop, false);
+    }
+
+    /// A project `muster down` stopped stays stopped when a shell comes
+    /// back while it stops.
+    #[test]
+    fn a_project_a_client_downs_stays_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_down, false);
+    }
+
+    /// A client stopping what an idle stop is already stopping takes it
+    /// over: a shell coming back does not start it again.
+    #[test]
+    fn a_client_stop_during_an_idle_stop_keeps_it_stopped_when_a_shell_comes_back() {
+        assert_a_client_stop_outlasts_a_return(client_stop, true);
+        assert_a_client_stop_outlasts_a_return(client_down, true);
     }
 
     /// CR-3: a report that arrives after its shell ended, its pid gone or

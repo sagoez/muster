@@ -3,7 +3,7 @@ use std::time::Instant;
 use super::entity::Supervisor;
 use crate::{
     adapter::service::{BatchOutcome, OccupancyStatus},
-    domain::value::IdleStop,
+    domain::value::{IdleStop, ProcessName},
 };
 
 impl Supervisor {
@@ -39,7 +39,27 @@ impl Supervisor {
             .processes()
             .iter()
             .any(|process| process.state().may_be_running());
-        runs_anything.then(|| self.down())
+        let outcome = runs_anything.then(|| self.down())?;
+        self.idle_stopping = outcome.acted().iter().cloned().collect();
+        Some(outcome)
+    }
+
+    /// Which of `stopping`, the processes an `up` found still stopping, the
+    /// last idle stop is stopping; a stop a client asked for is never among
+    /// them. Forgets what that idle stop stopped that has since stopped.
+    pub fn idle_stopping(&mut self, stopping: &[ProcessName]) -> Vec<ProcessName> {
+        self.idle_stopping.retain(|name| stopping.contains(name));
+        stopping
+            .iter()
+            .filter(|name| self.idle_stopping.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    /// Forgets what the last idle stop stopped, as a client acts on the
+    /// project and so owns what runs or stops there from now on.
+    pub fn forget_idle_stopping(&mut self) {
+        self.idle_stopping.clear();
     }
 
     /// How long this project keeps running with no shell in it: its own
@@ -176,6 +196,30 @@ mod tests {
             ProcessState::Running,
             "stopped through its stop policy"
         );
+    }
+
+    /// Only what the idle stop stopped counts as idle stopping, until it has
+    /// stopped or a client acts on the project.
+    #[test]
+    fn idle_stopping_names_only_what_the_idle_stop_stopped() {
+        let mut harness = running(RestartPolicy::Never);
+        let supervisor = harness.supervisor_mut();
+        let left = Instant::now();
+        supervisor.arm_idle(left);
+        let other = name("other");
+
+        assert!(supervisor.idle_stopping(&[name("web")]).is_empty());
+        supervisor.idle_stop_if_due(left + setting()).unwrap();
+
+        assert_eq!(supervisor.idle_stopping(&[name("web"), other.clone()]), [
+            name("web")
+        ]);
+        supervisor.forget_idle_stopping();
+        assert!(supervisor.idle_stopping(&[name("web")]).is_empty());
+
+        supervisor.idle_stopping = [name("web")].into();
+        assert!(supervisor.idle_stopping(&[other]).is_empty(), "web stopped");
+        assert!(supervisor.idle_stopping(&[name("web")]).is_empty());
     }
 
     #[test]

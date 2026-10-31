@@ -10,10 +10,8 @@ use std::{
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 
 use super::{
-    agent_config_error::AgentConfigError,
-    config_file::io_error,
-    lock_timing::LockTiming,
-    lock_token::{LockToken, clear},
+    agent_config_error::AgentConfigError, config_file::io_error, lock_timing::LockTiming,
+    lock_token::LockToken,
 };
 
 /// What Claude Code appends to its config's path for the folder that locks
@@ -29,18 +27,18 @@ const REFRESH_THREAD: &str = "config-lock-refresh";
 type Stamper = fn(&Path) -> io::Result<()>;
 
 /// The lock Claude Code takes around each re-read and write of its config,
-/// held by muster across its own: a folder beside the file, made with
-/// `mkdir`, muster's while it holds muster's token, stamped while held so it
-/// never looks stale, and removed when the guard drops only while it holds
-/// muster's token still. An RAII guard, so it has a hand-written
-/// constructor.
+/// held by muster across its own: an empty folder beside the file, made
+/// with `mkdir`, muster's while the token file beside it is muster's and
+/// names that very folder, stamped while held so it never looks stale, and
+/// removed when the guard drops only while it is muster's still. An RAII
+/// guard, so it has a hand-written constructor.
 #[derive(Debug)]
 pub(super) struct ConfigLock {
     /// The config it locks, as the agent names it.
     config: PathBuf,
     /// The lock folder.
     folder: PathBuf,
-    /// The token muster left in the folder.
+    /// muster's claim on the folder, kept beside it.
     token: LockToken,
     /// Dropped to stop the refresh.
     stop: Option<Sender<()>>,
@@ -96,7 +94,7 @@ impl ConfigLock {
             }
             if !stale_cleared && is_stale(&folder, timing.stale_after()) {
                 stale_cleared = true;
-                clear(&folder);
+                let _ = fs::remove_dir(&folder);
                 continue;
             }
             if cancelled() {
@@ -110,35 +108,40 @@ impl ConfigLock {
         }
     }
 
-    /// Checks the lock is muster's still, its folder holding muster's
-    /// token, so nothing is written under a lock another writer took over.
+    /// Checks the lock is muster's still, so nothing is written under a
+    /// lock another writer took over.
     ///
     /// # Errors
     /// Returns [`AgentConfigError::LockLost`] when it is not.
     pub(super) fn check_held(&self) -> Result<(), AgentConfigError> {
-        if self.token.is_in(&self.folder) {
+        if self.token.holds(&self.folder) {
             Ok(())
         } else {
             Err(AgentConfigError::LockLost(self.config.clone()))
         }
     }
 
-    /// The guard of `folder`, just made for `config`: given muster's token,
-    /// stamped by `stamper`, and stamped again every `refresh_every` from a
-    /// thread of its own.
+    /// The guard of `folder`, just made for `config`: claimed by a token
+    /// beside it, stamped by `stamper`, and stamped again every
+    /// `refresh_every` from a thread of its own.
     ///
     /// # Errors
-    /// Returns [`AgentConfigError::Io`] when the token cannot be left, the
-    /// folder stamped or the thread started; the folder is removed again.
+    /// Returns [`AgentConfigError::Io`] when the token cannot be written,
+    /// the folder stamped or the thread started; the lock is let go again.
     fn hold(
         config: &Path,
         folder: PathBuf,
         refresh_every: Duration,
         stamper: Stamper,
     ) -> Result<Self, AgentConfigError> {
-        let token = LockToken::fresh();
+        let token = match LockToken::claim(&folder) {
+            Ok(token) => token,
+            Err(source) => {
+                let _ = fs::remove_dir(&folder);
+                return Err(io_error(LOCK, config, source));
+            },
+        };
         let start = || -> io::Result<_> {
-            token.leave_in(&folder)?;
             stamper(&folder)?;
             let (stop, stopped) = bounded(0);
             let (watched, ours) = (folder.clone(), token.clone());
@@ -156,9 +159,7 @@ impl ConfigLock {
                 refresh: Some(refresh),
             }),
             Err(source) => {
-                // The token may not have been left, so the folder just made
-                // is cleared whatever it holds.
-                clear(&folder);
+                token.release(&folder);
                 Err(io_error(LOCK, config, source))
             },
         }
@@ -178,10 +179,10 @@ impl Drop for ConfigLock {
     }
 }
 
-/// Stamps `folder` with `stamper` every `every` while it holds `token`,
+/// Stamps `folder` with `stamper` every `every` while `token` holds it,
 /// until `stopped` says to stop. A stamp that fails is tried again at the
-/// next turn, well within the stale bound; only a folder no longer holding
-/// the token ends the refresh, leaving it to its new holder.
+/// next turn, well within the stale bound; only a lock no longer muster's
+/// ends the refresh, leaving it to its new holder.
 fn refresh(
     folder: &Path,
     token: &LockToken,
@@ -190,7 +191,7 @@ fn refresh(
     stamper: Stamper,
 ) {
     while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
-        if !token.is_in(folder) {
+        if !token.holds(folder) {
             return;
         }
         let _ = stamper(folder);
@@ -228,7 +229,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::agent_config::{lock_token::TOKEN_FILE, testing::uncancelled};
+    use crate::adapter::agent_config::{lock_token::token_file, testing::uncancelled};
 
     /// How long a test holds a live lock before letting it go.
     const HELD_FOR: Duration = Duration::from_millis(300);
@@ -314,27 +315,27 @@ mod tests {
     }
 
     /// A lock untouched past the stale bound was left by a writer that
-    /// died, so it is taken over, even one holding the token of a muster
-    /// that died; an interrupt while waiting gives up.
+    /// died, so it is taken over, even one a muster that died left with its
+    /// token beside it; an interrupt while waiting gives up.
     #[test]
     fn a_stale_lock_is_taken_and_an_interrupt_stops_the_wait() {
         let dir = TempDir::new().unwrap();
         let (config, folder) = paths(&dir);
-        for dead_token in [false, true] {
+        for dead_muster in [false, true] {
             fs::create_dir(&folder).unwrap();
-            if dead_token {
-                fs::write(folder.join(TOKEN_FILE), "gone").unwrap();
+            if dead_muster {
+                LockToken::claim(&folder).unwrap();
             }
             touch(&folder, SystemTime::now() - LONG_AGO);
             let started = Instant::now();
             let lock = take(&config, &claude()).unwrap();
-            assert!(lock.is_some(), "dead token {dead_token}");
+            assert!(lock.is_some(), "dead muster {dead_muster}");
             assert!(
                 started.elapsed() < claude().retry_pauses()[0],
                 "taken without a wait"
             );
             drop(lock);
-            assert!(!folder.exists());
+            assert!(!folder.exists() && !token_file(&folder).exists());
         }
 
         fs::create_dir(&folder).unwrap();
@@ -343,6 +344,32 @@ mod tests {
             Err(AgentConfigError::Interrupted)
         ));
         assert!(folder.is_dir(), "another writer's lock is left alone");
+    }
+
+    /// A muster that dies holding the lock leaves its folder empty, so
+    /// Claude Code's `rmdir` takes it over once stale; the token left
+    /// beside it holds nothing, and the next run of muster replaces it.
+    #[test]
+    fn a_lock_left_by_a_crash_is_taken_over_by_claude_code() {
+        let dir = TempDir::new().unwrap();
+        let (config, folder) = paths(&dir);
+        let held = take(&config, &claude()).unwrap().unwrap();
+        let dead = held.token.clone();
+        // A crash runs no drop: the folder and the token beside it stay.
+        let ConfigLock { stop, refresh, .. } = &mut *Box::leak(Box::new(held));
+        drop(stop.take());
+        refresh.take().unwrap().join().unwrap();
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "kept empty");
+
+        touch(&folder, SystemTime::now() - LONG_AGO);
+        fs::remove_dir(&folder).expect("Claude Code's stale takeover");
+        fs::create_dir(&folder).unwrap();
+        assert!(!dead.holds(&folder), "Claude Code's folder is not muster's");
+        fs::remove_dir(&folder).unwrap();
+
+        let next = take(&config, &claude()).unwrap().unwrap();
+        drop(next);
+        assert!(!folder.exists() && !token_file(&folder).exists());
     }
 
     /// A lock muster holds past the stale bound stays fresh, so another
@@ -363,26 +390,24 @@ mod tests {
         assert!(!folder.exists());
     }
 
-    /// A lock another writer took over by removing the folder and making
-    /// it again is neither stamped again nor removed by muster, and reads
-    /// as lost; so is one whose new folder reuses the old one's inode, as
-    /// the folder emptied in place and stamped just now stands for. A lock
-    /// merely touched by another is muster's still.
+    /// A lock another writer took over, by removing the folder and making
+    /// it again as Claude Code does or by leaving its own token beside it
+    /// as another muster does, is neither stamped again nor removed by
+    /// muster, and reads as lost; muster's own token beside a folder made
+    /// again goes. A lock merely touched by another is muster's still.
     #[test]
     fn a_lock_taken_over_is_left_to_its_new_holder() {
         let dir = TempDir::new().unwrap();
         let (config, folder) = paths(&dir);
-        let remake = |folder: &Path| {
-            clear(folder);
-            fs::create_dir(folder).unwrap();
-        };
-        let reuse_inode = |folder: &Path| {
-            fs::remove_file(folder.join(TOKEN_FILE)).unwrap();
-        };
-        let takeovers: [&dyn Fn(&Path); 2] = [&remake, &reuse_inode];
-        for take_over in takeovers {
+        let token = token_file(&folder);
+        for by_another_muster in [false, true] {
             let lock = take(&config, &quick()).unwrap().unwrap();
-            take_over(&folder);
+            if by_another_muster {
+                fs::write(&token, "theirs").unwrap();
+            } else {
+                fs::remove_dir(&folder).unwrap();
+                fs::create_dir(&folder).unwrap();
+            }
             let theirs = SystemTime::now() - QUICK_REFRESH;
             touch(&folder, theirs);
             assert!(matches!(
@@ -393,7 +418,9 @@ mod tests {
             assert_eq!(modified(&folder), Some(theirs), "no longer stamped");
             drop(lock);
             assert!(folder.is_dir(), "the new holder's lock is kept");
+            assert_eq!(token.exists(), by_another_muster);
             fs::remove_dir(&folder).unwrap();
+            let _ = fs::remove_file(&token);
         }
 
         let touched = take(&config, &quick()).unwrap().unwrap();

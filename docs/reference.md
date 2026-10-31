@@ -463,13 +463,17 @@ before any folder is made.
 Before it reads `.claude.json` to plan, muster takes Claude Code's own
 lock, the folder `<file>.lock` beside the path Claude Code is configured
 with, a link not followed, as Claude Code names it, waiting while Claude
-Code holds it and taking over one untouched for 10 seconds. It leaves a
-random token file in the folder it made, and the lock is muster's while
-that token is there; it stamps the folder's modified time every 2 seconds,
+Code holds it and taking over one untouched for 10 seconds. The folder
+stays empty, so Claude Code can always take it over once stale, even
+after muster dies holding it. muster writes a random token to
+`<file>.lock.muster` beside it, naming the folder it made, and the lock
+is muster's while that file holds muster's token and the folder is the
+one it names. It stamps the folder's modified time every 2 seconds,
 trying again at the next turn when a stamp fails, so Claude Code never
-takes the lock for stale, and it removes the folder, token first, only
-while the token is still muster's, writing nothing if another writer took
-the lock over. The lock is best-effort: Claude Code gives up on a held lock
+takes the lock for stale, and it removes the token file and then the
+folder only while the lock is still muster's, writing nothing if another
+writer took the lock over. A token file a muster that died left behind
+is replaced the next time muster takes the lock. The lock is best-effort: Claude Code gives up on a held lock
 after about 2 seconds and writes without it. The real guard is the check
 just before the files are replaced. Claude Code keeps its user and local
 servers in its older `.config.json`, in its config folder, instead of

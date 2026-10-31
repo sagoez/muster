@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 
 use nutype::nutype;
 
+use crate::adapter::spoken_list::{Conjunction, spoken_list};
+
 /// Most characters a server name holds, as Claude Code allows.
 const SERVER_NAME_MAX_CHARS: usize = 64;
 /// The name muster's entry takes unless another is asked for, and the key
@@ -9,15 +11,19 @@ const SERVER_NAME_MAX_CHARS: usize = 64;
 pub const DEFAULT_SERVER_NAME: &str = "muster";
 /// The punctuation a server name may hold besides ASCII letters and digits.
 const NAME_PUNCTUATION: [char; 2] = ['-', '_'];
-/// Between the last two kinds of character a server name takes.
-const LAST_SEPARATOR: &str = " and ";
+/// The kinds of character a server name holds besides its punctuation.
+const NAME_KINDS: [&str; 2] = ["ASCII letters", "digits"];
 
 /// The form a server name takes, for a refusal of one that does not.
 pub static SERVER_NAME_FORM: LazyLock<String> = LazyLock::new(|| {
-    let punctuation: Vec<String> = NAME_PUNCTUATION.iter().map(|c| format!("'{c}'")).collect();
+    let kinds: Vec<String> = NAME_KINDS
+        .iter()
+        .map(ToString::to_string)
+        .chain(NAME_PUNCTUATION.iter().map(|c| format!("'{c}'")))
+        .collect();
     format!(
-        "use 1 to {SERVER_NAME_MAX_CHARS} ASCII letters, digits, {}",
-        punctuation.join(LAST_SEPARATOR)
+        "use 1 to {SERVER_NAME_MAX_CHARS} {}",
+        spoken_list(&kinds, Conjunction::And)
     )
 });
 

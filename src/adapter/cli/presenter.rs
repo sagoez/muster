@@ -32,6 +32,7 @@ use crate::{
         detect::Candidate,
         sanitize::{printable, printable_lines},
         service::ProcessStatus,
+        spoken_list::{Conjunction, spoken_list},
     },
     constants::APP_NAME,
     domain::value::{ProcessName, ProjectName},
@@ -57,19 +58,10 @@ const CHOOSE_AGENTS_TO_REMOVE: &str = "Which agents should no longer run muster'
 const CHOOSE_AGENTS_ASKED: &str = "which agents to change";
 /// The flag that names the agents up front.
 const CLIENT_FLAG: &str = "--client";
-/// Between the agents the flag takes, but the last two.
-const AGENT_SEPARATOR: &str = ", ";
-/// Between the last two agents the flag takes.
-const LAST_AGENT_SEPARATOR: &str = " or ";
 /// The argument that answers it up front, naming every agent.
 pub(super) static CHOOSE_AGENTS_ARGUMENT: LazyLock<String> = LazyLock::new(|| {
     let names: Vec<String> = Agent::iter().map(|agent| agent.to_string()).collect();
-    let listed = match names.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{}{LAST_AGENT_SEPARATOR}{last}", rest.join(AGENT_SEPARATOR)),
-        None => String::new(),
-    };
-    format!("{CLIENT_FLAG} {listed}")
+    format!("{CLIENT_FLAG} {}", spoken_list(&names, Conjunction::Or))
 });
 /// The hint of an agent found installed, offered to add to.
 const AGENT_FOUND: &str = "installed";

@@ -33,6 +33,7 @@ pub mod service;
 pub mod shell;
 pub mod signal_hold;
 pub mod signal_target;
+pub mod spoken_list;
 pub mod store;
 pub mod terminal;
 #[cfg(test)]

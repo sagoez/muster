@@ -46,9 +46,11 @@ mod log_query;
 mod log_reader;
 mod log_scan;
 mod log_slice;
+mod log_tail;
 mod logged_line;
 #[cfg(test)]
 mod losing_sink;
+mod mark_file;
 mod matcher;
 mod pattern_error;
 mod piece;
@@ -63,7 +65,7 @@ mod recording_input;
 mod reject_reason;
 mod replay_request;
 mod resolved;
-mod run_starts;
+
 mod runner;
 #[cfg(test)]
 mod runner_fixture;
@@ -87,6 +89,7 @@ mod test_client;
 pub(crate) mod testing;
 #[cfg(test)]
 pub(crate) mod thread_launcher;
+mod visited_piece;
 #[cfg(test)]
 mod watch;
 
@@ -111,12 +114,13 @@ pub use log_query::*;
 pub use log_reader::*;
 pub use log_scan::*;
 pub use log_slice::*;
+pub use log_tail::*;
 pub use logged_line::*;
+pub use mark_file::{MarksStamp, marks_stamp, stream_marks};
 pub use pattern_error::*;
 pub use protocol::*;
 pub use record::*;
 pub use reject_reason::*;
-pub use run_starts::run_starts;
 pub use runner::*;
 pub use served_screen::*;
 pub use server::*;

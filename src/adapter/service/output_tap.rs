@@ -1,13 +1,26 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use super::tap_line::TapLine;
 use crate::{
-    adapter::terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
+    adapter::terminal::{
+        escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer,
+        stream_marks::StreamMarks,
+    },
     domain::value::OutputCursor,
 };
 
 /// Bytes of rendered lines a tap keeps, newest last.
 pub const TAP_RING_BYTES: usize = 256 * 1024;
+/// Columns an unfinished line may span and still be rendered whole for a
+/// pattern on every chunk: a prompt is far shorter.
+pub const CHEAP_PARTIAL_CELLS: usize = 1024;
+/// How long a longer unfinished line waits to be rendered whole for a
+/// pattern, so a line that never ends costs the loop one rendering of it
+/// per this period, however many chunks land on it.
+pub const PARTIAL_RECHECK: Duration = Duration::from_millis(100);
 
 /// The output stream of one process as lines, for waits and readiness to be
 /// tested against: renders each chunk as the next piece of one stream,
@@ -19,7 +32,10 @@ pub const TAP_RING_BYTES: usize = 256 * 1024;
 /// proportion to its own length, never to the length of the line it lands
 /// on, so a line that never ends cannot make the service loop render it
 /// again for every chunk. Only [`OutputTap::unfinished`] renders the line
-/// in progress whole, for a caller that has a pattern to test it against.
+/// in progress whole, for a caller that has a pattern to test it against,
+/// and [`OutputTap::unfinished_for_pattern`] does so on a chunk only while
+/// the line is short, leaving a longer one for [`OutputTap::unfinished_due`]
+/// at most once per [`PARTIAL_RECHECK`].
 pub struct OutputTap {
     /// The newest complete lines, oldest first.
     ring: VecDeque<TapLine>,
@@ -31,9 +47,14 @@ pub struct OutputTap {
     partial_at: OutputCursor,
     /// Where the current run began, once one has.
     run_start: Option<OutputCursor>,
+    /// Where the newest run in a seeded log began, by its marks.
+    logged_run_start: Option<OutputCursor>,
     /// Whether the cursor stands where the output really ends: a run began
     /// here, or the log's end was read.
     placed: bool,
+    /// When a long unfinished line left untested for a pattern is due to be
+    /// rendered whole and tested.
+    recheck: Option<Instant>,
 }
 
 impl OutputTap {
@@ -45,7 +66,9 @@ impl OutputTap {
             renderer: PlacedRenderer::new(start),
             partial_at: start,
             run_start: None,
+            logged_run_start: None,
             placed: false,
+            recheck: None,
         }
     }
 
@@ -66,10 +89,22 @@ impl OutputTap {
     }
 
     /// Takes `bytes`, the last of a log that starts at `at`, of output from
-    /// runs this tap never saw begin: the cursor moves to their end and their
-    /// lines are kept, but no run is claimed, so no run start is made up.
-    pub fn seed_at(&mut self, at: OutputCursor, bytes: &[u8]) {
+    /// runs this tap never saw begin, rendered as every reader renders the
+    /// log: on the screen `marks` say was up at `at`, and restarted at each
+    /// run start they record. The cursor moves to their end and their lines
+    /// are kept, and the last lines are those of the run the log says began
+    /// last; but no run is claimed, as this service never saw one begin.
+    pub fn seed_at(&mut self, at: OutputCursor, bytes: &[u8], marks: &StreamMarks) {
+        if at >= self.cursor() {
+            self.renderer.finish();
+            self.keep_finished();
+            self.renderer = PlacedRenderer::placed(at, marks);
+            self.partial_at = at;
+        } else {
+            self.renderer.restart_at(marks.run_starts());
+        }
         self.feed(Some(at), bytes);
+        self.logged_run_start = marks.last_run_start(self.cursor());
         self.placed = true;
     }
 
@@ -84,17 +119,21 @@ impl OutputTap {
     }
 
     /// Starts a new run at `start`, the offset its log says it began at,
-    /// which every later positioned chunk counts from. The current run placed
-    /// again, as a reconnect does, keeps what was seen of it, and the cursor
-    /// never moves back.
+    /// which every later positioned chunk counts from. The rendering starts
+    /// over only where the run truly begins: at `start` when the tap stands
+    /// there or before it. A tap already past `start` has rendered the run's
+    /// first bytes, as a reconnect or a seeded log leaves it, and keeps what
+    /// it drew of them; the cursor never moves back.
     pub fn begin_run_at(&mut self, start: OutputCursor) {
         if self.run_start == Some(start) {
             return;
         }
-        self.renderer.restart();
-        self.keep_finished();
-        self.renderer.skip_to(start);
-        self.partial_at = self.cursor();
+        if start >= self.cursor() {
+            self.renderer.finish();
+            self.keep_finished();
+            self.renderer.skip_to(start);
+            self.partial_at = start;
+        }
         self.run_start = Some(start);
         self.placed = true;
     }
@@ -138,6 +177,34 @@ impl OutputTap {
         self.renderer
             .peek_partial()
             .map(|line| self.tap_line(&line, self.partial_at))
+    }
+
+    /// The line still being written, for a pattern to test after a chunk at
+    /// `now`, while it spans at most [`CHEAP_PARTIAL_CELLS`] columns. A
+    /// longer one is not rendered now: it is due [`PARTIAL_RECHECK`] after
+    /// the first chunk that left it untested, for [`Self::unfinished_due`].
+    pub fn unfinished_for_pattern(&mut self, now: Instant) -> Option<TapLine> {
+        if self.renderer.partial_width() <= CHEAP_PARTIAL_CELLS {
+            self.recheck = None;
+            return self.unfinished();
+        }
+        self.recheck.get_or_insert(now + PARTIAL_RECHECK);
+        None
+    }
+
+    /// When a long unfinished line left untested is due, if one is.
+    pub fn recheck_at(&self) -> Option<Instant> {
+        self.recheck
+    }
+
+    /// The line still being written, rendered whole, once a long one left
+    /// untested is due at `now`.
+    pub fn unfinished_due(&mut self, now: Instant) -> Option<TapLine> {
+        if self.recheck.is_none_or(|due| due > now) {
+            return None;
+        }
+        self.recheck = None;
+        self.unfinished()
     }
 
     /// The held lines that began at or after `since`, with the unfinished
@@ -190,7 +257,10 @@ impl OutputTap {
     /// The last `count` lines of the current run, oldest first, the
     /// unfinished one included.
     pub fn tail(&self, count: usize) -> Vec<String> {
-        let start = self.run_start.unwrap_or(OutputCursor::new(0));
+        let start = self
+            .run_start
+            .or(self.logged_run_start)
+            .unwrap_or(OutputCursor::new(0));
         let mut lines: Vec<String> = self
             .unfinished()
             .into_iter()
@@ -227,7 +297,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::adapter::terminal::line_drawing::MAX_LINE_CELLS;
+    use crate::adapter::terminal::{
+        line_drawing::MAX_LINE_CELLS, mark_kind::MarkKind, stream_mark::StreamMark,
+    };
 
     /// Chunks of 1024 erases the endless-erase test feeds: a megabyte.
     const ERASE_CHUNKS: usize = 256;
@@ -382,7 +454,11 @@ mod tests {
         let mut tap = OutputTap::new(OutputCursor::new(0));
         assert!(!tap.is_placed());
 
-        tap.seed_at(OutputCursor::new(4096), b"39999\n40000\n");
+        tap.seed_at(
+            OutputCursor::new(4096),
+            b"39999\n40000\n",
+            &StreamMarks::default(),
+        );
 
         assert!(tap.is_placed());
         assert_eq!(tap.run_start(), None);
@@ -406,6 +482,47 @@ mod tests {
         tap.begin_run_at(OutputCursor::new(10));
         assert_eq!(tap.cursor(), OutputCursor::new(47));
         assert_eq!(tap.run_start(), Some(OutputCursor::new(10)));
+    }
+
+    /// Placing a run that began behind what the tap already rendered keeps
+    /// the state the run's first bytes left, as the alternate screen they
+    /// brought up, rather than starting over mid-run.
+    #[test]
+    fn placing_a_run_behind_the_cursor_keeps_its_state() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.seed_at(
+            OutputCursor::new(40),
+            b"\x1b[?1049hframe 1\n",
+            &StreamMarks::default(),
+        );
+
+        tap.begin_run_at(OutputCursor::new(40));
+        let lines = tap.feed(None, b"frame 2\n");
+
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(tap.run_start(), Some(OutputCursor::new(40)));
+    }
+
+    /// A seeded log renders from the screen its marks say is up where the
+    /// seed begins, and keeps the last run's lines as the tail.
+    #[test]
+    fn a_seed_starts_on_the_screen_its_marks_name() {
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        let marks = StreamMarks::new(vec![
+            StreamMark::builder()
+                .at(OutputCursor::new(0))
+                .kind(MarkKind::RunStart)
+                .build(),
+            StreamMark::builder()
+                .at(OutputCursor::new(30))
+                .kind(MarkKind::EnterAlternate)
+                .build(),
+        ]);
+
+        tap.seed_at(OutputCursor::new(100), b"frame 1\nframe 2\n", &marks);
+
+        assert!(tap.tail(5).is_empty(), "{:?}", tap.tail(5));
+        assert_eq!(tap.run_start(), None, "no run is claimed");
     }
 
     #[test]

@@ -5,12 +5,12 @@ use std::{
 
 use super::{
     followed_output::FollowedOutput,
+    marks_watch::MarksWatch,
     rendered_log::{PENDING_LINE_IDLE, gap_line},
 };
 use crate::{
     adapter::{
         client::LogText,
-        holder::run_starts,
         terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
     },
     domain::value::OutputCursor,
@@ -32,18 +32,24 @@ pub struct JsonLogLines<'a> {
     renderer: PlacedRenderer,
     /// When bytes last arrived.
     last_write: Instant,
+    /// The marks of the template's log, whose run starts the rendering
+    /// restarts at.
+    marks: MarksWatch,
 }
 
 impl<'a> JsonLogLines<'a> {
     /// A writer of lines shaped like `template` into `out`, whose first byte
-    /// sits at `start` in the process's output; the rendering restarts at
-    /// the run starts the template's log records.
+    /// sits at `start` in the process's output; the rendering starts on the
+    /// screen the template's log's marks say is up there, and restarts at
+    /// the run starts they record.
     pub fn new(out: &'a mut dyn Write, template: LogText, start: OutputCursor) -> Self {
+        let mut marks = MarksWatch::new(template.log().clone());
         Self {
             out,
             template,
-            renderer: PlacedRenderer::new(start),
+            renderer: marks.renderer_at(start),
             last_write: Instant::now(),
+            marks,
         }
     }
 
@@ -97,9 +103,7 @@ impl Write for JsonLogLines<'_> {
     /// and a run's start is recorded before its first byte, so every run
     /// start among them is known.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if let Some(log) = self.template.log() {
-            self.renderer.restart_at(run_starts(log));
-        }
+        self.marks.refresh(&mut self.renderer);
         for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
             self.renderer.advance(piece);
             self.write_lines()?;

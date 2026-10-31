@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::{HolderRecord, HolderRunner, LineMatcher, LogScan, abandon, collect},
+        holder::{HolderRecord, HolderRunner, LineMatcher, LogScan, LogTail, abandon, collect},
         service::{NoticeLevel, ServiceEvent},
     },
     domain::{
@@ -115,11 +115,7 @@ pub trait HolderAdopter {
     /// Where the log of the process `name` of `project` ends, and its last
     /// bytes before that with where they start, for a process this service
     /// never saw run. Defaults to none: no log is known.
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
         None
     }
 
@@ -177,11 +173,7 @@ impl HolderAdopter for HolderRunner {
         HolderRunner::adopt(self, record, since, sink)
     }
 
-    fn log_tail(
-        &self,
-        project: &ProjectRoot,
-        name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    fn log_tail(&self, project: &ProjectRoot, name: &ProcessName) -> Option<LogTail> {
         HolderRunner::log_tail(self, project, name)
     }
 

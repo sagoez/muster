@@ -131,8 +131,8 @@ impl HolderServer {
             .clone()
             .and_then(|root| ProjectRoot::try_new(root).ok())
             .ok_or(HolderError::MissingProject)?;
-        let log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
-        log.record_run_start()?;
+        let mut log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
+        log.record_run_start();
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
         let handle = runner.spawn(request.clone(), Box::new(HolderSink::new(sender.clone())))?;
         let child_started_at = SystemTime::now();
@@ -350,6 +350,7 @@ impl HolderServer {
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
         let _ = self.log.append(&bytes);
+        self.report_log_warning()?;
         if reset {
             self.resync_all()?;
             return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
@@ -458,7 +459,33 @@ impl HolderServer {
             self.reported_attached = self.writable_attached();
         }
         self.resync(client)?;
+        self.report_log_warning()?;
         self.report_attached()
+    }
+
+    /// Tells the supervisor, once one is connected, why the log's marks
+    /// could not be written, so the failure reaches the user as a notice
+    /// though the run goes on.
+    ///
+    /// # Errors
+    /// Returns a [`HolderError`] when the message cannot be encoded.
+    fn report_log_warning(&mut self) -> Result<(), HolderError> {
+        let supervisors: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, entry)| entry.role == Some(ClientRole::Supervisor))
+            .map(|(id, _)| *id)
+            .collect();
+        if supervisors.is_empty() {
+            return Ok(());
+        }
+        let Some(warning) = self.log.take_warning() else {
+            return Ok(());
+        };
+        for client in supervisors {
+            self.send(client, HolderMessage::Warning(warning.clone()))?;
+        }
+        Ok(())
     }
 
     /// Replaces whatever `client` has queued with the live screen, then the

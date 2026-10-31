@@ -19,6 +19,8 @@ use super::{
     line_matcher::LineMatcher,
     log_reader::{first_match, last_lines, log_end, read_log_range},
     log_scan::LogScan,
+    log_tail::LogTail,
+    mark_file::stream_marks,
     protocol::HolderMessage,
     record::HolderRecord,
 };
@@ -196,18 +198,22 @@ impl HolderRunner {
     }
 
     /// Where the log of the process `name` of `project` ends, and its last
-    /// bytes before that, at most `LOG_TAIL_BYTES`, with where they start:
-    /// what a supervisor that never saw the process run reports of it. None
-    /// when the log cannot be read, as before any run wrote one.
-    pub fn log_tail(
-        &self,
-        project: &ProjectRoot,
-        name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    /// bytes before that, at most `LOG_TAIL_BYTES`, with where they start and
+    /// the log's marks, read after them so they cover every run start among
+    /// them: what a supervisor that never saw the process run reports of it.
+    /// None when the log cannot be read, as before any run wrote one.
+    pub fn log_tail(&self, project: &ProjectRoot, name: &ProcessName) -> Option<LogTail> {
         let log = self.dirs.process_log(project, name);
         let end = log_end(&log).ok()?;
         let from = OutputCursor::new(end.offset().saturating_sub(LOG_TAIL_BYTES));
-        read_log_range(&log, from, end, LOG_TAIL_BYTES).ok()
+        let (at, bytes) = read_log_range(&log, from, end, LOG_TAIL_BYTES).ok()?;
+        Some(
+            LogTail::builder()
+                .at(at)
+                .bytes(bytes)
+                .marks(stream_marks(&log))
+                .build(),
+        )
     }
 
     /// The first line of the log of the process `name` of `project` that

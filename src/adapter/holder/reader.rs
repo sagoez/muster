@@ -94,16 +94,17 @@ impl Reader {
         if matchers.is_empty() {
             return;
         }
-        let _ = visit_lines(&log, from, until, |at, line, texts| {
+        let _ = visit_lines(&log, from, until, |piece| {
             if self.sink.is_detached() {
                 return ControlFlow::Break(());
             }
-            if !line.is_empty()
-                && texts
+            if !piece.bytes().is_empty()
+                && piece
+                    .texts()
                     .iter()
                     .any(|text| matchers.iter().any(|matcher| matcher.is_match(text)))
             {
-                self.forward(at, line.to_vec());
+                self.forward(piece.at(), piece.bytes().to_vec());
             }
             ControlFlow::Continue(())
         });

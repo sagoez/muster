@@ -4,14 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::followed_output::FollowedOutput;
+use super::{followed_output::FollowedOutput, marks_watch::MarksWatch};
 use crate::{
-    adapter::{
-        holder::run_starts,
-        terminal::{
-            bounded_parser::char_chunks, coloring::Coloring, escape::LINE_FEED, log_line::LogLine,
-            log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
-        },
+    adapter::terminal::{
+        bounded_parser::char_chunks, coloring::Coloring, escape::LINE_FEED, log_line::LogLine,
+        log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
     },
     domain::value::OutputCursor,
 };
@@ -49,26 +46,28 @@ pub struct RenderedLog<'a> {
     last_write: Instant,
     /// Whether a line was written in part, its line break still to come.
     open: bool,
-    /// The log whose run starts the rendering restarts at.
-    log: Option<PathBuf>,
+    /// The marks of the log, whose run starts the rendering restarts at.
+    marks: MarksWatch,
 }
 
 impl<'a> RenderedLog<'a> {
     /// Writes into `out`, colored as `coloring` asks, the output of the log
-    /// at `log` from `start`, restarting at the run starts it records.
+    /// at `log` from `start`, starting on the screen its marks say is up
+    /// there and restarting at the run starts they record.
     pub fn new(
         out: &'a mut dyn Write,
         coloring: Coloring,
         start: OutputCursor,
         log: Option<PathBuf>,
     ) -> Self {
+        let mut marks = MarksWatch::new(log);
         Self {
             out,
-            renderer: PlacedRenderer::new(start),
+            renderer: marks.renderer_at(start),
             coloring,
             last_write: Instant::now(),
             open: false,
-            log,
+            marks,
         }
     }
 
@@ -129,9 +128,7 @@ impl Write for RenderedLog<'_> {
     /// read after the bytes, and a run's start is recorded before its first
     /// byte, so every run start among the bytes is known.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if let Some(log) = &self.log {
-            self.renderer.restart_at(run_starts(log));
-        }
+        self.marks.refresh(&mut self.renderer);
         for chunk in char_chunks(bytes, RENDER_CHUNK_BYTES) {
             self.renderer.advance(chunk);
             self.write_lines()?;
@@ -320,10 +317,10 @@ mod tests {
         )
         .unwrap();
         let (first, second) = steering_runs();
-        log.record_run_start().unwrap();
+        log.record_run_start();
         log.append(&first).unwrap();
         let second_start = log.end();
-        log.record_run_start().unwrap();
+        log.record_run_start();
         log.append(&second).unwrap();
         let mut stream = first.clone();
         stream.extend_from_slice(&second);

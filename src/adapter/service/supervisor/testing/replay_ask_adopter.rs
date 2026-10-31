@@ -6,8 +6,9 @@ use typed_builder::TypedBuilder;
 use super::replay_ask_handle::ReplayAskHandle;
 use crate::{
     adapter::{
-        holder::{HolderRecord, LineMatcher, LogScan, LoggedLine},
+        holder::{HolderRecord, LineMatcher, LogScan, LogTail, LoggedLine},
         service::supervisor::HolderAdopter,
+        terminal::stream_marks::StreamMarks,
     },
     domain::{
         port::{OutputSink, ProcessHandle},
@@ -68,18 +69,20 @@ impl HolderAdopter for ReplayAskAdopter {
 
     /// Every logged line, from the oldest's offset; none when nothing is
     /// logged, as a log that cannot be read.
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
         let oldest = self.logged.first()?;
         let bytes = self
             .logged
             .iter()
             .flat_map(|line| format!("{}\n", line.text()).into_bytes())
             .collect();
-        Some((oldest.at(), bytes))
+        Some(
+            LogTail::builder()
+                .at(oldest.at())
+                .bytes(bytes)
+                .marks(StreamMarks::default())
+                .build(),
+        )
     }
 
     fn log_scan(

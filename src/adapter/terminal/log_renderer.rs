@@ -100,6 +100,18 @@ impl LogRenderer {
         self.recover();
     }
 
+    /// Columns the line still being drawn spans, which reading it whole
+    /// costs.
+    pub fn partial_width(&self) -> usize {
+        self.drawing.width()
+    }
+
+    /// Puts the rendering on the alternate screen, as a reader starting
+    /// where a process left it up must be.
+    pub fn enter_alternate(&mut self) {
+        self.drawing.enter_alternate();
+    }
+
     /// How many lines were dropped because rendering them panicked, since
     /// the last call.
     pub fn take_faults(&mut self) -> usize {

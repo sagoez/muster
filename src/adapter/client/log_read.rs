@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
 use crate::{
     adapter::{
-        holder::run_starts,
+        holder::stream_marks,
         terminal::{
             bounded_parser::char_chunks, escape::LINE_FEED, log_line::LogLine,
             log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
@@ -63,11 +63,12 @@ impl LogRead {
     }
 
     /// Every line read of the log at `log`, rendered as `muster logs` prints
-    /// it without color and restarted at each run start the log records,
-    /// each ending in a line break, the unfinished last one too.
+    /// it without color, from the screen the log's marks say is up where the
+    /// read starts and restarted at each run start they record, each ending
+    /// in a line break, the unfinished last one too.
     fn rendered_text(&self, log: &Path) -> String {
-        let mut renderer = PlacedRenderer::new(self.start().unwrap_or(OutputCursor::new(0)));
-        renderer.restart_at(run_starts(log));
+        let start = self.start().unwrap_or(OutputCursor::new(0));
+        let mut renderer = PlacedRenderer::placed(start, &stream_marks(log));
         let mut text = String::new();
         let mut append = |lines: Vec<LogLine>| {
             for line in lines {

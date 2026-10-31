@@ -11,13 +11,14 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::LineMatcher,
+        holder::{LineMatcher, LogTail},
         service::{
             EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
             OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
+        terminal::stream_marks::StreamMarks,
     },
     domain::{
         port::ListeningSocket,
@@ -393,11 +394,7 @@ impl Supervisor {
     /// adoption is answered timed out with that tail's last lines; any other
     /// is refused when its `since` is past that end and registered, or held
     /// on a scan, otherwise.
-    pub(super) fn answer_held_waits(
-        &mut self,
-        pane: PaneId,
-        tail: Option<(OutputCursor, Vec<u8>)>,
-    ) {
+    pub(super) fn answer_held_waits(&mut self, pane: PaneId, tail: Option<LogTail>) {
         let Some(waits) = self.held_waits.get_mut(&pane) else {
             return;
         };
@@ -422,10 +419,7 @@ impl Supervisor {
             })
             .collect();
         if !timed_out.is_empty() {
-            let last_lines = tail
-                .as_ref()
-                .map(|(at, bytes)| log_tail_lines(*at, bytes))
-                .unwrap_or_default();
+            let last_lines = tail.as_ref().map(log_tail_lines).unwrap_or_default();
             for (held, cursor) in timed_out {
                 let waiter = self.held_waiter(held);
                 self.answer_with_tail(
@@ -441,8 +435,15 @@ impl Supervisor {
             return;
         }
         if self.knows_no_output(pane) {
-            let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
-            self.tap(pane).seed_at(at, &bytes);
+            match &tail {
+                Some(tail) => self
+                    .tap(pane)
+                    .seed_at(*tail.at(), tail.bytes(), tail.marks()),
+                None => {
+                    self.tap(pane)
+                        .seed_at(OutputCursor::new(0), &[], &StreamMarks::default());
+                },
+            }
             self.report_render_faults(pane);
         }
         for HeldWait {
@@ -626,12 +627,31 @@ impl Supervisor {
             .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
         let held = self.held_waits.values().flatten().map(|held| held.deadline);
         let answers = self.held_answers.iter().map(|held| held.deadline);
+        let rechecks = self.taps.values().filter_map(OutputTap::recheck_at);
         waits
             .chain(checks)
             .chain(windows)
             .chain(held)
             .chain(answers)
+            .chain(rechecks)
             .min()
+    }
+
+    /// Tests each long unfinished line left untested and due by `now`
+    /// against the patterns still waiting on its pane.
+    fn test_due_partials(&mut self, now: Instant) {
+        let due: Vec<PaneId> = self
+            .taps
+            .iter()
+            .filter(|(_, tap)| tap.recheck_at().is_some_and(|at| at <= now))
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in due {
+            let line = self.tap(pane).unfinished_due(now);
+            if self.awaits_a_pattern(pane) {
+                self.test_lines(pane, &Vec::from_iter(line));
+            }
+        }
     }
 
     /// When the quick-exit window of `pane`'s live run ends.
@@ -648,6 +668,7 @@ impl Supervisor {
     /// condition now holds. The host runs it after each event it hands the
     /// supervisor.
     pub fn settle_waits(&mut self, now: Instant) {
+        self.test_due_partials(now);
         self.release_adoption_waits();
         self.settle_overdue_held_waits(now);
         self.send_overdue_answers(now);
@@ -737,11 +758,14 @@ impl Supervisor {
     /// completed against the pane's readiness pattern and log waits, and the
     /// line still being written too, so a prompt with no newline can match.
     /// That line is rendered whole only while a pattern waits on the pane;
-    /// otherwise a chunk costs only its own bytes.
+    /// otherwise a chunk costs only its own bytes, and a line too long to
+    /// render whole on every chunk is tested at most once per
+    /// [`PARTIAL_RECHECK`](crate::adapter::service::output_tap::PARTIAL_RECHECK),
+    /// from [`Self::settle_waits`].
     pub(super) fn tap_output(&mut self, pane: PaneId, at: Option<OutputCursor>, bytes: &[u8]) {
         let mut lines = self.tap(pane).feed(at, bytes);
         if self.awaits_a_pattern(pane) {
-            lines.extend(self.tap(pane).unfinished());
+            lines.extend(self.tap(pane).unfinished_for_pattern(Instant::now()));
         }
         self.report_render_faults(pane);
         self.test_lines(pane, &lines);
@@ -1077,7 +1101,7 @@ impl Supervisor {
         if patterns.is_empty()
             && let Some(start) = start
         {
-            self.tap(pane).seed_at(start, &[]);
+            self.tap(pane).seed_at(start, &[], &StreamMarks::default());
         }
     }
 
@@ -1476,11 +1500,11 @@ fn invalid_input(message: String) -> ServiceErrorBody {
         .build()
 }
 
-/// The last [`FAILURE_TAIL_LINES`] lines of `bytes`, the end of a log that
-/// starts at `at`.
-fn log_tail_lines(at: OutputCursor, bytes: &[u8]) -> Vec<String> {
-    let mut tap = OutputTap::new(at);
-    tap.seed_at(at, bytes);
+/// The last [`FAILURE_TAIL_LINES`] lines of the newest run in `tail`, the
+/// end of a log, rendered as every reader renders it.
+fn log_tail_lines(tail: &LogTail) -> Vec<String> {
+    let mut tap = OutputTap::new(*tail.at());
+    tap.seed_at(*tail.at(), tail.bytes(), tail.marks());
     tap.tail(FAILURE_TAIL_LINES)
 }
 
@@ -1494,13 +1518,13 @@ mod tests {
     use crate::{
         adapter::{
             service::{
-                LaunchEnvironment, StackEvent, StateGoal,
+                LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
                 supervisor::{
                     LogReadResult,
                     testing::{name as process_name, spec as process_spec, *},
                 },
             },
-            terminal::render_fault,
+            terminal::{mark_kind::MarkKind, render_fault, stream_mark::StreamMark},
         },
         domain::{
             config::ProcessSpec,
@@ -2272,7 +2296,13 @@ mod tests {
             landed,
             read,
             LogReadResult::builder()
-                .tail(Some((OutputCursor::new(0), b"late\n".to_vec())))
+                .tail(Some(
+                    LogTail::builder()
+                        .at(OutputCursor::new(0))
+                        .bytes(b"late\n".to_vec())
+                        .marks(StreamMarks::default())
+                        .build(),
+                ))
                 .build(),
         );
         let supervisor = harness.supervisor();
@@ -2354,5 +2384,128 @@ mod tests {
         assert_eq!(harness.notice_messages(), [
             "api: 1 line(s) of output could not be rendered and were dropped"
         ]);
+    }
+
+    /// A mark of `kind` at `offset`.
+    fn mark(kind: MarkKind, offset: u64) -> StreamMark {
+        StreamMark::builder()
+            .at(OutputCursor::new(offset))
+            .kind(kind)
+            .build()
+    }
+
+    /// The end of a log: a run killed on the alternate screen, then a run
+    /// that printed two lines, with the marks the holder records for them,
+    /// the first byte at offset 100.
+    fn killed_on_the_full_screen() -> (Vec<u8>, StreamMarks) {
+        let tail = b"run 1\n\x1b[?1049hTUI\nready\nboom\n".to_vec();
+        let marks = StreamMarks::new(vec![
+            mark(MarkKind::RunStart, 100),
+            mark(MarkKind::EnterAlternate, 114),
+            mark(MarkKind::RunStart, 118),
+        ]);
+        (tail, marks)
+    }
+
+    /// A wait seeded from the log of a process this service never saw run
+    /// renders it as every reader does: the run killed on the alternate
+    /// screen hides nothing of the next, and the tail is the last run's.
+    #[test]
+    fn a_seeded_wait_renders_each_run_from_a_fresh_terminal() {
+        let start = OutputCursor::new(100);
+        let (tail, marks) = killed_on_the_full_screen();
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::marked(start, &tail, marks)));
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("never")), Some(start)),
+            None,
+        );
+
+        let outcome = answered(&answers).expect("a process not running is answered at once");
+        assert_eq!(*outcome.tail(), ["ready", "boom"]);
+    }
+
+    /// The tail a timed-out wait carries from a log renders it as every
+    /// reader does, from a run killed on the alternate screen and from a
+    /// screen brought up before the tail's first byte.
+    #[test]
+    fn a_log_tail_renders_as_every_reader_does() {
+        let (bytes, marks) = killed_on_the_full_screen();
+        let killed = LogTail::builder()
+            .at(OutputCursor::new(100))
+            .bytes(bytes)
+            .marks(marks)
+            .build();
+        let mid_screen = LogTail::builder()
+            .at(OutputCursor::new(500))
+            .bytes(b"frame 1\nframe 2\n".to_vec())
+            .marks(StreamMarks::new(vec![
+                mark(MarkKind::RunStart, 0),
+                mark(MarkKind::EnterAlternate, 20),
+            ]))
+            .build();
+
+        assert_eq!(log_tail_lines(&killed), ["ready", "boom"]);
+        assert!(log_tail_lines(&mid_screen).is_empty());
+    }
+
+    /// Chunks of erases the pending-pattern test feeds onto one long line.
+    const ERASE_CHUNKS: usize = 1024;
+    /// How long those chunks may take with a pattern waiting; rendering the
+    /// whole line for each took seconds.
+    const ERASE_BOUND: Duration = Duration::from_secs(2);
+
+    /// A pattern waiting on a process costs each chunk only its own bytes,
+    /// even on a line that never ends and is erased again and again: the
+    /// long unfinished line is tested at most once per recheck, not once
+    /// per chunk, and a match on it is still found then.
+    #[test]
+    fn a_waiting_pattern_tests_a_long_unfinished_line_once_per_recheck() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("READY")), None), None);
+        print(&mut harness, "api", &vec![b'x'; 32 * 1024]);
+        let erases = b"\x1b[1K".repeat(1024);
+        let started = Instant::now();
+
+        for _ in 0..ERASE_CHUNKS {
+            print(&mut harness, "api", &erases);
+        }
+
+        assert!(
+            started.elapsed() < ERASE_BOUND,
+            "{:?} for {ERASE_CHUNKS} chunks",
+            started.elapsed()
+        );
+        print(&mut harness, "api", b"\rREADY");
+        assert!(answered(&answers).is_none(), "the long line waits its turn");
+        let due = harness
+            .supervisor()
+            .next_wait_deadline()
+            .expect("the recheck is a deadline");
+        assert!(due <= Instant::now() + PARTIAL_RECHECK);
+        harness.supervisor_mut().settle_waits(due);
+        let outcome = answered(&answers).expect("the recheck finds the match");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+    }
+
+    /// A short unfinished line, such as a prompt, is tested on the chunk
+    /// that drew it.
+    #[test]
+    fn a_waiting_pattern_tests_a_short_unfinished_line_at_once() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("Password:")), None),
+            None,
+        );
+
+        print(&mut harness, "api", b"Password: ");
+
+        let outcome = answered(&answers).expect("a prompt matches at once");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
     }
 }

@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, mem};
 
-use super::{log_line::LogLine, log_renderer::LogRenderer};
+use super::{log_line::LogLine, log_renderer::LogRenderer, stream_marks::StreamMarks};
 use crate::domain::value::OutputCursor;
 
 /// A [`LogRenderer`] that knows where in a process's output each byte it
@@ -26,19 +26,41 @@ impl PlacedRenderer {
         }
     }
 
+    /// A renderer whose first byte sits at `at`, in the state `marks` say
+    /// the stream is in there, restarting at each run start they record.
+    pub fn placed(at: OutputCursor, marks: &StreamMarks) -> Self {
+        let mut renderer = Self::new(at);
+        renderer.restart_at(marks.run_starts());
+        if marks.alternate_at(at) {
+            renderer.renderer.enter_alternate();
+        }
+        renderer
+    }
+
     /// Where the next byte sits.
     pub fn next(&self) -> OutputCursor {
         self.next
     }
 
-    /// Notes run starts; only those not yet passed are kept.
+    /// Notes run starts; only those not yet passed are kept. Merged with
+    /// those known, so noting the same starts again costs their count.
     pub fn restart_at(&mut self, starts: impl IntoIterator<Item = OutputCursor>) {
-        for start in starts {
-            if start < self.next || self.restarts.contains(&start) {
-                continue;
+        let mut incoming: Vec<OutputCursor> = starts
+            .into_iter()
+            .filter(|start| *start >= self.next)
+            .collect();
+        incoming.sort_unstable();
+        let known = mem::take(&mut self.restarts);
+        let mut known = known.into_iter().peekable();
+        let mut incoming = incoming.into_iter().peekable();
+        while let Some(start) = match (known.peek(), incoming.peek()) {
+            (Some(old), Some(new)) if new < old => incoming.next(),
+            (Some(_), _) => known.next(),
+            (None, _) => incoming.next(),
+        } {
+            if self.restarts.back() != Some(&start) {
+                self.restarts.push_back(start);
             }
-            let at = self.restarts.partition_point(|known| *known < start);
-            self.restarts.insert(at, start);
         }
     }
 
@@ -107,6 +129,11 @@ impl PlacedRenderer {
     /// The whole line still being drawn, unless it is blank.
     pub fn peek_partial(&self) -> Option<LogLine> {
         self.renderer.peek_partial()
+    }
+
+    /// Columns the line still being drawn spans.
+    pub fn partial_width(&self) -> usize {
+        self.renderer.partial_width()
     }
 
     /// Ends the line still being drawn as the end of the output does.

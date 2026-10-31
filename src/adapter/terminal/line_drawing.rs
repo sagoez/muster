@@ -197,6 +197,17 @@ impl LineDrawing {
         self.finished = finished;
     }
 
+    /// Columns the line being drawn spans, which reading it costs.
+    pub fn width(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Puts the drawing on the alternate screen, whose output is left out
+    /// until it goes away.
+    pub fn enter_alternate(&mut self) {
+        self.alternate = true;
+    }
+
     /// Whether what is drawn lands on the line rather than an overlay.
     fn on_line(&self) -> bool {
         !self.detached && !self.alternate

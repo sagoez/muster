@@ -1,5 +1,9 @@
 use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
+    adapter::{
+        holder::{HolderRecord, LogTail},
+        service::supervisor::HolderAdopter,
+        terminal::stream_marks::StreamMarks,
+    },
     domain::{
         port::{OutputSink, ProcessHandle},
         pty::PtyError,
@@ -14,14 +18,24 @@ pub(crate) struct LoggedAdopter {
     at: OutputCursor,
     /// The last bytes of every log.
     tail: Vec<u8>,
+    /// The marks every log records.
+    marks: StreamMarks,
 }
 
 impl LoggedAdopter {
-    /// An adopter whose logs end with `tail`, starting at `at`.
+    /// An adopter whose logs end with `tail`, starting at `at`, and record
+    /// no marks.
     pub(crate) fn new(at: OutputCursor, tail: &[u8]) -> Self {
+        Self::marked(at, tail, StreamMarks::default())
+    }
+
+    /// An adopter whose logs end with `tail`, starting at `at`, and record
+    /// `marks`.
+    pub(crate) fn marked(at: OutputCursor, tail: &[u8], marks: StreamMarks) -> Self {
         Self {
             at,
             tail: tail.to_vec(),
+            marks,
         }
     }
 }
@@ -44,11 +58,13 @@ impl HolderAdopter for LoggedAdopter {
         Err(PtyError::System(String::new()))
     }
 
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
-        Some((self.at, self.tail.clone()))
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
+        Some(
+            LogTail::builder()
+                .at(self.at)
+                .bytes(self.tail.clone())
+                .marks(self.marks.clone())
+                .build(),
+        )
     }
 }

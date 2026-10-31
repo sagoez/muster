@@ -4141,6 +4141,60 @@ fn a_line_that_never_ends_never_slows_the_service() {
     );
 }
 
+/// A pattern waiting on a process never brings the slow loop back: with a
+/// `wait --log` pending on a line that never ends and is erased at full
+/// speed, the service still answers `ps` at once, as the unfinished line is
+/// tested at most once per recheck instead of once per chunk.
+#[test]
+fn a_pending_wait_on_an_endless_line_never_slows_the_service() {
+    /// How many `ps` calls are timed.
+    const CALLS: usize = 7;
+    /// The slowest a `ps` may answer; with the line rendered per chunk it
+    /// took up to 6 s.
+    const SLOWEST: Duration = Duration::from_secs(3);
+    /// The most the median `ps` may take; it took seconds.
+    const MEDIAN: Duration = Duration::from_secs(1);
+    let scratch = Scratch::new();
+    let erasing = "e=$(for i in $(seq 1000); do printf '\\033[1K'; done); \
+                   head -c 32768 /dev/zero | tr '\\0' x; while :; do printf '%s' \"$e\"; done";
+    let shop = scratch.project("shop", &stack(&[entry("erasing", erasing, false)]));
+    let started = scratch.on(&shop, &["start", "erasing"]);
+    assert!(started.status.success(), "{}", shown(&started));
+    let mut waiting = scratch
+        .command(&[
+            "-p",
+            shop.to_str().unwrap(),
+            "wait",
+            "erasing",
+            "--log",
+            "NEVERMATCH",
+            "--timeout",
+            "60s",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_secs(1));
+
+    let mut times: Vec<Duration> = (0..CALLS)
+        .map(|_| {
+            let asked = Instant::now();
+            let ps = scratch.on(&shop, &["ps"]);
+            assert!(ps.status.success(), "{}", shown(&ps));
+            asked.elapsed()
+        })
+        .collect();
+    let _ = waiting.kill();
+    let _ = waiting.wait();
+    let stopped = scratch.on(&shop, &["kill", "erasing"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+
+    times.sort_unstable();
+    assert!(times[CALLS - 1] < SLOWEST, "{times:?}");
+    assert!(times[CALLS / 2] < MEDIAN, "{times:?}");
+}
+
 /// A `projects` action takes its project as the operand or from
 /// `--project`, never ignoring either: naming it both ways is refused, and
 /// `projects rm` removes the project `--project` names.

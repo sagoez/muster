@@ -11,7 +11,10 @@ use std::{
 
 use alacritty_terminal::vte::Params;
 
-use super::pen_color::{PARAM_SEPARATOR, PenColor, RGB_MODE};
+use super::{
+    param_separator::Separator,
+    pen_color::{PenColor, RGB_MODE},
+};
 
 /// The SGR code that resets every attribute.
 const RESET: u16 = 0;
@@ -193,27 +196,6 @@ impl Pen {
                 color.write_params(extended, out)?;
             }
         }
-        Ok(())
-    }
-}
-
-/// Writes the separator before every parameter but the first.
-#[derive(Default)]
-struct Separator {
-    /// Whether a parameter was written already.
-    started: bool,
-}
-
-impl Separator {
-    /// Writes a separator into `out` unless this is the first parameter.
-    ///
-    /// # Errors
-    /// Returns a [`fmt::Error`] when `out` cannot be written.
-    fn write(&mut self, out: &mut impl Write) -> fmt::Result {
-        if self.started {
-            out.write_char(PARAM_SEPARATOR)?;
-        }
-        self.started = true;
         Ok(())
     }
 }

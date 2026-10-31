@@ -30,6 +30,7 @@ pub mod mode_scanner;
 pub mod mouse_protocol_encoding;
 pub mod mouse_protocol_mode;
 pub mod observation;
+mod param_separator;
 pub mod pen;
 pub mod pen_color;
 pub mod placed_renderer;

@@ -4057,8 +4057,11 @@ const SMALL_LOG_CAP: &str = "16KiB";
 /// to rotate its log reads the same on every path, before and after a
 /// service restart adopts its live holder: `logs`, `--json`, `-n`,
 /// `--since`, `--grep`, `wait --log` and `process_logs` all show its lines
-/// and the one line logged in place of its frames, never a frame; and the
-/// frames never reach the log, so they rotate nothing away.
+/// and the one line logged in place of its frames, never a frame. A wait
+/// for text only the frames hold never matches, from the service that
+/// started the run or from the one that adopted it mid-screen, as the
+/// holder forwards the service only what it logs; and the frames never
+/// reach the log, so they rotate nothing away.
 #[test]
 fn a_long_full_screen_run_reads_alike_everywhere() {
     let mut scratch = Scratch::new();
@@ -4288,8 +4291,24 @@ fn a_pending_wait_on_an_endless_line_never_slows_the_service() {
         .collect();
     let _ = waiting.kill();
     let _ = waiting.wait();
-    let stopped = scratch.on(&shop, &["kill", "erasing"]);
-    assert!(stopped.status.success(), "{}", shown(&stopped));
+    // The service hears the exit only after the output the flood left
+    // queued, which a loaded machine can take longer to render than `kill`
+    // waits, so the stop is awaited on its own.
+    let killed = scratch.on(&shop, &["kill", "erasing"]);
+    assert!(
+        killed.status.success() || stdout(&killed).contains("still stopping"),
+        "{}",
+        shown(&killed)
+    );
+    let (_, stopped) = scratch.json_on(&shop, &[
+        "wait",
+        "erasing",
+        "--state",
+        "stopped",
+        "--timeout",
+        "120s",
+    ]);
+    assert_eq!(stopped["status"], "matched", "{stopped}");
 
     times.sort_unstable();
     assert!(times[CALLS - 1] < SLOWEST, "{times:?}");

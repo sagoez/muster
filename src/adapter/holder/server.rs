@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, Permissions},
+    mem,
     net::Shutdown,
     os::unix::{
         fs::PermissionsExt,
@@ -102,6 +103,9 @@ pub struct HolderServer {
     supervised: bool,
     /// The writable attach-client count supervisors were last told.
     reported_attached: u32,
+    /// Whether clients were warned of a screen reset, which this run's
+    /// holder does once however often the emulator fails.
+    reset_warned: bool,
     /// The loop's single inbox.
     events: Receiver<HolderEvent>,
     /// Feeds the loop's inbox from grace timers.
@@ -239,6 +243,7 @@ impl HolderServer {
             exit: None,
             supervised: false,
             reported_attached: 0,
+            reset_warned: false,
             events,
             timers,
             flushing,
@@ -361,6 +366,9 @@ impl HolderServer {
         let _ = self.log.append(&logged);
         if reset {
             self.resync_all()?;
+            if mem::replace(&mut self.reset_warned, true) {
+                return Ok(());
+            }
             return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
         }
         if !logged.is_empty() {
@@ -1498,7 +1506,8 @@ mod tests {
     }
 
     /// Output the emulator panics on rebuilds the screen instead of taking
-    /// the holder, and so the child, down, and warns the supervisor.
+    /// the holder, and so the child, down, and warns the supervisor, once
+    /// however often it happens in the run.
     #[test]
     fn an_emulator_panic_rebuilds_the_screen_and_keeps_serving() {
         let scratch = scratch();
@@ -1523,10 +1532,21 @@ mod tests {
             server.emulator.screen_text().contains('r'),
             "later output is shown"
         );
-        while !matches!(
-            HolderMessage::read_from(&mut peer).unwrap(),
-            HolderMessage::Warning(_)
-        ) {}
+        server.emulator =
+            TerminalEmulator::one_column(Rows::try_new(ROWS).unwrap(), 0, ColorScheme::Dark);
+        server
+            .on_output("again \u{754c}".as_bytes().to_vec())
+            .unwrap();
+        server.on_output(b"end".to_vec()).unwrap();
+        let mut warnings = 0;
+        loop {
+            match HolderMessage::read_from(&mut peer).unwrap() {
+                HolderMessage::Warning(_) => warnings += 1,
+                HolderMessage::Output { bytes, .. } if bytes == b"end" => break,
+                _ => {},
+            }
+        }
+        assert_eq!(warnings, 1, "the run is warned once");
     }
 
     /// What a child draws on the alternate screen reaches an attached

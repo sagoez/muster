@@ -476,6 +476,27 @@ mod tests {
         assert_eq!(nothing.cursor(), next.cursor());
     }
 
+    /// A line of output that reads `--` is a line like any other, never
+    /// taken for the separator between error groups, so dropping it to keep
+    /// the newest lines loses nothing else.
+    #[test]
+    fn a_line_reading_like_a_separator_is_a_line() {
+        let mut fixture = Fixture::new();
+        fixture.write(b"a\n--\nb\n");
+
+        let newest = fixture.read(&LogQuery::builder().lines(lines(1)).build());
+        let two = fixture.read(&LogQuery::builder().lines(lines(2)).build());
+        let all = fixture.read(
+            &LogQuery::builder()
+                .since(Some(OutputCursor::new(0)))
+                .build(),
+        );
+
+        assert_eq!(newest.lines(), &["b"]);
+        assert_eq!(two.lines(), &["--", "b"]);
+        assert_eq!(all.lines(), &["a", "--", "b"]);
+    }
+
     /// Output a prompt left without a line feed is read as a line.
     #[test]
     fn a_trailing_partial_line_is_returned() {

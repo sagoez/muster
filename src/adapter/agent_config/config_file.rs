@@ -12,8 +12,8 @@ use std::{
 use bytesize::ByteSize;
 use rustix::io::Errno;
 
-use super::agent_config_error::AgentConfigError;
-use crate::adapter::bounded_read::read_bounded;
+use super::{agent_config_error::AgentConfigError, file_fingerprint::FileFingerprint};
+use crate::adapter::bounded_read::read_bounded_with_metadata;
 
 /// The most an agent config muster reads may hold: well above the largest
 /// `.claude.json` a long-time user keeps, and a bound on what a project's
@@ -99,18 +99,21 @@ pub(super) fn confine(written: &Path, root: &Path, path: &Path) -> Result<(), Ag
     }
 }
 
-/// The text of the config at `written`, which the agent names `path`, or
-/// none when there is no file. Only a regular file of at most
-/// [`MAX_CONFIG_SIZE`] is read, opened without blocking so a pipe or device
-/// is never waited on.
+/// The text of the config at `written`, which the agent names `path`, with
+/// its fingerprint as it was read, or none when there is no file. Only a
+/// regular file of at most [`MAX_CONFIG_SIZE`] is read, opened without
+/// blocking so a pipe or device is never waited on.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::NotAFile`], [`AgentConfigError::TooLarge`],
 /// [`AgentConfigError::Unparseable`] for text that is not UTF-8, or
 /// [`AgentConfigError::Io`] when the file cannot be read.
-pub(super) fn read_text(written: &Path, path: &Path) -> Result<Option<String>, AgentConfigError> {
-    match read_bounded(written, MAX_CONFIG_SIZE.as_u64()) {
-        Ok(text) => Ok(Some(text)),
+pub(super) fn read_text(
+    written: &Path,
+    path: &Path,
+) -> Result<Option<(String, FileFingerprint)>, AgentConfigError> {
+    match read_bounded_with_metadata(written, MAX_CONFIG_SIZE.as_u64()) {
+        Ok((text, metadata)) => Ok(Some((text, FileFingerprint::of(&metadata)))),
         Err(error) => match error.kind() {
             io::ErrorKind::NotFound => Ok(None),
             io::ErrorKind::InvalidInput => Err(AgentConfigError::NotAFile(path.to_path_buf())),

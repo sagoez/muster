@@ -7,7 +7,8 @@ use super::{
     agent_config_error::AgentConfigError,
     config_file::io_error,
     config_lock::ConfigLock,
-    planned_edit::{PlannedEdit, WRITE},
+    file_edit::{FileEdit, WRITE},
+    planned_edit::PlannedEdit,
 };
 
 /// Every edit of one command, worked out and not yet written, with the
@@ -18,7 +19,7 @@ pub struct EditPlan {
     /// One per config, in the order the agents were given.
     #[getset(get = "pub")]
     edits: Vec<PlannedEdit>,
-    /// The agents' own locks, held from the read to the write.
+    /// The agents' own locks, held from the check to the write.
     locks: Vec<ConfigLock>,
 }
 
@@ -37,26 +38,24 @@ impl EditPlan {
     /// in place when a later one fails.
     pub(super) fn commit(self, cancelled: &dyn Fn() -> bool) -> Result<(), AgentConfigError> {
         let Self { edits, locks } = self;
-        let writing: Vec<&PlannedEdit> = edits.iter().filter(|edit| edit.writes()).collect();
-        for edit in &writing {
-            edit.check_unchanged()?;
+        let files: Vec<&FileEdit> = edits.iter().flat_map(PlannedEdit::files).collect();
+        for file in &files {
+            file.check_unchanged()?;
         }
-        let mut staged = Vec::with_capacity(writing.len());
-        for edit in &writing {
-            if let Some(file) = edit.stage()? {
-                staged.push((*edit, file));
-            }
+        let mut staged = Vec::with_capacity(files.len());
+        for file in &files {
+            staged.push((*file, file.stage()?));
         }
-        for edit in &writing {
-            edit.check_unchanged()?;
+        for file in &files {
+            file.check_unchanged()?;
         }
         if cancelled() {
             return Err(AgentConfigError::Interrupted);
         }
         let mut written: Vec<PathBuf> = Vec::with_capacity(staged.len());
-        for (edit, file) in staged {
-            if let Err(source) = file.commit() {
-                let failure = io_error(WRITE, edit.path(), source);
+        for (file, staged) in staged {
+            if let Err(source) = staged.commit() {
+                let failure = io_error(WRITE, file.path(), source);
                 return Err(if written.is_empty() {
                     failure
                 } else {
@@ -66,7 +65,7 @@ impl EditPlan {
                     }
                 });
             }
-            written.push(edit.path().clone());
+            written.push(file.path().clone());
         }
         drop(locks);
         Ok(())

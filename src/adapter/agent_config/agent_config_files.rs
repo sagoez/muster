@@ -16,9 +16,12 @@ use super::{
     edit_plan::EditPlan,
     edited::Edited,
     entry_change::EntryChange,
+    file_edit::FileEdit,
+    file_fingerprint::FileFingerprint,
     json_dialect::JsonDialect,
     json_document::edit_json,
     json_place::JsonPlace,
+    lock_timing::LockTiming,
     mcp_registry::McpRegistry,
     mcp_scope::McpScope,
     planned_edit::PlannedEdit,
@@ -148,7 +151,7 @@ impl AgentConfigFiles {
 
     /// Reads the config at `place` and works out `change` to the entry
     /// `name` in it, for `target`: the file written once its path is
-    /// resolved, its text, and the edit.
+    /// resolved, its fingerprint as read, and the edit.
     ///
     /// # Errors
     /// Returns the [`AgentConfigError`] of a file that is not a regular
@@ -161,7 +164,7 @@ impl AgentConfigFiles {
         name: &McpServerName,
         change: EntryChange,
         force: bool,
-    ) -> Result<(PathBuf, Option<String>, Edited), AgentConfigError> {
+    ) -> Result<(PathBuf, Option<FileFingerprint>, Edited), AgentConfigError> {
         let entry = self
             .launch
             .entry(target.scope(), target.agent() == Agent::Zed)?;
@@ -170,7 +173,7 @@ impl AgentConfigFiles {
         if let Some(root) = place.confined_to() {
             confine(&written, root, path)?;
         }
-        let original = read_text(&written, path)?;
+        let (original, fingerprint) = read_text(&written, path)?.unzip();
         let edited = match place.format() {
             ConfigFormat::Json(table, dialect) => edit_json(
                 original.as_deref(),
@@ -186,7 +189,7 @@ impl AgentConfigFiles {
             ),
             ConfigFormat::Toml => edit_toml(original.as_deref(), path, name, &entry, change, force),
         }?;
-        Ok((written, original, edited))
+        Ok((written, fingerprint, edited))
     }
 
     /// The edit of `target`'s config at `place`, checked to be one muster
@@ -203,10 +206,23 @@ impl AgentConfigFiles {
         change: EntryChange,
         force: bool,
     ) -> Result<PlannedEdit, AgentConfigError> {
-        let (written, original, edited) = self.read_edit(target, place, name, change, force)?;
+        let (written, fingerprint, edited) = self.read_edit(target, place, name, change, force)?;
         let outcome = edited.outcome();
-        if outcome.writes() && is_read_only(&written) {
-            return Err(AgentConfigError::ReadOnly(place.path().clone()));
+        let mut files = Vec::new();
+        if let Some(text) = edited.text() {
+            if is_read_only(&written) {
+                return Err(AgentConfigError::ReadOnly(place.path().clone()));
+            }
+            files.push(
+                FileEdit::builder()
+                    .path(place.path().clone())
+                    .written(written)
+                    .fingerprint(fingerprint)
+                    .text(text.clone())
+                    .makes_folder(place.makes_folder())
+                    .locked(place.locked())
+                    .build(),
+            );
         }
         let note = match (target.agent(), target.scope(), outcome) {
             (_, _, EditOutcome::Disabled) => Some(DISABLED_NOTE),
@@ -218,11 +234,8 @@ impl AgentConfigFiles {
         Ok(PlannedEdit::builder()
             .target(target.clone())
             .path(place.path().clone())
-            .written(written)
             .outcome(outcome)
-            .original(original)
-            .text(edited.text().clone())
-            .makes_folder(place.makes_folder())
+            .files(files)
             .note(note)
             .build())
     }
@@ -274,22 +287,27 @@ impl McpRegistry for AgentConfigFiles {
             .iter()
             .map(|target| self.place(target))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut locked: Vec<&Path> = places
-            .iter()
-            .filter(|place| place.locked())
-            .map(|place| place.path().as_path())
-            .collect();
-        locked.sort_unstable();
-        locked.dedup();
-        let mut locks = Vec::with_capacity(locked.len());
-        for path in locked {
-            locks.extend(ConfigLock::take(path, cancelled)?);
-        }
         let edits = targets
             .iter()
             .zip(&places)
             .map(|(target, place)| self.plan_one(target, place, name, change, force))
             .collect::<Result<Vec<_>, _>>()?;
+        let files: Vec<&FileEdit> = edits.iter().flat_map(PlannedEdit::files).collect();
+        let mut locked: Vec<&Path> = files
+            .iter()
+            .filter(|file| file.locked())
+            .map(|file| file.path().as_path())
+            .collect();
+        locked.sort_unstable();
+        locked.dedup();
+        let timing = LockTiming::claude_code();
+        let mut locks = Vec::with_capacity(locked.len());
+        for path in locked {
+            locks.extend(ConfigLock::take(path, &timing, cancelled)?);
+        }
+        for file in &files {
+            file.check_unchanged()?;
+        }
         Ok(EditPlan::builder().edits(edits).locks(locks).build())
     }
 
@@ -708,8 +726,8 @@ mod tests {
         assert!(strays(home.root(), &[".claude.json", "project"]).is_empty());
     }
 
-    /// Claude Code's lock is held from the read to the write, a held one
-    /// is waited for, and a stale one is taken over.
+    /// Claude Code's lock is held from the plan's check to the write, a
+    /// held one is waited for, and a stale one is taken over.
     #[test]
     fn claude_codes_lock_guards_the_edit() {
         let home = Home::new();
@@ -723,7 +741,7 @@ mod tests {
             EntryChange::Add,
         )
         .unwrap();
-        assert!(lock.is_dir(), "held from the read");
+        assert!(lock.is_dir(), "held until the write");
         home.files().commit(plan, &uncancelled).unwrap();
         assert!(!lock.exists(), "let go after the write");
 
@@ -739,6 +757,40 @@ mod tests {
         release.join().unwrap();
         assert_eq!(removed.outcome(), EditOutcome::Removed);
         assert!(!lock.exists());
+    }
+
+    /// A write Claude Code makes while muster waits for its lock, after
+    /// muster read the file, is caught by the file's fingerprint once the
+    /// lock is taken, and nothing is written.
+    #[test]
+    fn a_write_while_waiting_for_the_lock_is_caught() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        let lock = home.at(".claude.json.lock");
+        fs::write(&claude, "{}\n").unwrap();
+        fs::create_dir(&lock).unwrap();
+        let (written, held) = (claude.clone(), lock.clone());
+        let writer = thread::spawn(move || {
+            thread::sleep(LOCK_HELD_FOR);
+            fs::write(written, "{\"numStartups\": 5}\n").unwrap();
+            fs::remove_dir(held).unwrap();
+        });
+
+        let refused = planned(
+            &home,
+            &[home.target(Agent::Claude, McpScope::User)],
+            EntryChange::Add,
+        );
+        writer.join().unwrap();
+        assert!(
+            matches!(refused, Err(AgentConfigError::Changed(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&claude).unwrap(),
+            "{\"numStartups\": 5}\n"
+        );
+        assert!(!lock.exists(), "let go after the refusal");
     }
 
     /// A project's file that is a pipe, a device or a link out of the

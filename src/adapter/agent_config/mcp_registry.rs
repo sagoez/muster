@@ -10,7 +10,8 @@ pub trait McpRegistry: Sync {
     /// The agents whose config or binary is found, in a fixed order.
     fn present(&self) -> Vec<Agent>;
 
-    /// The agents of `targets` whose config holds an entry under `name`.
+    /// The agents of `targets` whose config holds muster's own entry under
+    /// `name`, judged as a removal without force would judge it.
     fn holding(&self, targets: &[ConfigTarget], name: &McpServerName) -> Vec<Agent>;
 
     /// The edits making `change` to the entry `name` in each of `targets`'

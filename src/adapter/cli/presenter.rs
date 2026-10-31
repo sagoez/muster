@@ -75,10 +75,11 @@ pub(super) static CHOOSE_AGENTS_ARGUMENT: LazyLock<String> = LazyLock::new(|| {
 const AGENT_FOUND: &str = "installed";
 /// The hint of an agent not found.
 const AGENT_NOT_FOUND: &str = "not found";
-/// The hint of an agent whose config holds the entry, offered to remove.
-const AGENT_HOLDING: &str = "has the entry";
+/// The hint of an agent whose config holds muster's entry, offered to
+/// remove.
+const AGENT_HOLDING: &str = "has muster's entry";
 /// The hint of an agent whose config does not.
-const AGENT_NOT_HOLDING: &str = "no entry";
+const AGENT_NOT_HOLDING: &str = "no entry of muster's";
 /// Between the parts of a choice's hint.
 const HINT_SEPARATOR: &str = " · ";
 /// Between a padded label and its detail in a framed line.

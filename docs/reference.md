@@ -425,7 +425,7 @@ project's file, which is shared with whoever clones the project, the bare
 
 Without `--client`, a terminal offers the agents, with those installed (a
 config or a binary on `PATH`) chosen for `add` and those whose config holds
-the entry chosen for `remove`; elsewhere `--client` is required, and it
+muster's own entry chosen for `remove`; elsewhere `--client` is required, and it
 takes several, comma-separated or repeated. An entry is muster's when its
 command is a file named `muster` and its arguments are `mcp`, whatever the
 path. An identical entry reports `already-added` and writes nothing; one an

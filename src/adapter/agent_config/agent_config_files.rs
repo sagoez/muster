@@ -267,7 +267,7 @@ impl McpRegistry for AgentConfigFiles {
             .filter(|target| {
                 self.place(target)
                     .and_then(|place| {
-                        self.read_edit(target, &place, name, EntryChange::Remove, true)
+                        self.read_edit(target, &place, name, EntryChange::Remove, false)
                     })
                     .is_ok_and(|(_, _, edited)| edited.outcome() == EditOutcome::Removed)
             })
@@ -851,10 +851,11 @@ mod tests {
         assert!(!home.at("project/.codex/missing").exists());
     }
 
-    /// The remove picker's agents are those whose config holds an entry
-    /// under the name, of muster's or not.
+    /// The remove picker ticks only the agents whose config holds muster's
+    /// own entry under the name, so its default choice removes them all
+    /// without --force; another server's entry is left unticked.
     #[test]
-    fn only_configs_with_an_entry_are_holding() {
+    fn only_configs_with_musters_entry_are_holding() {
         let home = Home::new();
         home.apply(Agent::Codex, McpScope::User, EntryChange::Add, false)
             .unwrap();
@@ -866,10 +867,15 @@ mod tests {
         let targets: Vec<ConfigTarget> = Agent::iter()
             .map(|agent| home.target(agent, McpScope::User))
             .collect();
-        assert_eq!(home.files().holding(&targets, &muster()), [
-            Agent::Claude,
-            Agent::Codex
-        ]);
+        let holding = home.files().holding(&targets, &muster());
+        assert_eq!(holding, [Agent::Codex]);
+
+        let ticked: Vec<ConfigTarget> = holding
+            .iter()
+            .map(|agent| home.target(*agent, McpScope::User))
+            .collect();
+        let plan = planned(&home, &ticked, EntryChange::Remove).unwrap();
+        assert_eq!(plan.edits()[0].outcome(), EditOutcome::Removed);
     }
 
     /// A Claude Code file with a comment is not JSON Claude Code reads, so

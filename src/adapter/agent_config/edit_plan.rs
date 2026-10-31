@@ -7,7 +7,7 @@ use super::{
     agent_config_error::AgentConfigError,
     config_file::io_error,
     config_lock::ConfigLock,
-    file_edit::{FileEdit, WRITE},
+    file_edit::{FileEdit, WRITE, unmake_folders},
     planned_edit::PlannedEdit,
 };
 
@@ -27,8 +27,8 @@ impl EditPlan {
     /// Writes every edit or none: each file is checked unchanged since it
     /// was read, each new text written and synced beside its file, each
     /// file checked again, and only then is every one put in place. A
-    /// failure or `cancelled` before that leaves every config as it was
-    /// and no temporary file behind.
+    /// failure or `cancelled` before that leaves every config as it was,
+    /// and no temporary file or folder muster made behind.
     ///
     /// # Errors
     /// Returns [`AgentConfigError::Changed`] for a file another writer
@@ -39,18 +39,27 @@ impl EditPlan {
     pub(super) fn commit(self, cancelled: &dyn Fn() -> bool) -> Result<(), AgentConfigError> {
         let Self { edits, locks } = self;
         let files: Vec<&FileEdit> = edits.iter().flat_map(PlannedEdit::files).collect();
-        for file in &files {
-            file.check_unchanged()?;
-        }
+        let mut made = Vec::new();
         let mut staged = Vec::with_capacity(files.len());
-        for file in &files {
-            staged.push((*file, file.stage()?));
-        }
-        for file in &files {
-            file.check_unchanged()?;
-        }
-        if cancelled() {
-            return Err(AgentConfigError::Interrupted);
+        let prepared = (|| {
+            for file in &files {
+                file.check_unchanged()?;
+            }
+            for file in &files {
+                staged.push((*file, file.stage(&mut made)?));
+            }
+            for file in &files {
+                file.check_unchanged()?;
+            }
+            if cancelled() {
+                return Err(AgentConfigError::Interrupted);
+            }
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            drop(staged);
+            unmake_folders(&made);
+            return Err(error);
         }
         let mut written: Vec<PathBuf> = Vec::with_capacity(staged.len());
         for (file, staged) in staged {

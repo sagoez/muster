@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -67,14 +67,19 @@ impl FileEdit {
 
     /// The new text written and synced to a temporary file beside the
     /// file, its folder made first where the agent expects muster to make
-    /// it; the file itself is untouched until the returned file is
-    /// committed, and dropping it removes the temporary file.
+    /// it, each folder made added to `made`, outermost first, so a failure
+    /// can take them out again; the file itself is untouched until the
+    /// returned file is committed, and dropping it removes the temporary
+    /// file.
     ///
     /// # Errors
     /// Returns [`AgentConfigError::Changed`] when a link now leads the
     /// file's path elsewhere, or [`AgentConfigError::Io`] when the folder or
     /// the temporary file cannot be made or written.
-    pub(super) fn stage(&self) -> Result<AtomicWriteFile, AgentConfigError> {
+    pub(super) fn stage(
+        &self,
+        made: &mut Vec<PathBuf>,
+    ) -> Result<AtomicWriteFile, AgentConfigError> {
         // The folders are made on the path that passed the plan's checks, so
         // a link put in it since must not redirect them.
         if resolved(&self.written)? != self.written {
@@ -83,7 +88,7 @@ impl FileEdit {
         if self.makes_folder
             && let Some(folder) = self.written.parent()
         {
-            fs::create_dir_all(folder)
+            make_folders(folder, made)
                 .map_err(|source| io_error(CREATE_FOLDER_FOR, &self.path, source))?;
         }
         let write = || -> io::Result<AtomicWriteFile> {
@@ -96,5 +101,32 @@ impl FileEdit {
             Ok(file)
         };
         write().map_err(|source| io_error(WRITE, &self.path, source))
+    }
+}
+
+/// Makes `folder` and each missing folder above it, adding each one made to
+/// `made`, outermost first.
+///
+/// # Errors
+/// Returns the failure to make one.
+fn make_folders(folder: &Path, made: &mut Vec<PathBuf>) -> io::Result<()> {
+    let missing: Vec<&Path> = folder
+        .ancestors()
+        .take_while(|ancestor| fs::symlink_metadata(ancestor).is_err())
+        .collect();
+    for folder in missing.into_iter().rev() {
+        match fs::create_dir(folder) {
+            Ok(()) => made.push(folder.to_path_buf()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Takes out the folders of `made` that are still empty, innermost first.
+pub(super) fn unmake_folders(made: &[PathBuf]) {
+    for folder in made.iter().rev() {
+        let _ = fs::remove_dir(folder);
     }
 }

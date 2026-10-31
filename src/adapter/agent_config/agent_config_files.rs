@@ -867,6 +867,35 @@ mod tests {
         );
     }
 
+    /// A config that cannot be written takes out the folders muster made
+    /// for another config of the run, so a refused run leaves no trace.
+    #[test]
+    fn a_failed_write_leaves_no_folder_it_made() {
+        let home = Home::new();
+        let codex = home.at(".codex");
+        fs::create_dir_all(&codex).unwrap();
+        fs::set_permissions(&codex, Permissions::from_mode(SEALED_FOLDER_MODE)).unwrap();
+
+        let plan = planned(
+            &home,
+            &[
+                home.target(Agent::Zed, McpScope::User),
+                home.target(Agent::Codex, McpScope::User),
+            ],
+            EntryChange::Add,
+        )
+        .unwrap();
+        let failed = home.files().commit(plan, &uncancelled);
+        fs::set_permissions(&codex, Permissions::from_mode(OPEN_FOLDER_MODE)).unwrap();
+
+        assert!(
+            matches!(failed, Err(AgentConfigError::Io { .. })),
+            "{failed:?}"
+        );
+        assert!(!home.at(".config").exists(), "Zed's folders are taken out");
+        assert!(codex.is_dir(), "a folder muster did not make stays");
+    }
+
     /// A rename that fails after another config was put in place names the
     /// config already written.
     #[test]

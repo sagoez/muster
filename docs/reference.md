@@ -427,8 +427,8 @@ Without `--client`, a terminal offers the agents, with those installed (a
 config or a binary on `PATH`) chosen for `add` and those whose config holds
 muster's own entry chosen for `remove`; elsewhere `--client` is required, and it
 takes several, comma-separated or repeated. An entry is muster's when its
-command is a file named `muster` and its arguments are `mcp`, whatever the
-path. An identical entry reports `already-added` and writes nothing; one an
+command is a file named `muster`, or named as the running binary is, and
+its arguments are `mcp`, whatever the path. An identical entry reports `already-added` and writes nothing; one an
 older muster wrote at another path is pointed at this one, its other keys
 kept, and reports `updated`; one turned off reports `disabled` and is
 turned back on in place only by `--force`, which reports `enabled` and

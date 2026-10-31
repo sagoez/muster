@@ -71,7 +71,8 @@ impl ServerEntry {
 
     /// What an existing entry holding `command` and `args` is to muster:
     /// the same entry, muster's own at another path (a program named
-    /// `muster` with the same arguments), or another server's.
+    /// `muster`, or named as this binary is, with the same arguments), or
+    /// another server's.
     pub(super) fn judge(
         &self,
         command: Option<&str>,
@@ -81,16 +82,15 @@ impl ServerEntry {
             args.into_iter()
                 .eq(self.args.iter().map(|arg| Some(arg.as_str())))
         });
+        let this_name = Path::new(&self.command).file_name();
+        let musters = |command: &str| {
+            Path::new(command)
+                .file_name()
+                .is_some_and(|name| name == APP_NAME || Some(name) == this_name)
+        };
         match command {
             Some(command) if same_args && command == self.command => EntryMatch::Same,
-            Some(command)
-                if same_args
-                    && Path::new(command)
-                        .file_name()
-                        .is_some_and(|name| name == APP_NAME) =>
-            {
-                EntryMatch::Older
-            },
+            Some(command) if same_args && musters(command) => EntryMatch::Older,
             _ => EntryMatch::Foreign,
         }
     }
@@ -144,6 +144,25 @@ mod tests {
             (json!(3), (EntryMatch::Foreign, false)),
         ] {
             assert_eq!(ours.judge_json(&value), expected, "{value}");
+        }
+    }
+
+    /// A binary run under another file name knows the entries it wrote
+    /// from another path by that name, as well as by `muster`.
+    #[test]
+    fn a_renamed_binary_knows_its_own_entries() {
+        let renamed = ServerEntry::builder()
+            .command("/opt/tools/mstr".to_owned())
+            .args(vec!["mcp".to_owned()])
+            .with_env(false)
+            .build();
+        for (command, expected) in [
+            ("/home/me/mstr", EntryMatch::Older),
+            ("/bin/muster", EntryMatch::Older),
+            ("/bin/other", EntryMatch::Foreign),
+        ] {
+            let value = json!({"command": command, "args": ["mcp"]});
+            assert_eq!(renamed.judge_json(&value).0, expected, "{command}");
         }
     }
 }

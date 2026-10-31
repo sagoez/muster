@@ -4,7 +4,7 @@ pub(super) enum Disabling {
     /// By a flag in the entry itself, `enabled = false`, as Codex and Zed
     /// read it.
     Flag,
-    /// By lists of turned-off names kept outside the entry, as Claude Code
-    /// keeps them; whether one of them names the entry.
-    Listed(bool),
+    /// Outside the entry, where muster does not look, as Claude Code keeps
+    /// it: no entry reads as turned off.
+    Elsewhere,
 }

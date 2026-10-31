@@ -19,37 +19,41 @@ pub struct EditPlan {
     /// One per config, in the order the agents were given.
     #[getset(get = "pub")]
     edits: Vec<PlannedEdit>,
-    /// The agents' own locks, held from the check to the write.
+    /// The agents' own locks, held from the read to the write.
     locks: Vec<ConfigLock>,
 }
 
 impl EditPlan {
-    /// Writes every edit or none: each file is checked unchanged since it
-    /// was read, each new text written and synced beside its file, each
-    /// file checked again, and only then is every one put in place. A
-    /// failure or `cancelled` before that leaves every config as it was,
-    /// and no temporary file or folder muster made behind.
+    /// Writes every edit or none: each new text is written and synced
+    /// beside its file, each file checked to hold what was read, each lock
+    /// checked to be muster's still, and only then is every file put in
+    /// place. A failure or `cancelled` before that leaves every config as
+    /// it was, and no temporary file or folder muster made behind.
     ///
     /// # Errors
     /// Returns [`AgentConfigError::Changed`] for a file another writer
-    /// changed, [`AgentConfigError::Interrupted`] when `cancelled` says so,
-    /// [`AgentConfigError::Io`] for a file that cannot be written, or
+    /// changed, [`AgentConfigError::LockLost`] for a lock another writer
+    /// took over, [`AgentConfigError::Interrupted`] when `cancelled` says
+    /// so, [`AgentConfigError::Io`] for a file that cannot be written, or
     /// [`AgentConfigError::PartlyWritten`] naming the configs already put
     /// in place when a later one fails.
     pub(super) fn commit(self, cancelled: &dyn Fn() -> bool) -> Result<(), AgentConfigError> {
         let Self { edits, locks } = self;
-        let files: Vec<&FileEdit> = edits.iter().flat_map(PlannedEdit::files).collect();
+        let files: Vec<&FileEdit> = edits
+            .iter()
+            .filter_map(|edit| edit.file().as_ref())
+            .collect();
         let mut made = Vec::new();
         let mut staged = Vec::with_capacity(files.len());
         let prepared = (|| {
-            for file in &files {
-                file.check_unchanged()?;
-            }
             for file in &files {
                 staged.push((*file, file.stage(&mut made)?));
             }
             for file in &files {
                 file.check_unchanged()?;
+            }
+            for lock in &locks {
+                lock.check_held()?;
             }
             if cancelled() {
                 return Err(AgentConfigError::Interrupted);

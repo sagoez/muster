@@ -832,7 +832,7 @@ Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --scope <SCOPE>      Which config: user (every project, the default), local (this project, in your own Claude Code config) or project (a file in this project, .mcp.json or .codex/config.toml, shared with whoever clones it). Zed has only user [possible values: local, project, user]
       --name <NAME>        The server's name in the agent's config [default: muster]
-      --force              Replace or remove a server under the name that runs something else, or turn muster's own back on
+      --force              Replace or remove a server under the name that runs something else, or turn muster's own back on in Codex or Zed
       --json               Print the result as JSON
   -h, --help               Print help (see more with '--help')
 
@@ -847,7 +847,7 @@ Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --scope <SCOPE>      Which config: user (every project, the default), local (this project, in your own Claude Code config) or project (a file in this project, .mcp.json or .codex/config.toml, shared with whoever clones it). Zed has only user [possible values: local, project, user]
       --name <NAME>        The server's name in the agent's config [default: muster]
-      --force              Replace or remove a server under the name that runs something else, or turn muster's own back on
+      --force              Replace or remove a server under the name that runs something else, or turn muster's own back on in Codex or Zed
       --json               Print the result as JSON
   -h, --help               Print help (see more with '--help')
 

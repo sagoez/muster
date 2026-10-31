@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 
 use super::{
     agent_config_error::AgentConfigError,
@@ -79,7 +79,7 @@ pub(super) fn edit_toml(
                 .get_mut(name.as_ref())
                 .and_then(Item::as_table_like_mut)
             {
-                existing.insert(COMMAND_KEY, value(entry.command().as_str()));
+                point_at(existing, entry);
                 if action == EntryAction::Enable {
                     existing.remove(ENABLED_KEY);
                 }
@@ -96,6 +96,16 @@ pub(super) fn edit_toml(
     let outcome = action.outcome();
     let text = outcome.writes().then(|| document.to_string());
     Ok(Edited::builder().outcome(outcome).text(text).build())
+}
+
+/// Points `existing`, muster's entry, at `entry`'s command, keeping the
+/// spacing and any comment around the old value.
+fn point_at(existing: &mut dyn TableLike, entry: &ServerEntry) {
+    let mut command = Value::from(entry.command().as_str());
+    if let Some(old) = existing.get(COMMAND_KEY).and_then(Item::as_value) {
+        *command.decor_mut() = old.decor().clone();
+    }
+    existing.insert(COMMAND_KEY, Item::Value(command));
 }
 
 /// `entry` as the table Codex reads: its command and arguments.
@@ -246,6 +256,18 @@ model = "o4-mini"
             Some(
                 "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n"
             )
+        );
+
+        let commented = "[mcp_servers.muster]\ncommand = \"/old/bin/muster\"  # pinned by hand\nargs = [\"mcp\"]\n";
+        assert_eq!(
+            edited(Some(commented), EntryChange::Add, false)
+                .unwrap()
+                .text()
+                .as_deref(),
+            Some(
+                "[mcp_servers.muster]\ncommand = \"/bin/muster\"  # pinned by hand\nargs = [\"mcp\"]\n"
+            ),
+            "the comment ending the command line is kept"
         );
 
         let unread =

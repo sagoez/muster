@@ -110,6 +110,9 @@ pub enum AgentConfigError {
     /// The agent kept its config locked for longer than muster waits.
     #[error("{} stayed locked by its agent; nothing was written, run the command again", .0.display())]
     Locked(PathBuf),
+    /// Another writer took over the agent's lock while muster held it.
+    #[error("another writer took over the lock on {}; nothing was written, run the command again", .0.display())]
+    LockLost(PathBuf),
     /// The person interrupted the command before any config was written.
     #[error("interrupted; nothing was written")]
     Interrupted,
@@ -140,7 +143,11 @@ impl AgentConfigError {
     /// holds it.
     pub fn is_conflict(&self) -> bool {
         match self {
-            Self::Taken { .. } | Self::NotOurs { .. } | Self::Changed(_) | Self::Locked(_) => true,
+            Self::Taken { .. }
+            | Self::NotOurs { .. }
+            | Self::Changed(_)
+            | Self::Locked(_)
+            | Self::LockLost(_) => true,
             Self::PartlyWritten { source, .. } => source.is_conflict(),
             _ => false,
         }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use jsonc_parser::{
     ParseOptions,
-    cst::{CstArray, CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode},
+    cst::{CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode},
 };
 use serde::de::IgnoredAny;
 
@@ -31,9 +31,8 @@ const LINE_BREAK: char = '\n';
 /// `change` applied to the entry `name` in `text`, the file at `place`, or
 /// in an empty file when there is none, the entry turned off as
 /// `disabling` says. A removal takes out the objects it leaves empty on the
-/// way to the entry; turning the entry back on clears its own flag, and
-/// leaves lists elsewhere to the caller. The new text is none when the file
-/// stays as it was.
+/// way to the entry; turning the entry back on clears its own flag. The new
+/// text is none when the file stays as it was.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::Unparseable`],
@@ -64,13 +63,9 @@ pub(super) fn edit_json(
     let judged = existing
         .as_ref()
         .map(|prop| judge(prop.value().as_ref(), entry));
-    let disabled = match disabling {
-        Disabling::Flag => judged.is_some_and(|(_, off)| off),
-        Disabling::Listed(listed) => listed,
-    };
     let action = EntryAction::decide(
         judged.map(|(matched, _)| matched),
-        disabled,
+        disabling == Disabling::Flag && judged.is_some_and(|(_, off)| off),
         change,
         force,
         place.path(),
@@ -89,9 +84,7 @@ pub(super) fn edit_json(
         (EntryAction::Update, _) => object.iter().for_each(point_at_this),
         (EntryAction::Enable, _) => {
             object.iter().for_each(point_at_this);
-            if disabling == Disabling::Flag
-                && let Some(flag) = object.as_ref().and_then(|object| object.get(ENABLED_KEY))
-            {
+            if let Some(flag) = object.as_ref().and_then(|object| object.get(ENABLED_KEY)) {
                 flag.remove();
             }
         },
@@ -108,39 +101,6 @@ pub(super) fn edit_json(
         .then(|| finished(&root))
         .filter(|written| Some(written.trim_end()) != text.map(str::trim_end));
     Ok(Edited::builder().outcome(outcome).text(text).build())
-}
-
-/// Whether the list at `place`, the last of its keys naming an array, holds
-/// `name`, in `text`, the file there. A missing list holds nothing.
-///
-/// # Errors
-/// As [`edit_json`] for a file muster cannot read safely.
-pub(super) fn lists(
-    text: &str,
-    place: &JsonPlace<'_>,
-    name: &McpServerName,
-) -> Result<bool, AgentConfigError> {
-    let (_, top) = parsed(Some(text), place)?;
-    Ok(list_of(&top, place)?.is_some_and(|list| !named(&list, name).is_empty()))
-}
-
-/// `text`, the file at `place`, with `name` taken out of the list there,
-/// every other element, key and comment kept.
-///
-/// # Errors
-/// As [`edit_json`] for a file muster cannot edit safely.
-pub(super) fn unlisted(
-    text: &str,
-    place: &JsonPlace<'_>,
-    name: &McpServerName,
-) -> Result<String, AgentConfigError> {
-    let (root, top) = parsed(Some(text), place)?;
-    if let Some(list) = list_of(&top, place)? {
-        for element in named(&list, name) {
-            element.remove();
-        }
-    }
-    Ok(finished(&root))
 }
 
 /// `text`, the file at `place`, parsed, with its top object; an empty file,
@@ -184,38 +144,6 @@ fn finished(root: &CstRootNode) -> String {
         written.push(LINE_BREAK);
     }
     written
-}
-
-/// The list under `top` at `place`, or none when a key on the way is
-/// absent or the last holds no array.
-///
-/// # Errors
-/// As [`table_of`] for the objects on the way.
-fn list_of(top: &CstObject, place: &JsonPlace<'_>) -> Result<Option<CstArray>, AgentConfigError> {
-    let Some((last, holders)) = place.table().split_last() else {
-        return Ok(None);
-    };
-    let parents = JsonPlace::builder()
-        .path(place.path())
-        .table(holders.to_vec())
-        .dialect(place.dialect())
-        .build();
-    Ok(table_of(top, &parents, false)?
-        .and_then(|(object, _)| object.get(last))
-        .and_then(|prop| prop.array_value()))
-}
-
-/// The elements of `list` that are the string `name`.
-fn named(list: &CstArray, name: &McpServerName) -> Vec<CstNode> {
-    list.elements()
-        .into_iter()
-        .filter(|element| {
-            element
-                .as_string_lit()
-                .and_then(|literal| literal.decoded_value().ok())
-                .is_some_and(|value| value == name.as_ref())
-        })
-        .collect()
 }
 
 /// The table of servers under `top`, with the property holding each object
@@ -334,26 +262,6 @@ mod tests {
             &entry(false),
             Disabling::Flag,
             change,
-            force,
-        )
-    }
-
-    /// `change` made to muster's entry in `text` at `at`, in a file whose
-    /// agent keeps its turned-off names in lists, `listed` saying whether
-    /// one names it.
-    fn edited_listed(
-        text: &str,
-        at: &JsonPlace<'_>,
-        listed: bool,
-        force: bool,
-    ) -> Result<Edited, AgentConfigError> {
-        edit_json(
-            Some(text),
-            at,
-            &muster(),
-            &entry(false),
-            Disabling::Listed(listed),
-            EntryChange::Add,
             force,
         )
     }
@@ -635,49 +543,32 @@ mod tests {
         );
     }
 
-    /// Where the agent keeps turned-off names in lists, a key in the entry
-    /// turns nothing off; a list naming it does, and force turns it back
-    /// on without touching the entry, leaving the lists to the caller.
+    /// Where the agent turns a server off outside the entry, as Claude Code
+    /// does, no key in the entry turns it off: muster's own reads as
+    /// added, `enabled: false` or not, and force leaves it as it is.
     #[test]
-    fn a_listed_entry_is_off_whatever_its_keys_say() {
+    fn an_entry_turned_off_elsewhere_reads_as_added() {
         let path = file();
         let at = place(&path, &["mcpServers"], JsonDialect::Strict);
-        let own = r#"{"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "disabled": true}}}"#;
-
-        let kept = edited_listed(own, &at, false, false).unwrap();
-        assert_eq!(kept.outcome(), EditOutcome::AlreadyAdded);
-        let off = edited_listed(own, &at, true, false).unwrap();
-        assert_eq!(off.outcome(), EditOutcome::Disabled);
-        let on = edited_listed(own, &at, true, true).unwrap();
-        assert_eq!(on.outcome(), EditOutcome::Enabled);
-        assert!(on.text().is_none(), "the entry itself is unchanged");
-    }
-
-    /// A list of names is read and has the name taken out, its other
-    /// elements and comments kept; a missing list names nothing.
-    #[test]
-    fn a_name_is_found_in_and_taken_out_of_a_list() {
-        let path = file();
-        let at = place(
-            &path,
-            &["projects", "/work/shop", "disabledMcpServers"],
-            JsonDialect::WithComments,
-        );
-        let text = r#"{
-  // mine
-  "projects": {"/work/shop": {"disabledMcpServers": ["other", "muster", "last"]}}
-}
-"#;
-        assert!(lists(text, &at, &muster()).unwrap());
-        let without = unlisted(text, &at, &muster()).unwrap();
-        assert!(!lists(&without, &at, &muster()).unwrap());
-        assert!(without.contains("// mine"), "{without}");
-        assert_eq!(
-            loosely_parsed(&without)["projects"]["/work/shop"]["disabledMcpServers"],
-            json!(["other", "last"])
-        );
-        assert!(!lists("{}", &at, &muster()).unwrap());
-        assert!(!lists(r#"{"projects": {"/work/shop": {}}}"#, &at, &muster()).unwrap());
+        for own in [
+            r#"{"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "disabled": true}}}"#,
+            r#"{"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "enabled": false}}}"#,
+        ] {
+            for force in [false, true] {
+                let added = edit_json(
+                    Some(own),
+                    &at,
+                    &muster(),
+                    &entry(false),
+                    Disabling::Elsewhere,
+                    EntryChange::Add,
+                    force,
+                )
+                .unwrap();
+                assert_eq!(added.outcome(), EditOutcome::AlreadyAdded, "{own}");
+                assert!(added.text().is_none(), "{own}");
+            }
+        }
     }
 
     /// An entry Claude Code wrote itself, with `type` and `env`, is muster's

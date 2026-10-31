@@ -6,13 +6,13 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
-use getset::{CopyGetters, Getters};
+use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use super::{
     agent_config_error::AgentConfigError,
-    config_file::{io_error, resolved},
-    file_fingerprint::FileFingerprint,
+    config_file::{io_error, read_text, resolved},
+    config_text::ConfigText,
 };
 
 /// The mode of a config muster creates: only its owner reads it, as Claude
@@ -28,7 +28,7 @@ const CREATE_FOLDER_FOR: &str = "create the folder for";
 
 /// The new text of one config file, worked out against the file as read and
 /// not yet written.
-#[derive(Clone, Debug, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 pub(super) struct FileEdit {
     /// The file, as the agent names it.
     #[getset(get = "pub(super)")]
@@ -37,28 +37,36 @@ pub(super) struct FileEdit {
     #[getset(get = "pub(super)")]
     written: PathBuf,
     /// The file as it was read, or none when it did not exist.
-    fingerprint: Option<FileFingerprint>,
+    original: Option<ConfigText>,
     /// The new text.
     text: String,
     /// Whether the file's folder is made when missing, where the agent
     /// expects muster to make it.
     makes_folder: bool,
-    /// Whether Claude Code's lock guards the file.
-    #[getset(get_copy = "pub(super)")]
-    locked: bool,
 }
 
 impl FileEdit {
-    /// Checks the file is still the one the edit was worked out against,
-    /// by its fingerprint rather than a second read.
+    /// Checks the file still holds what the edit was worked out against:
+    /// its size first, then its text read again and compared.
     ///
     /// # Errors
-    /// Returns [`AgentConfigError::Changed`] when it is not, or
-    /// [`AgentConfigError::Io`] when it cannot be looked at.
+    /// Returns [`AgentConfigError::Changed`] when it does not, or the
+    /// [`AgentConfigError`] of a file that cannot be looked at or read.
     pub(super) fn check_unchanged(&self) -> Result<(), AgentConfigError> {
-        let now = FileFingerprint::at(&self.written)
-            .map_err(|source| io_error(CHECK, &self.path, source))?;
-        if now == self.fingerprint {
+        let size = match fs::symlink_metadata(&self.written) {
+            Ok(metadata) => Some(metadata.len()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(source) => return Err(io_error(CHECK, &self.path, source)),
+        };
+        let unchanged = match (&self.original, size) {
+            (None, None) => true,
+            (Some(original), Some(size)) if size == original.size() => {
+                read_text(&self.written, &self.path)?
+                    .is_some_and(|now| now.text() == original.text())
+            },
+            _ => false,
+        };
+        if unchanged {
             Ok(())
         } else {
             Err(AgentConfigError::Changed(self.path.clone()))

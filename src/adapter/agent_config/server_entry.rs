@@ -71,8 +71,9 @@ impl ServerEntry {
 
     /// What an existing entry holding `command` and `args` is to muster:
     /// the same entry, muster's own at another path (a program named
-    /// `muster`, or named as this binary is, with the same arguments), or
-    /// another server's.
+    /// `muster`, with the same arguments), or another server's. A binary
+    /// run under another name knows only the entry it writes itself, so a
+    /// generic name such as `server` is never claimed.
     pub(super) fn judge(
         &self,
         command: Option<&str>,
@@ -82,12 +83,7 @@ impl ServerEntry {
             args.into_iter()
                 .eq(self.args.iter().map(|arg| Some(arg.as_str())))
         });
-        let this_name = Path::new(&self.command).file_name();
-        let musters = |command: &str| {
-            Path::new(command)
-                .file_name()
-                .is_some_and(|name| name == APP_NAME || Some(name) == this_name)
-        };
+        let musters = |command: &str| Path::new(command).file_name() == Some(APP_NAME.as_ref());
         match command {
             Some(command) if same_args && command == self.command => EntryMatch::Same,
             Some(command) if same_args && musters(command) => EntryMatch::Older,
@@ -147,22 +143,26 @@ mod tests {
         }
     }
 
-    /// A binary run under another file name knows the entries it wrote
-    /// from another path by that name, as well as by `muster`.
+    /// A binary run under a generic name such as `server` claims no other
+    /// `server` with the arguments `mcp`, only `muster` elsewhere and the
+    /// entry it writes itself.
     #[test]
-    fn a_renamed_binary_knows_its_own_entries() {
+    fn a_generic_name_is_never_claimed() {
         let renamed = ServerEntry::builder()
-            .command("/opt/tools/mstr".to_owned())
+            .command("/opt/tools/server".to_owned())
             .args(vec!["mcp".to_owned()])
             .with_env(false)
             .build();
         for (command, expected) in [
-            ("/home/me/mstr", EntryMatch::Older),
+            ("/usr/bin/server", EntryMatch::Foreign),
+            ("server", EntryMatch::Foreign),
             ("/bin/muster", EntryMatch::Older),
-            ("/bin/other", EntryMatch::Foreign),
+            ("/opt/tools/server", EntryMatch::Same),
         ] {
             let value = json!({"command": command, "args": ["mcp"]});
             assert_eq!(renamed.judge_json(&value).0, expected, "{command}");
         }
+        let generic = json!({"command": "/usr/bin/server", "args": ["mcp"]});
+        assert_eq!(entry(false).judge_json(&generic).0, EntryMatch::Foreign);
     }
 }

@@ -32,7 +32,7 @@ pub struct McpEntryArgs {
     #[getset(get = "pub")]
     name: McpServerName,
     /// Replace or remove a server under the name that runs something else,
-    /// or turn muster's own back on.
+    /// or turn muster's own back on in Codex or Zed.
     #[arg(long)]
     #[getset(get_copy = "pub")]
     force: bool,

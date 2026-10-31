@@ -3,6 +3,11 @@
 //! readiness and waits, and every line the holder reads, matches and returns
 //! to an agent.
 
+use std::{
+    cell::Cell,
+    panic::{self, AssertUnwindSafe},
+};
+
 use super::{bounded_parser::BoundedParser, line_drawing::LineDrawing, log_line::LogLine};
 
 /// Most bytes to render before taking the lines they finish, so a whole log
@@ -15,12 +20,22 @@ pub const RENDER_CHUNK_BYTES: usize = 64 * 1024;
 /// jump from a saved cursor, and the alternate screen left out. Each byte is
 /// rendered once, so feeding a line in many pieces costs what feeding it
 /// whole does.
+///
+/// A panic while rendering never leaves it: the line being drawn is dropped,
+/// the rendering starts over as on a fresh terminal, and the drop is counted
+/// for [`LogRenderer::take_faults`], so a child's output can never take its
+/// reader down.
 #[derive(Default)]
 pub struct LogRenderer {
     /// The parser, kept across pieces.
     parser: BoundedParser,
     /// The line being drawn and the lines finished.
     drawing: LineDrawing,
+    /// Whether reading the line being drawn panicked, so it is dropped
+    /// before anything else touches it.
+    broken: Cell<bool>,
+    /// Lines dropped because rendering them panicked, not yet taken.
+    faults: Cell<usize>,
 }
 
 impl LogRenderer {
@@ -31,7 +46,11 @@ impl LogRenderer {
 
     /// Renders `bytes`, the next piece of the stream.
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.drawing, bytes);
+        self.contained(|renderer| {
+            #[cfg(test)]
+            super::render_fault::fire_if_armed();
+            renderer.parser.advance(&mut renderer.drawing, bytes);
+        });
     }
 
     /// The lines finished since the last call, oldest first.
@@ -49,25 +68,63 @@ impl LogRenderer {
     /// before, unless that is blank; the line goes on, and its line feed
     /// yields only what follows, or all of it when the part taken changed.
     pub fn take_partial(&mut self) -> Option<LogLine> {
-        self.drawing.take_partial()
+        self.contained(|renderer| renderer.drawing.take_partial())
+            .flatten()
     }
 
     /// The whole line still being drawn, unless it is blank, leaving it be.
+    /// A line whose reading panics reads as none, and is dropped at the
+    /// next step.
     pub fn peek_partial(&self) -> Option<LogLine> {
-        self.drawing.peek()
+        if self.broken.get() {
+            return None;
+        }
+        panic::catch_unwind(AssertUnwindSafe(|| self.drawing.peek())).unwrap_or_else(|_| {
+            self.broken.set(true);
+            self.faults.set(self.faults.get() + 1);
+            None
+        })
     }
 
     /// Ends the line still being drawn as the end of the output does; it is
     /// among the next lines taken unless nothing is left of it to show.
     pub fn finish(&mut self) {
-        self.drawing.finish();
+        self.contained(|renderer| renderer.drawing.finish());
     }
 
     /// Ends the line still being drawn, then starts over as a fresh
     /// terminal: no sequence in progress, pen, saved cursor or alternate
     /// screen outlives this point.
     pub fn restart(&mut self) {
-        self.drawing.reset();
+        self.finish();
+        self.recover();
+    }
+
+    /// How many lines were dropped because rendering them panicked, since
+    /// the last call.
+    pub fn take_faults(&mut self) -> usize {
+        self.faults.take()
+    }
+
+    /// Runs `step`, unless it panics: then the line being drawn and any
+    /// sequence in progress are dropped, the fault is counted, and `None`
+    /// is returned. A line a peek found broken is dropped first.
+    fn contained<T>(&mut self, step: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if self.broken.take() {
+            self.recover();
+        }
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| step(self)));
+        if outcome.is_err() {
+            self.faults.set(self.faults.get() + 1);
+            self.recover();
+        }
+        outcome.ok()
+    }
+
+    /// Drops the line being drawn and any sequence in progress, keeping the
+    /// lines finished before them.
+    fn recover(&mut self) {
+        self.drawing.drop_line();
         self.parser = BoundedParser::new();
     }
 }
@@ -79,7 +136,9 @@ mod tests {
     use super::*;
     use crate::adapter::terminal::{
         coloring::Coloring,
+        fuzz_stream::FuzzStream,
         line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
+        render_fault,
     };
 
     /// Erases to the cursor the long-line test feeds.
@@ -87,6 +146,14 @@ mod tests {
     /// How long those erases may take; filling the line for each would take
     /// minutes.
     const ERASE_BOUND: Duration = Duration::from_secs(2);
+    /// Seeds the random streams, so a failure repeats.
+    const FUZZ_SEED: u64 = 0x5EED_1E55_C0DE_D00D;
+    /// Streams the fuzz test renders.
+    const FUZZ_CASES: usize = 400;
+    /// Pieces in each stream.
+    const FUZZ_STEPS: usize = 300;
+    /// One in this many steps reads the line one of four ways.
+    const READS: u64 = 6;
 
     /// Every line of `bytes` rendered as `coloring` asks, each ending in a
     /// line break, the unfinished last one too.
@@ -446,5 +513,70 @@ mod tests {
         let lines: Vec<String> = renderer.take_lines().iter().map(LogLine::colored).collect();
 
         assert_eq!(lines, ["run 1", "run 2"]);
+    }
+
+    /// An erase to the cursor that ends inside a wide glyph blanks the whole
+    /// glyph, as a terminal does, and reading the line never panics: an
+    /// emoji spinner cleared with `\r ESC[1K` once took the service down.
+    #[test]
+    fn an_erase_ending_inside_a_wide_glyph_blanks_all_of_it() {
+        assert_eq!(plain("你\r\x1b[1K\nnext\n".as_bytes()), "next\n");
+        assert_eq!(plain("🙂\r\x1b[1K\nnext\n".as_bytes()), "next\n");
+        assert_eq!(plain("ab你cd\x1b[3G\x1b[1K\n".as_bytes()), "    cd\n");
+        assert_eq!(plain("ab你cd\x1b[4G\x1b[1K\n".as_bytes()), "    cd\n");
+        let mut renderer = LogRenderer::new();
+        renderer.advance("🙂\r\x1b[1K".as_bytes());
+        assert_eq!(renderer.peek_partial(), None);
+        assert_eq!(renderer.take_partial(), None);
+        renderer.advance("x".as_bytes());
+        assert_eq!(
+            renderer.peek_partial().map(|line| line.plain()).as_deref(),
+            Some("x")
+        );
+        assert_eq!(renderer.take_faults(), 0);
+    }
+
+    /// Random streams of the pieces a line is drawn with, wide glyphs and
+    /// erases among them, and of raw bytes, never make rendering panic,
+    /// however the line is read along the way.
+    #[test]
+    fn no_stream_makes_rendering_panic() {
+        let mut stream = FuzzStream::new(FUZZ_SEED);
+        for _ in 0..FUZZ_CASES {
+            let mut renderer = LogRenderer::new();
+            for _ in 0..FUZZ_STEPS {
+                renderer.advance(&stream.piece());
+                match stream.below(READS) {
+                    0 => drop(renderer.peek_partial().map(|line| line.colored())),
+                    1 => drop(renderer.take_partial().map(|line| line.plain())),
+                    2 => renderer.finish(),
+                    3 => renderer.restart(),
+                    _ => {},
+                }
+                for line in renderer.take_lines() {
+                    drop((line.colored(), line.plain(), line.is_blank()));
+                }
+            }
+            renderer.finish();
+            assert_eq!(renderer.take_faults(), 0, "rendering panicked");
+        }
+    }
+
+    /// A panic while rendering drops only the line it hit: the lines
+    /// finished before it are kept, it is counted once, and what follows
+    /// renders as on a fresh terminal.
+    #[test]
+    fn a_panic_drops_only_the_line_it_hit() {
+        let mut renderer = LogRenderer::new();
+        renderer.advance(b"kept\n\x1b[31mlost");
+
+        render_fault::arm();
+        renderer.advance(b" more");
+        renderer.advance(b"next\n");
+
+        assert_eq!(renderer.take_faults(), 1);
+        assert_eq!(renderer.take_faults(), 0, "a fault is counted once");
+        let lines: Vec<String> = renderer.take_lines().iter().map(LogLine::colored).collect();
+        assert_eq!(lines, ["kept", "next"]);
     }
 }

@@ -113,6 +113,12 @@ impl PlacedRenderer {
     pub fn finish(&mut self) {
         self.renderer.finish();
     }
+
+    /// How many lines were dropped because rendering them panicked, since
+    /// the last call.
+    pub fn take_faults(&mut self) -> usize {
+        self.renderer.take_faults()
+    }
 }
 
 #[cfg(test)]

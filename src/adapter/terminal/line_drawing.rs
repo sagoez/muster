@@ -188,10 +188,10 @@ impl LineDrawing {
         self.close_line(false);
     }
 
-    /// Ends the line being drawn where it stands, then forgets everything
-    /// drawing it left behind, as at the start of a fresh terminal.
-    pub fn reset(&mut self) {
-        self.finish();
+    /// Forgets the line being drawn and everything drawing it left behind,
+    /// without rendering it, keeping the lines finished before it, as at the
+    /// start of a fresh terminal.
+    pub fn drop_line(&mut self) {
         let finished = mem::take(&mut self.finished);
         *self = Self::default();
         self.finished = finished;
@@ -346,11 +346,13 @@ impl LineDrawing {
     }
 
     /// Erases from the start of the line to the cursor by recording it: the
-    /// cells it covers read as blank until drawn over again. The older
-    /// erasures it reaches past are dropped, so the extents keep falling as
-    /// the stamps rise, and each erase costs constant time amortized.
+    /// cells it covers read as blank until drawn over again. An erase ending
+    /// inside a wide glyph takes the whole glyph, as a terminal does, so no
+    /// later column of a glyph outlives its first. The older erasures it
+    /// reaches past are dropped, so the extents keep falling as the stamps
+    /// rise, and each erase costs constant time amortized.
     fn erase_to_cursor(&mut self) {
-        let extent = (self.cursor + 1).min(self.cells.len());
+        let extent = self.glyph_end((self.cursor + 1).min(self.cells.len()));
         if extent == 0 {
             return;
         }
@@ -368,6 +370,15 @@ impl LineDrawing {
         self.erasures
             .push(Erasure::builder().stamp(self.stamp).extent(extent).build());
         self.touch(0);
+    }
+
+    /// `extent`, moved past the end of the glyph covering the column before
+    /// it, so a span ending there never splits a glyph.
+    fn glyph_end(&self, extent: usize) -> usize {
+        let Some(lead) = extent.checked_sub(1).and_then(|last| self.lead_of(last)) else {
+            return extent;
+        };
+        (lead + usize::from(self.cells[lead].width())).clamp(extent, self.cells.len())
     }
 
     /// Writes every recorded erasure into the cells it covers and starts the
@@ -418,11 +429,12 @@ impl LineDrawing {
         while index < cells.len() {
             let cell = cells[index];
             let end = index + usize::from(cell.width());
-            let whole = end <= cells.len()
+            let whole = !cell.continues()
+                && end <= cells.len()
                 && cells[index + 1..end]
                     .iter()
                     .all(|continuation| continuation.continues());
-            if cell.continues() || !whole {
+            if !whole {
                 cells[index] = LineCell::blank(0);
                 index += 1;
             } else {

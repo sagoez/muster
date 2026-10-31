@@ -17,6 +17,8 @@ mod erasure;
 pub mod escape;
 mod event_proxy;
 pub mod fed;
+#[cfg(test)]
+pub mod fuzz_stream;
 mod keyboard;
 pub mod keyboard_protocol;
 pub mod keyboard_tracker;
@@ -33,6 +35,8 @@ pub mod pen_color;
 pub mod placed_renderer;
 #[cfg(test)]
 pub mod render_cell;
+#[cfg(test)]
+pub mod render_fault;
 mod saved_cursor;
 mod scanned_modes;
 pub mod screen_snapshot;

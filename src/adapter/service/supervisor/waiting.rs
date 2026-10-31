@@ -443,6 +443,7 @@ impl Supervisor {
         if self.knows_no_output(pane) {
             let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
             self.tap(pane).seed_at(at, &bytes);
+            self.report_render_faults(pane);
         }
         for HeldWait {
             prepared,
@@ -742,7 +743,31 @@ impl Supervisor {
         if self.awaits_a_pattern(pane) {
             lines.extend(self.tap(pane).unfinished());
         }
+        self.report_render_faults(pane);
         self.test_lines(pane, &lines);
+    }
+
+    /// Warns of each line of `pane`'s output its tap dropped because
+    /// rendering it panicked since the last report.
+    fn report_render_faults(&mut self, pane: PaneId) {
+        let Some(dropped) = self
+            .taps
+            .get_mut(&pane)
+            .map(OutputTap::take_faults)
+            .filter(|dropped| *dropped > 0)
+        else {
+            return;
+        };
+        let name = self
+            .workspace
+            .process(pane)
+            .map(|process| process.name().to_string())
+            .unwrap_or_default();
+        self.notify(
+            NoticeLevel::Warning,
+            Some(pane),
+            format!("{name}: {dropped} line(s) of output could not be rendered and were dropped"),
+        );
     }
 
     /// Whether a readiness pattern or a log wait still waits on `pane`'s
@@ -1467,12 +1492,15 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::service::{
-            LaunchEnvironment, StackEvent, StateGoal,
-            supervisor::{
-                LogReadResult,
-                testing::{name as process_name, spec as process_spec, *},
+        adapter::{
+            service::{
+                LaunchEnvironment, StackEvent, StateGoal,
+                supervisor::{
+                    LogReadResult,
+                    testing::{name as process_name, spec as process_spec, *},
+                },
             },
+            terminal::render_fault,
         },
         domain::{
             config::ProcessSpec,
@@ -2305,6 +2333,26 @@ mod tests {
         assert_eq!(event_kinds(&harness)[..2], [
             EventKind::Started,
             EventKind::Exited
+        ]);
+    }
+
+    /// A panic while rendering a child's output never reaches the service:
+    /// the line it hit is dropped with a warning, and the output after it
+    /// still matches a wait.
+    #[test]
+    fn a_renderer_panic_drops_the_line_with_a_warning() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        print(&mut harness, "api", b"before\n");
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("after")), None), None);
+
+        render_fault::arm();
+        print(&mut harness, "api", "lost 你\r\x1b[1K".as_bytes());
+        print(&mut harness, "api", b"after\n");
+
+        let outcome = answered(&answers).expect("the line after the fault matches");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        assert_eq!(harness.notice_messages(), [
+            "api: 1 line(s) of output could not be rendered and were dropped"
         ]);
     }
 }

@@ -155,6 +155,12 @@ impl OutputTap {
         (lines, scanned_from)
     }
 
+    /// How many lines were dropped because rendering them panicked, since
+    /// the last call.
+    pub fn take_faults(&mut self) -> usize {
+        self.renderer.take_faults()
+    }
+
     /// Where the oldest line held begins, or where the next one will when
     /// none is.
     pub fn held_from(&self) -> OutputCursor {

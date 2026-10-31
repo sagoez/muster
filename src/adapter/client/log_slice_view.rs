@@ -38,6 +38,9 @@ pub struct LogSliceView {
     /// Bytes after the cursor asked for that rotation already removed.
     #[getset(get_copy = "pub")]
     rotated_away_bytes: u64,
+    /// How many lines were dropped because rendering them failed.
+    #[getset(get_copy = "pub")]
+    unrendered_lines: usize,
     /// The lines, stripped of terminal escapes.
     #[getset(get = "pub")]
     text: String,
@@ -59,6 +62,7 @@ impl LogSliceView {
             lines_returned: slice.lines().len(),
             omitted_lines: slice.omitted_lines(),
             rotated_away_bytes: slice.rotated_away_bytes(),
+            unrendered_lines: slice.unrendered_lines(),
             text: slice.lines().join(LINE_FEED),
         }
     }

@@ -26,7 +26,6 @@ pub mod line_cell;
 pub mod line_drawing;
 pub mod log_line;
 pub mod log_renderer;
-pub mod mark_kind;
 pub mod mode_scanner;
 pub mod mouse_protocol_encoding;
 pub mod mouse_protocol_mode;
@@ -43,9 +42,8 @@ mod saved_cursor;
 mod scanned_modes;
 pub mod screen_snapshot;
 mod screen_state;
+pub mod screen_switch;
 pub mod snapshot_cell;
-pub mod stream_mark;
-pub mod stream_marks;
 pub mod tab_stops;
 mod watched_performer;
 

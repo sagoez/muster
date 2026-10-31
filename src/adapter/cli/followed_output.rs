@@ -11,4 +11,8 @@ pub trait FollowedOutput: Write {
     /// # Errors
     /// Returns an [`io::Error`] when the note cannot be written.
     fn gap(&mut self, skipped: u64, resumed: OutputCursor) -> io::Result<()>;
+
+    /// How many lines were dropped because rendering them failed, since the
+    /// last call.
+    fn take_faults(&mut self) -> usize;
 }

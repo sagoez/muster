@@ -365,6 +365,12 @@ end, wherever every other command's output is colored: on a terminal, with
 `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE` honored. A pipe and `--json` get
 the same lines without color, and `--screen` shows the live screen instead.
 
+What a full-screen program draws on the alternate screen, such as an editor,
+`htop` or a TUI, is not logged: the log holds one line, `[full-screen output
+not logged]`, each time the alternate screen comes up, and logging resumes
+when it goes away. The full-screen output stays visible live through `muster
+attach` and `muster logs --screen`.
+
 Each run is read as if on a fresh terminal, so a run killed on the alternate
 screen, mid-color or mid-escape hides nothing of the next. `logs -f` shows a
 line still being written, such as a prompt, once it has sat unchanged for
@@ -373,7 +379,9 @@ place, such as a progress bar, shows only once finished. A block of lines
 redrawn by climbing back up, such as `docker pull`'s, prints its lines again
 with each redraw, as the lines it climbs over were already shown. If output
 rotates away before `muster logs -f` reads it, the follow says how many bytes
-it lost and carries on.
+it lost and carries on. Should a line ever fail to render, it alone is
+dropped: `muster logs` says so on stderr, `process_logs` counts it in
+`unrendered_lines`, and the service raises a notice once per run.
 
 Every byte has an offset that runs on across restarts and rotations, written
 as a cursor such as `o:18234`. `-n N` (100 by default, at most 2000), `--since

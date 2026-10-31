@@ -41,6 +41,7 @@ use super::{
     emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
     error::CliError,
     export::{Exported, export, export_rows},
+    followed_output::FollowedOutput,
     hooked_shell::own_ancestors,
     host_terminal::HostTerminal,
     idle_stop_override::IdleStopOverride,
@@ -60,7 +61,7 @@ use super::{
     open_args::OpenArgs,
     output,
     presenter::Presenter,
-    process::{follow_logs, named_or_chosen, running_named_or_chosen},
+    process::{follow_logs, named_or_chosen, running_named_or_chosen, warn_unrendered},
     process_args::ProcessArgs,
     project_log_slice::ProjectLogSlice,
     projects::{
@@ -107,7 +108,7 @@ use crate::{
         occupancy::{LoadId, ReportStamp},
         port::LocalState,
         project::Project,
-        value::{DetachKey, OutputCursor, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };
@@ -676,8 +677,17 @@ fn logs(
         Presenter::Plain
     };
     match result {
-        Ok(read) if json => print_result(json, &read.text_in(&project), |_| {}),
-        Ok(read) if read.log().is_some() => written(print_log(&read, coloring)),
+        Ok(read) if json => {
+            let text = read.text_in(&project);
+            print_result(json, &text, |_| {});
+            warn_unrendered(read.name(), text.unrendered_lines().unwrap_or_default());
+        },
+        Ok(read) if read.log().is_some() => match print_log(&read, coloring) {
+            Ok(dropped) => {
+                warn_unrendered(read.name(), dropped);
+            },
+            Err(error) => written(Err(error)),
+        },
         Ok(read) if on_terminal => written(print_safely(read.bytes())),
         Ok(read) => emit_bytes(read.bytes()),
         Err(error) => fail_framed(framing, json, &error),
@@ -696,17 +706,19 @@ fn log_coloring(json: bool) -> Coloring {
 }
 
 /// Prints the log `read` holds as the lines a log reader shows, colored as
-/// `coloring` asks, a piece at a time rather than built whole first.
+/// `coloring` asks, a piece at a time rather than built whole first, and
+/// returns how many lines rendering dropped.
 ///
 /// # Errors
 /// Returns the [`io::Error`] of a failed write.
-fn print_log(read: &LogRead, coloring: Coloring) -> io::Result<()> {
+fn print_log(read: &LogRead, coloring: Coloring) -> io::Result<usize> {
     let mut stdout = io::stdout().lock();
-    let start = read.start().unwrap_or(OutputCursor::new(0));
-    let mut out = RenderedLog::new(&mut stdout, coloring, start, read.log().clone());
+    let mut out = RenderedLog::new(&mut stdout, coloring);
     out.write_all(read.bytes())?;
     out.finish()?;
-    stdout.flush()
+    let dropped = out.take_faults();
+    stdout.flush()?;
+    Ok(dropped)
 }
 
 /// Prints `bytes` on this terminal through [`TerminalSafe`], ending on a
@@ -765,6 +777,8 @@ fn filtered_logs(
                     emit_line(&printable_lines(view.text()));
                 }
             });
+            let view = report.slice();
+            warn_unrendered(view.process(), view.unrendered_lines());
         },
         Err(error) => fail_command(json, &error),
     }

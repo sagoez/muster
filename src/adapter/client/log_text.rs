@@ -36,4 +36,10 @@ pub struct LogText {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     skipped_bytes: Option<u64>,
+    /// Lines of a log read dropped because rendering them failed, when any
+    /// were.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    #[getset(get_copy = "pub")]
+    unrendered_lines: Option<usize>,
 }

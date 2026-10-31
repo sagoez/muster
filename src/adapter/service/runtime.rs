@@ -1805,6 +1805,7 @@ mod tests {
                 },
             },
             signal_target::SignalTarget,
+            terminal::escape::RUN_START,
             test_wait::{REPLY, wait_within},
         },
         domain::{
@@ -2538,7 +2539,7 @@ mod tests {
             "the queue is full and no fuller"
         );
 
-        let mut seen = Vec::new();
+        let mut seen = RUN_START.to_vec();
         let mut resynced = false;
         while seen.len() < FLOOD_BYTES {
             let Ok(ServiceEvent::Output { output, .. }) = events.recv_timeout(WAIT) else {

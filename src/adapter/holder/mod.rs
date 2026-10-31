@@ -21,6 +21,8 @@ mod filter_state;
 mod flow;
 mod frame;
 mod frame_tag;
+#[cfg(test)]
+pub(crate) mod gated_log;
 mod generation;
 mod handle;
 #[cfg(test)]
@@ -42,6 +44,7 @@ mod log;
 mod log_base;
 #[cfg(test)]
 mod log_fixture;
+mod log_lines;
 mod log_query;
 mod log_reader;
 mod log_scan;
@@ -50,7 +53,6 @@ mod log_tail;
 mod logged_line;
 #[cfg(test)]
 mod losing_sink;
-mod mark_file;
 mod matcher;
 mod pattern_error;
 mod piece;
@@ -65,12 +67,12 @@ mod recording_input;
 mod reject_reason;
 mod replay_request;
 mod resolved;
-
 mod runner;
 #[cfg(test)]
 mod runner_fixture;
 #[cfg(test)]
 mod sabotage;
+mod screen_gate;
 mod served_screen;
 mod server;
 #[cfg(test)]
@@ -110,18 +112,19 @@ pub use line_filter::*;
 pub use line_limit::*;
 pub use line_matcher::*;
 pub use log::*;
+pub use log_lines::*;
 pub use log_query::*;
 pub use log_reader::*;
 pub use log_scan::*;
 pub use log_slice::*;
 pub use log_tail::*;
 pub use logged_line::*;
-pub use mark_file::{MarksStamp, marks_stamp, stream_marks};
 pub use pattern_error::*;
 pub use protocol::*;
 pub use record::*;
 pub use reject_reason::*;
 pub use runner::*;
+pub use screen_gate::FULL_SCREEN_LINE;
 pub use served_screen::*;
 pub use server::*;
 pub use spawn_request_wire::*;

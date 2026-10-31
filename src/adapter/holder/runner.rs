@@ -17,10 +17,10 @@ use super::{
     holder_launcher::HolderLauncher,
     id::HolderId,
     line_matcher::LineMatcher,
-    log_reader::{first_match, last_lines, log_end, read_log_range},
+    log_lines::LogLines,
+    log_reader::{first_match, last_lines, read_log_tail},
     log_scan::LogScan,
     log_tail::LogTail,
-    mark_file::stream_marks,
     protocol::HolderMessage,
     record::HolderRecord,
 };
@@ -197,23 +197,14 @@ impl HolderRunner {
             .and_then(|index| candidates.into_iter().nth(index))
     }
 
-    /// Where the log of the process `name` of `project` ends, and its last
-    /// bytes before that, at most `LOG_TAIL_BYTES`, with where they start and
-    /// the log's marks, read after them so they cover every run start among
-    /// them: what a supervisor that never saw the process run reports of it.
-    /// None when the log cannot be read, as before any run wrote one.
+    /// The last bytes of the log of the process `name` of `project`, at most
+    /// `LOG_TAIL_BYTES` from a line boundary, with where they start: what a
+    /// supervisor that never saw the process run reports of it. None when
+    /// the log cannot be read, as before any run wrote one.
     pub fn log_tail(&self, project: &ProjectRoot, name: &ProcessName) -> Option<LogTail> {
-        let log = self.dirs.process_log(project, name);
-        let end = log_end(&log).ok()?;
-        let from = OutputCursor::new(end.offset().saturating_sub(LOG_TAIL_BYTES));
-        let (at, bytes) = read_log_range(&log, from, end, LOG_TAIL_BYTES).ok()?;
-        Some(
-            LogTail::builder()
-                .at(at)
-                .bytes(bytes)
-                .marks(stream_marks(&log))
-                .build(),
-        )
+        let (at, bytes) =
+            read_log_tail(&self.dirs.process_log(project, name), LOG_TAIL_BYTES).ok()?;
+        Some(LogTail::builder().at(at).bytes(bytes).build())
     }
 
     /// The first line of the log of the process `name` of `project` that
@@ -240,7 +231,7 @@ impl HolderRunner {
         from: OutputCursor,
         until: OutputCursor,
         count: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<LogLines> {
         let log = self.dirs.process_log(project, name);
         last_lines(&log, from, until, count, LOG_TAIL_BYTES).ok()
     }
@@ -538,7 +529,10 @@ mod tests {
                 thread_launcher::ThreadLauncher,
                 watch::Watch,
             },
-            terminal::TerminalEmulator,
+            terminal::{
+                TerminalEmulator,
+                escape::{END_OPEN_LINE, RUN_START},
+            },
         },
         domain::{
             color_scheme::ColorScheme,
@@ -747,13 +741,18 @@ mod tests {
         assert_eq!(whole.take_backlog(), None, "replayed through the sink");
         let lines = [regex("first|second")];
         assert!(whole.replay_matching(&lines).is_some());
+        let reset = &RUN_START[END_OPEN_LINE.len()..];
         assert_eq!(
             replayed(&outputs, 2),
-            (start, b"first\r\nsecond\r\n".to_vec())
+            (
+                start.advanced(END_OPEN_LINE.len() as u64),
+                [reset, b"first\r\nsecond\r\n"].concat()
+            ),
+            "the raw line the reset starts is replayed with it"
         );
         drop(whole);
 
-        let later = start.advanced("first\r\n".len() as u64);
+        let later = start.advanced((RUN_START.len() + "first\r\n".len()) as u64);
         let (sender, outputs) = unbounded();
         let mut rest = runner
             .adopt(&record, Some(later), Box::new(ChannelSink::new(sender)))
@@ -927,7 +926,8 @@ mod tests {
         });
 
         let log = fs::read(record.log()).unwrap();
-        let lines = String::from_utf8_lossy(&log)
+        let output = log.strip_prefix(RUN_START).expect("the run starts the log");
+        let lines = String::from_utf8_lossy(output)
             .lines()
             .map(|line| line.trim_end_matches('\r').to_string())
             .filter(|line| line.starts_with("line-"))

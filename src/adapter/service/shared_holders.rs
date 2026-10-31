@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{holder_pool::HolderPool, supervisor::HolderAdopter};
 use crate::{
-    adapter::holder::{HolderRecord, LineMatcher, LogScan, LogTail},
+    adapter::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail},
     domain::{
         port::{OutputSink, ProcessHandle, ProcessRunner},
         pty::{PtyError, SpawnRequest},
@@ -78,7 +78,7 @@ impl HolderAdopter for SharedHolders {
         from: OutputCursor,
         until: OutputCursor,
         count: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<LogLines> {
         self.0.log_lines(project, name, from, until, count)
     }
 

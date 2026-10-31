@@ -8,7 +8,9 @@ use std::{
     panic::{self, AssertUnwindSafe},
 };
 
-use super::{bounded_parser::BoundedParser, line_drawing::LineDrawing, log_line::LogLine};
+use super::{
+    bounded_parser::BoundedParser, escape::LINE_FEED, line_drawing::LineDrawing, log_line::LogLine,
+};
 
 /// Most bytes to render before taking the lines they finish, so a whole log
 /// never holds every line's cells at once.
@@ -16,15 +18,16 @@ pub const RENDER_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Renders raw output, fed in pieces of any size, into finished
 /// [`LogLine`]s: each line's carriage returns, erases and column moves
-/// applied, and blank lines that only redrew the screen, footers drawn at a
-/// jump from a saved cursor, and the alternate screen left out. Each byte is
-/// rendered once, so feeding a line in many pieces costs what feeding it
-/// whole does.
+/// applied, and blank lines that only redrew the screen and footers drawn at
+/// a jump from a saved cursor left out. Each byte is rendered once, so
+/// feeding a line in many pieces costs what feeding it whole does. A full
+/// reset (RIS), which the holder logs where each run starts, wipes the line
+/// in progress and the pen, so each run renders from a fresh terminal.
 ///
 /// A panic while rendering never leaves it: the line being drawn is dropped,
-/// the rendering starts over as on a fresh terminal, and the drop is counted
-/// for [`LogRenderer::take_faults`], so a child's output can never take its
-/// reader down.
+/// the rendering starts over as on a fresh terminal at the next line, and
+/// the drop is counted for [`LogRenderer::take_faults`], so a child's output
+/// can never take its reader down or cost it more than that line.
 #[derive(Default)]
 pub struct LogRenderer {
     /// The parser, kept across pieces.
@@ -44,13 +47,16 @@ impl LogRenderer {
         Self::default()
     }
 
-    /// Renders `bytes`, the next piece of the stream.
+    /// Renders `bytes`, the next piece of the stream, each line on its own,
+    /// so a panic on one line never costs the lines after it.
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.contained(|renderer| {
-            #[cfg(test)]
-            super::render_fault::fire_if_armed();
-            renderer.parser.advance(&mut renderer.drawing, bytes);
-        });
+        for line in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
+            self.contained(|renderer| {
+                #[cfg(test)]
+                super::render_fault::fire_if_armed();
+                renderer.parser.advance(&mut renderer.drawing, line);
+            });
+        }
     }
 
     /// The lines finished since the last call, oldest first.
@@ -93,8 +99,8 @@ impl LogRenderer {
     }
 
     /// Ends the line still being drawn, then starts over as a fresh
-    /// terminal: no sequence in progress, pen, saved cursor or alternate
-    /// screen outlives this point.
+    /// terminal: no sequence in progress, pen or saved cursor outlives this
+    /// point.
     pub fn restart(&mut self) {
         self.finish();
         self.recover();
@@ -104,12 +110,6 @@ impl LogRenderer {
     /// costs.
     pub fn partial_width(&self) -> usize {
         self.drawing.width()
-    }
-
-    /// Puts the rendering on the alternate screen, as a reader starting
-    /// where a process left it up must be.
-    pub fn enter_alternate(&mut self) {
-        self.drawing.enter_alternate();
     }
 
     /// How many lines were dropped because rendering them panicked, since
@@ -148,6 +148,7 @@ mod tests {
     use super::*;
     use crate::adapter::terminal::{
         coloring::Coloring,
+        escape::{END_OPEN_LINE, RUN_START},
         fuzz_stream::FuzzStream,
         line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
         render_fault,
@@ -267,9 +268,9 @@ mod tests {
         );
     }
 
-    /// A title, a clipboard write, a query, a DCS, a scroll region, a mode
-    /// change and an alternate screen leave nothing; the text beside them
-    /// stays, and a line holding nothing else is dropped.
+    /// A title, a clipboard write, a query, a DCS, a scroll region and mode
+    /// changes, a screen switch among them, leave nothing; the text beside
+    /// them stays, and a line holding nothing else is dropped.
     #[test]
     fn sequences_that_steer_the_terminal_leave_nothing() {
         assert_eq!(
@@ -283,7 +284,7 @@ mod tests {
             "region set\n"
         );
         assert_eq!(
-            plain(b"before\n\x1b[?1049h\x1b[H\x1b[2Jfull screen\nui\n\x1b[?1049lafter\n"),
+            plain(b"before\n\x1b[?1049h\n\x1b[?1049lafter\n"),
             "before\nafter\n"
         );
         assert_eq!(
@@ -457,16 +458,35 @@ mod tests {
         );
     }
 
-    /// A full reset (RIS) wipes the line it lands on and leaves the
-    /// alternate screen and the pen behind.
+    /// A full reset (RIS) wipes the line it lands on and leaves the pen
+    /// behind.
     #[test]
     fn a_full_reset_starts_from_a_fresh_terminal() {
         assert_eq!(plain(b"before\x1bcafter\n"), "after\n");
         assert_eq!(
-            colored(b"\x1b[31m\x1b[?1049hTUI\x1bcok\n"),
+            colored(b"\x1b[31mred\x1bcok\n"),
             "ok\n",
-            "no alternate screen and no color after a reset"
+            "no color after a reset"
         );
+    }
+
+    /// What the holder logs where a run starts ends the line the run before
+    /// left open, adds no blank line after one it ended, cancels a sequence
+    /// it cut short, and leaves no pen behind.
+    #[test]
+    fn a_run_start_ends_the_last_run_and_starts_afresh() {
+        let after = |before: &[u8]| {
+            let mut stream = before.to_vec();
+            stream.extend_from_slice(RUN_START);
+            stream.extend_from_slice(b"next\n");
+            colored(&stream)
+        };
+
+        assert_eq!(after(b"open"), "open\nnext\n");
+        assert_eq!(after(b"done\n"), "done\nnext\n");
+        assert_eq!(after(b"\x1b[32mcut\x1b[3"), "\x1b[32mcut\x1b[0m\nnext\n");
+        assert_eq!(after(b"\x1b]0;title cut"), "next\n");
+        assert!(RUN_START.starts_with(END_OPEN_LINE));
     }
 
     /// A control character never lands on a line, even when the parser
@@ -513,12 +533,12 @@ mod tests {
         );
     }
 
-    /// A restart forgets the alternate screen, the pen and a sequence cut
-    /// short, so what follows renders as on a fresh terminal.
+    /// A restart forgets the pen and a sequence cut short, so what follows
+    /// renders as on a fresh terminal.
     #[test]
     fn a_restart_starts_from_a_fresh_terminal() {
         let mut renderer = LogRenderer::new();
-        renderer.advance(b"run 1\n\x1b[?1049h\x1b[31mTUI\x1b]0;cut");
+        renderer.advance(b"run 1\n\x1b[31m\x1b]0;cut");
         renderer.restart();
         renderer.advance(b"run 2\n");
 
@@ -590,5 +610,19 @@ mod tests {
         assert_eq!(renderer.take_faults(), 0, "a fault is counted once");
         let lines: Vec<String> = renderer.take_lines().iter().map(LogLine::colored).collect();
         assert_eq!(lines, ["kept", "next"]);
+    }
+
+    /// A panic on one line of a piece holding many costs only that line:
+    /// the lines after it in the same piece are rendered.
+    #[test]
+    fn a_panic_spares_the_lines_after_it_in_the_same_piece() {
+        let mut renderer = LogRenderer::new();
+
+        render_fault::arm();
+        renderer.advance(b"lost\nsecond\nthird\n");
+
+        assert_eq!(renderer.take_faults(), 1);
+        let lines: Vec<String> = renderer.take_lines().iter().map(LogLine::plain).collect();
+        assert_eq!(lines, ["second", "third"]);
     }
 }

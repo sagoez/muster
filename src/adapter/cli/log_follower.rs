@@ -164,12 +164,7 @@ mod tests {
     fn pump(follower: &mut LogFollower) -> String {
         let mut bytes = Vec::new();
         follower
-            .pump(&mut RenderedLog::new(
-                &mut bytes,
-                Coloring::Plain,
-                OutputCursor::new(0),
-                None,
-            ))
+            .pump(&mut RenderedLog::new(&mut bytes, Coloring::Plain))
             .unwrap();
         String::from_utf8(bytes).unwrap()
     }

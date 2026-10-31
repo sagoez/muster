@@ -1,14 +1,16 @@
 use std::{
     io::{self, Write},
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
-use super::{followed_output::FollowedOutput, marks_watch::MarksWatch};
+use super::followed_output::FollowedOutput;
 use crate::{
     adapter::terminal::{
-        bounded_parser::char_chunks, coloring::Coloring, escape::LINE_FEED, log_line::LogLine,
-        log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
+        bounded_parser::char_chunks,
+        coloring::Coloring,
+        escape::LINE_FEED,
+        log_line::LogLine,
+        log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
     },
     domain::value::OutputCursor,
 };
@@ -29,45 +31,35 @@ pub fn gap_line(skipped: u64) -> String {
 /// followed. Nothing that moves the cursor, erases or changes the terminal's
 /// state is ever written.
 ///
-/// The rendering restarts at each run start the log's sidecar records, and
-/// at each gap, so one run's terminal state never reaches the next. A line
-/// still being written is shown early only once nothing has arrived for
-/// [`PENDING_LINE_IDLE`] and nothing has redrawn it in place, so a prompt
-/// shows while a progress bar is printed once, finished; the rest of a line
-/// shown early goes on after it when its newline arrives.
+/// The rendering starts over at each gap, and at each run start by the reset
+/// the holder logs there, so one run's terminal state never reaches the
+/// next. A line still being written is shown early only once nothing has
+/// arrived for [`PENDING_LINE_IDLE`] and nothing has redrawn it in place, so
+/// a prompt shows while a progress bar is printed once, finished; the rest
+/// of a line shown early goes on after it when its newline arrives.
 pub struct RenderedLog<'a> {
     /// Where the lines go.
     out: &'a mut dyn Write,
-    /// The rendering, kept across writes, placed in the process's output.
-    renderer: PlacedRenderer,
+    /// The rendering, kept across writes.
+    renderer: LogRenderer,
     /// Whether the lines keep their colors.
     coloring: Coloring,
     /// When bytes last arrived.
     last_write: Instant,
     /// Whether a line was written in part, its line break still to come.
     open: bool,
-    /// The marks of the log, whose run starts the rendering restarts at.
-    marks: MarksWatch,
 }
 
 impl<'a> RenderedLog<'a> {
-    /// Writes into `out`, colored as `coloring` asks, the output of the log
-    /// at `log` from `start`, starting on the screen its marks say is up
-    /// there and restarting at the run starts they record.
-    pub fn new(
-        out: &'a mut dyn Write,
-        coloring: Coloring,
-        start: OutputCursor,
-        log: Option<PathBuf>,
-    ) -> Self {
-        let mut marks = MarksWatch::new(log);
+    /// Writes into `out`, colored as `coloring` asks, the output of a log
+    /// from a line boundary on.
+    pub fn new(out: &'a mut dyn Write, coloring: Coloring) -> Self {
         Self {
             out,
-            renderer: marks.renderer_at(start),
+            renderer: LogRenderer::new(),
             coloring,
             last_write: Instant::now(),
             open: false,
-            marks,
         }
     }
 
@@ -124,11 +116,8 @@ impl<'a> RenderedLog<'a> {
 }
 
 impl Write for RenderedLog<'_> {
-    /// Renders `bytes` and writes every line they finish. The run starts are
-    /// read after the bytes, and a run's start is recorded before its first
-    /// byte, so every run start among the bytes is known.
+    /// Renders `bytes` and writes every line they finish.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.marks.refresh(&mut self.renderer);
         for chunk in char_chunks(bytes, RENDER_CHUNK_BYTES) {
             self.renderer.advance(chunk);
             self.write_lines()?;
@@ -155,19 +144,22 @@ impl Write for RenderedLog<'_> {
 impl FollowedOutput for RenderedLog<'_> {
     /// Writes out the line the gap cut short, then the line naming the bytes
     /// lost; the rendering starts over after it.
-    fn gap(&mut self, skipped: u64, resumed: OutputCursor) -> io::Result<()> {
+    fn gap(&mut self, skipped: u64, _resumed: OutputCursor) -> io::Result<()> {
         self.finish()?;
-        self.renderer.skip_to(resumed);
+        self.renderer.restart();
         self.out.write_all(gap_line(skipped).as_bytes())?;
         self.out.write_all(&[LINE_FEED])
+    }
+
+    fn take_faults(&mut self) -> usize {
+        self.renderer.take_faults()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{path::PathBuf, thread};
 
-    use bytesize::ByteSize as RawByteSize;
     use tempfile::TempDir;
 
     use super::*;
@@ -175,12 +167,16 @@ mod tests {
         adapter::{
             cli::json_log_lines::JsonLogLines,
             client::{LogRead, LogText, ProjectIdentityView},
-            holder::{LineLimit, LogQuery, RotatingLog, last_lines, read_log},
+            holder::{
+                FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
+                read_log_stream,
+            },
             service::OutputTap,
+            terminal::render_fault,
         },
         domain::{
             project::Project,
-            value::{ByteSize, ProcessName, ProjectName, ProjectRoot},
+            value::{ProcessName, ProjectName, ProjectRoot},
         },
     };
 
@@ -192,7 +188,7 @@ mod tests {
     fn rendered(chunks: &[&[u8]], coloring: Coloring) -> String {
         let mut bytes = Vec::new();
         {
-            let mut out = RenderedLog::new(&mut bytes, coloring, OutputCursor::new(0), None);
+            let mut out = RenderedLog::new(&mut bytes, coloring);
             for chunk in chunks {
                 out.write_all(chunk).unwrap();
             }
@@ -206,7 +202,7 @@ mod tests {
     fn followed(chunks: &[&[u8]]) -> String {
         let mut bytes = Vec::new();
         {
-            let mut out = RenderedLog::new(&mut bytes, Coloring::Plain, OutputCursor::new(0), None);
+            let mut out = RenderedLog::new(&mut bytes, Coloring::Plain);
             for chunk in chunks {
                 out.write_all(chunk).unwrap();
                 out.flush().unwrap();
@@ -222,7 +218,7 @@ mod tests {
     #[test]
     fn a_gap_is_a_line_of_its_own() {
         let mut bytes = Vec::new();
-        let mut out = RenderedLog::new(&mut bytes, Coloring::Plain, OutputCursor::new(0), None);
+        let mut out = RenderedLog::new(&mut bytes, Coloring::Plain);
         out.write_all(b"partial\x1b[?1049h").unwrap();
         out.gap(42, OutputCursor::new(100)).unwrap();
         out.write_all(b"next\n").unwrap();
@@ -239,7 +235,7 @@ mod tests {
     #[test]
     fn lines_are_written_whole_and_redraws_leave_nothing() {
         let mut bytes = Vec::new();
-        let mut out = RenderedLog::new(&mut bytes, Coloring::Colored, OutputCursor::new(0), None);
+        let mut out = RenderedLog::new(&mut bytes, Coloring::Colored);
         for chunk in [
             b"\x1b[3".as_slice(),
             b"2mready\x1b[0m",
@@ -290,8 +286,8 @@ mod tests {
     /// Output that steers the terminal in the ways a log reader's rendering
     /// most easily gets wrong: the alternate screen, saved cursors jumping
     /// away, restored or not, a block climbed back over and redrawn, and a
-    /// progress bar; with a run start between two runs, the first left on
-    /// the alternate screen in color.
+    /// progress bar; in two runs, the first left on the alternate screen in
+    /// color.
     fn steering_runs() -> (Vec<u8>, Vec<u8>) {
         let first = b"before\n\x1b[?1049h\x1b[Hfull screen\nui\n\x1b[?1049lafter\n\
             progress 40%\x1b7\x1b[30;1Hstatus bar\nnext line\n\
@@ -304,28 +300,31 @@ mod tests {
         (first, second)
     }
 
+    /// Bytes the holder's reads in the every-path test arrive in, so the
+    /// screen switches are split across them.
+    const HOLDER_CHUNK: usize = 7;
+
     /// Every path that reads a log shows the same lines for the same
-    /// output: `logs`, `logs -f` fed a byte at a time, `logs --json`,
-    /// `logs -f --json`, `-n`, the holder's scans and the service's tap.
+    /// output, as a holder logs it: `logs`, `logs -f` fed a byte at a time,
+    /// `logs --json`, `logs -f --json`, `-n`, the holder's scans and the
+    /// service's tap, fed what the holder sends it.
     #[test]
     fn every_path_shows_the_same_lines() {
         let scratch = TempDir::new().unwrap();
         let path = scratch.path().join("api.log");
-        let mut log = RotatingLog::open(
-            path.clone(),
-            ByteSize::try_new(RawByteSize::mib(1)).unwrap(),
-        )
-        .unwrap();
+        let mut log = GatedLog::open(path.clone(), 1 << 20);
         let (first, second) = steering_runs();
-        log.record_run_start();
-        log.append(&first).unwrap();
-        let second_start = log.end();
-        log.record_run_start();
-        log.append(&second).unwrap();
-        let mut stream = first.clone();
-        stream.extend_from_slice(&second);
+        let mut sent = Vec::new();
+        let first_start = log.start_run();
+        for chunk in first.chunks(HOLDER_CHUNK) {
+            sent.push(log.write(chunk));
+        }
+        let second_start = log.start_run();
+        let second_sent = log.write(&second);
+        let (_, stream) = read_log_stream(&path).unwrap();
         let expected = [
             "before",
+            FULL_SCREEN_LINE,
             "after",
             "progress 40%",
             "next line",
@@ -336,29 +335,20 @@ mod tests {
             "[+] up 1/2",
             " Container Creating",
             " Container Created",
+            FULL_SCREEN_LINE,
             "   Compiling a",
             "    Finished",
         ];
 
         let mut whole = Vec::new();
         {
-            let mut out = RenderedLog::new(
-                &mut whole,
-                Coloring::Plain,
-                OutputCursor::new(0),
-                Some(path.clone()),
-            );
+            let mut out = RenderedLog::new(&mut whole, Coloring::Plain);
             out.write_all(&stream).unwrap();
             out.finish().unwrap();
         }
         let mut followed = Vec::new();
         {
-            let mut out = RenderedLog::new(
-                &mut followed,
-                Coloring::Plain,
-                OutputCursor::new(0),
-                Some(path.clone()),
-            );
+            let mut out = RenderedLog::new(&mut followed, Coloring::Plain);
             for byte in &stream {
                 out.write_all(&[*byte]).unwrap();
             }
@@ -392,6 +382,7 @@ mod tests {
             .end(Some(log.end()))
             .bytes(stream.clone())
             .build();
+        assert_eq!(read.start(), Some(OutputCursor::new(0)));
         let newest = read_log(
             &path,
             &LogQuery::builder()
@@ -408,18 +399,15 @@ mod tests {
         )
         .unwrap();
         let mut tap = OutputTap::new(OutputCursor::new(0));
-        tap.begin_run_at(OutputCursor::new(0));
-        let mut tapped: Vec<String> = tap
-            .feed(None, &first)
-            .iter()
-            .map(|line| line.text().clone())
-            .collect();
+        let mut tapped = Vec::new();
+        tap.begin_run_at(first_start);
+        for (at, bytes) in &sent {
+            tapped.extend(tap.feed(Some(*at), bytes));
+        }
         tap.begin_run_at(second_start);
-        tapped.extend(
-            tap.feed(None, &second)
-                .iter()
-                .map(|line| line.text().clone()),
-        );
+        tapped.extend(tap.feed(Some(second_sent.0), &second_sent.1));
+        tapped.extend(tap.unfinished());
+        let tapped: Vec<String> = tapped.iter().map(|line| line.text().clone()).collect();
 
         let lines = |bytes: &[u8]| -> Vec<String> {
             String::from_utf8(bytes.to_vec())
@@ -445,8 +433,25 @@ mod tests {
             "logs --json"
         );
         assert_eq!(*newest.lines(), expected, "logs -n");
-        assert_eq!(scanned, expected, "wait and readiness scans");
+        assert_eq!(*scanned.lines(), expected, "wait and readiness scans");
         assert_eq!(tapped, expected, "the service's tap");
+    }
+
+    /// A rendering fault drops only the line it hit, and the writer counts
+    /// it for the warning `logs` prints.
+    #[test]
+    fn a_rendering_fault_drops_one_line_and_is_counted() {
+        let mut bytes = Vec::new();
+        let dropped = {
+            let mut out = RenderedLog::new(&mut bytes, Coloring::Plain);
+            render_fault::arm();
+            out.write_all(b"lost\nkept\n").unwrap();
+            out.finish().unwrap();
+            out.take_faults()
+        };
+
+        assert_eq!(String::from_utf8(bytes).unwrap(), "kept\n");
+        assert_eq!(dropped, 1);
     }
 
     /// A C1 control split across writes, which the parser hands over as a

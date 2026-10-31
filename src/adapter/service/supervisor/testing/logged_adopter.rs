@@ -2,7 +2,6 @@ use crate::{
     adapter::{
         holder::{HolderRecord, LogTail},
         service::supervisor::HolderAdopter,
-        terminal::stream_marks::StreamMarks,
     },
     domain::{
         port::{OutputSink, ProcessHandle},
@@ -18,24 +17,14 @@ pub(crate) struct LoggedAdopter {
     at: OutputCursor,
     /// The last bytes of every log.
     tail: Vec<u8>,
-    /// The marks every log records.
-    marks: StreamMarks,
 }
 
 impl LoggedAdopter {
-    /// An adopter whose logs end with `tail`, starting at `at`, and record
-    /// no marks.
+    /// An adopter whose logs end with `tail`, starting at `at`.
     pub(crate) fn new(at: OutputCursor, tail: &[u8]) -> Self {
-        Self::marked(at, tail, StreamMarks::default())
-    }
-
-    /// An adopter whose logs end with `tail`, starting at `at`, and record
-    /// `marks`.
-    pub(crate) fn marked(at: OutputCursor, tail: &[u8], marks: StreamMarks) -> Self {
         Self {
             at,
             tail: tail.to_vec(),
-            marks,
         }
     }
 }
@@ -63,7 +52,6 @@ impl HolderAdopter for LoggedAdopter {
             LogTail::builder()
                 .at(self.at)
                 .bytes(self.tail.clone())
-                .marks(self.marks.clone())
                 .build(),
         )
     }

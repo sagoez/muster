@@ -24,8 +24,8 @@ use crossbeam_channel::unbounded;
 use muster::{
     adapter::{
         holder::{
-            ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderLauncher,
-            HolderRunner, client::greet,
+            ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
+            HolderLauncher, HolderRunner, client::greet,
         },
         open_files::OpenFilesLimit,
         private_dir::RUNTIME_DIR_ENV,
@@ -3925,8 +3925,15 @@ fn steering() -> String {
     )
 }
 
-/// The lines [`steering`] leaves for a log reader.
-const STEERING_LINES: [&str; 4] = ["first line", "red ok", "100% done", "last line"];
+/// The lines [`steering`] leaves for a log reader, its full-screen output
+/// among them as the one line the holder logs in its place.
+const STEERING_LINES: [&str; 5] = [
+    "first line",
+    "red ok",
+    "100% done",
+    FULL_SCREEN_LINE,
+    "last line",
+];
 
 /// Every escape sequence in `raw` that is not a color (SGR), and every
 /// control character but a line feed, carriage return or tab.
@@ -4017,7 +4024,8 @@ fn a_run_left_on_the_alternate_screen_hides_nothing_of_the_next() {
         let (_, ended) = scratch.json_on(&shop, &["wait", "tui", "--state", "stopped"]);
         assert_eq!(ended["status"], "matched", "{ended}");
     }
-    let expected = "run1 before\nrun2 hello\nrun2 world\n";
+    let expected = format!("run1 before\n{FULL_SCREEN_LINE}\nrun2 hello\nrun2 world\n");
+    let expected = expected.as_str();
 
     let plain = scratch.on(&shop, &["logs", "tui"]);
     let (_, json) = scratch.json_on(&shop, &["logs", "tui"]);
@@ -4035,8 +4043,101 @@ fn a_run_left_on_the_alternate_screen_hides_nothing_of_the_next() {
     assert_eq!(stdout(&plain), expected, "{}", shown(&plain));
     assert_eq!(json["text"], expected, "{json}");
     assert_eq!(newest["text"], expected.trim_end(), "{newest}");
-    assert_eq!(grep["text"], expected.trim_end(), "{grep}");
+    assert_eq!(
+        grep["text"], "run1 before\nrun2 hello\nrun2 world",
+        "{grep}"
+    );
     assert_eq!(waited["match"]["line"], "run2 world", "{waited}");
+}
+
+/// The smallest log cap, which the full-screen test's lines pass many times.
+const SMALL_LOG_CAP: &str = "16KiB";
+
+/// A full-screen program that keeps drawing long after enough plain lines
+/// to rotate its log reads the same on every path, before and after a
+/// service restart adopts its live holder: `logs`, `--json`, `-n`,
+/// `--since`, `--grep`, `wait --log` and `process_logs` all show its lines
+/// and the one line logged in place of its frames, never a frame; and the
+/// frames never reach the log, so they rotate nothing away.
+#[test]
+fn a_long_full_screen_run_reads_alike_everywhere() {
+    let mut scratch = Scratch::new();
+    let set = scratch.muster(&["config", "set", "log-max-size", SMALL_LOG_CAP]);
+    assert!(set.status.success(), "{}", shown(&set));
+    let command = "i=0; while [ $i -lt 1500 ]; do echo \"line $i of the plain output\"; \
+                   i=$((i+1)); done; printf '\\033[?1049h'; j=0; \
+                   while :; do printf '\\033[Hframe %d of the full screen\\n' $j; j=$((j+1)); done";
+    let shop = scratch.project("shop", &stack(&[entry("tui", command, false)]));
+    let started = scratch.on(&shop, &["start", "tui"]);
+    assert!(started.status.success(), "{}", shown(&started));
+    let (_, marked) = scratch.json_on(&shop, &[
+        "wait",
+        "tui",
+        "--log",
+        FULL_SCREEN_LINE,
+        "--since",
+        "o:0",
+    ]);
+    assert_eq!(marked["status"], "matched", "{marked}");
+    let (_, read) = scratch.json_on(&shop, &["logs", "tui"]);
+    let log = PathBuf::from(read["log"].as_str().unwrap_or_default());
+    let logged_size = || fs::metadata(&log).map_or(0, |meta| meta.len());
+    let settled = logged_size();
+    thread::sleep(Duration::from_secs(1));
+    assert_eq!(logged_size(), settled, "frames reached the log");
+    let last = "line 1499 of the plain output";
+    let newest = format!("line 1498 of the plain output\n{last}\n{FULL_SCREEN_LINE}");
+
+    for round in ["first service", "adopting service"] {
+        let plain = stdout(&scratch.on(&shop, &["logs", "tui"]));
+        let (_, json) = scratch.json_on(&shop, &["logs", "tui"]);
+        let (_, tail) = scratch.json_on(&shop, &["logs", "tui", "-n", "3"]);
+        let since = tail["from"].as_str().unwrap_or_default().to_string();
+        let (_, from) = scratch.json_on(&shop, &["logs", "tui", "--since", &since]);
+        let (_, frames) = scratch.json_on(&shop, &["logs", "tui", "--grep", "frame"]);
+        let (_, found) = scratch.json_on(&shop, &["wait", "tui", "--log", last, "--since", "o:0"]);
+        let (_, never) = scratch.json_on(&shop, &[
+            "wait",
+            "tui",
+            "--log",
+            "frame",
+            "--since",
+            "o:0",
+            "--timeout",
+            "1s",
+        ]);
+        let mut mcp = McpSession::start(&mut scratch, &shop);
+        let read = mcp.result(
+            "process_logs",
+            serde_json::json!({ "name": "tui", "lines": 3 }),
+        );
+
+        assert!(plain.ends_with(&format!("{newest}\n")), "{round}: {plain}");
+        assert!(!plain.contains("frame"), "{round}: {plain}");
+        assert!(
+            !plain.starts_with("line 0 "),
+            "{round}: the log never rotated"
+        );
+        assert_eq!(json["text"], plain.as_str(), "{round}");
+        assert_eq!(tail["text"], newest.as_str(), "{round}: {tail}");
+        assert_eq!(from["text"], newest.as_str(), "{round}: {from}");
+        assert_eq!(frames["text"], "", "{round}: {frames}");
+        assert_eq!(found["match"]["line"], last, "{round}: {found}");
+        assert_eq!(never["status"], "waiting", "{round}: {never}");
+        assert_eq!(
+            read["structuredContent"]["text"],
+            newest.as_str(),
+            "{round}: {read}"
+        );
+        assert_eq!(read["structuredContent"]["unrendered_lines"], 0, "{read}");
+        drop(mcp);
+        if round == "first service" {
+            restart_service_adopting(&scratch, &shop, "tui");
+        }
+    }
+    assert_eq!(logged_size(), settled, "frames reached the log");
+    let killed = scratch.on(&shop, &["kill", "tui"]);
+    assert!(killed.status.success(), "{}", shown(&killed));
 }
 
 /// `muster logs` colors a log as anstream colors every other command's

@@ -60,7 +60,6 @@ mod lock;
 mod lock_command;
 mod log_filter_args;
 mod log_follower;
-mod marks_watch;
 mod mcp_launch;
 #[cfg(test)]
 mod memory_coordination;

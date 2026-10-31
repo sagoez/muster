@@ -19,10 +19,7 @@ use super::{
     strip::strip_line,
 };
 use crate::{
-    adapter::terminal::{
-        escape::{ESC, LINE_FEED},
-        stream_marks::StreamMarks,
-    },
+    adapter::terminal::escape::{ESC, LINE_FEED},
     domain::value::OutputCursor,
 };
 
@@ -136,16 +133,10 @@ impl Span {
     /// pass the filter: scans back from the end in blocks, testing each line
     /// once, and stops at the line that completes the count. Errors-only
     /// counts error lines, each of which opens a group of at least one line.
-    /// A line that begins while `marks` say the alternate screen is up never
-    /// counts, as the stream's rendering leaves it out.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when a read fails.
-    pub(super) fn newest_start(
-        &self,
-        query: &LogQuery,
-        marks: &StreamMarks,
-    ) -> io::Result<OutputCursor> {
+    pub(super) fn newest_start(&self, query: &LogQuery) -> io::Result<OutputCursor> {
         let wanted = query.lines().into_inner();
         let oldest = self.oldest.offset();
         let end = self.end.offset();
@@ -163,11 +154,7 @@ impl Span {
                 }
                 let line_start = low + index as u64 + 1;
                 let trailing = line_start == end;
-                let hidden = marks.alternate_at(OutputCursor::new(line_start));
-                if !trailing
-                    && !hidden
-                    && self.counts(query, line_start, line_end, (low, &block[..filled]))?
-                {
+                if !trailing && self.counts(query, line_start, line_end, (low, &block[..filled]))? {
                     counted += 1;
                     if counted >= wanted {
                         return Ok(OutputCursor::new(line_start));

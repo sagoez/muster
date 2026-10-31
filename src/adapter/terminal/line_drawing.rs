@@ -17,10 +17,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::{
     erasure::Erasure,
-    escape::{
-        ALT_SCREEN_MODES, FULL_RESET_FINAL, LINE_FEED, PRIVATE_MARKER, RESET_MODE_FINAL,
-        SET_MODE_FINAL, SGR_FINAL, param_values,
-    },
+    escape::{FULL_RESET_FINAL, LINE_FEED, SGR_FINAL, param_values},
     line_cell::LineCell,
     log_line::LogLine,
     pen::Pen,
@@ -103,9 +100,10 @@ const MAX_GLYPH_WIDTH: usize = TAB_STOP;
 /// sequence on it, or one the cursor climbed back over. Cursor moves up and
 /// down are not applied, as a log reader has already shown the lines they
 /// reach. What is drawn after a saved cursor jumps to an absolute position,
-/// up to its restore or the next line feed, and everything drawn on the
-/// alternate screen, is a screen overlay such as a status footer, and is
-/// dropped. A save not restored by the end of its line is forgotten.
+/// up to its restore or the next line feed, is a screen overlay such as a
+/// status footer, and is dropped. A save not restored by the end of its line
+/// is forgotten. The alternate screen needs no handling: the holder never
+/// logs what is drawn on it.
 ///
 /// A glyph wider than one column takes its columns whole, and overwriting
 /// any of them blanks the rest, as a terminal does; a combining mark joins
@@ -131,8 +129,6 @@ pub struct LineDrawing {
     saved: Option<SavedCursor>,
     /// Whether a saved cursor jumped away, so what is drawn is an overlay.
     detached: bool,
-    /// Whether the alternate screen is up.
-    alternate: bool,
     /// Whether a sequence other than SGR reached the line.
     steered: bool,
     /// Whether the line was redrawn in place: a carriage return, backspace,
@@ -202,15 +198,9 @@ impl LineDrawing {
         self.cells.len()
     }
 
-    /// Puts the drawing on the alternate screen, whose output is left out
-    /// until it goes away.
-    pub fn enter_alternate(&mut self) {
-        self.alternate = true;
-    }
-
     /// Whether what is drawn lands on the line rather than an overlay.
     fn on_line(&self) -> bool {
-        !self.detached && !self.alternate
+        !self.detached
     }
 
     /// Draws `character` at the cursor in the current pen, or joins it to
@@ -498,9 +488,6 @@ impl LineDrawing {
     /// an overlay ends the jump away: the line drawn before it is done, as
     /// the cursor now stands on another row.
     fn end_line(&mut self) {
-        if self.alternate {
-            return;
-        }
         self.close_line(true);
         if mem::take(&mut self.detached) {
             self.risen = 0;
@@ -539,14 +526,13 @@ impl LineDrawing {
     }
 
     /// Clears everything, as a full reset (RIS) does: the line being drawn is
-    /// wiped with the screen it is on, and the pen, saved cursor, overlay and
-    /// alternate screen are gone.
+    /// wiped with the screen it is on, and the pen, saved cursor and overlay
+    /// are gone.
     fn full_reset(&mut self) {
         self.clear_line();
         self.pen = Pen::default();
         self.saved = None;
         self.detached = false;
-        self.alternate = false;
         self.risen = 0;
         self.steered = true;
     }
@@ -655,26 +641,16 @@ impl Perform for LineDrawing {
         }
     }
 
-    /// Sets the pen, notes the alternate screen, and applies the moves and
-    /// erases a line is redrawn with; every other sequence is dropped.
+    /// Sets the pen and applies the moves and erases a line is redrawn
+    /// with; every other sequence is dropped.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         if !ignore && intermediates.is_empty() && action == SGR_FINAL {
             self.pen.apply(params);
             return;
         }
         self.steered = true;
-        if ignore {
-            return;
-        }
-        match intermediates {
-            [] => self.steer(params, action),
-            [PRIVATE_MARKER]
-                if matches!(action, SET_MODE_FINAL | RESET_MODE_FINAL)
-                    && param_values(params).any(|mode| ALT_SCREEN_MODES.contains(&mode)) =>
-            {
-                self.alternate = action == SET_MODE_FINAL;
-            },
-            _ => {},
+        if !ignore && intermediates.is_empty() {
+            self.steer(params, action);
         }
     }
 

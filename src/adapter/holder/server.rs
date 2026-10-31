@@ -37,6 +37,7 @@ use super::{
     record::HolderRecord,
     record_guard::RecordGuard,
     reject_reason::RejectReason,
+    screen_gate::ScreenGate,
     socket_guard::SocketGuard,
 };
 use crate::{
@@ -85,6 +86,8 @@ pub struct HolderServer {
     keyboard: KittyKeyboardTracker,
     /// The child's output log.
     log: RotatingLog,
+    /// What of the child's output the log keeps.
+    gate: ScreenGate,
     /// Where the child's run began in the log, before it wrote anything.
     run_start: OutputCursor,
     /// Connected clients by identity.
@@ -132,7 +135,7 @@ impl HolderServer {
             .and_then(|root| ProjectRoot::try_new(root).ok())
             .ok_or(HolderError::MissingProject)?;
         let mut log = RotatingLog::open(config.log().clone(), request.log_max_size())?;
-        log.record_run_start();
+        log.start_run();
         let (sender, events) = bounded(EVENT_QUEUE_CAPACITY);
         let handle = runner.spawn(request.clone(), Box::new(HolderSink::new(sender.clone())))?;
         let child_started_at = SystemTime::now();
@@ -227,8 +230,9 @@ impl HolderServer {
                 request.color_scheme(),
             ),
             keyboard: KittyKeyboardTracker::default(),
-            run_start: log.end(),
+            run_start: log.run_start(),
             log,
+            gate: ScreenGate::default(),
             clients: HashMap::new(),
             resizes: Vec::new(),
             size,
@@ -329,12 +333,14 @@ impl HolderServer {
     }
 
     /// Feeds child output to the emulator and keyboard tracker, answers any
-    /// terminal queries they raise, logs it and broadcasts it. Output the
-    /// emulator panics on leaves it blank instead of ending the holder, and
-    /// with it the child: every client is resynced to that screen and warned.
-    /// That chunk still reaches the keyboard tracker and its query replies are
-    /// still sent, so the child neither loses a protocol change nor waits on
-    /// an answer.
+    /// terminal queries they raise, logs what the [`ScreenGate`] keeps of it
+    /// and broadcasts it: attached terminals get every byte, the supervisor
+    /// what was logged, at its place in the log, so its waits read the same
+    /// stream every log reader does. Output the emulator panics on leaves it
+    /// blank instead of ending the holder, and with it the child: every
+    /// client is resynced to that screen and warned. That chunk still reaches
+    /// the keyboard tracker and its query replies are still sent, so the
+    /// child neither loses a protocol change nor waits on an answer.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the output cannot be encoded.
@@ -346,16 +352,27 @@ impl HolderServer {
             let length = replies.len();
             self.input.try_push(replies, length);
         }
+        let logged = self
+            .gate
+            .logged(&bytes, &self.emulator.take_screen_switches());
         let at = self.log.end();
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
-        let _ = self.log.append(&bytes);
-        self.report_log_warning()?;
+        let _ = self.log.append(&logged);
         if reset {
             self.resync_all()?;
             return self.broadcast(HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()));
         }
-        self.broadcast(HolderMessage::Output { at, bytes })
+        if !logged.is_empty() {
+            self.broadcast_to(
+                |role| role == ClientRole::Supervisor,
+                HolderMessage::Output { at, bytes: logged },
+            )?;
+        }
+        self.broadcast_to(
+            |role| role != ClientRole::Supervisor,
+            HolderMessage::Output { at, bytes },
+        )
     }
 
     /// Registers a new connection and starts its writer thread.
@@ -459,33 +476,7 @@ impl HolderServer {
             self.reported_attached = self.writable_attached();
         }
         self.resync(client)?;
-        self.report_log_warning()?;
         self.report_attached()
-    }
-
-    /// Tells the supervisor, once one is connected, why the log's marks
-    /// could not be written, so the failure reaches the user as a notice
-    /// though the run goes on.
-    ///
-    /// # Errors
-    /// Returns a [`HolderError`] when the message cannot be encoded.
-    fn report_log_warning(&mut self) -> Result<(), HolderError> {
-        let supervisors: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(_, entry)| entry.role == Some(ClientRole::Supervisor))
-            .map(|(id, _)| *id)
-            .collect();
-        if supervisors.is_empty() {
-            return Ok(());
-        }
-        let Some(warning) = self.log.take_warning() else {
-            return Ok(());
-        };
-        for client in supervisors {
-            self.send(client, HolderMessage::Warning(warning.clone()))?;
-        }
-        Ok(())
     }
 
     /// Replaces whatever `client` has queued with the live screen, then the
@@ -689,12 +680,29 @@ impl HolderServer {
     /// # Errors
     /// Returns a [`HolderError`] when the message cannot be encoded.
     fn broadcast(&mut self, message: HolderMessage) -> Result<(), HolderError> {
+        self.broadcast_to(|_| true, message)
+    }
+
+    /// Queues `message` for every client that has said hello in a role
+    /// `takes` accepts; nothing is encoded when there is none.
+    ///
+    /// # Errors
+    /// Returns a [`HolderError`] when the message cannot be encoded.
+    fn broadcast_to(
+        &mut self,
+        takes: impl Fn(ClientRole) -> bool,
+        message: HolderMessage,
+    ) -> Result<(), HolderError> {
+        let taken = |entry: &Client| entry.role.is_some_and(&takes);
+        if !self.clients.values().any(taken) {
+            return Ok(());
+        }
         let frame = Frame::try_from(message)?;
         let length = frame.wire_len();
         let stalled = self
             .clients
             .iter()
-            .filter(|(_, entry)| entry.role.is_some())
+            .filter(|(_, entry)| taken(entry))
             .filter(|(_, entry)| !entry.outbox.try_push(frame.clone(), length))
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
@@ -872,6 +880,7 @@ mod tests {
                 client::repaint_text,
                 fake_child::FakeChild,
                 harness::Harness,
+                screen_gate::FULL_SCREEN_LINE,
                 server_testing::{
                     COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
                     WAIT, request, scratch, size, wait_until,
@@ -880,7 +889,7 @@ mod tests {
             },
             pty::PortablePtyRunner,
             signal_target::SignalTarget,
-            terminal::TerminalEmulator,
+            terminal::{TerminalEmulator, escape::RUN_START},
             test_wait::wait_within,
         },
         domain::{
@@ -937,7 +946,8 @@ mod tests {
     }
 
     /// Each output frame names where it starts in the log, so the frames tile
-    /// the log with no gap or overlap and end where the log ends.
+    /// the log, after the reset its run starts with, with no gap or overlap
+    /// and end where the log ends.
     #[test]
     fn output_frames_carry_their_log_offsets() {
         let harness = Harness::start("read x; seq 1 2000; read y");
@@ -946,7 +956,7 @@ mod tests {
         supervisor.output_until("2000\r\n");
 
         let frames = &supervisor.frames();
-        assert_eq!(frames[0].0, OutputCursor::new(0));
+        assert_eq!(frames[0].0, OutputCursor::new(RUN_START.len() as u64));
         for pair in frames.windows(2) {
             assert_eq!(
                 pair[1].0,
@@ -1517,6 +1527,61 @@ mod tests {
             HolderMessage::read_from(&mut peer).unwrap(),
             HolderMessage::Warning(_)
         ) {}
+    }
+
+    /// What a child draws on the alternate screen reaches an attached
+    /// terminal whole, but neither the log nor the supervisor: both get one
+    /// line in its place, the supervisor at its offset in the log, so the
+    /// service's waits read what every log reader reads.
+    #[test]
+    fn full_screen_output_reaches_attach_but_never_the_log() {
+        let scratch = scratch();
+        let (mut server, _) = fake_server(&scratch);
+        let (supervisor, mut supervisor_peer) = UnixStream::pair().unwrap();
+        let (attach, mut attach_peer) = UnixStream::pair().unwrap();
+        supervisor_peer.set_read_timeout(Some(WAIT)).unwrap();
+        attach_peer.set_read_timeout(Some(WAIT)).unwrap();
+        server.on_connected(ClientId::new(0), supervisor);
+        server
+            .on_hello(ClientId::new(0), ClientRole::Supervisor)
+            .unwrap();
+        server.on_connected(ClientId::new(1), attach);
+        server
+            .on_hello(ClientId::new(1), ClientRole::Attach { read_only: true })
+            .unwrap();
+        let chunk = b"ready\r\n\x1b[?1049h\x1b[Hsecret frame\x1b[?1049lafter\r\n";
+
+        server.on_output(chunk.to_vec()).unwrap();
+        server
+            .on_output(b"\x1b[?1049honly frames".to_vec())
+            .unwrap();
+        server.on_output(b"\x1b[?1049lend\r\n".to_vec()).unwrap();
+
+        let logged = fs::read(scratch.path().join("dev.log")).unwrap();
+        let text = String::from_utf8_lossy(&logged);
+        assert!(
+            !text.contains("secret") && !text.contains("only"),
+            "{text:?}"
+        );
+        assert_eq!(text.matches(FULL_SCREEN_LINE).count(), 2, "{text:?}");
+        let mut supervised = Vec::new();
+        while supervised.len() < logged.len() {
+            if let HolderMessage::Output { at, bytes } =
+                HolderMessage::read_from(&mut supervisor_peer).unwrap()
+            {
+                assert_eq!(at, OutputCursor::new(supervised.len() as u64));
+                supervised.extend(bytes);
+            }
+        }
+        assert_eq!(supervised, logged);
+        let attached = loop {
+            if let HolderMessage::Output { bytes, .. } =
+                HolderMessage::read_from(&mut attach_peer).unwrap()
+            {
+                break bytes;
+            }
+        };
+        assert_eq!(attached, chunk);
     }
 
     /// The chunk the emulator panics on still reaches the keyboard tracker,

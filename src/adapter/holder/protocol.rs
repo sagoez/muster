@@ -61,9 +61,12 @@ pub enum HolderMessage {
         log_end: OutputCursor,
     },
     /// Bytes the child wrote, with the output offset of the first, so a
-    /// client that missed frames sees the gap.
+    /// client that missed frames sees the gap. An attached terminal gets
+    /// every byte; the supervisor gets what the log kept of them, so its
+    /// frames tile the log.
     Output {
-        /// Where `bytes` start in the process's output stream.
+        /// Where `bytes` start in the process's output stream: in the log,
+        /// where the log's part of the chunk landed.
         at: OutputCursor,
         /// The bytes.
         bytes: Vec<u8>,

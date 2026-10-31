@@ -2,22 +2,15 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions, Permissions},
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
-use super::{
-    generation::Generation,
-    log_base::LogBase,
-    mark_file::{MAX_STREAM_MARKS, append_marks, stream_marks, write_marks},
-};
+use super::{generation::Generation, log_base::LogBase};
 use crate::{
     adapter::{
         private_dir::create_private_dir_all,
-        terminal::{
-            mark_kind::MarkKind, mode_scanner::ModeScanner, observation::Observation,
-            stream_mark::StreamMark, stream_marks::StreamMarks,
-        },
+        terminal::escape::{LINE_FEED, RUN_START},
     },
     domain::value::{ByteSize, OutputCursor},
 };
@@ -30,11 +23,7 @@ pub(super) const PRIVATE_LOG_MODE: u32 = 0o600;
 /// An append-only log that keeps one older generation: once the next write
 /// would pass the cap, `name.log` becomes `name.log.1` and a fresh file starts.
 /// It also tracks where each byte sits in the process's output stream across
-/// rotations and runs, recording the live file's start in a `.base` sidecar,
-/// and where each run starts and the alternate screen comes up or goes away
-/// in a `.marks` one. The marks only help readers render, so failing to
-/// write them never fails a run or a write: the failure is kept for
-/// [`RotatingLog::take_warning`].
+/// rotations and runs, recording the live file's start in a `.base` sidecar.
 pub struct RotatingLog {
     /// The live log file's path.
     path: PathBuf,
@@ -46,14 +35,12 @@ pub struct RotatingLog {
     base: u64,
     /// Size at which the live file rotates.
     cap: ByteSize,
-    /// Follows the alternate screen through what is appended.
-    scanner: ModeScanner,
-    /// Whether the alternate screen is up at the log's end.
-    alternate: bool,
-    /// How many marks the sidecar holds.
-    marks: usize,
-    /// Why the marks sidecar could not be written, until it is reported.
-    warning: Option<String>,
+    /// Where the run being logged began: where [`Self::start_run`] was
+    /// called, or where the log ended when opened.
+    run_start: OutputCursor,
+    /// Whether the live file ends on a line boundary: it is empty or its
+    /// last byte is a line feed.
+    ends_line: bool,
 }
 
 impl RotatingLog {
@@ -80,17 +67,15 @@ impl RotatingLog {
         };
         let sidecar = LogBase::read(&path);
         let base = LogBase::resolve(sidecar, Some(live), rotated).offset();
-        let marks = stream_marks(&path).marks().len();
+        let ends_line = ends_line(&path, live.len())?;
         let log = Self {
             path,
             file,
             written: live.len(),
             base,
             cap,
-            scanner: ModeScanner::new(),
-            alternate: false,
-            marks,
-            warning: None,
+            run_start: OutputCursor::new(base.saturating_add(live.len())),
+            ends_line,
         };
         if sidecar.is_none_or(|sidecar| sidecar.offset() != base || sidecar.inode() != live.inode())
         {
@@ -105,130 +90,65 @@ impl RotatingLog {
         OutputCursor::new(self.base.saturating_add(self.written))
     }
 
-    /// Records that a run begins at the log's end, before it writes anything,
-    /// so a reader that reads the run's output and then the marks always
-    /// finds its start; the run renders from a fresh terminal. Marks past
-    /// the end, left by a log reopened shorter, are dropped, as no reader
-    /// can follow them.
-    pub fn record_run_start(&mut self) {
-        self.scanner = ModeScanner::new();
-        self.alternate = false;
-        let end = self.end();
-        let start = StreamMark::builder()
-            .at(end)
-            .kind(MarkKind::RunStart)
-            .build();
-        let marks = stream_marks(&self.path);
-        if marks.marks().last().is_none_or(|mark| mark.at() <= end) {
-            self.add_marks(&[start]);
-            return;
-        }
-        let kept = marks
-            .marks()
-            .iter()
-            .copied()
-            .filter(|mark| mark.at() <= end)
-            .chain([start])
-            .collect();
-        self.replace_marks(&StreamMarks::new(kept));
+    /// Where the run being logged began.
+    pub fn run_start(&self) -> OutputCursor {
+        self.run_start
     }
 
-    /// Why the marks sidecar could not be written since the last call, if
-    /// it could not.
-    pub fn take_warning(&mut self) -> Option<String> {
-        self.warning.take()
+    /// Begins a run at the log's end, before the child writes anything:
+    /// appends [`RUN_START`], which ends the line the last run left open
+    /// and resets the terminal, so every reader renders the run from a fresh
+    /// terminal without knowing where it began. Like any write, a failed one
+    /// never stops the run.
+    pub fn start_run(&mut self) {
+        self.run_start = self.end();
+        let _ = self.append(RUN_START);
     }
 
-    /// Appends `bytes`, rotating first when they would carry a non-empty live
-    /// file past the cap. A single write larger than the cap is kept whole.
-    /// After a failed write the length is taken from the file again, so
-    /// [`Self::end`] keeps naming real log positions.
+    /// Appends `bytes`, rotating when they would carry a non-empty live file
+    /// past the cap: before them when the live file ends a line, and
+    /// otherwise after the line feed that ends its open line, so each
+    /// generation starts on a line wherever the output allows. A single
+    /// write larger than the cap is kept whole.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when rotating or writing fails.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
         let incoming = bytes.len() as u64;
-        if self.written > 0 && self.written.saturating_add(incoming) > self.cap.bytes() {
-            self.rotate()?;
+        if self.written == 0 || self.written.saturating_add(incoming) <= self.cap.bytes() {
+            return self.write(bytes);
         }
-        let at = self.end();
+        let head = if self.ends_line {
+            0
+        } else {
+            bytes
+                .iter()
+                .position(|byte| *byte == LINE_FEED)
+                .map_or(0, |feed| feed + 1)
+        };
+        self.write(&bytes[..head])?;
+        self.rotate()?;
+        self.write(&bytes[head..])
+    }
+
+    /// Writes `bytes` to the live file. After a failed write the length is
+    /// taken from the file again, so [`Self::end`] keeps naming real log
+    /// positions.
+    ///
+    /// # Errors
+    /// Returns an [`io::Error`] when writing fails.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         if let Err(error) = self.file.write_all(bytes) {
             if let Ok(metadata) = self.file.metadata() {
                 self.written = metadata.len();
             }
             return Err(error);
         }
-        self.written = self.written.saturating_add(incoming);
-        self.mark_screens(at, bytes);
+        self.written = self.written.saturating_add(bytes.len() as u64);
+        if let Some(last) = bytes.last() {
+            self.ends_line = *last == LINE_FEED;
+        }
         Ok(())
-    }
-
-    /// Records where `bytes`, written at `at`, bring the alternate screen up
-    /// or take it away, each just past the sequence that does it.
-    fn mark_screens(&mut self, at: OutputCursor, bytes: &[u8]) {
-        let mut found = Vec::new();
-        for (index, byte) in bytes.iter().enumerate() {
-            let up = match self.scanner.feed(*byte) {
-                Observation::EnterAlternate => true,
-                Observation::LeaveAlternate | Observation::FullReset => false,
-                _ => continue,
-            };
-            if up == self.alternate {
-                continue;
-            }
-            self.alternate = up;
-            let kind = if up {
-                MarkKind::EnterAlternate
-            } else {
-                MarkKind::LeaveAlternate
-            };
-            found.push(
-                StreamMark::builder()
-                    .at(at.advanced(index as u64 + 1))
-                    .kind(kind)
-                    .build(),
-            );
-        }
-        if !found.is_empty() {
-            self.add_marks(&found);
-        }
-    }
-
-    /// Appends `marks` to the sidecar, bounding it to [`MAX_STREAM_MARKS`]
-    /// once it holds more.
-    fn add_marks(&mut self, marks: &[StreamMark]) {
-        if let Err(error) = append_marks(&self.path, marks) {
-            self.warn(&error);
-            return;
-        }
-        self.marks += marks.len();
-        if self.marks > MAX_STREAM_MARKS {
-            self.retain_marks(OutputCursor::new(0));
-        }
-    }
-
-    /// Bounds the sidecar to the marks a log whose oldest byte is `oldest`
-    /// still needs, and to [`MAX_STREAM_MARKS`].
-    fn retain_marks(&mut self, oldest: OutputCursor) {
-        let kept = stream_marks(&self.path).retained(oldest, MAX_STREAM_MARKS);
-        self.replace_marks(&kept);
-    }
-
-    /// Replaces the sidecar with `marks`.
-    fn replace_marks(&mut self, marks: &StreamMarks) {
-        match write_marks(&self.path, marks) {
-            Ok(()) => self.marks = marks.marks().len(),
-            Err(error) => self.warn(&error),
-        }
-    }
-
-    /// Keeps `error`, met writing the marks sidecar, to be reported.
-    fn warn(&mut self, error: &io::Error) {
-        self.warning = Some(format!(
-            "could not record run starts and screen changes beside {}: {error}; \
-             reads of this log may render a run as the one before it left the terminal",
-            self.path.display()
-        ));
     }
 
     /// Moves the live file to its rotated name, replacing the older generation,
@@ -240,12 +160,10 @@ impl RotatingLog {
     fn rotate(&mut self) -> io::Result<()> {
         fs::rename(&self.path, rotated_path(&self.path))?;
         self.file = Self::append_to(&self.path)?;
-        let oldest = OutputCursor::new(self.base);
         self.base = self.base.saturating_add(self.written);
         self.written = 0;
-        self.record_base()?;
-        self.retain_marks(oldest);
-        Ok(())
+        self.ends_line = true;
+        self.record_base()
     }
 
     /// Writes the sidecar naming the live file and its start.
@@ -274,6 +192,20 @@ impl RotatingLog {
     }
 }
 
+/// Whether the file at `path`, `len` bytes long, ends on a line boundary:
+/// it is empty or its last byte is a line feed.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the file cannot be read.
+fn ends_line(path: &Path, len: u64) -> io::Result<bool> {
+    let Some(last) = len.checked_sub(1) else {
+        return Ok(true);
+    };
+    let mut byte = [0];
+    File::open(path)?.read_exact_at(&mut byte, last)?;
+    Ok(byte[0] == LINE_FEED)
+}
+
 /// The path of the older generation kept beside `path`.
 pub fn rotated_path(path: &Path) -> PathBuf {
     let mut rotated = OsString::from(path.as_os_str());
@@ -287,7 +219,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::holder::span::Span;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -397,91 +328,57 @@ mod tests {
         assert_eq!(LogBase::read(&path).unwrap().offset(), 8);
     }
 
-    /// A mark of `kind` at `offset`.
-    fn mark(kind: MarkKind, offset: u64) -> StreamMark {
-        StreamMark::builder()
-            .at(OutputCursor::new(offset))
-            .kind(kind)
-            .build()
-    }
-
-    /// Each run start is marked, and the alternate screen is marked just past
-    /// the sequence that brings it up or takes it away, once per change, a
-    /// full reset taking it away too, even when a sequence is split.
+    /// A write that carries the log past its cap while a line is open
+    /// rotates after the line feed that ends it, even in a log reopened
+    /// mid-line, so the new generation starts on a line and a reader that
+    /// starts at the oldest byte kept never starts inside a sequence; one
+    /// that finds a line ended rotates before it.
     #[test]
-    fn runs_and_screen_changes_are_marked() {
+    fn rotation_starts_the_new_generation_on_a_line() {
         let scratch = TempDir::new().unwrap();
         let path = scratch.path().join("proc.log");
-        let mut log = RotatingLog::open(
-            path.clone(),
-            ByteSize::try_new(RawByteSize::mib(1)).unwrap(),
-        )
-        .unwrap();
-
-        log.record_run_start();
-        log.append(b"ab\x1b[?10").unwrap();
-        log.append(b"49h\x1b[?1049hTUI\x1b[?1049l").unwrap();
-        log.append(b"\x1b[?47h\x1bc").unwrap();
-        log.record_run_start();
-
-        assert_eq!(stream_marks(&path).marks(), [
-            mark(MarkKind::RunStart, 0),
-            mark(MarkKind::EnterAlternate, 10),
-            mark(MarkKind::LeaveAlternate, 29),
-            mark(MarkKind::EnterAlternate, 35),
-            mark(MarkKind::LeaveAlternate, 37),
-            mark(MarkKind::RunStart, 37),
-        ]);
-        assert_eq!(log.take_warning(), None);
-    }
-
-    /// A marks sidecar that cannot be written never stops a run or a write:
-    /// the log goes on, and why the marks are missing is kept to report.
-    #[test]
-    fn an_unwritable_marks_sidecar_never_stops_the_log() {
-        let scratch = TempDir::new().unwrap();
-        let path = scratch.path().join("proc.log");
-        let mut marks = path.clone().into_os_string();
-        marks.push(".marks");
-        fs::create_dir(&marks).unwrap();
-        let mut log = RotatingLog::open(
-            path.clone(),
-            ByteSize::try_new(RawByteSize::mib(1)).unwrap(),
-        )
-        .unwrap();
-
-        log.record_run_start();
-        let warning = log.take_warning().expect("the failure is kept");
-        log.append(b"ready\n\x1b[?1049h").unwrap();
-
-        assert!(warning.contains("proc.log"), "{warning}");
-        assert!(log.take_warning().is_some(), "a later failure is kept too");
-        assert_eq!(fs::read(&path).unwrap(), b"ready\n\x1b[?1049h");
-    }
-
-    /// Runs whose bytes rotation discarded lose their marks at the rotation,
-    /// but for those the screen at the oldest byte kept comes from, so the
-    /// sidecar follows the log's size rather than the number of runs.
-    #[test]
-    fn rotation_drops_the_marks_of_discarded_output() {
-        let scratch = TempDir::new().unwrap();
-        let path = scratch.path().join("proc.log");
-        let cap = ByteSize::try_new(RawByteSize::b(16)).unwrap();
+        let cap = ByteSize::try_new(RawByteSize::b(10)).unwrap();
         let mut log = RotatingLog::open(path.clone(), cap).unwrap();
-        for _ in 0..100 {
-            log.record_run_start();
-            log.append(b"run\n").unwrap();
-        }
-        log.append(b"\x1b[?1049h").unwrap();
-        for _ in 0..10 {
-            log.append(b"frame\n").unwrap();
-        }
+        log.append(b"12345678").unwrap();
+        drop(log);
+        let mut log = RotatingLog::open(path.clone(), cap).unwrap();
+        log.append(b"9\n\x1b[31mred\nmore").unwrap();
 
-        let marks = stream_marks(&path);
-        let oldest = Span::open(&path).unwrap().oldest();
+        assert_eq!(fs::read(rotated_path(&path)).unwrap(), b"123456789\n");
+        assert_eq!(fs::read(&path).unwrap(), b"\x1b[31mred\nmore");
+        assert_eq!(LogBase::read(&path).unwrap().offset(), 10);
+        assert_eq!(log.end(), OutputCursor::new(23));
 
-        assert!(marks.marks().len() <= 4, "{:?}", marks.marks());
-        assert!(marks.alternate_at(oldest));
-        assert_eq!(log.take_warning(), None);
+        log.append(b" done\n").unwrap();
+        log.append(b"next\nline\n").unwrap();
+        assert_eq!(
+            fs::read(rotated_path(&path)).unwrap(),
+            b"\x1b[31mred\nmore done\n"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"next\nline\n");
+    }
+
+    /// Each run begins with the reset every reader renders it from, in the
+    /// log itself, and its start is where that reset was written.
+    #[test]
+    fn each_run_starts_with_a_reset_in_the_log() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("proc.log");
+        let cap = ByteSize::try_new(RawByteSize::mib(1)).unwrap();
+        let mut log = RotatingLog::open(path.clone(), cap).unwrap();
+        log.append(b"before").unwrap();
+        assert_eq!(log.run_start(), OutputCursor::new(0));
+
+        log.start_run();
+        log.append(b"run\n").unwrap();
+
+        assert_eq!(log.run_start(), OutputCursor::new(6));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            [b"before".as_slice(), RUN_START, b"run\n"].concat()
+        );
+        drop(log);
+        let reopened = RotatingLog::open(path.clone(), cap).unwrap();
+        assert_eq!(reopened.run_start(), reopened.end());
     }
 }

@@ -35,6 +35,7 @@ mod tests {
             .lines(vec!["ok".to_string()])
             .omitted_lines(0)
             .rotated_away_bytes(0)
+            .unrendered_lines(0)
             .build();
         let report = ProjectLogSlice::builder()
             .project(

@@ -6,9 +6,8 @@ use typed_builder::TypedBuilder;
 use super::replay_ask_handle::ReplayAskHandle;
 use crate::{
     adapter::{
-        holder::{HolderRecord, LineMatcher, LogScan, LogTail, LoggedLine},
+        holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine},
         service::supervisor::HolderAdopter,
-        terminal::stream_marks::StreamMarks,
     },
     domain::{
         port::{OutputSink, ProcessHandle},
@@ -76,13 +75,7 @@ impl HolderAdopter for ReplayAskAdopter {
             .iter()
             .flat_map(|line| format!("{}\n", line.text()).into_bytes())
             .collect();
-        Some(
-            LogTail::builder()
-                .at(oldest.at())
-                .bytes(bytes)
-                .marks(StreamMarks::default())
-                .build(),
-        )
+        Some(LogTail::builder().at(oldest.at()).bytes(bytes).build())
     }
 
     fn log_scan(
@@ -101,7 +94,13 @@ impl HolderAdopter for ReplayAskAdopter {
             .lines_within(began, until)
             .find(|line| matcher.is_match(line.text()))
             .cloned();
-        Some(LogScan::builder().from(began).matched(matched).build())
+        Some(
+            LogScan::builder()
+                .from(began)
+                .matched(matched)
+                .unrendered_lines(0)
+                .build(),
+        )
     }
 
     fn log_lines(
@@ -111,12 +110,17 @@ impl HolderAdopter for ReplayAskAdopter {
         from: OutputCursor,
         until: OutputCursor,
         count: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<LogLines> {
         let lines: Vec<String> = self
             .lines_within(from, until)
             .map(|line| line.text().clone())
             .collect();
-        Some(lines[lines.len().saturating_sub(count)..].to_vec())
+        Some(
+            LogLines::builder()
+                .lines(lines[lines.len().saturating_sub(count)..].to_vec())
+                .unrendered_lines(0)
+                .build(),
+        )
     }
 
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {

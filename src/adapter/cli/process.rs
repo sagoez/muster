@@ -11,7 +11,8 @@ use std::{
 
 use super::{
     error::CliError, followed_output::FollowedOutput, json_log_lines::JsonLogLines,
-    log_follower::LogFollower, presenter::Presenter, rendered_log::RenderedLog,
+    log_follower::LogFollower, output, presenter::Presenter, rendered_log::RenderedLog,
+    report::print_note,
 };
 use crate::{
     adapter::{
@@ -23,6 +24,7 @@ use crate::{
         service::{ProcessStatus, ProjectStatus},
         terminal::coloring::Coloring,
     },
+    constants::APP_NAME,
     domain::{
         process::ProcessState,
         project::Project,
@@ -54,38 +56,44 @@ pub fn follow_logs(
     let log = log_path(client, project, &name)?;
     let (start, kept) = read_log_stream(&log).map_err(|error| log_read_error(&log, error))?;
     if !json {
-        let mut rendered = RenderedLog::new(out, coloring, start, Some(log.clone()));
-        return follow(&log, start, &kept, &mut rendered);
+        let mut rendered = RenderedLog::new(out, coloring);
+        return follow(&name, &log, (start, &kept), &mut rendered);
     }
     let template = LogRead::builder()
-        .name(name)
+        .name(name.clone())
         .log(Some(log.clone()))
         .end(None)
         .bytes(Vec::new())
         .build()
         .text_in(project);
     follow(
+        &name,
         &log,
-        start,
-        &kept,
+        (start, &kept),
         &mut JsonLogLines::new(out, template, start),
     )
 }
 
-/// Writes `kept`, the log's output from `start` on, into `out`, then follows
-/// the live log from where it ends until the command is interrupted.
+/// Writes `kept`, the output of `name`'s log from `start` on, into `out`,
+/// then follows the live log from where it ends until the command is
+/// interrupted. The first time rendering drops a line, a warning goes to
+/// stderr, once.
 ///
 /// # Errors
 /// Returns a [`CliError`] when the log cannot be read or written out.
 fn follow(
+    name: &ProcessName,
     log: &Path,
-    start: OutputCursor,
-    kept: &[u8],
+    (start, kept): (OutputCursor, &[u8]),
     out: &mut dyn FollowedOutput,
 ) -> Result<Infallible, CliError> {
     out.write_all(kept).map_err(CliError::Output)?;
     let mut follower = LogFollower::new(log.to_path_buf(), start.advanced(kept.len() as u64));
+    let mut warned = false;
     loop {
+        if !warned {
+            warned = warn_unrendered(name, out.take_faults());
+        }
         follower.pump(out).map_err(|source| match source.kind() {
             io::ErrorKind::BrokenPipe => CliError::Output(source),
             _ => log_error(log, source).into(),
@@ -93,6 +101,16 @@ fn follow(
         out.flush().map_err(CliError::Output)?;
         thread::sleep(FOLLOW_POLL);
     }
+}
+
+/// Warns on stderr that rendering dropped `count` lines of `name`'s log,
+/// when it dropped any; returns whether it warned.
+pub fn warn_unrendered(name: &ProcessName, count: usize) -> bool {
+    if count == 0 {
+        return false;
+    }
+    print_note(APP_NAME, &output::unrendered_lines(name, count));
+    true
 }
 
 /// Picks, from a listing of `project`, the process `name` means, or the one

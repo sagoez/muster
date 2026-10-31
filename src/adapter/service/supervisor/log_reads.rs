@@ -100,6 +100,7 @@ impl Supervisor {
     pub fn handle_log_read(&mut self, pane: PaneId, read: u64, mut result: LogReadResult) {
         let tail = result.take_tail();
         let mut answers = result.take_answers();
+        let unrendered = answers.values().map(LogAnswer::unrendered_lines).sum();
         self.send_held_answers(read, &mut answers);
         let Some(end) = self
             .log_reads
@@ -109,6 +110,7 @@ impl Supervisor {
         else {
             return;
         };
+        self.report_render_faults(pane, unrendered);
         if end {
             self.answer_held_waits(pane, tail);
         }
@@ -126,8 +128,10 @@ impl Supervisor {
             .collect();
         for held in landed {
             let outcome = match answers.remove(&held.key) {
-                Some(LogAnswer::Lines(lines)) if lines.len() > held.outcome.tail().len() => {
-                    held.outcome.with_tail(lines)
+                Some(LogAnswer::Lines(lines))
+                    if lines.lines().len() > held.outcome.tail().len() =>
+                {
+                    held.outcome.with_tail(lines.into_lines())
                 },
                 Some(LogAnswer::Lines(_) | LogAnswer::Scan(_)) | None => held.outcome,
             };

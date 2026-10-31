@@ -18,7 +18,6 @@ use crate::{
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
-        terminal::stream_marks::StreamMarks,
     },
     domain::{
         port::ListeningSocket,
@@ -419,7 +418,8 @@ impl Supervisor {
             })
             .collect();
         if !timed_out.is_empty() {
-            let last_lines = tail.as_ref().map(log_tail_lines).unwrap_or_default();
+            let (last_lines, dropped) = tail.as_ref().map(log_tail_lines).unwrap_or_default();
+            self.report_render_faults(pane, dropped);
             for (held, cursor) in timed_out {
                 let waiter = self.held_waiter(held);
                 self.answer_with_tail(
@@ -436,15 +436,10 @@ impl Supervisor {
         }
         if self.knows_no_output(pane) {
             match &tail {
-                Some(tail) => self
-                    .tap(pane)
-                    .seed_at(*tail.at(), tail.bytes(), tail.marks()),
-                None => {
-                    self.tap(pane)
-                        .seed_at(OutputCursor::new(0), &[], &StreamMarks::default());
-                },
+                Some(tail) => self.tap(pane).seed_at(*tail.at(), tail.bytes()),
+                None => self.tap(pane).seed_at(OutputCursor::new(0), &[]),
             }
-            self.report_render_faults(pane);
+            self.report_render_faults(pane, 0);
         }
         for HeldWait {
             prepared,
@@ -767,18 +762,21 @@ impl Supervisor {
         if self.awaits_a_pattern(pane) {
             lines.extend(self.tap(pane).unfinished_for_pattern(Instant::now()));
         }
-        self.report_render_faults(pane);
+        self.report_render_faults(pane, 0);
         self.test_lines(pane, &lines);
     }
 
-    /// Warns of each line of `pane`'s output its tap dropped because
-    /// rendering it panicked since the last report.
-    fn report_render_faults(&mut self, pane: PaneId) {
+    /// Warns, once per run, that lines of `pane`'s output were dropped
+    /// because rendering them panicked: those its tap dropped, and the
+    /// `read` more a read of its log did.
+    pub(super) fn report_render_faults(&mut self, pane: PaneId, read: usize) {
+        if read > 0 {
+            self.tap(pane).note_faults(read);
+        }
         let Some(dropped) = self
             .taps
             .get_mut(&pane)
-            .map(OutputTap::take_faults)
-            .filter(|dropped| *dropped > 0)
+            .and_then(OutputTap::take_fault_report)
         else {
             return;
         };
@@ -790,7 +788,10 @@ impl Supervisor {
         self.notify(
             NoticeLevel::Warning,
             Some(pane),
-            format!("{name}: {dropped} line(s) of output could not be rendered and were dropped"),
+            format!(
+                "{name}: {dropped} line(s) of output could not be rendered and were dropped; \
+                 later ones this run are not reported"
+            ),
         );
     }
 
@@ -1101,7 +1102,7 @@ impl Supervisor {
         if patterns.is_empty()
             && let Some(start) = start
         {
-            self.tap(pane).seed_at(start, &[], &StreamMarks::default());
+            self.tap(pane).seed_at(start, &[]);
         }
     }
 
@@ -1501,11 +1502,13 @@ fn invalid_input(message: String) -> ServiceErrorBody {
 }
 
 /// The last [`FAILURE_TAIL_LINES`] lines of the newest run in `tail`, the
-/// end of a log, rendered as every reader renders it.
-fn log_tail_lines(tail: &LogTail) -> Vec<String> {
+/// end of a log, rendered as every reader renders it, and how many lines
+/// rendering dropped.
+fn log_tail_lines(tail: &LogTail) -> (Vec<String>, usize) {
     let mut tap = OutputTap::new(*tail.at());
-    tap.seed_at(*tail.at(), tail.bytes(), tail.marks());
-    tap.tail(FAILURE_TAIL_LINES)
+    tap.seed_at(*tail.at(), tail.bytes());
+    let dropped = tap.take_fault_report().unwrap_or_default();
+    (tap.tail(FAILURE_TAIL_LINES), dropped)
 }
 
 #[cfg(test)]
@@ -1517,6 +1520,7 @@ mod tests {
     use super::*;
     use crate::{
         adapter::{
+            holder::FULL_SCREEN_LINE,
             service::{
                 LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
                 supervisor::{
@@ -1524,7 +1528,10 @@ mod tests {
                     testing::{name as process_name, spec as process_spec, *},
                 },
             },
-            terminal::{mark_kind::MarkKind, render_fault, stream_mark::StreamMark},
+            terminal::{
+                escape::{END_OPEN_LINE, RUN_START},
+                render_fault,
+            },
         },
         domain::{
             config::ProcessSpec,
@@ -2300,7 +2307,6 @@ mod tests {
                     LogTail::builder()
                         .at(OutputCursor::new(0))
                         .bytes(b"late\n".to_vec())
-                        .marks(StreamMarks::default())
                         .build(),
                 ))
                 .build(),
@@ -2366,56 +2372,64 @@ mod tests {
         ]);
     }
 
+    /// The notice a dropped line of `api`'s output raises.
+    const DROPPED_NOTICE: &str = "api: 1 line(s) of output could not be rendered and were \
+                                  dropped; later ones this run are not reported";
+
     /// A panic while rendering a child's output never reaches the service:
-    /// the line it hit is dropped with a warning, and the output after it
-    /// still matches a wait.
+    /// the line it hit is dropped with a warning, once per run however often
+    /// it happens, and the output after it still matches a wait.
     #[test]
     fn a_renderer_panic_drops_the_line_with_a_warning() {
-        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
         print(&mut harness, "api", b"before\n");
         let answers = wait_on(&mut harness, "api", &spec(Some(log("after")), None), None);
 
         render_fault::arm();
         print(&mut harness, "api", "lost 你\r\x1b[1K".as_bytes());
         print(&mut harness, "api", b"after\n");
+        render_fault::arm();
+        print(&mut harness, "api", b"lost again\n");
 
         let outcome = answered(&answers).expect("the line after the fault matches");
         assert_eq!(outcome.status(), WaitStatus::Matched);
-        assert_eq!(harness.notice_messages(), [
-            "api: 1 line(s) of output could not be rendered and were dropped"
-        ]);
+        assert_eq!(harness.notice_messages(), [DROPPED_NOTICE]);
+
+        end(&mut harness, "api", ExitOutcome::Succeeded);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let respawn = harness.supervisor_mut().current_generation(pane);
+        harness.supervisor_mut().handle_respawn(pane, respawn);
+        render_fault::arm();
+        print(&mut harness, "api", b"lost in the next run\n");
+        assert_eq!(harness.notice_messages(), [DROPPED_NOTICE, DROPPED_NOTICE]);
     }
 
-    /// A mark of `kind` at `offset`.
-    fn mark(kind: MarkKind, offset: u64) -> StreamMark {
-        StreamMark::builder()
-            .at(OutputCursor::new(offset))
-            .kind(kind)
-            .build()
-    }
-
-    /// The end of a log: a run killed on the alternate screen, then a run
-    /// that printed two lines, with the marks the holder records for them,
-    /// the first byte at offset 100.
-    fn killed_on_the_full_screen() -> (Vec<u8>, StreamMarks) {
-        let tail = b"run 1\n\x1b[?1049hTUI\nready\nboom\n".to_vec();
-        let marks = StreamMarks::new(vec![
-            mark(MarkKind::RunStart, 100),
-            mark(MarkKind::EnterAlternate, 114),
-            mark(MarkKind::RunStart, 118),
-        ]);
-        (tail, marks)
+    /// The end of a log as the holder writes it: a run killed on the
+    /// alternate screen, then a run that printed two lines.
+    fn killed_on_the_full_screen() -> Vec<u8> {
+        [
+            RUN_START,
+            b"run 1\n",
+            END_OPEN_LINE,
+            FULL_SCREEN_LINE.as_bytes(),
+            b"\r\n",
+            RUN_START,
+            b"ready\nboom\n",
+        ]
+        .concat()
     }
 
     /// A wait seeded from the log of a process this service never saw run
-    /// renders it as every reader does: the run killed on the alternate
-    /// screen hides nothing of the next, and the tail is the last run's.
+    /// renders it as every reader does, and its tail is the last run's.
     #[test]
     fn a_seeded_wait_renders_each_run_from_a_fresh_terminal() {
         let start = OutputCursor::new(100);
-        let (tail, marks) = killed_on_the_full_screen();
+        let tail = killed_on_the_full_screen();
         let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
-            .adopting_through(Box::new(LoggedAdopter::marked(start, &tail, marks)));
+            .adopting_through(Box::new(LoggedAdopter::new(start, &tail)));
 
         let answers = wait_on(
             &mut harness,
@@ -2429,27 +2443,24 @@ mod tests {
     }
 
     /// The tail a timed-out wait carries from a log renders it as every
-    /// reader does, from a run killed on the alternate screen and from a
-    /// screen brought up before the tail's first byte.
+    /// reader does: the last run's lines, or every line of a tail that
+    /// starts inside its run.
     #[test]
     fn a_log_tail_renders_as_every_reader_does() {
-        let (bytes, marks) = killed_on_the_full_screen();
         let killed = LogTail::builder()
             .at(OutputCursor::new(100))
-            .bytes(bytes)
-            .marks(marks)
+            .bytes(killed_on_the_full_screen())
             .build();
-        let mid_screen = LogTail::builder()
+        let mid_run = LogTail::builder()
             .at(OutputCursor::new(500))
-            .bytes(b"frame 1\nframe 2\n".to_vec())
-            .marks(StreamMarks::new(vec![
-                mark(MarkKind::RunStart, 0),
-                mark(MarkKind::EnterAlternate, 20),
-            ]))
+            .bytes(b"line 1\nline 2\n".to_vec())
             .build();
 
-        assert_eq!(log_tail_lines(&killed), ["ready", "boom"]);
-        assert!(log_tail_lines(&mid_screen).is_empty());
+        assert_eq!(
+            log_tail_lines(&killed),
+            (vec!["ready".into(), "boom".into()], 0)
+        );
+        assert_eq!(log_tail_lines(&mid_run).0, ["line 1", "line 2"]);
     }
 
     /// Chunks of erases the pending-pattern test feeds onto one long line.

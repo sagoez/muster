@@ -1,16 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
 use crate::{
-    adapter::{
-        holder::stream_marks,
-        terminal::{
-            bounded_parser::char_chunks, escape::LINE_FEED, log_line::LogLine,
-            log_renderer::RENDER_CHUNK_BYTES, placed_renderer::PlacedRenderer,
-        },
+    adapter::terminal::{
+        bounded_parser::char_chunks,
+        escape::LINE_FEED,
+        log_line::LogLine,
+        log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
     },
     domain::{
         project::Project,
@@ -46,12 +45,15 @@ impl LogRead {
 
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
     /// replaced and the cursor just past it: a log as the lines `muster logs`
-    /// prints, without color, and a screen without the blank rows below its
-    /// last text.
+    /// prints, without color, with how many rendering dropped, and a screen
+    /// without the blank rows below its last text.
     pub fn text_in(&self, project: &Project) -> LogText {
-        let text = match &self.log {
-            Some(log) => self.rendered_text(log),
-            None => String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
+        let (text, unrendered) = match &self.log {
+            Some(_) => self.rendered_text(),
+            None => (
+                String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
+                0,
+            ),
         };
         LogText::builder()
             .project(ProjectIdentityView::from(project))
@@ -59,16 +61,15 @@ impl LogRead {
             .log(self.log.clone())
             .text(text)
             .cursor(self.end)
+            .unrendered_lines((unrendered > 0).then_some(unrendered))
             .build()
     }
 
-    /// Every line read of the log at `log`, rendered as `muster logs` prints
-    /// it without color, from the screen the log's marks say is up where the
-    /// read starts and restarted at each run start they record, each ending
-    /// in a line break, the unfinished last one too.
-    fn rendered_text(&self, log: &Path) -> String {
-        let start = self.start().unwrap_or(OutputCursor::new(0));
-        let mut renderer = PlacedRenderer::placed(start, &stream_marks(log));
+    /// Every line read of the log, rendered as `muster logs` prints it
+    /// without color, each ending in a line break, the unfinished last one
+    /// too, and how many lines rendering dropped.
+    fn rendered_text(&self) -> (String, usize) {
+        let mut renderer = LogRenderer::new();
         let mut text = String::new();
         let mut append = |lines: Vec<LogLine>| {
             for line in lines {
@@ -82,7 +83,7 @@ impl LogRead {
         }
         renderer.finish();
         append(renderer.take_lines());
-        text
+        (text, renderer.take_faults())
     }
 }
 

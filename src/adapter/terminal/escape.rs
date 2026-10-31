@@ -33,6 +33,15 @@ pub const SGR_RESET: &str = "\x1b[0m";
 pub const SGR_FINAL: char = 'm';
 /// Ends a line of output.
 pub const LINE_FEED: u8 = b'\n';
+/// Ends the line a log was drawing, when one is open, as the holder writes
+/// it into a log: CAN cancels a sequence cut short, a cursor save marks the
+/// line as a redraw, so a blank one is dropped rather than kept, and a line
+/// break ends it.
+pub const END_OPEN_LINE: &[u8] = b"\x18\x1b7\r\n";
+/// What the holder logs where each run starts, before the child's first
+/// byte: [`END_OPEN_LINE`], then a full reset (RIS), so every reader renders
+/// each run from a fresh terminal without knowing where it began.
+pub const RUN_START: &[u8] = b"\x18\x1b7\r\n\x1bc";
 
 /// The value of each parameter in `params`, without its sub-parameters; an
 /// omitted parameter reads as zero.

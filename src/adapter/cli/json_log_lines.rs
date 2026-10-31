@@ -5,7 +5,6 @@ use std::{
 
 use super::{
     followed_output::FollowedOutput,
-    marks_watch::MarksWatch,
     rendered_log::{PENDING_LINE_IDLE, gap_line},
 };
 use crate::{
@@ -32,24 +31,17 @@ pub struct JsonLogLines<'a> {
     renderer: PlacedRenderer,
     /// When bytes last arrived.
     last_write: Instant,
-    /// The marks of the template's log, whose run starts the rendering
-    /// restarts at.
-    marks: MarksWatch,
 }
 
 impl<'a> JsonLogLines<'a> {
     /// A writer of lines shaped like `template` into `out`, whose first byte
-    /// sits at `start` in the process's output; the rendering starts on the
-    /// screen the template's log's marks say is up there, and restarts at
-    /// the run starts they record.
+    /// sits at `start` in the process's output, on a line boundary.
     pub fn new(out: &'a mut dyn Write, template: LogText, start: OutputCursor) -> Self {
-        let mut marks = MarksWatch::new(template.log().clone());
         Self {
             out,
             template,
-            renderer: marks.renderer_at(start),
+            renderer: PlacedRenderer::new(start),
             last_write: Instant::now(),
-            marks,
         }
     }
 
@@ -99,11 +91,8 @@ impl<'a> JsonLogLines<'a> {
 
 impl Write for JsonLogLines<'_> {
     /// Renders `bytes` a line at a time, so each object carries the cursor
-    /// just past the line it ends. The run starts are read after the bytes,
-    /// and a run's start is recorded before its first byte, so every run
-    /// start among them is known.
+    /// just past the line it ends.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.marks.refresh(&mut self.renderer);
         for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
             self.renderer.advance(piece);
             self.write_lines()?;
@@ -137,6 +126,10 @@ impl FollowedOutput for JsonLogLines<'_> {
         self.renderer.skip_to(resumed);
         let object = self.object(gap_line(skipped), resumed, Some(skipped));
         self.write_object(&object)
+    }
+
+    fn take_faults(&mut self) -> usize {
+        self.renderer.take_faults()
     }
 }
 

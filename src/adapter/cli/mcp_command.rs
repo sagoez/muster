@@ -1,6 +1,9 @@
 use clap::Subcommand;
 
-use super::mcp_entry_args::McpEntryArgs;
+use super::mcp_entry_args::{FORCE_ARG, McpEntryArgs};
+
+/// What `--force` does for `muster mcp remove`, which turns nothing back on.
+const REMOVE_FORCE_HELP: &str = "Remove a server under the name that runs something else";
 
 /// What `muster mcp` does instead of serving.
 #[derive(Subcommand)]
@@ -12,13 +15,14 @@ pub enum McpCommand {
     /// An identical entry is left alone and one an older muster wrote is
     /// updated; another server's under the name is replaced, and one Codex
     /// or Zed has turned off is turned back on, only with --force. muster
-    /// does not read Claude Code's own turned-off list: if Claude Code has
-    /// the server turned off, it is still reported added; turn it back on
-    /// in Claude Code with /mcp.
+    /// never edits Claude Code's own turned-off lists: if Claude Code has
+    /// the server turned off, it is still added, with a note to turn it
+    /// back on in Claude Code with /mcp.
     Add(McpEntryArgs),
     /// Remove muster's MCP server from agents' configs.
     ///
     /// Removes only the entry under the name, and only when it launches a
     /// muster binary unless --force is given.
+    #[command(mut_arg(FORCE_ARG, |arg| arg.help(REMOVE_FORCE_HELP)))]
     Remove(McpEntryArgs),
 }

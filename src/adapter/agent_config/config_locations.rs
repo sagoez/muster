@@ -1,5 +1,7 @@
 use std::{
     ffi::OsString,
+    fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -19,6 +21,11 @@ pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// Claude Code's own file of settings, user servers and local servers.
 const CLAUDE_JSON: &str = ".claude.json";
+/// The older name of Claude Code's file, in its config folder, which it
+/// still reads in place of `.claude.json` when it holds anything.
+const CLAUDE_LEGACY_JSON: &str = ".config.json";
+/// The write bits of a file's mode, for its owner, group and others.
+const ANY_WRITE: u32 = 0o222;
 /// Claude Code's folder under home, present once it has run.
 const CLAUDE_DIR: &str = ".claude";
 /// Codex's home folder under the user's home.
@@ -66,6 +73,23 @@ impl ConfigLocations {
             .zed_settings(zed_settings(home, &absolute))
             .path(var(PATH_ENV))
             .build()
+    }
+
+    /// The file Claude Code keeps its user and local servers in: its older
+    /// `.config.json` in its config folder when that is a file holding
+    /// anything, or an empty but writable one with no `.claude.json` beside
+    /// it, as Claude Code itself chooses; else `.claude.json`.
+    pub fn claude_config(&self) -> PathBuf {
+        let legacy = self.claude_dir.join(CLAUDE_LEGACY_JSON);
+        let chosen = fs::metadata(&legacy).is_ok_and(|meta| {
+            meta.is_file()
+                && (meta.len() > 0 || (meta.mode() & ANY_WRITE != 0 && !self.claude_json.exists()))
+        });
+        if chosen {
+            legacy
+        } else {
+            self.claude_json.clone()
+        }
     }
 
     /// Whether one of `names` is a runnable file in an absolute `PATH`
@@ -144,6 +168,31 @@ mod tests {
             Path::new("/h/.codex"),
             "a relative override is ignored"
         );
+    }
+
+    /// Claude Code's older `.config.json` is its file when it holds
+    /// anything, or is empty and writable with no `.claude.json` beside it;
+    /// otherwise `.claude.json` is.
+    #[test]
+    fn claude_codes_older_file_wins_as_claude_code_chooses() {
+        let scratch = TempDir::new().unwrap();
+        let home = scratch.path();
+        let locations = ConfigLocations::from_env(home, |_| None);
+        let legacy = home.join(".claude/.config.json");
+        let current = home.join(".claude.json");
+        assert_eq!(locations.claude_config(), current, "no older file");
+
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "").unwrap();
+        assert_eq!(locations.claude_config(), legacy, "empty, writable, alone");
+        fs::write(&current, "{}").unwrap();
+        assert_eq!(locations.claude_config(), current, "empty beside the file");
+        fs::write(&legacy, "{}").unwrap();
+        assert_eq!(locations.claude_config(), legacy, "holding something");
+
+        fs::remove_file(&legacy).unwrap();
+        fs::create_dir(&legacy).unwrap();
+        assert_eq!(locations.claude_config(), current, "a folder is no file");
     }
 
     /// A binary counts as on `PATH` only as an executable file in an

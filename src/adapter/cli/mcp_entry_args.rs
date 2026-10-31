@@ -5,6 +5,8 @@ use crate::adapter::agent_config::{Agent, DEFAULT_SERVER_NAME, McpScope, McpServ
 
 /// Separates several agents in one `--client`.
 const CLIENT_SEPARATOR: char = ',';
+/// The id of `--force`, whose help `muster mcp remove` words for itself.
+pub(super) const FORCE_ARG: &str = "force";
 
 /// Which agents' configs `muster mcp add` or `remove` changes, and where.
 #[derive(clap::Args, Getters, CopyGetters)]
@@ -31,9 +33,9 @@ pub struct McpEntryArgs {
     #[arg(long, default_value = DEFAULT_SERVER_NAME, value_parser = server_name)]
     #[getset(get = "pub")]
     name: McpServerName,
-    /// Replace or remove a server under the name that runs something else,
-    /// or turn muster's own back on in Codex or Zed.
-    #[arg(long)]
+    /// Replace a server under the name that runs something else, or turn
+    /// muster's own back on in Codex or Zed.
+    #[arg(id = FORCE_ARG, long)]
     #[getset(get_copy = "pub")]
     force: bool,
     /// Print the result as JSON.

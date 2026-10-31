@@ -400,7 +400,7 @@ Where each scope goes:
 |---|---|---|
 | `claude` | `user` (default) | `~/.claude.json`, `mcpServers` |
 | `claude` | `local` | `~/.claude.json`, `projects["<repository root>"].mcpServers` |
-| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it |
+| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it until you approve it |
 | `codex` | `user` (default) | `~/.codex/config.toml` (`$CODEX_HOME`), `[mcp_servers.<name>]` |
 | `codex` | `project` | `.codex/config.toml` in the project; Codex reads it only for trusted projects |
 | `zed` | `user` (only) | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux), `context_servers` |
@@ -436,10 +436,18 @@ this one, its other keys kept, along with a comment ending Codex's
 its own `enabled = false`: such an entry reports `disabled` and is turned
 back on in place only by `--force`, which reports `enabled` and keeps every
 other key. Claude Code turns a server off outside its entry, and muster
-only ever writes or removes its own entry in `.claude.json` or `.mcp.json`:
-if Claude Code has the server turned off, `muster mcp add` still reports it
-added, and you turn it back on in Claude Code with `/mcp`. Another server's
-entry under the name is refused unless `--force` replaces it.
+only ever writes or removes its own entry in `.claude.json` or `.mcp.json`.
+It reads Claude Code's lists to warn, and never edits them: the project's
+`disabledMcpServers` in `.claude.json`, and for a project's `.mcp.json` the
+`disabledMcpjsonServers`, `enabledMcpjsonServers` and
+`enableAllProjectMcpServers` of Claude Code's user, project and local
+settings files. If Claude Code has the server turned off, `muster mcp add`
+still reports it `added` or `already-added`, noting that Claude Code has it
+turned off and you turn it on with `/mcp`; the note that Claude Code asks
+before using a `.mcp.json` server appears only while it has neither
+approved nor turned it down. A file it cannot read just leaves the note
+out. Another server's entry under the name is refused unless `--force`
+replaces it.
 `muster mcp remove` takes the same flags and removes
 the entry under the name only when it is muster's, unless `--force`, and
 takes out the table of servers, and a project's object in `.claude.json`,
@@ -450,21 +458,33 @@ may hold comments), that holds a key twice in the objects on the way to the
 entry, that is not a regular file or is larger than 128 MiB, or that is
 read-only is refused and left untouched. A project's file that leads out of
 the project, by a link or a `..` past a folder not made yet, is refused
-before any folder is made. Before it reads `.claude.json`, muster takes
-Claude Code's own lock, the folder `<file>.lock` beside the file a linked
-`.claude.json` leads to, as Claude Code names it, waiting while Claude Code
-holds it and taking over one untouched for 10 seconds. It touches the lock
-every 2 seconds while it holds it, and counts the lock as its own while
-the folder's modified time reads back within 2 seconds of the time it set,
-so a file system that keeps times coarsely (FAT, exFAT, network storage)
-neither loses nor strands it; it removes the lock only while it is still
-muster's, and writes nothing if another writer took it over.
+before any folder is made.
 
-Every config is read once and checked, and every new text written and
-synced beside its file, before any file is replaced. Just before the files
-are replaced, each is checked against the text muster read, by its size
-and then its content, so a refusal, a change by another writer or an
-interrupt changes nothing. Only a failure while
+Before it reads `.claude.json` to plan, muster takes Claude Code's own
+lock, the folder `<file>.lock` beside the path Claude Code is configured
+with, a link not followed, as Claude Code names it, waiting while Claude
+Code holds it and taking over one untouched for 10 seconds. It leaves a
+random token file in the folder it made, and the lock is muster's while
+that token is there; it stamps the folder's modified time every 2 seconds,
+trying again at the next turn when a stamp fails, so Claude Code never
+takes the lock for stale, and it removes the folder, token first, only
+while the token is still muster's, writing nothing if another writer took
+the lock over. The lock is best-effort: Claude Code gives up on a held lock
+after about 2 seconds and writes without it. The real guard is the check
+just before the files are replaced. Claude Code keeps its user and local
+servers in its older `.config.json`, in its config folder, instead of
+`.claude.json` when that file holds anything, and muster then writes and
+locks it there.
+
+The remove picker reads each config without a lock to choose which agents
+to tick. Every config is then read and checked once more, under the lock
+for `.claude.json`, and every new text written and synced beside its file,
+before any file is replaced. Just before the files are replaced, each is
+checked again: it must still be the same regular file, not made
+read-only, with the same mode and size, and its text, read again, must
+match what muster read. So a refusal, a change by another writer or an
+interrupt changes nothing. Errors name each config by the path its agent
+is configured with, not where a link leads. Only a failure while
 putting the files in place can leave some of them written, and the error
 then names those. Writes are atomic, keep an existing file's mode, create a
 new file readable by its owner alone, and follow a symlinked file, even one

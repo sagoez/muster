@@ -11,6 +11,7 @@ use serde::de::IgnoredAny;
 
 use super::{
     agent_config_error::AgentConfigError,
+    claude_standing::names,
     disabling::Disabling,
     edit_outcome::EditOutcome,
     edited::Edited,
@@ -50,10 +51,15 @@ pub(super) fn edit_json(
     force: bool,
 ) -> Result<Edited, AgentConfigError> {
     let (root, top) = parsed(text, place)?;
+    let listed_off = place
+        .off_list()
+        .as_ref()
+        .is_some_and(|keys| lists(&top, keys, name));
     let Some((table, holders)) = table_of(&top, place, change == EntryChange::Add)? else {
         return Ok(Edited::builder()
             .outcome(EditOutcome::Absent)
             .text(None)
+            .listed_off(listed_off)
             .build());
     };
     let existing = table.get(name.as_ref());
@@ -100,7 +106,27 @@ pub(super) fn edit_json(
         .writes()
         .then(|| finished(&root))
         .filter(|written| Some(written.trim_end()) != text.map(str::trim_end));
-    Ok(Edited::builder().outcome(outcome).text(text).build())
+    Ok(Edited::builder()
+        .outcome(outcome)
+        .text(text)
+        .listed_off(listed_off)
+        .build())
+}
+
+/// Whether the list `keys` lead to from `top` names `name`; a list of any
+/// other shape names nothing, as Claude Code reads it.
+fn lists(top: &CstObject, keys: &[String], name: &McpServerName) -> bool {
+    let Some((list, path)) = keys.split_last() else {
+        return false;
+    };
+    path.iter()
+        .try_fold(top.clone(), |object, key| {
+            object.get(key).and_then(|prop| prop.object_value())
+        })
+        .and_then(|object| object.get(list))
+        .and_then(|prop| prop.value())
+        .and_then(|value| value.to_serde_value())
+        .is_some_and(|value| names(&value, name.as_ref(), false))
 }
 
 /// `text`, the file at `place`, parsed, with its top object; an empty file,
@@ -245,6 +271,7 @@ mod tests {
             .path(path)
             .table(table.iter().map(ToString::to_string).collect())
             .dialect(dialect)
+            .off_list(None)
             .build()
     }
 

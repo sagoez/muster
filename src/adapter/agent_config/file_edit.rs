@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     agent_config_error::AgentConfigError,
-    config_file::{io_error, read_text, resolved},
+    config_file::{io_error, is_read_only_mode, read_text, resolved},
     config_text::ConfigText,
 };
 
@@ -46,23 +46,36 @@ pub(super) struct FileEdit {
 }
 
 impl FileEdit {
-    /// Checks the file still holds what the edit was worked out against:
-    /// its size first, then its text read again and compared.
+    /// Checks the file is still what the edit was worked out against: the
+    /// same regular file, not made read-only, with the same mode and size,
+    /// and then its text read again and compared.
     ///
     /// # Errors
-    /// Returns [`AgentConfigError::Changed`] when it does not, or the
-    /// [`AgentConfigError`] of a file that cannot be looked at or read.
+    /// Returns [`AgentConfigError::Changed`] when it is not,
+    /// [`AgentConfigError::ReadOnly`] for the file made read-only since, or
+    /// the [`AgentConfigError`] of a file that cannot be looked at or read.
     pub(super) fn check_unchanged(&self) -> Result<(), AgentConfigError> {
-        let size = match fs::symlink_metadata(&self.written) {
-            Ok(metadata) => Some(metadata.len()),
+        let now = match fs::symlink_metadata(&self.written) {
+            Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(source) => return Err(io_error(CHECK, &self.path, source)),
         };
-        let unchanged = match (&self.original, size) {
+        let unchanged = match (&self.original, now) {
             (None, None) => true,
-            (Some(original), Some(size)) if size == original.size() => {
-                read_text(&self.written, &self.path)?
-                    .is_some_and(|now| now.text() == original.text())
+            (Some(original), Some(now)) => {
+                let same_file = |device: u64, inode: u64| {
+                    device == original.device() && inode == original.inode()
+                };
+                let same_file_now = now.is_file() && same_file(now.dev(), now.ino());
+                if same_file_now && is_read_only_mode(now.mode()) {
+                    return Err(AgentConfigError::ReadOnly(self.path.clone()));
+                }
+                same_file_now
+                    && now.mode() == original.mode()
+                    && now.len() == original.size()
+                    && read_text(&self.written, &self.path)?.is_some_and(|again| {
+                        same_file(again.device(), again.inode()) && again.text() == original.text()
+                    })
             },
             _ => false,
         };

@@ -5,7 +5,7 @@
 
 use std::{
     fs, io,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::MetadataExt,
     path::{self, Component, Path, PathBuf},
 };
 
@@ -100,7 +100,8 @@ pub(super) fn confine(written: &Path, root: &Path, path: &Path) -> Result<(), Ag
 }
 
 /// The text of the config at `written`, which the agent names `path`, with
-/// its size as it was read, or none when there is no file. Only a regular
+/// the file's size, identity and mode as it was read, or none when there is
+/// no file. Only a regular
 /// file of at most [`MAX_CONFIG_SIZE`] is read, opened without blocking so
 /// a pipe or device is never waited on.
 ///
@@ -117,6 +118,9 @@ pub(super) fn read_text(
             ConfigText::builder()
                 .text(text)
                 .size(metadata.len())
+                .device(metadata.dev())
+                .inode(metadata.ino())
+                .mode(metadata.mode())
                 .build(),
         )),
         Err(error) => match error.kind() {
@@ -137,7 +141,12 @@ pub(super) fn read_text(
 
 /// Whether the file at `written` exists and its owner may not write it.
 pub(super) fn is_read_only(written: &Path) -> bool {
-    fs::metadata(written).is_ok_and(|meta| meta.permissions().mode() & OWNER_WRITE == 0)
+    fs::metadata(written).is_ok_and(|meta| is_read_only_mode(meta.mode()))
+}
+
+/// Whether a file of `mode` is one its owner may not write.
+pub(super) fn is_read_only_mode(mode: u32) -> bool {
+    mode & OWNER_WRITE == 0
 }
 
 /// The failure of `action` on `path`.

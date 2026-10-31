@@ -18,4 +18,8 @@ pub(super) struct JsonPlace<'a> {
     /// How strictly the file is read.
     #[getset(get_copy = "pub(super)")]
     dialect: JsonDialect,
+    /// The keys leading to a list of server names the agent keeps turned
+    /// off, outermost first, read only to warn and never edited.
+    #[getset(get = "pub(super)")]
+    off_list: Option<Vec<String>>,
 }

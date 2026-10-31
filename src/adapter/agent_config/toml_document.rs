@@ -53,6 +53,7 @@ pub(super) fn edit_toml(
         return Ok(Edited::builder()
             .outcome(EditOutcome::Absent)
             .text(None)
+            .listed_off(false)
             .build());
     };
     let servers = item
@@ -95,7 +96,11 @@ pub(super) fn edit_toml(
     }
     let outcome = action.outcome();
     let text = outcome.writes().then(|| document.to_string());
-    Ok(Edited::builder().outcome(outcome).text(text).build())
+    Ok(Edited::builder()
+        .outcome(outcome)
+        .text(text)
+        .listed_off(false)
+        .build())
 }
 
 /// Points `existing`, muster's entry, at `entry`'s command, keeping the

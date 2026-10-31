@@ -3816,6 +3816,14 @@ fn mcp_add_writes_the_path_link_and_updates_an_older_entry() {
     let added = ran(add);
     assert!(added.status.success(), "{}", shown(&added));
     assert_eq!(command_of(), link.to_str().unwrap());
+    let (_, print) = agent_home_command(&scratch, &project, &["mcp", "--print-config"]);
+    let printed = ran(print);
+    assert!(printed.status.success(), "{}", shown(&printed));
+    assert_eq!(
+        parsed(&printed)["mcpServers"]["muster"]["command"],
+        command_of(),
+        "--print-config names the binary as mcp add writes it"
+    );
 
     fs::write(
         &claude_json,

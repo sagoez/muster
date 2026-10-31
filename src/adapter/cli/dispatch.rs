@@ -97,8 +97,8 @@ use crate::{
         agent_config::EntryChange,
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
-            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
-            resolve_project, this_binary,
+            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView,
+            binary_as_typed, process, resolve_project, this_binary,
         },
         private_dir::state_dir,
         sanitize::printable_lines,
@@ -1388,12 +1388,13 @@ fn change_mcp_entries(invocation: &Invocation<'_>, change: EntryChange, args: &M
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the
 /// connecting agent disconnects; with `print_config`, prints the paste-in
-/// config snippet, which names no project, instead. Each call resolves its
-/// project from the folder `--project` names, or else the current one, so a
-/// folder registered later is found and one entry serves every project.
+/// config snippet, which names no project and the binary as `mcp add`
+/// writes it, instead. Each call resolves its project from the folder
+/// `--project` names, or else the current one, so a folder registered later
+/// is found and one entry serves every project.
 fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
     if print_config {
-        emit_line(&invocation.ports().mcp_config(&this_binary()));
+        emit_line(&invocation.ports().mcp_config(&binary_as_typed()));
         // Only a person reading it is told; a script piping it gets the
         // snippet alone.
         if io::stdout().is_terminal() {

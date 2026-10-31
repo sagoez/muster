@@ -14,9 +14,9 @@ pub enum ProjectsCommand {
     /// Stop a project's processes and forget it with its processes and
     /// coordination state; its folder is untouched.
     Rm {
-        /// The project's name, or its folder.
+        /// The project's name, or its folder; or name it with --project.
         #[arg(id = PROJECT_OPERAND, value_name = PROJECT_VALUE)]
-        project: String,
+        project: Option<String>,
         /// Remove without asking; required where nobody can be asked.
         #[arg(short, long)]
         yes: bool,

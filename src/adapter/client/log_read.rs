@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(screen.text_in(&project).text(), "$ ready\n  indented");
     }
 
-    /// A log read carries the text `muster logs` prints, without colour: a
+    /// A log read carries the text `muster logs` prints, without color: a
     /// progress bar at its last state, no title and no footer redraw.
     #[test]
     fn a_log_read_carries_its_rendered_text() {

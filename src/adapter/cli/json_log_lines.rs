@@ -21,7 +21,7 @@ use crate::{
 /// past it and the line's text as `muster logs` renders it, without color;
 /// a line that only redrew the screen moves the cursor on and writes nothing.
 /// A line is written once its newline arrives, or early, as `logs -f` shows
-/// it, once nothing arrived for [`PENDING_LINE_IDLE`] and nothing redrew it
+/// it, once nothing arrived for `PENDING_LINE_IDLE` and nothing redrew it
 /// in place; the rest of it then follows in an object of its own.
 pub struct JsonLogLines<'a> {
     /// Where each JSON line goes.
@@ -109,7 +109,7 @@ impl Write for JsonLogLines<'_> {
     }
 
     /// Writes out what a line still being drawn shows once nothing has
-    /// arrived for [`PENDING_LINE_IDLE`] and nothing redrew it in place, so
+    /// arrived for `PENDING_LINE_IDLE` and nothing redrew it in place, so
     /// a prompt that waits for input, such as `Password: `, is shown though
     /// no newline ends it, while a progress bar is not.
     fn flush(&mut self) -> io::Result<()> {

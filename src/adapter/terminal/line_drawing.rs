@@ -6,7 +6,7 @@
 //! Every step costs time in proportion to the bytes that drive it, never to
 //! the length of the line it lands on: a cell is a `Copy` value, an erase to
 //! the end or of the whole line only shortens the cells, and an erase to the
-//! cursor is recorded as an [`Erasure`] rather than written into every cell
+//! cursor is recorded as an `Erasure` rather than written into every cell
 //! it covers. The cells are resolved against the erasures only when a line
 //! is handed out.
 
@@ -588,7 +588,16 @@ impl Perform for LineDrawing {
     /// character is drawn as its escaped text, as everywhere muster shows a
     /// process's text.
     fn print(&mut self, character: char) {
-        if !self.on_line() || character.is_control() {
+        if !self.on_line() {
+            return;
+        }
+        if character.is_ascii() {
+            if !character.is_ascii_control() {
+                self.draw(character, 1);
+            }
+            return;
+        }
+        if character.is_control() {
             return;
         }
         if steers_the_terminal(character) {

@@ -170,7 +170,22 @@ impl FollowedOutput for RenderedLog<'_> {
 mod tests {
     use std::thread;
 
+    use bytesize::ByteSize as RawByteSize;
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::{
+        adapter::{
+            cli::json_log_lines::JsonLogLines,
+            client::{LogRead, LogText, ProjectIdentityView},
+            holder::{LineLimit, LogQuery, RotatingLog, last_lines, read_log},
+            service::OutputTap,
+        },
+        domain::{
+            project::Project,
+            value::{ByteSize, ProcessName, ProjectName, ProjectRoot},
+        },
+    };
 
     /// How far past the idle wait the prompt tests look.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);
@@ -273,6 +288,168 @@ mod tests {
             followed,
             "   Compiling a\n   Compiling b\n    Finished dev\n"
         );
+    }
+
+    /// Output that steers the terminal in the ways a log reader's rendering
+    /// most easily gets wrong: the alternate screen, saved cursors jumping
+    /// away, restored or not, a block climbed back over and redrawn, and a
+    /// progress bar; with a run start between two runs, the first left on
+    /// the alternate screen in color.
+    fn steering_runs() -> (Vec<u8>, Vec<u8>) {
+        let first = b"before\n\x1b[?1049h\x1b[Hfull screen\nui\n\x1b[?1049lafter\n\
+            progress 40%\x1b7\x1b[30;1Hstatus bar\nnext line\n\
+            \x1b7saved here\n\x1b[H\x1b[2JServer ready\n\
+            a\n\x1b[s\x1b[30;1Hfooter\x1b[ub\n\
+            [+] up 1/2\r\n Container Creating\r\n\x1b[2A\x1b[0G\r\n\r\n\x1b[2K Container Created\r\n\
+            \x1b[31m\x1b[?1049hTUI\n"
+            .to_vec();
+        let second = b"   Compiling a\n    Building [=>   ] 1/3: a\r\x1b[K    Finished\n".to_vec();
+        (first, second)
+    }
+
+    /// Every path that reads a log shows the same lines for the same
+    /// output: `logs`, `logs -f` fed a byte at a time, `logs --json`,
+    /// `logs -f --json`, `-n`, the holder's scans and the service's tap.
+    #[test]
+    fn every_path_shows_the_same_lines() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("api.log");
+        let mut log = RotatingLog::open(
+            path.clone(),
+            ByteSize::try_new(RawByteSize::mib(1)).unwrap(),
+        )
+        .unwrap();
+        let (first, second) = steering_runs();
+        log.record_run_start().unwrap();
+        log.append(&first).unwrap();
+        let second_start = log.end();
+        log.record_run_start().unwrap();
+        log.append(&second).unwrap();
+        let mut stream = first.clone();
+        stream.extend_from_slice(&second);
+        let expected = [
+            "before",
+            "after",
+            "progress 40%",
+            "next line",
+            "saved here",
+            "Server ready",
+            "a",
+            "b",
+            "[+] up 1/2",
+            " Container Creating",
+            " Container Created",
+            "   Compiling a",
+            "    Finished",
+        ];
+
+        let mut whole = Vec::new();
+        {
+            let mut out = RenderedLog::new(
+                &mut whole,
+                Coloring::Plain,
+                OutputCursor::new(0),
+                Some(path.clone()),
+            );
+            out.write_all(&stream).unwrap();
+            out.finish().unwrap();
+        }
+        let mut followed = Vec::new();
+        {
+            let mut out = RenderedLog::new(
+                &mut followed,
+                Coloring::Plain,
+                OutputCursor::new(0),
+                Some(path.clone()),
+            );
+            for byte in &stream {
+                out.write_all(&[*byte]).unwrap();
+            }
+            out.finish().unwrap();
+        }
+        let mut objects = Vec::new();
+        {
+            let template = LogText::builder()
+                .project(
+                    ProjectIdentityView::builder()
+                        .name(ProjectName::try_new("shop").unwrap())
+                        .root(PathBuf::from("/p"))
+                        .build(),
+                )
+                .process(ProcessName::try_new("api").unwrap())
+                .log(Some(path.clone()))
+                .text(String::new())
+                .build();
+            let mut out = JsonLogLines::new(&mut objects, template, OutputCursor::new(0));
+            for byte in &stream {
+                out.write_all(&[*byte]).unwrap();
+            }
+        }
+        let project = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/p")).unwrap())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let read = LogRead::builder()
+            .name(ProcessName::try_new("api").unwrap())
+            .log(Some(path.clone()))
+            .end(Some(log.end()))
+            .bytes(stream.clone())
+            .build();
+        let newest = read_log(
+            &path,
+            &LogQuery::builder()
+                .lines(LineLimit::try_new(expected.len()).unwrap())
+                .build(),
+        )
+        .unwrap();
+        let scanned = last_lines(
+            &path,
+            OutputCursor::new(0),
+            log.end(),
+            expected.len(),
+            stream.len() as u64,
+        )
+        .unwrap();
+        let mut tap = OutputTap::new(OutputCursor::new(0));
+        tap.begin_run_at(OutputCursor::new(0));
+        let mut tapped: Vec<String> = tap
+            .feed(None, &first)
+            .iter()
+            .map(|line| line.text().clone())
+            .collect();
+        tap.begin_run_at(second_start);
+        tapped.extend(
+            tap.feed(None, &second)
+                .iter()
+                .map(|line| line.text().clone()),
+        );
+
+        let lines = |bytes: &[u8]| -> Vec<String> {
+            String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+        let json_texts: Vec<String> = String::from_utf8(objects)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let object: serde_json::Value = serde_json::from_str(line).unwrap();
+                object["text"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(lines(&whole), expected, "logs");
+        assert_eq!(lines(&followed), expected, "logs -f");
+        assert_eq!(json_texts, expected, "logs -f --json");
+        assert_eq!(
+            lines(read.text_in(&project).text().as_bytes()),
+            expected,
+            "logs --json"
+        );
+        assert_eq!(*newest.lines(), expected, "logs -n");
+        assert_eq!(scanned, expected, "wait and readiness scans");
+        assert_eq!(tapped, expected, "the service's tap");
     }
 
     /// A C1 control split across writes, which the parser hands over as a

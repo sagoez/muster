@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 325
+assertion_line: 346
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -516,10 +516,10 @@ Options:
 $ muster projects rm -h
 Stop a project's processes and forget it with its processes and coordination state; its folder is untouched
 
-Usage: muster projects rm [OPTIONS] <PROJECT>
+Usage: muster projects rm [OPTIONS] [PROJECT]
 
 Arguments:
-  <PROJECT>  The project's name, or its folder
+  [PROJECT]  The project's name, or its folder; or name it with --project
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder

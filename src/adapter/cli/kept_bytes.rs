@@ -5,7 +5,7 @@ use crate::adapter::terminal::escape::CSI;
 /// The control characters that only lay text out, kept as they are: line
 /// feed, carriage return, tab and backspace.
 const LAYOUT_CONTROLS: &[u8] = b"\n\r\t\x08";
-/// The final characters of the control sequences kept: colour (SGR), cursor
+/// The final characters of the control sequences kept: color (SGR), cursor
 /// up, down, forward and back (CUU, CUD, CUF, CUB), cursor to column (CHA),
 /// cursor position (CUP), erase in line (EL) and erase in display (ED).
 const KEPT_FINALS: &[char] = &['m', 'A', 'B', 'C', 'D', 'G', 'H', 'K', 'J'];
@@ -53,7 +53,7 @@ impl Perform for Kept {
         }
     }
 
-    /// Keeps a colour, cursor-move or erase sequence, rebuilt from its
+    /// Keeps a color, cursor-move or erase sequence, rebuilt from its
     /// parameters; drops every other control sequence, such as a device,
     /// status or window query, and any with a private marker.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {

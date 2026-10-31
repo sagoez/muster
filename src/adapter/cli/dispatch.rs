@@ -13,10 +13,7 @@ use std::{
 };
 
 use anstream::{AutoStream, ColorChoice};
-use clap::{
-    Parser,
-    error::{Error as ParseError, ErrorKind},
-};
+use clap::error::{Error as ParseError, ErrorKind};
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
 
@@ -24,7 +21,7 @@ use super::{
     add::{add, add_rows},
     announce::Announce,
     answer::Answer,
-    args::{Args, completing_command},
+    args::{Args, completing_command, parse_from},
     attach::attach_named,
     attach_end::AttachEnd,
     cli_exit::CliExit,
@@ -132,6 +129,12 @@ const NOTHING_REMOVED: &str = "nothing removed";
 const NO_SERVICE_NOTICES: &str = "the service is not running; showing the stored notices only";
 /// The command words of `muster projects rm`, for its title.
 const PROJECTS_RM_WORDS: &str = "projects rm";
+/// Why `projects rm` named no project.
+const PROJECTS_RM_UNNAMED: &str =
+    "name the project to remove, by name or folder, or with --project";
+/// Why a `projects` action refuses a project named both ways.
+const PROJECT_NAMED_TWICE: &str =
+    "name the project once: either after the action or with --project, not both";
 /// Environment variable naming the user's shell, for the completions probe.
 const SHELL_ENV: &str = "SHELL";
 /// Environment variable controlling the XDG configuration root.
@@ -147,7 +150,7 @@ const LINE_BREAK: &[u8] = b"\n";
 /// invalid value, in JSON when `--json` was asked for.
 pub fn parse_args(ports: &'static dyn CliPorts) -> Args {
     CompleteEnv::with_factory(move || completing_command(ports)).complete();
-    match Args::try_parse() {
+    match parse_from(env::args_os().collect()) {
         Ok(args) => args,
         Err(error) if !error.use_stderr() => error.exit(),
         Err(error) => {
@@ -629,9 +632,9 @@ fn finish_wait(json: bool, result: Result<WaitOutcome, CliError>) {
 /// Prints a process's log or screen, or follows its log until interrupted;
 /// the process is chosen at a terminal when `name` names none. A log is
 /// printed as the lines a log reader shows, with nothing that moves the
-/// cursor or changes the terminal, coloured only on a terminal that draws
-/// colour. A screen printed to anything but a terminal is written byte for
-/// byte; on a terminal only its text, layout and colours are.
+/// cursor or changes the terminal, colored only on a terminal that draws
+/// color. A screen printed to anything but a terminal is written byte for
+/// byte; on a terminal only its text, layout and colors are.
 fn logs(
     invocation: &Invocation<'_>,
     name: Option<ProcessRef>,
@@ -1243,11 +1246,34 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
             }
         },
         Some(ProjectsCommand::Rm { project, yes }) => {
-            remove_project(invocation, &project, yes, json)
+            match projects_operand(invocation, project).and_then(|named| {
+                named.ok_or_else(|| CliError::Usage(PROJECTS_RM_UNNAMED.to_string()))
+            }) {
+                Ok(named) => remove_project(invocation, &named, yes, json),
+                Err(error) => fail_command(json, &error),
+            }
         },
         Some(ProjectsCommand::Set { project, idle_stop }) => {
-            set_project(invocation, project.as_deref(), idle_stop, json)
+            match projects_operand(invocation, project) {
+                Ok(named) => set_project(invocation, named.as_deref(), idle_stop, json),
+                Err(error) => fail_command(json, &error),
+            }
         },
+    }
+}
+
+/// The project a `projects` action names: its operand, or else the global
+/// `--project`.
+///
+/// # Errors
+/// Returns [`CliError::Usage`] when both name one, so neither is ignored.
+fn projects_operand(
+    invocation: &Invocation<'_>,
+    operand: Option<String>,
+) -> Result<Option<String>, CliError> {
+    match (operand, invocation.project_flag()) {
+        (Some(_), Some(_)) => Err(CliError::Usage(PROJECT_NAMED_TWICE.to_string())),
+        (operand, flag) => Ok(operand.or_else(|| flag.map(str::to_string))),
     }
 }
 

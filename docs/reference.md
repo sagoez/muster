@@ -359,16 +359,27 @@ a carriage return or erase that rewrites a line leaves only its last state, so
 a progress bar shows once, finished, and output that only redraws the screen,
 such as `docker compose up`'s footer and the blank rows it makes room with,
 is left out. Nothing that moves the cursor, erases, changes a mode or retitles
-your terminal reaches it; on a terminal that draws color, and without
-`NO_COLOR`, each line keeps its colors, reset at its end. A pipe and `--json`
-get the same lines without color, and `--screen` shows the live screen
-instead. If output rotates away before `muster logs -f` reads it, the follow
-says how many bytes it lost and carries on.
+your terminal reaches it, and a bidi control or zero-width character shows as
+its escape, such as `\u{202e}`. Lines keep their colors, reset at each line's
+end, wherever every other command's output is colored: on a terminal, with
+`NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE` honored. A pipe and `--json` get
+the same lines without color, and `--screen` shows the live screen instead.
+
+Each run is read as if on a fresh terminal, so a run killed on the alternate
+screen, mid-color or mid-escape hides nothing of the next. `logs -f` shows a
+line still being written, such as a prompt, once it has sat unchanged for
+half a second, and the rest of it when its newline comes; a line redrawn in
+place, such as a progress bar, shows only once finished. A block of lines
+redrawn by climbing back up, such as `docker pull`'s, prints its lines again
+with each redraw, as the lines it climbs over were already shown. If output
+rotates away before `muster logs -f` reads it, the follow says how many bytes
+it lost and carries on.
 
 Every byte has an offset that runs on across restarts and rotations, written
 as a cursor such as `o:18234`. `-n N` (100 by default, at most 2000), `--since
-CURSOR`, `--grep TEXT` and `--errors` print stripped lines. Waits report the
-same cursors, and how long they took as `elapsed_s`.
+CURSOR`, `--grep TEXT` and `--errors` print the same lines without color, each
+cut at 2000 characters. Waits and readiness checks test the same lines, and
+waits report the same cursors, and how long they took as `elapsed_s`.
 
 ## The service and holders
 

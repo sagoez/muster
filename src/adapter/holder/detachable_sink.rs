@@ -3,9 +3,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::domain::{port::OutputSink, pty::ProcessOutput};
 
 /// The output sink a holder connection's reader and writer share until its
-/// handle is dropped. Detaching drops the sink at once, rather than when the
-/// last thread holding it ends, and makes every later send a no-op, so a
-/// reader still probing the holder or reading its log reports nothing.
+/// handle is dropped. Detaching makes every send that starts afterwards a
+/// no-op, so a reader still probing the holder or reading its log reports
+/// nothing, and gives up this hold on the sink at once rather than when the
+/// last thread holding it ends. A send already under way at the detach is
+/// not stopped: it keeps the sink until it returns, and its output is still
+/// delivered, as it may be blocked on a full sink that the loop calling the
+/// detach is the one to drain.
 pub(super) struct DetachableSink {
     /// The sink, until detached.
     sink: Mutex<Option<Arc<dyn OutputSink>>>,
@@ -33,7 +37,8 @@ impl DetachableSink {
         }
     }
 
-    /// Drops the sink, so nothing more is forwarded.
+    /// Gives up this hold on the sink, so no send that starts afterwards
+    /// forwards anything.
     pub(super) fn detach(&self) {
         let sink = self
             .sink

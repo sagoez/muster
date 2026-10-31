@@ -1,5 +1,5 @@
 //! A process's raw output made safe to print on a person's terminal: text,
-//! line breaks, colours, cursor moves and erases pass, so a progress bar
+//! line breaks, colors, cursor moves and erases pass, so a progress bar
 //! redraws, while anything that could query the terminal, retitle it or write
 //! its clipboard is dropped.
 
@@ -10,7 +10,7 @@ use crate::adapter::terminal::bounded_parser::BoundedParser;
 
 /// A writer that passes what reaches it on to `out` with every terminal
 /// string (OSC, DCS, APC, PM, SOS), C1 control, escape and control sequence
-/// removed, except the colour (SGR), cursor-move, cursor-position and erase
+/// removed, except the color (SGR), cursor-move, cursor-position and erase
 /// sequences. A sequence split across writes is still recognised.
 pub struct TerminalSafe<W: Write> {
     /// Where the safe bytes go.
@@ -67,10 +67,10 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
-    /// Colours and layout pass; a title, a clipboard write, a device query,
+    /// Colors and layout pass; a title, a clipboard write, a device query,
     /// a DCS, an APC, a reset and C1 controls do not.
     #[test]
-    fn only_text_layout_and_colour_pass() {
+    fn only_text_layout_and_color_pass() {
         assert_eq!(
             safe(&[b"\x1b[1;31mred\x1b[0m\tok\r\n"]),
             "\x1b[1;31mred\x1b[0m\tok\r\n"

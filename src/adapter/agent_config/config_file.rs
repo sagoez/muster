@@ -1,12 +1,12 @@
 //! Reaching an agent's config file without trusting what is at its path: a
-//! link is followed by hand, so one that leads nowhere is still written at
-//! its target; a project's file must stay in the project; and only a
+//! path is resolved by hand, so a link that leads nowhere is still written
+//! at its target; a project's file must stay in the project; and only a
 //! regular file of bounded size is read.
 
 use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::{self, Component, Path, PathBuf},
 };
 
 use bytesize::ByteSize;
@@ -28,48 +28,68 @@ const READ: &str = "read";
 /// What a failed symlink resolution was doing.
 const FOLLOW: &str = "follow the link";
 
-/// The file `path` leads to: the end of its chain of symlinks, else `path`
-/// itself. A link leading nowhere gives where it points, so the file is
-/// made there and the link kept.
+/// The file `path` leads to, fully resolved: every link on the way followed,
+/// in its folders as in the file itself, and every `..` taken after the
+/// link before it, so the result holds neither. A part that does not exist
+/// yet is kept as named, and a `..` after it steps back over it, as making
+/// the folders and then the file would. A link leading nowhere gives where
+/// it points, so the file is made there and the link kept.
 ///
 /// # Errors
-/// Returns [`AgentConfigError::Io`] for a link that cannot be read, or a
-/// chain longer than the kernel follows.
-pub(super) fn followed(path: &Path) -> Result<PathBuf, AgentConfigError> {
-    let mut current = path.to_path_buf();
-    for _ in 0..MAX_LINK_HOPS {
-        let is_link =
-            fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink());
-        if !is_link {
-            return Ok(current);
+/// Returns [`AgentConfigError::Io`] for a link that cannot be read, or more
+/// links than the kernel follows.
+pub(super) fn resolved(path: &Path) -> Result<PathBuf, AgentConfigError> {
+    let absolute = path::absolute(path).map_err(|source| io_error(FOLLOW, path, source))?;
+    let mut pending = parts(&absolute);
+    let mut current = PathBuf::new();
+    let mut hops = 0;
+    while let Some(part) = pending.pop() {
+        match part.components().next() {
+            Some(Component::RootDir) => current = part,
+            Some(Component::ParentDir) => {
+                current.pop();
+            },
+            Some(Component::Normal(name)) => {
+                current.push(name);
+                let is_link =
+                    fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink());
+                if is_link {
+                    hops += 1;
+                    if hops > MAX_LINK_HOPS {
+                        return Err(io_error(FOLLOW, path, Errno::LOOP.into()));
+                    }
+                    let target =
+                        fs::read_link(&current).map_err(|source| io_error(FOLLOW, path, source))?;
+                    current.pop();
+                    pending.extend(parts(&target));
+                }
+            },
+            Some(Component::CurDir | Component::Prefix(_)) | None => {},
         }
-        let target = fs::read_link(&current).map_err(|source| io_error(FOLLOW, path, source))?;
-        current = match current.parent() {
-            Some(folder) => folder.join(target),
-            None => target,
-        };
     }
-    Err(io_error(FOLLOW, path, Errno::LOOP.into()))
+    Ok(current)
 }
 
-/// Refuses `written`, the file a project's config at `path` leads to, when
-/// it lies outside the project at `root`: the deepest folder of it that
-/// exists, every link in it followed, must be inside `root`.
+/// The parts of `path`, each its own path, last first so the next one to
+/// take is popped off the end.
+fn parts(path: &Path) -> Vec<PathBuf> {
+    path.components()
+        .rev()
+        .map(|part| PathBuf::from(part.as_os_str()))
+        .collect()
+}
+
+/// Refuses `written`, the file a project's config at `path` resolves to,
+/// when it lies outside the project at `root`. `written` comes from
+/// [`resolved`], so it holds no link or `..` that could lead out after the
+/// check.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::OutsideProject`] for a file outside the
-/// project, or [`AgentConfigError::Io`] for a folder that cannot be
-/// resolved.
+/// project, or [`AgentConfigError::Io`] for a root that cannot be resolved.
 pub(super) fn confine(written: &Path, root: &Path, path: &Path) -> Result<(), AgentConfigError> {
     let root = fs::canonicalize(root).map_err(|source| io_error(FOLLOW, root, source))?;
-    let Some(existing) = written
-        .ancestors()
-        .find(|ancestor| fs::symlink_metadata(ancestor).is_ok())
-    else {
-        return Ok(());
-    };
-    let real = fs::canonicalize(existing).map_err(|source| io_error(FOLLOW, path, source))?;
-    if real.starts_with(&root) {
+    if written.starts_with(&root) && written != root {
         Ok(())
     } else {
         Err(AgentConfigError::OutsideProject {
@@ -130,31 +150,77 @@ mod tests {
     use super::*;
     use crate::adapter::test_fifo::make_fifo;
 
+    /// A scratch folder and its path with every link followed.
+    fn scratch() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        (dir, base)
+    }
+
     /// A chain of links ends at its last target, a dangling one at where it
-    /// points, and a loop is refused.
+    /// points, a linked folder at the file inside its target, and a loop is
+    /// refused.
     #[test]
     fn a_link_is_followed_to_its_end_even_when_it_dangles() {
-        let dir = TempDir::new().unwrap();
-        let real = dir.path().join("dots/real.json");
+        let (_dir, base) = scratch();
+        let real = base.join("dots/real.json");
         fs::create_dir_all(real.parent().unwrap()).unwrap();
         fs::write(&real, "{}").unwrap();
-        symlink("dots/real.json", dir.path().join("middle")).unwrap();
-        symlink("middle", dir.path().join("config.json")).unwrap();
-        assert_eq!(
-            followed(&dir.path().join("config.json")).unwrap(),
-            dir.path().join("dots/real.json")
-        );
+        symlink("dots/real.json", base.join("middle")).unwrap();
+        symlink("middle", base.join("config.json")).unwrap();
+        assert_eq!(resolved(&base.join("config.json")).unwrap(), real);
 
-        symlink("dots/missing.json", dir.path().join("dangling")).unwrap();
+        symlink("dots/missing.json", base.join("dangling")).unwrap();
         assert_eq!(
-            followed(&dir.path().join("dangling")).unwrap(),
-            dir.path().join("dots/missing.json")
+            resolved(&base.join("dangling")).unwrap(),
+            base.join("dots/missing.json")
         );
-        assert_eq!(followed(&real).unwrap(), real);
+        assert_eq!(resolved(&real).unwrap(), real);
+        symlink("dots", base.join("linked")).unwrap();
+        assert_eq!(resolved(&base.join("linked/./real.json")).unwrap(), real);
 
-        symlink("loop", dir.path().join("loop")).unwrap();
+        symlink("loop", base.join("loop")).unwrap();
         assert!(matches!(
-            followed(&dir.path().join("loop")),
+            resolved(&base.join("loop")),
+            Err(AgentConfigError::Io { .. })
+        ));
+    }
+
+    /// A `..` after a link steps back from where the link leads, and one
+    /// after a folder not made yet steps back over it, so neither hides a
+    /// path out of the project behind a missing folder.
+    #[test]
+    fn every_dot_dot_is_taken_after_the_link_before_it() {
+        let (_dir, base) = scratch();
+        let root = base.join("deep/project");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(base.join("elsewhere/inner")).unwrap();
+        symlink("../../elsewhere/inner", root.join("linked")).unwrap();
+        assert_eq!(
+            resolved(&root.join("linked/../x.json")).unwrap(),
+            base.join("elsewhere/x.json")
+        );
+        assert_eq!(
+            resolved(&root.join("missing/../../../victim/config.toml")).unwrap(),
+            base.join("victim/config.toml")
+        );
+    }
+
+    /// A chain as long as the kernel follows is followed to its end; one
+    /// link more is refused.
+    #[test]
+    fn a_chain_of_the_most_links_is_followed() {
+        let (_dir, base) = scratch();
+        let real = base.join("real.json");
+        fs::write(&real, "{}").unwrap();
+        let link = |hop: usize| base.join(format!("link-{hop}"));
+        symlink(&real, link(1)).unwrap();
+        for hop in 2..=MAX_LINK_HOPS + 1 {
+            symlink(link(hop - 1), link(hop)).unwrap();
+        }
+        assert_eq!(resolved(&link(MAX_LINK_HOPS)).unwrap(), real);
+        assert!(matches!(
+            resolved(&link(MAX_LINK_HOPS + 1)),
             Err(AgentConfigError::Io { .. })
         ));
     }
@@ -187,25 +253,33 @@ mod tests {
     }
 
     /// A file inside the project, or one not made yet, passes; a link to a
-    /// file or folder outside it is refused.
+    /// file or folder outside it, or a `..` past a missing folder, is
+    /// refused.
     #[test]
     fn a_project_file_must_stay_in_the_project() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("project");
-        let outside = dir.path().join("outside");
+        let (_dir, base) = scratch();
+        let root = base.join("project");
+        let outside = base.join("outside");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&outside).unwrap();
+        let confined = |path: &Path| confine(&resolved(path).unwrap(), &root, path);
 
         let inside = root.join(".codex/config.toml");
-        assert!(confine(&inside, &root, &inside).is_ok());
+        assert!(confined(&inside).is_ok());
+        assert!(confined(&root.join("missing/../.mcp.json")).is_ok());
         symlink(&outside, root.join(".codex")).unwrap();
         assert!(matches!(
-            confine(&inside, &root, &inside),
+            confined(&inside),
             Err(AgentConfigError::OutsideProject { .. })
         ));
-        let linked = root.join(".mcp.json");
+        let escaping = root.join(".mcp.json");
+        symlink("missing/../../outside/x.json", &escaping).unwrap();
         assert!(matches!(
-            confine(&outside.join("x.json"), &root, &linked),
+            confined(&escaping),
+            Err(AgentConfigError::OutsideProject { .. })
+        ));
+        assert!(matches!(
+            confined(&root.join("missing/..")),
             Err(AgentConfigError::OutsideProject { .. })
         ));
     }

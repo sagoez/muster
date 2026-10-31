@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     agent_config_error::AgentConfigError,
-    config_file::{io_error, read_text},
+    config_file::{io_error, read_text, resolved},
     config_target::ConfigTarget,
     edit_outcome::EditOutcome,
 };
@@ -35,8 +35,7 @@ pub struct PlannedEdit {
     /// The file, as the agent names it.
     #[getset(get = "pub")]
     path: PathBuf,
-    /// The file written: `path` with its links followed, so a linked
-    /// dotfile stays a link.
+    /// The file written: `path` resolved, so a linked dotfile stays a link.
     written: PathBuf,
     /// What the edit does.
     #[getset(get_copy = "pub")]
@@ -85,6 +84,11 @@ impl PlannedEdit {
         let Some(text) = &self.text else {
             return Ok(None);
         };
+        // The folders are made on the path that passed the plan's checks, so
+        // a link put in it since must not redirect them.
+        if resolved(&self.written)? != self.written {
+            return Err(AgentConfigError::Changed(self.path.clone()));
+        }
         if self.makes_folder
             && let Some(folder) = self.written.parent()
         {

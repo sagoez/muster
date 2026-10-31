@@ -6,7 +6,7 @@ use super::{
     agent::Agent,
     agent_config_error::AgentConfigError,
     claude_project_key::claude_project_key,
-    config_file::{confine, followed, is_read_only, read_text},
+    config_file::{confine, is_read_only, read_text, resolved},
     config_format::ConfigFormat,
     config_locations::ConfigLocations,
     config_lock::ConfigLock,
@@ -147,8 +147,8 @@ impl AgentConfigFiles {
     }
 
     /// Reads the config at `place` and works out `change` to the entry
-    /// `name` in it, for `target`: the file written once its links are
-    /// followed, its text, and the edit.
+    /// `name` in it, for `target`: the file written once its path is
+    /// resolved, its text, and the edit.
     ///
     /// # Errors
     /// Returns the [`AgentConfigError`] of a file that is not a regular
@@ -166,7 +166,7 @@ impl AgentConfigFiles {
             .launch
             .entry(target.scope(), target.agent() == Agent::Zed)?;
         let path = place.path();
-        let written = followed(path)?;
+        let written = resolved(path)?;
         if let Some(root) = place.confined_to() {
             confine(&written, root, path)?;
         }
@@ -776,6 +776,27 @@ mod tests {
             Err(AgentConfigError::OutsideProject { .. })
         ));
         assert!(!home.at("elsewhere/config.toml").exists());
+    }
+
+    /// A project's file linked through a folder not made yet and back out
+    /// of the project is refused, and no folder is made inside or outside.
+    #[test]
+    fn a_link_out_past_a_missing_folder_is_refused() {
+        let home = Home::new();
+        fs::create_dir_all(home.at("project/.codex")).unwrap();
+        symlink(
+            "missing/../../../victim/config.toml",
+            home.at("project/.codex/config.toml"),
+        )
+        .unwrap();
+        for force in [false, true] {
+            assert!(matches!(
+                home.apply(Agent::Codex, McpScope::Project, EntryChange::Add, force),
+                Err(AgentConfigError::OutsideProject { .. })
+            ));
+        }
+        assert!(!home.at("victim").exists());
+        assert!(!home.at("project/.codex/missing").exists());
     }
 
     /// The remove picker's agents are those whose config holds an entry

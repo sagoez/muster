@@ -160,6 +160,7 @@ fn edit_line(edit: &McpConfigEdit) -> String {
             format!("pointed {name} in {path} at this muster ({scope} scope)")
         },
         EditOutcome::Disabled => format!("{name} in {path} is turned off ({scope} scope)"),
+        EditOutcome::Enabled => format!("turned {name} in {path} back on ({scope} scope)"),
         EditOutcome::Replaced => format!("replaced {name} in {path} ({scope} scope)"),
         EditOutcome::Removed => format!("removed {name} from {path} ({scope} scope)"),
         EditOutcome::Absent => format!("no {name} in {path} ({scope} scope)"),

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use super::config_format::ConfigFormat;
+use super::{config_format::ConfigFormat, disabled_list::DisabledList};
 
 /// Where one config lives and how it is edited.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]
@@ -23,4 +23,8 @@ pub(super) struct ConfigPlace {
     /// The project folder a file shared with the project must stay inside.
     #[getset(get = "pub(super)")]
     confined_to: Option<PathBuf>,
+    /// The lists whose naming the entry turns it off, where the agent keeps
+    /// such lists; none where the entry's own flag turns it off.
+    #[getset(get = "pub(super)")]
+    disabled_lists: Option<Vec<DisabledList>>,
 }

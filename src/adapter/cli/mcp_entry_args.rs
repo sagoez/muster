@@ -31,7 +31,8 @@ pub struct McpEntryArgs {
     #[arg(long, default_value = DEFAULT_SERVER_NAME, value_parser = server_name)]
     #[getset(get = "pub")]
     name: McpServerName,
-    /// Replace or remove a server under the name that runs something else.
+    /// Replace or remove a server under the name that runs something else,
+    /// or turn muster's own back on.
     #[arg(long)]
     #[getset(get_copy = "pub")]
     force: bool,

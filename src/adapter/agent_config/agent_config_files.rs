@@ -12,6 +12,8 @@ use super::{
     config_lock::ConfigLock,
     config_place::ConfigPlace,
     config_target::ConfigTarget,
+    disabled_list::DisabledList,
+    disabling::Disabling,
     edit_outcome::EditOutcome,
     edit_plan::EditPlan,
     edited::Edited,
@@ -19,21 +21,41 @@ use super::{
     file_edit::FileEdit,
     file_fingerprint::FileFingerprint,
     json_dialect::JsonDialect,
-    json_document::edit_json,
+    json_document::{edit_json, lists as lists_name, unlisted},
     json_place::JsonPlace,
     lock_timing::LockTiming,
     mcp_registry::McpRegistry,
     mcp_scope::McpScope,
     planned_edit::PlannedEdit,
+    server_entry::ServerEntry,
     server_launch::ServerLaunch,
     server_name::McpServerName,
     toml_document::edit_toml,
 };
 
+/// A config's file once resolved, with its text and fingerprint as read,
+/// or none when there is no file.
+type ConfigRead = (PathBuf, Option<(String, FileFingerprint)>);
+/// A list that names muster's entry, with its file once resolved and, when
+/// that is not the config itself, the file's text and fingerprint as read.
+type Listing<'a> = (&'a DisabledList, PathBuf, Option<(String, FileFingerprint)>);
+
 /// The key Claude Code keeps its servers under, at each level.
 const CLAUDE_SERVERS: &str = "mcpServers";
 /// The key of Claude Code's per-project settings in `.claude.json`.
 const CLAUDE_PROJECTS: &str = "projects";
+/// The key of a project's servers Claude Code has turned off there, in its
+/// object in `.claude.json`.
+const CLAUDE_DISABLED: &str = "disabledMcpServers";
+/// The key of a project's `.mcp.json` servers the person turned down, in
+/// Claude Code's settings files.
+const CLAUDE_REJECTED: &str = "disabledMcpjsonServers";
+/// Claude Code's settings file, in its config folder or a project's.
+const CLAUDE_SETTINGS: &str = "settings.json";
+/// A project's own Claude Code settings file, kept out of version control.
+const CLAUDE_LOCAL_SETTINGS: &str = "settings.local.json";
+/// A project's Claude Code folder.
+const CLAUDE_PROJECT_DIR: &str = ".claude";
 /// The file of a project's shared Claude Code servers.
 const CLAUDE_PROJECT_FILE: &str = ".mcp.json";
 /// The key Zed keeps its MCP servers under.
@@ -90,58 +112,114 @@ impl AgentConfigFiles {
                 .as_ref()
                 .ok_or(AgentConfigError::NoHome(agent))
         };
-        let json = |keys: &[&str], dialect| {
-            ConfigFormat::Json(keys.iter().map(ToString::to_string).collect(), dialect)
-        };
-        let user_file = |path: PathBuf, format| {
+        let keys = |keys: &[&str]| keys.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let json = |path: &[&str], dialect| ConfigFormat::Json(keys(path), dialect);
+        let user_file = |path: PathBuf, format, disabled_lists| {
             ConfigPlace::builder()
                 .path(path)
                 .format(format)
                 .makes_folder(true)
                 .locked(agent == Agent::Claude)
                 .confined_to(None)
+                .disabled_lists(disabled_lists)
                 .build()
         };
-        let project_file = |root: PathBuf, path: PathBuf, format| {
+        let project_file = |root: PathBuf, path: PathBuf, format, disabled_lists| {
             ConfigPlace::builder()
                 .path(path)
                 .format(format)
                 .makes_folder(agent == Agent::Codex)
                 .locked(false)
                 .confined_to(Some(root))
+                .disabled_lists(disabled_lists)
+                .build()
+        };
+        // Claude Code turns a server off for one project by naming it in
+        // that project's object in `.claude.json`.
+        let turned_off_in = |home: &ConfigLocations, key: &str| {
+            DisabledList::builder()
+                .path(home.claude_json().clone())
+                .keys(keys(&[CLAUDE_PROJECTS, key, CLAUDE_DISABLED]))
+                .dialect(JsonDialect::Strict)
+                .confined_to(None)
+                .locked(true)
                 .build()
         };
         Ok(match (agent, scope) {
             (Agent::Claude, McpScope::Local) => {
+                let home = home()?;
                 let key = claude_project_key(&root()?);
                 let key = key
                     .to_str()
                     .ok_or_else(|| AgentConfigError::ProjectNotUtf8(key.clone()))?;
                 user_file(
-                    home()?.claude_json().clone(),
+                    home.claude_json().clone(),
                     json(&[CLAUDE_PROJECTS, key, CLAUDE_SERVERS], JsonDialect::Strict),
+                    Some(vec![turned_off_in(home, key)]),
                 )
             },
             (Agent::Claude, McpScope::Project) => {
+                let home = home()?;
                 let root = root()?;
                 let path = root.join(CLAUDE_PROJECT_FILE);
-                project_file(root, path, json(&[CLAUDE_SERVERS], JsonDialect::Strict))
+                let key = claude_project_key(&root);
+                // A project Claude Code's config cannot name has no object
+                // there to turn the server off in.
+                let mut lists: Vec<DisabledList> = key
+                    .to_str()
+                    .map(|key| turned_off_in(home, key))
+                    .into_iter()
+                    .collect();
+                // A server of a project's `.mcp.json` the person turned
+                // down is named in any of Claude Code's settings files.
+                let settings = [
+                    (home.claude_dir().join(CLAUDE_SETTINGS), None),
+                    (
+                        root.join(CLAUDE_PROJECT_DIR).join(CLAUDE_SETTINGS),
+                        Some(root.clone()),
+                    ),
+                    (
+                        root.join(CLAUDE_PROJECT_DIR).join(CLAUDE_LOCAL_SETTINGS),
+                        Some(root.clone()),
+                    ),
+                ];
+                lists.extend(settings.into_iter().map(|(path, confined_to)| {
+                    DisabledList::builder()
+                        .path(path)
+                        .keys(keys(&[CLAUDE_REJECTED]))
+                        .dialect(JsonDialect::WithComments)
+                        .confined_to(confined_to)
+                        .locked(false)
+                        .build()
+                }));
+                project_file(
+                    root,
+                    path,
+                    json(&[CLAUDE_SERVERS], JsonDialect::Strict),
+                    Some(lists),
+                )
             },
+            // A user's server is turned off one project at a time, and a
+            // user's config names no project.
             (Agent::Claude, McpScope::User) => user_file(
                 home()?.claude_json().clone(),
                 json(&[CLAUDE_SERVERS], JsonDialect::Strict),
+                Some(Vec::new()),
             ),
-            (Agent::Codex, McpScope::User) => {
-                user_file(home()?.codex_home().join(CODEX_CONFIG), ConfigFormat::Toml)
-            },
+            (Agent::Codex, McpScope::User) => user_file(
+                home()?.codex_home().join(CODEX_CONFIG),
+                ConfigFormat::Toml,
+                None,
+            ),
             (Agent::Codex, McpScope::Project) => {
                 let root = root()?;
                 let path = root.join(CODEX_PROJECT_DIR).join(CODEX_CONFIG);
-                project_file(root, path, ConfigFormat::Toml)
+                project_file(root, path, ConfigFormat::Toml, None)
             },
             (Agent::Zed, McpScope::User) => user_file(
                 home()?.zed_settings().clone(),
                 json(&[ZED_SERVERS], JsonDialect::WithComments),
+                None,
             ),
             (Agent::Codex | Agent::Zed, _) => {
                 return Err(AgentConfigError::UnsupportedScope { agent, scope });
@@ -149,54 +227,25 @@ impl AgentConfigFiles {
         })
     }
 
-    /// Reads the config at `place` and works out `change` to the entry
-    /// `name` in it, for `target`: the file written once its path is
-    /// resolved, its fingerprint as read, and the edit.
+    /// muster's entry in `target`'s config.
+    ///
+    /// # Errors
+    /// Returns [`AgentConfigError::CommandNotUtf8`] for a binary path a
+    /// config cannot hold.
+    fn entry(&self, target: &ConfigTarget) -> Result<ServerEntry, AgentConfigError> {
+        self.launch
+            .entry(target.scope(), target.agent() == Agent::Zed)
+    }
+
+    /// The edit of `target`'s config at `place`, checked to be one muster
+    /// may write, with the lists that turn the entry off taken in hand
+    /// where the agent keeps them: read for an add, and with `force`, the
+    /// name taken out of each.
     ///
     /// # Errors
     /// Returns the [`AgentConfigError`] of a file that is not a regular
     /// file, leads out of its project, cannot be read or parsed, or holds an
-    /// entry muster must not touch.
-    fn read_edit(
-        &self,
-        target: &ConfigTarget,
-        place: &ConfigPlace,
-        name: &McpServerName,
-        change: EntryChange,
-        force: bool,
-    ) -> Result<(PathBuf, Option<FileFingerprint>, Edited), AgentConfigError> {
-        let entry = self
-            .launch
-            .entry(target.scope(), target.agent() == Agent::Zed)?;
-        let path = place.path();
-        let written = resolved(path)?;
-        if let Some(root) = place.confined_to() {
-            confine(&written, root, path)?;
-        }
-        let (original, fingerprint) = read_text(&written, path)?.unzip();
-        let edited = match place.format() {
-            ConfigFormat::Json(table, dialect) => edit_json(
-                original.as_deref(),
-                &JsonPlace::builder()
-                    .path(path)
-                    .table(table.clone())
-                    .dialect(*dialect)
-                    .build(),
-                name,
-                &entry,
-                change,
-                force,
-            ),
-            ConfigFormat::Toml => edit_toml(original.as_deref(), path, name, &entry, change, force),
-        }?;
-        Ok((written, fingerprint, edited))
-    }
-
-    /// The edit of `target`'s config at `place`, checked to be one muster
-    /// may write.
-    ///
-    /// # Errors
-    /// As [`Self::read_edit`], or [`AgentConfigError::ReadOnly`] for a
+    /// entry muster must not touch, or [`AgentConfigError::ReadOnly`] for a
     /// read-only file the edit would replace.
     fn plan_one(
         &self,
@@ -206,27 +255,65 @@ impl AgentConfigFiles {
         change: EntryChange,
         force: bool,
     ) -> Result<PlannedEdit, AgentConfigError> {
-        let (written, fingerprint, edited) = self.read_edit(target, place, name, change, force)?;
+        let path = place.path();
+        let (written, read) = read_config(path, place.confined_to().as_deref())?;
+        let original = read.as_ref().map(|(text, _)| text.as_str());
+        let listing = match (place.disabled_lists(), change) {
+            (Some(lists), EntryChange::Add) => listing(lists, &written, original, name)?,
+            _ => Vec::new(),
+        };
+        let disabling = if place.disabled_lists().is_some() {
+            Disabling::Listed(!listing.is_empty())
+        } else {
+            Disabling::Flag
+        };
+        let entry = self.entry(target)?;
+        let edited = edit_entry(place, original, name, &entry, disabling, change, force)?;
         let outcome = edited.outcome();
+        let unlists = force
+            && matches!(
+                outcome,
+                EditOutcome::Added | EditOutcome::Enabled | EditOutcome::Replaced
+            );
+        let mut text = edited.text().clone();
         let mut files = Vec::new();
-        if let Some(text) = edited.text() {
-            if is_read_only(&written) {
-                return Err(AgentConfigError::ReadOnly(place.path().clone()));
+        for (list, list_written, list_read) in listing.iter().filter(|_| unlists) {
+            if *list_written == written {
+                let base = text.as_deref().or(original).unwrap_or_default();
+                text = Some(unlisted(base, &list_place(list), name)?);
+            } else if let Some((list_text, fingerprint)) = list_read {
+                files.push(
+                    FileEdit::builder()
+                        .path(list.path().clone())
+                        .written(list_written.clone())
+                        .fingerprint(Some(*fingerprint))
+                        .text(unlisted(list_text, &list_place(list), name)?)
+                        .makes_folder(false)
+                        .locked(list.locked())
+                        .build(),
+                );
             }
-            files.push(
+        }
+        if let Some(text) = text {
+            files.insert(
+                0,
                 FileEdit::builder()
-                    .path(place.path().clone())
+                    .path(path.clone())
                     .written(written)
-                    .fingerprint(fingerprint)
-                    .text(text.clone())
+                    .fingerprint(read.map(|(_, fingerprint)| fingerprint))
+                    .text(text)
                     .makes_folder(place.makes_folder())
                     .locked(place.locked())
                     .build(),
             );
         }
+        if let Some(file) = files.iter().find(|file| is_read_only(file.written())) {
+            return Err(AgentConfigError::ReadOnly(file.path().clone()));
+        }
         let note = match (target.agent(), target.scope(), outcome) {
             (_, _, EditOutcome::Disabled) => Some(DISABLED_NOTE),
             (_, _, EditOutcome::Removed | EditOutcome::Absent) => None,
+            _ if !listing.is_empty() && !unlists => Some(DISABLED_NOTE),
             (Agent::Claude, McpScope::Project, _) => Some(CLAUDE_PROJECT_NOTE),
             (Agent::Codex, McpScope::Project, _) => Some(CODEX_PROJECT_NOTE),
             _ => None,
@@ -254,6 +341,112 @@ impl AgentConfigFiles {
     }
 }
 
+/// The file the agent's `path` leads to once resolved, refused when it
+/// leaves `confined_to`.
+///
+/// # Errors
+/// Returns the [`AgentConfigError`] of a path that cannot be resolved or
+/// leads out of its project.
+fn located(path: &Path, confined_to: Option<&Path>) -> Result<PathBuf, AgentConfigError> {
+    let written = resolved(path)?;
+    if let Some(root) = confined_to {
+        confine(&written, root, path)?;
+    }
+    Ok(written)
+}
+
+/// The config the agent names `path`: the file written once its path is
+/// resolved, kept inside `confined_to` when given, with its text and
+/// fingerprint as read, or none when there is no file.
+///
+/// # Errors
+/// As [`located`], or the [`AgentConfigError`] of a file that is not a
+/// regular file or cannot be read.
+fn read_config(path: &Path, confined_to: Option<&Path>) -> Result<ConfigRead, AgentConfigError> {
+    let written = located(path, confined_to)?;
+    let read = read_text(&written, path)?;
+    Ok((written, read))
+}
+
+/// Works out `change` to the entry `name` in `text`, the config at `place`,
+/// muster's own being `entry`, turned off as `disabling` says.
+///
+/// # Errors
+/// Returns the [`AgentConfigError`] of a file that does not parse, or holds
+/// an entry muster must not touch.
+fn edit_entry(
+    place: &ConfigPlace,
+    text: Option<&str>,
+    name: &McpServerName,
+    entry: &ServerEntry,
+    disabling: Disabling,
+    change: EntryChange,
+    force: bool,
+) -> Result<Edited, AgentConfigError> {
+    let path = place.path();
+    match place.format() {
+        ConfigFormat::Json(table, dialect) => edit_json(
+            text,
+            &JsonPlace::builder()
+                .path(path)
+                .table(table.clone())
+                .dialect(*dialect)
+                .build(),
+            name,
+            entry,
+            disabling,
+            change,
+            force,
+        ),
+        ConfigFormat::Toml => edit_toml(text, path, name, entry, change, force),
+    }
+}
+
+/// The lists of `lists` that name `name`, each with the file it is in once
+/// resolved and, unless that is `config`, the config already read as
+/// `config_text`, the file's text and fingerprint as read. A list whose
+/// file is missing names nothing.
+///
+/// # Errors
+/// As [`read_config`], or the [`AgentConfigError`] of a list's file that
+/// does not parse.
+fn listing<'a>(
+    lists: &'a [DisabledList],
+    config: &Path,
+    config_text: Option<&str>,
+    name: &McpServerName,
+) -> Result<Vec<Listing<'a>>, AgentConfigError> {
+    let mut naming = Vec::new();
+    for list in lists {
+        let written = located(list.path(), list.confined_to().as_deref())?;
+        let read = if written == config {
+            None
+        } else {
+            read_text(&written, list.path())?
+        };
+        let text = match &read {
+            Some((text, _)) => Some(text.as_str()),
+            None if written == config => config_text,
+            None => None,
+        };
+        if let Some(text) = text
+            && lists_name(text, &list_place(list), name)?
+        {
+            naming.push((list, written, read));
+        }
+    }
+    Ok(naming)
+}
+
+/// Where `list` lives in its file, as a JSON edit reads it.
+fn list_place(list: &DisabledList) -> JsonPlace<'_> {
+    JsonPlace::builder()
+        .path(list.path())
+        .table(list.keys().clone())
+        .dialect(list.dialect())
+        .build()
+}
+
 impl McpRegistry for AgentConfigFiles {
     fn present(&self) -> Vec<Agent> {
         Agent::iter()
@@ -265,11 +458,23 @@ impl McpRegistry for AgentConfigFiles {
         targets
             .iter()
             .filter(|target| {
-                self.place(target)
-                    .and_then(|place| {
-                        self.read_edit(target, &place, name, EntryChange::Remove, false)
-                    })
-                    .is_ok_and(|(_, _, edited)| edited.outcome() == EditOutcome::Removed)
+                let removal = || -> Result<Edited, AgentConfigError> {
+                    let place = self.place(target)?;
+                    let (_, read) = read_config(place.path(), place.confined_to().as_deref())?;
+                    let text = read.as_ref().map(|(text, _)| text.as_str());
+                    let entry = self.entry(target)?;
+                    let disabling = Disabling::Listed(false);
+                    edit_entry(
+                        &place,
+                        text,
+                        name,
+                        &entry,
+                        disabling,
+                        EntryChange::Remove,
+                        false,
+                    )
+                };
+                removal().is_ok_and(|edited| edited.outcome() == EditOutcome::Removed)
             })
             .map(ConfigTarget::agent)
             .collect()
@@ -876,6 +1081,205 @@ mod tests {
             .collect();
         let plan = planned(&home, &ticked, EntryChange::Remove).unwrap();
         assert_eq!(plan.edits()[0].outcome(), EditOutcome::Removed);
+    }
+
+    /// Claude Code's local entry is off when the project's list of turned
+    /// off servers names it, whatever keys the entry holds; `--force` takes
+    /// the name out of the list and keeps the entry and every other key.
+    #[test]
+    fn claude_turns_a_local_entry_off_by_its_list() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        let project = home.at("project").display().to_string();
+        let ours = json!({"command": MUSTER_BINARY, "args": ["mcp"], "env": {"A": "1"}});
+        let off = json!({"numStartups": 3, "projects": {&project: {
+            "mcpServers": {"muster": ours},
+            "disabledMcpServers": ["other", "muster"],
+        }}});
+        fs::write(&claude, off.to_string()).unwrap();
+
+        let kept = home
+            .apply(Agent::Claude, McpScope::Local, EntryChange::Add, false)
+            .unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::Disabled);
+        assert_eq!(kept.note(), Some(DISABLED_NOTE));
+        assert_eq!(json_at(&claude), off);
+
+        let on = home
+            .apply(Agent::Claude, McpScope::Local, EntryChange::Add, true)
+            .unwrap();
+        assert_eq!(on.outcome(), EditOutcome::Enabled);
+        let after = json_at(&claude);
+        assert_eq!(after["projects"][&project]["mcpServers"]["muster"], ours);
+        assert_eq!(
+            after["projects"][&project]["disabledMcpServers"],
+            json!(["other"])
+        );
+        assert_eq!(after["numStartups"], 3);
+
+        let flagged = json!({"projects": {&project: {"mcpServers": {"muster":
+            {"command": MUSTER_BINARY, "args": ["mcp"], "disabled": true}}}}});
+        fs::write(&claude, flagged.to_string()).unwrap();
+        let same = home
+            .apply(Agent::Claude, McpScope::Local, EntryChange::Add, false)
+            .unwrap();
+        assert_eq!(
+            same.outcome(),
+            EditOutcome::AlreadyAdded,
+            "Claude Code reads no key in the entry"
+        );
+    }
+
+    /// A project's `.mcp.json` entry is off when the project's list in
+    /// `.claude.json` or any settings file's list of turned-down servers
+    /// names it; `--force` takes the name out of each, leaving the entry,
+    /// the other names and every other key as they were.
+    #[test]
+    fn claude_turns_a_project_entry_off_by_its_lists() {
+        let home = Home::new();
+        let project = home.at("project").display().to_string();
+        let mcp_json = home.at("project/.mcp.json");
+        let entry = r#"{"mcpServers": {"muster": {"command": "muster", "args": ["mcp"]}}}"#;
+        fs::write(&mcp_json, entry).unwrap();
+        let claude = home.at(".claude.json");
+        fs::write(
+            &claude,
+            json!({"projects": {&project: {"disabledMcpServers": ["muster"]}}}).to_string(),
+        )
+        .unwrap();
+        let user_settings = home.at(".claude/settings.json");
+        let local_settings = home.at("project/.claude/settings.local.json");
+        fs::create_dir_all(user_settings.parent().unwrap()).unwrap();
+        fs::create_dir_all(local_settings.parent().unwrap()).unwrap();
+        fs::write(
+            &user_settings,
+            "{\n  // mine\n  \"disabledMcpjsonServers\": [\"muster\", \"x\"]\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            &local_settings,
+            r#"{"disabledMcpjsonServers": ["muster"], "enabledMcpjsonServers": ["y"]}"#,
+        )
+        .unwrap();
+
+        let kept = home
+            .apply(Agent::Claude, McpScope::Project, EntryChange::Add, false)
+            .unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::Disabled);
+        let shared_settings = home.at("project/.claude/settings.json");
+        let alone = Home::new();
+        let alone_settings = alone.at("project/.claude/settings.json");
+        fs::create_dir_all(alone_settings.parent().unwrap()).unwrap();
+        fs::write(alone.at("project/.mcp.json"), entry).unwrap();
+        fs::write(&alone_settings, r#"{"disabledMcpjsonServers": ["muster"]}"#).unwrap();
+        assert_eq!(
+            alone
+                .apply(Agent::Claude, McpScope::Project, EntryChange::Add, false)
+                .unwrap()
+                .outcome(),
+            EditOutcome::Disabled,
+            "the project's shared settings turn it down too"
+        );
+        assert!(!shared_settings.exists());
+
+        let on = home
+            .apply(Agent::Claude, McpScope::Project, EntryChange::Add, true)
+            .unwrap();
+        assert_eq!(on.outcome(), EditOutcome::Enabled);
+        assert_eq!(fs::read_to_string(&mcp_json).unwrap(), entry);
+        assert_eq!(
+            json_at(&claude)["projects"][&project]["disabledMcpServers"],
+            json!([])
+        );
+        let user = fs::read_to_string(&user_settings).unwrap();
+        assert!(
+            user.contains("// mine") && user.contains("\"x\"]") && !user.contains("muster"),
+            "{user}"
+        );
+        assert_eq!(
+            json_at(&local_settings),
+            json!({"disabledMcpjsonServers": [], "enabledMcpjsonServers": ["y"]})
+        );
+        assert!(!home.at(".claude.json.lock").exists());
+        assert_eq!(
+            home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, false)
+                .unwrap()
+                .outcome(),
+            EditOutcome::AlreadyAdded
+        );
+    }
+
+    /// A name a list turns off, with no entry under it yet, gains the entry
+    /// with the warning that it is off; `--force` adds it turned on.
+    #[test]
+    fn a_listed_name_without_an_entry_is_added_with_its_warning() {
+        let home = Home::new();
+        let claude = home.at(".claude.json");
+        let project = home.at("project").display().to_string();
+        let listed = json!({"projects": {&project: {"disabledMcpServers": ["muster"]}}});
+        fs::write(&claude, listed.to_string()).unwrap();
+
+        let plan = planned(
+            &home,
+            &[home.target(Agent::Claude, McpScope::Local)],
+            EntryChange::Add,
+        )
+        .unwrap();
+        assert_eq!(plan.edits()[0].outcome(), EditOutcome::Added);
+        assert_eq!(plan.edits()[0].note(), Some(DISABLED_NOTE));
+        drop(plan);
+
+        home.apply(Agent::Claude, McpScope::Local, EntryChange::Add, true)
+            .unwrap();
+        let after = json_at(&claude);
+        assert!(after["projects"][&project]["mcpServers"]["muster"].is_object());
+        assert_eq!(after["projects"][&project]["disabledMcpServers"], json!([]));
+    }
+
+    /// Codex's and Zed's entries are off by their own `enabled = false`, and
+    /// `--force` clears it in place, keeping every other key.
+    #[test]
+    fn codex_and_zed_turn_an_entry_off_by_its_flag() {
+        let home = Home::new();
+        let codex = home.at(".codex/config.toml");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!(
+                "[mcp_servers.muster]\ncommand = \"{MUSTER_BINARY}\"\nargs = [\"mcp\"]\nenabled = false\nstartup_timeout_sec = 20\n"
+            ),
+        )
+        .unwrap();
+        let zed = home.locations().zed_settings().clone();
+        fs::create_dir_all(zed.parent().unwrap()).unwrap();
+        fs::write(
+            &zed,
+            format!(
+                "// mine\n{{\"context_servers\": {{\"muster\": {{\"command\": \"{MUSTER_BINARY}\", \"args\": [\"mcp\"], \"env\": {{\"A\": \"1\"}}, \"enabled\": false}}}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        for agent in [Agent::Codex, Agent::Zed] {
+            let kept = home
+                .apply(agent, McpScope::User, EntryChange::Add, false)
+                .unwrap();
+            assert_eq!(kept.outcome(), EditOutcome::Disabled, "{agent}");
+            let on = home
+                .apply(agent, McpScope::User, EntryChange::Add, true)
+                .unwrap();
+            assert_eq!(on.outcome(), EditOutcome::Enabled, "{agent}");
+        }
+        assert_eq!(
+            fs::read_to_string(&codex).unwrap(),
+            format!(
+                "[mcp_servers.muster]\ncommand = \"{MUSTER_BINARY}\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n"
+            )
+        );
+        let zed_text = fs::read_to_string(&zed).unwrap();
+        assert!(zed_text.starts_with("// mine\n"), "{zed_text}");
+        assert!(!zed_text.contains("enabled"), "{zed_text}");
+        assert!(zed_text.contains("\"A\": \"1\""), "{zed_text}");
     }
 
     /// A Claude Code file with a comment is not JSON Claude Code reads, so

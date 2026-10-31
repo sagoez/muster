@@ -5,12 +5,13 @@ use std::collections::HashSet;
 
 use jsonc_parser::{
     ParseOptions,
-    cst::{CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode},
+    cst::{CstArray, CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode},
 };
 use serde::de::IgnoredAny;
 
 use super::{
     agent_config_error::AgentConfigError,
+    disabling::Disabling,
     edit_outcome::EditOutcome,
     edited::Edited,
     entry_action::EntryAction,
@@ -18,7 +19,7 @@ use super::{
     entry_match::EntryMatch,
     json_dialect::JsonDialect,
     json_place::JsonPlace,
-    server_entry::{COMMAND_KEY, ServerEntry},
+    server_entry::{COMMAND_KEY, ENABLED_KEY, ServerEntry},
     server_name::McpServerName,
 };
 
@@ -28,8 +29,11 @@ const EMPTY_OBJECT: &str = "{}\n";
 const LINE_BREAK: char = '\n';
 
 /// `change` applied to the entry `name` in `text`, the file at `place`, or
-/// in an empty file when there is none. A removal takes out the objects it
-/// leaves empty on the way to the entry.
+/// in an empty file when there is none, the entry turned off as
+/// `disabling` says. A removal takes out the objects it leaves empty on the
+/// way to the entry; turning the entry back on clears its own flag, and
+/// leaves lists elsewhere to the caller. The new text is none when the file
+/// stays as it was.
 ///
 /// # Errors
 /// Returns [`AgentConfigError::Unparseable`],
@@ -42,9 +46,115 @@ pub(super) fn edit_json(
     place: &JsonPlace<'_>,
     name: &McpServerName,
     entry: &ServerEntry,
+    disabling: Disabling,
     change: EntryChange,
     force: bool,
 ) -> Result<Edited, AgentConfigError> {
+    let (root, top) = parsed(text, place)?;
+    let Some((table, holders)) = table_of(&top, place, change == EntryChange::Add)? else {
+        return Ok(Edited::builder()
+            .outcome(EditOutcome::Absent)
+            .text(None)
+            .build());
+    };
+    let existing = table.get(name.as_ref());
+    if let Some(object) = existing.as_ref().and_then(CstObjectProp::object_value) {
+        unique_keys(&object, place)?;
+    }
+    let judged = existing
+        .as_ref()
+        .map(|prop| judge(prop.value().as_ref(), entry));
+    let disabled = match disabling {
+        Disabling::Flag => judged.is_some_and(|(_, off)| off),
+        Disabling::Listed(listed) => listed,
+    };
+    let action = EntryAction::decide(
+        judged.map(|(matched, _)| matched),
+        disabled,
+        change,
+        force,
+        place.path(),
+        name,
+    )?;
+    let object = existing.as_ref().and_then(CstObjectProp::object_value);
+    let point_at_this = |object: &CstObject| {
+        if let Some(command) = object.get(COMMAND_KEY) {
+            command.set_value(CstInputValue::from(entry.command().as_str()));
+        }
+    };
+    match (action, existing) {
+        (EntryAction::Insert, _) => {
+            table.append(name.as_ref(), entry.json_input());
+        },
+        (EntryAction::Update, _) => object.iter().for_each(point_at_this),
+        (EntryAction::Enable, _) => {
+            object.iter().for_each(point_at_this);
+            if disabling == Disabling::Flag
+                && let Some(flag) = object.as_ref().and_then(|object| object.get(ENABLED_KEY))
+            {
+                flag.remove();
+            }
+        },
+        (EntryAction::Replace, Some(prop)) => prop.set_value(entry.json_input()),
+        (EntryAction::Remove, Some(prop)) => {
+            prop.remove();
+            prune(&holders);
+        },
+        _ => {},
+    }
+    let outcome = action.outcome();
+    let text = outcome
+        .writes()
+        .then(|| finished(&root))
+        .filter(|written| Some(written.trim_end()) != text.map(str::trim_end));
+    Ok(Edited::builder().outcome(outcome).text(text).build())
+}
+
+/// Whether the list at `place`, the last of its keys naming an array, holds
+/// `name`, in `text`, the file there. A missing list holds nothing.
+///
+/// # Errors
+/// As [`edit_json`] for a file muster cannot read safely.
+pub(super) fn lists(
+    text: &str,
+    place: &JsonPlace<'_>,
+    name: &McpServerName,
+) -> Result<bool, AgentConfigError> {
+    let (_, top) = parsed(Some(text), place)?;
+    Ok(list_of(&top, place)?.is_some_and(|list| !named(&list, name).is_empty()))
+}
+
+/// `text`, the file at `place`, with `name` taken out of the list there,
+/// every other element, key and comment kept.
+///
+/// # Errors
+/// As [`edit_json`] for a file muster cannot edit safely.
+pub(super) fn unlisted(
+    text: &str,
+    place: &JsonPlace<'_>,
+    name: &McpServerName,
+) -> Result<String, AgentConfigError> {
+    let (root, top) = parsed(Some(text), place)?;
+    if let Some(list) = list_of(&top, place)? {
+        for element in named(&list, name) {
+            element.remove();
+        }
+    }
+    Ok(finished(&root))
+}
+
+/// `text`, the file at `place`, parsed, with its top object; an empty file,
+/// or one of comments alone, is an empty object.
+///
+/// # Errors
+/// Returns [`AgentConfigError::Unparseable`] for text that does not parse
+/// in the place's dialect, [`AgentConfigError::NotAnObject`] for a file
+/// holding something else, or [`AgentConfigError::DuplicateKey`] for a top
+/// object holding a key twice.
+fn parsed(
+    text: Option<&str>,
+    place: &JsonPlace<'_>,
+) -> Result<(CstRootNode, CstObject), AgentConfigError> {
     let source = text
         .filter(|text| !text.trim().is_empty())
         .unwrap_or(EMPTY_OBJECT);
@@ -60,53 +170,52 @@ pub(super) fn edit_json(
     }
     let root = CstRootNode::parse(source, &ParseOptions::default())
         .map_err(|error| unparseable(error.to_string()))?;
-    // A file of comments alone is empty settings, which gain an object.
     let top = root
         .object_value_or_create()
         .ok_or_else(|| AgentConfigError::NotAnObject(place.path().to_path_buf()))?;
     unique_keys(&top, place)?;
-    let Some((table, holders)) = table_of(&top, place, change == EntryChange::Add)? else {
-        return Ok(Edited::builder()
-            .outcome(EditOutcome::Absent)
-            .text(None)
-            .build());
+    Ok((root, top))
+}
+
+/// The text of `root`, ending in a line break.
+fn finished(root: &CstRootNode) -> String {
+    let mut written = root.to_string();
+    if !written.ends_with(LINE_BREAK) {
+        written.push(LINE_BREAK);
+    }
+    written
+}
+
+/// The list under `top` at `place`, or none when a key on the way is
+/// absent or the last holds no array.
+///
+/// # Errors
+/// As [`table_of`] for the objects on the way.
+fn list_of(top: &CstObject, place: &JsonPlace<'_>) -> Result<Option<CstArray>, AgentConfigError> {
+    let Some((last, holders)) = place.table().split_last() else {
+        return Ok(None);
     };
-    let existing = table.get(name.as_ref());
-    if let Some(object) = existing.as_ref().and_then(CstObjectProp::object_value) {
-        unique_keys(&object, place)?;
-    }
-    let judged = existing
-        .as_ref()
-        .map(|prop| judge(prop.value().as_ref(), entry));
-    let action = EntryAction::decide(judged, change, force, place.path(), name)?;
-    match (action, existing) {
-        (EntryAction::Insert, _) => {
-            table.append(name.as_ref(), entry.json_input());
-        },
-        (EntryAction::Update, Some(prop)) => {
-            if let Some(command) = prop
-                .object_value()
-                .and_then(|object| object.get(COMMAND_KEY))
-            {
-                command.set_value(CstInputValue::from(entry.command().as_str()));
-            }
-        },
-        (EntryAction::Replace, Some(prop)) => prop.set_value(entry.json_input()),
-        (EntryAction::Remove, Some(prop)) => {
-            prop.remove();
-            prune(&holders);
-        },
-        _ => {},
-    }
-    let outcome = action.outcome();
-    let text = outcome.writes().then(|| {
-        let mut written = root.to_string();
-        if !written.ends_with(LINE_BREAK) {
-            written.push(LINE_BREAK);
-        }
-        written
-    });
-    Ok(Edited::builder().outcome(outcome).text(text).build())
+    let parents = JsonPlace::builder()
+        .path(place.path())
+        .table(holders.to_vec())
+        .dialect(place.dialect())
+        .build();
+    Ok(table_of(top, &parents, false)?
+        .and_then(|(object, _)| object.get(last))
+        .and_then(|prop| prop.array_value()))
+}
+
+/// The elements of `list` that are the string `name`.
+fn named(list: &CstArray, name: &McpServerName) -> Vec<CstNode> {
+    list.elements()
+        .into_iter()
+        .filter(|element| {
+            element
+                .as_string_lit()
+                .and_then(|literal| literal.decoded_value().ok())
+                .is_some_and(|value| value == name.as_ref())
+        })
+        .collect()
 }
 
 /// The table of servers under `top`, with the property holding each object
@@ -218,7 +327,35 @@ mod tests {
         change: EntryChange,
         force: bool,
     ) -> Result<Edited, AgentConfigError> {
-        edit_json(text, at, &muster(), &entry(false), change, force)
+        edit_json(
+            text,
+            at,
+            &muster(),
+            &entry(false),
+            Disabling::Flag,
+            change,
+            force,
+        )
+    }
+
+    /// `change` made to muster's entry in `text` at `at`, in a file whose
+    /// agent keeps its turned-off names in lists, `listed` saying whether
+    /// one names it.
+    fn edited_listed(
+        text: &str,
+        at: &JsonPlace<'_>,
+        listed: bool,
+        force: bool,
+    ) -> Result<Edited, AgentConfigError> {
+        edit_json(
+            Some(text),
+            at,
+            &muster(),
+            &entry(false),
+            Disabling::Listed(listed),
+            EntryChange::Add,
+            force,
+        )
     }
 
     /// `text` as plain JSON.
@@ -255,7 +392,16 @@ mod tests {
         let path = file();
         let at = place(&path, &["context_servers"], JsonDialect::WithComments);
         let zed = |text: &str, change| {
-            edit_json(Some(text), &at, &muster(), &entry(true), change, false).unwrap()
+            edit_json(
+                Some(text),
+                &at,
+                &muster(),
+                &entry(true),
+                Disabling::Flag,
+                change,
+                false,
+            )
+            .unwrap()
         };
         let added = zed(ZED_SETTINGS, EntryChange::Add);
         let text = added.text().clone().unwrap();
@@ -470,20 +616,68 @@ mod tests {
     }
 
     /// A turned-off entry of muster's is reported as such and left off
-    /// without force, and turned back on with it.
+    /// without force, and turned back on in place with it: its flag
+    /// cleared, its command pointed at this binary, every other key kept.
     #[test]
     fn a_turned_off_entry_is_reported_not_added() {
         let path = file();
         let at = place(&path, &["context_servers"], JsonDialect::WithComments);
-        let off = r#"{"context_servers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "enabled": false}}}"#;
+        let off = r#"{"context_servers": {"muster": {"command": "/old/bin/muster", "args": ["mcp"], "env": {"A": "1"}, "enabled": false}}}"#;
 
         let kept = edited(Some(off), &at, EntryChange::Add, false).unwrap();
         assert_eq!(kept.outcome(), EditOutcome::Disabled);
         assert!(kept.text().is_none());
         let forced = edited(Some(off), &at, EntryChange::Add, true).unwrap();
-        assert_eq!(forced.outcome(), EditOutcome::Replaced);
-        let value = loosely_parsed(forced.text().as_ref().unwrap());
-        assert!(value["context_servers"]["muster"].get("enabled").is_none());
+        assert_eq!(forced.outcome(), EditOutcome::Enabled);
+        assert_eq!(
+            loosely_parsed(forced.text().as_ref().unwrap())["context_servers"]["muster"],
+            json!({"command": MUSTER_BINARY, "args": ["mcp"], "env": {"A": "1"}})
+        );
+    }
+
+    /// Where the agent keeps turned-off names in lists, a key in the entry
+    /// turns nothing off; a list naming it does, and force turns it back
+    /// on without touching the entry, leaving the lists to the caller.
+    #[test]
+    fn a_listed_entry_is_off_whatever_its_keys_say() {
+        let path = file();
+        let at = place(&path, &["mcpServers"], JsonDialect::Strict);
+        let own = r#"{"mcpServers": {"muster": {"command": "/bin/muster", "args": ["mcp"], "disabled": true}}}"#;
+
+        let kept = edited_listed(own, &at, false, false).unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::AlreadyAdded);
+        let off = edited_listed(own, &at, true, false).unwrap();
+        assert_eq!(off.outcome(), EditOutcome::Disabled);
+        let on = edited_listed(own, &at, true, true).unwrap();
+        assert_eq!(on.outcome(), EditOutcome::Enabled);
+        assert!(on.text().is_none(), "the entry itself is unchanged");
+    }
+
+    /// A list of names is read and has the name taken out, its other
+    /// elements and comments kept; a missing list names nothing.
+    #[test]
+    fn a_name_is_found_in_and_taken_out_of_a_list() {
+        let path = file();
+        let at = place(
+            &path,
+            &["projects", "/work/shop", "disabledMcpServers"],
+            JsonDialect::WithComments,
+        );
+        let text = r#"{
+  // mine
+  "projects": {"/work/shop": {"disabledMcpServers": ["other", "muster", "last"]}}
+}
+"#;
+        assert!(lists(text, &at, &muster()).unwrap());
+        let without = unlisted(text, &at, &muster()).unwrap();
+        assert!(!lists(&without, &at, &muster()).unwrap());
+        assert!(without.contains("// mine"), "{without}");
+        assert_eq!(
+            loosely_parsed(&without)["projects"]["/work/shop"]["disabledMcpServers"],
+            json!(["other", "last"])
+        );
+        assert!(!lists("{}", &at, &muster()).unwrap());
+        assert!(!lists(r#"{"projects": {"/work/shop": {}}}"#, &at, &muster()).unwrap());
     }
 
     /// An entry Claude Code wrote itself, with `type` and `env`, is muster's

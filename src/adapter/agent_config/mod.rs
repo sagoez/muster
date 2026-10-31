@@ -12,6 +12,8 @@ mod config_locations;
 mod config_lock;
 mod config_place;
 mod config_target;
+mod disabled_list;
+mod disabling;
 mod edit_outcome;
 mod edit_plan;
 mod edited;

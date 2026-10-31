@@ -430,10 +430,20 @@ takes several, comma-separated or repeated. An entry is muster's when its
 command is a file named `muster` and its arguments are `mcp`, whatever the
 path. An identical entry reports `already-added` and writes nothing; one an
 older muster wrote at another path is pointed at this one, its other keys
-kept, and reports `updated`; one turned off (`enabled = false`, or
-`"disabled": true`) reports `disabled` and is turned back on only by
-`--force`; another server's entry under the name is refused unless
-`--force` replaces it. `muster mcp remove` takes the same flags and removes
+kept, and reports `updated`; one turned off reports `disabled` and is
+turned back on in place only by `--force`, which reports `enabled` and
+keeps every other key. Codex and Zed turn an entry off by its own
+`enabled = false`, which `--force` clears. Claude Code keeps no flag in the
+entry: it turns a server off for a project by naming it in that project's
+`disabledMcpServers` in `.claude.json`, and a server of a project's
+`.mcp.json` the person turned down is named in `disabledMcpjsonServers` in
+any of its settings files (its own `settings.json`, and the project's
+`.claude/settings.json` and `.claude/settings.local.json`). muster reads
+those lists for the local and project scopes, warns when one names a new
+entry, and `--force` takes the name out of each; a user-scope entry is
+turned off one project at a time, so muster does not judge it. Another
+server's entry under the name is refused unless `--force` replaces it.
+`muster mcp remove` takes the same flags and removes
 the entry under the name only when it is muster's, unless `--force`, and
 takes out the table of servers, and a project's object in `.claude.json`,
 that it leaves empty.
@@ -442,15 +452,18 @@ A file that does not parse (Claude Code's files must be plain JSON, Zed's
 may hold comments), that holds a key twice in the objects on the way to the
 entry, that is not a regular file or is larger than 128 MiB, or that is
 read-only is refused and left untouched. A project's file that leads out of
-the project by a link is refused too. Around its read and write of
-`.claude.json`, muster takes Claude Code's own lock, the folder
-`.claude.json.lock` beside it, waiting while Claude Code holds it and taking
-over one untouched for 10 seconds.
+the project, by a link or a `..` past a folder not made yet, is refused
+before any folder is made. Before it writes `.claude.json`, muster takes
+Claude Code's own lock, the folder `.claude.json.lock` beside it, waiting
+while Claude Code holds it and taking over one untouched for 10 seconds; it
+touches the lock every 2 seconds while it holds it, and removes it only
+while it is still muster's.
 
-Every config is read and checked, and every new text written and synced
-beside its file, before any file is replaced, and each file is checked
-again for a change since it was read just before; so a refusal, a change by
-another writer or an interrupt changes nothing. Only a failure while
+Every config is read once and checked, and every new text written and
+synced beside its file, before any file is replaced. Each file is checked
+by its size, inode and times for a change since it was read, once the lock
+is taken and again just before the files are replaced; so a refusal, a
+change by another writer or an interrupt changes nothing. Only a failure while
 putting the files in place can leave some of them written, and the error
 then names those. Writes are atomic, keep an existing file's mode, create a
 new file readable by its owner alone, and follow a symlinked file, even one
@@ -459,7 +472,7 @@ that leads nowhere yet, to its target.
 With `--json` the result is `{"change": "add" | "remove", "edits": [...]}`,
 each edit `{agent, scope, name, path, outcome, note}` in the order the
 agents were given, `outcome` one of `added`, `already-added`, `updated`,
-`disabled`, `replaced`, `removed` or `absent`, and `note` what the agent
+`disabled`, `enabled`, `replaced`, `removed` or `absent`, and `note` what the agent
 does with the entry, or `null`. A failure is the usual `{"error": {kind,
 message}}`.
 

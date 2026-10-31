@@ -16,8 +16,6 @@ pub(super) const ARGS_KEY: &str = "args";
 const ENV_KEY: &str = "env";
 /// The key that turns an entry off when false, as Codex and Zed read it.
 pub(super) const ENABLED_KEY: &str = "enabled";
-/// The key that turns an entry off when true.
-pub(super) const DISABLED_KEY: &str = "disabled";
 
 /// muster's server entry as one config file writes it.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -57,8 +55,8 @@ impl ServerEntry {
         CstInputValue::Object(fields)
     }
 
-    /// What `value`, an existing JSON entry, is to muster, and whether it
-    /// is turned off.
+    /// What `value`, an existing JSON entry, is to muster, and whether its
+    /// own flag turns it off.
     pub(super) fn judge_json(&self, value: &Value) -> (EntryMatch, bool) {
         let matched = self.judge(
             value.get(COMMAND_KEY).and_then(Value::as_str),
@@ -67,10 +65,7 @@ impl ServerEntry {
                 .and_then(Value::as_array)
                 .map(|args| args.iter().map(Value::as_str).collect()),
         );
-        let off = turned_off(
-            value.get(ENABLED_KEY).and_then(Value::as_bool),
-            value.get(DISABLED_KEY).and_then(Value::as_bool),
-        );
+        let off = turned_off(value.get(ENABLED_KEY).and_then(Value::as_bool));
         (matched, off)
     }
 
@@ -101,10 +96,10 @@ impl ServerEntry {
     }
 }
 
-/// Whether an entry with `enabled` and `disabled` set as given is turned
-/// off.
-pub(super) fn turned_off(enabled: Option<bool>, disabled: Option<bool>) -> bool {
-    enabled == Some(false) || disabled == Some(true)
+/// Whether an entry whose `enabled` flag is as given is turned off: only an
+/// explicit `false` turns it off.
+pub(super) fn turned_off(enabled: Option<bool>) -> bool {
+    enabled == Some(false)
 }
 
 #[cfg(test)]
@@ -116,7 +111,8 @@ mod tests {
 
     /// The same command is the same entry, a `muster` elsewhere with the
     /// same arguments is muster's older one, and anything else is another
-    /// server's; `enabled: false` or `disabled: true` turns one off.
+    /// server's; only `enabled: false` turns one off, as no agent reads a
+    /// `disabled` key.
     #[test]
     fn an_entry_is_judged_by_its_program_and_arguments() {
         let ours = entry(false);
@@ -131,7 +127,7 @@ mod tests {
             ),
             (
                 json!({"command": "muster", "args": ["mcp"], "disabled": true}),
-                (EntryMatch::Older, true),
+                (EntryMatch::Older, false),
             ),
             (
                 json!({"command": "/bin/muster", "args": ["mcp", "--as", "x"]}),

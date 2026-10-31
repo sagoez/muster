@@ -13,6 +13,9 @@ pub(super) enum EntryAction {
     Insert,
     /// muster's older entry is pointed at this binary, its other keys kept.
     Update,
+    /// muster's turned-off entry is turned back on in place, pointed at
+    /// this binary, its other keys kept.
+    Enable,
     /// The entry under the name is replaced by muster's.
     Replace,
     /// The entry under the name is taken out.
@@ -23,13 +26,15 @@ pub(super) enum EntryAction {
 
 impl EntryAction {
     /// The action making `change` where `existing` is what is under the
-    /// name, with whether it is turned off, in the file at `path`.
+    /// name and `disabled` whether the agent has it turned off, in the file
+    /// at `path`.
     ///
     /// # Errors
     /// Returns [`AgentConfigError::Taken`] or [`AgentConfigError::NotOurs`]
     /// for another server's entry under `name` without `force`.
     pub(super) fn decide(
-        existing: Option<(EntryMatch, bool)>,
+        existing: Option<EntryMatch>,
+        disabled: bool,
         change: EntryChange,
         force: bool,
         path: &Path,
@@ -37,20 +42,19 @@ impl EntryAction {
     ) -> Result<Self, AgentConfigError> {
         Ok(match (change, existing) {
             (EntryChange::Add, None) => Self::Insert,
-            (EntryChange::Add, Some((EntryMatch::Foreign, _))) if !force => {
+            (EntryChange::Add, Some(EntryMatch::Foreign)) if force => Self::Replace,
+            (EntryChange::Add, Some(EntryMatch::Foreign)) => {
                 return Err(AgentConfigError::Taken {
                     path: path.to_path_buf(),
                     name: name.clone(),
                 });
             },
-            (EntryChange::Add, Some((EntryMatch::Foreign, _) | (_, true))) if force => {
-                Self::Replace
-            },
-            (EntryChange::Add, Some((_, true))) => Self::Keep(EditOutcome::Disabled),
-            (EntryChange::Add, Some((EntryMatch::Older, _))) => Self::Update,
-            (EntryChange::Add, Some(_)) => Self::Keep(EditOutcome::AlreadyAdded),
+            (EntryChange::Add, Some(_)) if disabled && force => Self::Enable,
+            (EntryChange::Add, Some(_)) if disabled => Self::Keep(EditOutcome::Disabled),
+            (EntryChange::Add, Some(EntryMatch::Older)) => Self::Update,
+            (EntryChange::Add, Some(EntryMatch::Same)) => Self::Keep(EditOutcome::AlreadyAdded),
             (EntryChange::Remove, None) => Self::Keep(EditOutcome::Absent),
-            (EntryChange::Remove, Some((EntryMatch::Foreign, _))) if !force => {
+            (EntryChange::Remove, Some(EntryMatch::Foreign)) if !force => {
                 return Err(AgentConfigError::NotOurs {
                     path: path.to_path_buf(),
                     name: name.clone(),
@@ -65,6 +69,7 @@ impl EntryAction {
         match self {
             Self::Insert => EditOutcome::Added,
             Self::Update => EditOutcome::Updated,
+            Self::Enable => EditOutcome::Enabled,
             Self::Replace => EditOutcome::Replaced,
             Self::Remove => EditOutcome::Removed,
             Self::Keep(outcome) => outcome,
@@ -77,85 +82,107 @@ mod tests {
     use super::*;
     use crate::adapter::agent_config::testing::muster;
 
-    /// The action for `existing` and `change`, or the refusal.
+    /// The action for `existing`, turned off or not, and `change`, or the
+    /// refusal.
     fn decided(
-        existing: Option<(EntryMatch, bool)>,
+        existing: Option<EntryMatch>,
+        disabled: bool,
         change: EntryChange,
         force: bool,
     ) -> Result<EntryAction, AgentConfigError> {
-        EntryAction::decide(existing, change, force, Path::new("/cfg"), &muster())
+        EntryAction::decide(
+            existing,
+            disabled,
+            change,
+            force,
+            Path::new("/cfg"),
+            &muster(),
+        )
     }
 
     /// muster's own entry at another path is updated without force, a
-    /// turned-off one is reported and turned on only with force, and
-    /// another server's is replaced or removed only with force.
+    /// turned-off one is reported and turned back on in place only with
+    /// force, and another server's is replaced or removed only with force.
     #[test]
     fn force_is_needed_only_for_another_server_or_a_turned_off_one() {
         use EntryMatch::{Foreign, Older, Same};
-        for (existing, add, add_forced, remove) in [
+        for (existing, disabled, add, add_forced, remove) in [
             (
                 None,
+                false,
                 EntryAction::Insert,
                 EntryAction::Insert,
                 EntryAction::Keep(EditOutcome::Absent),
             ),
             (
-                Some((Same, false)),
+                None,
+                true,
+                EntryAction::Insert,
+                EntryAction::Insert,
+                EntryAction::Keep(EditOutcome::Absent),
+            ),
+            (
+                Some(Same),
+                false,
                 EntryAction::Keep(EditOutcome::AlreadyAdded),
                 EntryAction::Keep(EditOutcome::AlreadyAdded),
                 EntryAction::Remove,
             ),
             (
-                Some((Older, false)),
+                Some(Older),
+                false,
                 EntryAction::Update,
                 EntryAction::Update,
                 EntryAction::Remove,
             ),
             (
-                Some((Same, true)),
+                Some(Same),
+                true,
                 EntryAction::Keep(EditOutcome::Disabled),
-                EntryAction::Replace,
+                EntryAction::Enable,
                 EntryAction::Remove,
             ),
             (
-                Some((Older, true)),
+                Some(Older),
+                true,
                 EntryAction::Keep(EditOutcome::Disabled),
-                EntryAction::Replace,
+                EntryAction::Enable,
                 EntryAction::Remove,
             ),
         ] {
+            let case = format!("{existing:?} disabled {disabled}");
             assert_eq!(
-                decided(existing, EntryChange::Add, false).unwrap(),
+                decided(existing, disabled, EntryChange::Add, false).unwrap(),
                 add,
-                "{existing:?}"
+                "{case}"
             );
             assert_eq!(
-                decided(existing, EntryChange::Add, true).unwrap(),
+                decided(existing, disabled, EntryChange::Add, true).unwrap(),
                 add_forced,
-                "{existing:?}"
+                "{case}"
             );
             assert_eq!(
-                decided(existing, EntryChange::Remove, false).unwrap(),
+                decided(existing, disabled, EntryChange::Remove, false).unwrap(),
                 remove,
-                "{existing:?}"
+                "{case}"
             );
         }
         for disabled in [false, true] {
-            let foreign = Some((Foreign, disabled));
+            let foreign = Some(Foreign);
             assert!(matches!(
-                decided(foreign, EntryChange::Add, false),
+                decided(foreign, disabled, EntryChange::Add, false),
                 Err(AgentConfigError::Taken { .. })
             ));
             assert!(matches!(
-                decided(foreign, EntryChange::Remove, false),
+                decided(foreign, disabled, EntryChange::Remove, false),
                 Err(AgentConfigError::NotOurs { .. })
             ));
             assert_eq!(
-                decided(foreign, EntryChange::Add, true).unwrap(),
+                decided(foreign, disabled, EntryChange::Add, true).unwrap(),
                 EntryAction::Replace
             );
             assert_eq!(
-                decided(foreign, EntryChange::Remove, true).unwrap(),
+                decided(foreign, disabled, EntryChange::Remove, true).unwrap(),
                 EntryAction::Remove
             );
         }

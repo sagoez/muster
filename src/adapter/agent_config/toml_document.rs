@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use super::{
     agent_config_error::AgentConfigError,
@@ -13,7 +13,7 @@ use super::{
     entry_action::EntryAction,
     entry_change::EntryChange,
     entry_match::EntryMatch,
-    server_entry::{ARGS_KEY, COMMAND_KEY, DISABLED_KEY, ENABLED_KEY, ServerEntry, turned_off},
+    server_entry::{ARGS_KEY, COMMAND_KEY, ENABLED_KEY, ServerEntry, turned_off},
     server_name::McpServerName,
 };
 
@@ -62,17 +62,27 @@ pub(super) fn edit_toml(
             key: SERVERS_TABLE.to_owned(),
         })?;
     let judged = servers.get(name.as_ref()).map(|item| judge(item, entry));
-    let action = EntryAction::decide(judged, change, force, path, name)?;
+    let action = EntryAction::decide(
+        judged.map(|(matched, _)| matched),
+        judged.is_some_and(|(_, off)| off),
+        change,
+        force,
+        path,
+        name,
+    )?;
     match action {
         EntryAction::Insert | EntryAction::Replace => {
             servers.insert(name.as_ref(), entry_table(entry));
         },
-        EntryAction::Update => {
+        EntryAction::Update | EntryAction::Enable => {
             if let Some(existing) = servers
                 .get_mut(name.as_ref())
                 .and_then(Item::as_table_like_mut)
             {
                 existing.insert(COMMAND_KEY, value(entry.command().as_str()));
+                if action == EntryAction::Enable {
+                    existing.remove(ENABLED_KEY);
+                }
             }
         },
         EntryAction::Remove => {
@@ -112,13 +122,8 @@ fn judge(item: &Item, entry: &ServerEntry) -> (EntryMatch, bool) {
             .and_then(Item::as_array)
             .map(|args| args.iter().map(Value::as_str).collect()),
     );
-    let flag = |key| bool_at(table, key);
-    (matched, turned_off(flag(ENABLED_KEY), flag(DISABLED_KEY)))
-}
-
-/// The boolean under `key` in `table`, if it holds one.
-fn bool_at(table: &dyn TableLike, key: &str) -> Option<bool> {
-    table.get(key).and_then(Item::as_bool)
+    let enabled = table.get(ENABLED_KEY).and_then(Item::as_bool);
+    (matched, turned_off(enabled))
 }
 
 #[cfg(test)]
@@ -215,7 +220,9 @@ model = "o4-mini"
     }
 
     /// muster's entry from another install's path is updated in place, its
-    /// other keys kept; a turned-off one is reported and needs force.
+    /// other keys kept; a turned-off one is reported, and turned back on in
+    /// place by force, its flag cleared and every other key kept. A
+    /// `disabled` key, which Codex does not read, turns nothing off.
     #[test]
     fn an_older_or_turned_off_entry_of_musters() {
         let older = "[mcp_servers.muster]\ncommand = \"/old/bin/muster\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n";
@@ -228,14 +235,23 @@ model = "o4-mini"
             )
         );
 
-        let off =
-            "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\nenabled = false\n";
+        let off = "[mcp_servers.muster]\ncommand = \"/old/bin/muster\"\nargs = [\"mcp\"]\nenabled = false\nstartup_timeout_sec = 20\n";
         let kept = edited(Some(off), EntryChange::Add, false).unwrap();
         assert_eq!(kept.outcome(), EditOutcome::Disabled);
         assert!(kept.text().is_none());
         let forced = edited(Some(off), EntryChange::Add, true).unwrap();
-        assert_eq!(forced.outcome(), EditOutcome::Replaced);
-        assert!(!forced.text().as_ref().unwrap().contains("enabled"));
+        assert_eq!(forced.outcome(), EditOutcome::Enabled);
+        assert_eq!(
+            forced.text().as_deref(),
+            Some(
+                "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\nstartup_timeout_sec = 20\n"
+            )
+        );
+
+        let unread =
+            "[mcp_servers.muster]\ncommand = \"/bin/muster\"\nargs = [\"mcp\"]\ndisabled = true\n";
+        let same = edited(Some(unread), EntryChange::Add, false).unwrap();
+        assert_eq!(same.outcome(), EditOutcome::AlreadyAdded);
     }
 
     /// Another server under the name needs force; a broken file or a

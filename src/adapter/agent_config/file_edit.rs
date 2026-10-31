@@ -34,6 +34,7 @@ pub(super) struct FileEdit {
     #[getset(get = "pub(super)")]
     path: PathBuf,
     /// The file written: `path` resolved, so a linked dotfile stays a link.
+    #[getset(get = "pub(super)")]
     written: PathBuf,
     /// The file as it was read, or none when it did not exist.
     fingerprint: Option<FileFingerprint>,

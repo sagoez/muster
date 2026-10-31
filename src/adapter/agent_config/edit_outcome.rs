@@ -13,6 +13,9 @@ pub enum EditOutcome {
     /// muster's entry is there but turned off, so nothing was written;
     /// `--force` turns it back on.
     Disabled,
+    /// muster's turned-off entry was turned back on in place, as `--force`
+    /// asked.
+    Enabled,
     /// A different entry under the name was replaced, as `--force` asked.
     Replaced,
     /// The entry was removed.
@@ -22,11 +25,11 @@ pub enum EditOutcome {
 }
 
 impl EditOutcome {
-    /// Whether the config file is written.
+    /// Whether the edit writes a config.
     pub fn writes(self) -> bool {
         matches!(
             self,
-            Self::Added | Self::Updated | Self::Replaced | Self::Removed
+            Self::Added | Self::Updated | Self::Enabled | Self::Replaced | Self::Removed
         )
     }
 }

@@ -282,6 +282,9 @@ impl AgentConfigFiles {
                 let base = text.as_deref().or(original).unwrap_or_default();
                 text = Some(unlisted(base, &list_place(list), name)?);
             } else if let Some((list_text, fingerprint)) = list_read {
+                // Only a list muster writes must stay in the project; one
+                // read alone may lead anywhere a person keeps it.
+                located(list.path(), list.confined_to().as_deref())?;
                 files.push(
                     FileEdit::builder()
                         .path(list.path().clone())
@@ -418,7 +421,7 @@ fn listing<'a>(
 ) -> Result<Vec<Listing<'a>>, AgentConfigError> {
     let mut naming = Vec::new();
     for list in lists {
-        let written = located(list.path(), list.confined_to().as_deref())?;
+        let written = located(list.path(), None)?;
         let read = if written == config {
             None
         } else {
@@ -1236,6 +1239,35 @@ mod tests {
                 .outcome(),
             EditOutcome::AlreadyAdded
         );
+    }
+
+    /// A project's settings file linked out of the project is read for its
+    /// list, but never written: turning the entry back on is refused and
+    /// the file left as it was.
+    #[test]
+    fn a_list_linked_out_of_the_project_is_read_not_written() {
+        let home = Home::new();
+        fs::write(
+            home.at("project/.mcp.json"),
+            r#"{"mcpServers": {"muster": {"command": "muster", "args": ["mcp"]}}}"#,
+        )
+        .unwrap();
+        let outside = home.at("dotfiles/settings.local.json");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        let listed = r#"{"disabledMcpjsonServers": ["muster"]}"#;
+        fs::write(&outside, listed).unwrap();
+        fs::create_dir_all(home.at("project/.claude")).unwrap();
+        symlink(&outside, home.at("project/.claude/settings.local.json")).unwrap();
+
+        let kept = home
+            .apply(Agent::Claude, McpScope::Project, EntryChange::Add, false)
+            .unwrap();
+        assert_eq!(kept.outcome(), EditOutcome::Disabled);
+        assert!(matches!(
+            home.apply(Agent::Claude, McpScope::Project, EntryChange::Add, true),
+            Err(AgentConfigError::OutsideProject { .. })
+        ));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), listed);
     }
 
     /// A name a list turns off, with no entry under it yet, gains the entry

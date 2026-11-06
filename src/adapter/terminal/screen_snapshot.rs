@@ -10,7 +10,7 @@ use super::{
     cell_flags::CellFlags,
     cell_style::CellStyle,
     cursor_state::CursorState,
-    escape::{CSI, SGR_RESET},
+    escape::{CSI, SGR_FINAL, SGR_RESET},
     snapshot_cell::SnapshotCell,
 };
 
@@ -50,8 +50,6 @@ const SGR_FOREGROUND: u8 = 38;
 /// SGR parameter prefix selecting a background color.
 const SGR_BACKGROUND: u8 = 48;
 
-/// Final character of the select-graphic-rendition (SGR) sequence.
-const SGR_FINAL: char = 'm';
 /// Final character of the cursor-position (CUP) sequence.
 const CUP_FINAL: char = 'H';
 

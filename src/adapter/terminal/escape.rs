@@ -29,6 +29,32 @@ pub const FULL_RESET_FINAL: u8 = b'c';
 pub const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
 /// SGR that resets every text attribute.
 pub const SGR_RESET: &str = "\x1b[0m";
+/// Final of SGR (`CSI ... m`), which sets the pen.
+pub const SGR_FINAL: char = 'm';
+/// Intermediate of the sequences that push and pop the pen (`CSI # {`).
+pub const PEN_STACK_INTERMEDIATE: u8 = b'#';
+/// Final of XTPUSHSGR, which saves the pen on a stack.
+pub const PUSH_PEN_FINAL: char = '{';
+/// Final of XTPOPSGR, which restores the pen last pushed.
+pub const POP_PEN_FINAL: char = '}';
+/// XTPUSHSGR: saves the pen, across line feeds, for [`POP_PEN`].
+pub const PUSH_PEN: &[u8] = b"\x1b[#{";
+/// XTPOPSGR: restores the pen [`PUSH_PEN`] saved.
+pub const POP_PEN: &[u8] = b"\x1b[#}";
+/// Ends a line of output.
+pub const LINE_FEED: u8 = b'\n';
+/// Ends the line a log was drawing, when one is open, as the holder writes
+/// it into a log: CAN cancels a sequence cut short, a cursor save marks the
+/// line as a redraw, so a blank one is dropped rather than kept, and a line
+/// break ends it.
+pub const END_OPEN_LINE: &[u8] = b"\x18\x1b7\r\n";
+/// What the holder logs where each run starts, before the child's first
+/// byte: [`END_OPEN_LINE`], then a full reset (RIS), so every reader renders
+/// each run from a fresh terminal without knowing where it began.
+pub const RUN_START: &[u8] = b"\x18\x1b7\r\n\x1bc";
+/// Where in [`RUN_START`] a run starts: at its reset, past the line end that
+/// belongs to the run before, so the run's first line begins there.
+pub const RUN_RESET_AT: usize = END_OPEN_LINE.len();
 
 /// The value of each parameter in `params`, without its sub-parameters; an
 /// omitted parameter reads as zero.

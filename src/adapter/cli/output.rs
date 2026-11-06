@@ -29,6 +29,7 @@ use crate::{
         },
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+        terminal::log_renderer::dropped_lines,
     },
     constants::APP_NAME,
     domain::{
@@ -494,6 +495,13 @@ pub fn opened_line(view: &OpenView) -> String {
 /// oldest `count` lines.
 pub fn omitted_lines(count: usize) -> String {
     format!("{OMITTED_OPEN}{count}{OMITTED_CLOSE}")
+}
+
+/// The warning `muster logs` prints on stderr when rendering dropped
+/// `count` lines of `process`'s log, such as `api: 2 line(s) of output
+/// could not be rendered and were dropped`.
+pub fn unrendered_lines(process: &ProcessName, count: usize) -> String {
+    format!("{process}: {}", dropped_lines(count))
 }
 
 /// The title `muster logs` opens its question with, such as

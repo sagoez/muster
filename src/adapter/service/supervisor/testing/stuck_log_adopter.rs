@@ -8,7 +8,10 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
+    adapter::{
+        holder::{HolderRecord, LogTail},
+        service::supervisor::HolderAdopter,
+    },
     domain::{
         port::{OutputSink, ProcessHandle},
         pty::PtyError,
@@ -52,11 +55,7 @@ impl HolderAdopter for StuckLogAdopter {
         Err(PtyError::System(String::new()))
     }
 
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let _ = self.gate.recv();
         None

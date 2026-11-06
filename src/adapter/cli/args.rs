@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Display, str::FromStr, sync::LazyLock};
+use std::{error::Error, ffi::OsString, fmt::Display, str::FromStr, sync::LazyLock};
 
 use clap::{
     Command as ClapCommand, CommandFactory, Parser, Subcommand,
@@ -6,6 +6,7 @@ use clap::{
         PossibleValuesParser, TypedValueParser,
         styling::{AnsiColor, Styles},
     },
+    error::{Error as ParseError, ErrorKind},
 };
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
@@ -85,6 +86,27 @@ const COMMAND_INDENT: &str = "  ";
 /// What separates a command's name from its summary in the main help.
 const SUMMARY_GAP: &str = "  ";
 
+/// Parses `line` as a command line. A request for help is answered with the
+/// main help's grouped template, which is built only then: it renders every
+/// command's definition a second time, which an everyday command, such as
+/// the one the shell hook runs at every prompt, should not pay for.
+///
+/// # Errors
+/// Returns the [`ParseError`] clap reports, a request for help or the
+/// version included.
+pub(super) fn parse_from(line: Vec<OsString>) -> Result<Args, ParseError> {
+    Args::try_parse_from(&line).map_err(|error| match error.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            Args::command()
+                .help_template(main_help_template())
+                .try_get_matches_from(line)
+                .err()
+                .unwrap_or(error)
+        },
+        _ => error,
+    })
+}
+
 /// The main help's template: the usage, the commands under
 /// [`COMMAND_GROUPS`]' headings with each one's summary, the options, and a
 /// line pointing to the reference. clap cannot group subcommands itself.
@@ -120,8 +142,8 @@ fn main_help_template() -> String {
 
 /// What `muster logs --lines` takes, followed by its maximum.
 const LINE_LIMIT_FORM: &str = "a whole number from 1 to ";
-/// The `muster logs` flags that print the whole raw log or follow it, which
-/// a filtered read conflicts with.
+/// The `muster logs` flags a filtered read conflicts with: following the log
+/// as it grows, and printing the live screen instead of the log.
 pub(super) const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
 
 /// The names `config` accepts for a setting.
@@ -261,14 +283,14 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
     bin_name = APP_NAME,
     version,
     about = "Run a project's dev processes in the background, and control them from any shell",
-    help_template = main_help_template(),
     styles = HELP_STYLES
 )]
 pub struct Args {
     /// The project to act on, by name or folder.
     // How a value resolves is in docs/reference.md, kept out of the help so
-    // `muster --help` lists it on one line. Global, so it is recognized before or after a subcommand rather than
-    // being swallowed by `run`'s command words.
+    // `muster --help` lists it on one line. Global, so it is recognized
+    // before or after a subcommand rather than being swallowed by `run`'s
+    // command words.
     #[arg(short, long, global = true, value_name = "PROJECT")]
     #[getset(get = "pub")]
     project: Option<String>,
@@ -286,7 +308,6 @@ impl Args {
 
 #[cfg(test)]
 mod tests {
-    use clap::error::ErrorKind;
 
     use super::*;
     use crate::{
@@ -330,7 +351,7 @@ mod tests {
     /// description shows up in review.
     #[test]
     fn cli_args_snapshot() {
-        let mut command = Args::command();
+        let mut command = Args::command().help_template(main_help_template());
         command.build();
         let mut helps = Vec::new();
         collect_help(&mut command, APP_NAME, &mut helps);
@@ -496,10 +517,22 @@ mod tests {
 
     /// Renders the help `line` asks for.
     fn help(line: &[&str]) -> String {
-        match Args::try_parse_from(line) {
+        match parse_from(line.iter().map(OsString::from).collect()) {
             Err(error) if error.kind() == ErrorKind::DisplayHelp => error.render().to_string(),
             _ => panic!("{line:?} prints help"),
         }
+    }
+
+    /// Only a request for help builds the main help's template: the command
+    /// line every other command parses carries none, so the shell hook run
+    /// at every prompt does not render every command a second time.
+    #[test]
+    fn only_a_request_for_help_builds_the_main_help() {
+        let everyday = Args::command().render_help().to_string();
+
+        assert!(!everyday.contains(REFERENCE_LEAD), "{everyday}");
+        assert!(help(&["muster", "-h"]).contains(REFERENCE_LEAD));
+        assert!(parse_from(vec![OsString::from("muster"), OsString::from("ps")]).is_ok());
     }
 
     /// Every way of asking prints help: the main help, whichever way it is
@@ -577,7 +610,7 @@ mod tests {
         assert_eq!(removal.project.as_deref(), Some("x"));
         assert!(matches!(
             removal.command,
-            Some(Command::Projects { command: Some(ProjectsCommand::Rm { project, .. }), .. })
+            Some(Command::Projects { command: Some(ProjectsCommand::Rm { project: Some(project), .. }), .. })
                 if project == "y"
         ));
         let alone = Args::try_parse_from(["muster", "projects", "rm", "y"]).unwrap();

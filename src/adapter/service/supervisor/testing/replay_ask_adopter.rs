@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 use super::replay_ask_handle::ReplayAskHandle;
 use crate::{
     adapter::{
-        holder::{HolderRecord, LineMatcher, LogScan, LoggedLine},
+        holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine},
         service::supervisor::HolderAdopter,
     },
     domain::{
@@ -68,18 +68,14 @@ impl HolderAdopter for ReplayAskAdopter {
 
     /// Every logged line, from the oldest's offset; none when nothing is
     /// logged, as a log that cannot be read.
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
         let oldest = self.logged.first()?;
         let bytes = self
             .logged
             .iter()
             .flat_map(|line| format!("{}\n", line.text()).into_bytes())
             .collect();
-        Some((oldest.at(), bytes))
+        Some(LogTail::builder().at(oldest.at()).bytes(bytes).build())
     }
 
     fn log_scan(
@@ -98,7 +94,13 @@ impl HolderAdopter for ReplayAskAdopter {
             .lines_within(began, until)
             .find(|line| matcher.is_match(line.text()))
             .cloned();
-        Some(LogScan::builder().from(began).matched(matched).build())
+        Some(
+            LogScan::builder()
+                .from(began)
+                .matched(matched)
+                .unrendered_lines(0)
+                .build(),
+        )
     }
 
     fn log_lines(
@@ -108,12 +110,17 @@ impl HolderAdopter for ReplayAskAdopter {
         from: OutputCursor,
         until: OutputCursor,
         count: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<LogLines> {
         let lines: Vec<String> = self
             .lines_within(from, until)
             .map(|line| line.text().clone())
             .collect();
-        Some(lines[lines.len().saturating_sub(count)..].to_vec())
+        Some(
+            LogLines::builder()
+                .lines(lines[lines.len().saturating_sub(count)..].to_vec())
+                .unrendered_lines(0)
+                .build(),
+        )
     }
 
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {

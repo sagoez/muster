@@ -1,21 +1,20 @@
-//! Turning one raw output line into the plain text an agent reads, through
-//! the same rendering `muster logs` shows: escape sequences removed,
+//! Turning one raw output line on its own into the plain text it reads as,
+//! through the rendering `muster logs` shows: escape sequences removed,
 //! carriage returns and erases applied, so a progress bar collapses to its
 //! last state, and a line that only redrew the screen dropped.
 
-use crate::adapter::terminal::{log_line::LogLine, log_renderer::LogRenderer};
+use crate::adapter::terminal::{escape::LINE_FEED, log_line::LogLine, log_renderer::LogRenderer};
 
-/// Longest a line of output grows without a newline before it is cut into a
-/// line of its own, so a stream with no newlines never grows one line
-/// without bound.
+/// Longest a raw line a scan hands over grows without a newline before it is
+/// handed in pieces, so a stream with no newlines is never held whole.
 pub const LINE_MAX_BYTES: usize = 64 * 1024;
-/// Ends a line.
-const LINE_FEED: u8 = b'\n';
 
-/// The text of one raw output line, its line feed there or not, without
-/// that line feed or trailing whitespace, invalid UTF-8 replaced; none when
-/// the line only redrew the screen, such as a status footer or the room
-/// made for it.
+/// The text of one raw output line rendered alone, its line feed there or
+/// not, without that line feed or trailing whitespace, invalid UTF-8
+/// replaced; none when the line only redrew the screen, such as a status
+/// footer or the room made for it. Only a backward scan, which cannot render
+/// the stream before a line, reads a line this way: every other reader
+/// renders the stream whole.
 pub fn strip_line(raw: &[u8]) -> Option<String> {
     let mut renderer = LogRenderer::new();
     renderer.advance(raw);
@@ -29,6 +28,7 @@ pub fn strip_line(raw: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::terminal::line_drawing::MAX_COLUMN;
 
     /// What `raw` strips to, a line that only redrew read as empty.
     fn stripped(raw: &[u8]) -> String {
@@ -62,7 +62,7 @@ mod tests {
     fn cursor_to_column_moves_within_the_line() {
         assert_eq!(stripped(b"\x1b[1G- working\x1b[1G\x1b[0Kdone"), "done");
         assert_eq!(stripped(b"ab\x1b[5Gc"), "ab  c");
-        assert_eq!(stripped(b"\x1b[65535Gx").chars().count(), 1024);
+        assert_eq!(stripped(b"\x1b[65535Gx").chars().count(), MAX_COLUMN);
     }
 
     #[test]

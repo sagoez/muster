@@ -369,6 +369,7 @@ mod tests {
                 ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. } => {},
             }
@@ -453,6 +454,7 @@ mod tests {
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
@@ -490,6 +492,7 @@ mod tests {
                 | ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. } => Vec::new(),
             })
@@ -517,6 +520,7 @@ mod tests {
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
@@ -531,6 +535,7 @@ mod tests {
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
@@ -587,6 +592,7 @@ mod tests {
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
@@ -607,6 +613,7 @@ mod tests {
                 other @ (ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. }) => panic!("unexpected output: {other:?}"),
             }
@@ -654,6 +661,7 @@ mod tests {
                 | ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
                 | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_)
                 | ProcessOutput::Placed { .. }
                 | ProcessOutput::Repaint { .. } => 0,
             })

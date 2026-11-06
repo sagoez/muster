@@ -1,5 +1,8 @@
 use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
+    adapter::{
+        holder::{HolderRecord, LogTail},
+        service::supervisor::HolderAdopter,
+    },
     domain::{
         port::{OutputSink, ProcessHandle},
         pty::PtyError,
@@ -44,11 +47,12 @@ impl HolderAdopter for LoggedAdopter {
         Err(PtyError::System(String::new()))
     }
 
-    fn log_tail(
-        &self,
-        _project: &ProjectRoot,
-        _name: &ProcessName,
-    ) -> Option<(OutputCursor, Vec<u8>)> {
-        Some((self.at, self.tail.clone()))
+    fn log_tail(&self, _project: &ProjectRoot, _name: &ProcessName) -> Option<LogTail> {
+        Some(
+            LogTail::builder()
+                .at(self.at)
+                .bytes(self.tail.clone())
+                .build(),
+        )
     }
 }

@@ -5,6 +5,7 @@
 //! text, and repaint the screen with its modes onto a fresh terminal.
 
 use std::{
+    mem,
     panic::{self, AssertUnwindSafe},
     sync::{Arc, Mutex},
 };
@@ -39,6 +40,7 @@ use super::{
     mouse_protocol_mode::MouseProtocolMode,
     observation::Observation,
     screen_snapshot::{ScreenSnapshot, cursor_position, push_charsets},
+    screen_switch::ScreenSwitch,
     snapshot_cell::SnapshotCell,
     tab_stops::TabStops,
 };
@@ -109,6 +111,14 @@ pub struct TerminalEmulator {
     shift_out: bool,
     /// The colors color queries are answered from, kept to rebuild the screen.
     color_scheme: ColorScheme,
+    /// Whether the scanned output last brought the alternate screen up,
+    /// rather than taking it away or resetting the terminal.
+    scanned_alternate: bool,
+    /// The screen switches in the chunks fed since they were last taken.
+    switches: Vec<ScreenSwitch>,
+    /// The bytes of the chunk being fed the scanner has read, so a reset
+    /// after a backend panic scans the rest.
+    scanned: usize,
 }
 
 impl TerminalEmulator {
@@ -150,6 +160,9 @@ impl TerminalEmulator {
             tabs: TabStops::new(size.columns()),
             shift_out: false,
             color_scheme,
+            scanned_alternate: false,
+            switches: Vec::new(),
+            scanned: 0,
         }
     }
 
@@ -157,28 +170,86 @@ impl TerminalEmulator {
     /// leaves a blank screen of the same size in place of one it may have
     /// left corrupt, rather than taking the caller's thread down. Replies to
     /// queries the chunk answered before the panic survive the reset, for
-    /// [`Self::take_pty_writes`]. Returns whether the screen was reset.
+    /// [`Self::take_pty_writes`], and so do the scanner and the screen
+    /// switches it found, the rest of the chunk scanned for its own: the
+    /// screen the child draws on comes from its bytes alone, never from the
+    /// reset, so the rebuilt screen is on the alternate one while the child
+    /// still is. Returns whether the screen was reset.
     pub fn process_or_reset(&mut self, bytes: &[u8]) -> bool {
         if panic::catch_unwind(AssertUnwindSafe(|| self.process(bytes))).is_ok() {
             return false;
         }
         let pending = self.take_pty_writes();
+        let switches = mem::take(&mut self.switches);
+        let scanner = mem::take(&mut self.scanner);
+        let (alternate, scanned) = (self.scanned_alternate, self.scanned);
         let size = TermSize::new(self.term.columns(), self.term.screen_lines());
         *self = Self::sized(size, self.history, self.color_scheme);
         lock_sink(&self.sink).write(&pending);
+        self.scanner = scanner;
+        self.scanned_alternate = alternate;
+        self.switches = switches;
+        self.scan_switches(bytes, scanned);
+        if self.scanned_alternate {
+            self.parser
+                .advance(&mut self.term, ENTER_ALT_SCREEN.as_bytes());
+        }
         true
+    }
+
+    /// Scans `bytes` from `from`, the part of a chunk a backend panic left
+    /// unscanned, for its screen switches alone.
+    fn scan_switches(&mut self, bytes: &[u8], from: usize) {
+        for (index, byte) in bytes.iter().enumerate().skip(from) {
+            match self.scanner.feed(*byte) {
+                Observation::EnterAlternate => self.note_screen(index, true),
+                Observation::LeaveAlternate | Observation::FullReset => {
+                    self.note_screen(index, false);
+                },
+                _ => {},
+            }
+        }
+    }
+
+    /// The screen switches in the chunks fed since the last call, each at
+    /// its index in the chunk that made it: where the alternate screen came
+    /// up, as any of its modes asks, or went away, as leaving it or a full
+    /// reset does.
+    pub fn take_screen_switches(&mut self) -> Vec<ScreenSwitch> {
+        mem::take(&mut self.switches)
+    }
+
+    /// Notes that the byte at `index` of the chunk being fed leaves the
+    /// alternate screen up or not, when that changes.
+    fn note_screen(&mut self, index: usize, alternate: bool) {
+        if alternate == self.scanned_alternate {
+            return;
+        }
+        self.scanned_alternate = alternate;
+        self.switches.push(
+            ScreenSwitch::builder()
+                .at(index + 1)
+                .alternate(alternate)
+                .build(),
+        );
     }
 
     /// Feeds one chunk of child output through the VT parser. The primary screen
     /// is copied just before an alternate-screen switch takes effect, so a
     /// later [`repaint`](Self::repaint) can rebuild both screens. A tab stop
     /// change is applied first, so the cursor column it acts on is known.
+    /// Each switch of screens is noted for [`Self::take_screen_switches`].
     pub fn process(&mut self, bytes: &[u8]) {
         let mut start = 0;
+        self.scanned = 0;
         for (index, byte) in bytes.iter().enumerate() {
-            match self.scanner.feed(*byte) {
-                Observation::Nothing | Observation::LeaveAlternate => {},
+            let observation = self.scanner.feed(*byte);
+            self.scanned = index + 1;
+            match observation {
+                Observation::Nothing => {},
+                Observation::LeaveAlternate => self.note_screen(index, false),
                 Observation::EnterAlternate => {
+                    self.note_screen(index, true);
                     self.parser.advance(&mut self.term, &bytes[start..index]);
                     start = index;
                     if !self.alternate_screen() {
@@ -192,6 +263,7 @@ impl TerminalEmulator {
                     }
                 },
                 Observation::FullReset => {
+                    self.note_screen(index, false);
                     self.scroll_region = None;
                     self.tabs = TabStops::new(self.term.columns());
                     self.shift_out = false;
@@ -776,7 +848,7 @@ mod tests {
 
     use super::{
         CURSOR_STYLE_FINAL, CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND,
-        TerminalEmulator, resolve_color, to_color,
+        ScreenSwitch, TerminalEmulator, resolve_color, to_color,
     };
     use crate::{
         adapter::terminal::bounded_parser::MAX_PENDING_BYTES,
@@ -1084,6 +1156,49 @@ mod tests {
             reply.starts_with("\x1b]11;rgb:"),
             "the background query is answered, got {reply:?}"
         );
+    }
+
+    /// Each switch of screens is noted once, just past the byte that made
+    /// it, for a sequence split across chunks, any alternate-screen mode and
+    /// a full reset; setting the screen already up is no switch.
+    #[test]
+    fn screen_switches_are_noted_where_they_happen() {
+        let switch = |at, alternate| ScreenSwitch::builder().at(at).alternate(alternate).build();
+        let mut emulator = TerminalEmulator::new(rows(4), cols(20), 0, ColorScheme::Dark);
+
+        emulator.process(b"ab\x1b[?10");
+        emulator.process(b"49hTUI\x1b[?1049h\x1b[?1049lx\x1b[?47h\x1bc\x1b[?1049l");
+
+        assert_eq!(emulator.take_screen_switches(), [
+            switch(3, true),
+            switch(22, false),
+            switch(29, true),
+            switch(31, false),
+        ]);
+        assert!(emulator.take_screen_switches().is_empty());
+    }
+
+    /// A screen rebuilt after a backend panic keeps the switches made before
+    /// it and stays on the screen the output chose: the alternate one while
+    /// the child has not left it, which only the output's own leave ends,
+    /// even one past the panic in the same chunk.
+    #[test]
+    fn a_rebuilt_screen_stays_on_the_screen_the_output_chose() {
+        let switch = |at, alternate| ScreenSwitch::builder().at(at).alternate(alternate).build();
+        let mut emulator = TerminalEmulator::one_column(rows(4), 0, ColorScheme::Dark);
+        let entered = "\x1b[?1049hwide \u{754c}".as_bytes();
+
+        assert!(emulator.process_or_reset(entered));
+
+        assert_eq!(emulator.take_screen_switches(), [switch(8, true)]);
+        assert!(emulator.alternate_screen());
+
+        let left = "wide \u{754c}\x1bHframe\x1b[?1049lafter".as_bytes();
+        let leave_end = left.len() - "after".len();
+        assert!(emulator.process_or_reset(left));
+
+        assert_eq!(emulator.take_screen_switches(), [switch(leave_end, false)]);
+        assert!(!emulator.alternate_screen());
     }
 
     /// `screen_text` returns the live written lines, trimmed of trailing blanks.

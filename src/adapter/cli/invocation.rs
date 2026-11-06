@@ -65,6 +65,11 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    /// The global `--project`, as typed, when it was given.
+    pub fn project_flag(&self) -> Option<&str> {
+        self.project.as_deref()
+    }
+
     /// The adapters the composition root wired.
     pub fn ports(&self) -> &'a dyn CliPorts {
         self.ports

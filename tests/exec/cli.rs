@@ -25,8 +25,8 @@ use crossbeam_channel::unbounded;
 use muster::{
     adapter::{
         holder::{
-            ClientRole, ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderDirs, HolderLauncher,
-            HolderRunner, client::greet,
+            ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
+            HolderLauncher, HolderRunner, client::greet,
         },
         open_files::OpenFilesLimit,
         private_dir::RUNTIME_DIR_ENV,
@@ -4158,7 +4158,7 @@ fn init_offers_what_the_folder_defines() {
 const COMPOSE_FOOTER: &str = "\\033[0G\\033[s\\0337\\033[1B\\033[0K\\033[1B\\033[0K\\033[u\\0338\\033[0K\\n\\033[0G\\033[0K\\n\\033[0G\\033[2A\\033[0G\\033[s\\0337\\033[30;0H\\033[0K\\033[1mw\\033[0m Enable Watch   \\033[1md\\033[0m Detach\\033[0G\\033[u\\0338";
 
 /// A process whose output steers the terminal the way a full-screen tool
-/// does: a title, a scroll region, colour, a carriage-return progress bar,
+/// does: a title, a scroll region, color, a carriage-return progress bar,
 /// a clipboard write, a trip to the alternate screen and a compose footer
 /// redrawn after each line, around four real lines.
 fn steering() -> String {
@@ -4167,10 +4167,17 @@ fn steering() -> String {
     )
 }
 
-/// The lines [`steering`] leaves for a log reader.
-const STEERING_LINES: [&str; 4] = ["first line", "red ok", "100% done", "last line"];
+/// The lines [`steering`] leaves for a log reader, its full-screen output
+/// among them as the one line the holder logs in its place.
+const STEERING_LINES: [&str; 5] = [
+    "first line",
+    "red ok",
+    "100% done",
+    FULL_SCREEN_LINE,
+    "last line",
+];
 
-/// Every escape sequence in `raw` that is not a colour (SGR), and every
+/// Every escape sequence in `raw` that is not a color (SGR), and every
 /// control character but a line feed, carriage return or tab.
 fn steering_bytes(raw: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -4195,9 +4202,9 @@ fn steering_bytes(raw: &str) -> Vec<String> {
 /// `logs` and `logs -f` print only the lines a log reader expects, on a
 /// terminal or a pipe: a footer redraw, a title, a scroll region, the
 /// alternate screen or a progress bar's earlier states never reach the
-/// person's terminal, only
-/// text, line breaks and colours reset at each line's end, and every real
-/// line is there. A pipe and `--json` get the same lines without colour.
+/// person's terminal, only text, line breaks and colors reset at each
+/// line's end, and every real line is there. A pipe and `--json` get the
+/// same lines without color.
 #[test]
 fn logs_print_only_the_lines_a_reader_expects() {
     let mut scratch = Scratch::new();
@@ -4242,6 +4249,350 @@ fn logs_print_only_the_lines_a_reader_expects() {
             "{args:?}: {raw:?}"
         );
     }
+}
+
+/// A run that ends on the alternate screen, mid-color, hides nothing of
+/// the next run, and every way of reading the log shows the same lines:
+/// `logs`, `logs --json`, `-n`, `--grep` and `wait --log`.
+#[test]
+fn a_run_left_on_the_alternate_screen_hides_nothing_of_the_next() {
+    let scratch = Scratch::new();
+    let command = "if [ -e ran ]; then echo run2 hello; echo run2 world; else touch ran; \
+                   printf 'run1 before\\n\\033[31m\\033[?1049hTUI\\n'; fi";
+    let shop = scratch.project("shop", &stack(&[entry("tui", command, false)]));
+    for _ in 0..2 {
+        let started = scratch.on(&shop, &["start", "tui"]);
+        assert!(started.status.success(), "{}", shown(&started));
+        let (_, ended) = scratch.json_on(&shop, &["wait", "tui", "--state", "stopped"]);
+        assert_eq!(ended["status"], "matched", "{ended}");
+    }
+    let expected = format!("run1 before\n{FULL_SCREEN_LINE}\nrun2 hello\nrun2 world\n");
+    let expected = expected.as_str();
+
+    let plain = scratch.on(&shop, &["logs", "tui"]);
+    let (_, json) = scratch.json_on(&shop, &["logs", "tui"]);
+    let (_, newest) = scratch.json_on(&shop, &["logs", "tui", "-n", "10"]);
+    let (_, grep) = scratch.json_on(&shop, &["logs", "tui", "--grep", "run"]);
+    let (_, waited) = scratch.json_on(&shop, &[
+        "wait",
+        "tui",
+        "--log",
+        "run2 world",
+        "--since",
+        "o:0",
+    ]);
+
+    assert_eq!(stdout(&plain), expected, "{}", shown(&plain));
+    assert_eq!(json["text"], expected, "{json}");
+    assert_eq!(newest["text"], expected.trim_end(), "{newest}");
+    assert_eq!(
+        grep["text"], "run1 before\nrun2 hello\nrun2 world",
+        "{grep}"
+    );
+    assert_eq!(waited["match"]["line"], "run2 world", "{waited}");
+}
+
+/// The smallest log cap, which the full-screen test's lines pass many times.
+const SMALL_LOG_CAP: &str = "16KiB";
+
+/// A full-screen program that keeps drawing long after enough plain lines
+/// to rotate its log reads the same on every path, before and after a
+/// service restart adopts its live holder: `logs`, `--json`, `-n`,
+/// `--since`, `--grep`, `wait --log` and `process_logs` all show its lines
+/// and the one line logged in place of its frames, never a frame. A wait
+/// for text only the frames hold never matches, from the service that
+/// started the run or from the one that adopted it mid-screen, as the
+/// holder forwards the service only what it logs; and the frames never
+/// reach the log, so they rotate nothing away.
+#[test]
+fn a_long_full_screen_run_reads_alike_everywhere() {
+    let mut scratch = Scratch::new();
+    let set = scratch.muster(&["config", "set", "log-max-size", SMALL_LOG_CAP]);
+    assert!(set.status.success(), "{}", shown(&set));
+    let command = "i=0; while [ $i -lt 1500 ]; do echo \"line $i of the plain output\"; \
+                   i=$((i+1)); done; printf '\\033[?1049h'; j=0; \
+                   while :; do printf '\\033[Hframe %d of the full screen\\n' $j; j=$((j+1)); done";
+    let shop = scratch.project("shop", &stack(&[entry("tui", command, false)]));
+    let started = scratch.on(&shop, &["start", "tui"]);
+    assert!(started.status.success(), "{}", shown(&started));
+    let (_, marked) = scratch.json_on(&shop, &[
+        "wait",
+        "tui",
+        "--log",
+        FULL_SCREEN_LINE,
+        "--since",
+        "o:0",
+    ]);
+    assert_eq!(marked["status"], "matched", "{marked}");
+    let (_, read) = scratch.json_on(&shop, &["logs", "tui"]);
+    let log = PathBuf::from(read["log"].as_str().unwrap_or_default());
+    let logged_size = || fs::metadata(&log).map_or(0, |meta| meta.len());
+    let settled = logged_size();
+    thread::sleep(Duration::from_secs(1));
+    assert_eq!(logged_size(), settled, "frames reached the log");
+    let last = "line 1499 of the plain output";
+    let newest = format!("line 1498 of the plain output\n{last}\n{FULL_SCREEN_LINE}");
+
+    for round in ["first service", "adopting service"] {
+        let plain = stdout(&scratch.on(&shop, &["logs", "tui"]));
+        let (_, json) = scratch.json_on(&shop, &["logs", "tui"]);
+        let (_, tail) = scratch.json_on(&shop, &["logs", "tui", "-n", "3"]);
+        let since = tail["from"].as_str().unwrap_or_default().to_string();
+        let (_, from) = scratch.json_on(&shop, &["logs", "tui", "--since", &since]);
+        let (_, frames) = scratch.json_on(&shop, &["logs", "tui", "--grep", "frame"]);
+        let (_, found) = scratch.json_on(&shop, &["wait", "tui", "--log", last, "--since", "o:0"]);
+        let (_, never) = scratch.json_on(&shop, &[
+            "wait",
+            "tui",
+            "--log",
+            "frame",
+            "--since",
+            "o:0",
+            "--timeout",
+            "1s",
+        ]);
+        let mut mcp = McpSession::start(&mut scratch, &shop);
+        let read = mcp.result(
+            "process_logs",
+            serde_json::json!({ "name": "tui", "lines": 3 }),
+        );
+
+        assert!(plain.ends_with(&format!("{newest}\n")), "{round}: {plain}");
+        assert!(!plain.contains("frame"), "{round}: {plain}");
+        assert!(
+            !plain.starts_with("line 0 "),
+            "{round}: the log never rotated"
+        );
+        assert_eq!(json["text"], plain.as_str(), "{round}");
+        assert_eq!(tail["text"], newest.as_str(), "{round}: {tail}");
+        assert_eq!(from["text"], newest.as_str(), "{round}: {from}");
+        assert_eq!(frames["text"], "", "{round}: {frames}");
+        assert_eq!(found["match"]["line"], last, "{round}: {found}");
+        assert_eq!(never["status"], "waiting", "{round}: {never}");
+        assert_eq!(
+            read["structuredContent"]["text"],
+            newest.as_str(),
+            "{round}: {read}"
+        );
+        assert_eq!(read["structuredContent"]["unrendered_lines"], 0, "{read}");
+        drop(mcp);
+        if round == "first service" {
+            restart_service_adopting(&scratch, &shop, "tui");
+        }
+    }
+    assert_eq!(logged_size(), settled, "frames reached the log");
+    let killed = scratch.on(&shop, &["kill", "tui"]);
+    assert!(killed.status.success(), "{}", shown(&killed));
+}
+
+/// `muster logs` colors a log as anstream colors every other command's
+/// output: `CLICOLOR_FORCE` colors it on a pipe, and `NO_COLOR` or
+/// `CLICOLOR=0` keep it plain.
+#[test]
+fn logs_color_as_every_other_command_does() {
+    let scratch = Scratch::new();
+    let shop = scratch.project(
+        "shop",
+        &stack(&[entry("api", "printf '\\033[32mready\\033[0m\\n'", false)]),
+    );
+    let started = scratch.on(&shop, &["start", "api"]);
+    assert!(started.status.success(), "{}", shown(&started));
+    let (_, ended) = scratch.json_on(&shop, &["wait", "api", "--state", "stopped"]);
+    assert_eq!(ended["status"], "matched", "{ended}");
+    let logs = |env: &[(&str, &str)]| {
+        let mut command = scratch.command(&["-p", shop.to_str().unwrap(), "logs", "api"]);
+        command
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR")
+            .env_remove("CLICOLOR_FORCE");
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        stdout(&command.output().unwrap())
+    };
+
+    assert_eq!(logs(&[]), "ready\n");
+    assert_eq!(logs(&[("CLICOLOR_FORCE", "1")]), "\x1b[32mready\x1b[0m\n");
+    assert_eq!(
+        logs(&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")]),
+        "ready\n"
+    );
+}
+
+/// The service keeps answering while a process redraws a line that never
+/// ends: 32 KiB of text erased to the cursor again and again once kept its
+/// loop busy for minutes, and a fast carriage-return progress bar slowed
+/// every call tenfold. The progress bar is timed against a process printing
+/// plain lines at the same pace, a pace even a debug build keeps up with.
+#[test]
+fn a_line_that_never_ends_never_slows_the_service() {
+    /// How many `ps` calls each phase times.
+    const CALLS: usize = 5;
+    /// The slowest a `ps` may answer while the service is flooded; it once
+    /// timed out at about 15 s.
+    const SLOWEST: Duration = Duration::from_secs(3);
+    /// How many times the plain phase's median the progress bar's may be.
+    const SLOWDOWN: u32 = 4;
+    /// Added to the plain phase's median, so a fast machine's noise is no
+    /// slowdown.
+    const NOISE: Duration = Duration::from_millis(250);
+    let scratch = Scratch::new();
+    let erasing = "e=$(for i in $(seq 100); do printf '\\033[1K'; done); \
+                   while :; do head -c 32768 /dev/zero | tr '\\0' x; \
+                   for j in $(seq 82); do printf '%s' \"$e\"; sleep 0.01; done; done";
+    let progress = "i=0; while :; do for j in $(seq 100); do \
+                    printf '\\r\\033[32m[%3d%%]\\033[0m downloading layer sha256:%064d' \
+                    $((i%100)) $i; i=$((i+1)); done; sleep 0.01; done";
+    let plain = "i=0; while :; do for j in $(seq 100); do \
+                 printf 'downloading layer sha256:%064d\\n' $i; i=$((i+1)); done; \
+                 sleep 0.01; done";
+    let shop = scratch.project(
+        "shop",
+        &stack(&[
+            entry("erasing", erasing, false),
+            entry("progress", progress, false),
+            entry("plain", plain, false),
+        ]),
+    );
+    let median_ps = || {
+        let mut times: Vec<Duration> = (0..CALLS)
+            .map(|_| {
+                let asked = Instant::now();
+                let ps = scratch.on(&shop, &["ps"]);
+                assert!(ps.status.success(), "{}", shown(&ps));
+                asked.elapsed()
+            })
+            .collect();
+        times.sort_unstable();
+        assert!(times[CALLS - 1] < SLOWEST, "{times:?}");
+        times[CALLS / 2]
+    };
+    let phase = |name: &str| {
+        let started = scratch.on(&shop, &["start", name]);
+        assert!(started.status.success(), "{}", shown(&started));
+        thread::sleep(Duration::from_secs(1));
+        let median = median_ps();
+        let stopped = scratch.on(&shop, &["kill", name]);
+        assert!(stopped.status.success(), "{}", shown(&stopped));
+        median
+    };
+
+    phase("erasing");
+    let plain_median = phase("plain");
+    let progress_median = phase("progress");
+
+    assert!(
+        progress_median <= plain_median * SLOWDOWN + NOISE,
+        "progress {progress_median:?} against plain {plain_median:?}"
+    );
+}
+
+/// A pattern waiting on a process never brings the slow loop back: with a
+/// `wait --log` pending on a line that never ends and is erased at full
+/// speed, the service still answers `ps` at once, as the unfinished line is
+/// tested at most once per recheck instead of once per chunk.
+#[test]
+fn a_pending_wait_on_an_endless_line_never_slows_the_service() {
+    /// How many `ps` calls are timed.
+    const CALLS: usize = 7;
+    /// The slowest a `ps` may answer; with the line rendered per chunk it
+    /// took up to 6 s.
+    const SLOWEST: Duration = Duration::from_secs(3);
+    /// The most the median `ps` may take; it took seconds.
+    const MEDIAN: Duration = Duration::from_secs(1);
+    let scratch = Scratch::new();
+    let erasing = "e=$(for i in $(seq 1000); do printf '\\033[1K'; done); \
+                   head -c 32768 /dev/zero | tr '\\0' x; while :; do printf '%s' \"$e\"; done";
+    let shop = scratch.project("shop", &stack(&[entry("erasing", erasing, false)]));
+    let started = scratch.on(&shop, &["start", "erasing"]);
+    assert!(started.status.success(), "{}", shown(&started));
+    let mut waiting = scratch
+        .command(&[
+            "-p",
+            shop.to_str().unwrap(),
+            "wait",
+            "erasing",
+            "--log",
+            "NEVERMATCH",
+            "--timeout",
+            "60s",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_secs(1));
+
+    let mut times: Vec<Duration> = (0..CALLS)
+        .map(|_| {
+            let asked = Instant::now();
+            let ps = scratch.on(&shop, &["ps"]);
+            assert!(ps.status.success(), "{}", shown(&ps));
+            asked.elapsed()
+        })
+        .collect();
+    let _ = waiting.kill();
+    let _ = waiting.wait();
+    // The service hears the exit only after the output the flood left
+    // queued, which a loaded machine can take longer to render than `kill`
+    // waits, so the stop is awaited on its own.
+    let killed = scratch.on(&shop, &["kill", "erasing"]);
+    assert!(
+        killed.status.success() || stdout(&killed).contains("still stopping"),
+        "{}",
+        shown(&killed)
+    );
+    let (_, stopped) = scratch.json_on(&shop, &[
+        "wait",
+        "erasing",
+        "--state",
+        "stopped",
+        "--timeout",
+        "120s",
+    ]);
+    assert_eq!(stopped["status"], "matched", "{stopped}");
+
+    times.sort_unstable();
+    assert!(times[CALLS - 1] < SLOWEST, "{times:?}");
+    assert!(times[CALLS / 2] < MEDIAN, "{times:?}");
+}
+
+/// A `projects` action takes its project as the operand or from
+/// `--project`, never ignoring either: naming it both ways is refused, and
+/// `projects rm` removes the project `--project` names.
+#[test]
+fn a_projects_action_never_ignores_the_project_flag() {
+    let scratch = Scratch::new();
+    scratch.project("shop", &single());
+    scratch.project("blog", &single());
+
+    let twice = scratch.muster(&["-p", "blog", "projects", "rm", "shop", "--yes"]);
+    let set_twice = scratch.muster(&[
+        "-p",
+        "nosuch",
+        "projects",
+        "set",
+        "shop",
+        "--idle-stop",
+        "never",
+    ]);
+    let unnamed = scratch.muster(&["projects", "rm", "--yes"]);
+    let (removed, removal) = scratch.json(&["-p", "blog", "projects", "rm", "--yes"]);
+
+    for refused in [&twice, &set_twice, &unnamed] {
+        assert_eq!(refused.status.code(), Some(USAGE), "{}", shown(refused));
+    }
+    assert!(stderr(&twice).contains("--project"), "{}", shown(&twice));
+    assert!(removed.status.success(), "{}", shown(&removed));
+    assert_eq!(removal["removed"], true, "{removal}");
+    let (_, listed) = scratch.json(&["projects"]);
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|project| project["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["shop"], "{listed}");
 }
 
 /// `export -` on a terminal escapes the control and bidi characters a
@@ -4610,6 +4961,47 @@ fn a_wait_after_a_service_restart_makes_up_no_run_start() {
     assert!(status["processes"][0]["run_start"].is_null(), "{status}");
     let read = mcp.result("process_logs", serde_json::json!({ "name": "long" }));
     assert!(read["structuredContent"]["run_start"].is_null(), "{read}");
+}
+
+/// A readiness line longer than one piece of a log scan, its pattern near
+/// its start and colored, still makes an adopting service find the process
+/// ready, and a wait for it from the run's start matches.
+#[test]
+fn an_adopted_long_ready_line_is_still_seen() {
+    let scratch = Scratch::new();
+    let command = "printf '\\033[32mREADY-MARK '; head -c 102400 /dev/zero | tr '\\0' x; \
+                   printf '\\033[0m\\n'; sleep 600";
+    let shop = scratch.project("shop", &stack(&[entry("web", command, false)]));
+    let set = scratch.on(&shop, &[
+        "set",
+        "web",
+        "--ready-log",
+        "READY-MARK",
+        "--ready-timeout",
+        "60s",
+    ]);
+    assert!(set.status.success(), "{}", shown(&set));
+    scratch.on(&shop, &["start", "web"]);
+    let (_, first) = scratch.json_on(&shop, &["wait", "web", "--timeout", "20s"]);
+    assert_eq!(first["status"], "matched", "{first}");
+    restart_service_adopting(&scratch, &shop, "web");
+
+    let (_, ready) = scratch.json_on(&shop, &["wait", "web", "--timeout", "20s"]);
+    let (_, logged) = scratch.json_on(&shop, &[
+        "wait",
+        "web",
+        "--log",
+        "READY-MARK",
+        "--since",
+        "o:0",
+        "--timeout",
+        "10s",
+    ]);
+
+    assert_eq!(ready["status"], "matched", "{ready}");
+    assert_eq!(logged["status"], "matched", "{logged}");
+    let stopped = scratch.on(&shop, &["stop", "web"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
 }
 
 /// Restarts the service over `project`, whose process `name` runs, and

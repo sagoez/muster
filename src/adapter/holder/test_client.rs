@@ -80,7 +80,8 @@ impl TestClient {
             HolderMessage::Exited(_)
             | HolderMessage::Rejected(_)
             | HolderMessage::Warning(_)
-            | HolderMessage::Attached(_) => {},
+            | HolderMessage::Attached(_)
+            | HolderMessage::Unlogged(_) => {},
         }
         message
     }

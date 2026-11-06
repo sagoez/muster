@@ -15,4 +15,7 @@ pub struct LogScan {
     /// The first line the pattern matched, if any.
     #[getset(get = "pub")]
     matched: Option<LoggedLine>,
+    /// Lines dropped because rendering them failed.
+    #[getset(get_copy = "pub")]
+    unrendered_lines: usize,
 }

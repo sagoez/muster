@@ -26,4 +26,7 @@ pub struct LogSlice {
     /// which rotation discarded.
     #[getset(get_copy = "pub")]
     rotated_away_bytes: u64,
+    /// Lines dropped because rendering them failed.
+    #[getset(get_copy = "pub")]
+    unrendered_lines: usize,
 }

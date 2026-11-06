@@ -1,6 +1,13 @@
 //! Reading a process's log by output cursor: mapping the cursor through the
 //! live and rotated files, finding the newest lines without reading the whole
-//! log, stripping and filtering them, and capping what is returned.
+//! log, rendering and filtering them, and capping what is returned.
+//!
+//! Every read renders the log as one stream, the way `muster logs` does, so
+//! each path shows a line the same. The log holds no full-screen output and
+//! a reset where each run starts, so a read that starts partway needs to
+//! know nothing of what came before: it starts at a line boundary at most
+//! [`RENDER_LOOKBACK_BYTES`] back, never inside a sequence, renders the
+//! output before its start once, and shows only what follows.
 
 use std::{
     collections::VecDeque,
@@ -12,23 +19,16 @@ use std::{
 };
 
 use super::{
-    error::HolderError,
-    filter_state::FilterState,
-    generation::Generation,
-    kept::Kept,
-    line_matcher::LineMatcher,
-    log::rotated_path,
-    log_base::LogBase,
-    log_query::LogQuery,
-    log_scan::LogScan,
-    log_slice::LogSlice,
-    logged_line::LoggedLine,
-    reader::CATCH_UP_CHUNK_BYTES,
-    span::Span,
-    span_reader::SpanReader,
-    strip::{LINE_MAX_BYTES, strip_line},
+    error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
+    line_matcher::LineMatcher, log::rotated_path, log_base::LogBase, log_lines::LogLines,
+    log_query::LogQuery, log_scan::LogScan, log_slice::LogSlice, logged_line::LoggedLine,
+    reader::CATCH_UP_CHUNK_BYTES, span::Span, span_reader::SpanReader, strip::LINE_MAX_BYTES,
+    visited_piece::VisitedPiece,
 };
-use crate::domain::value::OutputCursor;
+use crate::{
+    adapter::terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
+    domain::value::OutputCursor,
+};
 
 /// The longest line a read returns, in characters; the rest is cut.
 pub const LINE_MAX_CHARS: usize = 2000;
@@ -36,14 +36,17 @@ pub const LINE_MAX_CHARS: usize = 2000;
 pub const ERROR_CONTEXT_LINES: usize = 12;
 /// Separates non-adjacent error groups.
 pub const GROUP_SEPARATOR: &str = "--";
-/// Raw bytes of one line kept for stripping and matching; the rest of a
-/// longer line is skipped, so one huge line cannot exhaust memory.
+/// Raw bytes of one line a backward scan renders to tell whether it counts;
+/// the rest of a longer line is left out of that test.
 pub(super) const RAW_LINE_KEEP_BYTES: usize = 64 * 1024;
 /// Bytes read per step when scanning back from the end, and buffered when
 /// reading forward.
 pub(super) const BLOCK_BYTES: usize = 64 * 1024;
-/// Ends a line.
-pub(super) const LINE_FEED: u8 = b'\n';
+/// Most bytes before a read's start rendered, and not shown, so the read
+/// starts in the state the whole stream's rendering is in there: a saved
+/// cursor, the pen. Older output than this is taken to have left the
+/// terminal as it found it.
+pub const RENDER_LOOKBACK_BYTES: u64 = 256 * 1024;
 /// Opens the note on a cut line, before the count of characters cut.
 const CUT_OPEN: &str = " [... ";
 /// Closes the note on a cut line.
@@ -68,29 +71,72 @@ pub fn read_log(log: &Path, query: &LogQuery) -> Result<LogSlice, HolderError> {
                 end: span.end(),
             });
         },
+        Some(since) if since.max(span.oldest()) == span.end() => {
+            return Ok(LogSlice::builder()
+                .from(span.end())
+                .cursor(span.end())
+                .omitted_lines(0)
+                .lines(Vec::new())
+                .rotated_away_bytes(span.oldest().bytes_since(since))
+                .unrendered_lines(0)
+                .build());
+        },
         Some(since) => (since.max(span.oldest()), span.oldest().bytes_since(since)),
         None => (span.newest_start(query)?, 0),
     };
+    // The newest lines are found by testing each raw line on its own, which
+    // cannot tell every line the stream's rendering drops. Reading from the
+    // line boundary at the look-back before them lets the caps keep the
+    // newest the stream shows; the lines before the estimate count as
+    // omitted only if they are kept.
+    let mut renderer = match query.since() {
+        Some(_) => renderer_at(&span, start)?,
+        None => PlacedRenderer::new(line_start_before(&span, start)?),
+    };
+    let begin = renderer.next();
     let mut kept = Kept::new(query);
     let mut filter = FilterState::new(query.filter());
-    let mut lines = BufReader::with_capacity(BLOCK_BYTES, SpanReader::new(&span, start));
-    let mut at = start;
-    while let Some((line, consumed)) = next_line(&mut lines)? {
-        if let Some(line) = line {
-            filter.offer(line, at, &mut kept);
+    let mut reader = BufReader::with_capacity(BLOCK_BYTES, SpanReader::new(&span, begin));
+    let mut offer = |lines: Vec<LogLine>, at: OutputCursor| {
+        kept.count_from_now(at >= start);
+        for line in &lines {
+            filter.offer(cut(line.plain()), at, &mut kept);
         }
-        at = at.advanced(consumed);
-    }
-    let from = match kept.first_at() {
-        Some(first) if kept.omitted() > 0 => first,
-        Some(_) | None => start,
     };
+    let mut line_at = begin;
+    let mut at = begin;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        let (taken, ended) = match buffer.iter().position(|byte| *byte == LINE_FEED) {
+            Some(end) => (end + 1, true),
+            None => (buffer.len(), false),
+        };
+        renderer.advance(&buffer[..taken]);
+        reader.consume(taken);
+        at = at.advanced(taken as u64);
+        let lines = renderer.take_lines();
+        let produced = !lines.is_empty();
+        offer(lines, line_at);
+        if ended || produced {
+            line_at = at;
+        }
+    }
+    renderer.finish();
+    offer(renderer.take_lines(), line_at);
+    let from = kept
+        .first_at()
+        .filter(|first| kept.omitted() > 0 || *first < start)
+        .unwrap_or(start);
     Ok(LogSlice::builder()
         .from(from)
         .cursor(span.end())
         .omitted_lines(kept.omitted())
         .lines(kept.into_lines())
         .rotated_away_bytes(rotated_away_bytes)
+        .unrendered_lines(renderer.take_faults())
         .build())
 }
 
@@ -158,6 +204,31 @@ pub(super) fn read_log_range(
     Ok((start, bytes))
 }
 
+/// The last bytes of the log at `log`, at most `max`, and where they start:
+/// just past the first line feed among them, so they begin on a line
+/// boundary, unless they hold all the log keeps or no line feed at all.
+///
+/// # Errors
+/// Returns [`HolderError::Io`] when the files cannot be read.
+pub(super) fn read_log_tail(log: &Path, max: u64) -> Result<(OutputCursor, Vec<u8>), HolderError> {
+    let span = Span::open(log)?;
+    let from = span
+        .oldest()
+        .max(OutputCursor::new(span.end().offset().saturating_sub(max)));
+    let mut bytes = Vec::new();
+    SpanReader::new(&span, from)
+        .take(span.end().bytes_since(from))
+        .read_to_end(&mut bytes)?;
+    if from == span.oldest() {
+        return Ok((from, bytes));
+    }
+    let boundary = bytes
+        .iter()
+        .position(|byte| *byte == LINE_FEED)
+        .map_or(0, |feed| feed + 1);
+    Ok((from.advanced(boundary as u64), bytes.split_off(boundary)))
+}
+
 /// The first line of the log at `log` that begins from `from` up to `until`
 /// and `matcher` matches, with where the scan began.
 ///
@@ -170,14 +241,28 @@ pub fn first_match(
     matcher: &LineMatcher,
 ) -> Result<LogScan, HolderError> {
     let mut matched = None;
-    let began = visit_lines(log, from, until, |at, line| {
-        let Some(text) = strip_line(line).filter(|text| matcher.is_match(text)) else {
+    let (began, unrendered) = visit_lines(log, from, until, |piece| {
+        let Some((index, text)) = piece
+            .texts()
+            .iter()
+            .enumerate()
+            .find(|(_, text)| matcher.is_match(text))
+        else {
             return ControlFlow::Continue(());
         };
-        matched = Some(LoggedLine::builder().at(at).text(text).build());
+        matched = Some(
+            LoggedLine::builder()
+                .at(piece.began(index))
+                .text(text.clone())
+                .build(),
+        );
         ControlFlow::Break(())
     })?;
-    Ok(LogScan::builder().from(began).matched(matched).build())
+    Ok(LogScan::builder()
+        .from(began)
+        .matched(matched)
+        .unrendered_lines(unrendered)
+        .build())
 }
 
 /// The last `count` lines of the log at `log` that begin from `from` up to
@@ -192,9 +277,9 @@ pub fn last_lines(
     until: OutputCursor,
     count: usize,
     max: u64,
-) -> Result<Vec<String>, HolderError> {
+) -> Result<LogLines, HolderError> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(LogLines::default());
     }
     let mut lines = VecDeque::with_capacity(count);
     let bound = from.max(OutputCursor::new(until.offset().saturating_sub(max)));
@@ -204,27 +289,33 @@ pub fn last_lines(
     } else {
         bound
     };
-    visit_lines(log, start, until, |_, line| {
-        if mem::take(&mut cut) {
+    let (_, unrendered) = visit_lines(log, start, until, |piece| {
+        if mem::take(&mut cut) && piece.at() == start {
             return ControlFlow::Continue(());
         }
-        let Some(text) = strip_line(line) else {
-            return ControlFlow::Continue(());
-        };
-        if lines.len() == count {
-            lines.pop_front();
+        for text in piece.texts() {
+            if lines.len() == count {
+                lines.pop_front();
+            }
+            lines.push_back(text.clone());
         }
-        lines.push_back(text);
         ControlFlow::Continue(())
     })?;
-    Ok(lines.into())
+    Ok(LogLines::builder()
+        .lines(lines.into())
+        .unrendered_lines(unrendered)
+        .build())
 }
 
 /// Hands `visit` each raw line of the log at `log` that begins from `from` up
-/// to `until`, with where it began, reading at most [`CATCH_UP_CHUNK_BYTES`]
-/// at a time; a line cut at [`LINE_MAX_BYTES`], at a gap rotation left, or at
-/// `until` is handed as it stands. Stops once `visit` breaks. Returns where
-/// the read began: `from`, or the oldest byte kept when that is newer.
+/// to `until`, with where it began, the text of the lines its rendering, as
+/// part of the whole stream, finished, and where the first of those began;
+/// reading at most [`CATCH_UP_CHUNK_BYTES`] at a time. A line cut at
+/// [`LINE_MAX_BYTES`], at a gap rotation left, or at `until` is handed as it
+/// stands, and the last one with the text of the line it leaves unfinished.
+/// Once `visit` breaks it is never called again. Returns where the read
+/// began: `from`, or past the oldest byte kept when that is newer, and how
+/// many lines rendering dropped.
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the first read fails; a later failure
@@ -233,13 +324,19 @@ pub(super) fn visit_lines(
     log: &Path,
     from: OutputCursor,
     until: OutputCursor,
-    mut visit: impl FnMut(OutputCursor, &[u8]) -> ControlFlow<()>,
-) -> Result<OutputCursor, HolderError> {
+    mut visit: impl FnMut(&VisitedPiece<'_>) -> ControlFlow<()>,
+) -> Result<(OutputCursor, usize), HolderError> {
+    let mut renderer = {
+        let span = Span::open(log)?;
+        renderer_at(&span, from.max(span.oldest()))?
+    };
+    let start = renderer.next().max(from);
     let mut began = None;
-    let mut next = from;
+    let mut next = start;
     let mut line: Vec<u8> = Vec::new();
-    let mut line_at = from;
-    'read: while next < until {
+    let mut line_at = start;
+    let mut drawn_from = start;
+    while next < until {
         let (at, bytes) = match read_log_range(log, next, until, CATCH_UP_CHUNK_BYTES) {
             Ok(read) => read,
             Err(error) if began.is_none() => return Err(error),
@@ -249,8 +346,19 @@ pub(super) fn visit_lines(
         if bytes.is_empty() {
             break;
         }
-        if at > next && hand_line(&mut visit, line_at, &mut line).is_break() {
-            break;
+        if at > next {
+            let (flow, _) = hand_line(
+                &mut visit,
+                &mut renderer,
+                &mut line,
+                (line_at, drawn_from),
+                true,
+            );
+            if flow.is_break() {
+                return Ok((began.unwrap_or(start), renderer.take_faults()));
+            }
+            renderer.skip_to(at);
+            drawn_from = at;
         }
         let mut cursor = at;
         for piece in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
@@ -259,100 +367,194 @@ pub(super) fn visit_lines(
             }
             line.extend_from_slice(piece);
             cursor = cursor.advanced(piece.len() as u64);
-            if (piece.ends_with(&[LINE_FEED]) || line.len() >= LINE_MAX_BYTES)
-                && hand_line(&mut visit, line_at, &mut line).is_break()
-            {
-                break 'read;
+            let ended = piece.ends_with(&[LINE_FEED]);
+            if !ended && line.len() < LINE_MAX_BYTES {
+                continue;
+            }
+            let (flow, produced) = hand_line(
+                &mut visit,
+                &mut renderer,
+                &mut line,
+                (line_at, drawn_from),
+                false,
+            );
+            if flow.is_break() {
+                return Ok((began.unwrap_or(start), renderer.take_faults()));
+            }
+            if ended || produced {
+                drawn_from = cursor;
             }
         }
         next = cursor;
     }
-    let _ = hand_line(&mut visit, line_at, &mut line);
-    Ok(began.unwrap_or(from))
+    let _ = hand_line(
+        &mut visit,
+        &mut renderer,
+        &mut line,
+        (line_at, drawn_from),
+        true,
+    );
+    Ok((began.unwrap_or(start), renderer.take_faults()))
 }
 
-/// Hands `line`, which began at `at`, to `visit` unless it is empty, and
-/// empties it.
+/// Renders `line`, which began at the first of `(at, drawn_from)` while the
+/// line its rendering draws began at the second, and hands it to `visit`
+/// with the text of the lines it finished, then empties it; `ending`
+/// finishes the line it leaves unfinished too. Nothing is handed when there
+/// is neither a byte nor a line. Returns what `visit` asked, and whether a
+/// line was finished.
 fn hand_line(
-    visit: &mut impl FnMut(OutputCursor, &[u8]) -> ControlFlow<()>,
-    at: OutputCursor,
+    visit: &mut impl FnMut(&VisitedPiece<'_>) -> ControlFlow<()>,
+    renderer: &mut PlacedRenderer,
     line: &mut Vec<u8>,
-) -> ControlFlow<()> {
-    if line.is_empty() {
-        return ControlFlow::Continue(());
+    (at, drawn_from): (OutputCursor, OutputCursor),
+    ending: bool,
+) -> (ControlFlow<()>, bool) {
+    renderer.advance(line);
+    if ending {
+        renderer.finish();
     }
-    let flow = visit(at, line);
+    let texts: Vec<String> = renderer.take_lines().iter().map(LogLine::plain).collect();
+    if line.is_empty() && texts.is_empty() {
+        return (ControlFlow::Continue(()), false);
+    }
+    let flow = visit(
+        &VisitedPiece::builder()
+            .at(at)
+            .bytes(line)
+            .line_at(drawn_from)
+            .texts(&texts)
+            .build(),
+    );
     line.clear();
-    flow
+    (flow, !texts.is_empty())
 }
 
-/// Reads the next line from `reader`, stripped, keeping at most
-/// [`RAW_LINE_KEEP_BYTES`] of it and cutting what strips past
-/// [`LINE_MAX_CHARS`], with the raw bytes it took; the text is none for a
-/// line that only redrew the screen. A final line with no line feed is
-/// returned too.
+/// A renderer for a read of the output `span` holds from `start`, in the
+/// state the whole stream's rendering is in there: it renders, without
+/// showing, the output from where [`look_back`] begins up to `start`, and
+/// ends there the line `start` falls inside, so the read shows from
+/// `start`. The sequence state `start` falls inside is kept, so a read
+/// never starts mid-escape. The look-back is read once, the rendering
+/// starting over where it learns the read begins later.
 ///
 /// # Errors
-/// Returns an [`io::Error`] when the read fails.
-fn next_line(reader: &mut impl BufRead) -> io::Result<Option<(Option<String>, u64)>> {
-    let mut head = Vec::new();
-    let mut skipped = 0usize;
-    let mut consumed = 0u64;
-    let mut read_any = false;
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            break;
-        }
-        read_any = true;
-        let (taken, ended) = match buffer.iter().position(|byte| *byte == LINE_FEED) {
-            Some(at) => (at, true),
-            None => (buffer.len(), false),
+/// Returns an [`io::Error`] when the files cannot be read.
+fn renderer_at(span: &Span, start: OutputCursor) -> io::Result<PlacedRenderer> {
+    let mut drawn: Option<(OutputCursor, PlacedRenderer)> = None;
+    let begin = look_back(span, start, |begin, _, piece| {
+        let (_, renderer) = match &mut drawn {
+            Some(drawn) if drawn.0 == begin => drawn,
+            _ => drawn.insert((begin, PlacedRenderer::new(begin))),
         };
-        let room = RAW_LINE_KEEP_BYTES.saturating_sub(head.len());
-        head.extend_from_slice(&buffer[..taken.min(room)]);
-        skipped = skipped.saturating_add(taken.saturating_sub(room));
-        let step = taken + usize::from(ended);
-        reader.consume(step);
-        consumed += step as u64;
-        if ended {
-            break;
-        }
+        renderer.advance(piece);
+        renderer.take_lines();
+        ControlFlow::Continue(())
+    })?;
+    let mut renderer = drawn.map_or_else(|| PlacedRenderer::new(begin), |(_, drawn)| drawn);
+    renderer.finish();
+    renderer.take_lines();
+    renderer.take_faults();
+    if renderer.next() < start {
+        renderer.skip_to(start);
     }
-    if !read_any {
-        return Ok(None);
-    }
-    Ok(Some((
-        strip_line(&head).map(|text| cut(text, skipped)),
-        consumed,
-    )))
+    Ok(renderer)
 }
 
-/// `text` cut to [`LINE_MAX_CHARS`] with a note of how much went, counting
-/// `skipped` raw bytes never stripped as one character each.
-fn cut(text: String, skipped: usize) -> String {
+/// Where a read from `start` of the output `span` holds begins rendering,
+/// as [`look_back`] finds it, reading only up to the line start it finds.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the files cannot be read.
+fn line_start_before(span: &Span, start: OutputCursor) -> io::Result<OutputCursor> {
+    look_back(span, start, |_, on_line, _| {
+        if on_line {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+}
+
+/// Reads, once, the output `span` holds between the look-back bound before
+/// `start` and `start`, and hands `take` each piece with where the read
+/// begins rendering as far as is known, and whether that is a line start.
+/// The look-back bound lies no more than [`RENDER_LOOKBACK_BYTES`] back;
+/// the read begins at the oldest byte kept, where the log starts each
+/// generation on a line, or just past the first line feed after the bound,
+/// so it never begins inside a sequence, or at the bound for a line longer
+/// than the look-back. A piece handed under a later beginning starts over.
+/// Reading stops when `take` breaks. Returns where the read begins.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the files cannot be read.
+fn look_back(
+    span: &Span,
+    start: OutputCursor,
+    mut take: impl FnMut(OutputCursor, bool, &[u8]) -> ControlFlow<()>,
+) -> io::Result<OutputCursor> {
+    let bound = span.oldest().max(OutputCursor::new(
+        start.offset().saturating_sub(RENDER_LOOKBACK_BYTES),
+    ));
+    let mut begin = bound;
+    let mut on_line = bound == span.oldest();
+    if on_line && take(begin, on_line, &[]).is_break() {
+        return Ok(begin);
+    }
+    let mut reader = SpanReader::new(span, bound).take(start.bytes_since(bound));
+    let mut block = vec![0; BLOCK_BYTES];
+    let mut at = bound;
+    loop {
+        let read = reader.read(&mut block)?;
+        if read == 0 {
+            return Ok(begin);
+        }
+        let mut piece = &block[..read];
+        if !on_line && let Some(index) = piece.iter().position(|byte| *byte == LINE_FEED) {
+            on_line = true;
+            begin = at.advanced(index as u64 + 1);
+            piece = &piece[index + 1..];
+        }
+        at = at.advanced(read as u64);
+        if take(begin, on_line, piece).is_break() {
+            return Ok(begin);
+        }
+    }
+}
+
+/// `text` cut to [`LINE_MAX_CHARS`] with a note of how many characters went.
+fn cut(text: String) -> String {
     let length = text.chars().count();
-    if length <= LINE_MAX_CHARS && skipped == 0 {
+    if length <= LINE_MAX_CHARS {
         return text;
     }
-    let dropped = length
-        .saturating_sub(LINE_MAX_CHARS)
-        .saturating_add(skipped);
     let kept: String = text.chars().take(LINE_MAX_CHARS).collect();
-    format!("{kept}{CUT_OPEN}{dropped}{CUT_CLOSE}")
+    format!("{kept}{CUT_OPEN}{}{CUT_CLOSE}", length - LINE_MAX_CHARS)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, ops::Range};
+    use std::{
+        fs,
+        ops::Range,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::{
-        adapter::holder::{
-            byte_limit::ByteLimit, line_filter::LineFilter, line_limit::LineLimit,
-            line_matcher::LineMatcher, log::rotated_path, log_fixture::Fixture,
+        adapter::{
+            holder::{
+                byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter,
+                line_limit::LineLimit, line_matcher::LineMatcher, log::rotated_path,
+                log_fixture::Fixture, screen_gate::FULL_SCREEN_LINE,
+            },
+            terminal::{
+                line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
+                render_fault,
+            },
         },
         domain::{
             process::{LogPattern, PatternKind, PatternText},
@@ -417,6 +619,27 @@ mod tests {
         let nothing = fixture.read(&LogQuery::builder().since(Some(next.cursor())).build());
         assert!(nothing.lines().is_empty());
         assert_eq!(nothing.cursor(), next.cursor());
+    }
+
+    /// A line of output that reads `--` is a line like any other, never
+    /// taken for the separator between error groups, so dropping it to keep
+    /// the newest lines loses nothing else.
+    #[test]
+    fn a_line_reading_like_a_separator_is_a_line() {
+        let mut fixture = Fixture::new();
+        fixture.write(b"a\n--\nb\n");
+
+        let newest = fixture.read(&LogQuery::builder().lines(lines(1)).build());
+        let two = fixture.read(&LogQuery::builder().lines(lines(2)).build());
+        let all = fixture.read(
+            &LogQuery::builder()
+                .since(Some(OutputCursor::new(0)))
+                .build(),
+        );
+
+        assert_eq!(newest.lines(), &["b"]);
+        assert_eq!(two.lines(), &["--", "b"]);
+        assert_eq!(all.lines(), &["a", "--", "b"]);
     }
 
     /// Output a prompt left without a line feed is read as a line.
@@ -545,9 +768,9 @@ mod tests {
         let cut = last_lines(fixture.path(), first, end, 10, 7).unwrap();
         let aligned = last_lines(fixture.path(), first, end, 10, 10).unwrap();
 
-        assert_eq!(whole, ["dddd", "eeee"]);
-        assert_eq!(cut, ["eeee"]);
-        assert_eq!(aligned, ["dddd", "eeee"]);
+        assert_eq!(*whole.lines(), ["dddd", "eeee"]);
+        assert_eq!(*cut.lines(), ["eeee"]);
+        assert_eq!(*aligned.lines(), ["dddd", "eeee"]);
     }
 
     /// The tail spans the rotated and live files as one stream.
@@ -698,25 +921,308 @@ mod tests {
         assert_eq!(one_error.omitted_lines(), 1);
     }
 
-    /// A line past the character limit is cut with a note, and one past the
-    /// raw limit is never held whole.
+    /// A line past the character limit is cut with a note, and one past
+    /// what a line holds is cut into lines of its own, as `muster logs`
+    /// shows it, never held whole.
     #[test]
     fn long_lines_are_cut() {
         let mut fixture = Fixture::new();
         fixture.write(format!("{}\n", "x".repeat(LINE_MAX_CHARS + 1000)).as_bytes());
-        fixture.write(format!("{}\n", "y".repeat(RAW_LINE_KEEP_BYTES + 10)).as_bytes());
+        fixture.write(format!("{}\n", "y".repeat(MAX_LINE_CELLS + 10)).as_bytes());
         let slice = fixture.read(&LogQuery::builder().build());
-        assert_eq!(
-            slice.lines()[0],
-            format!("{} [... 1000 chars cut]", "x".repeat(LINE_MAX_CHARS))
-        );
-        assert_eq!(
-            slice.lines()[1],
+        assert_eq!(slice.lines(), &[
+            format!("{} [... 1000 chars cut]", "x".repeat(LINE_MAX_CHARS)),
             format!(
                 "{} [... {} chars cut]",
                 "y".repeat(LINE_MAX_CHARS),
-                RAW_LINE_KEEP_BYTES + 10 - LINE_MAX_CHARS
-            )
+                MAX_LINE_CELLS - LINE_MAX_CHARS
+            ),
+            "y".repeat(10),
+        ]);
+    }
+
+    /// The newest lines of a log that is one huge line with no newline are
+    /// its last pieces, cut and marked, never nothing: here the line's first
+    /// 64 KiB end on an erase, which once left a read of it blank.
+    #[test]
+    fn the_newest_lines_of_one_endless_line_are_its_last_pieces() {
+        let mut fixture = Fixture::new();
+        let unit = b"\x1b[2K\x1b[1024Gx";
+        let units = RAW_LINE_KEEP_BYTES / unit.len() + 2;
+        fixture.write(&unit.repeat(units));
+        fixture.write(&vec![b'z'; MAX_LINE_CELLS * 2]);
+
+        let slice = fixture.read(&LogQuery::builder().lines(lines(2)).build());
+
+        let piece = format!(
+            "{} [... {} chars cut]",
+            "z".repeat(LINE_MAX_CHARS),
+            MAX_LINE_CELLS - LINE_MAX_CHARS
+        );
+        assert_eq!(slice.lines(), &[piece, "z".repeat(MAX_COLUMN)]);
+        let all = fixture.read(&LogQuery::builder().lines(lines(5)).build());
+        assert_eq!(all.lines().len(), 3);
+        assert!(all.lines()[0].trim_start().starts_with("xzz"));
+    }
+
+    /// A log written as a holder writes one, in a scratch directory that
+    /// lives as long as it does.
+    fn gated() -> (TempDir, PathBuf, GatedLog) {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("api.log");
+        let log = GatedLog::open(path.clone(), 1 << 30);
+        (scratch, path, log)
+    }
+
+    /// Every read renders the log as one stream that starts over at each
+    /// run, from the reset the holder logs there: a run that ends mid-color
+    /// or mid-escape hides nothing of the next, its open line is ended, and
+    /// what a run draws on the alternate screen reads as one line wherever
+    /// a read starts.
+    #[test]
+    fn reads_render_the_stream_restarted_at_each_run() {
+        let (_scratch, path, mut log) = gated();
+        log.start_run();
+        log.write(b"run1 before\n\x1b[31mopen\x1b]0;cut");
+        let run2 = log.start_run();
+        log.write(b"run2 hello\n\x1b[?1049h\x1b[Hfull screen\n");
+        log.write(b"still on it\n");
+        let end = log.end();
+
+        let every = read_log(&path, &LogQuery::builder().build()).unwrap();
+        let newest = read_log(&path, &LogQuery::builder().lines(lines(1)).build()).unwrap();
+        let since = read_log(&path, &LogQuery::builder().since(Some(run2)).build()).unwrap();
+        let matcher = LineMatcher::of_text("on it", PatternKind::Substring).unwrap();
+        let scan = first_match(&path, run2, end, &matcher).unwrap();
+
+        assert_eq!(every.lines(), &[
+            "run1 before",
+            "open",
+            "run2 hello",
+            FULL_SCREEN_LINE
+        ]);
+        assert_eq!(newest.lines(), &[FULL_SCREEN_LINE]);
+        assert_eq!(since.lines(), &["run2 hello", FULL_SCREEN_LINE]);
+        assert_eq!(*scan.matched(), None);
+        assert_eq!(
+            *last_lines(&path, run2, end, 5, BLOCK_BYTES as u64)
+                .unwrap()
+                .lines(),
+            ["run2 hello", FULL_SCREEN_LINE]
+        );
+    }
+
+    /// A read from a cursor inside a line and inside a sequence keeps the
+    /// state the stream's rendering is in there: the line goes on from the
+    /// cursor, and the sequence is finished rather than read as text.
+    #[test]
+    fn a_read_from_inside_a_sequence_never_reads_it_as_text() {
+        let mut fixture = Fixture::new();
+        fixture.write(b"first\nsecond \x1b[3");
+        let inside = fixture.write(b"1mred\x1b[0m\nthird\n");
+
+        let since = fixture.read(&LogQuery::builder().since(Some(inside)).build());
+
+        assert_eq!(since.lines(), &["red", "third"]);
+    }
+
+    /// A read that starts far into a long log, past the look-back, starts
+    /// rendering just past a line feed, wherever the look-back bound falls,
+    /// so it never starts inside a sequence; one within the look-back of
+    /// the oldest byte starts there.
+    #[test]
+    fn the_look_back_starts_on_a_line() {
+        let filler = b"\x1b[1my\x1b[0m\n";
+        let count = RENDER_LOOKBACK_BYTES as usize / filler.len() + 10;
+        for offset in 0..filler.len() {
+            let mut fixture = Fixture::new();
+            fixture.write(&b"x\n".repeat(offset));
+            fixture.write(&filler.repeat(count));
+            let last = fixture.write(b"last\n");
+            let span = Span::open(fixture.path()).unwrap();
+            let bytes = fs::read(fixture.path()).unwrap();
+
+            let begin = line_start_before(&span, last).unwrap();
+            let early = line_start_before(&span, OutputCursor::new(5)).unwrap();
+
+            assert!(begin <= last && last.bytes_since(begin) <= RENDER_LOOKBACK_BYTES);
+            let before = usize::try_from(begin.offset()).unwrap() - 1;
+            assert_eq!(bytes[before], LINE_FEED, "offset {offset}");
+            assert_eq!(early, OutputCursor::new(0));
+        }
+    }
+
+    /// Bold switched on this many times makes a line of a few characters
+    /// span more raw bytes than a scan hands out at once.
+    const LONG_RAW_LINE_SEQUENCES: usize = 20_000;
+
+    /// A line drawn across more raw bytes than a scan hands out at once is
+    /// matched at where the line began, not where its last piece did.
+    #[test]
+    fn a_match_on_a_long_line_reports_where_the_line_began() {
+        let mut fixture = Fixture::new();
+        fixture.write(b"first\n");
+        let mut long = b"needle".to_vec();
+        long.extend(b"\x1b[1m".repeat(LONG_RAW_LINE_SEQUENCES));
+        long.extend(b" end\n");
+        assert!(long.len() > LINE_MAX_BYTES);
+        let began = fixture.write(&long);
+        let end = fixture.log().end();
+        let matcher = LineMatcher::of_text("needle", PatternKind::Substring).unwrap();
+
+        let scan = first_match(fixture.path(), OutputCursor::new(0), end, &matcher).unwrap();
+
+        let matched = scan.matched().clone().expect("the long line matches");
+        assert_eq!(matched.at(), began);
+        assert_eq!(matched.text(), "needle end");
+    }
+
+    /// Once the visitor asks to stop it is never called again, not even for
+    /// the line a stop left unfinished.
+    #[test]
+    fn a_stopped_scan_never_visits_again() {
+        let mut fixture = Fixture::new();
+        let mut partial = b"partial".to_vec();
+        partial.extend(b"\x1b[1m".repeat(LONG_RAW_LINE_SEQUENCES));
+        fixture.write(&partial);
+        fixture.write(b" rest\nmore\nunfinished");
+        let end = fixture.log().end();
+        let mut visits = 0;
+
+        visit_lines(fixture.path(), OutputCursor::new(0), end, |_| {
+            visits += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+
+        assert_eq!(visits, 1);
+    }
+
+    /// Frames a long-lived full-screen program draws in the long-screen
+    /// test: far more than the look-back covers.
+    const SCREEN_FRAMES: usize = 30_000;
+
+    /// A run that stays on the alternate screen far longer than the look-back
+    /// leaves one line in the log, so every path reads it alike from
+    /// anywhere: no frame is shown, matched or kept.
+    #[test]
+    fn a_long_alternate_screen_run_reads_alike_from_anywhere() {
+        let (_scratch, path, mut log) = gated();
+        let start = log.start_run();
+        log.write(b"pre\n\x1b[?1049h");
+        for frame in 0..SCREEN_FRAMES {
+            log.write(format!("\x1b[Hframe {frame} xxxxxxxxxxxx\n").as_bytes());
+        }
+        let end = log.end();
+        let matcher = LineMatcher::of_text("frame", PatternKind::Substring).unwrap();
+
+        let newest = read_log(&path, &LogQuery::builder().lines(lines(3)).build()).unwrap();
+        let since = read_log(&path, &LogQuery::builder().since(Some(start)).build()).unwrap();
+        let scan = first_match(&path, start, end, &matcher).unwrap();
+        let tail = last_lines(&path, start, end, 5, BLOCK_BYTES as u64).unwrap();
+
+        assert!(end.bytes_since(start) < 128, "{end}");
+        assert_eq!(newest.lines(), &["pre", FULL_SCREEN_LINE]);
+        assert_eq!(since.lines(), newest.lines());
+        assert_eq!(*scan.matched(), None);
+        assert_eq!(tail.lines(), newest.lines());
+    }
+
+    /// Short runs, far more of them than a fixed count of run starts once
+    /// kept.
+    const SHORT_RUNS: usize = 1000;
+
+    /// A crash loop reads as each run's lines and nothing between them: the
+    /// run killed on the alternate screen hides nothing of the thousand runs
+    /// after it, and no run start adds a blank line.
+    #[test]
+    fn a_crash_loop_reads_as_its_runs() {
+        let (_scratch, path, mut log) = gated();
+        log.start_run();
+        log.write(b"\x1b[?1049hkilled on the full screen\n");
+        for run in 0..SHORT_RUNS {
+            log.start_run();
+            log.write(format!("run {run}\n").as_bytes());
+        }
+
+        let all = read_log(
+            &path,
+            &LogQuery::builder()
+                .since(Some(OutputCursor::new(0)))
+                .lines(lines(2 * SHORT_RUNS))
+                .build(),
+        )
+        .unwrap();
+
+        let expected: Vec<String> = [FULL_SCREEN_LINE.to_string()]
+            .into_iter()
+            .chain((0..SHORT_RUNS).map(|run| format!("run {run}")))
+            .collect();
+        assert_eq!(all.lines(), expected.as_slice());
+    }
+
+    /// A rendering fault drops only the line it hit on every read, and each
+    /// read counts it.
+    #[test]
+    fn a_rendering_fault_drops_one_line_on_every_read() {
+        let mut fixture = Fixture::new();
+        fixture.write(b"one\ntwo\nthree\n");
+        let end = fixture.log().end();
+        let every = LineMatcher::of_text("t", PatternKind::Substring).unwrap();
+
+        render_fault::arm();
+        let slice = fixture.read(&LogQuery::builder().build());
+        render_fault::arm();
+        let scan = first_match(fixture.path(), OutputCursor::new(0), end, &every).unwrap();
+        render_fault::arm();
+        let tail = last_lines(
+            fixture.path(),
+            OutputCursor::new(0),
+            end,
+            5,
+            BLOCK_BYTES as u64,
+        )
+        .unwrap();
+
+        assert_eq!(slice.lines(), &["two", "three"]);
+        assert_eq!(slice.unrendered_lines(), 1);
+        assert_eq!(
+            scan.matched().as_ref().map(|line| line.text().as_str()),
+            Some("two")
+        );
+        assert_eq!(scan.unrendered_lines(), 1);
+        assert_eq!(*tail.lines(), ["two", "three"]);
+        assert_eq!(tail.unrendered_lines(), 1);
+    }
+
+    /// Times the idle poll test reads from the log's end.
+    const IDLE_POLLS: usize = 200;
+    /// How long those polls may take, far more than reading nothing needs;
+    /// rendering the look-back for each took seconds.
+    const IDLE_POLL_BOUND: Duration = Duration::from_secs(1);
+
+    /// A read from the log's end, as an idle `--since` poll makes, returns at
+    /// once with nothing, rendering none of the output before it.
+    #[test]
+    fn an_idle_poll_from_the_end_renders_nothing() {
+        let mut fixture = Fixture::new();
+        let line = format!("\x1b[32m{}\x1b[0m\n", "x".repeat(200));
+        for _ in 0..(2 * RENDER_LOOKBACK_BYTES as usize) / line.len() {
+            fixture.write(line.as_bytes());
+        }
+        let end = fixture.log().end();
+        let started = Instant::now();
+
+        for _ in 0..IDLE_POLLS {
+            let slice = fixture.read(&LogQuery::builder().since(Some(end)).build());
+            assert!(slice.lines().is_empty());
+            assert_eq!(slice.cursor(), end);
+        }
+
+        assert!(
+            started.elapsed() < IDLE_POLL_BOUND,
+            "{:?} for {IDLE_POLLS} polls",
+            started.elapsed()
         );
     }
 }

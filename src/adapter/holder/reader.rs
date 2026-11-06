@@ -19,7 +19,6 @@ use super::{
     log_reader::{read_log_range, visit_lines},
     protocol::HolderMessage,
     replay_request::ReplayRequest,
-    strip::strip_line,
 };
 use crate::{
     adapter::ipc,
@@ -81,8 +80,10 @@ impl Reader {
     }
 
     /// Reads the log from `from` up to `until` in pieces and forwards each
-    /// line one of `matchers` matches, as [`visit_lines`] hands it, stopping
-    /// once the handle is dropped.
+    /// line one of `matchers` matches, from where its drawing began, so a
+    /// line [`visit_lines`] hands in pieces reaches the tap whole: a line
+    /// begun in the piece goes from memory, and only one begun earlier is
+    /// read back from the log. It stops once the handle is dropped.
     fn forward_matching(
         &mut self,
         from: OutputCursor,
@@ -95,14 +96,22 @@ impl Reader {
         if matchers.is_empty() {
             return;
         }
-        let _ = visit_lines(&log, from, until, |at, line| {
+        let _ = visit_lines(&log, from, until, |piece| {
             if self.sink.is_detached() {
                 return ControlFlow::Break(());
             }
-            if strip_line(line)
-                .is_some_and(|text| matchers.iter().any(|matcher| matcher.is_match(&text)))
+            if !piece.bytes().is_empty()
+                && piece
+                    .texts()
+                    .iter()
+                    .any(|text| matchers.iter().any(|matcher| matcher.is_match(text)))
             {
-                self.forward(at, line.to_vec());
+                if piece.line_at() < piece.at() {
+                    let end = piece.at().advanced(piece.bytes().len() as u64);
+                    self.forward_logged(&log, piece.line_at(), end);
+                } else {
+                    self.forward(piece.at(), piece.bytes().to_vec());
+                }
             }
             ControlFlow::Continue(())
         });
@@ -122,12 +131,23 @@ impl Reader {
     /// placed past what was forwarded shows the tap the gap, as `logs -f`
     /// reports the bytes it skipped. A dropped handle ends it.
     fn catch_up(&mut self, log_end: OutputCursor) {
-        let Some(log) = self.log.clone() else {
-            return;
-        };
-        while self.delivered < log_end && !self.sink.is_detached() {
-            match read_log_range(&log, self.delivered, log_end, CATCH_UP_CHUNK_BYTES) {
-                Ok((at, bytes)) if !bytes.is_empty() => self.forward(at, bytes),
+        if let Some(log) = self.log.clone() {
+            self.forward_logged(&log, self.delivered, log_end);
+        }
+    }
+
+    /// Forwards what `log` holds from `from` up to `until`, in pieces of at
+    /// most [`CATCH_UP_CHUNK_BYTES`], each from the oldest byte still held
+    /// when rotation discarded more. A failed read or a dropped handle ends
+    /// it.
+    fn forward_logged(&mut self, log: &Path, from: OutputCursor, until: OutputCursor) {
+        let mut next = from;
+        while next < until && !self.sink.is_detached() {
+            match read_log_range(log, next, until, CATCH_UP_CHUNK_BYTES) {
+                Ok((at, bytes)) if !bytes.is_empty() => {
+                    next = at.advanced(bytes.len() as u64);
+                    self.forward(at, bytes);
+                },
                 Ok(_) | Err(_) => return,
             }
         }
@@ -173,6 +193,9 @@ pub(super) fn spawn_reader(mut reader: Reader) {
                     reader.exit_held.store(true, Ordering::SeqCst);
                     reader.sink.send(ProcessOutput::Exited(outcome));
                     return;
+                },
+                Ok(HolderMessage::Unlogged(bytes)) => {
+                    reader.sink.send(ProcessOutput::Unlogged(bytes));
                 },
                 Ok(HolderMessage::Warning(text)) => reader.sink.send(ProcessOutput::Warning(text)),
                 Ok(HolderMessage::Attached(count)) => {

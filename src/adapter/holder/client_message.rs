@@ -86,7 +86,8 @@ impl TryFrom<Frame> for ClientMessage {
             | FrameTag::Exited
             | FrameTag::Rejected
             | FrameTag::Warning
-            | FrameTag::Attached => Err(HolderError::UnexpectedFrame(tag)),
+            | FrameTag::Attached
+            | FrameTag::Unlogged => Err(HolderError::UnexpectedFrame(tag)),
         }
     }
 }

@@ -475,7 +475,8 @@ mod tests {
                     | ProcessOutput::Exited(_)
                     | ProcessOutput::Unreadable(_)
                     | ProcessOutput::Warning(_)
-                    | ProcessOutput::Attached(_) => None,
+                    | ProcessOutput::Attached(_)
+                    | ProcessOutput::Unlogged(_) => None,
                 })
                 .collect();
         assert_eq!(placed, [
@@ -545,7 +546,8 @@ mod tests {
                     | ProcessOutput::Exited(_)
                     | ProcessOutput::Unreadable(_)
                     | ProcessOutput::Warning(_)
-                    | ProcessOutput::Attached(_) => None,
+                    | ProcessOutput::Attached(_)
+                    | ProcessOutput::Unlogged(_) => None,
                 })
                 .collect();
         let (first, replayed) = placed.split_first().unwrap();

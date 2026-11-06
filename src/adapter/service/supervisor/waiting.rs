@@ -11,13 +11,14 @@ use super::{
 };
 use crate::{
     adapter::{
-        holder::LineMatcher,
+        holder::{LineMatcher, LogTail},
         service::{
             EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
             OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
+        terminal::log_renderer::dropped_lines,
     },
     domain::{
         port::ListeningSocket,
@@ -47,6 +48,11 @@ const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
 const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
+/// Names the lines a read of a process's log dropped, as against those its
+/// live output did.
+const IN_A_LOG_READ: &str = "in a read of its log";
+/// Ends a notice of dropped lines, which a run gets once from each source.
+const LATER_FAULTS_UNREPORTED: &str = "later ones this run are not reported";
 
 /// A wait checked against its process and ready to register: what it waits
 /// for, resolved and compiled. Made by [`Supervisor::prepare_wait`] before a
@@ -393,11 +399,7 @@ impl Supervisor {
     /// adoption is answered timed out with that tail's last lines; any other
     /// is refused when its `since` is past that end and registered, or held
     /// on a scan, otherwise.
-    pub(super) fn answer_held_waits(
-        &mut self,
-        pane: PaneId,
-        tail: Option<(OutputCursor, Vec<u8>)>,
-    ) {
+    pub(super) fn answer_held_waits(&mut self, pane: PaneId, tail: Option<LogTail>) {
         let Some(waits) = self.held_waits.get_mut(&pane) else {
             return;
         };
@@ -422,10 +424,8 @@ impl Supervisor {
             })
             .collect();
         if !timed_out.is_empty() {
-            let last_lines = tail
-                .as_ref()
-                .map(|(at, bytes)| log_tail_lines(*at, bytes))
-                .unwrap_or_default();
+            let (last_lines, dropped) = tail.as_ref().map(log_tail_lines).unwrap_or_default();
+            self.report_render_faults(pane, dropped);
             for (held, cursor) in timed_out {
                 let waiter = self.held_waiter(held);
                 self.answer_with_tail(
@@ -441,8 +441,11 @@ impl Supervisor {
             return;
         }
         if self.knows_no_output(pane) {
-            let (at, bytes) = tail.unwrap_or((OutputCursor::new(0), Vec::new()));
-            self.tap(pane).seed_at(at, &bytes);
+            match &tail {
+                Some(tail) => self.tap(pane).seed_at(*tail.at(), tail.bytes()),
+                None => self.tap(pane).seed_at(OutputCursor::new(0), &[]),
+            }
+            self.report_render_faults(pane, 0);
         }
         for HeldWait {
             prepared,
@@ -625,12 +628,31 @@ impl Supervisor {
             .filter_map(|waiter| self.quick_exit_end(waiter.pane()));
         let held = self.held_waits.values().flatten().map(|held| held.deadline);
         let answers = self.held_answers.iter().map(|held| held.deadline);
+        let rechecks = self.taps.values().filter_map(OutputTap::recheck_at);
         waits
             .chain(checks)
             .chain(windows)
             .chain(held)
             .chain(answers)
+            .chain(rechecks)
             .min()
+    }
+
+    /// Tests each long unfinished line left untested and due by `now`
+    /// against the patterns still waiting on its pane.
+    fn test_due_partials(&mut self, now: Instant) {
+        let due: Vec<PaneId> = self
+            .taps
+            .iter()
+            .filter(|(_, tap)| tap.recheck_at().is_some_and(|at| at <= now))
+            .map(|(pane, _)| *pane)
+            .collect();
+        for pane in due {
+            let line = self.tap(pane).unfinished_due(now);
+            if self.awaits_a_pattern(pane) {
+                self.test_lines(pane, &Vec::from_iter(line));
+            }
+        }
     }
 
     /// When the quick-exit window of `pane`'s live run ends.
@@ -647,6 +669,7 @@ impl Supervisor {
     /// condition now holds. The host runs it after each event it hands the
     /// supervisor.
     pub fn settle_waits(&mut self, now: Instant) {
+        self.test_due_partials(now);
         self.release_adoption_waits();
         self.settle_overdue_held_waits(now);
         self.send_overdue_answers(now);
@@ -733,10 +756,76 @@ impl Supervisor {
     }
 
     /// Feeds one chunk of `pane`'s output to its tap and tests what it
-    /// completed against the pane's readiness pattern and log waits.
+    /// completed against the pane's readiness pattern and log waits, and the
+    /// line still being written too, so a prompt with no newline can match.
+    /// That line is rendered whole only while a pattern waits on the pane;
+    /// otherwise a chunk costs only its own bytes, and a line too long to
+    /// render whole on every chunk is tested at most once per
+    /// [`PARTIAL_RECHECK`](crate::adapter::service::output_tap::PARTIAL_RECHECK),
+    /// from [`Self::settle_waits`].
     pub(super) fn tap_output(&mut self, pane: PaneId, at: Option<OutputCursor>, bytes: &[u8]) {
-        let lines = self.tap(pane).feed(at, bytes);
+        let mut lines = self.tap(pane).feed(at, bytes);
+        if self.awaits_a_pattern(pane) {
+            lines.extend(self.tap(pane).unfinished_for_pattern(Instant::now()));
+        }
+        self.report_render_faults(pane, 0);
         self.test_lines(pane, &lines);
+    }
+
+    /// Tests output `pane`'s log could not hold against its readiness
+    /// pattern and log waits, so a full disk never leaves them blind, as
+    /// [`OutputTap::feed_unlogged`] renders it: carried across chunks, at
+    /// no place in the log, and with a dropped line reported as a log
+    /// read's are. Best effort: a resync or an adoption loses what was not
+    /// tested yet.
+    pub(super) fn test_unlogged(&mut self, pane: PaneId, bytes: &[u8]) {
+        let lines = self.tap(pane).feed_unlogged(bytes);
+        self.report_render_faults(pane, 0);
+        self.test_lines(pane, &lines);
+    }
+
+    /// Warns, once per run each, that lines of `pane`'s output were dropped
+    /// because rendering them panicked: those its tap dropped, and apart
+    /// from them the `read` more a read of its log did, so a read never
+    /// stands in for the warning the live output is owed.
+    pub(super) fn report_render_faults(&mut self, pane: PaneId, read: usize) {
+        if read > 0 {
+            self.tap(pane).note_read_faults(read);
+        }
+        let Some(tap) = self.taps.get_mut(&pane) else {
+            return;
+        };
+        let (live, read) = (tap.take_fault_report(), tap.take_read_fault_report());
+        if live.is_none() && read.is_none() {
+            return;
+        }
+        let reports = [
+            live.map(dropped_lines),
+            read.map(|dropped| format!("{} {IN_A_LOG_READ}", dropped_lines(dropped))),
+        ];
+        let name = self
+            .workspace
+            .process(pane)
+            .map(|process| process.name().to_string())
+            .unwrap_or_default();
+        for report in reports.into_iter().flatten() {
+            self.notify(
+                NoticeLevel::Warning,
+                Some(pane),
+                format!("{name}: {report}; {LATER_FAULTS_UNREPORTED}"),
+            );
+        }
+    }
+
+    /// Whether a readiness pattern or a log wait still waits on `pane`'s
+    /// output.
+    fn awaits_a_pattern(&self, pane: PaneId) -> bool {
+        let generation = self.current_generation(pane);
+        self.readiness.get(&pane).is_some_and(|readiness| {
+            readiness.state().is_waiting() && readiness.matcher().is_some()
+        }) || self.waiters.iter().any(|waiter| {
+            waiter.pane() == pane && waiter.pin().counts(generation) && waiter.matcher().is_some()
+        })
     }
 
     /// Tests `lines` of `pane`'s current run against its readiness pattern
@@ -1434,12 +1523,14 @@ fn invalid_input(message: String) -> ServiceErrorBody {
         .build()
 }
 
-/// The last [`FAILURE_TAIL_LINES`] lines of `bytes`, the end of a log that
-/// starts at `at`.
-fn log_tail_lines(at: OutputCursor, bytes: &[u8]) -> Vec<String> {
-    let mut tap = OutputTap::new(at);
-    tap.seed_at(at, bytes);
-    tap.tail(FAILURE_TAIL_LINES)
+/// The last [`FAILURE_TAIL_LINES`] lines of the newest run in `tail`, the
+/// end of a log, rendered as every reader renders it, and how many lines
+/// rendering dropped.
+fn log_tail_lines(tail: &LogTail) -> (Vec<String>, usize) {
+    let mut tap = OutputTap::new(*tail.at());
+    tap.seed_at(*tail.at(), tail.bytes());
+    let dropped = tap.take_fault_report().unwrap_or_default();
+    (tap.tail(FAILURE_TAIL_LINES), dropped)
 }
 
 #[cfg(test)]
@@ -1450,11 +1541,18 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapter::service::{
-            LaunchEnvironment, StackEvent, StateGoal,
-            supervisor::{
-                LogReadResult,
-                testing::{name as process_name, spec as process_spec, *},
+        adapter::{
+            holder::FULL_SCREEN_LINE,
+            service::{
+                LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
+                supervisor::{
+                    LogReadResult,
+                    testing::{name as process_name, spec as process_spec, *},
+                },
+            },
+            terminal::{
+                escape::{END_OPEN_LINE, RUN_START},
+                render_fault,
             },
         },
         domain::{
@@ -1910,6 +2008,103 @@ mod tests {
         assert!(event_kinds(&harness).contains(&EventKind::Ready));
     }
 
+    /// Output the log could not hold, as a holder sends it when a write
+    /// fails, still passes a readiness log check and answers a log wait,
+    /// and leaves the tap's cursor where the log ends.
+    #[test]
+    fn unlogged_output_still_passes_readiness_and_waits() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let ready_wait = wait_on(&mut harness, "api", &spec(None, None), None);
+        let log_wait = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("listening")), None),
+            None,
+        );
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        let cursor = harness.supervisor_mut().tap(pane).cursor();
+
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"webpack compiled in 3ms\nlistening on 3000".to_vec()),
+        );
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        assert_eq!(answered(&ready_wait).unwrap().status(), WaitStatus::Matched);
+        assert_eq!(answered(&log_wait).unwrap().status(), WaitStatus::Matched);
+        assert_eq!(harness.supervisor_mut().tap(pane).cursor(), cursor);
+    }
+
+    /// A line of unlogged output split across two chunks is tested whole,
+    /// and logged output after it starts the unlogged rendering over.
+    #[test]
+    fn an_unlogged_line_split_across_chunks_is_tested_whole() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let ready_wait = wait_on(&mut harness, "api", &spec(None, None), None);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+
+        for part in [&b"webpack comp"[..], &b"iled in 3ms\n"[..]] {
+            harness.supervisor_mut().handle_output(
+                pane,
+                generation,
+                ProcessOutput::Unlogged(part.to_vec()),
+            );
+        }
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        assert_eq!(
+            answered(&ready_wait).map(|answer| answer.status()),
+            Some(WaitStatus::Matched)
+        );
+        let log_wait = wait_on(&mut harness, "api", &spec(Some(log("abc")), None), None);
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"a".to_vec()),
+        );
+        print(&mut harness, "api", b"x\n");
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"bc\n".to_vec()),
+        );
+        assert!(answered(&log_wait).is_none(), "logged output starts over");
+    }
+
+    /// A line of unlogged output that rendering drops is reported, as a
+    /// log read's dropped lines are.
+    #[test]
+    fn a_dropped_line_of_unlogged_output_is_reported() {
+        const NOTICE: &str = "api: 1 line(s) of output could not be rendered and were dropped \
+                              in a read of its log; later ones this run are not reported";
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+
+        render_fault::arm();
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"lost\nkept\n".to_vec()),
+        );
+
+        assert_eq!(harness.notice_messages(), [NOTICE]);
+    }
+
     #[test]
     fn a_readiness_check_that_times_out_warns_and_fails_its_wait() {
         let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
@@ -2148,6 +2343,37 @@ mod tests {
         assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
     }
 
+    /// A first run whose output the tap held from where the run starts, as
+    /// the holder sends it, answers a wait its crash ends at once, with the
+    /// lines the tap holds: no log read could add one.
+    #[test]
+    fn a_first_run_failure_answers_without_a_log_read() {
+        let (_release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        harness.up();
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let start = OutputCursor::new(64);
+        harness.supervisor_mut().place_run(pane, start);
+        harness
+            .supervisor_mut()
+            .tap_output(pane, Some(start), b"booting\nError: EADDRINUSE\n");
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(3)),
+        );
+
+        let outcome = answered(&answers).expect("answered without a read");
+        assert_eq!(outcome.tail(), &["booting", "Error: EADDRINUSE"]);
+        assert_eq!(adopter.reads_started(), 0);
+    }
+
     /// A harness over `api` adopting through `adopter`, whose log reads
     /// stall until its gate is released.
     fn stalled(adopter: &StuckLogAdopter) -> Harness {
@@ -2227,7 +2453,12 @@ mod tests {
             landed,
             read,
             LogReadResult::builder()
-                .tail(Some((OutputCursor::new(0), b"late\n".to_vec())))
+                .tail(Some(
+                    LogTail::builder()
+                        .at(OutputCursor::new(0))
+                        .bytes(b"late\n".to_vec())
+                        .build(),
+                ))
                 .build(),
         );
         let supervisor = harness.supervisor();
@@ -2289,5 +2520,175 @@ mod tests {
             EventKind::Started,
             EventKind::Exited
         ]);
+    }
+
+    /// The notice a dropped line of `api`'s output raises.
+    const DROPPED_NOTICE: &str = "api: 1 line(s) of output could not be rendered and were \
+                                  dropped; later ones this run are not reported";
+
+    /// A panic while rendering a child's output never reaches the service:
+    /// the line it hit is dropped with a warning, once per run however often
+    /// it happens, and the output after it still matches a wait.
+    #[test]
+    fn a_renderer_panic_drops_the_line_with_a_warning() {
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+        print(&mut harness, "api", b"before\n");
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("after")), None), None);
+
+        render_fault::arm();
+        print(&mut harness, "api", "lost 你\r\x1b[1K".as_bytes());
+        print(&mut harness, "api", b"after\n");
+        render_fault::arm();
+        print(&mut harness, "api", b"lost again\n");
+
+        let outcome = answered(&answers).expect("the line after the fault matches");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+        assert_eq!(harness.notice_messages(), [DROPPED_NOTICE]);
+
+        end(&mut harness, "api", ExitOutcome::Succeeded);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let respawn = harness.supervisor_mut().current_generation(pane);
+        harness.supervisor_mut().handle_respawn(pane, respawn);
+        render_fault::arm();
+        print(&mut harness, "api", b"lost in the next run\n");
+        assert_eq!(harness.notice_messages(), [DROPPED_NOTICE, DROPPED_NOTICE]);
+    }
+
+    /// Lines a read of the log dropped are warned of apart from the live
+    /// output's, once per run, so a read warned of first never uses up the
+    /// warning a fault in the live output is owed.
+    #[test]
+    fn a_read_fault_never_uses_up_the_live_warning() {
+        const READ_NOTICE: &str = "api: 2 line(s) of output could not be rendered and were \
+                                   dropped in a read of its log; later ones this run are not \
+                                   reported";
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        harness.supervisor_mut().report_render_faults(pane, 2);
+        harness.supervisor_mut().report_render_faults(pane, 1);
+        render_fault::arm();
+        print(&mut harness, "api", b"lost\n");
+
+        assert_eq!(harness.notice_messages(), [READ_NOTICE, DROPPED_NOTICE]);
+    }
+
+    /// The end of a log as the holder writes it: a run killed on the
+    /// alternate screen, then a run that printed two lines.
+    fn killed_on_the_full_screen() -> Vec<u8> {
+        [
+            RUN_START,
+            b"run 1\n",
+            END_OPEN_LINE,
+            FULL_SCREEN_LINE.as_bytes(),
+            b"\r\n",
+            RUN_START,
+            b"ready\nboom\n",
+        ]
+        .concat()
+    }
+
+    /// A wait seeded from the log of a process this service never saw run
+    /// renders it as every reader does, and its tail is the last run's.
+    #[test]
+    fn a_seeded_wait_renders_each_run_from_a_fresh_terminal() {
+        let start = OutputCursor::new(100);
+        let tail = killed_on_the_full_screen();
+        let mut harness = Harness::over(Box::new(FakeRunner), &[api(RestartPolicy::Never, None)])
+            .adopting_through(Box::new(LoggedAdopter::new(start, &tail)));
+
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("never")), Some(start)),
+            None,
+        );
+
+        let outcome = answered(&answers).expect("a process not running is answered at once");
+        assert_eq!(*outcome.tail(), ["ready", "boom"]);
+    }
+
+    /// The tail a timed-out wait carries from a log renders it as every
+    /// reader does: the last run's lines, or every line of a tail that
+    /// starts inside its run.
+    #[test]
+    fn a_log_tail_renders_as_every_reader_does() {
+        let killed = LogTail::builder()
+            .at(OutputCursor::new(100))
+            .bytes(killed_on_the_full_screen())
+            .build();
+        let mid_run = LogTail::builder()
+            .at(OutputCursor::new(500))
+            .bytes(b"line 1\nline 2\n".to_vec())
+            .build();
+
+        assert_eq!(
+            log_tail_lines(&killed),
+            (vec!["ready".into(), "boom".into()], 0)
+        );
+        assert_eq!(log_tail_lines(&mid_run).0, ["line 1", "line 2"]);
+    }
+
+    /// Chunks of erases the pending-pattern test feeds onto one long line.
+    const ERASE_CHUNKS: usize = 1024;
+    /// How long those chunks may take with a pattern waiting; rendering the
+    /// whole line for each took seconds.
+    const ERASE_BOUND: Duration = Duration::from_secs(2);
+
+    /// A pattern waiting on a process costs each chunk only its own bytes,
+    /// even on a line that never ends and is erased again and again: the
+    /// long unfinished line is tested at most once per recheck, not once
+    /// per chunk, and a match on it is still found then.
+    #[test]
+    fn a_waiting_pattern_tests_a_long_unfinished_line_once_per_recheck() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("READY")), None), None);
+        print(&mut harness, "api", &vec![b'x'; 32 * 1024]);
+        let erases = b"\x1b[1K".repeat(1024);
+        let started = Instant::now();
+
+        for _ in 0..ERASE_CHUNKS {
+            print(&mut harness, "api", &erases);
+        }
+
+        assert!(
+            started.elapsed() < ERASE_BOUND,
+            "{:?} for {ERASE_CHUNKS} chunks",
+            started.elapsed()
+        );
+        print(&mut harness, "api", b"\rREADY");
+        assert!(answered(&answers).is_none(), "the long line waits its turn");
+        let due = harness
+            .supervisor()
+            .next_wait_deadline()
+            .expect("the recheck is a deadline");
+        assert!(due <= Instant::now() + PARTIAL_RECHECK);
+        harness.supervisor_mut().settle_waits(due);
+        let outcome = answered(&answers).expect("the recheck finds the match");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
+    }
+
+    /// A short unfinished line, such as a prompt, is tested on the chunk
+    /// that drew it.
+    #[test]
+    fn a_waiting_pattern_tests_a_short_unfinished_line_at_once() {
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let answers = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("Password:")), None),
+            None,
+        );
+
+        print(&mut harness, "api", b"Password: ");
+
+        let outcome = answered(&answers).expect("a prompt matches at once");
+        assert_eq!(outcome.status(), WaitStatus::Matched);
     }
 }

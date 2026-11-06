@@ -5,7 +5,12 @@ use typed_builder::TypedBuilder;
 
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
 use crate::{
-    adapter::terminal::{colouring::Colouring, log_renderer::LogRenderer},
+    adapter::terminal::{
+        bounded_parser::char_chunks,
+        escape::LINE_FEED,
+        log_line::LogLine,
+        log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
+    },
     domain::{
         project::Project,
         value::{OutputCursor, ProcessName},
@@ -33,12 +38,15 @@ pub struct LogRead {
 impl LogRead {
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
     /// replaced and the cursor just past it: a log as the lines `muster logs`
-    /// prints, without colour, and a screen without the blank rows below its
-    /// last text.
+    /// prints, without color, with how many rendering dropped, and a screen
+    /// without the blank rows below its last text.
     pub fn text_in(&self, project: &Project) -> LogText {
-        let text = match self.log {
-            Some(_) => LogRenderer::text_of(&self.bytes, Colouring::Plain),
-            None => String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
+        let (text, unrendered) = match &self.log {
+            Some(_) => self.rendered_text(),
+            None => (
+                String::from_utf8_lossy(&self.bytes).trim_end().to_string(),
+                0,
+            ),
         };
         LogText::builder()
             .project(ProjectIdentityView::from(project))
@@ -46,7 +54,29 @@ impl LogRead {
             .log(self.log.clone())
             .text(text)
             .cursor(self.end)
+            .unrendered_lines((unrendered > 0).then_some(unrendered))
             .build()
+    }
+
+    /// Every line read of the log, rendered as `muster logs` prints it
+    /// without color, each ending in a line break, the unfinished last one
+    /// too, and how many lines rendering dropped.
+    fn rendered_text(&self) -> (String, usize) {
+        let mut renderer = LogRenderer::new();
+        let mut text = String::new();
+        let mut append = |lines: Vec<LogLine>| {
+            for line in lines {
+                text.push_str(&line.plain());
+                text.push(char::from(LINE_FEED));
+            }
+        };
+        for chunk in char_chunks(&self.bytes, RENDER_CHUNK_BYTES) {
+            renderer.advance(chunk);
+            append(renderer.take_lines());
+        }
+        renderer.finish();
+        append(renderer.take_lines());
+        (text, renderer.take_faults())
     }
 }
 
@@ -99,7 +129,7 @@ mod tests {
         assert_eq!(screen.text_in(&project).text(), "$ ready\n  indented");
     }
 
-    /// A log read carries the text `muster logs` prints, without colour: a
+    /// A log read carries the text `muster logs` prints, without color: a
     /// progress bar at its last state, no title and no footer redraw.
     #[test]
     fn a_log_read_carries_its_rendered_text() {

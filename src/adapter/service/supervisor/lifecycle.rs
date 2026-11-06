@@ -424,6 +424,11 @@ impl Supervisor {
                     self.tap_output(pane, Some(at), &bytes);
                 }
             },
+            ProcessOutput::Unlogged(bytes) => {
+                if self.panes.contains_key(&pane) {
+                    self.test_unlogged(pane, &bytes);
+                }
+            },
             ProcessOutput::Repaint { bytes, size } => self.keep_screen(pane, &bytes, size),
             ProcessOutput::Warning(warning) => {
                 self.notify(NoticeLevel::Warning, Some(pane), warning);

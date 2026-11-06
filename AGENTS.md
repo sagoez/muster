@@ -94,9 +94,9 @@ plugs into a port.
     the `idle_stop_*` columns of `settings` and `projects`),
     `adapter/exchange` (the export file), `adapter/detect` (stack
     detection for `muster init`), `adapter/terminal` (the VT emulator,
-    keyboard tracker and log line renderer), `adapter/herdr` (the `TerminalWorkspace` port over
-    the herdr CLI, each call bounded and its child killed and reaped),
-    notifier, metrics.
+    keyboard tracker and log line renderer), `adapter/herdr` (the
+    `TerminalWorkspace` port over the herdr CLI, each call bounded and its
+    child killed and reaped), notifier, metrics.
 - **`main.rs`** - the composition root. The only place that knows every concrete
   adapter; it constructs them, wires them to ports, and runs. It hands the CLI
   its ports through `CliPorts`, builds the MCP server's deps when the CLI asks

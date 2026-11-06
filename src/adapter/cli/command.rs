@@ -220,8 +220,8 @@ pub enum Command {
     /// Detect processes in this folder and add them.
     ///
     /// Finds processes in the folder's package.json, Procfile, justfile,
-    /// Makefile or Compose file. At a terminal it asks which to add; elsewhere it lists them and adds
-    /// the suggested ones with --yes.
+    /// Makefile or Compose file. At a terminal it asks which to add;
+    /// elsewhere it lists them and adds the suggested ones with --yes.
     Init {
         /// Add the suggested processes without asking.
         #[arg(short, long)]

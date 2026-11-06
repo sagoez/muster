@@ -1,7 +1,10 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
-use crate::adapter::{client::LogSliceView, sanitize::printable_lines, service::WaitOutcome};
+use crate::adapter::{
+    client::LogSliceView, sanitize::printable_lines, service::WaitOutcome,
+    terminal::log_renderer::dropped_lines,
+};
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;
@@ -23,6 +26,9 @@ pub fn log_text(view: &LogSliceView) -> String {
             "\n[... {} earlier lines omitted]",
             view.omitted_lines()
         ));
+    }
+    if view.unrendered_lines() > 0 {
+        text.push_str(&format!("\n[{}]", dropped_lines(view.unrendered_lines())));
     }
     if !view.text().is_empty() {
         text.push('\n');
@@ -81,6 +87,7 @@ mod tests {
             ])
             .omitted_lines(3)
             .rotated_away_bytes(0)
+            .unrendered_lines(0)
             .build();
         let view = LogSliceView::for_slice(ProcessName::try_new("api").unwrap(), &slice, None);
 
@@ -88,6 +95,29 @@ mod tests {
             log_text(&view),
             "api o:16010..o:18234 (2 lines)\n[... 3 earlier lines omitted]\nListening on 3000\nGET / 200"
         );
+    }
+
+    /// Lines rendering dropped are named under the header, so an agent knows
+    /// the log it reads is missing some.
+    #[test]
+    fn dropped_lines_are_named() {
+        let slice = LogSlice::builder()
+            .from(OutputCursor::new(0))
+            .cursor(OutputCursor::new(9))
+            .lines(vec!["ok".to_string()])
+            .omitted_lines(0)
+            .rotated_away_bytes(0)
+            .unrendered_lines(2)
+            .build();
+        let view = LogSliceView::for_slice(ProcessName::try_new("api").unwrap(), &slice, None);
+
+        assert_eq!(view.unrendered_lines(), 2);
+        assert_eq!(
+            log_text(&view),
+            "api o:0..o:9 (1 lines)\n[2 line(s) of output could not be rendered and were \
+             dropped]\nok"
+        );
+        assert_eq!(serde_json::to_value(&view).unwrap()["unrendered_lines"], 2);
     }
 
     /// A screen loses its trailing blanks and its escape sequences, and a

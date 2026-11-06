@@ -141,7 +141,7 @@ mod tests {
         adapter::{
             cli::rendered_log::{RenderedLog, gap_line},
             holder::RotatingLog,
-            terminal::colouring::Colouring,
+            terminal::coloring::Coloring,
         },
         domain::value::ByteSize,
     };
@@ -164,7 +164,7 @@ mod tests {
     fn pump(follower: &mut LogFollower) -> String {
         let mut bytes = Vec::new();
         follower
-            .pump(&mut RenderedLog::new(&mut bytes, Colouring::Plain))
+            .pump(&mut RenderedLog::new(&mut bytes, Coloring::Plain))
             .unwrap();
         String::from_utf8(bytes).unwrap()
     }

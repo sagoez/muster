@@ -60,7 +60,12 @@ mod lock;
 mod lock_command;
 mod log_filter_args;
 mod log_follower;
+mod mcp_agent;
+mod mcp_command;
 mod mcp_launch;
+mod mcp_register;
+mod mcp_registration;
+mod mcp_scope;
 #[cfg(test)]
 mod memory_coordination;
 mod note;

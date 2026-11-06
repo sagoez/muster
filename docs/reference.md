@@ -195,6 +195,7 @@ settings.
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
+| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, or unregister it |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -429,6 +430,34 @@ signal it directly, and the service retries the holder on a backoff timer or
 on `start` or `restart`.
 
 ## MCP
+
+`muster mcp add <agent>` asks the agent's own CLI to register muster's
+server under the name `muster`, so the agent itself decides where the
+entry goes and how it is kept:
+
+| Agent | What runs |
+|---|---|
+| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
+| `codex` | `codex mcp add muster -- <muster> mcp` |
+| `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
+
+`muster mcp remove <agent>` runs `claude mcp remove [--scope <scope>]
+muster` or `codex mcp remove muster`, and for Zed says what to delete.
+Without `--scope`, Claude Code removes the server from whichever scope
+holds it. muster replaces itself with the agent's CLI (`exec`) in the
+current folder, so the agent owns the terminal and muster's exit, code or
+signal, is the agent's own, not one of muster's documented exit codes.
+`--scope` is Claude Code's: `user` (the default for add, every project),
+`local` (this folder's project, in your own config) or `project` (this
+folder's `.mcp.json`). Codex and Zed take servers for the user only.
+`--project` is refused, as the agent works in the current folder. When the
+agent, or what it needs to start, is not found, muster fails with the OS
+error and prints the command to run once it is installed.
+
+`<muster>` is this binary's own path, as `--print-config` prints it, and a
+binary replaced or removed since it started is refused rather than named; a
+`project` scope entry, shared with whoever clones the project, names the
+bare `muster` for each person's own `PATH` to find.
 
 `muster mcp --print-config` prints the config snippet. Each tool call acts on
 the project its `project` argument names, else the one the server's folder,

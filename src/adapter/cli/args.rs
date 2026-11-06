@@ -12,7 +12,10 @@ use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
 use strum::IntoEnumIterator;
 
-use super::{cli_ports::CliPorts, command::Command, shell_init::SHELL_INIT_SUBCOMMAND};
+use super::{
+    cli_ports::CliPorts, command::Command, mcp_agent::McpAgent, mcp_scope::McpScope,
+    shell_init::SHELL_INIT_SUBCOMMAND,
+};
 use crate::{
     adapter::{
         holder::{LineLimit, MAX_LOG_LINES},
@@ -155,6 +158,10 @@ static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateG
 pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
 /// The names `muster open --direction` accepts.
 static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
+/// The agents `muster mcp add` accepts.
+static MCP_AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpAgent>);
+/// The scopes `muster mcp add --scope` accepts.
+static MCP_SCOPES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpScope>);
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -190,6 +197,16 @@ pub(super) fn stop_signal_parser() -> impl TypedValueParser<Value = StopSignal> 
 /// Parses a `muster wait --state`.
 pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
     one_of(&STATE_GOALS)
+}
+
+/// Parses the agent of `muster mcp add`.
+pub(super) fn mcp_agent_parser() -> impl TypedValueParser<Value = McpAgent> {
+    one_of(&MCP_AGENTS)
+}
+
+/// Parses a `muster mcp add --scope`.
+pub(super) fn mcp_scope_parser() -> impl TypedValueParser<Value = McpScope> {
+    one_of(&MCP_SCOPES)
 }
 
 /// Parses a positive duration such as `5s` or `1m 30s`.

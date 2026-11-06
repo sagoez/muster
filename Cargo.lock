@@ -1499,14 +1499,8 @@ dependencies = [
  "muster-store",
  "muster-terminal",
  "notify-rust",
- "nutype",
- "portable-pty",
- "regex",
- "rmcp",
  "rusqlite",
  "rustix",
- "schemars",
- "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1516,13 +1510,8 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
- "tokio",
  "typed-builder",
- "unicode-normalization",
- "unicode-properties",
  "unicode-width",
- "ureq",
- "uuid",
 ]
 
 [[package]]

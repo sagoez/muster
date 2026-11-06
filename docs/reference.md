@@ -398,22 +398,24 @@ entry goes and how it is kept:
 |---|---|
 | `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
 | `codex` | `codex mcp add muster -- <muster> mcp` |
-| `zed` | nothing: Zed has no such command, so muster prints the `context_servers` entry to add to its settings, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
+| `zed` | nothing: Zed has no such command, so muster prints the entry `--print-config` prints, to add under `context_servers` in its settings as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
-`muster mcp remove <agent>` runs `claude mcp remove --scope <scope> muster`
-or `codex mcp remove muster`, and for Zed says what to delete. The agent's
-CLI runs in the current folder with the terminal handed to it, so it
-speaks for itself, and muster exits with its exit code. `--scope` is
-Claude Code's: `user` (the default, every project), `local` (this folder's
-project, in your own config) or `project` (this folder's `.mcp.json`).
-Codex and Zed take servers for the user only. When the agent's binary is
-not on `PATH`, muster fails and prints the command to run once it is
-installed.
+`muster mcp remove <agent>` runs `claude mcp remove [--scope <scope>]
+muster` or `codex mcp remove muster`, and for Zed says what to delete.
+Without `--scope`, Claude Code removes the server from whichever scope
+holds it. muster replaces itself with the agent's CLI (`exec`) in the
+current folder, so the agent owns the terminal and muster's exit, code or
+signal, is the agent's own, not one of muster's documented exit codes.
+`--scope` is Claude Code's: `user` (the default for add, every project),
+`local` (this folder's project, in your own config) or `project` (this
+folder's `.mcp.json`). Codex and Zed take servers for the user only.
+`--project` is refused, as the agent works in the current folder. When the
+agent's binary is not on `PATH`, muster fails and prints the command to run
+once it is installed.
 
-`<muster>` is the bare `muster` when the first `muster` on `PATH` is this
-binary, so the entry survives an upgrade, else this binary's own path; a
-`project` scope entry, shared with whoever clones the project, always names
-the bare `muster`.
+`<muster>` is this binary's own path, as `--print-config` prints it; a
+`project` scope entry, shared with whoever clones the project, names the
+bare `muster` for each person's own `PATH` to find.
 
 `muster mcp --print-config` prints the config snippet. Each tool call acts on
 the project its `project` argument names, else the one the server's folder,

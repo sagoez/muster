@@ -13,9 +13,11 @@ pub struct McpRegistration {
     #[arg(value_parser = mcp_agent_parser())]
     #[getset(get_copy = "pub")]
     agent: McpAgent,
-    /// Claude Code's scope: user (every project, the default), local (this
-    /// folder's project, in your own config) or project (this folder's
-    /// .mcp.json). Codex and Zed take servers for the user only.
+    /// Claude Code's scope: user (every project, the default for add), local
+    /// (this folder's project, in your own config) or project (this
+    /// folder's .mcp.json); remove without it takes the server out of
+    /// whichever scope holds it. Codex and Zed take servers for the user
+    /// only.
     #[arg(long, value_parser = mcp_scope_parser())]
     #[getset(get_copy = "pub")]
     scope: Option<McpScope>,

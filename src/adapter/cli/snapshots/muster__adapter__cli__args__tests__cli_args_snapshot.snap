@@ -832,7 +832,7 @@ Arguments:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Claude Code's scope: user (every project, the default), local (this folder's project, in your own config) or project (this folder's .mcp.json). Codex and Zed take servers for the user only [possible values: local, project, user]
+      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
   -h, --help               Print help (see more with '--help')
 
 
@@ -846,7 +846,7 @@ Arguments:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Claude Code's scope: user (every project, the default), local (this folder's project, in your own config) or project (this folder's .mcp.json). Codex and Zed take servers for the user only [possible values: local, project, user]
+      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
   -h, --help               Print help (see more with '--help')
 
 

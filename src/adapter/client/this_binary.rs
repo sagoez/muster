@@ -22,13 +22,6 @@ pub fn this_binary() -> PathBuf {
     located(env::current_exe(), env::var_os("PATH"))
 }
 
-/// This muster binary as an agent's config names it: the bare `muster`
-/// when the first `muster` on `PATH` is this binary, else its own path.
-pub fn binary_as_typed() -> PathBuf {
-    let own = this_binary();
-    as_typed(runnable(&own).unwrap_or(own), env::var_os("PATH"))
-}
-
 /// The binary a pane can run for `binary`: `binary` when it is a file, or
 /// for one Linux marks as replaced, the file now at its path. None for a
 /// path that is not absolute or names no file.
@@ -57,17 +50,6 @@ fn located(current: io::Result<PathBuf>, path: Option<OsString>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(APP_NAME))
 }
 
-/// The bare `muster` when the first one in `path` is the file `own` leads
-/// to, else `own`.
-fn as_typed(own: PathBuf, path: Option<OsString>) -> PathBuf {
-    let same = |first: PathBuf| matches!((fs::canonicalize(first), fs::canonicalize(&own)), (Ok(a), Ok(b)) if a == b);
-    if path.and_then(|path| on_path(&path)).is_some_and(same) {
-        PathBuf::from(APP_NAME)
-    } else {
-        own
-    }
-}
-
 /// The first runnable file named `muster` in the absolute folders of
 /// `path`, a `PATH` value.
 fn on_path(path: &OsStr) -> Option<PathBuf> {
@@ -82,7 +64,7 @@ fn on_path(path: &OsStr) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind, os::unix::fs::symlink};
+    use std::io::ErrorKind;
 
     use tempfile::TempDir;
 
@@ -141,24 +123,5 @@ mod tests {
         assert_eq!(runnable(&removed), None);
         assert_eq!(runnable(&dir.path().join("missing")), None);
         assert_eq!(runnable(Path::new(APP_NAME)), None);
-    }
-
-    /// A `PATH` whose first `muster` links to this binary gives the bare
-    /// name; another `muster` first, or none, gives this binary's path.
-    #[test]
-    fn the_bare_name_stands_for_this_binary_only_when_path_finds_it() {
-        let installs = folder_with_muster(0o755);
-        let own = installs.path().join(APP_NAME);
-        let bin = TempDir::new().unwrap();
-        symlink(&own, bin.path().join(APP_NAME)).unwrap();
-        let other = folder_with_muster(0o755);
-
-        assert_eq!(
-            as_typed(own.clone(), Some(bin.path().into())),
-            PathBuf::from(APP_NAME)
-        );
-        let later = env::join_paths([other.path(), bin.path()]).unwrap();
-        assert_eq!(as_typed(own.clone(), Some(later)), own);
-        assert_eq!(as_typed(own.clone(), None), own);
     }
 }

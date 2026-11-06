@@ -12,6 +12,7 @@ use std::{
     os::unix::{
         fs::{PermissionsExt, symlink},
         net::{UnixListener, UnixStream},
+        process::ExitStatusExt,
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
@@ -3496,21 +3497,28 @@ fn mcp_print_config_is_plain_data() {
 }
 
 /// A fake agent CLI: it writes its working folder and then each argument on
-/// a line of its own to `<itself>.log`, speaks on stdout, and exits with
-/// the code in `<itself>.status` when there is one.
+/// a line of its own to `<itself>.log`, speaks on stdout, ends by SIGTERM
+/// when `<itself>.signal` exists, and exits with the code in
+/// `<itself>.status` when there is one.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 pwd -P > "$0.log"
 for arg in "$@"; do printf '%s\n' "$arg" >> "$0.log"; done
 echo "fake agent spoke"
+if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
 exit 0
 "#;
+/// The signal the fake ends by when asked to.
+const FAKE_AGENT_SIGNAL: i32 = 15;
+/// A mode under which nobody may run a file.
+const UNRUNNABLE_MODE: u32 = 0o600;
 /// The fakes' mode: their owner may run them.
 const FAKE_AGENT_MODE: u32 = 0o700;
 /// What the fakes print, which muster passes through.
 const FAKE_AGENT_SPEECH: &str = "fake agent spoke";
 
-/// A folder inside `scratch` holding fake `claude` and `codex` CLIs.
+/// A folder inside `scratch` holding fake `claude` and `codex` CLIs, and a
+/// `muster` link to the built binary.
 fn fake_agents(scratch: &Scratch) -> PathBuf {
     let bin = scratch.path().join("agents");
     fs::create_dir_all(&bin).unwrap();
@@ -3519,6 +3527,11 @@ fn fake_agents(scratch: &Scratch) -> PathBuf {
         fs::write(&script, FAKE_AGENT).unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(FAKE_AGENT_MODE)).unwrap();
     }
+    symlink(
+        Path::new(BINARY).canonicalize().unwrap(),
+        bin.join(APP_NAME),
+    )
+    .unwrap();
     bin
 }
 
@@ -3544,10 +3557,11 @@ fn agent_call(bin: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// `mcp add` and `mcp remove` run the agent's own CLI in this folder, its
-/// output passed through: Claude Code with its scope, Codex with none and
-/// only the user's, muster's command line after `--`, and muster exits as
-/// the agent does.
+/// `mcp add` and `mcp remove` become the agent's own CLI in this folder, its
+/// output passed through: Claude Code with its scope, a remove with only a
+/// scope given, Codex with none and only the user's, muster's command line
+/// after `--` naming this binary's path even with a `muster` link first on
+/// `PATH`, and muster's exit, signal or code, the agent's own.
 #[test]
 fn mcp_add_and_remove_run_the_agents_own_cli() {
     let scratch = Scratch::new();
@@ -3580,8 +3594,38 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
     assert_eq!(agent_call(&bin, "claude"), [
-        here, "mcp", "remove", "--scope", "user", "muster"
+        here, "mcp", "remove", "muster"
     ]);
+    let scoped = mcp_with_agents(&scratch, &bin, &folder, &[
+        "remove", "claude", "--scope", "local",
+    ]);
+    assert!(scoped.status.success(), "{}", shown(&scoped));
+    assert_eq!(agent_call(&bin, "claude")[1..], [
+        "mcp", "remove", "--scope", "local", "muster"
+    ]);
+
+    let elsewhere = scratch
+        .command(&["-p", here, "mcp", "add", "claude"])
+        .current_dir(&folder)
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(elsewhere.status.code(), Some(2), "{}", shown(&elsewhere));
+    assert!(
+        String::from_utf8_lossy(&elsewhere.stderr).contains("take no --project"),
+        "{}",
+        shown(&elsewhere)
+    );
+    assert_eq!(agent_call(&bin, "claude")[2], "remove", "nothing ran");
+
+    fs::write(bin.join("claude.signal"), "").unwrap();
+    let killed = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert_eq!(
+        killed.status.signal(),
+        Some(FAKE_AGENT_SIGNAL),
+        "{}",
+        shown(&killed)
+    );
 
     let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
     assert!(codex.status.success(), "{}", shown(&codex));
@@ -3607,8 +3651,9 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
 }
 
 /// Without the agent on `PATH`, `mcp add` fails and names the command to
-/// run once it is installed; Zed, which has no such command, is given the
-/// entry to add by hand and nothing runs.
+/// run once it is installed; an agent found but not runnable fails with the
+/// OS error alone; Zed, which has no such command, is given the entry
+/// `--print-config` prints, and nothing runs.
 #[test]
 fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let scratch = Scratch::new();
@@ -3619,7 +3664,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "once it is installed and on PATH, run: claude mcp add --scope user muster -- {} mcp",
+        "claude is not on PATH; once it is installed, run: claude mcp add --scope user muster -- {} mcp",
         binary.display()
     );
     assert!(
@@ -3628,11 +3673,29 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
         shown(&missing)
     );
 
+    let locked = scratch.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("codex"), FAKE_AGENT).unwrap();
+    fs::set_permissions(
+        locked.join("codex"),
+        Permissions::from_mode(UNRUNNABLE_MODE),
+    )
+    .unwrap();
+    let unrunnable = mcp_with_agents(&scratch, &locked, &empty, &["add", "codex"]);
+    let said = String::from_utf8_lossy(&unrunnable.stderr);
+    assert!(!unrunnable.status.success(), "{}", shown(&unrunnable));
+    assert!(
+        said.contains("could not run codex") && !said.contains("once it is installed"),
+        "{}",
+        shown(&unrunnable)
+    );
+
     let zed = mcp_with_agents(&scratch, &empty, &empty, &["add", "zed"]);
     assert!(zed.status.success(), "{}", shown(&zed));
-    let entry = &parsed(&zed)["context_servers"]["muster"];
+    let printed = mcp_with_agents(&scratch, &empty, &empty, &["--print-config"]);
+    assert_eq!(zed.stdout, printed.stdout, "{}", shown(&zed));
+    let entry = &parsed(&zed)["mcpServers"]["muster"];
     assert_eq!(entry["command"], binary.to_str().unwrap());
-    assert_eq!(entry["args"], serde_json::json!(["mcp"]));
     assert!(
         String::from_utf8_lossy(&zed.stderr).contains("https://zed.dev/docs/ai/mcp"),
         "{}",
@@ -3643,7 +3706,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     assert!(unzed.status.success(), "{}", shown(&unzed));
     assert!(unzed.stdout.is_empty(), "{}", shown(&unzed));
     assert!(
-        String::from_utf8_lossy(&unzed.stderr).contains("delete \"muster\" from context_servers"),
+        String::from_utf8_lossy(&unzed.stderr).contains("delete the muster entry"),
         "{}",
         shown(&unzed)
     );

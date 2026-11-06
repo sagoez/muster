@@ -182,6 +182,7 @@ fn json_requested() -> bool {
 /// Runs the command `args` names on `ports`, printing its result and exiting
 /// with the code its outcome documents.
 pub fn run(args: Args, ports: &dyn CliPorts) {
+    let project_given = args.project().is_some();
     let invocation = Invocation::new(args.project().clone(), ports);
     let invocation = &invocation;
     match args.into_command() {
@@ -336,9 +337,10 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         Some(Command::Mcp {
             command: Some(command),
             ..
-        }) => match register(&command) {
-            Ok(code) => exit(code),
-            Err(error) => fail_command(false, &error),
+        }) => {
+            if let Err(error) = register(invocation, &command, project_given) {
+                fail_command(false, &error);
+            }
         },
         Some(Command::Mcp {
             command: None,

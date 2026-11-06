@@ -246,13 +246,19 @@ pub enum CliError {
     /// user's.
     #[error("{0} takes MCP servers for the user only; drop --scope or pass --scope user")]
     UserScopeOnly(&'static str),
-    /// The agent's own CLI could not be run.
-    #[error("could not run {program}: {source}; once it is installed and on PATH, run: {command}")]
-    AgentNotRunnable {
+    /// The agent's own CLI is not on `PATH`.
+    #[error("{program} is not on PATH; once it is installed, run: {command}")]
+    AgentMissing {
         /// The agent's binary.
         program: &'static str,
         /// The command muster would have run, as a person types it.
         command: String,
+    },
+    /// The agent's own CLI was found but could not be run.
+    #[error("could not run {program}: {source}")]
+    AgentNotRunnable {
+        /// The agent's binary.
+        program: &'static str,
         /// Why it could not be run.
         source: io::Error,
     },
@@ -400,7 +406,7 @@ impl CliError {
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
             Self::UserScopeOnly(_) => FailureKind::InvalidInput,
-            Self::AgentNotRunnable { .. } => FailureKind::Io,
+            Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -491,6 +497,7 @@ impl CliError {
             | Self::Unexportable { .. }
             | Self::Unhookable(_)
             | Self::UserScopeOnly(_)
+            | Self::AgentMissing { .. }
             | Self::AgentNotRunnable { .. } => &[],
         }
     }

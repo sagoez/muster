@@ -66,7 +66,8 @@ plugs into a port.
     `StateChangeNotifier`) from the composition root, so a test injects fakes
     and never reaches the user's real database or socket. The CLI also takes
     the `ShellRegistry` port, for the shell records and notes its hidden
-    `__shell-report` command keeps.
+    `__shell-report` command keeps. `muster mcp add|remove` hands off to
+    the agent's own CLI by `exec`, with no port between.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,

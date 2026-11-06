@@ -32,7 +32,7 @@ jobs:
         run: cargo +nightly fmt --all --check
 
       - name: Clippy
-        run: cargo +stable clippy --all-targets --all-features
+        run: cargo +stable clippy --workspace --all-targets --all-features
 
       - name: Test
-        run: cargo +stable test --all-features
+        run: cargo +stable test --workspace --all-features

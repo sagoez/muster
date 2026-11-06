@@ -7,33 +7,33 @@ nightly_rustfmt := `ls ~/.rustup/toolchains/nightly*/bin/rustfmt 2>/dev/null | h
 default:
     @just --list
 
-# Type-check the crate.
+# Type-check every crate.
 check:
-    cargo check
+    cargo check --workspace --all-targets
 
-# Build the crate.
+# Build every crate.
 build:
-    cargo build
+    cargo build --workspace
 
 # Run the CLI. Pass args after `--`, e.g. `just run -- ps` or `just run -- up`.
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run --bin muster -- {{ARGS}}
 
 # Run the test suite.
 test:
-    cargo test
+    cargo test --workspace --all-features
 
 # Format with nightly rustfmt (honors rustfmt.toml; no global config change).
 fmt:
-    RUSTFMT="{{nightly_rustfmt}}" cargo fmt
+    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --all
 
 # Verify formatting without writing changes.
 fmt-check:
-    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --check
+    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --all --check
 
 # Lint; warnings are errors.
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Everything CI enforces.
 ci: fmt-check lint test

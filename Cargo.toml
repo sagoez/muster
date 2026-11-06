@@ -1,12 +1,67 @@
-[package]
-name = "muster-workspace"
+[workspace]
+resolver = "3"
+
+[workspace.package]
 version = "0.11.0"
 edition = "2024"
 rust-version = "1.89"
-description = "The supervisor and control plane behind your terminal for a project's dev processes"
 license = "MIT"
 repository = "https://github.com/sagoez/muster"
 readme = "README.md"
+
+[workspace.dependencies]
+alacritty_terminal = "0.26"
+anstream = "1.0.0"
+anstyle = "1.0.14"
+atomic-write-file = "0.3.0"
+bytesize = { version = "2.7.0", features = ["serde"] }
+clap = { version = "4.6.2", features = ["derive"] }
+clap_complete = { version = "4.6.7", features = ["unstable-dynamic"] }
+cliclack = "0.5.6"
+console = "0.16.4"
+crossbeam-channel = "0.5.16"
+directories = "6.0.0"
+getset = "0.1.7"
+humantime = "2.4.0"
+humantime-serde = "1.1.1"
+insta = "1.48.0"
+libc = "0.2.186"
+listeners = "0.6.1"
+notify-rust = "4.11.7"
+nutype = { version = "0.7.0", features = ["serde"] }
+portable-pty = "0.9.0"
+regex = "1.13.1"
+rmcp = { version = "3.2.0", features = ["server", "macros", "transport-io"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustix = { version = "1.1.4", features = ["event", "fs", "net", "process", "stdio", "termios"] }
+schemars = "1.2.2"
+semver = { version = "1.0.28", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml_ng = "0.10.0"
+shlex = "2"
+signal-hook = "0.4.5"
+strum = { version = "0.28.0", features = ["derive"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+tempfile = "3.27.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
+typed-builder = "0.23.2"
+unicode-normalization = "0.1.25"
+unicode-properties = "0.1.4"
+unicode-width = "0.2.2"
+ureq = { version = "3.5.0", default-features = false }
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[package]
+name = "muster-workspace"
+description = "The supervisor and control plane behind your terminal for a project's dev processes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 keywords = ["terminal", "supervisor", "process-manager", "dev-server", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
@@ -28,48 +83,48 @@ name = "muster"
 path = "src/main.rs"
 
 [dependencies]
-alacritty_terminal = "0.26"
-anstream = "1.0.0"
-anstyle = "1.0.14"
-atomic-write-file = "0.3.0"
-bytesize = { version = "2.7.0", features = ["serde"] }
-clap = { version = "4.6.2", features = ["derive"] }
-clap_complete = { version = "4.6.7", features = ["unstable-dynamic"] }
-cliclack = "0.5.6"
-console = "0.16.4"
-crossbeam-channel = "0.5.16"
-directories = "6.0.0"
-getset = "0.1.7"
-humantime = "2.4.0"
-humantime-serde = "1.1.1"
-libc = "0.2.186"
-listeners = "0.6.1"
-notify-rust = "4.11.7"
-nutype = { version = "0.7.0", features = ["serde"] }
-portable-pty = "0.9.0"
-regex = "1.13.1"
-rmcp = { version = "3.2.0", features = ["server", "macros", "transport-io"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-rustix = { version = "1.1.4", features = ["event", "fs", "net", "process", "stdio", "termios"] }
-schemars = "1.2.2"
-semver = { version = "1.0.28", features = ["serde"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.145"
-serde_yaml_ng = "0.10.0"
-shlex = "2"
-signal-hook = "0.4.5"
-strum = { version = "0.28.0", features = ["derive"] }
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
-thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
-typed-builder = "0.23.2"
-unicode-normalization = "0.1.25"
-unicode-properties = "0.1.4"
-unicode-width = "0.2.2"
-ureq = { version = "3.5.0", default-features = false }
-uuid = { version = "1.18.1", features = ["v4"] }
+alacritty_terminal = { workspace = true }
+anstream = { workspace = true }
+anstyle = { workspace = true }
+atomic-write-file = { workspace = true }
+bytesize = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cliclack = { workspace = true }
+console = { workspace = true }
+crossbeam-channel = { workspace = true }
+directories = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+libc = { workspace = true }
+listeners = { workspace = true }
+notify-rust = { workspace = true }
+nutype = { workspace = true }
+portable-pty = { workspace = true }
+regex = { workspace = true }
+rmcp = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true }
+schemars = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+shlex = { workspace = true }
+signal-hook = { workspace = true }
+strum = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+typed-builder = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-properties = { workspace = true }
+unicode-width = { workspace = true }
+ureq = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-insta = "1.48.0"
-rustix = { version = "1.1.4", features = ["pty"] }
-tempfile = "3.27.0"
+insta = { workspace = true }
+rustix = { workspace = true, features = ["pty"] }
+tempfile = { workspace = true }

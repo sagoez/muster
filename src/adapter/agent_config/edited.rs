@@ -12,7 +12,4 @@ pub(super) struct Edited {
     /// The file's new text, when the edit changes it.
     #[getset(get = "pub(super)")]
     text: Option<String>,
-    /// Whether the file's own list of turned-off servers names the entry.
-    #[getset(get_copy = "pub(super)")]
-    listed_off: bool,
 }

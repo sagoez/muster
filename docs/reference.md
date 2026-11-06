@@ -400,7 +400,7 @@ Where each scope goes:
 |---|---|---|
 | `claude` | `user` (default) | `~/.claude.json`, `mcpServers` |
 | `claude` | `local` | `~/.claude.json`, `projects["<repository root>"].mcpServers` |
-| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it until you approve it |
+| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it |
 | `codex` | `user` (default) | `~/.codex/config.toml` (`$CODEX_HOME`), `[mcp_servers.<name>]` |
 | `codex` | `project` | `.codex/config.toml` in the project; Codex reads it only for trusted projects |
 | `zed` | `user` (only) | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux), `context_servers` |
@@ -436,18 +436,10 @@ this one, its other keys kept, along with a comment ending Codex's
 its own `enabled = false`: such an entry reports `disabled` and is turned
 back on in place only by `--force`, which reports `enabled` and keeps every
 other key. Claude Code turns a server off outside its entry, and muster
-only ever writes or removes its own entry in `.claude.json` or `.mcp.json`.
-It reads Claude Code's lists to warn, and never edits them: the project's
-`disabledMcpServers` in `.claude.json`, and for a project's `.mcp.json` the
-`disabledMcpjsonServers`, `enabledMcpjsonServers` and
-`enableAllProjectMcpServers` of Claude Code's user, project and local
-settings files. If Claude Code has the server turned off, `muster mcp add`
-still reports it `added` or `already-added`, noting that Claude Code has it
-turned off and you turn it on with `/mcp`; the note that Claude Code asks
-before using a `.mcp.json` server appears only while it has neither
-approved nor turned it down. A file it cannot read just leaves the note
-out. Another server's entry under the name is refused unless `--force`
-replaces it.
+only ever writes or removes its own entry in `.claude.json` or `.mcp.json`:
+if Claude Code has the server turned off, `muster mcp add` still reports it
+added, and you turn it back on in Claude Code with `/mcp`. Another server's
+entry under the name is refused unless `--force` replaces it.
 `muster mcp remove` takes the same flags and removes
 the entry under the name only when it is muster's, unless `--force`, and
 takes out the table of servers, and a project's object in `.claude.json`,

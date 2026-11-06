@@ -26,8 +26,4 @@ pub(super) struct ConfigPlace {
     /// How the agent turns an entry off.
     #[getset(get_copy = "pub(super)")]
     disabling: Disabling,
-    /// The keys leading to the file's own list of servers the agent keeps
-    /// turned off for the project, read only to warn.
-    #[getset(get = "pub(super)")]
-    off_list: Option<Vec<String>>,
 }

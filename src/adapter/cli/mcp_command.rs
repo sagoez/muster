@@ -15,9 +15,9 @@ pub enum McpCommand {
     /// An identical entry is left alone and one an older muster wrote is
     /// updated; another server's under the name is replaced, and one Codex
     /// or Zed has turned off is turned back on, only with --force. muster
-    /// never edits Claude Code's own turned-off lists: if Claude Code has
-    /// the server turned off, it is still added, with a note to turn it
-    /// back on in Claude Code with /mcp.
+    /// does not read Claude Code's own turned-off list: if Claude Code has
+    /// the server turned off, it is still reported added; turn it back on
+    /// in Claude Code with /mcp.
     Add(McpEntryArgs),
     /// Remove muster's MCP server from agents' configs.
     ///

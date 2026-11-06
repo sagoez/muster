@@ -6,7 +6,6 @@ mod agent;
 mod agent_config_error;
 mod agent_config_files;
 mod claude_project_key;
-mod claude_standing;
 mod config_file;
 mod config_format;
 mod config_locations;

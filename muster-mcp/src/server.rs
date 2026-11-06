@@ -8,7 +8,7 @@ use muster_domain::{
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
     service::NotificationContext,
     tool_handler,
     transport::stdio,
@@ -266,11 +266,11 @@ pub(super) fn object() -> Value {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MusterMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut implementation = Implementation::default();
         implementation.name = MCP_SERVER_NAME.to_string();
         implementation.version = MCP_SERVER_VERSION.to_string();
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = implementation;
         info.instructions = Some(instructions());

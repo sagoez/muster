@@ -427,10 +427,14 @@ fn hook_shell_from_path(shell_path: &str) -> Option<HookShell> {
 /// Whether any active (non-comment) line contains the shell's registration
 /// hook; a commented-out line is never evaluated by the shell.
 fn registers_completions(content: &str, shell: CompletionShell) -> bool {
+    // A shell with no hook line is never registered, rather than matching
+    // every line on an empty pattern.
+    let Some(hook) = shell.get_message().filter(|hook| !hook.is_empty()) else {
+        return false;
+    };
     content.lines().any(|line| {
         let active = line.trim_start();
-        !active.starts_with(COMMENT_PREFIX)
-            && active.contains(shell.get_message().unwrap_or_default())
+        !active.starts_with(COMMENT_PREFIX) && active.contains(hook)
     })
 }
 

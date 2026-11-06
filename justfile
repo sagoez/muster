@@ -35,6 +35,14 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+# Lint each crate alone, so none builds only through workspace feature unification.
+lint-crates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+        cargo clippy -p "$crate" --all-targets -- -D warnings
+    done
+
 # Package every crate as crates.io would and build the packages.
 package:
     cargo package --workspace --locked
@@ -45,5 +53,5 @@ bump version:
     sed -i -E 's/^(muster-[a-z]+ = \{ path = "[^"]+", version = )"=[^"]+"/\1"={{version}}"/' Cargo.toml
     cargo update --workspace
 
-# Everything CI enforces.
-ci: fmt-check lint test
+# Everything CI enforces, in its order.
+ci: fmt-check lint lint-crates test package

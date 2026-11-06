@@ -23,6 +23,13 @@ jobs:
     name: "muster::release"
     runs-on: ubuntu-latest
     steps:
+      # A push only runs on main; a manual run must not publish another branch.
+      - name: Refuse a branch other than main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Releases publish from main only, not $GITHUB_REF" >&2
+          exit 1
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 2
@@ -56,35 +63,70 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.version.outputs.changed == 'true'
 
-      - name: Authenticate with crates.io
+      # Before any upload. Trusted Publishing cannot create a crate name, so a
+      # crate crates.io has never seen fails the run here; AGENTS.md's "First
+      # release of the split crates" says how to publish one by hand. A crate
+      # already at this version is skipped, so a run that stopped half way
+      # finishes on a re-run. A lookup crates.io does not answer with 200 or
+      # 404 is retried, then fails the run: it never counts as unpublished.
+      - name: Look up every crate on crates.io
         if: steps.version.outputs.changed == 'true'
+        id: lookup
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LOOKUP_ATTEMPTS: 5
+          LOOKUP_RETRY_SECONDS: 10
+          LOOKUP_TIMEOUT_SECONDS: 20
+        run: |
+          status_of() {
+            local url=$1 attempt code
+            for attempt in $(seq "$LOOKUP_ATTEMPTS"); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$LOOKUP_TIMEOUT_SECONDS" \
+                -A "muster release (https://github.com/sagoez/muster)" "$url" || true)
+              if [ "$code" = 200 ] || [ "$code" = 404 ]; then
+                echo "$code"
+                return 0
+              fi
+              echo "crates.io answered $url with '$code' (attempt $attempt)" >&2
+              sleep "$LOOKUP_RETRY_SECONDS"
+            done
+            echo "crates.io did not answer $url after $LOOKUP_ATTEMPTS attempts" >&2
+            return 1
+          }
+          crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          missing=()
+          exclude=()
+          for crate in $crates; do
+            code=$(status_of "https://crates.io/api/v1/crates/$crate")
+            if [ "$code" = 404 ]; then
+              missing+=("$crate")
+              continue
+            fi
+            code=$(status_of "https://crates.io/api/v1/crates/$crate/$VERSION")
+            if [ "$code" = 200 ]; then
+              exclude+=(--exclude "$crate")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Not on crates.io yet: ${missing[*]}. Publish each once by hand first; see \"First release of the split crates\" in AGENTS.md." >&2
+            exit 1
+          fi
+          echo "exclude=${exclude[*]}" >> "$GITHUB_OUTPUT"
+          echo "pending=$(( $(echo "$crates" | wc -w) - ${#exclude[@]} / 2 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate with crates.io
+        if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      # Skips every crate already at this version, so a run that stopped half
-      # way finishes on a re-run.
       - name: Publish to crates.io
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          EXCLUDE: ${{ steps.lookup.outputs.exclude }}
         run: |
-          crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
-          exclude=()
-          pending=0
-          for crate in $crates; do
-            if curl -sf -o /dev/null -A "muster release (https://github.com/sagoez/muster)" \
-                "https://crates.io/api/v1/crates/$crate/$VERSION"; then
-              exclude+=(--exclude "$crate")
-            else
-              pending=$((pending + 1))
-            fi
-          done
-          if [ "$pending" -eq 0 ]; then
-            echo "every crate is already at $VERSION"
-          else
-            cargo publish --workspace --locked "${exclude[@]}"
-          fi
+          read -r -a exclude <<< "$EXCLUDE"
+          cargo publish --workspace --locked "${exclude[@]}"
 
       - name: Create release
         if: steps.version.outputs.changed == 'true'

@@ -34,6 +34,14 @@ jobs:
       - name: Clippy
         run: cargo +stable clippy --workspace --all-targets --all-features
 
+      # Each crate on its own, so none builds only because a sibling turned a
+      # feature on for the whole workspace. `just lint-crates` runs the same.
+      - name: Clippy per crate
+        run: |
+          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+            cargo +stable clippy -p "$crate" --all-targets -- -D warnings
+          done
+
       - name: Test
         run: cargo +stable test --workspace --all-features
 

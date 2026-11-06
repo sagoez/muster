@@ -575,22 +575,33 @@ library crates are new names. Their first release is **0.12.0**, done once:
 2. On crates.io, Account Settings -> API Tokens: create a token with the
    `publish-new` scope only, crate pattern `muster-*`, short expiry.
 3. On a branch from a freshly fetched `main`: `just bump 0.12.0`, commit
-   `chore(release): bump version to 0.12.0`.
-4. From that commit, with a clean tree, publish the eleven by hand in
-   dependency order (every normal and dev dependency before the crate that
-   names it), each with
-   `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
+   `chore(release): bump version to 0.12.0`, and open the PR. Wait for CI to
+   pass and for review. Published versions are permanent, so nothing may
+   change in a library crate after the next step.
+4. Check out the PR's head with a clean tree (`git rev-parse HEAD` equals
+   the PR head), and from it publish the eleven by hand in dependency order
+   (every normal and dev dependency before the crate that names it), each
+   with `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
    `muster-domain`, `muster-application`, `muster-os`, `muster-terminal`,
    `muster-store`, `muster-herdr`, `muster-protocol`, `muster-holder`,
    `muster-service`, `muster-client`, `muster-mcp`. Not `muster-workspace`:
-   CI publishes it. crates.io rate-limits new names; on HTTP 429, wait the
-   time it names and continue with the next crate.
+   CI publishes it. crates.io rate-limits new names; on HTTP 429 that crate
+   was not published, so wait the time it names and retry the same crate
+   before going on to the next.
 5. For each of the eleven: crate page -> Settings -> Trusted Publishing ->
    Add: GitHub, owner `sagoez`, repository `muster`, workflow `release.yml`.
    Then require Trusted Publishing for it, as `muster-workspace` does.
 6. Revoke the token.
-7. Open the PR and merge the bump. The workflow finds the eleven at 0.12.0,
+7. Merge the PR with no further commits. If `main` moved meanwhile, first
+   check `git diff <published sha> origin/main -- ':!muster-workspace'` is
+   empty; otherwise bump again. The workflow finds the eleven at 0.12.0,
    publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
+
+If the bump reached `main` before step 4, its release run fails at the
+lookup and publishes nothing. Do steps 4 to 6 from `main`'s commit, then
+re-run the failed release job, or start the workflow by hand on `main`
+(`workflow_dispatch` with `version: 0.12.0`). The same re-run finishes any
+release that stopped half way: crates already at the version are skipped.
 
 ## Review gate
 

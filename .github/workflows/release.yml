@@ -77,7 +77,9 @@ jobs:
           LOOKUP_ATTEMPTS: 5
           LOOKUP_RETRY_SECONDS: 10
           LOOKUP_TIMEOUT_SECONDS: 20
+        shell: bash
         run: |
+          set -euo pipefail
           status_of() {
             local url=$1 attempt code
             for attempt in $(seq "$LOOKUP_ATTEMPTS"); do
@@ -94,6 +96,8 @@ jobs:
             return 1
           }
           crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          # An empty list would publish nothing and still tag the release.
+          [ -n "$crates" ] || { echo "cargo metadata named no crate" >&2; exit 1; }
           missing=()
           exclude=()
           for crate in $crates; do

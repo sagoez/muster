@@ -39,13 +39,15 @@ lint:
 lint-crates:
     #!/usr/bin/env bash
     set -euo pipefail
-    for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+    crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+    [ -n "$crates" ] || { echo "cargo metadata named no crate" >&2; exit 1; }
+    for crate in $crates; do
         cargo clippy -p "$crate" --all-targets -- -D warnings
     done
 
-# Package every crate as crates.io would and build the packages.
+# Package every crate as crates.io would, uncommitted work included, and build them.
 package:
-    cargo package --workspace --locked
+    cargo package --workspace --locked --allow-dirty
 
 # Set the release version of every crate and its sibling pins.
 bump version:

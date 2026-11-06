@@ -37,8 +37,12 @@ jobs:
       # Each crate on its own, so none builds only because a sibling turned a
       # feature on for the whole workspace. `just lint-crates` runs the same.
       - name: Clippy per crate
+        shell: bash
         run: |
-          for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do
+          set -euo pipefail
+          crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          [ -n "$crates" ] || { echo "cargo metadata named no crate" >&2; exit 1; }
+          for crate in $crates; do
             cargo +stable clippy -p "$crate" --all-targets -- -D warnings
           done
 

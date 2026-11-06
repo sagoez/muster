@@ -579,7 +579,7 @@ library crates are new names. Their first release is **0.12.0**, done once:
    pass and for review. Published versions are permanent, so nothing may
    change in a library crate after the next step.
 4. Check out the PR's head with a clean tree (`git rev-parse HEAD` equals
-   the PR head), and from it publish the eleven by hand in dependency order
+   the PR head; note it as the published sha), and from it publish the eleven by hand in dependency order
    (every normal and dev dependency before the crate that names it), each
    with `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
    `muster-domain`, `muster-application`, `muster-os`, `muster-terminal`,
@@ -593,15 +593,22 @@ library crates are new names. Their first release is **0.12.0**, done once:
    Then require Trusted Publishing for it, as `muster-workspace` does.
 6. Revoke the token.
 7. Merge the PR with no further commits. If `main` moved meanwhile, first
-   check `git diff <published sha> origin/main -- ':!muster-workspace'` is
-   empty; otherwise bump again. The workflow finds the eleven at 0.12.0,
+   `git fetch` and check that
+   `git diff <published sha> origin/main -- muster-domain muster-application muster-os muster-terminal muster-store muster-herdr muster-protocol muster-holder muster-service muster-client muster-mcp`
+   is empty. If it is not, the published libraries no longer match `main`:
+   do not merge; bump again (0.12.1) and release that, which CI publishes in
+   full, all twelve crates. The workflow finds the eleven at 0.12.0,
    publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
 
 If the bump reached `main` before step 4, its release run fails at the
-lookup and publishes nothing. Do steps 4 to 6 from `main`'s commit, then
-re-run the failed release job, or start the workflow by hand on `main`
-(`workflow_dispatch` with `version: 0.12.0`). The same re-run finishes any
-release that stopped half way: crates already at the version are skipped.
+lookup and publishes nothing. Do steps 4 to 6 from the bump commit on
+`main`, and run the release on that same commit: re-run its failed release
+job if `main` has not moved since. If `main` has moved, publish from
+`main`'s current tip instead (after the step 7 check against the bump
+commit), then start the workflow by hand on `main` (`workflow_dispatch`
+with `version: 0.12.0`), so the libraries and `muster-workspace` come from
+one tree. Re-running a job on the commit it ran on also finishes any release
+that stopped half way: crates already at the version are skipped.
 
 ## Review gate
 

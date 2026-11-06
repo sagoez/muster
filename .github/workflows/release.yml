@@ -38,10 +38,13 @@ jobs:
         id: version
         env:
           DISPATCH_VERSION: ${{ inputs.version }}
+        shell: bash
         run: |
+          set -euo pipefail
           # `[package]` too: the manifest before the workspace split kept it there.
           version_of() { awk '/^\[(workspace\.)?package\]/{s=1;next} /^\[/{s=0} s && /^version/{gsub(/.*= *"|".*/,"");print;exit}'; }
           NEW=$(version_of < Cargo.toml)
+          [ -n "$NEW" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ "$DISPATCH_VERSION" != "$NEW" ]; then
@@ -54,7 +57,9 @@ jobs:
             exit 0
           fi
 
+          # A failed read must stop the run, never look like a version change.
           OLD=$(git show HEAD~1:Cargo.toml | version_of)
+          [ -n "$OLD" ] || { echo "no version in the previous commit's Cargo.toml" >&2; exit 1; }
           if [ "$NEW" != "$OLD" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"

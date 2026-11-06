@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use muster_client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint};
 use muster_domain::{
     config::{ConfigError, McpStackEdits, SettingKey},
-    value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
+    value::{NameProblem, ProcessName, ProjectRoot, ValueParseError, printable},
 };
-use muster_os::sanitize::printable;
 use muster_protocol::holder::PatternError;
 use thiserror::Error;
 

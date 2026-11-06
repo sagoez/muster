@@ -1,5 +1,5 @@
 use getset::{CopyGetters, Getters};
-use muster_os::sanitize::printable;
+use muster_domain::value::printable;
 use typed_builder::TypedBuilder;
 
 use super::{report::PLAIN_SEPARATOR, row_kind::RowKind};

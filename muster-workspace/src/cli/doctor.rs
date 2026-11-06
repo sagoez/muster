@@ -10,9 +10,8 @@ use muster_client::{ClientError, ProjectTarget, SocketDirCheck};
 use muster_domain::{
     config::{ConfigError, ProcessSpec, Stack},
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
-    value::{DetachKey, Pid},
+    value::{DetachKey, Pid, printable},
 };
-use muster_os::sanitize::printable;
 use strum::IntoEnumIterator;
 
 use super::{

@@ -904,7 +904,7 @@ mod tests {
     use bytesize::ByteSize as RawByteSize;
     use muster_domain::{
         color_scheme::ColorScheme,
-        pty::ExitOutcome,
+        pty::{ExitOutcome, testing::size},
         value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
     };
     use muster_os::{
@@ -930,7 +930,7 @@ mod tests {
         pty::PortablePtyRunner,
         server_testing::{
             COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
-            request, scratch, size,
+            request, scratch,
         },
         testing::{test_request, test_stop},
     };

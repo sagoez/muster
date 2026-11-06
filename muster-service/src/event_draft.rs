@@ -1,8 +1,7 @@
 use std::time::SystemTime;
 
 use getset::Getters;
-use muster_domain::value::{OutputCursor, ProcessName, ProjectRoot};
-use muster_os::sanitize::printable;
+use muster_domain::value::{OutputCursor, ProcessName, ProjectRoot, printable};
 use muster_protocol::service::{EventKind, EventSeq, StackEvent};
 use typed_builder::TypedBuilder;
 

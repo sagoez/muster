@@ -4,8 +4,10 @@
 use std::time::{Duration, Instant};
 
 use muster_client::{ClientError, ElapsedSeconds};
-use muster_domain::{process::PatternKind, value::OutputCursor};
-use muster_os::sanitize::printable;
+use muster_domain::{
+    process::PatternKind,
+    value::{OutputCursor, printable},
+};
 use muster_protocol::{
     holder::LineMatcher,
     service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},

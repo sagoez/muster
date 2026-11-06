@@ -15,9 +15,8 @@ use muster_domain::{
     constants::APP_NAME,
     process::{RestartPolicy, StopSignal},
     terminal_workspace::SplitDirection,
-    value::{Pid, PositiveDuration, StopGrace},
+    value::{Pid, PositiveDuration, StopGrace, printable},
 };
-use muster_os::sanitize::printable;
 use muster_protocol::{
     holder::{LineLimit, MAX_LOG_LINES},
     service::StateGoal,

@@ -5,9 +5,12 @@ use muster_domain::{
     occupancy::RegisteredProject,
     port::ProjectStore,
     project::Project,
-    value::{EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
+    value::{
+        EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError,
+        printable,
+    },
 };
-use muster_os::{clock::nanos_now, sanitize::printable};
+use muster_os::clock::nanos_now;
 use rusqlite::{Connection, Params, Row, params};
 
 use super::{

@@ -1,5 +1,5 @@
 use getset::Getters;
-use muster_os::sanitize::printable;
+use muster_domain::value::printable;
 use muster_protocol::service::{EventKind, StackEvent};
 use serde::Serialize;
 use typed_builder::TypedBuilder;

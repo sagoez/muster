@@ -83,11 +83,7 @@ impl UnsupervisedChild {
 mod tests {
     use std::process;
     #[cfg(target_os = "linux")]
-    use std::process::Command;
-    #[cfg(target_os = "linux")]
-    use std::thread;
-    #[cfg(target_os = "linux")]
-    use std::time::Duration;
+    use std::{process::Command, thread, time::Duration};
 
     use super::*;
 

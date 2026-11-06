@@ -14,9 +14,9 @@ use cliclack::{
 use console::{Term, style};
 use muster_domain::{
     constants::APP_NAME,
-    value::{ProcessName, ProjectName},
+    value::{ProcessName, ProjectName, printable},
 };
-use muster_os::sanitize::{printable, printable_lines};
+use muster_os::sanitize::printable_lines;
 use muster_protocol::service::ProcessStatus;
 use unicode_width::UnicodeWidthStr;
 

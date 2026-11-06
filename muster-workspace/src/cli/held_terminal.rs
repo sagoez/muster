@@ -3,7 +3,7 @@ use std::{
     io::{self, Write},
 };
 
-use muster_os::sanitize::printable;
+use muster_domain::value::printable;
 use muster_terminal::{
     escape::SGR_RESET, mode_scanner::ModeScanner, observation::Observation,
     screen_snapshot::cursor_position,

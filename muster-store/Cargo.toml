@@ -29,5 +29,4 @@ testing = ["dep:tempfile"]
 
 [dev-dependencies]
 muster-domain = { workspace = true, features = ["testing"] }
-muster-os = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

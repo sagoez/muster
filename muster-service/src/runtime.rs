@@ -1772,7 +1772,7 @@ mod tests {
     use muster_domain::{
         config::{ProcessSpec, SettingChange},
         coordination::Author,
-        occupancy::testing::stamp,
+        occupancy::testing::{stamp, test_shell},
         port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
         process::{
             LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck, ReadyProbe,
@@ -1783,7 +1783,7 @@ mod tests {
     };
     use muster_os::{
         signal_target::SignalTarget,
-        test_wait::{REPLY, wait_within},
+        test_wait::{POLL, REPLY, WAIT, wait_until, wait_within},
     };
     use muster_protocol::{
         holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
@@ -1804,8 +1804,7 @@ mod tests {
         running::Running,
         runtime_fixture::Fixture,
         runtime_testing::{
-            POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process, sleeper,
-            test_shell, wait_until,
+            SLEEPER, TEST_BINARY, VERSION, commands, find, no_env, process, sleeper,
         },
         supervisor::{
             ChannelOutputSink, SpawnGeneration,

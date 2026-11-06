@@ -6,7 +6,7 @@ use std::{
 
 use getset::{Getters, MutGetters};
 use muster_domain::{color_scheme::ColorScheme, pty::PtySize};
-use muster_os::signal_target::SignalTarget;
+use muster_os::{signal_target::SignalTarget, test_wait::wait_until};
 use muster_protocol::holder::{
     ClientMessage, ClientRole, HolderConfig, HolderControl, HolderError, HolderId, HolderMessage,
     HolderRecord,
@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use super::{
     server::HolderServer,
-    server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch, wait_until},
+    server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch},
     test_client::TestClient,
 };
 use crate::pty::PortablePtyRunner;

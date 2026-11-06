@@ -108,9 +108,7 @@ fn arrival(previous: Option<&ShellRecord>, cwd: &Path) -> EpochNanos {
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_os = "macos"))]
-    use std::ffi::OsStr;
-    #[cfg(not(target_os = "macos"))]
-    use std::os::unix::ffi::OsStrExt as _;
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
     use std::{
         fs,
         path::PathBuf,

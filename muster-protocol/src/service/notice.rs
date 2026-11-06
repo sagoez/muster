@@ -3,9 +3,8 @@ use std::time::SystemTime;
 use getset::Getters;
 use muster_domain::{
     config::RecordedEdit,
-    value::{ProcessName, ProjectRoot},
+    value::{ProcessName, ProjectRoot, printable},
 };
-use muster_os::sanitize::printable;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 

@@ -9,14 +9,14 @@ use muster_domain::{
     process::ProcessState,
     value::{ProcessName, ProjectRoot},
 };
-use muster_os::test_wait::REPLY;
+use muster_os::test_wait::{POLL, REPLY, WAIT, wait_until};
 use muster_protocol::service::{
     Notice, ProcessAction, ProjectStatus, ServiceRequest, ServiceResponse, endpoint,
 };
 use typed_builder::TypedBuilder;
 
 use super::{
-    runtime_testing::{POLL, WAIT, find, no_env, wait_until},
+    runtime_testing::{find, no_env},
     service_error::ServiceError,
 };
 

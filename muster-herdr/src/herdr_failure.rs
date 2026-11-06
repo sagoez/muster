@@ -1,8 +1,7 @@
 use std::{io, path::PathBuf, process::ExitStatus, time::Duration};
 
 use humantime::format_duration;
-use muster_domain::terminal_workspace::WorkspaceError;
-use muster_os::sanitize::printable;
+use muster_domain::{terminal_workspace::WorkspaceError, value::printable};
 use thiserror::Error;
 
 use super::reply::ErrorReply;

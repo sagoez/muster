@@ -52,10 +52,9 @@ impl ShellSweeper {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{fake_shells::FakeShells, runtime_testing::test_shell},
-        *,
-    };
+    use muster_domain::occupancy::testing::test_shell;
+
+    use super::{super::fake_shells::FakeShells, *};
 
     /// Longest a test waits for a sweep.
     const SWEEP_WAIT: Duration = Duration::from_secs(5);

@@ -20,9 +20,8 @@ use muster_client::{ClientError, ServiceClient, process::locate};
 use muster_domain::{
     constants::APP_NAME,
     project::Project,
-    value::{DetachKey, ProcessName},
+    value::{DetachKey, ProcessName, printable},
 };
-use muster_os::sanitize::printable;
 use muster_protocol::{
     holder::{
         ClientRole, HolderError, HolderMessage,

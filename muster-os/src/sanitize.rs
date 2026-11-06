@@ -3,7 +3,7 @@
 //! stores, the CLI to what it prints. The rule itself is the domain's
 //! [`printable`], which project names are validated against too.
 
-pub use muster_domain::value::printable;
+use muster_domain::value::printable;
 
 /// Separates the lines [`printable_lines`] keeps.
 const LINE_BREAK: char = '\n';

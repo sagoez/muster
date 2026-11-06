@@ -6,7 +6,11 @@ use muster_domain::{
     config::ProcessSpec, port::PortOccupant, pty::SpawnRequest, value::ProjectRoot,
 };
 use muster_holder::{holders::Holders, testing::test_request, thread_launcher::ThreadLauncher};
-use muster_os::{signal_target::SignalTarget, test_scratch::short_scratch, test_wait::REPLY};
+use muster_os::{
+    signal_target::SignalTarget,
+    test_scratch::short_scratch,
+    test_wait::{POLL, REPLY, WAIT, wait_until},
+};
 use muster_protocol::{
     holder::{HolderDirs, HolderRecord},
     service::{ServiceRequest, endpoint},
@@ -22,7 +26,7 @@ use super::{
     project_ports::ProjectPorts,
     running::Running,
     runtime::ServiceRuntime,
-    runtime_testing::{POLL, SCRATCH_PREFIX, TEST_BINARY, VERSION, WAIT, wait_until},
+    runtime_testing::{SCRATCH_PREFIX, TEST_BINARY, VERSION},
     service_deps::ServiceDeps,
     singleton::Singleton,
     test_ports::TestPorts,

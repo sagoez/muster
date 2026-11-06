@@ -36,9 +36,12 @@ impl ShellNotes {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::value::{ProcessName, ProjectName};
+    use muster_domain::{
+        occupancy::testing::test_shell,
+        value::{ProcessName, ProjectName},
+    };
 
-    use super::{super::runtime_testing::test_shell, *};
+    use super::*;
 
     /// A note that `index` started in the project `shop`.
     fn started(index: usize) -> ShellNote {

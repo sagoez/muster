@@ -8,10 +8,9 @@ use muster_domain::{
     coordination::Author,
     value::{
         COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError, NameProblem,
-        ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
+        ProcessName, ProcessNameError, ProjectName, ProjectRoot, printable, refused_name,
     },
 };
-use muster_os::sanitize::printable;
 use muster_protocol::{
     holder::{HolderError, PatternError},
     service::ServiceErrorKind,

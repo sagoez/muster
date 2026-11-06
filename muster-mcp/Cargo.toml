@@ -30,9 +30,6 @@ typed-builder = { workspace = true }
 
 [dev-dependencies]
 muster-client = { workspace = true, features = ["testing"] }
-muster-domain = { workspace = true, features = ["testing"] }
-muster-os = { workspace = true, features = ["testing"] }
-muster-protocol = { workspace = true, features = ["testing"] }
 muster-store = { workspace = true, features = ["testing"] }
 insta = { workspace = true }
 shlex = { workspace = true }

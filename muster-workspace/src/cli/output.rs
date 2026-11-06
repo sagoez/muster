@@ -19,9 +19,8 @@ use muster_domain::{
     process::{ProcessState, Readiness},
     project::Project,
     pty::{ExitCause, ExitOutcome, SignalName},
-    value::{ProcessName, ProjectName, ProjectRoot},
+    value::{ProcessName, ProjectName, ProjectRoot, printable},
 };
-use muster_os::sanitize::printable;
 use muster_protocol::service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus};
 use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;

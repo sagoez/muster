@@ -13,9 +13,9 @@ use muster_domain::{
     config::ConfigError,
     port::{LocalState, StateChangeNotifier},
     project::Project,
-    value::{IdleStop, ProjectName, ProjectRoot},
+    value::{IdleStop, ProjectName, ProjectRoot, printable},
 };
-use muster_os::{path::expand_home, sanitize::printable};
+use muster_os::path::expand_home;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 

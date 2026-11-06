@@ -3,10 +3,11 @@
 
 use std::{path::Path, time::Duration};
 
-pub(super) use muster_domain::pty::testing::size;
-use muster_domain::{color_scheme::ColorScheme, pty::SpawnRequest};
+use muster_domain::{
+    color_scheme::ColorScheme,
+    pty::{SpawnRequest, testing::size},
+};
 use muster_os::test_scratch::short_scratch;
-pub(super) use muster_os::test_wait::{WAIT, wait_until};
 use tempfile::TempDir;
 
 use super::testing::test_request;

@@ -1,13 +1,11 @@
 //! What the service runtime's tests and their fixtures share: bounds, the
 //! test service's identity, and the processes and statuses they work with.
 
-pub(super) use muster_domain::occupancy::testing::{test_root, test_shell};
 use muster_domain::{
     config::{Environment, ProcessSpec},
     process::RestartPolicy,
     value::{CommandLine, ProcessName},
 };
-pub(super) use muster_os::test_wait::{POLL, WAIT, wait_until};
 use muster_protocol::service::{LaunchEnvironment, ProcessStatus, ProjectStatus};
 
 use super::supervisor::testing::test_stop;

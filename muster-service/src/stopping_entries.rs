@@ -72,10 +72,9 @@ impl StoppingEntries {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::runtime_testing::{test_root, test_shell},
-        *,
-    };
+    use muster_domain::occupancy::testing::{test_root, test_shell};
+
+    use super::*;
 
     /// The process named `raw`.
     fn name(raw: &str) -> ProcessName {

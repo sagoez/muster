@@ -2,8 +2,8 @@ use std::error::Error;
 
 use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
-use muster_domain::coordination::Author;
-use muster_os::sanitize::{printable, printable_lines};
+use muster_domain::{coordination::Author, value::printable};
+use muster_os::sanitize::printable_lines;
 use typed_builder::TypedBuilder;
 
 use super::{row::Row, row_kind::RowKind};

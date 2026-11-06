@@ -1,7 +1,7 @@
 //! The lines a shell's hook prints at its next prompt for what the service
 //! said about its entering a project.
 
-use muster_os::sanitize::printable;
+use muster_domain::value::printable;
 use muster_protocol::service::ShellNote;
 
 use super::block_hint::block_hint;

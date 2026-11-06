@@ -1,28 +1,20 @@
 use clap::Subcommand;
 
-use super::mcp_entry_args::{FORCE_ARG, McpEntryArgs};
-
-/// What `--force` does for `muster mcp remove`, which turns nothing back on.
-const REMOVE_FORCE_HELP: &str = "Remove a server under the name that runs something else";
+use super::mcp_registration::McpRegistration;
 
 /// What `muster mcp` does instead of serving.
 #[derive(Subcommand)]
 pub enum McpCommand {
-    /// Add muster's MCP server to agents' configs.
+    /// Register muster's MCP server with an agent.
     ///
-    /// Writes an entry launching this muster binary into Claude Code's,
-    /// Codex's or Zed's own config, keeping everything else in the file.
-    /// An identical entry is left alone and one an older muster wrote is
-    /// updated; another server's under the name is replaced, and one Codex
-    /// or Zed has turned off is turned back on, only with --force. muster
-    /// does not read Claude Code's own turned-off list: if Claude Code has
-    /// the server turned off, it is still reported added; turn it back on
-    /// in Claude Code with /mcp.
-    Add(McpEntryArgs),
-    /// Remove muster's MCP server from agents' configs.
+    /// Runs the agent's own `mcp add` (`claude mcp add` or `codex mcp add`)
+    /// in this folder, launching this muster binary, and exits as it does.
+    /// Zed has no such command, so for zed this prints the entry to add to
+    /// its settings and writes nothing.
+    Add(McpRegistration),
+    /// Unregister muster's MCP server from an agent.
     ///
-    /// Removes only the entry under the name, and only when it launches a
-    /// muster binary unless --force is given.
-    #[command(mut_arg(FORCE_ARG, |arg| arg.help(REMOVE_FORCE_HELP)))]
-    Remove(McpEntryArgs),
+    /// Runs the agent's own `mcp remove` in this folder and exits as it
+    /// does. For zed this says what to delete from its settings.
+    Remove(McpRegistration),
 }

@@ -67,15 +67,12 @@ compose files and offer the commands it finds. Bare `muster` is `muster ps`.
 ## For agents (MCP)
 
 ```sh
-muster mcp add   # add muster to Claude Code, Codex or Zed
+muster mcp add claude   # or codex; runs the agent's own `mcp add`
+muster mcp add zed      # prints the entry for Zed's settings
 ```
 
-At a terminal it asks which of the agents it found to add muster to; pass
-`--client claude`, `codex` or `zed` to choose up front. The entry goes in
-your own config for every project, unless `--scope` picks one project. It
-keeps everything else in the agent's config, and `muster mcp remove` takes
-the entry out again. For any other agent, `muster mcp --print-config` prints
-the snippet to paste in.
+`muster mcp remove <agent>` takes it out again. For any other agent,
+`muster mcp --print-config` prints the snippet to paste in.
 
 One entry serves every project. Over MCP an agent can:
 

@@ -10,7 +10,6 @@ use tempfile::TempDir;
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
 use crate::{
     adapter::{
-        agent_config::{AgentConfigFiles, ConfigLocations, McpRegistry, testing::launch},
         client::{
             ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
             recording_workspace::RecordingWorkspace,
@@ -49,8 +48,6 @@ pub(super) struct FakePorts {
     /// The hooked shell the ports run straight from, if any, and the folder
     /// it works in.
     hooked: Option<(Pid, PathBuf)>,
-    /// The scratch home the agents' configs are kept under.
-    agent_home: TempDir,
 }
 
 impl FakePorts {
@@ -73,13 +70,7 @@ impl FakePorts {
             user: geteuid().as_raw(),
             workspace: None,
             hooked: None,
-            agent_home: TempDir::new().unwrap(),
         }
-    }
-
-    /// The scratch home the agents' configs these ports edit are under.
-    pub(super) fn agent_home(&self) -> &Path {
-        self.agent_home.path()
     }
 
     /// These ports run straight from the hooked shell `pid`, working in
@@ -181,11 +172,6 @@ impl CliPorts for FakePorts {
 
     fn mcp_config(&self, _executable: &Path) -> String {
         String::new()
-    }
-
-    fn mcp_registry(&self) -> Arc<dyn McpRegistry> {
-        let locations = ConfigLocations::from_env(self.agent_home.path(), |_| None);
-        Arc::new(AgentConfigFiles::new(Some(locations), launch()))
     }
 
     fn run_service(&self) -> Result<(), MusterError> {

@@ -1,4 +1,3 @@
-pub mod agent_config;
 pub mod bounded_read;
 #[cfg(test)]
 pub(crate) mod channel_sink;
@@ -33,7 +32,6 @@ pub mod service;
 pub mod shell;
 pub mod signal_hold;
 pub mod signal_target;
-pub mod spoken_list;
 pub mod store;
 pub mod terminal;
 #[cfg(test)]

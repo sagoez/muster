@@ -4,7 +4,6 @@ use thiserror::Error;
 
 use crate::{
     adapter::{
-        agent_config::AgentConfigError,
         client::{
             ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError,
             open::attach_hint,
@@ -243,10 +242,20 @@ pub enum CliError {
     /// in a shell script.
     #[error(transparent)]
     Unhookable(#[from] HookScriptError),
-    /// An agent's MCP config could not be changed; nothing was written to
-    /// it.
-    #[error(transparent)]
-    AgentConfig(#[from] AgentConfigError),
+    /// An agent other than Claude Code was asked for a scope other than the
+    /// user's.
+    #[error("{0} takes MCP servers for the user only; drop --scope or pass --scope user")]
+    UserScopeOnly(&'static str),
+    /// The agent's own CLI could not be run.
+    #[error("could not run {program}: {source}; once it is installed and on PATH, run: {command}")]
+    AgentNotRunnable {
+        /// The agent's binary.
+        program: &'static str,
+        /// The command muster would have run, as a person types it.
+        command: String,
+        /// Why it could not be run.
+        source: io::Error,
+    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -390,9 +399,8 @@ impl CliError {
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
-            Self::AgentConfig(error) if error.is_conflict() => FailureKind::Conflict,
-            Self::AgentConfig(error) if error.is_io() => FailureKind::Io,
-            Self::AgentConfig(_) => FailureKind::InvalidInput,
+            Self::UserScopeOnly(_) => FailureKind::InvalidInput,
+            Self::AgentNotRunnable { .. } => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -482,7 +490,8 @@ impl CliError {
             | Self::FileExists(_)
             | Self::Unexportable { .. }
             | Self::Unhookable(_)
-            | Self::AgentConfig(_) => &[],
+            | Self::UserScopeOnly(_)
+            | Self::AgentNotRunnable { .. } => &[],
         }
     }
 

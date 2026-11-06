@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::constants::{APP_NAME, PATH_ENV};
+use crate::constants::APP_NAME;
 
 /// What Linux appends to the path of a running binary that was replaced or
 /// removed since it started.
@@ -19,15 +19,14 @@ const RUNNABLE_BITS: u32 = 0o111;
 /// name. On Linux a binary replaced or removed since it started reads as
 /// its path marked deleted.
 pub fn this_binary() -> PathBuf {
-    located(env::current_exe(), env::var_os(PATH_ENV))
+    located(env::current_exe(), env::var_os("PATH"))
 }
 
-/// This muster binary by the path a person would type for it: the first
-/// `muster` on `PATH` when that is this same binary, kept as `PATH` names it
-/// so no versioned install path is written down, else its own path without
-/// the mark Linux gives a replaced binary.
+/// This muster binary as an agent's config names it: the bare `muster`
+/// when the first `muster` on `PATH` is this binary, else its own path.
 pub fn binary_as_typed() -> PathBuf {
-    as_typed(env::current_exe(), env::var_os(PATH_ENV))
+    let own = this_binary();
+    as_typed(runnable(&own).unwrap_or(own), env::var_os("PATH"))
 }
 
 /// The binary a pane can run for `binary`: `binary` when it is a file, or
@@ -40,21 +39,12 @@ pub fn runnable(binary: &Path) -> Option<PathBuf> {
     if binary.is_file() {
         return Some(binary.to_path_buf());
     }
-    let current = unmarked(binary)?;
+    let replaced = binary
+        .as_os_str()
+        .as_bytes()
+        .strip_suffix(DELETED_SUFFIX.as_bytes())?;
+    let current = PathBuf::from(OsStr::from_bytes(replaced));
     current.is_file().then_some(current)
-}
-
-/// The first runnable file named `name` in the absolute folders of `path`,
-/// a `PATH` value; a relative folder is skipped, as it names a different
-/// file from every working folder.
-pub fn first_on_path(path: &OsStr, name: &str) -> Option<PathBuf> {
-    env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| {
-            fs::metadata(candidate)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & RUNNABLE_BITS != 0)
-        })
 }
 
 /// `current`, the path the OS gave for this binary, or when it gave none,
@@ -63,41 +53,31 @@ pub fn first_on_path(path: &OsStr, name: &str) -> Option<PathBuf> {
 fn located(current: io::Result<PathBuf>, path: Option<OsString>) -> PathBuf {
     current
         .ok()
-        .or_else(|| first_on_path(&path?, APP_NAME))
+        .or_else(|| on_path(&path?))
         .unwrap_or_else(|| PathBuf::from(APP_NAME))
 }
 
-/// The path to write for this binary, given `current`, the path the OS gave
-/// for it, and `path`, a `PATH` value.
-fn as_typed(current: io::Result<PathBuf>, path: Option<OsString>) -> PathBuf {
-    let first = path.and_then(|path| first_on_path(&path, APP_NAME));
-    let Ok(own) = current else {
-        return first.unwrap_or_else(|| PathBuf::from(APP_NAME));
-    };
-    let own = unmarked(&own).unwrap_or(own);
-    match first {
-        Some(first) if same_file(&first, &own) => first,
-        _ => own,
+/// The bare `muster` when the first one in `path` is the file `own` leads
+/// to, else `own`.
+fn as_typed(own: PathBuf, path: Option<OsString>) -> PathBuf {
+    let same = |first: PathBuf| matches!((fs::canonicalize(first), fs::canonicalize(&own)), (Ok(a), Ok(b)) if a == b);
+    if path.and_then(|path| on_path(&path)).is_some_and(same) {
+        PathBuf::from(APP_NAME)
+    } else {
+        own
     }
 }
 
-/// `binary` without the mark Linux gives a replaced binary, or none when it
-/// carries no mark.
-fn unmarked(binary: &Path) -> Option<PathBuf> {
-    let kept = binary
-        .as_os_str()
-        .as_bytes()
-        .strip_suffix(DELETED_SUFFIX.as_bytes())?;
-    Some(PathBuf::from(OsStr::from_bytes(kept)))
-}
-
-/// Whether `one` and `other` lead to the same file once every link is
-/// followed.
-fn same_file(one: &Path, other: &Path) -> bool {
-    matches!(
-        (fs::canonicalize(one), fs::canonicalize(other)),
-        (Ok(one), Ok(other)) if one == other
-    )
+/// The first runnable file named `muster` in the absolute folders of
+/// `path`, a `PATH` value.
+fn on_path(path: &OsStr) -> Option<PathBuf> {
+    env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(APP_NAME))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & RUNNABLE_BITS != 0)
+        })
 }
 
 #[cfg(test)]
@@ -107,11 +87,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    /// A mode anyone may run.
-    const RUNNABLE_MODE: u32 = 0o755;
-    /// A mode nobody may run.
-    const UNRUNNABLE_MODE: u32 = 0o644;
 
     /// A folder holding a file `muster` with `mode`.
     fn folder_with_muster(mode: u32) -> TempDir {
@@ -128,8 +103,8 @@ mod tests {
     #[test]
     fn without_its_own_path_the_binary_is_found_on_path() {
         let unreadable = || Err(io::Error::from(ErrorKind::NotFound));
-        let runnable_dir = folder_with_muster(RUNNABLE_MODE);
-        let unrunnable_dir = folder_with_muster(UNRUNNABLE_MODE);
+        let runnable_dir = folder_with_muster(0o755);
+        let unrunnable_dir = folder_with_muster(0o644);
         let own = PathBuf::from("/opt/muster/bin/muster");
 
         assert_eq!(
@@ -156,7 +131,7 @@ mod tests {
     /// with nothing there, or for a path that is not absolute, none runs.
     #[test]
     fn a_replaced_binary_runs_as_the_file_now_at_its_path() {
-        let dir = folder_with_muster(RUNNABLE_MODE);
+        let dir = folder_with_muster(0o755);
         let current = dir.path().join(APP_NAME);
         let replaced = PathBuf::from(format!("{}{DELETED_SUFFIX}", current.display()));
         let removed = dir.path().join(format!("gone{DELETED_SUFFIX}"));
@@ -168,38 +143,22 @@ mod tests {
         assert_eq!(runnable(Path::new(APP_NAME)), None);
     }
 
-    /// A link on `PATH` to this very binary is written as the link, so a
-    /// versioned target is not; a `PATH` muster that is another binary, or
-    /// none, leaves this binary's own path, unmarked when Linux marked it.
+    /// A `PATH` whose first `muster` links to this binary gives the bare
+    /// name; another `muster` first, or none, gives this binary's path.
     #[test]
-    fn the_typed_path_is_the_path_link_to_this_binary() {
-        let installs = folder_with_muster(RUNNABLE_MODE);
+    fn the_bare_name_stands_for_this_binary_only_when_path_finds_it() {
+        let installs = folder_with_muster(0o755);
         let own = installs.path().join(APP_NAME);
         let bin = TempDir::new().unwrap();
         symlink(&own, bin.path().join(APP_NAME)).unwrap();
-        let other = folder_with_muster(RUNNABLE_MODE);
+        let other = folder_with_muster(0o755);
 
         assert_eq!(
-            as_typed(Ok(own.clone()), Some(bin.path().into())),
-            bin.path().join(APP_NAME)
-        );
-        let marked = PathBuf::from(format!("{}{DELETED_SUFFIX}", own.display()));
-        assert_eq!(
-            as_typed(Ok(marked.clone()), Some(bin.path().into())),
-            bin.path().join(APP_NAME),
-            "a replaced binary is the file now at its path"
-        );
-        assert_eq!(as_typed(Ok(marked), None), own);
-        assert_eq!(
-            as_typed(Ok(own.clone()), Some(other.path().into())),
-            own,
-            "the first muster on PATH is another binary"
-        );
-        let later = env::join_paths([other.path(), bin.path()]).unwrap();
-        assert_eq!(as_typed(Ok(own.clone()), Some(later)), own);
-        assert_eq!(
-            as_typed(Err(io::Error::from(ErrorKind::NotFound)), None),
+            as_typed(own.clone(), Some(bin.path().into())),
             PathBuf::from(APP_NAME)
         );
+        let later = env::join_paths([other.path(), bin.path()]).unwrap();
+        assert_eq!(as_typed(own.clone(), Some(later)), own);
+        assert_eq!(as_typed(own.clone(), None), own);
     }
 }

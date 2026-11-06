@@ -68,7 +68,7 @@ mod wait_arg;
 pub use mcp_deps::*;
 pub use mcp_error::*;
 pub use scope::*;
-pub use server::{MCP_SUBCOMMAND, MusterMcp, connection_config};
+pub use server::{MusterMcp, connection_config};
 pub use stdio_runtime::*;
 pub use tool_error::*;
 pub use tool_failure::*;

@@ -56,10 +56,8 @@ use super::{
     kv::kv,
     lock::lock,
     log_filter_args::LogFilterArgs,
-    mcp_command::McpCommand,
-    mcp_entries::{mcp_entries, mcp_rows},
-    mcp_entry_args::McpEntryArgs,
     mcp_launch::McpLaunch,
+    mcp_register::register,
     note::note,
     open::open_here,
     open_args::OpenArgs,
@@ -94,11 +92,10 @@ use super::{
 };
 use crate::{
     adapter::{
-        agent_config::EntryChange,
         client::{
             Action, ActionReport, ClientError, NoticeView, ProjectIdentityView, ProjectTarget,
-            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView,
-            binary_as_typed, process, resolve_project, this_binary,
+            ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
+            resolve_project, this_binary,
         },
         private_dir::state_dir,
         sanitize::printable_lines,
@@ -106,7 +103,7 @@ use crate::{
         shell::HookShell,
         terminal::{colouring::Colouring, log_renderer::LogRenderer},
     },
-    constants::{APP_NAME, DOT_CONFIG, MUSTER_SHELL_ENV, XDG_CONFIG_HOME_ENV},
+    constants::{APP_NAME, MUSTER_SHELL_ENV},
     domain::{
         config::{ImportMode, Stack},
         coordination::Author,
@@ -137,11 +134,12 @@ const NO_SERVICE_NOTICES: &str = "the service is not running; showing the stored
 const PROJECTS_RM_WORDS: &str = "projects rm";
 /// Environment variable naming the user's shell, for the completions probe.
 const SHELL_ENV: &str = "SHELL";
+/// Environment variable controlling the XDG configuration root.
+const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+/// XDG configuration root under home when the environment does not override.
+const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
-/// What `muster mcp --print-config` adds for a person at a terminal.
-const PRINT_CONFIG_NOTE: &str =
-    "`muster mcp add` writes this into Claude Code's, Codex's or Zed's config for you";
 
 /// The command line, parsed. A shell's completion hook is answered here from
 /// `ports` and the process exits; a command line that does not parse exits
@@ -336,13 +334,12 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(McpCommand::Add(args)),
+            command: Some(command),
             ..
-        }) => change_mcp_entries(invocation, EntryChange::Add, &args),
-        Some(Command::Mcp {
-            command: Some(McpCommand::Remove(args)),
-            ..
-        }) => change_mcp_entries(invocation, EntryChange::Remove, &args),
+        }) => match register(&command) {
+            Ok(code) => exit(code),
+            Err(error) => fail_command(false, &error),
+        },
         Some(Command::Mcp {
             command: None,
             print_config,
@@ -1375,31 +1372,14 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
         .unwrap_or_else(|error| fail_command(json, &error))
 }
 
-/// `muster mcp add` or `remove`: makes `change` to muster's entry in the
-/// agents' configs `args` names, and says what it wrote where.
-fn change_mcp_entries(invocation: &Invocation<'_>, change: EntryChange, args: &McpEntryArgs) {
-    let json = args.json();
-    let presenter = Presenter::detect(json);
-    match mcp_entries(invocation, presenter, change, args) {
-        Ok(view) => print_result(json, &view, |view| written(presenter.show(&mcp_rows(view)))),
-        Err(error) => fail_command(json, &error),
-    }
-}
-
 /// Serves muster to agents as an MCP server over stdio, blocking until the
 /// connecting agent disconnects; with `print_config`, prints the paste-in
-/// config snippet, which names no project and the binary as `mcp add`
-/// writes it, instead. Each call resolves its project from the folder
-/// `--project` names, or else the current one, so a folder registered later
-/// is found and one entry serves every project.
+/// config snippet, which names no project, instead. Each call resolves its
+/// project from the folder `--project` names, or else the current one, so a
+/// folder registered later is found and one entry serves every project.
 fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<String>) {
     if print_config {
-        emit_line(&invocation.ports().mcp_config(&binary_as_typed()));
-        // Only a person reading it is told; a script piping it gets the
-        // snippet alone.
-        if io::stdout().is_terminal() {
-            print_note(APP_NAME, PRINT_CONFIG_NOTE);
-        }
+        emit_line(&invocation.ports().mcp_config(&this_binary()));
         return;
     }
     let launch = invocation.store().and_then(|store| {
@@ -1451,7 +1431,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
     let xdg_config = env::var_os(XDG_CONFIG_HOME_ENV)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(DOT_CONFIG));
+        .unwrap_or_else(|| home.join(XDG_CONFIG_HOME_DEFAULT));
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),

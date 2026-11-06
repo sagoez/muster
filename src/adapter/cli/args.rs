@@ -11,10 +11,12 @@ use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
 use strum::IntoEnumIterator;
 
-use super::{cli_ports::CliPorts, command::Command, shell_init::SHELL_INIT_SUBCOMMAND};
+use super::{
+    cli_ports::CliPorts, command::Command, mcp_agent::McpAgent, mcp_scope::McpScope,
+    shell_init::SHELL_INIT_SUBCOMMAND,
+};
 use crate::{
     adapter::{
-        agent_config::{Agent, McpScope, McpServerName, SERVER_NAME_FORM},
         holder::{LineLimit, MAX_LOG_LINES},
         sanitize::printable,
         service::StateGoal,
@@ -134,8 +136,8 @@ static STATE_GOALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StateG
 pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<HookShell>);
 /// The names `muster open --direction` accepts.
 static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
-/// The agents `muster mcp add --client` accepts.
-static AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<Agent>);
+/// The agents `muster mcp add` accepts.
+static MCP_AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpAgent>);
 /// The scopes `muster mcp add --scope` accepts.
 static MCP_SCOPES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpScope>);
 /// What a pid argument takes.
@@ -175,9 +177,9 @@ pub(super) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
     one_of(&STATE_GOALS)
 }
 
-/// Parses a `muster mcp add --client`.
-pub(super) fn agent_parser() -> impl TypedValueParser<Value = Agent> {
-    one_of(&AGENTS)
+/// Parses the agent of `muster mcp add`.
+pub(super) fn mcp_agent_parser() -> impl TypedValueParser<Value = McpAgent> {
+    one_of(&MCP_AGENTS)
 }
 
 /// Parses a `muster mcp add --scope`.
@@ -225,14 +227,6 @@ pub(super) fn pid(raw: &str) -> Result<Pid, String> {
         .ok()
         .and_then(|pid| Pid::try_new(pid).ok())
         .ok_or_else(|| PID_FORM.to_string())
-}
-
-/// Parses a `muster mcp add --name`.
-///
-/// # Errors
-/// Returns the form expected for a name no agent takes as a server key.
-pub(super) fn server_name(raw: &str) -> Result<McpServerName, String> {
-    McpServerName::try_new(raw).map_err(|_| SERVER_NAME_FORM.clone())
 }
 
 /// The command line's definition, with `--project` completing the projects

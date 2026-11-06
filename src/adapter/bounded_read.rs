@@ -3,7 +3,7 @@
 //! read into memory.
 
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{self, Read},
     path::Path,
 };
@@ -27,16 +27,6 @@ const TOO_LARGE: &str = "file is too large";
 /// path that is not a regular file, [`io::ErrorKind::FileTooLarge`] for one
 /// over `max` bytes, or the failure of the open or read itself.
 pub fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    read_regular(open_nonblocking(path)?, max).map(|(text, _)| text)
-}
-
-/// As [`read_bounded`], with the file's metadata as the open handle gave it
-/// before the read, so a write during or after the read shows in a later
-/// look at the file.
-///
-/// # Errors
-/// As [`read_bounded`].
-pub fn read_bounded_with_metadata(path: &Path, max: u64) -> io::Result<(String, Metadata)> {
     read_regular(open_nonblocking(path)?, max)
 }
 
@@ -55,12 +45,11 @@ fn open_nonblocking(path: &Path) -> io::Result<File> {
 }
 
 /// The text of the open `file`, checked on its own metadata to be a regular
-/// file of at most `max` bytes, and read through the cap in case it grows,
-/// with that metadata.
+/// file of at most `max` bytes, and read through the cap in case it grows.
 ///
 /// # Errors
 /// As [`read_bounded`].
-fn read_regular(file: File, max: u64) -> io::Result<(String, Metadata)> {
+fn read_regular(file: File, max: u64) -> io::Result<String> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, NOT_A_FILE));
@@ -68,7 +57,7 @@ fn read_regular(file: File, max: u64) -> io::Result<(String, Metadata)> {
     if metadata.len() > max {
         return Err(io::Error::new(io::ErrorKind::FileTooLarge, TOO_LARGE));
     }
-    Ok((read_capped(file, max)?, metadata))
+    read_capped(file, max)
 }
 
 /// The UTF-8 text `reader` yields, without a leading byte order mark,

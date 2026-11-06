@@ -194,8 +194,8 @@ settings.
 | `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state, paged with `--limit` (50 by default, at most 200) and `--cursor` |
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
-| `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP, or print the config snippet |
-| `muster mcp add\|remove [--client AGENT] [--scope user\|local\|project] [--name NAME] [--force] [--json]` | Add muster's MCP server to Claude Code's, Codex's or Zed's config, or remove it |
+| `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
+| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, or unregister it |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -390,111 +390,32 @@ on `start` or `restart`.
 
 ## MCP
 
-`muster mcp add` registers the server with an agent: it writes an entry that
-runs muster with the argument `mcp` into the agent's own config, keeping
-every other key, server and comment in the file. The default scope, `user`,
-serves every project, since the server finds each call's project itself.
-Where each scope goes:
+`muster mcp add <agent>` asks the agent's own CLI to register muster's
+server under the name `muster`, so the agent itself decides where the
+entry goes and how it is kept:
 
-| `--client` | `--scope` | File and key |
-|---|---|---|
-| `claude` | `user` (default) | `~/.claude.json`, `mcpServers` |
-| `claude` | `local` | `~/.claude.json`, `projects["<repository root>"].mcpServers` |
-| `claude` | `project` | `.mcp.json` in the project, `mcpServers`; Claude Code asks before using it |
-| `codex` | `user` (default) | `~/.codex/config.toml` (`$CODEX_HOME`), `[mcp_servers.<name>]` |
-| `codex` | `project` | `.codex/config.toml` in the project; Codex reads it only for trusted projects |
-| `zed` | `user` (only) | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux), `context_servers` |
+| Agent | What runs |
+|---|---|
+| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
+| `codex` | `codex mcp add muster -- <muster> mcp` |
+| `zed` | nothing: Zed has no such command, so muster prints the `context_servers` entry to add to its settings, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
-These follow each agent's docs: Claude Code at
-<https://code.claude.com/docs/en/mcp>, Codex at
-<https://learn.chatgpt.com/docs/extend/mcp>, Zed at
-<https://zed.dev/docs/ai/mcp>. `$CLAUDE_CONFIG_DIR` moves `.claude.json`,
-and a missing `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME` or Zed folder is made. The
-local and project scopes need a registered project: the one containing the
-current folder, or `--project`. A local entry is keyed the way Claude Code
-keys it: by the root of the git repository holding the project, the main
-repository's for a linked worktree, so Claude Code started anywhere in the
-repository finds it; outside git, by the project folder alone, which Claude
-Code reads only when started in that very folder.
+`muster mcp remove <agent>` runs `claude mcp remove --scope <scope> muster`
+or `codex mcp remove muster`, and for Zed says what to delete. The agent's
+CLI runs in the current folder with the terminal handed to it, so it
+speaks for itself, and muster exits with its exit code. `--scope` is
+Claude Code's: `user` (the default, every project), `local` (this folder's
+project, in your own config) or `project` (this folder's `.mcp.json`).
+Codex and Zed take servers for the user only. When the agent's binary is
+not on `PATH`, muster fails and prints the command to run once it is
+installed.
 
-The entry names the binary as a person would type it, so it survives an
-upgrade: in the user's own configs, the first `muster` on `PATH` when that
-is this binary, kept as `PATH` names it, else this binary's own path; in a
-project's file, which is shared with whoever clones the project, the bare
-`muster` for each person's own `PATH` to find.
+`<muster>` is the bare `muster` when the first `muster` on `PATH` is this
+binary, so the entry survives an upgrade, else this binary's own path; a
+`project` scope entry, shared with whoever clones the project, always names
+the bare `muster`.
 
-Without `--client`, a terminal offers the agents, with those installed (a
-config or a binary on `PATH`) chosen for `add` and those whose config holds
-muster's own entry chosen for `remove`; elsewhere `--client` is required, and it
-takes several, comma-separated or repeated. An entry is muster's when it
-is the entry muster would write, or its command is a file named `muster`
-and its arguments are `mcp`, whatever the path; a binary run under another
-name claims no other entry. An identical entry reports `already-added` and
-writes nothing; one an older muster wrote at another path is pointed at
-this one, its other keys kept, along with a comment ending Codex's
-`command` line, and reports `updated`. Codex and Zed turn an entry off by
-its own `enabled = false`: such an entry reports `disabled` and is turned
-back on in place only by `--force`, which reports `enabled` and keeps every
-other key. Claude Code turns a server off outside its entry, and muster
-only ever writes or removes its own entry in `.claude.json` or `.mcp.json`:
-if Claude Code has the server turned off, `muster mcp add` still reports it
-added, and you turn it back on in Claude Code with `/mcp`. Another server's
-entry under the name is refused unless `--force` replaces it.
-`muster mcp remove` takes the same flags and removes
-the entry under the name only when it is muster's, unless `--force`, and
-takes out the table of servers, and a project's object in `.claude.json`,
-that it leaves empty.
-
-A file that does not parse (Claude Code's files must be plain JSON, Zed's
-may hold comments), that holds a key twice in the objects on the way to the
-entry, that is not a regular file or is larger than 128 MiB, or that is
-read-only is refused and left untouched. A project's file that leads out of
-the project, by a link or a `..` past a folder not made yet, is refused
-before any folder is made.
-
-Before it reads `.claude.json` to plan, muster takes Claude Code's own
-lock, the folder `<file>.lock` beside the path Claude Code is configured
-with, a link not followed, as Claude Code names it, waiting while Claude
-Code holds it and taking over one untouched for 10 seconds. The folder
-stays empty, so Claude Code can always take it over once stale, even
-after muster dies holding it. muster writes a random token to
-`<file>.lock.muster` beside it, naming the folder it made, and the lock
-is muster's while that file holds muster's token and the folder is the
-one it names. It stamps the folder's modified time every 2 seconds,
-trying again at the next turn when a stamp fails, so Claude Code never
-takes the lock for stale, and it removes the token file and then the
-folder only while the lock is still muster's, writing nothing if another
-writer took the lock over. A token file a muster that died left behind
-is replaced the next time muster takes the lock. The lock is best-effort: Claude Code gives up on a held lock
-after about 2 seconds and writes without it. The real guard is the check
-just before the files are replaced. Claude Code keeps its user and local
-servers in its older `.config.json`, in its config folder, instead of
-`.claude.json` when that file holds anything, and muster then writes and
-locks it there.
-
-The remove picker reads each config without a lock to choose which agents
-to tick. Every config is then read and checked once more, under the lock
-for `.claude.json`, and every new text written and synced beside its file,
-before any file is replaced. Just before the files are replaced, each is
-checked again: it must still be the same regular file, not made
-read-only, with the same mode and size, and its text, read again, must
-match what muster read. So a refusal, a change by another writer or an
-interrupt changes nothing. Errors name each config by the path its agent
-is configured with, not where a link leads. Only a failure while
-putting the files in place can leave some of them written, and the error
-then names those. Writes are atomic, keep an existing file's mode, create a
-new file readable by its owner alone, and follow a symlinked file, even one
-that leads nowhere yet, to its target.
-
-With `--json` the result is `{"change": "add" | "remove", "edits": [...]}`,
-each edit `{agent, scope, name, path, outcome, note}` in the order the
-agents were given, `outcome` one of `added`, `already-added`, `updated`,
-`disabled`, `enabled`, `replaced`, `removed` or `absent`, and `note` what the agent
-does with the entry, or `null`. A failure is the usual `{"error": {kind,
-message}}`.
-
-`muster mcp --print-config` prints the config snippet for any other agent.
-Each tool call acts on
+`muster mcp --print-config` prints the config snippet. Each tool call acts on
 the project its `project` argument names, else the one the server's folder,
 `--project` or `$MUSTER_PROJECT` resolves to, worked out per call. Every
 result about a project names it.

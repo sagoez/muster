@@ -24,17 +24,17 @@ use super::{
     tool_result::ToolResult,
 };
 use crate::{
-    adapter::{
-        agent_config::DEFAULT_SERVER_NAME,
-        client::{ServiceClient, process},
-    },
+    adapter::client::{ServiceClient, process},
     domain::project::Project,
 };
 
 /// Server name reported to connecting agents.
 const MCP_SERVER_NAME: &str = "muster";
+/// Key muster's server is registered under in an agent's MCP config; it
+/// namespaces the tools an agent sees.
+const MCP_CONNECTION_KEY: &str = "muster";
 /// Subcommand an agent invokes to start the server.
-pub const MCP_SUBCOMMAND: &str = "mcp";
+const MCP_SUBCOMMAND: &str = "mcp";
 /// Server version reported to connecting agents.
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Guidance shown to agents that connect to the server.
@@ -66,7 +66,7 @@ pub(super) fn instructions() -> String {
 pub fn connection_config(executable: &Path) -> String {
     let value = serde_json::json!({
         "mcpServers": {
-            DEFAULT_SERVER_NAME: {
+            MCP_CONNECTION_KEY: {
                 "command": executable.display().to_string(),
                 "args": [MCP_SUBCOMMAND],
             },
@@ -303,7 +303,7 @@ mod tests {
     fn connection_config_names_no_project() {
         let json = connection_config(&PathBuf::from("/usr/local/bin/muster"));
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let entry = &parsed["mcpServers"][DEFAULT_SERVER_NAME];
+        let entry = &parsed["mcpServers"][MCP_CONNECTION_KEY];
         assert_eq!(entry["command"], "/usr/local/bin/muster");
         assert_eq!(entry["args"], serde_json::json!(["mcp"]));
     }

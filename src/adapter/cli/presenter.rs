@@ -6,14 +6,12 @@
 use std::{
     error::Error,
     io::{self, Write},
-    sync::LazyLock,
 };
 
 use cliclack::{
     ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,
 };
 use console::{Term, style};
-use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -28,11 +26,9 @@ use super::{
 };
 use crate::{
     adapter::{
-        agent_config::{Agent, EntryChange},
         detect::Candidate,
         sanitize::{printable, printable_lines},
         service::ProcessStatus,
-        spoken_list::{Conjunction, spoken_list},
     },
     constants::APP_NAME,
     domain::value::{ProcessName, ProjectName},
@@ -50,28 +46,6 @@ const CHOOSE_CANDIDATES: &str = "Which processes should muster run?";
 const CHOOSE_CANDIDATES_ASKED: &str = "which processes to add";
 /// The argument that answers it up front.
 const CHOOSE_CANDIDATES_ARGUMENT: &str = "--yes to add the suggested ones";
-/// The question that picks the agents `muster mcp add` writes to.
-const CHOOSE_AGENTS_TO_ADD: &str = "Which agents should run muster's MCP server?";
-/// The question that picks the agents `muster mcp remove` edits.
-const CHOOSE_AGENTS_TO_REMOVE: &str = "Which agents should no longer run muster's MCP server?";
-/// What the plain fallback says it could not ask, choosing agents.
-const CHOOSE_AGENTS_ASKED: &str = "which agents to change";
-/// The flag that names the agents up front.
-const CLIENT_FLAG: &str = "--client";
-/// The argument that answers it up front, naming every agent.
-pub(super) static CHOOSE_AGENTS_ARGUMENT: LazyLock<String> = LazyLock::new(|| {
-    let names: Vec<String> = Agent::iter().map(|agent| agent.to_string()).collect();
-    format!("{CLIENT_FLAG} {}", spoken_list(&names, Conjunction::Or))
-});
-/// The hint of an agent found installed, offered to add to.
-const AGENT_FOUND: &str = "installed";
-/// The hint of an agent not found.
-const AGENT_NOT_FOUND: &str = "not found";
-/// The hint of an agent whose config holds muster's entry, offered to
-/// remove.
-const AGENT_HOLDING: &str = "has muster's entry";
-/// The hint of an agent whose config does not.
-const AGENT_NOT_HOLDING: &str = "no entry of muster's";
 /// Between the parts of a choice's hint.
 const HINT_SEPARATOR: &str = " · ";
 /// Between a padded label and its detail in a framed line.
@@ -303,52 +277,6 @@ impl Presenter {
         })
     }
 
-    /// Asks which of `offered` to make `change` to, those `chosen` names
-    /// ticked to begin with: for an add the agents installed, for a removal
-    /// those whose config holds the entry. `chosen` runs only once the
-    /// person can be asked.
-    ///
-    /// # Errors
-    /// Returns [`CliError::CannotAsk`] naming `--client` in the plain
-    /// layout, the failure of `chosen`, or [`CliError::Cancelled`] when the
-    /// person cancels.
-    pub fn choose_agents(
-        self,
-        change: EntryChange,
-        offered: &[Agent],
-        chosen: impl FnOnce() -> Result<Vec<Agent>, CliError>,
-    ) -> Result<Vec<Agent>, CliError> {
-        self.can_confirm(CHOOSE_AGENTS_ASKED, CHOOSE_AGENTS_ARGUMENT.as_str())?;
-        let chosen = chosen()?;
-        let (question, ticked, unticked) = match change {
-            EntryChange::Add => (CHOOSE_AGENTS_TO_ADD, AGENT_FOUND, AGENT_NOT_FOUND),
-            EntryChange::Remove => (CHOOSE_AGENTS_TO_REMOVE, AGENT_HOLDING, AGENT_NOT_HOLDING),
-        };
-        let items: Vec<(Agent, &str, &str)> = offered
-            .iter()
-            .map(|agent| {
-                let hint = if chosen.contains(agent) {
-                    ticked
-                } else {
-                    unticked
-                };
-                (*agent, agent.title(), hint)
-            })
-            .collect();
-        let initial: Vec<Agent> = offered
-            .iter()
-            .filter(|agent| chosen.contains(agent))
-            .copied()
-            .collect();
-        asked(|| {
-            multiselect(question)
-                .items(&items)
-                .initial_values(initial)
-                .required(false)
-                .interact()
-        })
-    }
-
     /// Asks `question`, which `argument` answers up front, offering
     /// `initial`, and answers whether the person agreed.
     ///
@@ -533,14 +461,6 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            Presenter::Plain.choose_agents(EntryChange::Add, &[Agent::Claude], || {
-                unreachable!("nothing is read for a question never put")
-            }),
-            Err(CliError::CannotAsk { argument, .. })
-                if argument == CHOOSE_AGENTS_ARGUMENT.as_str()
-        ));
-        assert_eq!(*CHOOSE_AGENTS_ARGUMENT, "--client claude, codex or zed");
         assert!(Presenter::Interactive.can_choose_process().is_ok());
     }
 

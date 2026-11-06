@@ -36,3 +36,7 @@ jobs:
 
       - name: Test
         run: cargo +stable test --workspace --all-features
+
+      - name: Package
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo +stable package --workspace --locked

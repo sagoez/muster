@@ -32,7 +32,9 @@ jobs:
         env:
           DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          NEW=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # `[package]` too: the manifest before the workspace split kept it there.
+          version_of() { awk '/^\[(workspace\.)?package\]/{s=1;next} /^\[/{s=0} s && /^version/{gsub(/.*= *"|".*/,"");print;exit}'; }
+          NEW=$(version_of < Cargo.toml)
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             if [ "$DISPATCH_VERSION" != "$NEW" ]; then
@@ -45,7 +47,7 @@ jobs:
             exit 0
           fi
 
-          OLD=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          OLD=$(git show HEAD~1:Cargo.toml | version_of)
           if [ "$NEW" != "$OLD" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
@@ -59,11 +61,30 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
+      # Skips every crate already at this version, so a run that stopped half
+      # way finishes on a re-run.
       - name: Publish to crates.io
         if: steps.version.outputs.changed == 'true'
-        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          exclude=()
+          pending=0
+          for crate in $crates; do
+            if curl -sf -o /dev/null -A "muster release (https://github.com/sagoez/muster)" \
+                "https://crates.io/api/v1/crates/$crate/$VERSION"; then
+              exclude+=(--exclude "$crate")
+            else
+              pending=$((pending + 1))
+            fi
+          done
+          if [ "$pending" -eq 0 ]; then
+            echo "every crate is already at $VERSION"
+          else
+            cargo publish --workspace --locked "${exclude[@]}"
+          fi
 
       - name: Create release
         if: steps.version.outputs.changed == 'true'

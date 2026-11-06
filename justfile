@@ -35,5 +35,15 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+# Package every crate as crates.io would and build the packages.
+package:
+    cargo package --workspace --locked
+
+# Set the release version of every crate and its sibling pins.
+bump version:
+    sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sed -i -E 's/^(muster-[a-z]+ = \{ path = "[^"]+", version = )"=[^"]+"/\1"={{version}}"/' Cargo.toml
+    cargo update --workspace
+
 # Everything CI enforces.
 ci: fmt-check lint test

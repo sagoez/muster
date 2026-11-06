@@ -17,12 +17,12 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
     value::{ByteSize, CommandLine, ProcessName, StopGrace},
 };
-use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
+use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, channel_sink::ChannelSink};
 use muster_os::open_files::OpenFilesLimit;
 use muster_protocol::holder::HolderRecord;
 use muster_service::HolderRunner;
 
-use crate::common::{BINARY, ChannelSink, Scratch, WAIT, processes_under, wait_until};
+use crate::common::{BINARY, Scratch, WAIT, processes_under, wait_until};
 
 /// Log cap of the test runners.
 const LOG_CAP_MIB: u64 = 4;

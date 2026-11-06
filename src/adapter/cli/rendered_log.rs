@@ -151,6 +151,8 @@ impl FollowedOutput for RenderedLog<'_> {
         self.out.write_all(&[LINE_FEED])
     }
 
+    /// How many lines rendering the followed output dropped since the last
+    /// call.
     fn take_faults(&mut self) -> usize {
         self.renderer.take_faults()
     }

@@ -18,6 +18,7 @@ use crate::{
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
+        terminal::log_renderer::dropped_lines,
     },
     domain::{
         port::ListeningSocket,
@@ -47,6 +48,11 @@ const LOG_TAIL_OVERDUE: &str = "the end of its log could not be read within";
 const LOG_SCAN_OVERDUE: &str = "its log from the cursor could not be read within";
 /// Prefix of the notice for a stored readiness pattern that does not compile.
 const READY_PATTERN_NOTICE: &str = "its readiness check cannot be used";
+/// Names the lines a read of a process's log dropped, as against those its
+/// live output did.
+const IN_A_LOG_READ: &str = "in a read of its log";
+/// Ends a notice of dropped lines, which a run gets once from each source.
+const LATER_FAULTS_UNREPORTED: &str = "later ones this run are not reported";
 
 /// A wait checked against its process and ready to register: what it waits
 /// for, resolved and compiled. Made by [`Supervisor::prepare_wait`] before a
@@ -766,33 +772,34 @@ impl Supervisor {
         self.test_lines(pane, &lines);
     }
 
-    /// Warns, once per run, that lines of `pane`'s output were dropped
-    /// because rendering them panicked: those its tap dropped, and the
-    /// `read` more a read of its log did.
+    /// Warns, once per run each, that lines of `pane`'s output were dropped
+    /// because rendering them panicked: those its tap dropped, and apart
+    /// from them the `read` more a read of its log did, so a read never
+    /// stands in for the warning the live output is owed.
     pub(super) fn report_render_faults(&mut self, pane: PaneId, read: usize) {
         if read > 0 {
-            self.tap(pane).note_faults(read);
+            self.tap(pane).note_read_faults(read);
         }
-        let Some(dropped) = self
-            .taps
-            .get_mut(&pane)
-            .and_then(OutputTap::take_fault_report)
-        else {
+        let Some(tap) = self.taps.get_mut(&pane) else {
             return;
         };
+        let reports = [
+            tap.take_fault_report().map(dropped_lines),
+            tap.take_read_fault_report()
+                .map(|dropped| format!("{} {IN_A_LOG_READ}", dropped_lines(dropped))),
+        ];
         let name = self
             .workspace
             .process(pane)
             .map(|process| process.name().to_string())
             .unwrap_or_default();
-        self.notify(
-            NoticeLevel::Warning,
-            Some(pane),
-            format!(
-                "{name}: {dropped} line(s) of output could not be rendered and were dropped; \
-                 later ones this run are not reported"
-            ),
-        );
+        for report in reports.into_iter().flatten() {
+            self.notify(
+                NoticeLevel::Warning,
+                Some(pane),
+                format!("{name}: {report}; {LATER_FAULTS_UNREPORTED}"),
+            );
+        }
     }
 
     /// Whether a readiness pattern or a log wait still waits on `pane`'s
@@ -2405,6 +2412,28 @@ mod tests {
         render_fault::arm();
         print(&mut harness, "api", b"lost in the next run\n");
         assert_eq!(harness.notice_messages(), [DROPPED_NOTICE, DROPPED_NOTICE]);
+    }
+
+    /// Lines a read of the log dropped are warned of apart from the live
+    /// output's, once per run, so a read warned of first never uses up the
+    /// warning a fault in the live output is owed.
+    #[test]
+    fn a_read_fault_never_uses_up_the_live_warning() {
+        const READ_NOTICE: &str = "api: 2 line(s) of output could not be rendered and were \
+                                   dropped in a read of its log; later ones this run are not \
+                                   reported";
+        let mut harness = up(&[api(RestartPolicy::Always, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+
+        harness.supervisor_mut().report_render_faults(pane, 2);
+        harness.supervisor_mut().report_render_faults(pane, 1);
+        render_fault::arm();
+        print(&mut harness, "api", b"lost\n");
+
+        assert_eq!(harness.notice_messages(), [READ_NOTICE, DROPPED_NOTICE]);
     }
 
     /// The end of a log as the holder writes it: a run killed on the

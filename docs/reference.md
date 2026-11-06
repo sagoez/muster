@@ -354,7 +354,9 @@ command = "muster attach web"
 
 Each process's raw output goes to a log under the state directory, across
 restarts and after it exits, rotating at `log-max-size` and keeping one older
-file. `muster logs` and `logs -f` print it as the lines a log reader expects:
+file. A log rotates only between lines: a line still open at the size runs
+on until it ends, and one that runs 64 KiB past the size is ended there.
+`muster logs` and `logs -f` print it as the lines a log reader expects:
 a carriage return or erase that rewrites a line leaves only its last state, so
 a progress bar shows once, finished, and output that only redraws the screen,
 such as `docker compose up`'s footer and the blank rows it makes room with,
@@ -366,9 +368,9 @@ end, wherever every other command's output is colored: on a terminal, with
 the same lines without color, and `--screen` shows the live screen instead.
 
 What a full-screen program draws on the alternate screen, such as an editor,
-`htop` or a TUI, is not logged: the log holds one line, `[full-screen output
-not logged]`, each time the alternate screen comes up, and logging resumes
-when it goes away. The full-screen output stays visible live through `muster
+`htop` or a TUI, is not logged: the log holds one uncolored line,
+`[full-screen output not logged]`, each time the alternate screen comes up,
+and logging resumes when it goes away, in the colors set before it. The full-screen output stays visible live through `muster
 attach` and `muster logs --screen`.
 
 Each run is read as if on a fresh terminal, so a run killed on the alternate

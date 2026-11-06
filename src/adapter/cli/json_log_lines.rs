@@ -128,6 +128,8 @@ impl FollowedOutput for JsonLogLines<'_> {
         self.write_object(&object)
     }
 
+    /// How many lines rendering the followed output dropped since the last
+    /// call.
     fn take_faults(&mut self) -> usize {
         self.renderer.take_faults()
     }

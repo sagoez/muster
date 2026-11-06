@@ -1,10 +1,9 @@
 use std::{
     collections::VecDeque,
-    mem,
     time::{Duration, Instant},
 };
 
-use super::tap_line::TapLine;
+use super::{fault_budget::FaultBudget, tap_line::TapLine};
 use crate::{
     adapter::terminal::{
         escape::{LINE_FEED, RUN_START},
@@ -52,10 +51,10 @@ pub struct OutputTap {
     /// Where the newest run in a seeded log began, by the reset the holder
     /// logs there.
     logged_run_start: Option<OutputCursor>,
-    /// Lines dropped because rendering them panicked, not yet reported.
-    faults: usize,
-    /// Whether the dropped lines of the current run were reported already.
-    faults_reported: bool,
+    /// Lines this tap dropped because rendering them panicked.
+    live_faults: FaultBudget,
+    /// Lines reads of the log dropped, reported apart from the tap's own.
+    read_faults: FaultBudget,
     /// Whether the cursor stands where the output really ends: a run began
     /// here, or the log's end was read.
     placed: bool,
@@ -74,8 +73,8 @@ impl OutputTap {
             partial_at: start,
             run_start: None,
             logged_run_start: None,
-            faults: 0,
-            faults_reported: false,
+            live_faults: FaultBudget::default(),
+            read_faults: FaultBudget::default(),
             placed: false,
             recheck: None,
         }
@@ -125,7 +124,7 @@ impl OutputTap {
         self.keep_finished();
         self.partial_at = self.cursor();
         self.run_start = Some(self.cursor());
-        self.faults_reported = false;
+        self.renew_faults();
         self.placed = true;
     }
 
@@ -146,7 +145,7 @@ impl OutputTap {
             self.partial_at = start;
         }
         self.run_start = Some(start);
-        self.faults_reported = false;
+        self.renew_faults();
         self.placed = true;
     }
 
@@ -235,22 +234,30 @@ impl OutputTap {
     }
 
     /// Counts `dropped` lines of this process's output that a read of its
-    /// log could not render, to report with the tap's own.
-    pub fn note_faults(&mut self, dropped: usize) {
-        self.faults += dropped;
+    /// log could not render, to report apart from the tap's own, so reads
+    /// never use up the report a fault in the live output is owed.
+    pub fn note_read_faults(&mut self, dropped: usize) {
+        self.read_faults.note(dropped);
     }
 
-    /// How many lines were dropped because rendering them panicked, the
+    /// How many lines this tap dropped because rendering them panicked, the
     /// first time any were in the current run; none after that until the
     /// next run begins, so a run is reported once however often it fails.
     pub fn take_fault_report(&mut self) -> Option<usize> {
-        self.faults += self.renderer.take_faults();
-        let dropped = mem::take(&mut self.faults);
-        if dropped == 0 || self.faults_reported {
-            return None;
-        }
-        self.faults_reported = true;
-        Some(dropped)
+        self.live_faults.note(self.renderer.take_faults());
+        self.live_faults.take_report()
+    }
+
+    /// How many lines reads of the log dropped, counted and reported as
+    /// [`Self::take_fault_report`] counts the tap's own.
+    pub fn take_read_fault_report(&mut self) -> Option<usize> {
+        self.read_faults.take_report()
+    }
+
+    /// Begins a run for the fault reports, which report it afresh.
+    fn renew_faults(&mut self) {
+        self.live_faults.renew();
+        self.read_faults.renew();
     }
 
     /// Where the oldest line held begins, or where the next one will when
@@ -535,26 +542,31 @@ mod tests {
     }
 
     /// Lines dropped because rendering them panicked are reported once per
-    /// run, with those a log read counted, and again in the next run.
+    /// run, and again in the next run; those reads of the log dropped are
+    /// counted apart, so a read reported first never uses up the report the
+    /// live output's own fault is owed.
     #[test]
     fn dropped_lines_are_reported_once_per_run() {
         let mut tap = OutputTap::new(OutputCursor::new(0));
         tap.begin_run();
         assert_eq!(tap.take_fault_report(), None);
 
+        tap.note_read_faults(2);
+        let read = tap.take_read_fault_report();
         render_fault::arm();
         tap.feed(None, b"lost\nkept\n");
-        tap.note_faults(2);
         let first = tap.take_fault_report();
         render_fault::arm();
         tap.feed(None, b"lost again\n");
-        let same_run = tap.take_fault_report();
+        tap.note_read_faults(1);
+        let same_run = (tap.take_fault_report(), tap.take_read_fault_report());
         tap.begin_run_at(OutputCursor::new(1000));
-        tap.note_faults(1);
-        let next_run = tap.take_fault_report();
+        tap.note_read_faults(1);
+        let next_run = tap.take_read_fault_report();
 
-        assert_eq!(first, Some(3));
-        assert_eq!(same_run, None);
+        assert_eq!(read, Some(2));
+        assert_eq!(first, Some(1), "a read never uses up the live report");
+        assert_eq!(same_run, (None, None));
         assert_eq!(next_run, Some(1));
     }
 

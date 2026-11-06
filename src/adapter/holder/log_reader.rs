@@ -435,22 +435,32 @@ fn hand_line(
 /// showing, the output from [`line_start_before`] up to `start`, and ends
 /// there the line `start` falls inside, so the read shows from `start`. The
 /// sequence state `start` falls inside is kept, so a read never starts
-/// mid-escape.
+/// mid-escape. The look-back is read once: rendering starts at the
+/// look-back bound and starts over past the first line feed found.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when the files cannot be read.
 fn renderer_at(span: &Span, start: OutputCursor) -> io::Result<PlacedRenderer> {
-    let begin = line_start_before(span, start)?;
-    let mut renderer = PlacedRenderer::new(begin);
-    let mut before = SpanReader::new(span, begin).take(start.bytes_since(begin));
+    let bound = look_back_bound(span, start);
+    let mut on_line = bound == span.oldest();
+    let mut renderer = PlacedRenderer::new(bound);
+    let mut before = SpanReader::new(span, bound).take(start.bytes_since(bound));
     let mut block = vec![0; BLOCK_BYTES];
+    let mut at = bound;
     loop {
         let read = before.read(&mut block)?;
         if read == 0 {
             break;
         }
-        renderer.advance(&block[..read]);
+        let mut piece = &block[..read];
+        if !on_line && let Some(index) = piece.iter().position(|byte| *byte == LINE_FEED) {
+            on_line = true;
+            renderer = PlacedRenderer::new(at.advanced(index as u64 + 1));
+            piece = &piece[index + 1..];
+        }
+        renderer.advance(piece);
         renderer.take_lines();
+        at = at.advanced(read as u64);
     }
     renderer.finish();
     renderer.take_lines();
@@ -471,9 +481,7 @@ fn renderer_at(span: &Span, start: OutputCursor) -> io::Result<PlacedRenderer> {
 /// # Errors
 /// Returns an [`io::Error`] when the files cannot be read.
 fn line_start_before(span: &Span, start: OutputCursor) -> io::Result<OutputCursor> {
-    let bound = span.oldest().max(OutputCursor::new(
-        start.offset().saturating_sub(RENDER_LOOKBACK_BYTES),
-    ));
+    let bound = look_back_bound(span, start);
     if bound == span.oldest() {
         return Ok(bound);
     }
@@ -490,6 +498,14 @@ fn line_start_before(span: &Span, start: OutputCursor) -> io::Result<OutputCurso
         }
         at = at.advanced(read as u64);
     }
+}
+
+/// How far back from `start` a read of the output `span` holds may look for
+/// a line start: [`RENDER_LOOKBACK_BYTES`], or the oldest byte kept.
+fn look_back_bound(span: &Span, start: OutputCursor) -> OutputCursor {
+    span.oldest().max(OutputCursor::new(
+        start.offset().saturating_sub(RENDER_LOOKBACK_BYTES),
+    ))
 }
 
 /// `text` cut to [`LINE_MAX_CHARS`] with a note of how many characters went.

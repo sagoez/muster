@@ -15,6 +15,15 @@ use super::{
 /// Most bytes to render before taking the lines they finish, so a whole log
 /// never holds every line's cells at once.
 pub const RENDER_CHUNK_BYTES: usize = 64 * 1024;
+/// Follows the count of lines rendering dropped, wherever that is reported.
+const DROPPED_LINES: &str = "line(s) of output could not be rendered and were dropped";
+
+/// `count` lines dropped because rendering them panicked, as every report of
+/// them words it: `2 line(s) of output could not be rendered and were
+/// dropped`.
+pub fn dropped_lines(count: usize) -> String {
+    format!("{count} {DROPPED_LINES}")
+}
 
 /// Renders raw output, fed in pieces of any size, into finished
 /// [`LogLine`]s: each line's carriage returns, erases and column moves
@@ -295,6 +304,21 @@ mod tests {
             plain(b"\x1b7\x1b[30;1Hstatus\nnot lost\n\x1b[1;3Hab\n"),
             "not lost\n  ab\n",
             "a line feed ends a jump that is never restored, and its save"
+        );
+    }
+
+    /// A pen pushed comes back when popped, across line feeds; a pop with
+    /// none pushed changes nothing, and a full reset forgets what was pushed.
+    #[test]
+    fn a_pushed_pen_comes_back_when_popped() {
+        assert_eq!(
+            colored(b"\x1b[31m\x1b[#{\x1b[0mplain\n\x1b[#}red\n\x1b[#}still red\n"),
+            "plain\n\x1b[31mred\x1b[0m\n\x1b[31mstill red\x1b[0m\n"
+        );
+        assert_eq!(
+            colored(b"\x1b[31m\x1b[#{\x1bc\x1b[#}plain\n"),
+            "plain\n",
+            "a reset drops the pushed pen"
         );
     }
 

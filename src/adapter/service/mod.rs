@@ -21,6 +21,7 @@ mod fake_metrics;
 mod fake_pool;
 #[cfg(test)]
 mod fake_shells;
+mod fault_budget;
 #[cfg(test)]
 mod fixed_listening_ports;
 mod flow;

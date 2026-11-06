@@ -116,6 +116,9 @@ pub struct TerminalEmulator {
     scanned_alternate: bool,
     /// The screen switches in the chunks fed since they were last taken.
     switches: Vec<ScreenSwitch>,
+    /// The bytes of the chunk being fed the scanner has read, so a reset
+    /// after a backend panic scans the rest.
+    scanned: usize,
 }
 
 impl TerminalEmulator {
@@ -159,6 +162,7 @@ impl TerminalEmulator {
             color_scheme,
             scanned_alternate: false,
             switches: Vec::new(),
+            scanned: 0,
         }
     }
 
@@ -166,28 +170,45 @@ impl TerminalEmulator {
     /// leaves a blank screen of the same size in place of one it may have
     /// left corrupt, rather than taking the caller's thread down. Replies to
     /// queries the chunk answered before the panic survive the reset, for
-    /// [`Self::take_pty_writes`], and so do the screen switches it made, the
-    /// reset taking the alternate screen away at the chunk's end. Returns
-    /// whether the screen was reset.
+    /// [`Self::take_pty_writes`], and so do the scanner and the screen
+    /// switches it found, the rest of the chunk scanned for its own: the
+    /// screen the child draws on comes from its bytes alone, never from the
+    /// reset, so the rebuilt screen is on the alternate one while the child
+    /// still is. Returns whether the screen was reset.
     pub fn process_or_reset(&mut self, bytes: &[u8]) -> bool {
         if panic::catch_unwind(AssertUnwindSafe(|| self.process(bytes))).is_ok() {
             return false;
         }
         let pending = self.take_pty_writes();
-        let mut switches = mem::take(&mut self.switches);
-        if self.scanned_alternate {
-            switches.push(
-                ScreenSwitch::builder()
-                    .at(bytes.len())
-                    .alternate(false)
-                    .build(),
-            );
-        }
+        let switches = mem::take(&mut self.switches);
+        let scanner = mem::take(&mut self.scanner);
+        let (alternate, scanned) = (self.scanned_alternate, self.scanned);
         let size = TermSize::new(self.term.columns(), self.term.screen_lines());
         *self = Self::sized(size, self.history, self.color_scheme);
         lock_sink(&self.sink).write(&pending);
+        self.scanner = scanner;
+        self.scanned_alternate = alternate;
         self.switches = switches;
+        self.scan_switches(bytes, scanned);
+        if self.scanned_alternate {
+            self.parser
+                .advance(&mut self.term, ENTER_ALT_SCREEN.as_bytes());
+        }
         true
+    }
+
+    /// Scans `bytes` from `from`, the part of a chunk a backend panic left
+    /// unscanned, for its screen switches alone.
+    fn scan_switches(&mut self, bytes: &[u8], from: usize) {
+        for (index, byte) in bytes.iter().enumerate().skip(from) {
+            match self.scanner.feed(*byte) {
+                Observation::EnterAlternate => self.note_screen(index, true),
+                Observation::LeaveAlternate | Observation::FullReset => {
+                    self.note_screen(index, false);
+                },
+                _ => {},
+            }
+        }
     }
 
     /// The screen switches in the chunks fed since the last call, each at
@@ -220,8 +241,11 @@ impl TerminalEmulator {
     /// Each switch of screens is noted for [`Self::take_screen_switches`].
     pub fn process(&mut self, bytes: &[u8]) {
         let mut start = 0;
+        self.scanned = 0;
         for (index, byte) in bytes.iter().enumerate() {
-            match self.scanner.feed(*byte) {
+            let observation = self.scanner.feed(*byte);
+            self.scanned = index + 1;
+            match observation {
                 Observation::Nothing => {},
                 Observation::LeaveAlternate => self.note_screen(index, false),
                 Observation::EnterAlternate => {
@@ -1155,19 +1179,26 @@ mod tests {
     }
 
     /// A screen rebuilt after a backend panic keeps the switches made before
-    /// it, and is on the primary screen from the chunk's end.
+    /// it and stays on the screen the output chose: the alternate one while
+    /// the child has not left it, which only the output's own leave ends,
+    /// even one past the panic in the same chunk.
     #[test]
-    fn a_rebuilt_screen_takes_the_alternate_screen_away() {
+    fn a_rebuilt_screen_stays_on_the_screen_the_output_chose() {
         let switch = |at, alternate| ScreenSwitch::builder().at(at).alternate(alternate).build();
         let mut emulator = TerminalEmulator::one_column(rows(4), 0, ColorScheme::Dark);
-        let chunk = "\x1b[?1049hwide \u{754c}".as_bytes();
+        let entered = "\x1b[?1049hwide \u{754c}".as_bytes();
 
-        assert!(emulator.process_or_reset(chunk));
+        assert!(emulator.process_or_reset(entered));
 
-        assert_eq!(emulator.take_screen_switches(), [
-            switch(8, true),
-            switch(chunk.len(), false),
-        ]);
+        assert_eq!(emulator.take_screen_switches(), [switch(8, true)]);
+        assert!(emulator.alternate_screen());
+
+        let left = "wide \u{754c}\x1bHframe\x1b[?1049lafter".as_bytes();
+        let leave_end = left.len() - "after".len();
+        assert!(emulator.process_or_reset(left));
+
+        assert_eq!(emulator.take_screen_switches(), [switch(leave_end, false)]);
+        assert!(!emulator.alternate_screen());
     }
 
     /// `screen_text` returns the live written lines, trimmed of trailing blanks.

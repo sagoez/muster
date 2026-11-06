@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     ffi::OsString,
     fs::{self, File, OpenOptions, Permissions},
     io::{self, Write},
@@ -10,13 +11,16 @@ use super::{generation::Generation, log_base::LogBase};
 use crate::{
     adapter::{
         private_dir::create_private_dir_all,
-        terminal::escape::{LINE_FEED, RUN_START},
+        terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_START},
     },
     domain::value::{ByteSize, OutputCursor},
 };
 
 /// Suffix of the single retained older log generation.
 const ROTATED_SUFFIX: &str = ".1";
+/// How far past its cap a live file grows while a line is open, waiting for
+/// the line feed to rotate after, before the log ends the line itself.
+pub const MAX_OPEN_LINE_OVERRUN: u64 = 64 * 1024;
 /// Mode of a log and its sidecar: its owner's alone.
 pub(super) const PRIVATE_LOG_MODE: u32 = 0o600;
 
@@ -67,7 +71,7 @@ impl RotatingLog {
         };
         let sidecar = LogBase::read(&path);
         let base = LogBase::resolve(sidecar, Some(live), rotated).offset();
-        let ends_line = ends_line(&path, live.len())?;
+        let ends_line = ends_line(&path, live.len());
         let log = Self {
             path,
             file,
@@ -105,15 +109,47 @@ impl RotatingLog {
         let _ = self.append(RUN_START);
     }
 
-    /// Appends `bytes`, rotating when they would carry a non-empty live file
-    /// past the cap: before them when the live file ends a line, and
-    /// otherwise after the line feed that ends its open line, so each
-    /// generation starts on a line wherever the output allows. A single
-    /// write larger than the cap is kept whole.
+    /// Appends `bytes` as [`Self::append`] does, and returns them as the log
+    /// holds them, after the [`END_OPEN_LINE`] it wrote first when it ended
+    /// the open line, with the outcome of the write; so a caller that hands
+    /// the logged bytes on hands on what the log holds.
+    pub fn append_held<'a>(&mut self, bytes: Cow<'a, [u8]>) -> (Cow<'a, [u8]>, io::Result<()>) {
+        let ended = self.ends_line_first(&bytes);
+        let outcome = self.append(&bytes);
+        if ended {
+            return (Cow::Owned([END_OPEN_LINE, &bytes].concat()), outcome);
+        }
+        (bytes, outcome)
+    }
+
+    /// Whether appending `bytes` ends the open line first, writing
+    /// [`END_OPEN_LINE`] ahead of them: a line is open, `bytes` hold no line
+    /// feed to rotate after, and they would carry the live file more than
+    /// [`MAX_OPEN_LINE_OVERRUN`] past the cap.
+    fn ends_line_first(&self, bytes: &[u8]) -> bool {
+        let limit = self.cap.bytes().saturating_add(MAX_OPEN_LINE_OVERRUN);
+        !self.ends_line
+            && self.written.saturating_add(bytes.len() as u64) > limit
+            && !bytes.contains(&LINE_FEED)
+    }
+
+    /// Appends `bytes`, rotating only on a line boundary once they would
+    /// carry a non-empty live file past the cap: before them when the live
+    /// file ends a line, and otherwise after the line feed that ends its
+    /// open line. A line still open runs past the cap up to
+    /// [`MAX_OPEN_LINE_OVERRUN`], and is then ended with [`END_OPEN_LINE`]
+    /// before the rotation: so every generation starts on a line, and an
+    /// endless line still rotates.
+    /// A single write larger than the cap is kept whole.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when rotating or writing fails.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.ends_line_first(bytes) {
+            self.write(END_OPEN_LINE)?;
+            self.rotate()?;
+            return self.write(bytes);
+        }
         let incoming = bytes.len() as u64;
         if self.written == 0 || self.written.saturating_add(incoming) <= self.cap.bytes() {
             return self.write(bytes);
@@ -121,19 +157,20 @@ impl RotatingLog {
         let head = if self.ends_line {
             0
         } else {
-            bytes
-                .iter()
-                .position(|byte| *byte == LINE_FEED)
-                .map_or(0, |feed| feed + 1)
+            match bytes.iter().position(|byte| *byte == LINE_FEED) {
+                Some(feed) => feed + 1,
+                None => return self.write(bytes),
+            }
         };
         self.write(&bytes[..head])?;
         self.rotate()?;
         self.write(&bytes[head..])
     }
 
-    /// Writes `bytes` to the live file. After a failed write the length is
+    /// Writes `bytes` to the live file. After a failed write, which may have
+    /// written part of them, the length and whether the file ends a line are
     /// taken from the file again, so [`Self::end`] keeps naming real log
-    /// positions.
+    /// positions and rotation sees the line as it is.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when writing fails.
@@ -142,6 +179,7 @@ impl RotatingLog {
             if let Ok(metadata) = self.file.metadata() {
                 self.written = metadata.len();
             }
+            self.ends_line = ends_line(&self.path, self.written);
             return Err(error);
         }
         self.written = self.written.saturating_add(bytes.len() as u64);
@@ -193,17 +231,17 @@ impl RotatingLog {
 }
 
 /// Whether the file at `path`, `len` bytes long, ends on a line boundary:
-/// it is empty or its last byte is a line feed.
-///
-/// # Errors
-/// Returns an [`io::Error`] when the file cannot be read.
-fn ends_line(path: &Path, len: u64) -> io::Result<bool> {
+/// it is empty or its last byte is a line feed. A last byte that cannot be
+/// read counts as leaving a line open, which only makes rotation wait for a
+/// line feed.
+fn ends_line(path: &Path, len: u64) -> bool {
     let Some(last) = len.checked_sub(1) else {
-        return Ok(true);
+        return true;
     };
     let mut byte = [0];
-    File::open(path)?.read_exact_at(&mut byte, last)?;
-    Ok(byte[0] == LINE_FEED)
+    File::open(path)
+        .and_then(|file| file.read_exact_at(&mut byte, last))
+        .is_ok_and(|()| byte[0] == LINE_FEED)
 }
 
 /// The path of the older generation kept beside `path`.
@@ -243,8 +281,8 @@ mod tests {
         let path = scratch.path().join("logs").join("project").join("proc.log");
         let cap = ByteSize::try_new(RawByteSize::b(4)).unwrap();
         let mut log = RotatingLog::open(path.clone(), cap).unwrap();
-        log.append(b"1234").unwrap();
-        log.append(b"5678").unwrap();
+        log.append(b"123\n").unwrap();
+        log.append(b"567\n").unwrap();
 
         assert_eq!(mode_of(&path), OWNER_FILE);
         assert_eq!(mode_of(&rotated_path(&path)), OWNER_FILE);
@@ -267,22 +305,22 @@ mod tests {
         let path = scratch.path().join("logs").join("proc.log");
         let cap = ByteSize::try_new(RawByteSize::b(10)).unwrap();
         let mut log = RotatingLog::open(path.clone(), cap).unwrap();
-        log.append(b"12345").unwrap();
-        log.append(b"678").unwrap();
-        log.append(b"abcdef").unwrap();
+        log.append(b"1234\n").unwrap();
+        log.append(b"67\n").unwrap();
+        log.append(b"abcde\n").unwrap();
 
-        assert_eq!(fs::read(rotated_path(&path)).unwrap(), b"12345678");
-        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+        assert_eq!(fs::read(rotated_path(&path)).unwrap(), b"1234\n67\n");
+        assert_eq!(fs::read(&path).unwrap(), b"abcde\n");
 
         drop(log);
         let mut reopened = RotatingLog::open(path.clone(), cap).unwrap();
-        reopened.append(b"ghijk").unwrap();
+        reopened.append(b"ghij\n").unwrap();
         assert_eq!(
             fs::read(rotated_path(&path)).unwrap(),
-            b"abcdef",
+            b"abcde\n",
             "a reopened log counts its existing bytes and keeps one generation"
         );
-        assert_eq!(fs::read(&path).unwrap(), b"ghijk");
+        assert_eq!(fs::read(&path).unwrap(), b"ghij\n");
     }
 
     /// Offsets run on across rotations and across runs that reopen the log,
@@ -294,18 +332,18 @@ mod tests {
         let cap = ByteSize::try_new(RawByteSize::b(10)).unwrap();
         let mut log = RotatingLog::open(path.clone(), cap).unwrap();
         assert_eq!(log.end(), OutputCursor::new(0));
-        log.append(b"12345678").unwrap();
-        log.append(b"abcdef").unwrap();
+        log.append(b"1234567\n").unwrap();
+        log.append(b"abcde\n").unwrap();
         assert_eq!(log.end(), OutputCursor::new(14));
         assert_eq!(LogBase::read(&path).unwrap().offset(), 8);
 
         drop(log);
         let mut reopened = RotatingLog::open(path.clone(), cap).unwrap();
         assert_eq!(reopened.end(), OutputCursor::new(14), "a new run continues");
-        reopened.append(b"ghijk").unwrap();
+        reopened.append(b"ghij\n").unwrap();
         assert_eq!(reopened.end(), OutputCursor::new(19));
         assert_eq!(LogBase::read(&path).unwrap().offset(), 14);
-        assert_eq!(fs::read(rotated_path(&path)).unwrap(), b"abcdef");
+        assert_eq!(fs::read(rotated_path(&path)).unwrap(), b"abcde\n");
     }
 
     /// A holder that died between a rotation's rename and its sidecar write
@@ -356,6 +394,89 @@ mod tests {
             b"\x1b[31mred\nmore done\n"
         );
         assert_eq!(fs::read(&path).unwrap(), b"next\nline\n");
+    }
+
+    /// Writes with no line feed that carry an open line across the cap
+    /// never rotate inside it: the line runs on until its line feed, and the
+    /// generation after starts on the next line. An endless line ends where
+    /// it passes [`MAX_OPEN_LINE_OVERRUN`] beyond the cap, with
+    /// [`END_OPEN_LINE`] closing it in the older generation, so the new one
+    /// still starts on a line.
+    #[test]
+    fn a_long_line_across_the_cap_never_splits_a_generation() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("proc.log");
+        let cap = ByteSize::try_new(RawByteSize::b(10)).unwrap();
+        let mut log = RotatingLog::open(path.clone(), cap).unwrap();
+        log.append(b"\x1b[31mlong").unwrap();
+        log.append(b" line \x1b[").unwrap();
+        log.append(b"0m going on").unwrap();
+        assert!(!rotated_path(&path).exists(), "no rotation inside the line");
+
+        log.append(b" ends\nnext\n").unwrap();
+        assert_eq!(
+            fs::read(rotated_path(&path)).unwrap(),
+            b"\x1b[31mlong line \x1b[0m going on ends\n"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"next\n");
+
+        let endless = vec![b'x'; usize::try_from(MAX_OPEN_LINE_OVERRUN + cap.bytes()).unwrap()];
+        log.append(b"open").unwrap();
+        assert!(!log.ends_line_first(&endless[..1024]));
+        assert!(log.ends_line_first(&endless));
+        let before = log.end();
+        let (held, outcome) = log.append_held(Cow::Borrowed(&endless));
+        outcome.unwrap();
+
+        assert_eq!(held, [END_OPEN_LINE, &endless].concat());
+        assert_eq!(
+            fs::read(rotated_path(&path)).unwrap(),
+            [b"next\nopen".as_slice(), END_OPEN_LINE].concat()
+        );
+        assert_eq!(fs::read(&path).unwrap(), endless);
+        assert_eq!(
+            log.end(),
+            before.advanced((END_OPEN_LINE.len() + endless.len()) as u64)
+        );
+        assert_eq!(
+            LogBase::read(&path).unwrap().offset(),
+            before.advanced(END_OPEN_LINE.len() as u64).offset()
+        );
+    }
+
+    /// A log whose last byte cannot be read opens all the same, taken as
+    /// leaving a line open.
+    #[test]
+    fn an_unreadable_last_byte_reads_as_an_open_line() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("proc.log");
+        fs::write(&path, b"line\n").unwrap();
+
+        assert!(ends_line(&path, 5));
+        assert!(!ends_line(&path, 50), "past the end");
+        assert!(!ends_line(&scratch.path().join("gone.log"), 5));
+    }
+
+    /// A write that fails after another writer left the file mid-line
+    /// leaves the log knowing the line is open, so it never rotates inside
+    /// it.
+    #[test]
+    fn a_failed_write_takes_the_line_state_from_the_file() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("proc.log");
+        let cap = ByteSize::try_new(RawByteSize::mib(1)).unwrap();
+        let mut log = RotatingLog::open(path.clone(), cap).unwrap();
+        log.append(b"line\n").unwrap();
+        RotatingLog::append_to(&path)
+            .unwrap()
+            .write_all(b"part")
+            .unwrap();
+        log.file = File::open(&path).unwrap();
+
+        assert!(log.append(b"rest of it\n").is_err());
+
+        assert_eq!(log.end(), OutputCursor::new(9));
+        assert!(!log.ends_line, "the file ends inside a line");
     }
 
     /// Each run begins with the reset every reader renders it from, in the

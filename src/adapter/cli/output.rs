@@ -29,6 +29,7 @@ use crate::{
         },
         sanitize::printable,
         service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+        terminal::log_renderer::dropped_lines,
     },
     constants::APP_NAME,
     domain::{
@@ -158,8 +159,6 @@ const IN_PANE: &str = "in pane";
 /// Around the count of lines a filtered log read dropped.
 const OMITTED_OPEN: &str = "[... ";
 const OMITTED_CLOSE: &str = " earlier lines omitted]";
-/// After the count of lines of a log that could not be rendered.
-const UNRENDERED: &str = "line(s) of output could not be rendered and were dropped";
 /// Between a command and its project in a title.
 const TITLE_SEPARATOR: &str = " · ";
 /// Start of the line saying the service runs, before its version.
@@ -502,7 +501,7 @@ pub fn omitted_lines(count: usize) -> String {
 /// `count` lines of `process`'s log, such as `api: 2 line(s) of output
 /// could not be rendered and were dropped`.
 pub fn unrendered_lines(process: &ProcessName, count: usize) -> String {
-    format!("{process}: {count} {UNRENDERED}")
+    format!("{process}: {}", dropped_lines(count))
 }
 
 /// The title `muster logs` opens its question with, such as

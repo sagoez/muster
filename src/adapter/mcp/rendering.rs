@@ -1,7 +1,10 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
-use crate::adapter::{client::LogSliceView, sanitize::printable_lines, service::WaitOutcome};
+use crate::adapter::{
+    client::LogSliceView, sanitize::printable_lines, service::WaitOutcome,
+    terminal::log_renderer::dropped_lines,
+};
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;
@@ -25,10 +28,7 @@ pub fn log_text(view: &LogSliceView) -> String {
         ));
     }
     if view.unrendered_lines() > 0 {
-        text.push_str(&format!(
-            "\n[{} lines could not be rendered and were dropped]",
-            view.unrendered_lines()
-        ));
+        text.push_str(&format!("\n[{}]", dropped_lines(view.unrendered_lines())));
     }
     if !view.text().is_empty() {
         text.push('\n');
@@ -114,7 +114,8 @@ mod tests {
         assert_eq!(view.unrendered_lines(), 2);
         assert_eq!(
             log_text(&view),
-            "api o:0..o:9 (1 lines)\n[2 lines could not be rendered and were dropped]\nok"
+            "api o:0..o:9 (1 lines)\n[2 line(s) of output could not be rendered and were \
+             dropped]\nok"
         );
         assert_eq!(serde_json::to_value(&view).unwrap()["unrendered_lines"], 2);
     }

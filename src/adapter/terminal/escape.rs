@@ -31,6 +31,16 @@ pub const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
 pub const SGR_RESET: &str = "\x1b[0m";
 /// Final of SGR (`CSI ... m`), which sets the pen.
 pub const SGR_FINAL: char = 'm';
+/// Intermediate of the sequences that push and pop the pen (`CSI # {`).
+pub const PEN_STACK_INTERMEDIATE: u8 = b'#';
+/// Final of XTPUSHSGR, which saves the pen on a stack.
+pub const PUSH_PEN_FINAL: char = '{';
+/// Final of XTPOPSGR, which restores the pen last pushed.
+pub const POP_PEN_FINAL: char = '}';
+/// XTPUSHSGR: saves the pen, across line feeds, for [`POP_PEN`].
+pub const PUSH_PEN: &[u8] = b"\x1b[#{";
+/// XTPOPSGR: restores the pen [`PUSH_PEN`] saved.
+pub const POP_PEN: &[u8] = b"\x1b[#}";
 /// Ends a line of output.
 pub const LINE_FEED: u8 = b'\n';
 /// Ends the line a log was drawing, when one is open, as the holder writes

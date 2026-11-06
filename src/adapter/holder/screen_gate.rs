@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+
 use crate::adapter::terminal::{
-    escape::{END_OPEN_LINE, ESC},
+    escape::{END_OPEN_LINE, ESC, POP_PEN, PUSH_PEN, SGR_RESET},
     screen_switch::ScreenSwitch,
 };
 
@@ -23,11 +25,18 @@ pub struct ScreenGate {
 
 impl ScreenGate {
     /// What the log keeps of `bytes`, the next chunk of output, in which
-    /// the emulator found `switches`. The sequence that brings the alternate
+    /// the emulator found `switches`: `bytes` itself, or nothing, when the
+    /// chunk switches no screen. The sequence that brings the alternate
     /// screen up starts at the last escape before its switch; one that began
     /// in an earlier chunk is cancelled by the line ending
-    /// [`FULL_SCREEN_LINE`] starts with.
-    pub fn logged(&mut self, bytes: &[u8], switches: &[ScreenSwitch]) -> Vec<u8> {
+    /// [`FULL_SCREEN_LINE`] starts with. That line is drawn in a reset pen
+    /// pushed and popped around it, so it takes no color from the output
+    /// before it and leaves the pen as it found it, whichever mode brought
+    /// the screen up.
+    pub fn logged<'a>(&mut self, bytes: &'a [u8], switches: &[ScreenSwitch]) -> Cow<'a, [u8]> {
+        if switches.is_empty() {
+            return Cow::Borrowed(if self.alternate { &[] } else { bytes });
+        }
         let mut logged = Vec::with_capacity(bytes.len());
         let mut from = 0;
         for switch in switches {
@@ -43,9 +52,16 @@ impl ScreenGate {
                 };
                 logged.extend_from_slice(&bytes[from..kept]);
                 if switch.alternate() {
-                    logged.extend_from_slice(END_OPEN_LINE);
-                    logged.extend_from_slice(FULL_SCREEN_LINE.as_bytes());
-                    logged.extend_from_slice(LINE_BREAK);
+                    for part in [
+                        END_OPEN_LINE,
+                        PUSH_PEN,
+                        SGR_RESET.as_bytes(),
+                        FULL_SCREEN_LINE.as_bytes(),
+                        POP_PEN,
+                        LINE_BREAK,
+                    ] {
+                        logged.extend_from_slice(part);
+                    }
                 }
             }
             self.alternate = switch.alternate();
@@ -54,7 +70,7 @@ impl ScreenGate {
         if !self.alternate {
             logged.extend_from_slice(&bytes[from..]);
         }
-        logged
+        Cow::Owned(logged)
     }
 }
 
@@ -86,21 +102,63 @@ mod tests {
         let mut log = Vec::new();
         for chunk in chunks {
             emulator.process(chunk);
-            log.extend(gate.logged(chunk, &emulator.take_screen_switches()));
+            log.extend_from_slice(&gate.logged(chunk, &emulator.take_screen_switches()));
         }
         log
     }
 
-    /// The lines a log of `bytes` reads as.
-    fn read(bytes: &[u8]) -> Vec<String> {
+    /// The lines a log of `bytes` reads as, colored as `coloring` asks.
+    fn read_as(bytes: &[u8], coloring: Coloring) -> Vec<String> {
         let mut renderer = LogRenderer::new();
         renderer.advance(bytes);
         renderer.finish();
         renderer
             .take_lines()
             .iter()
-            .map(|line| line.text(Coloring::Plain))
+            .map(|line| line.text(coloring))
             .collect()
+    }
+
+    /// The lines a log of `bytes` reads as.
+    fn read(bytes: &[u8]) -> Vec<String> {
+        read_as(bytes, Coloring::Plain)
+    }
+
+    /// A chunk that switches no screen is logged as it came, without a
+    /// copy, and one wholly on the alternate screen leaves nothing.
+    #[test]
+    fn a_chunk_without_a_switch_is_passed_through() {
+        let mut gate = ScreenGate::default();
+        let plain = b"plain\r\n".as_slice();
+
+        assert!(matches!(gate.logged(plain, &[]), Cow::Borrowed(kept) if kept == plain));
+        gate.alternate = true;
+        assert!(matches!(gate.logged(plain, &[]), Cow::Borrowed(kept) if kept.is_empty()));
+    }
+
+    /// The line in place of a full-screen run is drawn in a reset pen
+    /// whatever color was set before it, and the output after it is drawn
+    /// in the pen it had before, the same for every mode that brings the
+    /// alternate screen up.
+    #[test]
+    fn the_full_screen_line_takes_and_leaves_no_color() {
+        let colored = |mode: &str| {
+            let enter = format!("\x1b[31mred\r\n\x1b[?{mode}h\x1b[32mframe");
+            let leave = format!("\x1b[?{mode}lstill red\r\n");
+            read_as(
+                &logged(&[enter.as_bytes(), leave.as_bytes()]),
+                Coloring::Colored,
+            )
+        };
+
+        let expected = [
+            "\x1b[31mred\x1b[0m".to_string(),
+            FULL_SCREEN_LINE.to_string(),
+            "\x1b[31mstill red\x1b[0m".to_string(),
+        ];
+        for mode in ["47", "1047", "1049"] {
+            assert_eq!(colored(mode), expected, "mode {mode}");
+        }
     }
 
     /// A full-screen program leaves one line in the log, however many frames

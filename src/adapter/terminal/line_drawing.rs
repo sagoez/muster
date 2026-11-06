@@ -17,7 +17,10 @@ use unicode_width::UnicodeWidthChar;
 
 use super::{
     erasure::Erasure,
-    escape::{FULL_RESET_FINAL, LINE_FEED, SGR_FINAL, param_values},
+    escape::{
+        FULL_RESET_FINAL, LINE_FEED, PEN_STACK_INTERMEDIATE, POP_PEN_FINAL, PUSH_PEN_FINAL,
+        SGR_FINAL, param_values,
+    },
     line_cell::LineCell,
     log_line::LogLine,
     pen::Pen,
@@ -91,6 +94,9 @@ const MAX_RISE: usize = 256;
 const MAX_MARK_BYTES: usize = 32;
 /// The widest glyph a line holds: a tab spans at most one tab stop.
 const MAX_GLYPH_WIDTH: usize = TAB_STOP;
+/// Most pens XTPUSHSGR keeps, as xterm does; a push past it drops the
+/// oldest.
+const MAX_PUSHED_PENS: usize = 10;
 
 /// The line being drawn and the lines finished so far.
 ///
@@ -127,6 +133,9 @@ pub struct LineDrawing {
     erasures: Vec<Erasure>,
     /// The cursor a save kept, until it is restored or its line ends.
     saved: Option<SavedCursor>,
+    /// The pens pushed (XTPUSHSGR) and not yet popped, newest last; they
+    /// outlive line feeds, as on a terminal.
+    pushed: Vec<Pen>,
     /// Whether a saved cursor jumped away, so what is drawn is an overlay.
     detached: bool,
     /// Whether a sequence other than SGR reached the line.
@@ -526,15 +535,32 @@ impl LineDrawing {
     }
 
     /// Clears everything, as a full reset (RIS) does: the line being drawn is
-    /// wiped with the screen it is on, and the pen, saved cursor and overlay
-    /// are gone.
+    /// wiped with the screen it is on, and the pen, the pens pushed, saved
+    /// cursor and overlay are gone.
     fn full_reset(&mut self) {
         self.clear_line();
         self.pen = Pen::default();
+        self.pushed.clear();
         self.saved = None;
         self.detached = false;
         self.risen = 0;
         self.steered = true;
+    }
+
+    /// Saves the pen for a later [`Self::pop_pen`], dropping the oldest
+    /// saved once [`MAX_PUSHED_PENS`] are.
+    fn push_pen(&mut self) {
+        if self.pushed.len() == MAX_PUSHED_PENS {
+            self.pushed.remove(0);
+        }
+        self.pushed.push(self.pen);
+    }
+
+    /// Restores the pen last pushed, if any is.
+    fn pop_pen(&mut self) {
+        if let Some(pen) = self.pushed.pop() {
+            self.pen = pen;
+        }
     }
 
     /// Moves the cursor to `column`, numbered from one.
@@ -641,12 +667,19 @@ impl Perform for LineDrawing {
         }
     }
 
-    /// Sets the pen and applies the moves and erases a line is redrawn
-    /// with; every other sequence is dropped.
+    /// Sets, pushes and pops the pen, and applies the moves and erases a
+    /// line is redrawn with; every other sequence is dropped.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         if !ignore && intermediates.is_empty() && action == SGR_FINAL {
             self.pen.apply(params);
             return;
+        }
+        if !ignore && intermediates == [PEN_STACK_INTERMEDIATE] {
+            match action {
+                PUSH_PEN_FINAL => return self.push_pen(),
+                POP_PEN_FINAL => return self.pop_pen(),
+                _ => {},
+            }
         }
         self.steered = true;
         if !ignore && intermediates.is_empty() {

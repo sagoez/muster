@@ -50,11 +50,16 @@ impl<T: Send + 'static> ByteQueue<T> {
         self.enqueue(item, bytes)
     }
 
-    /// Discards everything queued that the consumer has not taken yet.
-    pub(super) fn clear(&self) {
-        for (_, bytes) in self.backlog.try_iter() {
-            self.queued.fetch_sub(bytes, Ordering::SeqCst);
-        }
+    /// Discards everything queued that the consumer has not taken yet, and
+    /// returns it, oldest first.
+    pub(super) fn clear(&self) -> Vec<T> {
+        self.backlog
+            .try_iter()
+            .map(|(item, bytes)| {
+                self.queued.fetch_sub(bytes, Ordering::SeqCst);
+                item
+            })
+            .collect()
     }
 
     /// The consumer's side: yields items in order, releasing their bytes, and

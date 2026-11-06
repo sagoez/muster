@@ -9,7 +9,9 @@ repository.workspace = true
 readme.workspace = true
 keywords = ["terminal", "supervisor", "process-manager", "dev-server", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["/src/**", "/LICENSE"]
+# docs/reference.md and examples/muster.yml link to the repo's own copies; the
+# unit tests read them, so the published crate's tests build from the tarball.
+include = ["/src/**", "/LICENSE", "/docs/reference.md", "/examples/muster.yml"]
 
 [lib]
 name = "muster"

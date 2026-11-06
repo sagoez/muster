@@ -472,7 +472,7 @@ mod tests {
     fn the_reference_documents_the_same_exit_codes() {
         use crate::cli::CliExit;
 
-        let reference = include_str!("../../../docs/reference.md");
+        let reference = include_str!("../../docs/reference.md");
         let (_, table) = reference
             .split_once("## Exit codes\n")
             .expect("the reference has an exit code section");

@@ -83,14 +83,15 @@ pub(crate) const EVENT_CAPACITY: usize = 256;
 const LAUNCH_DETACH_WAIT: Duration = Duration::from_secs(10);
 // The exit's parts, in order: the wait for launches in flight, the flush of
 // what the service records, the flush of the notices it mirrors to its log.
-// Together they fit the bound a client's stop waits for.
+// Together they are exactly the bound a client's stop waits for, so a part
+// that grows or shrinks fails the build until the bound moves with it.
 const _: () = assert!(
     LAUNCH_DETACH_WAIT
         .saturating_add(RECORD_DRAIN_BOUND)
         .saturating_add(RECORD_FLUSH_SETTLE)
         .saturating_add(NOTICE_FLUSH_WAIT)
         .as_nanos()
-        <= SERVICE_EXIT_BOUND.as_nanos()
+        == SERVICE_EXIT_BOUND.as_nanos()
 );
 /// Shown when a process name matches nothing in its project.
 const UNKNOWN_PROCESS: &str = "no process with that name in this project";

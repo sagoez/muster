@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use muster_application::StackEditor;
 use muster_domain::{
     constants::{APP_NAME, MUSTER_PROJECT_ENV},
     port::{LocalState, StateChangeNotifier},
@@ -16,9 +17,8 @@ use super::{
     cli_ports::CliPorts, error::CliError, report::print_note,
     shell_registration::name_in_hooked_shell,
 };
-use crate::{
-    adapter::client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project},
-    application::StackEditor,
+use crate::adapter::client::{
+    ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project,
 };
 
 /// Between the project acted on and the one the current folder is in.

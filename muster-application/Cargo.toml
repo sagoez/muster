@@ -1,0 +1,16 @@
+[package]
+name = "muster-application"
+description = "Internal crate of muster-workspace: use cases over the domain's ports: stack editing, stack sync, workspace and process lifecycle. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+
+getset = { workspace = true }
+typed-builder = { workspace = true }

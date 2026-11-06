@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use muster_application::{ExitDecision, ProcessLifecycle};
 use muster_domain::{
     notification::Notification,
     port::{PortOccupant, ProcessHandle},
@@ -21,15 +22,12 @@ use super::{
     shutdown_generation::ShutdownGeneration, spawn_generation::SpawnGeneration,
     stale_release::StaleRelease,
 };
-use crate::{
-    adapter::{
-        holder::client::repaint_text,
-        service::{
-            BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock,
-            Refusal, ServiceEvent, WaitStatus,
-        },
+use crate::adapter::{
+    holder::client::repaint_text,
+    service::{
+        BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
+        ServiceEvent, WaitStatus,
     },
-    application::{ExitDecision, ProcessLifecycle},
 };
 
 /// Delay before the first automatic restart of a failing process.

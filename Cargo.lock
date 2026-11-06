@@ -1261,6 +1261,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-application"
+version = "0.11.0"
+dependencies = [
+ "getset",
+ "muster-domain",
+ "typed-builder",
+]
+
+[[package]]
 name = "muster-domain"
 version = "0.11.0"
 dependencies = [
@@ -1326,6 +1335,7 @@ dependencies = [
  "insta",
  "libc",
  "listeners",
+ "muster-application",
  "muster-domain",
  "muster-os",
  "muster-terminal",

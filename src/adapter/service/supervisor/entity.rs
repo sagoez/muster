@@ -6,6 +6,7 @@ use std::{
 
 use crossbeam_channel::Sender;
 use getset::{Getters, MutGetters};
+use muster_application::{StackSync, Workspace};
 use muster_domain::{
     config::Stack,
     port::ProcessRunner,
@@ -20,9 +21,8 @@ use super::{
     launch_book::LaunchBook, metrics_book::MetricsBook, pane::Pane, pending_read::PendingRead,
     restart_book::RestartBook, run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
-use crate::{
-    adapter::service::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter},
-    application::{StackSync, Workspace},
+use crate::adapter::service::{
+    OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter,
 };
 
 /// Supervises one project's processes: spawns them, applies their stop and

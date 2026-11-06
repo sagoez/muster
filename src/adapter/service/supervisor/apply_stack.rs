@@ -1,7 +1,7 @@
+use muster_application::StackSync;
 use muster_domain::config::Stack;
 
 use super::{config_membership::ConfigMembership, entity::Supervisor};
-use crate::application::StackSync;
 
 impl Supervisor {
     /// Brings the workspace in line with `stack`, the project's stored stack,

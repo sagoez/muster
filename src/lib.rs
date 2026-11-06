@@ -7,5 +7,4 @@
 //! binary in `main.rs` is a thin composition root over this library.
 
 pub mod adapter;
-pub mod application;
 pub mod error;

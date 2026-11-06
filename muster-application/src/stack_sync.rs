@@ -4,7 +4,7 @@ use getset::Getters;
 use muster_domain::{config::ProcessSpec, process::Process, value::PaneId};
 use typed_builder::TypedBuilder;
 
-use crate::application::Workspace;
+use crate::Workspace;
 
 /// Brings a live workspace in line with a project's stored stack, matching
 /// processes by name key since names are unique and never renamed. Pure: the

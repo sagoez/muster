@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use getset::{CopyGetters, Getters};
+use muster_application::StackEditor;
 use muster_domain::{
     config::{ImportMode, ProcessDraft, ProcessSpec},
     port::{SettingsStore, StackStore},
@@ -15,10 +16,7 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{error::CliError, output::COLUMN_GAP, report::Report, row::Row, row_kind::RowKind};
-use crate::{
-    adapter::detect::{Candidate, DetectSource, detect},
-    application::StackEditor,
-};
+use crate::adapter::detect::{Candidate, DetectSource, detect};
 
 /// Title of the `init` reports.
 pub const INIT_TITLE: &str = "muster init";

@@ -7,6 +7,7 @@ use std::{
 };
 
 use getset::{CopyGetters, Getters};
+use muster_application::StackEditor;
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, StateChangeNotifier},
@@ -28,10 +29,7 @@ use super::{
     row::Row,
     row_kind::RowKind,
 };
-use crate::{
-    adapter::client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down},
-    application::StackEditor,
-};
+use crate::adapter::client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down};
 
 /// Title of the `projects` reports.
 const PROJECTS_TITLE: &str = "muster projects";

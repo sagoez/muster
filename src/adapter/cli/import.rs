@@ -4,6 +4,7 @@
 use std::{io, path::PathBuf, time::SystemTime};
 
 use getset::{CopyGetters, Getters};
+use muster_application::StackEditor;
 use muster_domain::{
     config::{ImportMode, ImportPlan, ProcessSpec, Stack},
     port::{LocalState, StackStore},
@@ -20,16 +21,13 @@ use super::{
     error::CliError, imported_run::ImportedRun, invocation::Invocation, output::project_title,
     report::Report, row::Row, row_kind::RowKind, stack_path::StackPath, stack_read::StackRead,
 };
-use crate::{
-    adapter::{
-        client::{
-            ProjectIdentityView, ProjectTarget, RemovedView, ServiceAccess, ServiceClient,
-            SettleWatch, UNBOUNDED,
-            process::{runs_now, settle_removed, status},
-        },
-        exchange::{EntryError, ExchangeError, read_stack_file},
+use crate::adapter::{
+    client::{
+        ProjectIdentityView, ProjectTarget, RemovedView, ServiceAccess, ServiceClient, SettleWatch,
+        UNBOUNDED,
+        process::{runs_now, settle_removed, status},
     },
-    application::StackEditor,
+    exchange::{EntryError, ExchangeError, read_stack_file},
 };
 
 /// The command word of `muster import`.

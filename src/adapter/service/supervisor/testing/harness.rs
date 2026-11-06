@@ -2,15 +2,13 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
 use getset::{Getters, MutGetters};
+use muster_application::Workspace;
 use muster_domain::{config::ProcessSpec, port::ProcessRunner, process::Process, value::PaneId};
 
 use super::fixtures::{stack, test_project, test_settings};
-use crate::{
-    adapter::service::{
-        EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
-        supervisor::{HolderAdopter, LogReadResult, Supervisor, SupervisorDeps},
-    },
-    application::Workspace,
+use crate::adapter::service::{
+    EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
+    supervisor::{HolderAdopter, LogReadResult, Supervisor, SupervisorDeps},
 };
 
 /// Longest a test waits for a worker's log read to land.

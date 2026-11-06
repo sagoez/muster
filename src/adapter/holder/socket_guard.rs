@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use crate::adapter::ipc;
+use muster_protocol::ipc;
 
 /// Stops the accept loop and removes the socket when the holder ends.
 pub(super) struct SocketGuard {

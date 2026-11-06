@@ -17,6 +17,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use muster_os::private_dir::prepare_socket_dir;
+use muster_protocol::{ipc, ipc::fits_a_socket};
 use serde_json::Value;
 
 use super::{
@@ -24,7 +25,6 @@ use super::{
     service_error_body::ServiceErrorBody, service_error_kind::ServiceErrorKind,
     service_request::ServiceRequest, service_response::ServiceResponse,
 };
-use crate::adapter::{ipc, ipc::fits_a_socket};
 
 /// Mode of the service socket: only its owner may connect.
 const SOCKET_MODE: u32 = 0o600;

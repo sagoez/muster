@@ -8,7 +8,7 @@ use typed_builder::TypedBuilder;
 #[getset(get_copy = "pub")]
 pub struct StopView {
     /// The signal a graceful stop sends.
-    #[serde(with = "crate::adapter::wire::form")]
+    #[serde(with = "muster_protocol::wire::form")]
     signal: StopSignal,
     /// Seconds a graceful stop waits before it kills.
     grace: f64,

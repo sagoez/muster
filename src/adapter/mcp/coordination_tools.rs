@@ -20,6 +20,7 @@ use muster_domain::{
     value::ProjectRoot,
 };
 use muster_os::clock::epoch_now;
+use muster_protocol::wire::WireForm;
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -45,10 +46,7 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::adapter::{
-    client::{ListedValue, NoteEntry, TodoPage, TodoView},
-    wire::WireForm,
-};
+use crate::adapter::client::{ListedValue, NoteEntry, TodoPage, TodoView};
 
 /// Pause between attempts at a lock someone else holds.
 const LOCK_RETRY: Duration = Duration::from_millis(250);

@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 #[getset(get = "pub")]
 pub struct StopEntry {
     /// The graceful signal.
-    #[serde(with = "crate::adapter::wire::form")]
+    #[serde(with = "muster_protocol::wire::form")]
     signal: StopSignal,
     /// Time allowed before a force-kill, in humantime (`5s`).
     #[serde(with = "humantime_serde")]

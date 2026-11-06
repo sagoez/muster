@@ -1,0 +1,29 @@
+[package]
+name = "muster-protocol"
+description = "Internal crate of muster-workspace: what its service, holders and clients exchange (wire DTOs, framed IPC, the service protocol, the process log format). No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+
+bytesize = { workspace = true }
+crossbeam-channel = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+muster-domain = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
+uuid = { workspace = true }

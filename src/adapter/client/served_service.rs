@@ -1,13 +1,11 @@
 use std::{fs, path::PathBuf, thread, thread::JoinHandle, time::Duration};
 
 use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
+use muster_protocol::ipc;
 use tempfile::TempDir;
 
 use super::{connector::Connector, service_client::ServiceClient};
-use crate::adapter::{
-    ipc,
-    service::{ServiceRequest, ServiceResponse, ServiceVersion, protocol},
-};
+use crate::adapter::service::{ServiceRequest, ServiceResponse, ServiceVersion, protocol};
 
 /// Prefix of each served service's scratch directory.
 const SCRATCH_PREFIX: &str = "msv-";

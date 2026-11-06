@@ -9,6 +9,7 @@ use muster_domain::{
     project::Project,
     value::{OutputCursor, ProcessName, ProcessRef, refused_name},
 };
+use muster_protocol::workspace_request::WorkspaceRequest;
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -43,7 +44,6 @@ use crate::adapter::{
         ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
     },
     service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
-    workspace_request::WorkspaceRequest,
 };
 
 /// Carriage return that submits a line typed into a terminal.

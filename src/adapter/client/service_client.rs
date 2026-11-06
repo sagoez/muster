@@ -17,6 +17,7 @@ use muster_os::{
     },
     spawn::{detached, reap},
 };
+use muster_protocol::ipc::fits_a_socket;
 
 use super::{
     asked::Asked, client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
@@ -26,7 +27,6 @@ use super::{
 };
 use crate::adapter::{
     holder::{HolderDirs, HolderId},
-    ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
         ServiceResponse, ServiceVersion, protocol, protocol::SERVICE_SUBCOMMAND,

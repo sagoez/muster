@@ -12,7 +12,7 @@ pub const LISTED_VALUE_CHARS: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]
 pub struct ListedValue {
     /// The entry, its value cut.
-    #[serde(flatten, with = "crate::adapter::wire::form")]
+    #[serde(flatten, with = "muster_protocol::wire::form")]
     #[getset(get = "pub")]
     entry: KeyValue,
     /// Whether the value was cut.

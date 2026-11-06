@@ -1,22 +1,22 @@
 use getset::Getters;
 use muster_domain::{
-    coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, Scratchpad, ScratchpadKey},
+    coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
     value::EpochSeconds,
 };
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::adapter::wire::{WireForm, form};
+use crate::wire::{WireForm, form};
 
-/// A scratchpad as a coordination snapshot and an agent read it.
+/// A key-value entry as a coordination snapshot and an agent read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 #[serde(deny_unknown_fields)]
-pub struct ScratchpadEntry {
-    /// The note's name.
-    key: ScratchpadKey,
-    /// Its markdown body.
-    body: String,
+pub struct KeyValueEntry {
+    /// The entry's name.
+    key: KvKey,
+    /// Its stored value.
+    value: String,
     /// Who last wrote it.
     #[serde(with = "form")]
     author: Author,
@@ -25,29 +25,29 @@ pub struct ScratchpadEntry {
     updated_at: EpochSeconds,
 }
 
-impl WireForm for Scratchpad {
-    type Wire = ScratchpadEntry;
+impl WireForm for KeyValue {
+    type Wire = KeyValueEntry;
 
-    fn to_wire(&self) -> ScratchpadEntry {
-        ScratchpadEntry {
+    fn to_wire(&self) -> KeyValueEntry {
+        KeyValueEntry {
             key: self.key().clone(),
-            body: self.body().clone(),
+            value: self.value().clone(),
             author: self.author().clone(),
             updated_at: *self.updated_at(),
         }
     }
 
-    fn from_wire(wire: ScratchpadEntry) -> Result<Self, String> {
-        let found = wire.body.chars().count();
-        let body = NoteBody::try_new(wire.body).map_err(|_| {
+    fn from_wire(wire: KeyValueEntry) -> Result<Self, String> {
+        let found = wire.value.chars().count();
+        let value = KvValue::try_new(wire.value).map_err(|_| {
             format!(
-                "note '{}' has a body of {found} characters; at most {NOTE_BODY_MAX_CHARS} are allowed",
+                "value '{}' is {found} characters; at most {KV_VALUE_MAX_CHARS} are allowed",
                 wire.key.as_ref()
             )
         })?;
         Ok(Self::builder()
             .key(wire.key)
-            .body(body.into_inner())
+            .value(value.into_inner())
             .author(wire.author)
             .updated_at(wire.updated_at)
             .build())

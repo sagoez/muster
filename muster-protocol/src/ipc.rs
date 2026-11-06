@@ -22,6 +22,18 @@ const PEER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest request accepted, in bytes. Caps server-side allocation so one peer
 /// cannot force unbounded memory with an endless line.
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
+/// FNV-1a's 64-bit offset basis.
+const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
+/// FNV-1a's 64-bit prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
+
+/// The 64-bit FNV-1a hash of `bytes`: stable across builds and platforms,
+/// unlike the standard library's hasher. A long path hashes into a socket name.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
 
 /// Whether `path` fits in a Unix socket address, whose `sun_path` holds
 /// only about a hundred bytes.
@@ -245,7 +257,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::adapter::{ping::Ping, pong::Pong};
+    use crate::{ping::Ping, pong::Pong};
 
     /// A socket path short enough for every platform's `sun_path` cap. macOS
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches
@@ -253,6 +265,13 @@ mod tests {
     fn short_socket_path() -> PathBuf {
         let unique = Uuid::new_v4().simple().to_string();
         Path::new("/tmp").join(format!("mstr-{}.sock", &unique[..8]))
+    }
+
+    /// The hash is the published FNV-1a, so log folders survive rebuilds.
+    #[test]
+    fn the_folder_hash_is_stable_fnv1a() {
+        assert_eq!(fnv1a(b""), FNV_OFFSET_BASIS);
+        assert_eq!(fnv1a(b"a"), 0xAF63_DC4C_8601_EC8C);
     }
 
     /// A request round-trips through the listener to a handler and back.

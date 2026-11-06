@@ -3,16 +3,14 @@ use muster_domain::{
     port::CoordinationStore,
     value::ProjectRoot,
 };
+use muster_protocol::wire::WireForm;
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, kv_command::KvCommand, page_cursor::parse_cursor,
     report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::adapter::{
-    client::{ListedValue, PageSize},
-    wire::WireForm,
-};
+use crate::adapter::client::{ListedValue, PageSize};
 
 /// What a refusal calls an entry's value.
 const KV_VALUE: &str = "value";

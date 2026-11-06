@@ -8,7 +8,7 @@ use muster_domain::{
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::adapter::wire::{WireForm, form, optional_form};
+use crate::wire::{WireForm, form, optional_form};
 
 /// A todo as a coordination snapshot keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

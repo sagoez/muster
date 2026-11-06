@@ -28,6 +28,7 @@ use muster_os::{
     private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
     process_identity::LocalProcessIdentity,
 };
+use muster_protocol::ipc;
 use muster_terminal::{KittyKeyboardTracker, TerminalEmulator};
 
 use super::{
@@ -54,7 +55,6 @@ use super::{
     screen_gate::ScreenGate,
     socket_guard::SocketGuard,
 };
-use crate::adapter::ipc;
 
 /// Events the holder loop drains: child output plus every client's traffic.
 /// Bounded so a stalled loop pushes back on the PTY reader instead of growing.

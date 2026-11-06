@@ -19,6 +19,7 @@ use muster_domain::{
     settings::Settings,
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
+use muster_protocol::workspace_request::WorkspaceRequest;
 use signal_hook::{
     iterator::{Handle as SignalsHandle, Signals},
     low_level::emulate_default_handler,
@@ -76,7 +77,7 @@ use super::{
     },
     usage_sampler::UsageSampler,
 };
-use crate::adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest};
+use crate::adapter::holder::HolderRecord;
 
 /// Most shells the service keeps track of; a report from a new shell past it
 /// is refused as busy until a sweep finds some ended.
@@ -1792,6 +1793,7 @@ mod tests {
         signal_target::SignalTarget,
         test_wait::{REPLY, wait_within},
     };
+    use muster_protocol::ipc;
     use muster_terminal::escape::RUN_START;
     use rustix::process::Signal;
     use signal_hook::{consts::SIGUSR2, low_level::raise};
@@ -1799,7 +1801,6 @@ mod tests {
     use super::*;
     use crate::adapter::{
         holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
-        ipc,
         service::{
             BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
             WaitStatus,

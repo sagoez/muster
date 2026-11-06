@@ -9,6 +9,7 @@ use muster_domain::{
     pty::{ExitOutcome, PtySize},
     value::{OutputCursor, Pid},
 };
+use muster_protocol::wire::WireForm;
 
 #[cfg(test)]
 use super::frame::write_frame;
@@ -18,7 +19,6 @@ use super::{
     frame_tag::FrameTag,
     reject_reason::RejectReason,
 };
-use crate::adapter::wire::WireForm;
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
 const SIZE_BYTES: usize = 4;

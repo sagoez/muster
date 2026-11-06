@@ -14,6 +14,7 @@ use std::{
 
 use crossbeam_channel::Receiver;
 use muster_domain::{pty::ProcessOutput, value::OutputCursor};
+use muster_protocol::ipc;
 
 use super::{
     detachable_sink::DetachableSink,
@@ -22,7 +23,6 @@ use super::{
     protocol::HolderMessage,
     replay_request::ReplayRequest,
 };
-use crate::adapter::ipc;
 
 /// Reported when the holder closed the connection without an exit and no
 /// longer serves its socket.

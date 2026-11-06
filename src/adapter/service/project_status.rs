@@ -11,7 +11,7 @@ use super::{occupancy_status::OccupancyStatus, process_status::ProcessStatus};
 #[serde(rename_all = "kebab-case")]
 pub struct ProjectStatus {
     /// The project the processes belong to.
-    #[serde(with = "crate::adapter::wire::form")]
+    #[serde(with = "muster_protocol::wire::form")]
     project: Project,
     /// Every process, in stack order.
     processes: Vec<ProcessStatus>,

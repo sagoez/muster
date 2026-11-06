@@ -80,7 +80,6 @@ mod shared_writer;
 mod socket_guard;
 mod span;
 mod span_reader;
-mod spawn_request_wire;
 #[cfg(test)]
 mod spec_launcher;
 mod strip;
@@ -126,5 +125,4 @@ pub use runner::*;
 pub use screen_gate::FULL_SCREEN_LINE;
 pub use served_screen::*;
 pub use server::*;
-pub use spawn_request_wire::*;
 pub use strip::*;

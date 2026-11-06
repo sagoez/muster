@@ -11,7 +11,7 @@ use muster_domain::{
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::adapter::wire::{WireForm, form};
+use crate::wire::{WireForm, form};
 
 /// Reported for a log cap of zero bytes, which no log can keep.
 const ZERO_LOG_CAP: &str = "the log cap must be at least one byte";

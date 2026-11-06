@@ -1322,6 +1322,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-protocol"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "crossbeam-channel",
+ "getset",
+ "humantime",
+ "libc",
+ "muster-domain",
+ "muster-os",
+ "rustix",
+ "serde",
+ "serde_json",
+ "typed-builder",
+ "uuid",
+]
+
+[[package]]
 name = "muster-store"
 version = "0.11.0"
 dependencies = [
@@ -1371,6 +1389,7 @@ dependencies = [
  "muster-domain",
  "muster-herdr",
  "muster-os",
+ "muster-protocol",
  "muster-store",
  "muster-terminal",
  "notify-rust",

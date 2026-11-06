@@ -6,7 +6,7 @@ use muster_domain::{
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::adapter::wire::{WireForm, form};
+use crate::wire::{WireForm, form};
 
 /// An agent's hold on a todo, as a coordination snapshot keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

@@ -1,9 +1,8 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::coordination::{KeyValue, Scratchpad, Todo};
+use muster_protocol::wire::form_list;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
-
-use crate::adapter::wire::form_list;
 
 /// The snapshot schema version, checked on import so a file from a newer
 /// muster is refused rather than half-read.

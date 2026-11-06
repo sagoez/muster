@@ -14,10 +14,10 @@ pub struct NoteEntry {
     /// The note's key.
     key: String,
     /// Who last wrote it.
-    #[serde(with = "crate::adapter::wire::form")]
+    #[serde(with = "muster_protocol::wire::form")]
     author: Author,
     /// When it was last written, as RFC 3339 UTC.
-    #[serde(with = "crate::adapter::wire::form")]
+    #[serde(with = "muster_protocol::wire::form")]
     updated_at: EpochSeconds,
 }
 

@@ -4,13 +4,13 @@ use muster_domain::{
     occupancy::ShellRecord,
     value::{ProcessName, ProjectRoot},
 };
+use muster_protocol::workspace_request::WorkspaceRequest;
 use serde::{Deserialize, Serialize};
 
 use super::{
     event_kind::EventKind, event_seq::EventSeq, launch_environment::LaunchEnvironment,
     process_action::ProcessAction, service_version::ServiceVersion, wait_spec::WaitSpec,
 };
-use crate::adapter::workspace_request::WorkspaceRequest;
 
 /// One request a client sends the service, as one JSON line. A `project` is
 /// that project's folder.
@@ -126,7 +126,7 @@ pub enum ServiceRequest {
     ShellReport {
         /// The report: which shell, at which hook load and prompt, so an
         /// older report is dropped, and the project its folder is in.
-        #[serde(with = "crate::adapter::wire::form")]
+        #[serde(with = "muster_protocol::wire::form")]
         record: ShellRecord,
         /// The shell's exported environment, which what entering a project
         /// starts runs with; sent only by a report that may enter one, and

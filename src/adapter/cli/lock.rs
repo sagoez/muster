@@ -4,12 +4,13 @@ use muster_domain::{
     value::{EpochSeconds, ProjectRoot},
 };
 use muster_os::clock::epoch_now;
+use muster_protocol::wire::WireForm;
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind,
 };
-use crate::adapter::{client::LockView, wire::WireForm};
+use crate::adapter::client::LockView;
 
 /// Line printed when no lock is held in the project.
 const EMPTY_NOTE: &str = "no locks held";

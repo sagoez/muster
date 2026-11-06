@@ -23,6 +23,7 @@ use muster_domain::{
     value::{DetachKey, ProcessName},
 };
 use muster_os::sanitize::printable;
+use muster_protocol::ipc;
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     io::{Errno, read},
@@ -40,7 +41,6 @@ use crate::adapter::{
         ClientRole, HolderError, HolderMessage,
         client::{Greeting, greet},
     },
-    ipc,
     service::Located,
 };
 

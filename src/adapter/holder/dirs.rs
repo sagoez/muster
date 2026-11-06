@@ -5,6 +5,7 @@ use std::{
 
 use getset::Getters;
 use muster_domain::value::{ProcessName, ProjectRoot};
+use muster_protocol::ipc::fnv1a;
 use typed_builder::TypedBuilder;
 
 use super::{error::HolderError, id::HolderId, server::ensure_private_dir};
@@ -33,10 +34,6 @@ const LOG_STEM_MAX: usize = 200;
 const LOG_NAME_HASH_DIGITS: usize = 8;
 /// Between a log file name's encoded process name and its hash.
 const LOG_HASH_SEPARATOR: char = '.';
-/// FNV-1a's 64-bit offset basis.
-const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
-/// FNV-1a's 64-bit prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
 
 /// Where holders keep their sockets, records and logs.
 #[derive(Debug, Clone, Getters, TypedBuilder)]
@@ -144,14 +141,6 @@ fn log_file_stem(name: &ProcessName) -> String {
         "{stem}{LOG_HASH_SEPARATOR}{}",
         &hash[..LOG_NAME_HASH_DIGITS]
     )
-}
-
-/// The 64-bit FNV-1a hash of `bytes`: stable across builds and platforms,
-/// unlike the standard library's hasher.
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-    })
 }
 
 #[cfg(test)]
@@ -289,12 +278,5 @@ mod tests {
 
         assert!(!legacy.exists());
         assert_eq!(fs::read_to_string(current).unwrap(), "new");
-    }
-
-    /// The hash is the published FNV-1a, so log folders survive rebuilds.
-    #[test]
-    fn the_folder_hash_is_stable_fnv1a() {
-        assert_eq!(fnv1a(b""), FNV_OFFSET_BASIS);
-        assert_eq!(fnv1a(b"a"), 0xAF63_DC4C_8601_EC8C);
     }
 }

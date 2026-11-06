@@ -8,10 +8,15 @@ use std::{
 };
 
 use serde_json::json;
+use strum::{EnumMessage, EnumProperty};
 
 use super::{
-    emit::emit_line, error::CliError, mcp_agent::McpAgent, mcp_command::McpCommand,
-    mcp_scope::McpScope, report::print_note,
+    emit::emit_line,
+    error::CliError,
+    mcp_agent::{McpAgent, PROGRAM},
+    mcp_command::McpCommand,
+    mcp_scope::McpScope,
+    report::print_note,
 };
 use crate::{
     adapter::client::{runnable, this_binary},
@@ -59,9 +64,11 @@ pub fn register(command: &McpCommand, project_given: bool) -> Result<(), CliErro
     };
     let agent = args.agent();
     if agent != McpAgent::Claude && args.scope().is_some_and(|scope| scope != McpScope::User) {
-        return Err(CliError::UserScopeOnly(agent.title()));
+        return Err(CliError::UserScopeOnly(
+            agent.get_message().unwrap_or_default(),
+        ));
     }
-    let Some(program) = agent.program() else {
+    let Some(program) = agent.get_str(PROGRAM) else {
         if !adding {
             print_note(APP_NAME, ZED_REMOVE_NOTE);
             return Ok(());

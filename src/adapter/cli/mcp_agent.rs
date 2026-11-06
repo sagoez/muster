@@ -1,45 +1,44 @@
-use strum::{Display, EnumIter, EnumString};
+use strum::{Display, EnumIter, EnumMessage, EnumProperty, EnumString};
 
-/// Claude Code's binary.
-const CLAUDE_PROGRAM: &str = "claude";
-/// Codex's binary.
-const CODEX_PROGRAM: &str = "codex";
-/// Codex, as a person knows it.
-const CODEX_TITLE: &str = "Codex";
-/// Claude Code, as a person knows it.
-const CLAUDE_TITLE: &str = "Claude Code";
-/// Zed, as a person knows it.
-const ZED_TITLE: &str = "Zed";
+/// The property naming the binary whose `mcp add` and `mcp remove` register
+/// servers; Zed has none.
+pub const PROGRAM: &str = "program";
 
-/// An agent `muster mcp add` registers muster's MCP server with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter)]
+/// An agent `muster mcp add` registers muster's MCP server with. Its message
+/// is its name as a person knows it.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter, EnumMessage, EnumProperty,
+)]
 #[strum(serialize_all = "kebab-case")]
 pub enum McpAgent {
     /// Claude Code, through `claude mcp`.
+    #[strum(message = "Claude Code", props(program = "claude"))]
     Claude,
     /// OpenAI's Codex CLI, through `codex mcp`.
+    #[strum(message = "Codex", props(program = "codex"))]
     Codex,
     /// The Zed editor, which has no such command.
+    #[strum(message = "Zed")]
     Zed,
 }
 
-impl McpAgent {
-    /// The agent's name as a person knows it.
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Claude => CLAUDE_TITLE,
-            Self::Codex => CODEX_TITLE,
-            Self::Zed => ZED_TITLE,
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use strum::{EnumMessage, EnumProperty, IntoEnumIterator};
 
-    /// The binary whose `mcp add` and `mcp remove` register servers, none
-    /// for Zed.
-    pub fn program(self) -> Option<&'static str> {
-        match self {
-            Self::Claude => Some(CLAUDE_PROGRAM),
-            Self::Codex => Some(CODEX_PROGRAM),
-            Self::Zed => None,
+    use super::{McpAgent, PROGRAM};
+
+    #[test]
+    fn every_agent_has_a_title_and_only_zed_lacks_a_program() {
+        for agent in McpAgent::iter() {
+            assert!(agent.get_message().is_some(), "{agent}");
+            assert_eq!(
+                agent.get_str(PROGRAM).is_none(),
+                agent == McpAgent::Zed,
+                "{agent}"
+            );
         }
+        assert_eq!(McpAgent::Claude.get_str(PROGRAM), Some("claude"));
+        assert_eq!(McpAgent::Codex.get_str(PROGRAM), Some("codex"));
     }
 }

@@ -9,7 +9,7 @@ to yours.
 
 Beta. Linux and macOS.
 
-![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](docs/muster-demo.gif)
+![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](https://github.com/sagoez/muster/raw/main/docs/muster-demo.gif)
 
 ## Install
 
@@ -59,7 +59,7 @@ compose files and offer the commands it finds. Bare `muster` is `muster ps`.
   default) it stops them. The prompt never waits on muster.
 - `muster export` writes the stack to a `muster.yml` you can commit, and
   `muster import` loads it into another checkout. Environment values stay out
-  unless you ask for them. See [examples/muster.yml](examples/muster.yml).
+  unless you ask for them. See [examples/muster.yml](https://github.com/sagoez/muster/blob/main/examples/muster.yml).
 - `--json` on almost every command, and stable exit codes, for scripts.
 - `muster doctor` checks the database, the projects, the shell hook,
   completions and the terminal workspace.
@@ -140,14 +140,16 @@ editing works even when the service is down. `attach` connects your terminal
 straight to the holder's screen, and `open` asks herdr for a pane that runs
 `attach`.
 
-Inside, the code is hexagonal. A pure `domain` with no I/O defines the ports,
-`application` holds the use cases, and everything concrete (CLI, MCP, service,
-holder, PTY, SQLite) is an adapter wired together in `main.rs`.
+Inside, the code is hexagonal, and the hexagon is a Cargo workspace of
+`muster-*` crates. A pure `muster-domain` with no I/O defines the ports,
+`muster-application` holds the use cases, and everything concrete (CLI, MCP,
+service, holder, PTY, SQLite) is an adapter in its own crate, wired together in
+`muster-workspace`'s `main.rs`.
 
 ## Reference
 
 Every command, setting, exit code, the JSON conventions, the stack file format
-and the full MCP tool list are in [docs/reference.md](docs/reference.md).
+and the full MCP tool list are in [docs/reference.md](https://github.com/sagoez/muster/blob/main/docs/reference.md).
 
 ## License
 

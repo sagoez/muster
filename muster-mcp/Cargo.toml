@@ -1,0 +1,36 @@
+[package]
+name = "muster-mcp"
+description = "Internal crate of muster-workspace: the MCP server over stdio. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-application = { workspace = true }
+muster-client = { workspace = true }
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+muster-terminal = { workspace = true }
+
+getset = { workspace = true }
+humantime = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+muster-client = { workspace = true, features = ["testing"] }
+muster-store = { workspace = true, features = ["testing"] }
+insta = { workspace = true }
+shlex = { workspace = true }
+tempfile = { workspace = true }

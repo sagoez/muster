@@ -1,0 +1,32 @@
+use std::sync::Mutex;
+
+use getset::{Getters, MutGetters};
+use muster_domain::{port::StateChangeNotifier, value::ProjectRoot};
+
+/// A [`StateChangeNotifier`] that records what it was told.
+#[derive(Default, Getters, MutGetters)]
+pub struct RecordingNotifier {
+    /// Each folder registered as a project, in order.
+    #[getset(get = "pub")]
+    registered: Mutex<Vec<ProjectRoot>>,
+    /// Each project whose stack changed, in order.
+    #[getset(get = "pub", get_mut = "pub")]
+    stacks: Mutex<Vec<ProjectRoot>>,
+    /// How many times the settings changed.
+    #[getset(get = "pub", get_mut = "pub")]
+    settings: Mutex<usize>,
+}
+
+impl StateChangeNotifier for RecordingNotifier {
+    fn project_registered(&self, root: &ProjectRoot) {
+        self.registered.lock().unwrap().push(root.clone());
+    }
+
+    fn stack_changed(&self, root: &ProjectRoot) {
+        self.stacks.lock().unwrap().push(root.clone());
+    }
+
+    fn settings_changed(&self) {
+        *self.settings.lock().unwrap() += 1;
+    }
+}

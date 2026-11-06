@@ -1,0 +1,40 @@
+use getset::Getters;
+use muster_domain::{
+    coordination::{Author, TodoClaim},
+    value::EpochSeconds,
+};
+use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
+
+use crate::wire::{WireForm, form};
+
+/// An agent's hold on a todo, as a coordination snapshot keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
+#[serde(deny_unknown_fields)]
+pub struct TodoClaimEntry {
+    /// The agent working the todo.
+    #[serde(with = "form")]
+    owner: Author,
+    /// When the lease runs out, as RFC 3339 UTC.
+    #[serde(with = "form")]
+    claimed_until: EpochSeconds,
+}
+
+impl WireForm for TodoClaim {
+    type Wire = TodoClaimEntry;
+
+    fn to_wire(&self) -> TodoClaimEntry {
+        TodoClaimEntry {
+            owner: self.owner().clone(),
+            claimed_until: *self.claimed_until(),
+        }
+    }
+
+    fn from_wire(wire: TodoClaimEntry) -> Result<Self, String> {
+        Ok(Self::builder()
+            .owner(wire.owner)
+            .claimed_until(wire.claimed_until)
+            .build())
+    }
+}

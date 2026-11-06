@@ -1,0 +1,232 @@
+use std::{
+    io::{self, Read},
+    ops::ControlFlow,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+use crossbeam_channel::Receiver;
+use muster_domain::{pty::ProcessOutput, value::OutputCursor};
+use muster_protocol::{
+    holder::{CATCH_UP_CHUNK_BYTES, HolderMessage, LineMatcher, read_log_range, visit_lines},
+    ipc,
+};
+
+use super::{detachable_sink::DetachableSink, replay_request::ReplayRequest};
+
+/// Reported when the holder closed the connection without an exit and no
+/// longer serves its socket.
+pub(super) const HOLDER_LOST: &str = "the holder stopped serving without reporting an exit";
+/// How long a probe of a holder's socket waits for a dying holder's exit to
+/// reset the connection its listener still queued.
+const SERVING_PROBE: Duration = Duration::from_millis(500);
+
+/// Everything the reader thread of a holder connection owns.
+pub(super) struct Reader {
+    /// The connection's read half.
+    pub(super) stream: UnixStream,
+    /// The holder's socket, probed when the connection drops unexpectedly.
+    pub(super) socket: PathBuf,
+    /// The child's log, which a resync's dropped output is read back from.
+    pub(super) log: Option<PathBuf>,
+    /// Where the output forwarded so far ends.
+    pub(super) delivered: OutputCursor,
+    /// Where the child's screen, output and exit go, until the handle is
+    /// dropped.
+    pub(super) sink: Arc<DetachableSink>,
+    /// Set when the holder reports the exit.
+    pub(super) exit_held: Arc<AtomicBool>,
+    /// Holds the reader back until its handle says what to replay from the
+    /// log, up to `delivered`, before the holder's frames; closed with no
+    /// word, nothing is replayed.
+    pub(super) replay: Receiver<ReplayRequest>,
+}
+
+impl Reader {
+    /// Waits for what to replay, then scans what the log holds from there up
+    /// to where the holder's frames begin, in pieces, and forwards only the
+    /// lines one of its patterns matches, each at where it began, so they are
+    /// seen first, and the log is never read on the caller's thread. A
+    /// dropped handle replays nothing.
+    fn replay(&mut self) {
+        let Ok(request) = self.replay.recv() else {
+            return;
+        };
+        if self.sink.is_detached() || *request.from() >= self.delivered {
+            return;
+        }
+        let matchers: Vec<LineMatcher> = request
+            .patterns()
+            .iter()
+            .filter_map(|pattern| LineMatcher::compile(pattern).ok())
+            .collect();
+        let until = self.delivered;
+        self.forward_matching(*request.from(), until, &matchers);
+        self.delivered = until;
+    }
+
+    /// Reads the log from `from` up to `until` in pieces and forwards each
+    /// line one of `matchers` matches, from where its drawing began, so a
+    /// line [`visit_lines`] hands in pieces reaches the tap whole: a line
+    /// begun in the piece goes from memory, and only one begun earlier is
+    /// read back from the log. It stops once the handle is dropped.
+    fn forward_matching(
+        &mut self,
+        from: OutputCursor,
+        until: OutputCursor,
+        matchers: &[LineMatcher],
+    ) {
+        let Some(log) = self.log.clone() else {
+            return;
+        };
+        if matchers.is_empty() {
+            return;
+        }
+        let _ = visit_lines(&log, from, until, |piece| {
+            if self.sink.is_detached() {
+                return ControlFlow::Break(());
+            }
+            if !piece.bytes().is_empty()
+                && piece
+                    .texts()
+                    .iter()
+                    .any(|text| matchers.iter().any(|matcher| matcher.is_match(text)))
+            {
+                if piece.line_at() < piece.at() {
+                    let end = piece.at().advanced(piece.bytes().len() as u64);
+                    self.forward_logged(&log, piece.line_at(), end);
+                } else {
+                    self.forward(piece.at(), piece.bytes().to_vec());
+                }
+            }
+            ControlFlow::Continue(())
+        });
+    }
+
+    /// Forwards `bytes` the child wrote at `at`.
+    fn forward(&mut self, at: OutputCursor, bytes: Vec<u8>) {
+        self.delivered = self.delivered.max(at.advanced(bytes.len() as u64));
+        self.sink.send(ProcessOutput::Placed { at, bytes });
+    }
+
+    /// Forwards from the log the output a resync dropped: everything between
+    /// what was forwarded and `log_end`, where the holder's frames resume,
+    /// in pieces of at most [`CATCH_UP_CHUNK_BYTES`]. Each piece starts at
+    /// the oldest byte the log still holds when rotation discarded more, so
+    /// however far it rotated the rest is still replayed, and the piece
+    /// placed past what was forwarded shows the tap the gap, as `logs -f`
+    /// reports the bytes it skipped. A dropped handle ends it.
+    fn catch_up(&mut self, log_end: OutputCursor) {
+        if let Some(log) = self.log.clone() {
+            self.forward_logged(&log, self.delivered, log_end);
+        }
+    }
+
+    /// Forwards what `log` holds from `from` up to `until`, in pieces of at
+    /// most [`CATCH_UP_CHUNK_BYTES`], each from the oldest byte still held
+    /// when rotation discarded more. A failed read or a dropped handle ends
+    /// it.
+    fn forward_logged(&mut self, log: &Path, from: OutputCursor, until: OutputCursor) {
+        let mut next = from;
+        while next < until && !self.sink.is_detached() {
+            match read_log_range(log, next, until, CATCH_UP_CHUNK_BYTES) {
+                Ok((at, bytes)) if !bytes.is_empty() => {
+                    next = at.advanced(bytes.len() as u64);
+                    self.forward(at, bytes);
+                },
+                Ok(_) | Err(_) => return,
+            }
+        }
+    }
+}
+
+/// Forwards the holder's frames to the sink until the child exits or the
+/// connection closes. A sink that is slow only delays this thread; the holder
+/// resyncs a supervisor that falls behind rather than waiting for it, and the
+/// output that resync dropped is read back from the log and forwarded first,
+/// so the supervisor sees every byte.
+///
+/// The exit is forwarded, never collected: the holder keeps it until the
+/// supervisor acknowledges it, so an exit lost on the way leaves the holder
+/// re-adoptable. A frame that cannot be decoded is reported as unreadable
+/// output and ends the reader. A connection lost without an exit is reported
+/// as unreadable too, when the handle was not dropped and the holder no
+/// longer serves its socket, so the supervisor's reconnect decides whether
+/// the child outlived its holder; a holder that still serves has handed the
+/// child to another supervisor, which is reported as nothing. Once the handle
+/// is dropped nothing is forwarded, though the thread may still be probing.
+pub(super) fn spawn_reader(mut reader: Reader) {
+    thread::spawn(move || {
+        reader.replay();
+        loop {
+            match HolderMessage::read_from(&mut reader.stream) {
+                Ok(HolderMessage::Snapshot {
+                    repaint,
+                    size,
+                    attached,
+                    log_end,
+                    ..
+                }) => {
+                    reader.catch_up(log_end);
+                    reader.sink.send(ProcessOutput::Repaint {
+                        bytes: repaint,
+                        size,
+                    });
+                    reader.sink.send(ProcessOutput::Attached(attached));
+                },
+                Ok(HolderMessage::Output { at, bytes }) => reader.forward(at, bytes),
+                Ok(HolderMessage::Exited(outcome)) => {
+                    reader.exit_held.store(true, Ordering::SeqCst);
+                    reader.sink.send(ProcessOutput::Exited(outcome));
+                    return;
+                },
+                Ok(HolderMessage::Unlogged(bytes)) => {
+                    reader.sink.send(ProcessOutput::Unlogged(bytes));
+                },
+                Ok(HolderMessage::Warning(text)) => reader.sink.send(ProcessOutput::Warning(text)),
+                Ok(HolderMessage::Attached(count)) => {
+                    reader.sink.send(ProcessOutput::Attached(count));
+                },
+                Ok(HolderMessage::Rejected(_)) => {},
+                Err(error) if error.is_undecodable() => {
+                    reader
+                        .sink
+                        .send(ProcessOutput::Unreadable(error.to_string()));
+                    return;
+                },
+                Err(_) => break,
+            }
+        }
+        if !reader.sink.is_detached() && !holder_serves(&reader.socket) {
+            reader
+                .sink
+                .send(ProcessOutput::Unreadable(HOLDER_LOST.to_string()));
+        }
+    });
+}
+
+/// Whether a holder still serves `socket`: it takes a connection and keeps it
+/// open for [`SERVING_PROBE`]. A holder killed mid-exit may close this
+/// connection before its listener, which then still queues a connect until
+/// the exit resets it, so a connect alone would mistake it for serving.
+fn holder_serves(socket: &Path) -> bool {
+    let Ok(mut probe) = ipc::connect(socket) else {
+        return false;
+    };
+    if probe.set_read_timeout(Some(SERVING_PROBE)).is_err() {
+        return true;
+    }
+    match probe.read(&mut [0; 1]) {
+        Ok(read) => read > 0,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+        ),
+    }
+}

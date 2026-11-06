@@ -1,0 +1,39 @@
+[package]
+name = "muster-service"
+description = "Internal crate of muster-workspace: the per-user service that supervises every project's processes through their holders. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-application = { workspace = true }
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+muster-terminal = { workspace = true }
+
+crossbeam-channel = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+nutype = { workspace = true }
+rustix = { workspace = true }
+serde_json = { workspace = true }
+signal-hook = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+ureq = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+muster-domain = { workspace = true, features = ["testing"] }
+muster-holder = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
+muster-protocol = { workspace = true, features = ["testing"] }
+muster-terminal = { workspace = true, features = ["testing"] }
+bytesize = { workspace = true }
+libc = { workspace = true }
+tempfile = { workspace = true }

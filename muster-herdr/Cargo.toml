@@ -1,0 +1,28 @@
+[package]
+name = "muster-herdr"
+description = "Internal crate of muster-workspace: opens processes in herdr panes. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+
+crossbeam-channel = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+muster-os = { workspace = true, features = ["testing"] }
+signal-hook = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,83 @@
+//! The holder protocol and the process log format: what a holder and its
+//! clients send over the holder socket, where a holder keeps its socket,
+//! record and log, and how a log is written, rotated, filtered and read.
+
+mod bounds;
+mod byte_limit;
+pub mod client;
+mod client_message;
+mod client_role;
+mod config;
+mod dirs;
+mod error;
+mod error_line;
+mod filter_state;
+mod frame;
+mod frame_tag;
+#[cfg(any(test, feature = "testing"))]
+pub mod gated_log;
+mod generation;
+mod holder_control;
+mod holder_launcher;
+mod id;
+mod kept;
+mod kept_line;
+mod line_filter;
+mod line_limit;
+mod line_matcher;
+mod log;
+mod log_base;
+#[cfg(any(test, feature = "testing"))]
+pub mod log_fixture;
+mod log_lines;
+mod log_query;
+mod log_reader;
+mod log_scan;
+mod log_slice;
+mod log_tail;
+mod logged_line;
+mod matcher;
+mod pattern_error;
+mod piece;
+mod protocol;
+mod record;
+mod reject_reason;
+mod resolved;
+mod screen_gate;
+mod served_screen;
+mod span;
+mod span_reader;
+mod strip;
+mod visited_piece;
+
+pub use bounds::*;
+pub use byte_limit::*;
+pub use client_message::*;
+pub use client_role::*;
+pub use config::*;
+pub use dirs::*;
+pub use error::*;
+pub use frame::*;
+pub use frame_tag::*;
+pub use holder_control::*;
+pub use holder_launcher::*;
+pub use id::*;
+pub use line_filter::*;
+pub use line_limit::*;
+pub use line_matcher::*;
+pub use log::*;
+pub use log_lines::*;
+pub use log_query::*;
+pub use log_reader::*;
+pub use log_scan::*;
+pub use log_slice::*;
+pub use log_tail::*;
+pub use logged_line::*;
+pub use pattern_error::*;
+pub use protocol::*;
+pub use record::*;
+pub use reject_reason::*;
+pub use screen_gate::*;
+pub use served_screen::*;
+pub use strip::*;
+pub use visited_piece::*;

@@ -1,0 +1,40 @@
+[package]
+name = "muster-client"
+description = "Internal crate of muster-workspace: the service client and the process use cases, reports and views the CLI and MCP server share. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+muster-terminal = { workspace = true }
+
+getset = { workspace = true }
+humantime = { workspace = true }
+nutype = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+
+[dependencies.tempfile]
+workspace = true
+optional = true
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = ["dep:tempfile", "muster-os/testing"]
+
+[dev-dependencies]
+muster-os = { workspace = true, features = ["testing"] }
+muster-store = { workspace = true, features = ["testing"] }
+insta = { workspace = true }
+tempfile = { workspace = true }

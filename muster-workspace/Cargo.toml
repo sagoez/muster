@@ -1,0 +1,78 @@
+[package]
+name = "muster-workspace"
+description = "The supervisor and control plane behind your terminal for a project's dev processes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["terminal", "supervisor", "process-manager", "dev-server", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+# docs/reference.md and examples/muster.yml link to the repo's own copies; the
+# unit tests read them, so the published crate's tests build from the tarball.
+include = ["/src/**", "/LICENSE", "/docs/reference.md", "/examples/muster.yml"]
+
+[lib]
+name = "muster"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muster"
+path = "src/main.rs"
+
+[dependencies]
+muster-application = { workspace = true }
+muster-client = { workspace = true }
+muster-domain = { workspace = true }
+muster-herdr = { workspace = true }
+muster-holder = { workspace = true }
+muster-mcp = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+muster-service = { workspace = true }
+muster-store = { workspace = true }
+muster-terminal = { workspace = true }
+
+alacritty_terminal = { workspace = true }
+anstream = { workspace = true }
+anstyle = { workspace = true }
+atomic-write-file = { workspace = true }
+bytesize = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cliclack = { workspace = true }
+console = { workspace = true }
+crossbeam-channel = { workspace = true }
+directories = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+listeners = { workspace = true }
+notify-rust = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+shlex = { workspace = true }
+signal-hook = { workspace = true }
+strum = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+muster-client = { workspace = true, features = ["testing"] }
+muster-domain = { workspace = true, features = ["testing"] }
+muster-holder = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
+muster-protocol = { workspace = true, features = ["testing"] }
+muster-store = { workspace = true, features = ["testing"] }
+muster-terminal = { workspace = true, features = ["testing"] }
+
+insta = { workspace = true }
+libc = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true, features = ["pty"] }
+tempfile = { workspace = true }

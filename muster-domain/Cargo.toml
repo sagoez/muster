@@ -1,0 +1,32 @@
+[package]
+name = "muster-domain"
+description = "Internal crate of muster-workspace: the domain model: processes, stacks, settings, coordination, and the ports adapters implement. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+bytesize = { workspace = true }
+getset = { workspace = true }
+humantime = { workspace = true }
+nutype = { workspace = true }
+serde = { workspace = true }
+shlex = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-properties = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = []
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }

@@ -7,33 +7,53 @@ nightly_rustfmt := `ls ~/.rustup/toolchains/nightly*/bin/rustfmt 2>/dev/null | h
 default:
     @just --list
 
-# Type-check the crate.
+# Type-check every crate.
 check:
-    cargo check
+    cargo check --workspace --all-targets
 
-# Build the crate.
+# Build every crate.
 build:
-    cargo build
+    cargo build --workspace
 
 # Run the CLI. Pass args after `--`, e.g. `just run -- ps` or `just run -- up`.
 run *ARGS:
-    cargo run -- {{ARGS}}
+    cargo run --bin muster -- {{ARGS}}
 
 # Run the test suite.
 test:
-    cargo test
+    cargo test --workspace --all-features
 
 # Format with nightly rustfmt (honors rustfmt.toml; no global config change).
 fmt:
-    RUSTFMT="{{nightly_rustfmt}}" cargo fmt
+    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --all
 
 # Verify formatting without writing changes.
 fmt-check:
-    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --check
+    RUSTFMT="{{nightly_rustfmt}}" cargo fmt --all --check
 
 # Lint; warnings are errors.
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-# Everything CI enforces.
-ci: fmt-check lint test
+# Lint each crate alone, so none builds only through workspace feature unification.
+lint-crates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    crates=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+    [ -n "$crates" ] || { echo "cargo metadata named no crate" >&2; exit 1; }
+    for crate in $crates; do
+        cargo clippy -p "$crate" --all-targets -- -D warnings
+    done
+
+# Package every crate as crates.io would, uncommitted work included, and build them.
+package:
+    cargo package --workspace --locked --allow-dirty
+
+# Set the release version of every crate and its sibling pins.
+bump version:
+    sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sed -i -E 's/^(muster-[a-z]+ = \{ path = "[^"]+", version = )"=[^"]+"/\1"={{version}}"/' Cargo.toml
+    cargo update --workspace
+
+# Everything CI enforces, in its order.
+ci: fmt-check lint lint-crates test package

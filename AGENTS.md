@@ -35,7 +35,7 @@ pre-1.0 on-disk files.
 
 The database is the exception: it is the only copy of the user's stack, so it
 migrates forward. Its schema version is `PRAGMA user_version`, and each schema
-change is a new numbered SQL file under `src/adapter/store/migrations/`. A
+change is a new numbered SQL file under `muster-store/src/migrations/`. A
 shipped migration is never edited.
 
 ## Architecture: Ports and Adapters (hexagonal)
@@ -44,121 +44,182 @@ The code is organized as a hexagon. The domain is pure and knows nothing about
 sockets, tokio, PTYs, terminals or YAML. Everything concrete is an adapter that
 plugs into a port.
 
-- **`domain`** - the core. Entities, value objects, and **ports** (traits the
-  core needs the outside world to fulfil, e.g. `ProcessRunner`,
+**Crates.** The hexagon is a Cargo workspace, and crate boundaries enforce it.
+Every crate and its folder share one `muster-` name at the repo root; the bare
+names are taken on crates.io, and the binary keeps the published name
+`muster-workspace`.
+
+```
+muster-workspace     `muster` binary: CLI, composition root, the adapters only it wires
+     |
+muster-mcp -> muster-client      the MCP server; the drivers' shared client
+muster-service   muster-holder   the two processes muster runs
+     |                |
+muster-protocol                  what service, holders and clients exchange
+     |
+muster-terminal  muster-store  muster-herdr  muster-application
+     |
+muster-os                        unix helpers
+muster-domain                    pure model and ports
+```
+
+The diagram shows layers, not every edge. Exactly (`cargo tree -p <crate> -e
+normal --depth 1`): os, terminal and application use domain; store and herdr
+use domain and os; protocol uses domain, os and terminal; holder and client
+use domain, os, protocol and terminal; service uses those and application;
+mcp uses those, application and client; `muster-workspace` uses all eleven.
+
+| Crate | Holds | Why it is a crate |
+|---|---|---|
+| `muster-domain` | entities, value objects, ports, crate-wide constants | Its dependencies must stay out: no I/O, no async, no framework types. Cargo only enforces that across a crate boundary. |
+| `muster-application` | `StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle` | Use cases reach the world only through ports; as a crate it cannot import an adapter. |
+| `muster-os` | private state and socket dirs, process groups and signals, detached spawns, bounded reads, sanitizing, clocks | Shared by every crate but domain, application and terminal, and keeps rustix, signal-hook and directories out of the domain. |
+| `muster-terminal` | VT emulator, keyboard tracker, `BoundedParser`, log rendering | alacritty_terminal stays out of domain, os, application, store and herdr. Every crate above protocol renders a log or a screen, so it links it. |
+| `muster-store` | `SqliteStore`, migrations | Bundled SQLite is linked only where state is stored; the holder and the service cannot reach it. |
+| `muster-protocol` | wire DTOs, framed IPC, service requests and responses, holder messages, records, dirs, the process log format | The contract between three processes; both ends of every socket and file compile against one crate. |
+| `muster-holder` | the holder process, `PortablePtyRunner` | It runs on its own (`muster __holder`) and outlives the service; it cannot reach the service, the store or MCP. |
+| `muster-service` | `ServiceRuntime`, supervisors, launching and adopting holders | It runs on its own (`muster __service`) and reads state only through ports; no SQLite, clap or tokio. |
+| `muster-client` | the service client, process use cases, reports, views, `ClientError` | Shared by the two drivers, which never import each other. |
+| `muster-mcp` | the MCP server | tokio, rmcp and schemars stay inside it. |
+| `muster-herdr` | `HerdrWorkspace` | An outside system's adapter that knows only a domain port; stands alone. |
+| `muster-workspace` | `main.rs`, the CLI, export/import, stack detection, the shell hook, notifier, metrics, listening ports | It ships. |
+
+**Crate or module?** Default to a module. A new crate needs one of: its
+dependencies must stay out of the rest; it stands alone; it runs or ships on
+its own. "It is a layer" is not a reason; layers are folders. Add a row above
+saying which.
+
+What each part does:
+
+- **`muster-domain`** - the core. Entities, value objects, and **ports**
+  (traits the core needs the outside world to fulfil, e.g. `ProcessRunner`,
   `StackStore`, `Notifier`). `LocalState` is the state a driver reads and
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
   `CoordinationStore`, `StackEditLog`). `RunHistory`, `RaisedEdits` and
-  `PendingIdleStops` stay out of it: only the service writes them. The domain has no I/O, no
-  framework types and no `async`, and is fully unit-testable in isolation.
-- **`application`** - use-cases that orchestrate the domain through ports
-  (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`). Depends on
-  `domain` only.
-- **`adapter`** - infrastructure:
-  - **driving adapters** `adapter/cli` (clap commands, `attach`) and
-    `adapter/mcp` (the rmcp server). Both edit stored state through
-    `StackEditor` and drive the service through `adapter/client`, which holds
-    the service client, the process use cases, their reports and views, and
-    `ClientError`; each driver maps that error to its own surface and neither
-    imports the other. Each takes its state, the service and what tells the
-    service of a stored change as ports (`LocalState`, `ServiceAccess`,
-    `StateChangeNotifier`) from the composition root, so a test injects fakes
-    and never reaches the user's real database or socket. The CLI also takes
-    the `ShellRegistry` port, for the shell records and notes its hidden
-    `__shell-report` command keeps. `muster mcp add|remove` hands off to
-    the agent's own CLI by `exec`, with no port between.
-  - **`adapter/service`** - the per-user service: one runtime loop owning a
-    supervisor per loaded project, the socket protocol and notices. It reads
-    the database through read-only ports (`StackReader`, `SettingsReader`,
-    `StackEditLog`); writers tell it what changed. What it writes, through
-    `RunHistory`, `RaisedEdits` and `PendingIdleStops` from a thread of its
-    own, is how each process last ended, which agent edits it raised and
-    when each project's last shell left; through
-    `ShellRegistry` it deletes the record and notes of each shell that has
-    ended. Shell occupancy lives in the loop (`Occupancy`, in
-    `domain/occupancy`); a `ShellSweeper` thread checks that reported shells
-    are alive, deletes the files of the ended ones and posts them back as an
-    event, and the loop starts an entered project and stops an idle one.
-  - **`adapter/shell`** - the hook each shell loads (`hook_script`, over the
-    scripts in `adapter/shell/scripts`) and `ShellFiles`, the shell records
-    and pending notes kept under `shells/` in the state directory, behind the
-    `ShellRegistry` port. `muster __shell-report` is the hidden command the
-    hook runs.
-  - **`adapter/holder`** - the detached process that owns one child's PTY,
-    emulator and log, and outlives the service. It spawns its child through
-    the `ProcessRunner` the composition root hands it.
-  - **driven adapters** `adapter/pty` (portable-pty implements
-    `ProcessRunner`), `adapter/store` (one `SqliteStore` implements every store
-    port; its schema holds the `process_ports` table of declared ports and
-    the `idle_stop_*` columns of `settings` and `projects`),
-    `adapter/exchange` (the export file), `adapter/detect` (stack
-    detection for `muster init`), `adapter/terminal` (the VT emulator,
-    keyboard tracker and log line renderer), `adapter/herdr` (the
-    `TerminalWorkspace` port over the herdr CLI, each call bounded and its
-    child killed and reaped), notifier, metrics.
-- **`main.rs`** - the composition root. The only place that knows every concrete
-  adapter; it constructs them, wires them to ports, and runs. It hands the CLI
-  its ports through `CliPorts`, builds the MCP server's deps when the CLI asks
-  to serve one and hands them to `adapter/mcp`'s `run_stdio`, which builds the
-  async runtime, and hands a holder `PortablePtyRunner`. It builds the herdr
-  workspace from the environment once per CLI call and once per MCP server. No
-  adapter builds another adapter's concrete type.
+  `PendingIdleStops` stay out of it: only the service writes them. The domain
+  has no I/O, no framework types and no `async`, and is fully unit-testable
+  in isolation.
+- **`muster-application`** - use-cases that orchestrate the domain through
+  ports (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`).
+- **Driving adapters** - the CLI (`muster-workspace/src/cli`: clap commands,
+  `attach`) and the MCP server (`muster-mcp`). Both edit stored state through
+  `StackEditor` and drive the service through `muster-client`, which holds
+  the service client, the process use cases, their reports and views, and
+  `ClientError`; each driver maps that error to its own surface and neither
+  imports the other. Each takes its state, the service and what tells the
+  service of a stored change as ports (`LocalState`, `ServiceAccess`,
+  `StateChangeNotifier`) from the composition root, so a test injects fakes
+  and never reaches the user's real database or socket. The CLI also takes
+  the `ShellRegistry` port, for the shell records and notes its hidden
+  `__shell-report` command keeps. `muster mcp add|remove` hands off to the
+  agent's own CLI by `exec`, with no port between.
+- **`muster-service`** - the per-user service: one runtime loop owning a
+  supervisor per loaded project, and the notices. It speaks the service
+  protocol of `muster-protocol`. It reads the database through read-only
+  ports (`StackReader`, `SettingsReader`, `StackEditLog`); writers tell it
+  what changed. What it writes, through `RunHistory`, `RaisedEdits` and
+  `PendingIdleStops` from a thread of its own, is how each process last
+  ended, which agent edits it raised and when each project's last shell
+  left; through `ShellRegistry` it deletes the record and notes of each
+  shell that has ended. Shell occupancy lives in the loop (`Occupancy`, in
+  `muster-domain/src/occupancy`); a `ShellSweeper` thread checks that
+  reported shells are alive, deletes the files of the ended ones and posts
+  them back as an event, and the loop starts an entered project and stops
+  an idle one. Its `holder_client` launches and adopts holders and drives
+  each through a `HolderHandle`.
+- **`muster-holder`** - the detached process that owns one child's PTY,
+  emulator and log, and outlives the service. It spawns its child through
+  the `ProcessRunner` the composition root hands it; `PortablePtyRunner`
+  (portable-pty) is that runner.
+- **The shell hook** (`muster-workspace/src/shell`) - the hook each shell
+  loads (`hook_script`, over the scripts in `shell/scripts`) and
+  `ShellFiles`, the shell records and pending notes kept under `shells/` in
+  the state directory, behind the `ShellRegistry` port.
+  `muster __shell-report` is the hidden command the hook runs.
+- **Driven adapters** - `muster-store` (one `SqliteStore` implements every
+  store port; its schema holds the `process_ports` table of declared ports
+  and the `idle_stop_*` columns of `settings` and `projects`),
+  `muster-terminal` (the VT emulator, keyboard tracker and log line
+  renderer), `muster-herdr` (the `TerminalWorkspace` port over the herdr
+  CLI, each call bounded and its child killed and reaped), and in
+  `muster-workspace`: `exchange` (the export file), `detect` (stack
+  detection for `muster init`), notifier, metrics, listening ports.
+- **`muster-workspace/src/main.rs`** - the composition root. The only place
+  that knows every concrete adapter; it constructs them, wires them to
+  ports, and runs. It hands the CLI its ports through `CliPorts`, builds the
+  MCP server's deps when the CLI asks to serve one and hands them to
+  `muster-mcp`'s `run_stdio`, which builds the async runtime, and hands a
+  holder `PortablePtyRunner`. It builds the herdr workspace from the
+  environment once per CLI call and once per MCP server. No adapter builds
+  another adapter's concrete type.
 
-**Dependency rule (strict):** dependencies point inward. `domain` depends on
-nothing internal. `application` depends on `domain`. `adapter` depends on
-`domain` (and its own crates). `main` depends on everything and wires it. A port
-is a trait defined in `domain`; an adapter is an `impl` of that trait living in
-`adapter`. Framework/library types never cross into `domain`.
+**Dependency rule (strict):** dependencies point down the diagram.
+`muster-domain` depends on no workspace crate. A port is a trait in
+`muster-domain`; an adapter is an `impl` of it in another crate.
+Framework/library types never cross into the domain. Each internal crate is
+declared once in `[workspace.dependencies]` with an exact `=` version pin,
+every third-party version lives there too, and each crate lists only what it
+uses with `{ workspace = true }`.
 
-Some seams are traits inside `adapter` instead: `ServiceAccess`, `CliPorts`,
-`HolderPool`, `HolderAdopter`, `HolderLauncher`, `ProjectPorts`,
-`SettleWatch` and `FollowedStream`. Each abstracts one adapter's call into
-another, or what the composition root hands an adapter, and carries adapter
-types (service requests, holder records, clap launches), so it has no place
-in `domain`. A seam the core itself needs, with only domain types in its
-signature, is a domain port.
+Some seams are traits outside the domain instead, in the crate that owns the
+call: `ServiceAccess`, `SettleWatch` (client); `HolderPool`, `HolderAdopter`,
+`ProjectPorts`, `FollowedStream` (service); `HolderLauncher` (protocol,
+implemented by the holder's `ExecHolderLauncher` and the test launchers);
+`CliPorts` (binary). Each abstracts one adapter's call into another, or what
+the composition root hands an adapter, and carries adapter types (service
+requests, holder records, clap launches), so it has no place in the domain.
+A seam the core itself needs, with only domain types in its signature, is a
+domain port.
 
 ```
-src/
-  main.rs              # composition root: CliPorts, the MCP server, service and holder entry points
-  lib.rs               # the library crate the binary and integration tests link
-  error.rs             # MusterError (transparent aggregate of domain/adapter errors)
-  constants.rs         # crate-wide named constants (app identity, ...)
-  domain/
-    process/           # Process, ProcessState, restart and stop policies, readiness checks
-    config/            # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
-    coordination/      # shared notes, todos, key-value entries and locks
-    occupancy/         # which shell is in which project: Occupancy, ShellRecord
-    pty/               # SpawnRequest, PtySize, process output and exit outcomes
-    terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
-    port/              # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
-    value/             # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
-    project.rs, settings.rs, color_scheme.rs, notification.rs
-  application/         # StackEditor, StackSync, Workspace, ProcessLifecycle
-  adapter/
+Cargo.toml             # virtual workspace root: members, [workspace.package], [workspace.dependencies]
+muster-domain/src/
+  lib.rs, constants.rs   # the domain's modules; crate-wide named constants (app identity, ...)
+  process/             # Process, ProcessState, restart and stop policies, readiness checks
+  config/              # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
+  coordination/        # shared notes, todos, key-value entries and locks
+  occupancy/           # which shell is in which project: Occupancy, ShellRecord
+  pty/                 # SpawnRequest, PtySize, process output and exit outcomes
+  terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
+  port/                # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
+  value/               # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
+  project.rs, settings.rs, color_scheme.rs, notification.rs
+muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle
+muster-os/src/         # private_dir, no_state_dir, signal_target, child_group, spawn, sanitize, clock, ...
+  test_wait.rs, test_scratch.rs, test_fifo.rs  # `testing`: the poll, scratch dirs and FIFOs every test shares
+muster-terminal/src/   # VT emulator, keyboard tracker, the bounded vte parser, log line renderer
+muster-store/src/      # SqliteStore, its row modules
+  migrations/          # the numbered schema migrations
+muster-herdr/src/      # TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
+muster-protocol/src/
+  wire/                # the DTOs domain values travel as, their serde with-modules, the export file's coordination entries
+  ipc.rs               # framed requests over Unix sockets
+  workspace_request.rs # the MCP-to-service requests the service protocol lacks
+  service/             # the service protocol: requests, responses, notices, waits, the socket endpoint
+  holder/              # the holder protocol, records, dirs and the process log format
+muster-holder/src/     # the holder server and launcher
+  pty/                 # ProcessRunner via portable-pty
+muster-service/src/    # the per-user service, its runtime and notices
+  supervisor/          # one supervisor per loaded project
+  holder_client/       # the service's side of its holders: runner, handle, reader
+muster-client/src/     # what both drivers share: ServiceAccess, process use cases, reports
+muster-mcp/src/        # driving: the MCP server over stdio
+muster-workspace/
+  src/
+    main.rs            # composition root: CliPorts, the MCP server, service and holder entry points
+    lib.rs             # the library the binary and integration tests link
+    error.rs           # MusterError (transparent aggregate of every crate's errors)
     cli/               # driving: commands, attach
-    mcp/               # driving: the MCP server over stdio
-    client/            # what both drivers share: ServiceAccess, process use cases, reports
-    service/           # the per-user service and its supervisors
-    holder/            # one detached process per child, owning its PTY
-    terminal/          # VT emulator, keyboard tracker, the bounded vte parser, log line renderer
-    herdr/             # driven: TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
-    pty/               # driven: ProcessRunner via portable-pty
-    store/             # driven: SqliteStore, migrations
-    exchange/          # driven: the `muster export` / `muster import` file
-    shell/             # driven: the hook scripts `muster shell-init` prints, the shell records and notes
-    detect/            # driven: stack detection for `muster init`
-    wire/              # the DTOs domain values travel as, and their serde with-modules
-    workspace_request.rs  # the MCP-to-service requests the service protocol lacks
-    sanitize.rs        # control characters made safe to print, for the service and the CLI
-    ipc.rs, private_dir.rs, no_state_dir.rs, ...  # sockets, the state directory, OS probes
-    test_scratch.rs, test_wait.rs  # cfg(test): the scratch dirs and the poll every unit test shares
-tests/
-  exec/                # one integration test crate running the built binary
-    main.rs            # declares the cli, holder and service suites and their fixtures
-    cli.rs, holder.rs, service.rs  # the suites
-    common/            # the Scratch, sink, PTY, MCP session and launchers they share
+    exchange/          # the `muster export` / `muster import` file
+    shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
+    detect/            # stack detection for `muster init`
+    listening.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
+  tests/
+    exec/              # one integration test crate running the built binary
+      main.rs          # declares the suites and their fixtures
+      cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs  # the suites
+      common/          # the Scratch, PTY, MCP session and launchers they share
 ```
 
 ## Dependencies and libraries
@@ -188,7 +249,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Byte sizes | `bytesize` |
 | Arg parsing and completions | `clap` + `clap_complete` |
 | CLI styling | `anstream` + `anstyle` |
-| Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by `adapter/cli`'s presenter; `Spinners` only holds the spinner line the presenter starts |
+| Interactive CLI frames, spinners and prompts | `cliclack` (themed through `console`), called only by the CLI's presenter (`muster-workspace/src/cli`); `Spinners` only holds the spinner line the presenter starts |
 | MCP server and its tool schemas | `rmcp` on `tokio`, `schemars` |
 | Desktop notifications | `notify-rust` |
 | Process usage | `sysinfo` |
@@ -308,11 +369,14 @@ than passing bare `u16`/`usize`.
 - **Domain definitions are not serde types.** `ProcessSpec`, `Settings` and
   their kin derive `WithSetters` with `#[set_with]` and `#[getset(get = "pub",
   set_with = "pub")]` where they are edited by value. The export file has its
-  own serde DTOs in `adapter/exchange`, each with `#[serde(deny_unknown_fields)]`
-  and converted to and from the domain with `TryFrom`/`From`. A domain value on
-  a wire or in a file names its DTO through `adapter::wire::WireForm`, and the
-  field keeps its domain type with `#[serde(with = "...::wire::form")]`
-  (`optional_form`, `form_list`). Only validated newtypes derive serde.
+  own serde DTOs in `muster-workspace/src/exchange`, each with
+  `#[serde(deny_unknown_fields)]` and converted to and from the domain with
+  `TryFrom`/`From`. A domain value on a wire or in a file names its DTO through
+  `muster_protocol::wire::WireForm`, and the field keeps its domain type with
+  `#[serde(with = "muster_protocol::wire::form")]` (`optional_form`,
+  `form_list`). The export file's coordination entries live in
+  `muster-protocol/src/wire/`, because a `WireForm` impl must sit with the
+  trait or the type. Only validated newtypes derive serde.
 - Fields are private; expose access through `Getters`, never `pub` fields.
   This holds for clap `Args` structs and test fixtures too. The exceptions:
   - A deps struct (`SupervisorDeps`, `ServiceDeps`): its boxed ports are
@@ -346,7 +410,7 @@ pub struct ProcessSpec {
   `MAX_LIST_LIMIT`) and a log read's size bound what one call costs, not what
   the user configures, so they are constants beside the code that enforces
   them. A tool description, an argument's description in its input schema
-  and the server instructions name them through `adapter/mcp/described.rs`
+  and the server instructions name them through `muster-mcp/src/described.rs`
   placeholders, never by repeating the number.
 
 ### Secret config fields
@@ -443,14 +507,26 @@ pub use state::*;
 
 ### Testing
 - **Tests live inline**, in `#[cfg(test)] mod tests { ... }` in the same file.
-  The `tests/` directory holds only integration tests that run the built binary,
-  as one crate, `tests/exec`, whose suites share the fixtures in its `common/`.
+  `muster-workspace/tests/exec` holds the integration tests that run the
+  built binary, as one crate whose suites share the fixtures in its
+  `common/`.
 - **Test-only types live in `#[cfg(test)]` fixture files** of their module,
-  one type per file as elsewhere (`holder/testing.rs`, `holder/watch.rs`,
-  `service/supervisor/testing/`), never inline in a `mod tests`. A fake is
-  shared, not copied: one `ChannelSink`, one `ThreadLauncher` with its
-  `Holders`, one `FakeService`, one `wait_until` (`adapter/test_wait.rs`),
-  one holder `Harness`. Every fixture fn gets a doc comment.
+  one type per file as elsewhere (`muster-holder/src/testing.rs`,
+  `muster-service/src/holder_client/watch.rs`,
+  `muster-service/src/supervisor/testing/`), never inline in a `mod tests`.
+  A fixture another crate's tests use is gated
+  `#[cfg(any(test, feature = "testing"))]` and `pub`, and the other crate
+  enables `testing` only from its dev-dependencies. A fake is shared, not
+  copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
+  one holder `Harness` (`muster-holder`), one `FakeService`
+  (`muster-client`), one `wait_until` (`muster-os/src/test_wait.rs`). The
+  exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
+  a 30 s bound for a whole binary's start and stop. Every fixture fn gets a
+  doc comment.
+- **A `testing` gate never changes behaviour unless a test arms it.** Cargo
+  unifies features under `cargo test`, so the `muster` binary the exec suite
+  runs is built with every `testing` feature its dev-dependencies turn on,
+  while the shipped binary has none.
 - **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
   `cargo insta review`; never blindly accept.
 - **Use getters** to read private fields in tests rather than making fields `pub`.
@@ -464,19 +540,77 @@ pub use state::*;
 Use the `justfile`:
 
 ```bash
-just build        # cargo build
-just check        # cargo check
-just test         # cargo test
+just build        # cargo build --workspace
+just check        # cargo check --workspace --all-targets
+just test         # cargo test --workspace --all-features
 just run          # run the CLI (just run -- ps, just run -- up)
-just fmt          # format (nightly rustfmt, honors rustfmt.toml)
+just fmt          # format every crate (nightly rustfmt, honors rustfmt.toml)
 just fmt-check    # verify formatting
-just lint         # cargo clippy --all-targets -- -D warnings
-just ci           # fmt-check + lint + test
+just lint         # cargo clippy --workspace --all-targets --all-features -- -D warnings
+just lint-crates  # cargo clippy -p <crate> --all-targets -- -D warnings, for each crate alone
+just package      # package every crate as crates.io would and build the packages
+just bump 0.12.0  # set the release version of every crate and its sibling pins
+just ci           # what CI runs: fmt-check + lint + lint-crates + test + package
 ```
 
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`
 locates the installed nightly toolchain and overrides `RUSTFMT`; it does not
 change any global tool config.
+
+## Releasing
+
+A release is a version bump on `main`: `just bump <version>` on a branch,
+merge it, and the release workflow publishes every crate not yet at that
+version through crates.io Trusted Publishing, then tags it. Before any
+upload it looks every crate up, and fails at once if one has never been
+published, because Trusted Publishing cannot create a crate name.
+
+### First release of the split crates
+
+0.11.0 is on crates.io as the single `muster-workspace` crate; the eleven
+library crates are new names. Their first release is **0.12.0**, done once:
+
+1. Check each name is still free: `curl -s -o /dev/null -w '%{http_code}'
+   https://crates.io/api/v1/crates/<crate>` answers 404 for all eleven.
+2. On crates.io, Account Settings -> API Tokens: create a token with the
+   `publish-new` scope only, crate pattern `muster-*`, short expiry.
+3. On a branch from a freshly fetched `main`: `just bump 0.12.0`, commit
+   `chore(release): bump version to 0.12.0`, and open the PR. Wait for CI to
+   pass and for review. Published versions are permanent, so nothing may
+   change in a library crate after the next step.
+4. Check out the PR's head with a clean tree (`git rev-parse HEAD` equals
+   the PR head; note it as the published sha), and from it publish the
+   eleven by hand in dependency order (every normal and dev dependency
+   before the crate that names it), each
+   with `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
+   `muster-domain`, `muster-application`, `muster-os`, `muster-terminal`,
+   `muster-store`, `muster-herdr`, `muster-protocol`, `muster-holder`,
+   `muster-service`, `muster-client`, `muster-mcp`. Not `muster-workspace`:
+   CI publishes it. crates.io rate-limits new names; on HTTP 429 that crate
+   was not published, so wait the time it names and retry the same crate
+   before going on to the next.
+5. For each of the eleven: crate page -> Settings -> Trusted Publishing ->
+   Add: GitHub, owner `sagoez`, repository `muster`, workflow `release.yml`.
+   Then require Trusted Publishing for it, as `muster-workspace` does.
+6. Revoke the token.
+7. Merge the PR with no further commits. The workflow finds the eleven at
+   0.12.0, publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
+   If `main` moved meanwhile, first
+   `git fetch` and check that
+   `git diff <published sha> origin/main -- muster-domain muster-application muster-os muster-terminal muster-store muster-herdr muster-protocol muster-holder muster-service muster-client muster-mcp`
+   is empty. If it is not, the published libraries no longer match `main`:
+   do not merge; bump again (0.12.1) and release that, which CI publishes in
+   full, all twelve crates.
+
+If the bump reached `main` before step 4, its release run fails at the
+lookup and publishes nothing. Do steps 4 to 6 from the bump commit on
+`main`, and run the release on that same commit: re-run its failed release
+job if `main` has not moved since. If `main` has moved, publish from
+`main`'s current tip instead (after the step 7 check against the bump
+commit), then start the workflow by hand on `main` (`workflow_dispatch`
+with `version: 0.12.0`), so the libraries and `muster-workspace` come from
+one tree. Re-running a job on the commit it ran on also finishes any release
+that stopped half way: crates already at the version are skipped.
 
 ## Review gate
 

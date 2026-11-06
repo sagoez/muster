@@ -1261,6 +1261,212 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-application"
+version = "0.11.0"
+dependencies = [
+ "getset",
+ "muster-domain",
+ "typed-builder",
+]
+
+[[package]]
+name = "muster-client"
+version = "0.11.0"
+dependencies = [
+ "getset",
+ "humantime",
+ "insta",
+ "muster-domain",
+ "muster-os",
+ "muster-protocol",
+ "muster-store",
+ "muster-terminal",
+ "nutype",
+ "serde",
+ "serde_json",
+ "shlex",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+]
+
+[[package]]
+name = "muster-domain"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "getset",
+ "humantime",
+ "nutype",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "shlex",
+ "strum",
+ "thiserror 2.0.19",
+ "typed-builder",
+ "unicode-normalization",
+ "unicode-properties",
+ "uuid",
+]
+
+[[package]]
+name = "muster-herdr"
+version = "0.11.0"
+dependencies = [
+ "crossbeam-channel",
+ "getset",
+ "humantime",
+ "muster-domain",
+ "muster-os",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+]
+
+[[package]]
+name = "muster-holder"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "crossbeam-channel",
+ "getset",
+ "libc",
+ "muster-domain",
+ "muster-os",
+ "muster-protocol",
+ "muster-terminal",
+ "portable-pty",
+ "rustix",
+ "signal-hook",
+ "tempfile",
+ "typed-builder",
+]
+
+[[package]]
+name = "muster-mcp"
+version = "0.11.0"
+dependencies = [
+ "getset",
+ "humantime",
+ "insta",
+ "muster-application",
+ "muster-client",
+ "muster-domain",
+ "muster-os",
+ "muster-protocol",
+ "muster-store",
+ "muster-terminal",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shlex",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "typed-builder",
+]
+
+[[package]]
+name = "muster-os"
+version = "0.11.0"
+dependencies = [
+ "directories",
+ "libc",
+ "muster-domain",
+ "nutype",
+ "rustix",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "muster-protocol"
+version = "0.11.0"
+dependencies = [
+ "atomic-write-file",
+ "bytesize",
+ "crossbeam-channel",
+ "getset",
+ "humantime",
+ "humantime-serde",
+ "libc",
+ "muster-domain",
+ "muster-os",
+ "muster-terminal",
+ "nutype",
+ "regex",
+ "rustix",
+ "semver",
+ "serde",
+ "serde_json",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+ "uuid",
+]
+
+[[package]]
+name = "muster-service"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "crossbeam-channel",
+ "getset",
+ "humantime",
+ "libc",
+ "muster-application",
+ "muster-domain",
+ "muster-holder",
+ "muster-os",
+ "muster-protocol",
+ "muster-terminal",
+ "nutype",
+ "rustix",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "muster-store"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "muster-domain",
+ "muster-os",
+ "rusqlite",
+ "serde_json",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "muster-terminal"
+version = "0.11.0"
+dependencies = [
+ "alacritty_terminal",
+ "getset",
+ "muster-domain",
+ "typed-builder",
+ "unicode-width",
+]
+
+[[package]]
 name = "muster-workspace"
 version = "0.11.0"
 dependencies = [
@@ -1281,15 +1487,20 @@ dependencies = [
  "insta",
  "libc",
  "listeners",
+ "muster-application",
+ "muster-client",
+ "muster-domain",
+ "muster-herdr",
+ "muster-holder",
+ "muster-mcp",
+ "muster-os",
+ "muster-protocol",
+ "muster-service",
+ "muster-store",
+ "muster-terminal",
  "notify-rust",
- "nutype",
- "portable-pty",
- "regex",
- "rmcp",
  "rusqlite",
  "rustix",
- "schemars",
- "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1299,13 +1510,8 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
- "tokio",
  "typed-builder",
- "unicode-normalization",
- "unicode-properties",
  "unicode-width",
- "ureq",
- "uuid",
 ]
 
 [[package]]

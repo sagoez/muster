@@ -126,8 +126,10 @@ impl ConfigLock {
     /// `refresh_every` from a thread of its own.
     ///
     /// # Errors
-    /// Returns [`AgentConfigError::Io`] when the token cannot be written,
-    /// the folder stamped or the thread started; the lock is let go again.
+    /// Returns [`AgentConfigError::Locked`] when another writer made a token
+    /// file beside the folder first, leaving both to it, or
+    /// [`AgentConfigError::Io`] when the token cannot be written, the folder
+    /// stamped or the thread started; the lock is let go again.
     fn hold(
         config: &Path,
         folder: PathBuf,
@@ -136,6 +138,11 @@ impl ConfigLock {
     ) -> Result<Self, AgentConfigError> {
         let token = match LockToken::claim(&folder) {
             Ok(token) => token,
+            // The folder may be the other writer's by now, so it stays; an
+            // empty one muster left goes stale like any other.
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(AgentConfigError::Locked(config.to_path_buf()));
+            },
             Err(source) => {
                 let _ = fs::remove_dir(&folder);
                 return Err(io_error(LOCK, config, source));

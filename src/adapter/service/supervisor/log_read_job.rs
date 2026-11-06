@@ -1,5 +1,6 @@
+use muster_domain::value::{ProcessName, ProjectRoot};
+
 use super::{adopter::HolderAdopter, log_ask::LogAsk, log_read_result::LogReadResult};
-use crate::domain::value::{ProcessName, ProjectRoot};
 
 /// What one read of a process's log off the loop is asked: its end, for
 /// waits on a process this service never saw run, and what each held wait

@@ -1,19 +1,19 @@
 use std::{path::PathBuf, sync::Arc};
 
 use getset::Getters;
+use muster_domain::{
+    port::{
+        CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
+        StateChangeNotifier, TerminalWorkspace,
+    },
+    project::Project,
+};
 use typed_builder::TypedBuilder;
 
 use super::{scope::Scope, tool_error::ToolError};
 use crate::{
     adapter::client::{ProjectTarget, ServiceAccess},
     application::StackEditor,
-    domain::{
-        port::{
-            CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
-            StateChangeNotifier, TerminalWorkspace,
-        },
-        project::Project,
-    },
 };
 
 /// What the MCP server works with: where it resolves projects from, the

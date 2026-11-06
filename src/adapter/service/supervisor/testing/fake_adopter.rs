@@ -1,12 +1,11 @@
-use super::pid_handle::PidHandle;
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
 };
+
+use super::pid_handle::PidHandle;
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter whose every holder answers with a pid-reporting handle.
 pub(crate) struct FakeAdopter;

@@ -1,8 +1,8 @@
 use std::{ffi::OsString, iter};
 
-use crate::{
+use muster_domain::{
     constants::{MUSTER_OPEN_ARG_PREFIX as ARG_ENV_PREFIX, MUSTER_OPEN_PROGRAM_ENV},
-    domain::terminal_workspace::PaneCommand,
+    terminal_workspace::PaneCommand,
 };
 
 /// Leads the line, which keeps it out of the history of a shell that skips

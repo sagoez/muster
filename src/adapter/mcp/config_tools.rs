@@ -1,5 +1,6 @@
 //! The settings tools: the machine's muster settings, read and changed.
 
+use muster_domain::config::{SettingChange, SettingKey};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use super::{
@@ -10,10 +11,7 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::{
-    adapter::client::{SettingView, SettingsView},
-    domain::config::{SettingChange, SettingKey},
-};
+use crate::adapter::client::{SettingView, SettingsView};
 
 /// The setting tool, as a read-only refusal names it.
 pub(super) const CONFIG_SET: &str = "config_set";
@@ -74,12 +72,12 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{config::McpStackEdits, port::SettingsReader};
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::{
-        adapter::mcp::test_support::{add, content, edits, fixture, refusal, register, runtime},
-        domain::{config::McpStackEdits, port::SettingsReader},
+    use crate::adapter::mcp::test_support::{
+        add, content, edits, fixture, refusal, register, runtime,
     };
 
     /// `config_get` reads every setting or one; an unknown key lists the

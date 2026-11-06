@@ -1,7 +1,7 @@
+use muster_domain::value::{ProcessName, ProjectName};
 use serde::{Deserialize, Serialize};
 
 use super::refusal::Refusal;
-use crate::domain::value::{ProcessName, ProjectName};
 
 /// What the service tells a shell's hook to print at its next prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

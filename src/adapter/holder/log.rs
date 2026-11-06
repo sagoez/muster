@@ -1,19 +1,20 @@
 use std::{
     borrow::Cow,
     ffi::OsString,
-    fs::{self, File, OpenOptions, Permissions},
-    io::{self, Write},
+    fs,
+    fs::{File, OpenOptions, Permissions},
+    io,
+    io::Write,
     os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
+use muster_domain::value::{ByteSize, OutputCursor};
+
 use super::{generation::Generation, log_base::LogBase};
-use crate::{
-    adapter::{
-        private_dir::create_private_dir_all,
-        terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START},
-    },
-    domain::value::{ByteSize, OutputCursor},
+use crate::adapter::{
+    private_dir::create_private_dir_all,
+    terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START},
 };
 
 /// Suffix of the single retained older log generation.

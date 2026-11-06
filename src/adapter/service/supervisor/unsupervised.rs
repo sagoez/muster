@@ -1,20 +1,18 @@
 use std::time::{Duration, Instant};
 
+use muster_domain::{
+    process::{ExitIntent, ProcessState},
+    value::{PaneId, Pid, StartToken},
+};
 use rustix::process::Signal;
 
 use super::{
     adopter::collect_without_kill, config_membership::ConfigMembership, entity::Supervisor,
     unsupervised_child::UnsupervisedChild,
 };
-use crate::{
-    adapter::{
-        pty::{signal_group, unix_signal},
-        service::{NoticeLevel, Refusal},
-    },
-    domain::{
-        process::{ExitIntent, ProcessState},
-        value::{PaneId, Pid, StartToken},
-    },
+use crate::adapter::{
+    pty::{signal_group, unix_signal},
+    service::{NoticeLevel, Refusal},
 };
 
 /// Interval between checks that a signalled unsupervised process is gone.

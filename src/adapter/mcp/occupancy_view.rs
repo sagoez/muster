@@ -1,11 +1,9 @@
 use getset::CopyGetters;
+use muster_domain::value::IdleStop;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::{client::whole_seconds_up, service::OccupancyStatus},
-    domain::value::IdleStop,
-};
+use crate::adapter::{client::whole_seconds_up, service::OccupancyStatus};
 
 /// Who is in a project and when it stops for want of anyone, as
 /// `stack_status` shows it.
@@ -40,8 +38,9 @@ impl From<&OccupancyStatus> for OccupancyView {
 mod tests {
     use std::time::Duration;
 
+    use muster_domain::value::PositiveDuration;
+
     use super::*;
-    use crate::domain::value::PositiveDuration;
 
     /// The status of a project with `shells` in it and a stop `stops_in`
     /// away under a 30 minute idle stop.

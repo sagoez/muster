@@ -1,11 +1,12 @@
 use std::{thread, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use muster_domain::pty::PtyError;
 
 use super::{
     config::HolderConfig, holder_launcher::HolderLauncher, holders::Holders, server::HolderServer,
 };
-use crate::{adapter::pty::PortablePtyRunner, domain::pty::PtyError};
+use crate::adapter::pty::PortablePtyRunner;
 
 /// Runs each holder on a thread of the test process over a real PTY, once its
 /// start opens, is dropped, or `wait` passes.

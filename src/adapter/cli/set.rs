@@ -2,6 +2,11 @@
 //! process keeps running and takes the change at its next start.
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::{ConfigError, DeclaredPorts, FieldEdit, ProcessChange},
+    coordination::Author,
+    value::{CommandLine, Description},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -9,16 +14,9 @@ use super::{
     command_words::command_string, error::CliError, invocation::Invocation, output::project_title,
     process_flags::env_name, report::Report, row::Row, row_kind::RowKind, set_args::SetArgs,
 };
-use crate::{
-    adapter::client::{
-        DefinitionView, ProjectIdentityView, WorkingDirPlace,
-        process::{resolve_among, runs_now},
-    },
-    domain::{
-        config::{ConfigError, DeclaredPorts, FieldEdit, ProcessChange},
-        coordination::Author,
-        value::{CommandLine, Description},
-    },
+use crate::adapter::client::{
+    DefinitionView, ProjectIdentityView, WorkingDirPlace,
+    process::{resolve_among, runs_now},
 };
 
 /// The command word of `muster set`.
@@ -291,6 +289,15 @@ mod tests {
     };
 
     use clap::{Parser, error::ErrorKind};
+    use muster_domain::{
+        config::{DECLARED_PORTS_MAX, Environment, ProcessSpec},
+        port::StackReader,
+        process::{RestartPolicy, StopPolicy, StopSignal},
+        value::{
+            CommandLine, EnvName, EnvValue, LocalPort, PORT_FORM, ProcessName, ProjectName,
+            ProjectRoot, StopGrace,
+        },
+    };
     use tempfile::TempDir;
 
     use super::{
@@ -300,18 +307,7 @@ mod tests {
         },
         *,
     };
-    use crate::{
-        adapter::{cli::report::plain, store::test_support::fresh_store},
-        domain::{
-            config::{DECLARED_PORTS_MAX, Environment, ProcessSpec},
-            port::StackReader,
-            process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{
-                CommandLine, EnvName, EnvValue, LocalPort, PORT_FORM, ProcessName, ProjectName,
-                ProjectRoot, StopGrace,
-            },
-        },
-    };
+    use crate::adapter::{cli::report::plain, store::test_support::fresh_store};
 
     /// `muster` run with `words`, parsed.
     fn parse(words: &[&str]) -> Result<Command, clap::Error> {

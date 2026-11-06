@@ -1,6 +1,5 @@
+use muster_domain::process::PATTERN_MAX_CHARS;
 use thiserror::Error;
-
-use crate::domain::process::PATTERN_MAX_CHARS;
 
 /// A log pattern that cannot be used to match lines.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

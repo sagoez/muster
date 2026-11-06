@@ -1,17 +1,15 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    process::{ProcessState, Readiness},
+    value::{Pid, ProcessName},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{exit_view::ExitView, port_block_view::PortBlockView};
-use crate::{
-    adapter::service::ProcessStatus,
-    domain::{
-        process::{ProcessState, Readiness},
-        value::{Pid, ProcessName},
-    },
-};
+use crate::adapter::service::ProcessStatus;
 
 /// One process as `--json` shows it. Uptime is whole seconds; the stop grace
 /// is whole seconds rounded up, so a grace under a second never reads as 0.

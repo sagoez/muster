@@ -4,8 +4,7 @@ use std::{
 };
 
 use directories::BaseDirs;
-
-use crate::domain::{config::ConfigError, value::ProjectRoot};
+use muster_domain::{config::ConfigError, value::ProjectRoot};
 
 /// Leading path component expanded to the user's home directory.
 const HOME_PREFIX: &str = "~";

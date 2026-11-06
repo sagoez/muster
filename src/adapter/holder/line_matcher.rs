@@ -1,7 +1,7 @@
+use muster_domain::process::{LogPattern, PatternKind, PatternText};
 use regex::RegexBuilder;
 
 use super::{matcher::Matcher, pattern_error::PatternError};
-use crate::domain::process::{LogPattern, PatternKind, PatternText};
 
 /// The most memory a compiled regex may take, so a pathological pattern is
 /// refused rather than stalling whoever compiles it.
@@ -77,8 +77,9 @@ fn pattern_of(text: &str, kind: PatternKind) -> Result<LogPattern, PatternError>
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::process::PatternText;
+
     use super::*;
-    use crate::domain::process::PatternText;
 
     /// The log pattern `text`, read as `kind`.
     fn pattern(text: &str, kind: PatternKind) -> LogPattern {

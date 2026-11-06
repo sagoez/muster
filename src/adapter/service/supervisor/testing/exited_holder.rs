@@ -2,16 +2,14 @@ use std::{os::unix::net::UnixListener, path::PathBuf, thread};
 
 use crossbeam_channel::{Receiver, bounded};
 use getset::Getters;
+use muster_domain::pty::ExitOutcome;
 use tempfile::TempDir;
 use typed_builder::TypedBuilder;
 
 use super::fixtures::SETTLE_WAIT;
-use crate::{
-    adapter::{
-        holder::{ClientMessage, HolderControl, HolderMessage},
-        test_scratch::short_scratch,
-    },
-    domain::pty::ExitOutcome,
+use crate::adapter::{
+    holder::{ClientMessage, HolderControl, HolderMessage},
+    test_scratch::short_scratch,
 };
 
 /// Prefix of every exited holder's scratch directory.

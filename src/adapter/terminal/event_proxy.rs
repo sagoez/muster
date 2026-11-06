@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
+use muster_domain::color_scheme::ColorScheme;
 
 use super::{
     emulator::resolve_color,
     emulator_sink::{EmulatorSink, lock_sink},
 };
-use crate::domain::color_scheme::ColorScheme;
 
 /// The `alacritty_terminal` event listener. It shares [`EmulatorSink`] with the
 /// emulator through `Arc<Mutex<_>>` so the emulator can move between threads.

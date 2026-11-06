@@ -1,10 +1,9 @@
 use std::time::Duration;
 
 use getset::CopyGetters;
+use muster_domain::value::IdleStop;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::IdleStop;
 
 /// Who is in a project and when it stops for want of anyone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, CopyGetters, TypedBuilder)]

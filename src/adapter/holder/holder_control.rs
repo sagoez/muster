@@ -1,8 +1,7 @@
 use std::time::Duration;
 
+use muster_domain::process::StopSignal;
 use serde::{Deserialize, Serialize};
-
-use crate::domain::process::StopSignal;
 
 /// A process control request, honoured only from a supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

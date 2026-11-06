@@ -7,6 +7,7 @@ use std::{
     process::Command,
 };
 
+use muster_domain::constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
 use serde_json::json;
 use strum::{EnumMessage, EnumProperty};
 
@@ -18,10 +19,7 @@ use super::{
     mcp_scope::McpScope,
     report::print_note,
 };
-use crate::{
-    adapter::client::{runnable, this_binary},
-    constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
-};
+use crate::adapter::client::{runnable, this_binary};
 
 /// The scope an add registers in when none is given: every project, as the
 /// server finds each call's project itself.

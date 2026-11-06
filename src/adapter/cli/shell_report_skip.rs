@@ -1,9 +1,7 @@
+use muster_domain::{config::ConfigError, occupancy::ShellRegistryError, value::Pid};
 use thiserror::Error;
 
-use crate::{
-    adapter::{client::ClientError, no_state_dir::NoStateDir},
-    domain::{config::ConfigError, occupancy::ShellRegistryError, value::Pid},
-};
+use crate::adapter::{client::ClientError, no_state_dir::NoStateDir};
 
 /// Why a shell's report wrote nothing. The hook never shows it: the report
 /// runs detached at a prompt, and the next prompt reports again.

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use muster_domain::{coordination::Lock, value::EpochSeconds};
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -23,13 +24,10 @@ use super::{
     tool_result::ToolResult,
     up_view::UpView,
 };
-use crate::{
-    adapter::{
-        client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
-        clock::epoch_now,
-        service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec},
-    },
-    domain::{coordination::Lock, value::EpochSeconds},
+use crate::adapter::{
+    client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
+    clock::epoch_now,
+    service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec},
 };
 
 /// Most notices `stack_status` returns.
@@ -217,22 +215,20 @@ impl MusterMcp {
 mod tests {
     use std::iter;
 
+    use muster_domain::{
+        port::{PortOccupant, ProjectStore},
+        process::ProcessState,
+        value::{IdleStop, LocalPort, Pid, PositiveDuration, ProcessName, ProjectName},
+    };
     use rmcp::model::ErrorCode;
     use serde_json::Value;
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::{
-        adapter::{
-            client::{Outcome, PortBlockView, ProcessOutcome},
-            mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
-            service::{OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus},
-        },
-        domain::{
-            port::{PortOccupant, ProjectStore},
-            process::ProcessState,
-            value::{IdleStop, LocalPort, Pid, PositiveDuration, ProcessName, ProjectName},
-        },
+    use crate::adapter::{
+        client::{Outcome, PortBlockView, ProcessOutcome},
+        mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
+        service::{OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus},
     };
 
     /// The fixture's registered project with `processes` in it and

@@ -1,7 +1,8 @@
 use std::time::Instant;
 
+use muster_domain::value::{PaneId, ProjectRoot};
+
 use super::{probe_target::ProbeTarget, supervisor::SpawnGeneration};
-use crate::domain::value::{PaneId, ProjectRoot};
 
 /// One probe the worker tries until it passes or its time runs out.
 pub(super) struct ProbeTask {

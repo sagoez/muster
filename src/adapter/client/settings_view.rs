@@ -1,10 +1,10 @@
 use getset::Getters;
+use muster_domain::{config::SettingKey, settings::Settings};
 use serde::Serialize;
 use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use super::setting_view::SettingView;
-use crate::domain::{config::SettingKey, settings::Settings};
 
 /// Every setting, in key order, as `muster config list` and `config_get`
 /// without a key show them.

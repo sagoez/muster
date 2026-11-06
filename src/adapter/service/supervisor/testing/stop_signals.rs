@@ -4,9 +4,8 @@ use std::{
 };
 
 use getset::Getters;
+use muster_domain::process::StopSignal;
 use typed_builder::TypedBuilder;
-
-use crate::domain::process::StopSignal;
 
 /// Counts graceful termination requests separately from hard kills.
 #[derive(Default, Getters, TypedBuilder)]

@@ -1,7 +1,6 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// One raw line of a log, or the piece of one a read cut it into, as a scan
 /// of the log hands it out with the lines its rendering finished.

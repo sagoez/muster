@@ -3,8 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use muster_domain::value::ProjectRoot;
+
 use super::working_dir_error::WorkingDirError;
-use crate::domain::value::ProjectRoot;
 
 /// Where a process's working directory sits relative to its project, with
 /// symlinks resolved, so a folder reached through an alias of the project

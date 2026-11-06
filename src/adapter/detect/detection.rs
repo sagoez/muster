@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+use muster_domain::value::{ProcessName, ProjectRoot};
+
 use super::{
     candidate::Candidate, compose, justfile, makefile, package_json, procfile,
     source_file::new_name,
 };
-use crate::domain::value::{ProcessName, ProjectRoot};
 
 /// Every candidate the files under `root` offer, by source in a fixed order,
 /// leaving out each name `taken` says the project already has. A name

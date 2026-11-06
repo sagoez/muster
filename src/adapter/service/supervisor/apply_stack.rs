@@ -1,5 +1,7 @@
+use muster_domain::config::Stack;
+
 use super::{config_membership::ConfigMembership, entity::Supervisor};
-use crate::{application::StackSync, domain::config::Stack};
+use crate::application::StackSync;
 
 impl Supervisor {
     /// Brings the workspace in line with `stack`, the project's stored stack,
@@ -46,16 +48,14 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use muster_domain::{
+        process::{ProcessState, RestartPolicy},
+        pty::{ExitOutcome, ProcessOutput},
+        value::PaneId,
+    };
     use rustix::process::Signal;
 
-    use crate::{
-        adapter::service::{LaunchEnvironment, supervisor::testing::*},
-        domain::{
-            process::{ProcessState, RestartPolicy},
-            pty::{ExitOutcome, ProcessOutput},
-            value::PaneId,
-        },
-    };
+    use crate::adapter::service::{LaunchEnvironment, supervisor::testing::*};
 
     /// The state of the process named `raw`.
     fn state_of(harness: &Harness, raw: &str) -> ProcessState {

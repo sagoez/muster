@@ -1,9 +1,7 @@
+use muster_domain::value::{Pid, ProcessName, ProjectName};
 use serde::Serialize;
 
-use crate::{
-    adapter::service::PortOwner,
-    domain::value::{Pid, ProcessName, ProjectName},
-};
+use crate::adapter::service::PortOwner;
 
 /// Who holds a port a start needs, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

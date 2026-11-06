@@ -1,10 +1,11 @@
 use std::{io, path::PathBuf, process::ExitStatus, time::Duration};
 
 use humantime::format_duration;
+use muster_domain::terminal_workspace::WorkspaceError;
 use thiserror::Error;
 
 use super::reply::ErrorReply;
-use crate::{adapter::sanitize::printable, domain::terminal_workspace::WorkspaceError};
+use crate::adapter::sanitize::printable;
 
 /// The name muster gives herdr in what it reports.
 pub(super) const WORKSPACE_NAME: &str = "herdr";

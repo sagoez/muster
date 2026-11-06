@@ -1,11 +1,11 @@
 use listeners::{Listener, Protocol, SocketState};
-use sysinfo::{Pid as SysinfoPid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-
-use super::process_tree::ancestors;
-use crate::domain::{
+use muster_domain::{
     port::{PortOccupant, PortOccupants},
     value::{LocalPort, Pid},
 };
+use sysinfo::{Pid as SysinfoPid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+use super::process_tree::ancestors;
 
 /// Between the arguments of a command line read from the process table.
 const ARGUMENT_SEPARATOR: &str = " ";

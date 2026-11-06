@@ -3,6 +3,13 @@
 
 use std::{ffi::OsString, iter, path::Path};
 
+use muster_domain::{
+    constants::APP_NAME,
+    port::TerminalWorkspace,
+    project::Project,
+    terminal_workspace::{PaneCommand, PaneRequest},
+    value::{ProcessName, ProjectRoot, printable},
+};
 use shlex::Quoter;
 
 use super::{
@@ -15,16 +22,7 @@ use super::{
     service_client::{ServiceClient, other_version},
     this_binary::runnable,
 };
-use crate::{
-    adapter::service::{ServiceRequest, ServiceResponse},
-    constants::APP_NAME,
-    domain::{
-        port::TerminalWorkspace,
-        project::Project,
-        terminal_workspace::{PaneCommand, PaneRequest},
-        value::{ProcessName, ProjectRoot, printable},
-    },
-};
+use crate::adapter::service::{ServiceRequest, ServiceResponse};
 
 /// The subcommand a pane runs to show the process.
 const ATTACH_SUBCOMMAND: &str = "attach";
@@ -140,22 +138,20 @@ pub fn unopenable_here(
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::{
+        terminal_workspace::{PaneFocus, SplitDirection, WorkspaceError},
+        value::ProjectName,
+    };
+
     use super::*;
-    use crate::{
-        adapter::{
-            client::{
-                FailureKind, RunningService, fake_service::FakeService,
-                recording_workspace::RecordingWorkspace, served_service::ServedService,
-                this_binary,
-            },
-            service::{
-                Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
-                ServiceVersion,
-            },
+    use crate::adapter::{
+        client::{
+            FailureKind, RunningService, fake_service::FakeService,
+            recording_workspace::RecordingWorkspace, served_service::ServedService, this_binary,
         },
-        domain::{
-            terminal_workspace::{PaneFocus, SplitDirection, WorkspaceError},
-            value::ProjectName,
+        service::{
+            Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+            ServiceVersion,
         },
     };
 

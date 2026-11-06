@@ -1,12 +1,13 @@
 use std::time::{Duration, SystemTime};
 
-use super::fixtures::LOGGED_AHEAD_END;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+
+use super::fixtures::LOGGED_AHEAD_END;
 
 /// A handle whose log already ends at [`LOGGED_AHEAD_END`], ahead of any
 /// output it delivered, as a holder's log is while its output is in flight.

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
-    io::{self, Read},
+    io,
+    io::Read,
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
@@ -9,15 +10,13 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, bounded};
+use muster_domain::value::Pid;
 use rustix::process::Signal;
 
 use super::herdr_failure::HerdrFailure;
-use crate::{
-    adapter::{
-        bounded_read::read_capped, child_group::ChildGroup, signal_hold::catch_ending_signals,
-        signal_target::SignalTarget,
-    },
-    domain::value::Pid,
+use crate::adapter::{
+    bounded_read::read_capped, child_group::ChildGroup, signal_hold::catch_ending_signals,
+    signal_target::SignalTarget,
 };
 
 /// The most bytes muster reads of what herdr prints on either stream.

@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle, ProcessRunner},
+    pty::{PtyError, SpawnRequest},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
     retry_stop_handle::RetryStopHandle, retry_stop_signals::RetryStopSignals,
     terminate_outcome::TerminateOutcome,
-};
-use crate::domain::{
-    port::{OutputSink, ProcessHandle, ProcessRunner},
-    pty::{PtyError, SpawnRequest},
 };
 
 /// A runner used to verify that failed stop delivery remains retryable.

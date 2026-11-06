@@ -1,4 +1,4 @@
-use crate::domain::process::ProcessState;
+use muster_domain::process::ProcessState;
 
 /// Next lifecycle action after a managed child exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

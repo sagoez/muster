@@ -6,6 +6,13 @@ use std::{
 
 use crossbeam_channel::Sender;
 use getset::{Getters, MutGetters};
+use muster_domain::{
+    config::Stack,
+    port::ProcessRunner,
+    project::Project,
+    settings::Settings,
+    value::{OutputCursor, PaneId, ProcessName, ProjectRoot},
+};
 
 use super::{
     adopter::HolderAdopter, adoption_retries::AdoptionRetries, attach_book::AttachBook,
@@ -16,13 +23,6 @@ use super::{
 use crate::{
     adapter::service::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter},
     application::{StackSync, Workspace},
-    domain::{
-        config::Stack,
-        port::ProcessRunner,
-        project::Project,
-        settings::Settings,
-        value::{OutputCursor, PaneId, ProcessName, ProjectRoot},
-    },
 };
 
 /// Supervises one project's processes: spawns them, applies their stop and

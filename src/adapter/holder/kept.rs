@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
 use getset::CopyGetters;
+use muster_domain::value::OutputCursor;
 
 use super::{kept_line::KeptLine, log_query::LogQuery, log_reader::GROUP_SEPARATOR};
-use crate::domain::value::OutputCursor;
 
 /// The newest lines a read keeps, dropping the oldest past the line or byte
 /// cap. Group separators take bytes but do not count as lines.

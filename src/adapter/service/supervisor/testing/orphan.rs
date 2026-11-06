@@ -7,12 +7,10 @@ use std::{
 
 use crossbeam_channel::{Receiver, unbounded};
 use libc::{SIG_IGN, SIGINT, SIGTERM, signal};
+use muster_domain::value::Pid;
 use rustix::process::Signal;
 
-use crate::{
-    adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget},
-    domain::value::Pid,
-};
+use crate::adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 
 /// What an [`Orphan`] runs: a long sleep it never finishes on its own.
 const ORPHAN_PROGRAM: &str = "sleep";

@@ -48,14 +48,13 @@ fn note_text(note: &ShellNote) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        adapter::service::{PortBlock, PortHolder, PortOwner, Refusal},
-        domain::{
-            port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
-            value::{LocalPort, Pid, ProcessName, ProjectName},
-        },
+    use muster_domain::{
+        port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
+        value::{LocalPort, Pid, ProcessName, ProjectName},
     };
+
+    use super::*;
+    use crate::adapter::service::{PortBlock, PortHolder, PortOwner, Refusal};
 
     /// The project `name`.
     fn project(name: &str) -> ProjectName {

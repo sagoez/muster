@@ -4,27 +4,25 @@ use std::{
 };
 
 use crossbeam_channel::Sender;
+use muster_domain::{
+    port::ListeningSocket,
+    process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
+    value::{OutputCursor, PaneId, Pid, ProcessName},
+};
 
 use super::{
     entity::Supervisor, held_scan::HeldScan, held_wait::HeldWait, log_ask::LogAsk, run_end::RunEnd,
     run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
-use crate::{
-    adapter::{
-        holder::{LineMatcher, LogTail},
-        service::{
-            EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel,
-            OutputTap, ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
-            ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
-            WaitSpec, WaitStatus, Waiter,
-        },
-        terminal::log_renderer::dropped_lines,
+use crate::adapter::{
+    holder::{LineMatcher, LogTail},
+    service::{
+        EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel, OutputTap,
+        ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
+        ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
+        WaitSpec, WaitStatus, Waiter,
     },
-    domain::{
-        port::ListeningSocket,
-        process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
-        value::{OutputCursor, PaneId, Pid, ProcessName},
-    },
+    terminal::log_renderer::dropped_lines,
 };
 
 /// Lines of a run a wait that did not match carries.
@@ -1538,28 +1536,26 @@ mod tests {
     use std::{sync::atomic::AtomicUsize, thread};
 
     use crossbeam_channel::{Receiver, unbounded};
+    use muster_domain::{
+        config::ProcessSpec,
+        process::{LogPattern, PatternKind, PatternText, RestartPolicy},
+        pty::{ExitCause, ExitOutcome, ProcessOutput},
+        value::{LocalPort, PositiveDuration},
+    };
 
     use super::*;
-    use crate::{
-        adapter::{
-            holder::FULL_SCREEN_LINE,
-            service::{
-                LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
-                supervisor::{
-                    LogReadResult,
-                    testing::{name as process_name, spec as process_spec, *},
-                },
-            },
-            terminal::{
-                escape::{END_OPEN_LINE, RUN_START},
-                render_fault,
+    use crate::adapter::{
+        holder::FULL_SCREEN_LINE,
+        service::{
+            LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
+            supervisor::{
+                LogReadResult,
+                testing::{name as process_name, spec as process_spec, *},
             },
         },
-        domain::{
-            config::ProcessSpec,
-            process::{LogPattern, PatternKind, PatternText, RestartPolicy},
-            pty::{ExitCause, ExitOutcome, ProcessOutput},
-            value::{LocalPort, PositiveDuration},
+        terminal::{
+            escape::{END_OPEN_LINE, RUN_START},
+            render_fault,
         },
     };
 

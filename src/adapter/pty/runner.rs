@@ -10,6 +10,13 @@ use std::{
 
 use crossbeam_channel::bounded;
 use libc::strsignal;
+use muster_domain::{
+    constants::MUSTER_PROJECT_ENV,
+    port::{OutputSink, ProcessHandle, ProcessRunner},
+    process::StopSignal,
+    pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
+    value::Pid,
+};
 use portable_pty::{
     ChildKiller, CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system,
 };
@@ -22,16 +29,7 @@ use super::{
     pty_input::PtyInput,
     pty_process_handle::PtyProcessHandle,
 };
-use crate::{
-    adapter::signal_target::SignalTarget,
-    constants::MUSTER_PROJECT_ENV,
-    domain::{
-        port::{OutputSink, ProcessHandle, ProcessRunner},
-        process::StopSignal,
-        pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
-        value::Pid,
-    },
-};
+use crate::adapter::signal_target::SignalTarget;
 
 /// Size of a single PTY read buffer, in bytes.
 const READ_BUFFER_BYTES: usize = 4096;
@@ -302,16 +300,14 @@ mod tests {
     };
 
     use bytesize::ByteSize as RawByteSize;
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        process::StopPolicy,
+        value::{ByteSize, CommandLine, ProcessName, StopGrace},
+    };
 
     use super::*;
-    use crate::{
-        adapter::channel_sink::ChannelSink,
-        domain::{
-            color_scheme::ColorScheme,
-            process::StopPolicy,
-            value::{ByteSize, CommandLine, ProcessName, StopGrace},
-        },
-    };
+    use crate::adapter::channel_sink::ChannelSink;
 
     /// Name given to every test process.
     const TEST_PROCESS: &str = "test";

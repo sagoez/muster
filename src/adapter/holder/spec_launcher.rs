@@ -1,10 +1,12 @@
 use std::{fs, thread};
 
+use muster_domain::pty::PtyError;
+
 use super::{
     config::HolderConfig, holder_launcher::HolderLauncher, holders::Holders, launcher::run_holder,
     sabotage::Sabotage,
 };
-use crate::{adapter::pty::PortablePtyRunner, domain::pty::PtyError};
+use crate::adapter::pty::PortablePtyRunner;
 
 /// A spec no holder can parse.
 pub(super) const CORRUPT_SPEC: &[u8] = b"{not a spec";

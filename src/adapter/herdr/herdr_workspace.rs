@@ -1,14 +1,6 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
-use serde::de::DeserializeOwned;
-
-use super::{
-    herdr_call::call,
-    herdr_failure::{HerdrFailure, WORKSPACE_NAME, herdr_text},
-    reply::{LayoutReply, PaneReply},
-    typed_line::typed_line,
-};
-use crate::domain::{
+use muster_domain::{
     coordination::HERDR_PANE_ENV,
     port::TerminalWorkspace,
     terminal_workspace::{
@@ -16,6 +8,14 @@ use crate::domain::{
         WorkspaceProbe,
     },
     value::{Cols, Rows, WorkspacePaneId},
+};
+use serde::de::DeserializeOwned;
+
+use super::{
+    herdr_call::call,
+    herdr_failure::{HerdrFailure, WORKSPACE_NAME, herdr_text},
+    reply::{LayoutReply, PaneReply},
+    typed_line::typed_line,
 };
 
 /// How long one herdr call may take before it is killed.
@@ -346,18 +346,16 @@ fn unreadable(action: &str, reason: &str) -> WorkspaceError {
 mod tests {
     use std::{collections::HashMap, thread, time::Instant};
 
+    use muster_domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection};
     use signal_hook::{consts::SIGINT, low_level::raise};
 
     use super::*;
-    use crate::{
-        adapter::{
-            child_group,
-            herdr::fake_herdr::{CALLER, FakeHerdr},
-            signal_hold::SignalHold,
-            signal_target::SignalTarget,
-            test_wait::{POLL, WAIT, wait_until},
-        },
-        domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection},
+    use crate::adapter::{
+        child_group,
+        herdr::fake_herdr::{CALLER, FakeHerdr},
+        signal_hold::SignalHold,
+        signal_target::SignalTarget,
+        test_wait::{POLL, WAIT, wait_until},
     };
 
     /// A timeout no fake call comes near.

@@ -1,4 +1,4 @@
-use crate::domain::{coordination::Author, value::ProjectRoot};
+use muster_domain::{coordination::Author, value::ProjectRoot};
 
 /// One step the editor fakes record, so a test can check what happened in
 /// order.

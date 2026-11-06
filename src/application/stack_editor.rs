@@ -1,6 +1,4 @@
-use typed_builder::TypedBuilder;
-
-use crate::domain::{
+use muster_domain::{
     config::{
         AppliedChange, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft,
         ProcessSpec, Registration, SettingChange,
@@ -11,6 +9,7 @@ use crate::domain::{
     settings::Settings,
     value::{IdleStop, ProcessName, ProjectRoot},
 };
+use typed_builder::TypedBuilder;
 
 /// The one use case the CLI and MCP drive to edit stored state: each method
 /// writes through its store and, once that write committed, tells the notifier.
@@ -147,6 +146,12 @@ impl StackEditor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        config::Environment,
+        process::{RestartPolicy, StopSignal},
+        value::ScrollbackLines,
+    };
+
     use super::{
         super::{
             editor_fakes::EditorFakes,
@@ -154,11 +159,6 @@ mod tests {
             editor_step::EditorStep,
         },
         *,
-    };
-    use crate::domain::{
-        config::Environment,
-        process::{RestartPolicy, StopSignal},
-        value::ScrollbackLines,
     };
 
     /// The write commits first, then the notifier hears the project's root.

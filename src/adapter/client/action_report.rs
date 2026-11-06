@@ -1,4 +1,5 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::ProcessName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -6,7 +7,7 @@ use super::{
     action::Action, notice_view::NoticeView, process_outcome::ProcessOutcome,
     project_identity_view::ProjectIdentityView, wait_end::WaitEnd,
 };
-use crate::{adapter::service::NoticeLevel, domain::value::ProcessName};
+use crate::adapter::service::NoticeLevel;
 
 /// What a command that acts on processes did, once they settled: the
 /// `--json` output of `up`, `down`, `start` and their siblings.

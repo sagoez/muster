@@ -1,11 +1,10 @@
 //! The CLI's words for freeing a port a start found held.
 
-use crate::{
-    adapter::{
-        client::{PortBlockView, PortOwnerView},
-        service::{PortBlock, PortOwner},
-    },
-    domain::value::{ProcessName, ProjectName},
+use muster_domain::value::{ProcessName, ProjectName};
+
+use crate::adapter::{
+    client::{PortBlockView, PortOwnerView},
+    service::{PortBlock, PortOwner},
 };
 
 /// The command that frees a port another project's process holds, before
@@ -55,14 +54,13 @@ fn supervised_hint(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        adapter::service::PortHolder,
-        domain::{
-            port::PortOccupant,
-            value::{LocalPort, Pid},
-        },
+    use muster_domain::{
+        port::PortOccupant,
+        value::{LocalPort, Pid},
     };
+
+    use super::*;
+    use crate::adapter::service::PortHolder;
 
     /// The block of port 5173 by `owner`.
     fn block(owner: PortOwner) -> PortBlock {

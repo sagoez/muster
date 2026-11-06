@@ -1,5 +1,5 @@
 use crossbeam_channel::Sender;
-use muster::domain::{port::OutputSink, pty::ProcessOutput};
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// Forwards a handle's output into a channel.
 pub struct ChannelSink(Sender<ProcessOutput>);

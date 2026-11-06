@@ -1,12 +1,12 @@
 use crossbeam_channel::Sender;
+use muster_domain::{
+    port::{Notifier, PortOccupants, ProcessRunner},
+    settings::Settings,
+};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::service::{ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices, StoreRecorder},
-    domain::{
-        port::{Notifier, PortOccupants, ProcessRunner},
-        settings::Settings,
-    },
+use crate::adapter::service::{
+    ProbeWorker, ServiceEvent, SharedEventLog, SharedNotices, StoreRecorder,
 };
 
 /// The driven adapters and channels one [`Supervisor`](super::Supervisor) runs

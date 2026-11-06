@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use crate::domain::{
+use muster_domain::{
     port::TerminalWorkspace,
     terminal_workspace::{OpenedPane, PaneRequest, WorkspaceError, WorkspaceProbe},
     value::WorkspacePaneId,

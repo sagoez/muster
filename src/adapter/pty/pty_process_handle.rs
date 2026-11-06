@@ -1,6 +1,12 @@
 use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::Sender;
+use muster_domain::{
+    port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
+    pty::{PtyError, PtySize, ScreenSource},
+    value::{OutputCursor, Pid},
+};
 use portable_pty::{ChildKiller, MasterPty};
 use rustix::process::Signal;
 use typed_builder::TypedBuilder;
@@ -10,12 +16,6 @@ use super::{
     runner::{
         signal_group, signallable, system_error, terminate_group, to_portable_size, unix_signal,
     },
-};
-use crate::domain::{
-    port::{ProcessHandle, ProcessInput},
-    process::StopSignal,
-    pty::{PtyError, PtySize, ScreenSource},
-    value::{OutputCursor, Pid},
 };
 
 /// Live handle to a PTY-backed process.

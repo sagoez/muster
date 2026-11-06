@@ -1,8 +1,7 @@
 use getset::CopyGetters;
+use muster_domain::process::{StopPolicy, StopSignal};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::process::{StopPolicy, StopSignal};
 
 /// How a process is stopped, as `--json` shows it. The grace is in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, CopyGetters, TypedBuilder)]

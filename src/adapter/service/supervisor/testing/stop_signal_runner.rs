@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals};
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+use typed_builder::TypedBuilder;
+
+use super::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals};
 
 /// A runner whose handles record which stop mechanism was selected.
 #[derive(Getters, TypedBuilder)]

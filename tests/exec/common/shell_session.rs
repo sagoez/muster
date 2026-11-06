@@ -7,10 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use muster::{
-    adapter::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
-    domain::{occupancy::ShellRecord, port::ShellRegistry, value::Pid},
-};
+use muster::adapter::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles};
+use muster_domain::{occupancy::ShellRecord, port::ShellRegistry, value::Pid};
 use rustix::process::{Pid as RawPid, Signal, kill_process};
 
 use super::{

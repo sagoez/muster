@@ -1,6 +1,14 @@
 use std::time::Duration;
 
 use bytesize::ByteSize as RawByteSize;
+use muster_domain::{
+    config::{AppliedSettings, ConfigError, SettingChange, StackEdit},
+    coordination::Author,
+    port::{SettingsReader, SettingsStore},
+    pty::PtySize,
+    settings::Settings,
+    value::{ByteSize, DetachKey, IdleStop, LogMaxSize, PositiveDuration, ScrollbackLines},
+};
 use rusqlite::{Connection, Row, params};
 
 use super::{
@@ -11,14 +19,6 @@ use super::{
         SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
     store_error::StoreError,
-};
-use crate::domain::{
-    config::{AppliedSettings, ConfigError, SettingChange, StackEdit},
-    coordination::Author,
-    port::{SettingsReader, SettingsStore},
-    pty::PtySize,
-    settings::Settings,
-    value::{ByteSize, DetachKey, IdleStop, LogMaxSize, PositiveDuration, ScrollbackLines},
 };
 
 /// Selects the settings columns [`settings_from_row`] reads by name.
@@ -217,17 +217,16 @@ impl SettingsStore for SqliteStore {
 mod tests {
     use std::fs;
 
-    use super::*;
-    use crate::{
-        adapter::store::test_support::{database, fresh_store, spec},
-        domain::{
-            color_scheme::ColorScheme,
-            config::{McpStackEdits, SettingKey},
-            port::{StackEditLog, StackStore},
-            process::{RestartPolicy, StopSignal},
-            value::ProjectRoot,
-        },
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        config::{McpStackEdits, SettingKey},
+        port::{StackEditLog, StackStore},
+        process::{RestartPolicy, StopSignal},
+        value::ProjectRoot,
     };
+
+    use super::*;
+    use crate::adapter::store::test_support::{database, fresh_store, spec};
 
     /// The change setting `key` to `raw`.
     fn parsed(key: SettingKey, raw: &str) -> SettingChange {

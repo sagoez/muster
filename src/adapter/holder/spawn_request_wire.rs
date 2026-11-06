@@ -2,18 +2,16 @@ use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 use bytesize::ByteSize as RawByteSize;
 use getset::Getters;
+use muster_domain::{
+    color_scheme::ColorScheme,
+    process::StopPolicy,
+    pty::{PtySize, SpawnHistory, SpawnRequest},
+    value::{ByteSize, CommandLine, ProcessName},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::{WireForm, form},
-    domain::{
-        color_scheme::ColorScheme,
-        process::StopPolicy,
-        pty::{PtySize, SpawnHistory, SpawnRequest},
-        value::{ByteSize, CommandLine, ProcessName},
-    },
-};
+use crate::adapter::wire::{WireForm, form};
 
 /// Reported for a log cap of zero bytes, which no log can keep.
 const ZERO_LOG_CAP: &str = "the log cap must be at least one byte";

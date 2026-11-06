@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
+use muster_domain::{port::ProcessMetrics, value::Pid};
+
 use super::supervisor::Supervisor;
-use crate::domain::{port::ProcessMetrics, value::Pid};
 
 /// How often each running process's resource usage is resampled.
 pub const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
@@ -70,6 +71,11 @@ impl UsageSampler {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        process::{Process, RestartPolicy},
+        value::PaneId,
+    };
+
     use super::{
         super::{
             fake_metrics::{FakeMetrics, SAMPLED_MEMORY},
@@ -77,13 +83,7 @@ mod tests {
         },
         *,
     };
-    use crate::{
-        adapter::service::supervisor::testing::*,
-        domain::{
-            process::{Process, RestartPolicy},
-            value::PaneId,
-        },
-    };
+    use crate::adapter::service::supervisor::testing::*;
 
     /// A sampler over [`FakeMetrics`] and the calls it records.
     fn sampler() -> (UsageSampler, SampledCalls) {

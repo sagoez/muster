@@ -1,12 +1,12 @@
 use getset::CopyGetters;
+use muster_domain::{
+    occupancy::ShellId,
+    value::{Pid, StartToken},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::WireForm;
-use crate::domain::{
-    occupancy::ShellId,
-    value::{Pid, StartToken},
-};
 
 /// A shell, as its report to the service names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CopyGetters, TypedBuilder)]

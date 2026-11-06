@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::terminal_workspace::{PaneFocus, SplitDirection};
 use typed_builder::TypedBuilder;
-
-use crate::domain::terminal_workspace::{PaneFocus, SplitDirection};
 
 /// How a driver asks for a process to be opened in a pane beside its
 /// caller's.

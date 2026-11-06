@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use crate::domain::{
+use muster_domain::{
     color_scheme::ColorScheme,
     config::{McpStackEdits, ProcessDraft, ProcessSpec, Registration},
     process::{RestartPolicy, StopSignal},

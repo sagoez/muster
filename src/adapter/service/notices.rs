@@ -4,8 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use muster_domain::value::ProjectRoot;
+
 use super::{notice::Notice, notice_mirror::NoticeMirror, shared_notices::SharedNotices};
-use crate::domain::value::ProjectRoot;
 
 /// Most notices kept in memory; the oldest is dropped to make room.
 pub const MAX_NOTICES: usize = 256;

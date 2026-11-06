@@ -9,19 +9,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::{
+    config::ConfigError,
+    value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
+};
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OpenFlags, Result as SqliteResult,
     TransactionBehavior,
 };
 
 use super::{StoreError, refusal::Refusal};
-use crate::{
-    adapter::private_dir::{prepare_state_dir, state_dir},
-    domain::{
-        config::ConfigError,
-        value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
-    },
-};
+use crate::adapter::private_dir::{prepare_state_dir, state_dir};
 
 /// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;
@@ -366,24 +364,20 @@ pub(super) fn nanos_param(at: EpochNanos) -> i64 {
 mod tests {
     use std::{fs, thread};
 
+    use muster_domain::{
+        config::SettingChange,
+        coordination::Author,
+        port::{
+            CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsReader,
+            SettingsStore, StackEditLog, StackReader, StackStore,
+        },
+        process::StopSignal,
+        value::{COMMAND_MAX_CHARS, CommandLine, EnvName, ProcessName, ProjectRoot, StackRevision},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::test_support::spec,
-        domain::{
-            config::SettingChange,
-            coordination::Author,
-            port::{
-                CoordinationStore, ProjectStore, RaisedEdits, RunHistory, SettingsReader,
-                SettingsStore, StackEditLog, StackReader, StackStore,
-            },
-            process::StopSignal,
-            value::{
-                COMMAND_MAX_CHARS, CommandLine, EnvName, ProcessName, ProjectRoot, StackRevision,
-            },
-        },
-    };
+    use crate::adapter::store::test_support::spec;
 
     /// The schema version the stack edit log shipped at, the last before the
     /// setting edits, lock sessions and service records.

@@ -2,8 +2,8 @@ use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
-        child_group,
-        cli::{self, CliPorts, McpLaunch},
+        child_group, cli,
+        cli::{CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
@@ -24,15 +24,14 @@ use muster::{
         shell::ShellFiles,
         store::SqliteStore,
     },
-    domain::{
-        config::ConfigError,
-        port::{
-            LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier,
-            TerminalWorkspace,
-        },
-        value::{Pid, ProjectRoot},
-    },
     error::MusterError,
+};
+use muster_domain::{
+    config::ConfigError,
+    port::{
+        LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier, TerminalWorkspace,
+    },
+    value::{Pid, ProjectRoot},
 };
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},

@@ -1,20 +1,18 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    project::Project,
+    value::{OutputCursor, ProcessName},
+};
 use typed_builder::TypedBuilder;
 
 use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
-use crate::{
-    adapter::terminal::{
-        bounded_parser::char_chunks,
-        escape::LINE_FEED,
-        log_line::LogLine,
-        log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
-    },
-    domain::{
-        project::Project,
-        value::{OutputCursor, ProcessName},
-    },
+use crate::adapter::terminal::{
+    bounded_parser::char_chunks,
+    escape::LINE_FEED,
+    log_line::LogLine,
+    log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
 };
 
 /// What `muster logs` read of one process: its bytes exactly as written,
@@ -82,8 +80,9 @@ impl LogRead {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::value::{ProjectName, ProjectRoot};
+
     use super::*;
-    use crate::domain::value::{ProjectName, ProjectRoot};
 
     /// The JSON names the project by name and folder, as every command does,
     /// and carries the cursor just past the text for a later `--since`.

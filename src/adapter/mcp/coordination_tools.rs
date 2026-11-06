@@ -7,6 +7,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::{
+    coordination::{
+        Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
+        LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS,
+        NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey,
+        ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
+        Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate,
+        claimable,
+    },
+    port::CoordinationStore,
+    value::ProjectRoot,
+};
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -32,24 +44,10 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::{
-    adapter::{
-        client::{ListedValue, NoteEntry, TodoPage, TodoView},
-        clock::epoch_now,
-        wire::WireForm,
-    },
-    domain::{
-        coordination::{
-            Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
-            LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl,
-            NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody,
-            ScratchpadKey, ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX,
-            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease,
-            TodoStatus, TodoUpdate, claimable,
-        },
-        port::CoordinationStore,
-        value::ProjectRoot,
-    },
+use crate::adapter::{
+    client::{ListedValue, NoteEntry, TodoPage, TodoView},
+    clock::epoch_now,
+    wire::WireForm,
 };
 
 /// Pause between attempts at a lock someone else holds.
@@ -754,18 +752,17 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore};
+
     use super::*;
-    use crate::{
-        adapter::{
-            client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
-            mcp::{
-                server::release_session_locks,
-                test_support::{
-                    AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
-                },
+    use crate::adapter::{
+        client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
+        mcp::{
+            server::release_session_locks,
+            test_support::{
+                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
             },
         },
-        domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore},
     };
 
     /// The key a `todo_list` page holds its todos under.

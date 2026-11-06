@@ -6,13 +6,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use super::fixtures::FIRST_SCREEN;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+
+use super::fixtures::FIRST_SCREEN;
 
 /// A handle that connected to a screen already showing [`FIRST_SCREEN`],
 /// which its log holds too, counting the kills it is sent.

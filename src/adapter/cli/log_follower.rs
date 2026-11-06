@@ -1,15 +1,16 @@
 use std::{
-    fs::{self, File, Metadata},
-    io::{self, Seek, SeekFrom},
+    fs,
+    fs::{File, Metadata},
+    io,
+    io::{Seek, SeekFrom},
     os::unix::fs::MetadataExt,
     path::PathBuf,
 };
 
+use muster_domain::value::OutputCursor;
+
 use super::{file_identity::FileIdentity, followed_output::FollowedOutput};
-use crate::{
-    adapter::holder::{live_start, rotated_path},
-    domain::value::OutputCursor,
-};
+use crate::adapter::holder::{live_start, rotated_path};
 
 /// Follows a process log the way `tail -f` does, across the holder's
 /// rotation, by output cursor: when the live path starts naming a new file,
@@ -134,16 +135,14 @@ mod tests {
     use std::{fs::OpenOptions, io::Write, path::Path};
 
     use bytesize::ByteSize as RawByteSize;
+    use muster_domain::value::ByteSize;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            cli::rendered_log::{RenderedLog, gap_line},
-            holder::RotatingLog,
-            terminal::coloring::Coloring,
-        },
-        domain::value::ByteSize,
+    use crate::adapter::{
+        cli::rendered_log::{RenderedLog, gap_line},
+        holder::RotatingLog,
+        terminal::coloring::Coloring,
     };
 
     /// The cap of the logs these tests rotate.

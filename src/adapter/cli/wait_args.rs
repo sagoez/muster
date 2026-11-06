@@ -1,10 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{LocalPort, LocalUrl, OutputCursor, PositiveDuration, ProcessRef};
 
 use super::args::{positive_duration, state_goal_parser};
-use crate::{
-    adapter::service::StateGoal,
-    domain::value::{LocalPort, LocalUrl, OutputCursor, PositiveDuration, ProcessRef},
-};
+use crate::adapter::service::StateGoal;
 
 /// `muster wait`: a process and what to wait for.
 #[derive(clap::Args, Getters, CopyGetters)]

@@ -1,5 +1,7 @@
 use std::{collections::HashMap, thread, time::Instant};
 
+use muster_domain::value::{OutputCursor, PaneId};
+
 use super::{
     entity::Supervisor,
     held_answer::HeldAnswer,
@@ -11,10 +13,7 @@ use super::{
     pending_read::PendingRead,
     waiting::{FAILURE_TAIL_LINES, LOG_TAIL_TIMEOUT},
 };
-use crate::{
-    adapter::service::{ServiceEvent, WaitOutcome, WaitReply},
-    domain::value::{OutputCursor, PaneId},
-};
+use crate::adapter::service::{ServiceEvent, WaitOutcome, WaitReply};
 
 impl Supervisor {
     /// Starts a read of `pane`'s log for what is held on it and not yet

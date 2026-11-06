@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
-    fs::{self, Permissions},
+    fs,
+    fs::Permissions,
     iter,
     net::Shutdown,
     os::unix::{
@@ -18,6 +19,11 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use muster_domain::{
+    port::{ProcessHandle, ProcessInput, ProcessRunner},
+    pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
+    value::{OutputCursor, Pid, ProjectRoot},
+};
 
 use super::{
     byte_queue::ByteQueue,
@@ -43,18 +49,11 @@ use super::{
     screen_gate::ScreenGate,
     socket_guard::SocketGuard,
 };
-use crate::{
-    adapter::{
-        ipc,
-        private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
-        process_identity::LocalProcessIdentity,
-        terminal::{KittyKeyboardTracker, TerminalEmulator},
-    },
-    domain::{
-        port::{ProcessHandle, ProcessInput, ProcessRunner},
-        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
-        value::{OutputCursor, Pid, ProjectRoot},
-    },
+use crate::adapter::{
+    ipc,
+    private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
+    process_identity::LocalProcessIdentity,
+    terminal::{KittyKeyboardTracker, TerminalEmulator},
 };
 
 /// Events the holder loop drains: child output plus every client's traffic.
@@ -924,7 +923,8 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{self, Permissions},
+        fs,
+        fs::Permissions,
         os::unix::{fs::PermissionsExt, net::UnixStream},
         path::{Path, PathBuf},
         sync::Mutex,
@@ -933,39 +933,37 @@ mod tests {
     };
 
     use bytesize::ByteSize as RawByteSize;
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        pty::ExitOutcome,
+        value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            holder::{
-                ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
-                HolderRecord, RejectReason,
-                client::repaint_text,
-                fake_child::FakeChild,
-                harness::Harness,
-                screen_gate::FULL_SCREEN_LINE,
-                server_testing::{
-                    COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
-                    WAIT, request, scratch, size, wait_until,
-                },
-                testing::{test_request, test_stop},
+    use crate::adapter::{
+        holder::{
+            ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
+            HolderRecord, RejectReason,
+            client::repaint_text,
+            fake_child::FakeChild,
+            harness::Harness,
+            screen_gate::FULL_SCREEN_LINE,
+            server_testing::{
+                COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
+                WAIT, request, scratch, size, wait_until,
             },
-            pty::PortablePtyRunner,
-            signal_target::SignalTarget,
-            terminal::{
-                TerminalEmulator,
-                escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
-                log_line::LogLine,
-                log_renderer::LogRenderer,
-            },
-            test_wait::wait_within,
+            testing::{test_request, test_stop},
         },
-        domain::{
-            color_scheme::ColorScheme,
-            pty::ExitOutcome,
-            value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
+        pty::PortablePtyRunner,
+        signal_target::SignalTarget,
+        terminal::{
+            TerminalEmulator,
+            escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
+            log_line::LogLine,
+            log_renderer::LogRenderer,
         },
+        test_wait::wait_within,
     };
 
     /// A first-supervisor deadline short enough to test.

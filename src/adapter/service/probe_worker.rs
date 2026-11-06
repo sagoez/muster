@@ -4,12 +4,12 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use muster_domain::value::{PaneId, ProjectRoot};
 
 use super::{
     event::ServiceEvent, probe_command::ProbeCommand, probe_target::ProbeTarget,
     probe_task::ProbeTask, supervisor::SpawnGeneration,
 };
-use crate::domain::value::{PaneId, ProjectRoot};
 
 /// How often each pending probe is tried.
 pub const PROBE_INTERVAL: Duration = Duration::from_millis(250);
@@ -138,9 +138,9 @@ mod tests {
     };
 
     use crossbeam_channel::bounded;
+    use muster_domain::value::LocalPort;
 
     use super::*;
-    use crate::domain::value::LocalPort;
 
     /// Longest a test waits for a probe to pass.
     const PASS_WAIT: Duration = Duration::from_secs(5);

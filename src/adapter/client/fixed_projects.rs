@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::domain::{
+use muster_domain::{
     config::{ConfigError, UnreadableProject},
     occupancy::RegisteredProject,
     port::ProjectStore,

@@ -1,8 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
 
 use super::logged_line::LoggedLine;
-use crate::domain::value::OutputCursor;
 
 /// What a scan of a log for one pattern found: the first matching line, and
 /// where the scan began, past what rotation discarded.

@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{OutputCursor, ProcessName};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{matched_line::MatchedLine, wait_condition::WaitCondition, wait_status::WaitStatus};
-use crate::domain::value::{OutputCursor, ProcessName};
 
 /// How one wait ended, with what the caller needs next.
 #[derive(

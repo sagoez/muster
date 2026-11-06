@@ -1,9 +1,7 @@
 use std::{thread, time::Duration};
 
-use muster::{
-    adapter::holder::{ExecHolderLauncher, HolderConfig, HolderLauncher},
-    domain::pty::PtyError,
-};
+use muster::adapter::holder::{ExecHolderLauncher, HolderConfig, HolderLauncher};
+use muster_domain::pty::PtyError;
 
 /// How long a launch is held, so a replacement waits on it.
 pub const GATE_HOLD: Duration = Duration::from_millis(1500);

@@ -1,5 +1,6 @@
+use muster_domain::coordination::Author;
+
 use super::WireForm;
-use crate::domain::coordination::Author;
 
 impl WireForm for Author {
     type Wire = String;
@@ -17,8 +18,9 @@ impl WireForm for Author {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::coordination::BlankAuthor;
+
     use super::*;
-    use crate::domain::coordination::BlankAuthor;
 
     /// The human and a named agent round-trip through their labels.
     #[test]

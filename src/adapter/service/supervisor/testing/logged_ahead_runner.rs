@@ -1,8 +1,9 @@
-use super::logged_ahead_handle::LoggedAheadHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::logged_ahead_handle::LoggedAheadHandle;
 
 /// A runner whose processes' logs run ahead of the output they delivered.
 pub(crate) struct LoggedAheadRunner;

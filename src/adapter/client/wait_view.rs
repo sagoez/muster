@@ -1,14 +1,12 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{OutputCursor, ProcessName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
     condition_view::ConditionView, elapsed_seconds::ElapsedSeconds, match_view::MatchView,
 };
-use crate::{
-    adapter::service::{WaitOutcome, WaitStatus},
-    domain::value::{OutputCursor, ProcessName},
-};
+use crate::adapter::service::{WaitOutcome, WaitStatus};
 
 /// How a wait ended, as `--json` and MCP show it: elapsed time in seconds to
 /// the millisecond, the condition in words, cursors in their text form.

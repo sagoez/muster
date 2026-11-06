@@ -1,12 +1,8 @@
 use std::thread;
 
 use crossbeam_channel::{Sender, bounded};
+use muster_domain::{constants::APP_NAME, notification::Notification, port::Notifier};
 use notify_rust::Notification as OsNotification;
-
-use crate::{
-    constants::APP_NAME,
-    domain::{notification::Notification, port::Notifier},
-};
 
 /// Bounded backlog of pending desktop notifications. If the daemon stalls this
 /// fills and further notifications are dropped, rather than blocking the

@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::value::ProcessName;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::service_error_kind::ServiceErrorKind;
-use crate::domain::value::ProcessName;
 
 /// A refused request: why, in words for a person and as a kind for a client,
 /// with the valid process names when the name was unknown.

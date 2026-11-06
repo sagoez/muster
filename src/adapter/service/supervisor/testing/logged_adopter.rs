@@ -1,13 +1,12 @@
-use crate::{
-    adapter::{
-        holder::{HolderRecord, LogTail},
-        service::supervisor::HolderAdopter,
-    },
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid, ProcessName, ProjectRoot},
-    },
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid, ProcessName, ProjectRoot},
+};
+
+use crate::adapter::{
+    holder::{HolderRecord, LogTail},
+    service::supervisor::HolderAdopter,
 };
 
 /// An adopter with no running holders whose processes' logs all end with

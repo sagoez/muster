@@ -1,11 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::coordination::{KeyValue, Scratchpad, Todo};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::form_list,
-    domain::coordination::{KeyValue, Scratchpad, Todo},
-};
+use crate::adapter::wire::form_list;
 
 /// The snapshot schema version, checked on import so a file from a newer
 /// muster is refused rather than half-read.
@@ -39,14 +37,15 @@ pub struct CoordinationSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         coordination::{
             Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, NOTE_BODY_MAX_CHARS,
             NOTE_KEY_MAX_CHARS, ScratchpadKey, TODO_DEPS_MAX,
         },
         value::EpochSeconds,
     };
+
+    use super::*;
 
     /// A snapshot round-trips through YAML with its authors as labels and
     /// its times as RFC 3339.

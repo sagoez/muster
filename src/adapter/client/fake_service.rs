@@ -3,16 +3,15 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use muster_domain::value::ProjectRoot;
+
 use super::{
     asked::Asked, client_error::ClientError, connector::Connector, served_service::ServedService,
     service_access::ServiceAccess, service_client::ServiceClient, service_status::ServiceStatus,
 };
-use crate::{
-    adapter::{
-        no_state_dir::NoStateDir,
-        service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
-    },
-    domain::value::ProjectRoot,
+use crate::adapter::{
+    no_state_dir::NoStateDir,
+    service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
 };
 
 /// A service a test never reaches unless told to: connecting fails as an

@@ -1,7 +1,6 @@
+use muster_domain::constants::APP_VERSION;
 use nutype::nutype;
 use semver::Version;
-
-use crate::constants::APP_VERSION;
 
 /// A muster build's semantic version, as a client and the service exchange
 /// it in their hello, so the newer one can replace the older.

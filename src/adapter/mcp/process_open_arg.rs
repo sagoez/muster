@@ -1,10 +1,10 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::terminal_workspace::SplitDirection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use typed_builder::TypedBuilder;
 
 use super::{process_fields::choice, tool_error::ToolError};
-use crate::domain::terminal_workspace::SplitDirection;
 
 /// The `direction` field.
 const DIRECTION_FIELD: &str = "direction";

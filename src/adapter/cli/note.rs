@@ -1,22 +1,20 @@
+use muster_domain::{
+    coordination::{
+        Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
+        ScratchpadKeyError,
+    },
+    port::CoordinationStore,
+    value::ProjectRoot,
+};
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, note_command::NoteCommand, page_cursor::parse_cursor,
     report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::{
-    adapter::{
-        client::{NoteEntry, PageSize},
-        wire::WireForm,
-    },
-    domain::{
-        coordination::{
-            Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
-            ScratchpadKeyError,
-        },
-        port::CoordinationStore,
-        value::ProjectRoot,
-    },
+use crate::adapter::{
+    client::{NoteEntry, PageSize},
+    wire::WireForm,
 };
 
 /// What a refusal calls a note's body.

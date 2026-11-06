@@ -1,8 +1,7 @@
+use muster_domain::value::{PaneId, Pid, ProcessName};
+
 use super::entity::Supervisor;
-use crate::{
-    adapter::service::NoticeLevel,
-    domain::value::{PaneId, Pid, ProcessName},
-};
+use crate::adapter::service::NoticeLevel;
 
 /// Shown when a process name matches nothing in the project.
 pub(super) const UNKNOWN_PROCESS_NOTICE: &str = "no process with that name in this project";
@@ -90,7 +89,9 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{adapter::service::supervisor::testing::*, domain::process::RestartPolicy};
+    use muster_domain::process::RestartPolicy;
+
+    use crate::adapter::service::supervisor::testing::*;
 
     /// A name is matched by its key, however its accent was encoded.
     #[test]

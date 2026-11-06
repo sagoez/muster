@@ -6,6 +6,11 @@ use std::{
 };
 
 use clap::ValueEnum;
+use muster_domain::{
+    config::{ConfigError, ProcessSpec, Stack},
+    port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
+    value::{DetachKey, Pid},
+};
 use strum::IntoEnumIterator;
 
 use super::{
@@ -21,17 +26,10 @@ use super::{
     row_kind::RowKind,
     shell_init::rc_line,
 };
-use crate::{
-    adapter::{
-        client::{ClientError, ProjectTarget, SocketDirCheck},
-        sanitize::printable,
-        shell::HookShell,
-    },
-    domain::{
-        config::{ConfigError, ProcessSpec, Stack},
-        port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
-        value::{DetachKey, Pid},
-    },
+use crate::adapter::{
+    client::{ClientError, ProjectTarget, SocketDirCheck},
+    sanitize::printable,
+    shell::HookShell,
 };
 
 /// Title of the doctor report.
@@ -493,21 +491,19 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 mod tests {
     use std::io;
 
+    use muster_domain::{
+        project::Project,
+        terminal_workspace::WorkspaceError,
+        value::{ProjectName, ProjectRoot},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
-            client::{
-                fixed_projects::FixedProjects,
-                recording_workspace::{CALLER_PANE, RECORDING_WORKSPACE, RecordingWorkspace},
-            },
-        },
-        domain::{
-            project::Project,
-            terminal_workspace::WorkspaceError,
-            value::{ProjectName, ProjectRoot},
+    use crate::adapter::{
+        cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
+        client::{
+            fixed_projects::FixedProjects,
+            recording_workspace::{CALLER_PANE, RECORDING_WORKSPACE, RecordingWorkspace},
         },
     };
 

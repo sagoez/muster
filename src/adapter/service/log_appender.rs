@@ -1,7 +1,9 @@
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
+    fs,
+    fs::{File, OpenOptions},
+    io,
+    io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };

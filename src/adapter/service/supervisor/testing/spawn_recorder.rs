@@ -1,9 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use getset::Getters;
+use muster_domain::pty::SpawnRequest;
 use typed_builder::TypedBuilder;
-
-use crate::domain::pty::SpawnRequest;
 
 /// Shared record of complete PTY requests for command and environment
 /// assertions.

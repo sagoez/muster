@@ -1,9 +1,10 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::IdleStop;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::idle_stop_source::IdleStopSource;
-use crate::{adapter::client::ProjectIdentityView, domain::value::IdleStop};
+use crate::adapter::client::ProjectIdentityView;
 
 /// A project's idle stop after `muster projects set`, as `--json` prints it:
 /// the value in effect and whether it is the project's own or the setting's.

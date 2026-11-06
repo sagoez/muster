@@ -1,10 +1,11 @@
+use muster_domain::value::OutputCursor;
+
 use super::{
     error_line::{is_continuation, is_error_line},
     kept::Kept,
     line_filter::LineFilter,
     log_reader::ERROR_CONTEXT_LINES,
 };
-use crate::domain::value::OutputCursor;
 
 /// A filter applied line by line, with what errors-only needs to remember.
 pub(super) struct FilterState<'a> {

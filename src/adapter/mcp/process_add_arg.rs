@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
 use getset::Getters;
+use muster_domain::{
+    config::{Environment, ProcessDraft},
+    value::ProjectRoot,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Number;
@@ -14,13 +18,7 @@ use super::{
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::{
-    adapter::mcp::tool_error::ToolError,
-    domain::{
-        config::{Environment, ProcessDraft},
-        value::ProjectRoot,
-    },
-};
+use crate::adapter::mcp::tool_error::ToolError;
 
 /// A process to add to the project's stack. Fields left out take the
 /// `default_*` settings.

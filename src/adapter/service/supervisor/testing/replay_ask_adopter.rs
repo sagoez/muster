@@ -1,20 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    process::LogPattern,
+    pty::PtyError,
+    value::{OutputCursor, Pid, ProcessName, ProjectRoot},
+};
 use typed_builder::TypedBuilder;
 
 use super::replay_ask_handle::ReplayAskHandle;
-use crate::{
-    adapter::{
-        holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine},
-        service::supervisor::HolderAdopter,
-    },
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        process::LogPattern,
-        pty::PtyError,
-        value::{OutputCursor, Pid, ProcessName, ProjectRoot},
-    },
+use crate::adapter::{
+    holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine},
+    service::supervisor::HolderAdopter,
 };
 
 /// An adopter whose every holder answers with a [`ReplayAskHandle`] that

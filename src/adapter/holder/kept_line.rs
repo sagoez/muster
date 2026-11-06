@@ -1,7 +1,6 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// One entry a read keeps: a line of output, or a separator it put between
 /// two error groups, told apart by how it was added and never by its text.

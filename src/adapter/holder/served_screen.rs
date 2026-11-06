@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
+use muster_domain::{port::ScreenReader, pty::PtyError};
+
 use super::client::screen_text;
-use crate::domain::{port::ScreenReader, pty::PtyError};
 
 /// The screen a holder serves on its socket.
 #[derive(Debug, Clone, PartialEq, Eq)]

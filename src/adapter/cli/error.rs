@@ -1,27 +1,24 @@
 use std::{io, path::PathBuf, time::Duration};
 
+use muster_domain::{
+    config::ConfigError,
+    coordination::Author,
+    value::{
+        COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError, NameProblem,
+        ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
+    },
+};
 use thiserror::Error;
 
-use crate::{
-    adapter::{
-        client::{
-            ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError,
-            open::attach_hint,
-        },
-        exchange::ExchangeError,
-        holder::{HolderError, PatternError},
-        sanitize::printable,
-        service::ServiceErrorKind,
-        shell::HookScriptError,
+use crate::adapter::{
+    client::{
+        ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError, open::attach_hint,
     },
-    domain::{
-        config::ConfigError,
-        coordination::Author,
-        value::{
-            COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError,
-            NameProblem, ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
-        },
-    },
+    exchange::ExchangeError,
+    holder::{HolderError, PatternError},
+    sanitize::printable,
+    service::ServiceErrorKind,
+    shell::HookScriptError,
 };
 
 /// What a refusal calls a process's command.

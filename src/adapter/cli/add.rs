@@ -2,6 +2,11 @@
 //! when it is not one. Nothing is started.
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::{Environment, ProcessDraft},
+    coordination::Author,
+    value::{Description, ProcessName},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -9,14 +14,7 @@ use super::{
     add_args::AddArgs, command_words::command_string, error::CliError, invocation::Invocation,
     output::project_title, report::Report, row::Row, row_kind::RowKind,
 };
-use crate::{
-    adapter::client::{DefinitionView, ProjectIdentityView, WorkingDirPlace},
-    domain::{
-        config::{Environment, ProcessDraft},
-        coordination::Author,
-        value::{Description, ProcessName},
-    },
-};
+use crate::adapter::client::{DefinitionView, ProjectIdentityView, WorkingDirPlace};
 
 /// The command word of `muster add`.
 const ADD_WORD: &str = "add";
@@ -136,16 +134,15 @@ fn start_hint(process: &DefinitionView) -> String {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use super::*;
-    use crate::{
-        adapter::cli::report::plain,
-        domain::{
-            config::ProcessSpec,
-            process::{RestartPolicy, StopPolicy, StopSignal},
-            project::Project,
-            value::{CommandLine, ProjectName, ProjectRoot, StopGrace},
-        },
+    use muster_domain::{
+        config::ProcessSpec,
+        process::{RestartPolicy, StopPolicy, StopSignal},
+        project::Project,
+        value::{CommandLine, ProjectName, ProjectRoot, StopGrace},
     };
+
+    use super::*;
+    use crate::adapter::cli::report::plain;
 
     /// What adding `web` to a new project `shop` reports.
     fn view(autostart: bool, registered: bool) -> AddView {

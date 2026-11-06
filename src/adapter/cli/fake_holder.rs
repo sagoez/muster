@@ -7,18 +7,16 @@ use std::{
 };
 
 use getset::{Getters, MutGetters};
+use muster_domain::{
+    pty::{PtySize, testing::size},
+    value::{OutputCursor, Pid},
+};
 use tempfile::TempDir;
 
 use super::attach_testing::{COLS, FAKE_PID, ROWS, scratch};
-use crate::{
-    adapter::{
-        holder::{ClientMessage, HolderMessage},
-        test_wait::{WAIT, wait_until},
-    },
-    domain::{
-        pty::{PtySize, testing::size},
-        value::{OutputCursor, Pid},
-    },
+use crate::adapter::{
+    holder::{ClientMessage, HolderMessage},
+    test_wait::{WAIT, wait_until},
 };
 
 /// A scripted holder: it answers the hello with a repaint, then records

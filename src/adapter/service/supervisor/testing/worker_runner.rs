@@ -1,10 +1,11 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use super::connected_handle::ConnectedHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::connected_handle::ConnectedHandle;
 
 /// A runner whose launches run on a worker, as a holder runner's do; the
 /// shared count is the kills its handles were sent.

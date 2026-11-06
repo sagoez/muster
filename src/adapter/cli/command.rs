@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use muster_domain::{
+    occupancy::{LoadStart, ReportSeq},
+    value::{EpochNanos, Pid, ProcessRef},
+};
 
 use super::{
     add_args::AddArgs,
@@ -24,17 +28,11 @@ use super::{
     todo_command::TodoCommand,
     wait_args::WaitArgs,
 };
-use crate::{
-    adapter::{
-        client::PageSize,
-        holder::HOLDER_SUBCOMMAND,
-        service::protocol::SERVICE_SUBCOMMAND,
-        shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
-    },
-    domain::{
-        occupancy::{LoadStart, ReportSeq},
-        value::{EpochNanos, Pid, ProcessRef},
-    },
+use crate::adapter::{
+    client::PageSize,
+    holder::HOLDER_SUBCOMMAND,
+    service::protocol::SERVICE_SUBCOMMAND,
+    shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
 };
 
 /// Subcommands. Absent, muster prints `ps`.

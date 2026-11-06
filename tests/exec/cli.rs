@@ -6,7 +6,8 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, Permissions},
+    fs,
+    fs::Permissions,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
@@ -15,43 +16,42 @@ use std::{
         process::ExitStatusExt,
     },
     path::{Path, PathBuf},
-    process::{self, Child, Command, Output, Stdio},
+    process,
+    process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex, PoisonError},
-    thread::{self, JoinHandle},
+    thread,
+    thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
 use crossbeam_channel::unbounded;
-use muster::{
-    adapter::{
-        holder::{
-            ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
-            HolderLauncher, HolderRunner, client::greet,
-        },
-        open_files::OpenFilesLimit,
-        private_dir::RUNTIME_DIR_ENV,
-        service::{
-            BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-            OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
-            ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion,
-            Singleton,
-            protocol::{self, SERVICE_SUBCOMMAND},
-        },
-        shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
-        store::SqliteStore,
+use muster::adapter::{
+    holder::{
+        ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
+        HolderLauncher, HolderRunner, client::greet,
     },
+    open_files::OpenFilesLimit,
+    private_dir::RUNTIME_DIR_ENV,
+    service::{
+        BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
+        OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
+        ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
+        protocol, protocol::SERVICE_SUBCOMMAND,
+    },
+    shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
+    store::SqliteStore,
+};
+use muster_domain::{
+    config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
-    domain::{
-        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
-        coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-        port::{StackReader, StackStore},
-        process::ProcessState,
-        project::Project,
-        pty::PtySize,
-        value::{
-            COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
-            IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
-        },
+    coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
+    port::{StackReader, StackStore},
+    process::ProcessState,
+    project::Project,
+    pty::PtySize,
+    value::{
+        COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
+        IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
     },
 };
 use rusqlite::Connection;

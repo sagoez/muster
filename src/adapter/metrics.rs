@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, set_open_files_limit};
-
-use super::process_tree::ProcessTree;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessMetrics, ProcessSample},
     value::Pid,
 };
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, set_open_files_limit};
+
+use super::process_tree::ProcessTree;
 
 /// How many `/proc` files `sysinfo` may keep open between refreshes. It keeps
 /// one per process it has seen otherwise, up to half the hard limit.

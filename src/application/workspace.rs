@@ -1,11 +1,10 @@
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use crate::domain::{
+use muster_domain::{
     process::{Process, ProcessState},
     pty::ExitOutcome,
     value::PaneId,
 };
+use typed_builder::TypedBuilder;
 
 /// In-memory workspace state: the ordered processes. Pure domain
 /// orchestration, free of any rendering or I/O concern.
@@ -64,12 +63,13 @@ impl Workspace {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         config::Environment,
         process::{RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, ProcessName, StopGrace},
     };
+
+    use super::*;
 
     /// A process on pane `id` restarting by `restart`.
     fn process(id: u64, restart: RestartPolicy) -> Process {

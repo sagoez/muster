@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::domain::{
+use muster_domain::{
     occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
     port::ShellRegistry,
     value::Pid,

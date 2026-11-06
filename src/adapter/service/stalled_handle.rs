@@ -9,17 +9,15 @@ use std::{
 };
 
 use getset::{Getters, MutGetters};
+use muster_domain::{
+    port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
+    pty::{PtyError, PtySize, ScreenSource},
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::holder::{ServedScreen, abandon},
-    domain::{
-        port::{ProcessHandle, ProcessInput},
-        process::StopSignal,
-        pty::{PtyError, PtySize, ScreenSource},
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::holder::{ServedScreen, abandon};
 
 /// A handle whose holder, when it has one, serves at `socket` but never
 /// answers, counting the kills it is sent, with the child `pid` when one is

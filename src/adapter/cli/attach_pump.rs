@@ -9,17 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::{pty::PtySize, value::ProcessName};
+
 use super::{
     attach_end::AttachEnd, attach_event::AttachEvent, detach_scanner::DetachScanner,
     error::CliError, held_terminal::AUTOWRAP_ON, host_terminal::HostTerminal,
     raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
 };
-use crate::{
-    adapter::{
-        holder::{ClientMessage, HolderError, HolderMessage, RejectReason, client::Greeting},
-        terminal::emulator::{DISABLE_AUTOWRAP, RESET_TERMINAL},
-    },
-    domain::{pty::PtySize, value::ProcessName},
+use crate::adapter::{
+    holder::{ClientMessage, HolderError, HolderMessage, RejectReason, client::Greeting},
+    terminal::emulator::{DISABLE_AUTOWRAP, RESET_TERMINAL},
 };
 
 /// How long an escape sequence cut off at the end of what was typed is held

@@ -1,12 +1,10 @@
 use std::time::Instant;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::process::{Readiness, ReadyCheck, ReadyProbe};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::{holder::LineMatcher, service::ProbeTarget},
-    domain::process::{Readiness, ReadyCheck, ReadyProbe},
-};
+use crate::adapter::{holder::LineMatcher, service::ProbeTarget};
 
 /// The readiness of one pane's current run: its check, how far it got, and
 /// what is tested to pass it. Private to the supervisor, which owns it.

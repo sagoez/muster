@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
 use getset::Getters;
+use muster_domain::{config::ProcessSpec, value::ProjectRoot};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Error as YamlError, Value};
 use typed_builder::TypedBuilder;
 
 use super::{EntryError, EnvExport, ExchangeError, ProcessEntry};
-use crate::domain::{config::ProcessSpec, value::ProjectRoot};
 
 /// The stack file `muster export` writes and `muster import` reads, in the
 /// project root unless a path is given.
@@ -142,8 +142,7 @@ mod tests {
         time::Duration,
     };
 
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         config::{DECLARED_PORTS_MAX, DeclaredPorts, ENV_VARS_MAX, Environment, OverCap},
         process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
@@ -152,6 +151,8 @@ mod tests {
             PositiveDuration, ProcessName, StopGrace,
         },
     };
+
+    use super::*;
 
     /// The two-process stack the design's example shows, values included.
     const EXAMPLE: &str = "\

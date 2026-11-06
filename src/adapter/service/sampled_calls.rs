@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::domain::value::Pid;
+use muster_domain::value::Pid;
 
 /// The pids of every call a [`FakeMetrics`](super::fake_metrics::FakeMetrics)
 /// answered, in order.

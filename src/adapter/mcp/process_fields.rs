@@ -3,21 +3,19 @@
 
 use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
+use muster_domain::{
+    config::{DeclaredPorts, Environment},
+    value::{
+        COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
+        DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, PORT_FORM, ProcessName,
+        ProjectRoot, StopGrace, ValueParseError, parse_choice, refused_name,
+    },
+};
 use serde_json::Number;
 use strum::IntoEnumIterator;
 
 use super::{seconds_arg::SecondsArg, tool_error::ToolError};
-use crate::{
-    adapter::client::WorkingDirPlace,
-    domain::{
-        config::{DeclaredPorts, Environment},
-        value::{
-            COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
-            DescriptionError, EnvName, EnvValue, LocalPort, MAX_STOP_GRACE, PORT_FORM, ProcessName,
-            ProjectRoot, StopGrace, ValueParseError, parse_choice, refused_name,
-        },
-    },
-};
+use crate::adapter::client::WorkingDirPlace;
 
 /// The `command` field.
 pub(super) const COMMAND_FIELD: &str = "command";
@@ -225,10 +223,10 @@ pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBu
 mod tests {
     use std::{fs, os::unix::fs::symlink, time::Duration};
 
+    use muster_domain::process::RestartPolicy;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::process::RestartPolicy;
 
     /// The canonical root of a fresh project folder with a `frontend` folder
     /// inside it, held alive by the returned directory.

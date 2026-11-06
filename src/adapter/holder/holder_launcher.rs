@@ -1,5 +1,6 @@
+use muster_domain::pty::PtyError;
+
 use super::config::HolderConfig;
-use crate::domain::pty::PtyError;
 
 /// Starts a holder for one child.
 pub trait HolderLauncher: Send + Sync {

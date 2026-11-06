@@ -1,10 +1,11 @@
 use std::{io, path::PathBuf};
 
+use muster_domain::config::ConfigError;
 use rusqlite::{Error as SqliteError, ErrorCode};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-use crate::{adapter::no_state_dir::NoStateDir, domain::config::ConfigError};
+use crate::adapter::no_state_dir::NoStateDir;
 
 /// Failures of the SQLite store itself, which reach the domain as an opaque
 /// [`ConfigError::Storage`] or [`ConfigError::Busy`] so no database or

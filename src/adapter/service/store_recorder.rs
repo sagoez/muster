@@ -8,16 +8,16 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-
-use super::{
-    notice::Notice, notice_level::NoticeLevel, record_retry::RecordRetry,
-    recorder_stores::RecorderStores, shared_notices::SharedNotices, store_record::StoreRecord,
-};
-use crate::domain::{
+use muster_domain::{
     config::ConfigError,
     occupancy::PendingIdleStop,
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
+};
+
+use super::{
+    notice::Notice, notice_level::NoticeLevel, record_retry::RecordRetry,
+    recorder_stores::RecorderStores, shared_notices::SharedNotices, store_record::StoreRecord,
 };
 
 /// Prefix of the notice for a run end the store was too busy to take yet;
@@ -344,13 +344,12 @@ fn report_unconfirmed(notices: &SharedNotices, count: usize) {
 mod tests {
     use std::time::Duration;
 
+    use muster_domain::{pty::ExitOutcome, value::ProcessName};
+
     use super::*;
-    use crate::{
-        adapter::{
-            service::{failing_history::FailingHistory, notices::Notices},
-            test_wait::wait_until,
-        },
-        domain::{pty::ExitOutcome, value::ProcessName},
+    use crate::adapter::{
+        service::{failing_history::FailingHistory, notices::Notices},
+        test_wait::wait_until,
     };
 
     /// Longest a test lets a flush take before calling it unbounded.

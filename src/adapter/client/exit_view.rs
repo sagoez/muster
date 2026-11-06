@@ -1,8 +1,7 @@
 use getset::Getters;
+use muster_domain::pty::{ExitCause, ExitOutcome, SignalName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::pty::{ExitCause, ExitOutcome, SignalName};
 
 /// How a process last ended, as `--json` shows it: its exit status, or the
 /// signal that ended it. Both are absent when the end was seen without

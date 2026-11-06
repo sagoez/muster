@@ -1,6 +1,5 @@
 use clap::Subcommand;
-
-use crate::domain::coordination::TodoStatus;
+use muster_domain::coordination::TodoStatus;
 
 /// Todo actions under `muster todo`. Absent, todos are listed.
 #[derive(Subcommand)]

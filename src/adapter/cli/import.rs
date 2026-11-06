@@ -4,6 +4,11 @@
 use std::{io, path::PathBuf, time::SystemTime};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::{ImportMode, ImportPlan, ProcessSpec, Stack},
+    port::{LocalState, StackStore},
+    value::{ProcessName, ProjectRoot},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -23,11 +28,6 @@ use crate::{
         path::resolved,
     },
     application::StackEditor,
-    domain::{
-        config::{ImportMode, ImportPlan, ProcessSpec, Stack},
-        port::{LocalState, StackStore},
-        value::{ProcessName, ProjectRoot},
-    },
 };
 
 /// The command word of `muster import`.
@@ -407,17 +407,15 @@ pub fn import_rows(view: &ImportView) -> Report {
 mod tests {
     use std::{fs, os::unix::fs::symlink, path::PathBuf, time::Duration};
 
+    use muster_domain::{
+        config::{Environment, ProcessSpec},
+        process::{RestartPolicy, StopPolicy, StopSignal},
+        value::{CommandLine, ProjectName, StopGrace},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::cli::report::plain,
-        domain::{
-            config::{Environment, ProcessSpec},
-            process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{CommandLine, ProjectName, StopGrace},
-        },
-    };
+    use crate::adapter::cli::report::plain;
 
     /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {

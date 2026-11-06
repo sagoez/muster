@@ -5,6 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::{ImportMode, ProcessDraft, ProcessSpec},
+    port::{SettingsStore, StackStore},
+    value::{ProcessName, ProjectRoot},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -15,11 +20,6 @@ use crate::{
         path::project_root,
     },
     application::StackEditor,
-    domain::{
-        config::{ImportMode, ProcessDraft, ProcessSpec},
-        port::{SettingsStore, StackStore},
-        value::{ProcessName, ProjectRoot},
-    },
 };
 
 /// Title of the `init` reports.
@@ -231,10 +231,11 @@ pub fn added_outro(added: &[ProcessName], autostart: bool) -> String {
 mod tests {
     use std::fs;
 
+    use muster_domain::value::CommandLine;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{adapter::cli::report::plain, domain::value::CommandLine};
+    use crate::adapter::cli::report::plain;
 
     /// A candidate `name` running `command` from `source`.
     fn candidate(name: &str, command: &str, source: DetectSource, suggested: bool) -> Candidate {

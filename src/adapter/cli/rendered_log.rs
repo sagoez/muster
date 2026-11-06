@@ -1,18 +1,18 @@
 use std::{
-    io::{self, Write},
+    io,
+    io::Write,
     time::{Duration, Instant},
 };
 
+use muster_domain::value::OutputCursor;
+
 use super::followed_output::FollowedOutput;
-use crate::{
-    adapter::terminal::{
-        bounded_parser::char_chunks,
-        coloring::Coloring,
-        escape::LINE_FEED,
-        log_line::LogLine,
-        log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
-    },
-    domain::value::OutputCursor,
+use crate::adapter::terminal::{
+    bounded_parser::char_chunks,
+    coloring::Coloring,
+    escape::LINE_FEED,
+    log_line::LogLine,
+    log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
 };
 
 /// How long a line without its newline is held back once nothing more
@@ -162,24 +162,22 @@ impl FollowedOutput for RenderedLog<'_> {
 mod tests {
     use std::{path::PathBuf, thread};
 
+    use muster_domain::{
+        project::Project,
+        value::{ProcessName, ProjectName, ProjectRoot},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            cli::json_log_lines::JsonLogLines,
-            client::{LogRead, LogText, ProjectIdentityView},
-            holder::{
-                FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
-                read_log_stream,
-            },
-            service::OutputTap,
-            terminal::render_fault,
+    use crate::adapter::{
+        cli::json_log_lines::JsonLogLines,
+        client::{LogRead, LogText, ProjectIdentityView},
+        holder::{
+            FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
+            read_log_stream,
         },
-        domain::{
-            project::Project,
-            value::{ProcessName, ProjectName, ProjectRoot},
-        },
+        service::OutputTap,
+        terminal::render_fault,
     };
 
     /// How far past the idle wait the prompt tests look.

@@ -1,8 +1,7 @@
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
-
-use crate::domain::{
+use muster_domain::{
     occupancy::PendingIdleStop,
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},

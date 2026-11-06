@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
-use serde::Serialize;
-use typed_builder::TypedBuilder;
-
-use super::{environment_view::EnvironmentView, ready_view::ReadyView, stop_view::StopView};
-use crate::domain::{
+use muster_domain::{
     config::ProcessSpec,
     process::RestartPolicy,
     value::{CommandLine, Description, ProcessName},
 };
+use serde::Serialize;
+use typed_builder::TypedBuilder;
+
+use super::{environment_view::EnvironmentView, ready_view::ReadyView, stop_view::StopView};
 
 /// One process's stored definition, as `--json` and MCP show it.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]
@@ -84,12 +84,13 @@ impl DefinitionView {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         config::{DeclaredPorts, Environment},
         process::{ReadyCheck, ReadyProbe, StopPolicy, StopSignal},
         value::{EnvName, EnvValue, LocalPort, PositiveDuration, StopGrace},
     };
+
+    use super::*;
 
     /// The definition reads as the documented JSON: snake_case keys,
     /// kebab-case values and the grace and readiness timeout in seconds.

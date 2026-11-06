@@ -1,7 +1,6 @@
 use getset::Getters;
+use muster_domain::{process::LogPattern, value::OutputCursor};
 use typed_builder::TypedBuilder;
-
-use crate::domain::{process::LogPattern, value::OutputCursor};
 
 /// What an adopting handle asks its held-back reader to read back from the
 /// log before the holder's frames: the lines from `from` that one of

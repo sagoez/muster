@@ -8,17 +8,15 @@ use std::{
 
 use crossbeam_channel::Receiver;
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::fixed_pid_handle::FixedPidHandle;
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// The longest a gated `locate` blocks, so a test that runs it on the loop by
 /// mistake fails rather than hangs.

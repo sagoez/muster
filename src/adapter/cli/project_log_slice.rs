@@ -20,11 +20,10 @@ pub struct ProjectLogSlice {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::value::{OutputCursor, ProcessName, ProjectName};
+
     use super::*;
-    use crate::{
-        adapter::holder::LogSlice,
-        domain::value::{OutputCursor, ProcessName, ProjectName},
-    };
+    use crate::adapter::holder::LogSlice;
 
     /// The project is `{name, root}`, beside the slice's own fields.
     #[test]

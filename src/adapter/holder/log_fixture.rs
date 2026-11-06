@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use bytesize::ByteSize as RawByteSize;
 use getset::{Getters, MutGetters};
+use muster_domain::value::{ByteSize, OutputCursor};
 use tempfile::TempDir;
 
 use super::{log::RotatingLog, log_query::LogQuery, log_reader::read_log, log_slice::LogSlice};
-use crate::domain::value::{ByteSize, OutputCursor};
 
 /// A log in a scratch directory, written through the holder's own log.
 #[derive(Getters, MutGetters)]

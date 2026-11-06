@@ -1,14 +1,14 @@
 use std::{ffi::OsString, os::unix::ffi::OsStringExt as _, path::PathBuf};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    occupancy::{LoadId, LoadStart, ReportSeq, ReportStamp, ShellId, ShellRecord},
+    value::{EpochNanos, Pid, ProjectRoot, StartToken},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::WireForm;
-use crate::domain::{
-    occupancy::{LoadId, LoadStart, ReportSeq, ReportStamp, ShellId, ShellRecord},
-    value::{EpochNanos, Pid, ProjectRoot, StartToken},
-};
 
 /// A shell's report, as its record file and the service protocol hold it.
 #[derive(
@@ -83,8 +83,9 @@ impl WireForm for ShellRecord {
 mod tests {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
 
+    use muster_domain::occupancy::testing::stamp;
+
     use super::*;
-    use crate::domain::occupancy::testing::stamp;
 
     /// The shell every test record is of.
     fn shell() -> ShellId {

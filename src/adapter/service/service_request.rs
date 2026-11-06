@@ -1,18 +1,16 @@
 use std::time::Duration;
 
+use muster_domain::{
+    occupancy::ShellRecord,
+    value::{ProcessName, ProjectRoot},
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
     event_kind::EventKind, event_seq::EventSeq, launch_environment::LaunchEnvironment,
     process_action::ProcessAction, service_version::ServiceVersion, wait_spec::WaitSpec,
 };
-use crate::{
-    adapter::workspace_request::WorkspaceRequest,
-    domain::{
-        occupancy::ShellRecord,
-        value::{ProcessName, ProjectRoot},
-    },
-};
+use crate::adapter::workspace_request::WorkspaceRequest;
 
 /// One request a client sends the service, as one JSON line. A `project` is
 /// that project's folder.
@@ -145,13 +143,14 @@ pub enum ServiceRequest {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::{
+        occupancy::{ShellId, testing::stamp},
+        value::{EpochNanos, LocalPort, Pid, ProjectName, StartToken},
+    };
+
     use super::*;
-    use crate::{
-        adapter::service::{PortBlock, PortHolder, PortOwner, Refusal, ServiceResponse, ShellNote},
-        domain::{
-            occupancy::{ShellId, testing::stamp},
-            value::{EpochNanos, LocalPort, Pid, ProjectName, StartToken},
-        },
+    use crate::adapter::service::{
+        PortBlock, PortHolder, PortOwner, Refusal, ServiceResponse, ShellNote,
     };
 
     #[test]

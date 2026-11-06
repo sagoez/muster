@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use getset::CopyGetters;
+use muster_domain::value::Pid;
 
 use super::retry_id::RetryId;
-use crate::domain::value::Pid;
 
 /// One pane's retries of adopting the holder of a child left running
 /// unsupervised, owned and built by [`super::adoption_retries::AdoptionRetries`].

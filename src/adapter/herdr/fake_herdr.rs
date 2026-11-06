@@ -12,15 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::value::{Pid, WorkspacePaneId};
 use tempfile::TempDir;
 
 use super::herdr_workspace::HerdrWorkspace;
-use crate::{
-    adapter::{
-        child_group,
-        test_wait::{POLL, WAIT},
-    },
-    domain::value::{Pid, WorkspacePaneId},
+use crate::adapter::{
+    child_group,
+    test_wait::{POLL, WAIT},
 };
 
 /// The fake's file name.

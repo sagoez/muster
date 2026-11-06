@@ -1,17 +1,15 @@
 use std::{cell::Cell, rc::Rc};
 
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::{fixed_pid_handle::FixedPidHandle, fixtures::REFUSAL};
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter that finds `record` for its child's pid, and adopts it unless
 /// it `refuses`, counting each adoption.

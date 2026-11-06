@@ -1,4 +1,4 @@
-use crate::domain::value::IdleStop;
+use muster_domain::value::IdleStop;
 
 /// The word that clears a project's idle stop, so it follows the setting.
 pub const INHERIT_WORD: &str = "default";

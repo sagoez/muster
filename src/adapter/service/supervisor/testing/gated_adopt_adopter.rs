@@ -5,17 +5,15 @@ use std::sync::{
 
 use crossbeam_channel::Receiver;
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::{gated_locate_adopter::LOCATE_GATE_LIMIT, kill_count_handle::KillCountHandle};
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter that runs on a worker, as the service's does, whose holder
 /// for `record`'s child serves, and whose every adoption blocks until `gate`

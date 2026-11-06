@@ -47,11 +47,12 @@ impl From<&PortBlock> for BlockedView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
         value::{LocalPort, Pid},
     };
+
+    use super::*;
 
     /// A program holding the port with a huge command line is named by it
     /// cut to the cap and marked, never the whole argv.

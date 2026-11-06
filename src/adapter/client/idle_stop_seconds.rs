@@ -1,10 +1,10 @@
 //! Serde `with` encoding of an idle stop in `--json` and MCP output: whole
 //! seconds, rounded up, or null for never.
 
+use muster_domain::value::IdleStop;
 use serde::{Serialize, Serializer};
 
 use super::whole_seconds_up;
-use crate::domain::value::IdleStop;
 
 /// `idle_stop` in whole seconds, rounded up, or none when it never comes.
 pub fn seconds(idle_stop: &IdleStop) -> Option<u64> {

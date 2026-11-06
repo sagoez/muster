@@ -1,12 +1,13 @@
 use std::time::{Duration, SystemTime};
 
-use super::fixtures::fake_launcher_pid;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+
+use super::fixtures::fake_launcher_pid;
 
 /// A handle that reports a pid, like the real PTY handle does.
 pub(crate) struct PidHandle;

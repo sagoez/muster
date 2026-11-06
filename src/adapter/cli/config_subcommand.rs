@@ -1,7 +1,7 @@
 use clap::Subcommand;
+use muster_domain::config::SettingKey;
 
 use super::args::{SETTING_KEYS, one_of};
-use crate::domain::config::SettingKey;
 
 /// Settings actions under `muster config`. Absent, every setting is listed.
 #[derive(Subcommand)]

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use muster_domain::constants::STDIO_PATH;
+
 use super::{error::CliError, invocation::Invocation};
-use crate::{adapter::exchange::STACK_FILE, constants::STDIO_PATH};
+use crate::adapter::exchange::STACK_FILE;
 
 /// Where `export` writes a stack file and `import` reads one.
 #[derive(Debug, Clone, PartialEq, Eq)]

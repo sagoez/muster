@@ -1,13 +1,14 @@
 use std::{path::Path, sync::Arc};
 
+use muster_domain::{
+    config::ConfigError,
+    port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
+    value::{Pid, ProjectRoot},
+};
+
 use super::mcp_launch::McpLaunch;
 use crate::{
     adapter::{client::ServiceAccess, no_state_dir::NoStateDir},
-    domain::{
-        config::ConfigError,
-        port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
-        value::{Pid, ProjectRoot},
-    },
     error::MusterError,
 };
 

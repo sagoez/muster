@@ -1,6 +1,11 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use getset::Getters;
+use muster_domain::{
+    config::{FieldEdit, ProcessChange},
+    process::ReadyCheck,
+    value::{Description, ProjectRoot},
+};
 use schemars::JsonSchema;
 use serde::{
     Deserialize, Deserializer,
@@ -18,14 +23,7 @@ use super::{
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::{
-    adapter::mcp::tool_error::ToolError,
-    domain::{
-        config::{FieldEdit, ProcessChange},
-        process::ReadyCheck,
-        value::{Description, ProjectRoot},
-    },
-};
+use crate::adapter::mcp::tool_error::ToolError;
 
 /// The field naming the project.
 const PROJECT_FIELD: &str = "project";

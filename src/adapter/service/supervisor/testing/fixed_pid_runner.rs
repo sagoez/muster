@@ -4,14 +4,14 @@ use std::sync::{
 };
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::fixed_pid_handle::FixedPidHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
     value::Pid,
 };
+use typed_builder::TypedBuilder;
+
+use super::fixed_pid_handle::FixedPidHandle;
 
 /// A runner whose every process reports `pid`, counting its spawns.
 #[derive(Getters, TypedBuilder)]

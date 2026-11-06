@@ -1,4 +1,4 @@
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// Discards a detached handle's output.
 pub(super) struct NullSink;

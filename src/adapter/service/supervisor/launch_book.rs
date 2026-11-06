@@ -3,12 +3,13 @@ use std::{
     ffi::OsString,
 };
 
+use muster_domain::{pty::ProcessOutput, value::PaneId};
+
 use super::{
     config_membership::ConfigMembership, launch_purpose::LaunchPurpose,
     pending_intent::PendingIntent, pending_launch::PendingLaunch,
     spawn_generation::SpawnGeneration,
 };
-use crate::domain::{pty::ProcessOutput, value::PaneId};
 
 /// The launches and adoptions in flight, and the environment each pane's
 /// launches run with.
@@ -200,8 +201,9 @@ impl LaunchBook {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::process::ProcessState;
+
     use super::*;
-    use crate::domain::process::ProcessState;
 
     const PANE: u64 = 0;
 

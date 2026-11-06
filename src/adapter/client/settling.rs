@@ -1,10 +1,11 @@
 use std::time::{Duration, SystemTime};
 
 use getset::CopyGetters;
+use muster_domain::value::ProcessName;
 use typed_builder::TypedBuilder;
 
 use super::action::Action;
-use crate::{adapter::service::ProjectStatus, domain::value::ProcessName};
+use crate::adapter::service::ProjectStatus;
 
 /// A wait with no bound beyond the action's own timeout.
 pub const UNBOUNDED: Duration = Duration::MAX;

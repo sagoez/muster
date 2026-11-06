@@ -1,19 +1,18 @@
 //! What the service runtime's tests and their fixtures share: bounds, the
 //! test service's identity, and the processes and statuses they work with.
 
-use super::{
-    launch_environment::LaunchEnvironment, process_status::ProcessStatus,
-    project_status::ProjectStatus, supervisor::testing::test_stop,
-};
-use crate::domain::{
+pub(super) use muster_domain::occupancy::testing::{test_root, test_shell};
+use muster_domain::{
     config::{Environment, ProcessSpec},
     process::RestartPolicy,
     value::{CommandLine, ProcessName},
 };
-pub(super) use crate::{
-    adapter::test_wait::{POLL, WAIT, wait_until},
-    domain::occupancy::testing::{test_root, test_shell},
+
+use super::{
+    launch_environment::LaunchEnvironment, process_status::ProcessStatus,
+    project_status::ProjectStatus, supervisor::testing::test_stop,
 };
+pub(super) use crate::adapter::test_wait::{POLL, WAIT, wait_until};
 
 /// Prefix of every test scratch directory.
 pub(super) const SCRATCH_PREFIX: &str = "ms-";

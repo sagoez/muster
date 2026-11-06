@@ -1,6 +1,9 @@
-use std::fmt::{self, Display, Formatter};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
-use crate::domain::value::ProjectName;
+use muster_domain::value::ProjectName;
 
 /// Why a folder may not be registered as a project: it would claim the whole
 /// machine, the user's home, or a registered project's folder.

@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// A sink whose receiver is gone: it notes that the exit arrived and delivers
 /// nothing.

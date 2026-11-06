@@ -1,13 +1,12 @@
 use std::{collections::BTreeSet, time::Instant};
 
-use super::{config_membership::ConfigMembership, entity::Supervisor};
-use crate::{
-    adapter::service::{ProcessStatus, ProjectStatus, StackUrl, UrlSource},
-    domain::{
-        port::ListeningSocket,
-        process::{ProcessState, ReadyCheck, ReadyProbe},
-    },
+use muster_domain::{
+    port::ListeningSocket,
+    process::{ProcessState, ReadyCheck, ReadyProbe},
 };
+
+use super::{config_membership::ConfigMembership, entity::Supervisor};
+use crate::adapter::service::{ProcessStatus, ProjectStatus, StackUrl, UrlSource};
 
 /// What a detected port's URL starts with, before the port.
 const DETECTED_URL_PREFIX: &str = "http://localhost:";
@@ -117,14 +116,13 @@ fn urls(check: Option<&ReadyCheck>, ports: &[ListeningSocket]) -> Vec<StackUrl> 
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        adapter::service::supervisor::testing::*,
-        domain::{
-            process::{ProcessState, RestartPolicy},
-            pty::{ExitOutcome, ProcessOutput},
-            value::PaneId,
-        },
+    use muster_domain::{
+        process::{ProcessState, RestartPolicy},
+        pty::{ExitOutcome, ProcessOutput},
+        value::PaneId,
     };
+
+    use crate::adapter::service::supervisor::testing::*;
 
     const PANE: u64 = 0;
 

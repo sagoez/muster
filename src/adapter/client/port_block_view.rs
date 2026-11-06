@@ -28,16 +28,14 @@ impl From<&PortBlock> for PortBlockView {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
+        value::{LocalPort, Pid, ProcessName, ProjectName},
+    };
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        adapter::service::{PortHolder, PortOwner},
-        domain::{
-            port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
-            value::{LocalPort, Pid, ProcessName, ProjectName},
-        },
-    };
+    use crate::adapter::service::{PortHolder, PortOwner};
 
     /// Each kind of holder is tagged by `kind`, its fields in snake case.
     #[test]

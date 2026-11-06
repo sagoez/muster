@@ -7,6 +7,18 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
+use muster_domain::{
+    config::{ConfigError, Stack},
+    occupancy::{Occupancy, OccupancyChange, PendingIdleStop, ShellId, ShellRecord},
+    port::{
+        PendingIdleStops, ProcessHandle, RaisedEdits, RunHistory, SettingsReader, ShellRegistry,
+        StackEditLog, StackReader,
+    },
+    project::Project,
+    pty::PtyError,
+    settings::Settings,
+    value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
+};
 use signal_hook::{
     iterator::{Handle as SignalsHandle, Signals},
     low_level::emulate_default_handler,
@@ -64,23 +76,7 @@ use super::{
     },
     usage_sampler::UsageSampler,
 };
-use crate::{
-    adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest},
-    domain::{
-        config::{ConfigError, Stack},
-        occupancy::{Occupancy, OccupancyChange, PendingIdleStop, ShellId, ShellRecord},
-        port::{
-            PendingIdleStops, ProcessHandle, RaisedEdits, RunHistory, SettingsReader,
-            ShellRegistry, StackEditLog, StackReader,
-        },
-        project::Project,
-        pty::PtyError,
-        settings::Settings,
-        value::{
-            EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision,
-        },
-    },
-};
+use crate::adapter::{holder::HolderRecord, workspace_request::WorkspaceRequest};
 
 /// Most shells the service keeps track of; a report from a new shell past it
 /// is refused as busy until a sweep finds some ended.
@@ -1780,46 +1776,44 @@ mod tests {
     };
 
     use crossbeam_channel::unbounded;
+    use muster_domain::{
+        config::{ProcessSpec, SettingChange},
+        coordination::Author,
+        occupancy::testing::stamp,
+        port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
+        process::{
+            LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck, ReadyProbe,
+            StopPolicy, StopSignal,
+        },
+        pty::{ProcessOutput, PtySize},
+        value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
+    };
     use rustix::process::Signal;
     use signal_hook::{consts::SIGUSR2, low_level::raise};
 
     use super::*;
-    use crate::{
-        adapter::{
-            holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
-            ipc,
-            service::{
-                BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
-                WaitStatus,
-                fake_pool::{BROKEN_STREAM, FakePool},
-                null_sink::NullSink,
-                running::Running,
-                runtime_fixture::Fixture,
-                runtime_testing::{
-                    POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process,
-                    sleeper, test_shell, wait_until,
-                },
-                supervisor::{
-                    ChannelOutputSink, SpawnGeneration,
-                    testing::{KillCountHandle, Orphan, test_settings, test_stop},
-                },
+    use crate::adapter::{
+        holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
+        ipc,
+        service::{
+            BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
+            WaitStatus,
+            fake_pool::{BROKEN_STREAM, FakePool},
+            null_sink::NullSink,
+            running::Running,
+            runtime_fixture::Fixture,
+            runtime_testing::{
+                POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process,
+                sleeper, test_shell, wait_until,
             },
-            signal_target::SignalTarget,
-            terminal::escape::RUN_START,
-            test_wait::{REPLY, wait_within},
-        },
-        domain::{
-            config::{ProcessSpec, SettingChange},
-            coordination::Author,
-            occupancy::testing::stamp,
-            port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
-            process::{
-                LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck,
-                ReadyProbe, StopPolicy, StopSignal,
+            supervisor::{
+                ChannelOutputSink, SpawnGeneration,
+                testing::{KillCountHandle, Orphan, test_settings, test_stop},
             },
-            pty::{ProcessOutput, PtySize},
-            value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
         },
+        signal_target::SignalTarget,
+        terminal::escape::RUN_START,
+        test_wait::{REPLY, wait_within},
     };
 
     /// Longest the loop may take to answer a request while a holder read,

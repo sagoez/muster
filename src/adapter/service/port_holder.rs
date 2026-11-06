@@ -1,10 +1,9 @@
 use std::fmt;
 
 use getset::Getters;
+use muster_domain::value::{ProcessName, ProjectName};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::{ProcessName, ProjectName};
 
 /// A supervised process listening on a port, named by its project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

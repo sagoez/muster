@@ -6,6 +6,12 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use muster_domain::{
+    port::{OutputSink, ProcessHandle, ProcessRunner},
+    pty::{PtyError, SpawnRequest},
+    value::{OutputCursor, Pid, PositiveDuration, ProcessName, ProjectRoot},
+};
+
 use super::{
     client_message::ClientMessage,
     client_role::ClientRole,
@@ -24,16 +30,9 @@ use super::{
     protocol::HolderMessage,
     record::HolderRecord,
 };
-use crate::{
-    adapter::{
-        ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir,
-        signal_target::SignalTarget,
-    },
-    domain::{
-        port::{OutputSink, ProcessHandle, ProcessRunner},
-        pty::{PtyError, SpawnRequest},
-        value::{OutputCursor, Pid, PositiveDuration, ProcessName, ProjectRoot},
-    },
+use crate::adapter::{
+    ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir,
+    signal_target::SignalTarget,
 };
 
 /// Longest a launched holder may take to accept its supervisor and send its
@@ -510,36 +509,34 @@ mod tests {
     };
 
     use crossbeam_channel::{Receiver, bounded, unbounded};
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        process::{LogPattern, PatternKind, StopSignal},
+        pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
+        value::{Cols, CommandLine, ProcessName, Rows, StartToken},
+    };
     use rustix::{net::listen, process::Signal};
 
     use super::*;
-    use crate::{
-        adapter::{
-            channel_sink::ChannelSink,
-            holder::{
-                LineMatcher, ServedScreen,
-                client::{greet, screen_text},
-                error_path_beside,
-                losing_sink::LosingSink,
-                runner_fixture::Fixture,
-                sabotage::Sabotage,
-                server_testing::{POLL, WAIT, wait_until},
-                spec_launcher::CORRUPT_SPEC,
-                testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
-                thread_launcher::ThreadLauncher,
-                watch::Watch,
-            },
-            terminal::{
-                TerminalEmulator,
-                escape::{RUN_RESET_AT, RUN_START},
-                log_renderer::LogRenderer,
-            },
+    use crate::adapter::{
+        channel_sink::ChannelSink,
+        holder::{
+            LineMatcher, ServedScreen,
+            client::{greet, screen_text},
+            error_path_beside,
+            losing_sink::LosingSink,
+            runner_fixture::Fixture,
+            sabotage::Sabotage,
+            server_testing::{POLL, WAIT, wait_until},
+            spec_launcher::CORRUPT_SPEC,
+            testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
+            thread_launcher::ThreadLauncher,
+            watch::Watch,
         },
-        domain::{
-            color_scheme::ColorScheme,
-            process::{LogPattern, PatternKind, StopSignal},
-            pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
-            value::{Cols, CommandLine, ProcessName, Rows, StartToken},
+        terminal::{
+            TerminalEmulator,
+            escape::{RUN_RESET_AT, RUN_START},
+            log_renderer::LogRenderer,
         },
     };
 

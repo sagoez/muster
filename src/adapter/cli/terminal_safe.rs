@@ -3,7 +3,7 @@
 //! redraws, while anything that could query the terminal, retitle it or write
 //! its clipboard is dropped.
 
-use std::io::{self, Write};
+use std::{io, io::Write};
 
 use super::kept_bytes::Kept;
 use crate::adapter::terminal::bounded_parser::BoundedParser;

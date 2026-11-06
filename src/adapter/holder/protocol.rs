@@ -5,6 +5,11 @@ use std::io::Read;
 #[cfg(test)]
 use std::io::Write;
 
+use muster_domain::{
+    pty::{ExitOutcome, PtySize},
+    value::{OutputCursor, Pid},
+};
+
 #[cfg(test)]
 use super::frame::write_frame;
 use super::{
@@ -13,13 +18,7 @@ use super::{
     frame_tag::FrameTag,
     reject_reason::RejectReason,
 };
-use crate::{
-    adapter::wire::WireForm,
-    domain::{
-        pty::{ExitOutcome, PtySize},
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::wire::WireForm;
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
 const SIZE_BYTES: usize = 4;
@@ -244,15 +243,14 @@ pub(super) fn decode_size(bytes: &[u8]) -> Option<PtySize> {
 mod tests {
     use std::{io::Cursor, time::Duration};
 
+    use muster_domain::{
+        process::StopSignal,
+        pty::{ExitCause, SignalName, testing::size},
+    };
+
     use super::*;
-    use crate::{
-        adapter::holder::{
-            client_message::ClientMessage, client_role::ClientRole, holder_control::HolderControl,
-        },
-        domain::{
-            process::StopSignal,
-            pty::{ExitCause, SignalName, testing::size},
-        },
+    use crate::adapter::holder::{
+        client_message::ClientMessage, client_role::ClientRole, holder_control::HolderControl,
     };
 
     /// Every message survives the wire in both directions.

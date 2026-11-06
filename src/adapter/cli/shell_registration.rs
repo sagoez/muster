@@ -3,8 +3,9 @@
 
 use std::path::Path;
 
+use muster_domain::value::ProjectRoot;
+
 use super::cli_ports::CliPorts;
-use crate::domain::value::ProjectRoot;
 
 /// Names `root`, just registered by a command run in `cwd`, in the record of
 /// the hooked shell that is the command's direct parent, so that shell's next
@@ -33,16 +34,14 @@ pub fn name_in_hooked_shell(ports: &dyn CliPorts, root: &ProjectRoot, cwd: &Path
 mod tests {
     use std::{fs, process};
 
+    use muster_domain::{
+        occupancy::{ShellRecord, testing::stamp},
+        value::Pid,
+    };
     use rustix::process::geteuid;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::{
-        adapter::{clock::nanos_now, store::test_support::fresh_store},
-        domain::{
-            occupancy::{ShellRecord, testing::stamp},
-            value::Pid,
-        },
-    };
+    use crate::adapter::{clock::nanos_now, store::test_support::fresh_store};
 
     /// This test process, standing for the hooked shell.
     fn this_shell() -> Pid {

@@ -1,4 +1,4 @@
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };

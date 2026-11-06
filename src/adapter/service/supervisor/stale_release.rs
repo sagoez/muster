@@ -1,4 +1,4 @@
-use crate::domain::port::ProcessHandle;
+use muster_domain::port::ProcessHandle;
 
 /// How the process of a launch or adoption result that came back stale is
 /// let go.

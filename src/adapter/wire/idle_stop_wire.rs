@@ -1,5 +1,6 @@
+use muster_domain::value::{IdleStop, ValueParseError};
+
 use super::WireForm;
-use crate::domain::value::{IdleStop, ValueParseError};
 
 impl WireForm for IdleStop {
     type Wire = String;

@@ -1,9 +1,8 @@
 use std::time::Duration;
 
+use muster_domain::process::ProcessState;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString};
-
-use crate::domain::process::ProcessState;
 
 /// How long a run must have lasted before it counts as running: a launch
 /// report and a wait for `running` hold on this long, so a process that exits

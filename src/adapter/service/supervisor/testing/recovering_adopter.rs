@@ -1,17 +1,15 @@
 use std::{cell::Cell, rc::Rc};
 
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::{fixed_pid_handle::FixedPidHandle, fixtures::REFUSAL};
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter of `record` whose live holder refuses its first `refusals`
 /// adoptions and takes every later one, as a holder busy or wedged when the

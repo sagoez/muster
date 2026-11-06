@@ -6,17 +6,17 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use muster_domain::{
+    port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
+    pty::{PtyError, PtySize, ScreenSource},
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
     recording_input::RecordingInput,
     server_testing::{FAKE_PID, RESIZE_REFUSED},
-};
-use crate::domain::{
-    port::{ProcessHandle, ProcessInput},
-    process::StopSignal,
-    pty::{PtyError, PtySize, ScreenSource},
-    value::{OutputCursor, Pid},
 };
 
 /// A live child whose PTY refuses every resize and that records a kill

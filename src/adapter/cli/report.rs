@@ -2,13 +2,11 @@ use std::error::Error;
 
 use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
+use muster_domain::coordination::Author;
 use typed_builder::TypedBuilder;
 
 use super::{row::Row, row_kind::RowKind};
-use crate::{
-    adapter::sanitize::{printable, printable_lines},
-    domain::coordination::Author,
-};
+use crate::adapter::sanitize::{printable, printable_lines};
 
 /// Columns before an author attribution suffix on a listed line.
 const ATTRIBUTION_GAP: &str = "  ";

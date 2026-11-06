@@ -76,13 +76,14 @@ impl ScreenGate {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        value::{Cols, Rows},
+    };
+
     use super::*;
-    use crate::{
-        adapter::terminal::{TerminalEmulator, coloring::Coloring, log_renderer::LogRenderer},
-        domain::{
-            color_scheme::ColorScheme,
-            value::{Cols, Rows},
-        },
+    use crate::adapter::terminal::{
+        TerminalEmulator, coloring::Coloring, log_renderer::LogRenderer,
     };
 
     /// Screen rows of the emulator the tests feed.

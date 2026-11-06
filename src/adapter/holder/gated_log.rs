@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 
 use bytesize::ByteSize as RawByteSize;
+use muster_domain::{
+    color_scheme::ColorScheme,
+    value::{ByteSize, Cols, OutputCursor, Rows},
+};
 
 use super::{log::RotatingLog, screen_gate::ScreenGate};
-use crate::{
-    adapter::terminal::TerminalEmulator,
-    domain::{
-        color_scheme::ColorScheme,
-        value::{ByteSize, Cols, OutputCursor, Rows},
-    },
-};
+use crate::adapter::terminal::TerminalEmulator;
 
 /// Screen rows of the emulator a [`GatedLog`] follows the screen with.
 const ROWS: u16 = 24;

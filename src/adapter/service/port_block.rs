@@ -1,11 +1,11 @@
 use std::fmt;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::LocalPort;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::port_owner::PortOwner;
-use crate::domain::value::LocalPort;
 
 /// Opens the reason a start was refused for a held port, before the port.
 const BLOCKED_REASON: &str = "did not start: port";

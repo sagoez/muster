@@ -10,18 +10,16 @@ use std::{
 
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
-use muster::{
-    adapter::{
-        holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRecord, HolderRunner},
-        open_files::OpenFilesLimit,
-    },
-    domain::{
-        color_scheme::ColorScheme,
-        port::ProcessRunner,
-        process::{StopPolicy, StopSignal},
-        pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
-        value::{ByteSize, CommandLine, ProcessName, StopGrace},
-    },
+use muster::adapter::{
+    holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRecord, HolderRunner},
+    open_files::OpenFilesLimit,
+};
+use muster_domain::{
+    color_scheme::ColorScheme,
+    port::ProcessRunner,
+    process::{StopPolicy, StopSignal},
+    pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
+    value::{ByteSize, CommandLine, ProcessName, StopGrace},
 };
 
 use crate::common::{BINARY, ChannelSink, Scratch, WAIT, processes_under, wait_until};

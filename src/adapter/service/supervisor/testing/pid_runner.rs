@@ -1,8 +1,9 @@
-use super::pid_handle::PidHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::pid_handle::PidHandle;
 
 /// A successful runner whose handles report a pid.
 pub(crate) struct PidRunner;

@@ -9,6 +9,14 @@ use std::{
 };
 
 use bytesize::ByteSize;
+use muster_domain::{
+    config::{ProcessSpec, Stack},
+    constants::APP_NAME,
+    process::{ProcessState, Readiness},
+    project::Project,
+    pty::{ExitCause, ExitOutcome, SignalName},
+    value::{ProcessName, ProjectName, ProjectRoot},
+};
 use serde::Serialize;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
@@ -21,24 +29,14 @@ use super::{
     row::Row,
     row_kind::RowKind,
 };
-use crate::{
-    adapter::{
-        client::{
-            Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
-            ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
-        },
-        sanitize::printable,
-        service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
-        terminal::log_renderer::dropped_lines,
+use crate::adapter::{
+    client::{
+        Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
+        ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
     },
-    constants::APP_NAME,
-    domain::{
-        config::{ProcessSpec, Stack},
-        process::{ProcessState, Readiness},
-        project::Project,
-        pty::{ExitCause, ExitOutcome, SignalName},
-        value::{ProcessName, ProjectName, ProjectRoot},
-    },
+    sanitize::printable,
+    service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+    terminal::log_renderer::dropped_lines,
 };
 
 /// Column headers of the `ps` table, in order.
@@ -816,27 +814,25 @@ mod tests {
         path::PathBuf,
     };
 
-    use super::*;
-    use crate::{
-        adapter::{
-            cli::{ending_signal::EndingSignal, report::plain},
-            client::{
-                ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView,
-                ProjectView,
-            },
-            service::{
-                ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner,
-                ProcessUsage, ServiceErrorKind,
-            },
+    use muster_domain::{
+        config::{Environment, ProcessSpec},
+        port::{ListeningSocket, PortOccupant},
+        process::{RestartPolicy, StopPolicy, StopSignal},
+        value::{
+            CommandLine, IdleStop, LocalPort, Pid, PositiveDuration, ProjectRoot, StopGrace,
+            WorkspacePaneId,
         },
-        domain::{
-            config::{Environment, ProcessSpec},
-            port::{ListeningSocket, PortOccupant},
-            process::{RestartPolicy, StopPolicy, StopSignal},
-            value::{
-                CommandLine, IdleStop, LocalPort, Pid, PositiveDuration, ProjectRoot, StopGrace,
-                WorkspacePaneId,
-            },
+    };
+
+    use super::*;
+    use crate::adapter::{
+        cli::{ending_signal::EndingSignal, report::plain},
+        client::{
+            ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView, ProjectView,
+        },
+        service::{
+            ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessUsage,
+            ServiceErrorKind,
         },
     };
 

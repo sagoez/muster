@@ -3,14 +3,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::shared_port_occupants::SharedPortOccupants;
-use crate::{
-    adapter::service::{PortBlock, PortHolder, ProcessUsage},
-    domain::{
-        port::{ListeningSocket, PortOccupants},
-        value::PaneId,
-    },
+use muster_domain::{
+    port::{ListeningSocket, PortOccupants},
+    value::PaneId,
 };
+
+use super::shared_port_occupants::SharedPortOccupants;
+use crate::adapter::service::{PortBlock, PortHolder, ProcessUsage};
 
 /// What the live processes were last sampled using and listening on, which
 /// ports every supervised process holds, and the starts those ports blocked.

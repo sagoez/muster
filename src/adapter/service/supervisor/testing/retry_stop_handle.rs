@@ -4,15 +4,15 @@ use std::{
 };
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::{retry_stop_signals::RetryStopSignals, terminate_outcome::TerminateOutcome};
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use typed_builder::TypedBuilder;
+
+use super::{retry_stop_signals::RetryStopSignals, terminate_outcome::TerminateOutcome};
 
 /// A handle whose graceful termination follows its configured outcome and
 /// whose hard kill succeeds on the second attempt.

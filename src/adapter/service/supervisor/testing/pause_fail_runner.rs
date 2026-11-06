@@ -1,8 +1,9 @@
-use super::pause_fail_handle::PauseFailHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::pause_fail_handle::PauseFailHandle;
 
 /// A runner whose handles fail every pause and resume, modelling a signal that
 /// cannot be delivered.

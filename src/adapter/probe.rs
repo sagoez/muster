@@ -7,9 +7,8 @@ use std::{
     time::Duration,
 };
 
+use muster_domain::value::{LocalPort, LocalUrl};
 use ureq::{Agent, http::Uri};
-
-use crate::domain::value::{LocalPort, LocalUrl};
 
 /// Longest a TCP connect attempt waits on one address.
 pub const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);

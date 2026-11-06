@@ -3,13 +3,12 @@
 
 use std::path::Path;
 
+use muster_domain::constants::APP_NAME;
+
 use super::{cli_ports::CliPorts, error::CliError};
-use crate::{
-    adapter::{
-        client::ClientError,
-        shell::{HookShell, hook_script},
-    },
-    constants::APP_NAME,
+use crate::adapter::{
+    client::ClientError,
+    shell::{HookShell, hook_script},
 };
 
 /// The command that prints the hook.

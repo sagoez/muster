@@ -1,18 +1,16 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    process::{LogPattern, PatternKind},
+    value::{LocalPort, LocalUrl, PORT_FORM},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{process_fields::invalid, tool_error::ToolError};
-use crate::{
-    adapter::{
-        holder::LineMatcher,
-        service::{StateGoal, WaitCondition},
-    },
-    domain::{
-        process::{LogPattern, PatternKind},
-        value::{LocalPort, LocalUrl, PORT_FORM},
-    },
+use crate::adapter::{
+    holder::LineMatcher,
+    service::{StateGoal, WaitCondition},
 };
 
 /// What a condition must name exactly one of.

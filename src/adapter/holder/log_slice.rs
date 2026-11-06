@@ -1,7 +1,6 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// What one log read returns: stripped, filtered and capped lines, and the
 /// span of output they were taken from.

@@ -1,9 +1,6 @@
 use std::{num::TryFromIntError, sync::LazyLock};
 
-use strum::ParseError;
-
-use super::idle_stop_refusal::IdleStopRefusal;
-use crate::domain::{
+use muster_domain::{
     coordination::{
         EntryPositionError, KvKeyError, LockNameError, LockNoteError, ScratchpadKeyError,
         TodoIdError, TodoTitleError,
@@ -15,6 +12,9 @@ use crate::domain::{
         ProcessNameError, ScrollbackLinesError, StopGraceError,
     },
 };
+use strum::ParseError;
+
+use super::idle_stop_refusal::IdleStopRefusal;
 
 /// Why an empty stored value is refused.
 const EMPTY: &str = "it is empty";

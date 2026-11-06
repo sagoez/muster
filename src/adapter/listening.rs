@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use listeners::{Protocol, SocketState};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-
-use super::process_tree::ProcessTree;
-use crate::domain::{
+use muster_domain::{
     port::{ListeningPorts, ListeningSocket},
     value::Pid,
 };
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+use super::process_tree::ProcessTree;
 
 /// A [`ListeningPorts`] over the OS socket tables (`/proc` on Linux,
 /// `libproc` on macOS) through `listeners`, attributing each listener to the

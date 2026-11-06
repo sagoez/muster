@@ -4,11 +4,7 @@ use std::{
 };
 
 use getset::Getters;
-use serde::{Deserialize, Serialize};
-use typed_builder::TypedBuilder;
-
-use super::{EntryError, ReadyEntry, StopEntry};
-use crate::domain::{
+use muster_domain::{
     config::{DeclaredPorts, Environment, ProcessSpec, RepeatedPort, stays_under_root},
     process::{ReadyCheck, RestartPolicy, StopPolicy},
     value::{
@@ -16,6 +12,10 @@ use crate::domain::{
         DescriptionError, EnvName, EnvValue, LocalPort, ProcessName, ProjectRoot, StopGrace,
     },
 };
+use serde::{Deserialize, Serialize};
+use typed_builder::TypedBuilder;
+
+use super::{EntryError, ReadyEntry, StopEntry};
 
 /// The key of an entry's command.
 const COMMAND_KEY: &str = "command";

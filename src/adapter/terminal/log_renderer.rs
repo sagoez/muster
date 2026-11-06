@@ -3,10 +3,7 @@
 //! readiness and waits, and every line the holder reads, matches and returns
 //! to an agent.
 
-use std::{
-    cell::Cell,
-    panic::{self, AssertUnwindSafe},
-};
+use std::{cell::Cell, panic, panic::AssertUnwindSafe};
 
 #[cfg(test)]
 use super::render_fault::fire_if_armed;

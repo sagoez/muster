@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
-use thiserror::Error;
-
-use crate::domain::{
+use muster_domain::{
     config::{RepeatedPort, TooManyPorts},
     value::{NameProblem, PORT_FORM},
 };
+use thiserror::Error;
 
 /// Why one process entry of a stack file is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

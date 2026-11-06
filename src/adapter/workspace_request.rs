@@ -2,9 +2,8 @@
 //! service's other requests do not cover. It lives in the adapter layer, so
 //! the core never sees it.
 
+use muster_domain::value::ProcessName;
 use serde::{Deserialize, Serialize};
-
-use crate::domain::value::ProcessName;
 
 /// A request an MCP client sends the service about one project, answered with
 /// `Ok` or a refusal.

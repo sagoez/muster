@@ -1,13 +1,13 @@
 use std::{path::PathBuf, time::Duration};
 
-use tempfile::TempDir;
-
-use super::{DATABASE_FILE, SqliteStore};
-use crate::domain::{
+use muster_domain::{
     config::{Environment, ProcessSpec},
     process::{RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, ProcessName, StopGrace},
 };
+use tempfile::TempDir;
+
+use super::{DATABASE_FILE, SqliteStore};
 
 /// The state folder a test database lives in, under its scratch directory.
 const STATE_DIR: &str = "state";

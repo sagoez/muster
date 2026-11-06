@@ -1,5 +1,6 @@
+use muster_domain::port::{Notifier, PortOccupant, PortOccupants};
+
 use super::{project_ports::ProjectPorts, supervisor::testing::Occupied};
-use crate::domain::port::{Notifier, PortOccupant, PortOccupants};
 
 /// Ports whose every lookup finds the port held by one process, and no
 /// notifier.

@@ -1,5 +1,6 @@
+use muster_domain::value::CommandLine;
+
 use super::error::CliError;
-use crate::domain::value::CommandLine;
 
 /// The command `add` and `run` store, from the words after `--`.
 ///
@@ -24,8 +25,9 @@ pub fn command_string(words: &[String]) -> Result<CommandLine, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::value::COMMAND_MAX_CHARS;
+
     use super::*;
-    use crate::domain::value::COMMAND_MAX_CHARS;
 
     /// The words, owned.
     fn words(raw: &[&str]) -> Vec<String> {

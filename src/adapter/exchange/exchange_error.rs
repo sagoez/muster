@@ -1,7 +1,7 @@
+use muster_domain::value::ProcessName;
 use thiserror::Error;
 
 use super::{EntryError, STACK_FILE_VERSION};
-use crate::domain::value::ProcessName;
 
 /// Why a stack file cannot be read or written.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

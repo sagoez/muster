@@ -1,25 +1,24 @@
 use std::{path::PathBuf, sync::Arc, thread};
 
+use muster_domain::{
+    config::{Environment, ProcessSpec},
+    port::{OutputSink, ProcessHandle},
+    process::{ExitIntent, ProcessState, RestartPolicy},
+    pty::{ExitOutcome, PtyError},
+    value::{OutputCursor, PaneId, Pid, ProcessName, ProjectRoot},
+};
+
 use super::{
     adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
     config_membership::ConfigMembership, entity::Supervisor, launch_purpose::LaunchPurpose,
     pending_intent::PendingIntent, pending_launch::PendingLaunch, retry_id::RetryId,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
-use crate::{
-    adapter::{
-        holder::{
-            HolderRecord, HolderRunner, LineMatcher, LogLines, LogScan, LogTail, abandon, collect,
-        },
-        service::{NoticeLevel, ServiceEvent},
+use crate::adapter::{
+    holder::{
+        HolderRecord, HolderRunner, LineMatcher, LogLines, LogScan, LogTail, abandon, collect,
     },
-    domain::{
-        config::{Environment, ProcessSpec},
-        port::{OutputSink, ProcessHandle},
-        process::{ExitIntent, ProcessState, RestartPolicy},
-        pty::{ExitOutcome, PtyError},
-        value::{OutputCursor, PaneId, Pid, ProcessName, ProjectRoot},
-    },
+    service::{NoticeLevel, ServiceEvent},
 };
 
 /// Shown when a running holder's process is no longer in the project, so it
@@ -920,34 +919,30 @@ mod tests {
     };
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
+    use muster_domain::{
+        port::ProcessRunner,
+        process::{
+            LogPattern, PatternKind, PatternText, ProcessState, ReadyCheck, ReadyProbe,
+            RestartPolicy, StopPolicy, StopSignal,
+        },
+        pty::{ExitCause, ExitOutcome, ProcessOutput},
+        value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace},
+    };
     use rustix::process::Signal;
 
     use super::*;
-    use crate::{
-        adapter::{
-            holder::{HolderId, LoggedLine},
-            service::{
-                LaunchEnvironment, ServiceEvent, ServiceResponse, TAP_RING_BYTES, WaitCondition,
-                WaitOutcome, WaitSpec, WaitStatus,
-                supervisor::{
-                    ConfigMembership, SpawnGeneration,
-                    lifecycle::FORCE_STOP_NOTICE,
-                    testing::*,
-                    unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
-                    unsupervised_child::UnsupervisedChild,
-                    waiting::LOG_TAIL_TIMEOUT,
-                },
-            },
-        },
-        domain::{
-            port::ProcessRunner,
-            process::{
-                LogPattern, PatternKind, PatternText, ProcessState, ReadyCheck, ReadyProbe,
-                RestartPolicy, StopPolicy, StopSignal,
-            },
-            pty::{ExitCause, ExitOutcome, ProcessOutput},
-            value::{
-                CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace,
+    use crate::adapter::{
+        holder::{HolderId, LoggedLine},
+        service::{
+            LaunchEnvironment, ServiceEvent, ServiceResponse, TAP_RING_BYTES, WaitCondition,
+            WaitOutcome, WaitSpec, WaitStatus,
+            supervisor::{
+                ConfigMembership, SpawnGeneration,
+                lifecycle::FORCE_STOP_NOTICE,
+                testing::*,
+                unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
+                unsupervised_child::UnsupervisedChild,
+                waiting::LOG_TAIL_TIMEOUT,
             },
         },
     };

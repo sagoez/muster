@@ -1,6 +1,7 @@
 use std::{io, os::unix::net::UnixStream, path::Path};
 
 use getset::{Getters, MutGetters};
+use muster_domain::{color_scheme::ColorScheme, value::OutputCursor};
 
 use super::{
     client_message::ClientMessage,
@@ -9,10 +10,7 @@ use super::{
     protocol::HolderMessage,
     server_testing::{SCROLLBACK, WAIT, wait_until},
 };
-use crate::{
-    adapter::terminal::TerminalEmulator,
-    domain::{color_scheme::ColorScheme, value::OutputCursor},
-};
+use crate::adapter::terminal::TerminalEmulator;
 
 /// One client connection with a bounded read timeout, mirroring the screen
 /// it is shown.

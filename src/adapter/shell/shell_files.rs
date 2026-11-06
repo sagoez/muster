@@ -1,25 +1,23 @@
 use std::{
-    fs,
-    io::{self, Write as _},
+    fs, io,
+    io::Write as _,
     os::{fd::OwnedFd, unix::fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
+use muster_domain::{
+    occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
+    port::ShellRegistry,
+    value::Pid,
+};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 
-use crate::{
-    adapter::{
-        private_dir::create_private_dir_all,
-        process_identity::LocalProcessIdentity,
-        signal_target::SignalTarget,
-        wire::{ShellRecordWire, WireForm},
-    },
-    domain::{
-        occupancy::{ReportStamp, ShellId, ShellRecord, ShellRegistryError},
-        port::ShellRegistry,
-        value::Pid,
-    },
+use crate::adapter::{
+    private_dir::create_private_dir_all,
+    process_identity::LocalProcessIdentity,
+    signal_target::SignalTarget,
+    wire::{ShellRecordWire, WireForm},
 };
 
 /// The folder under the state directory that holds every shell's files.
@@ -280,18 +278,19 @@ fn read_record(path: &Path) -> Option<ShellRecord> {
 mod tests {
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
-        process::{self, Command, Stdio},
+        process,
+        process::{Command, Stdio},
         thread,
         time::Duration,
     };
 
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         occupancy::testing::stamp,
         value::{EpochNanos, ProjectRoot, StartToken},
     };
+    use tempfile::TempDir;
+
+    use super::*;
 
     /// The permission bits of a mode.
     const PERMISSION_BITS: u32 = 0o777;

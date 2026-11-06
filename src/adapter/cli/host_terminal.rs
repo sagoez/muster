@@ -1,15 +1,16 @@
 use std::{
-    io::{self, IsTerminal},
+    io,
+    io::IsTerminal,
     os::fd::{AsFd, OwnedFd},
 };
 
-use rustix::termios::tcgetwinsize;
-
-use super::error::CliError;
-use crate::domain::{
+use muster_domain::{
     pty::PtySize,
     value::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS},
 };
+use rustix::termios::tcgetwinsize;
+
+use super::error::CliError;
 
 /// The terminal `muster attach` takes over: where keys are read from and the
 /// process's screen is drawn. An RAII resource owning duplicated file
@@ -76,10 +77,9 @@ impl HostTerminal {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        adapter::cli::test_pty::TestPty,
-        domain::{pty::PtySize, value::MIN_COLS},
-    };
+    use muster_domain::{pty::PtySize, value::MIN_COLS};
+
+    use crate::adapter::cli::test_pty::TestPty;
 
     /// A one-column terminal is reported at the narrowest size a holder
     /// takes, so an attach never sends a resize the holder refuses.

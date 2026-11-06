@@ -1,8 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::{config::SettingKey, settings::Settings};
 use serde::{Serialize, Serializer};
 use typed_builder::TypedBuilder;
-
-use crate::domain::{config::SettingKey, settings::Settings};
 
 /// One setting as `muster config get` and `config_get` show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

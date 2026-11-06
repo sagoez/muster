@@ -4,14 +4,15 @@
 
 use std::collections::HashMap;
 
+use muster_domain::{
+    port::PortOccupant,
+    process::{Process, ProcessState},
+    value::{LocalPort, PaneId, Pid},
+};
+
 use super::{entity::Supervisor, spawn_generation::SpawnGeneration};
-use crate::{
-    adapter::service::{EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner, WaitStatus},
-    domain::{
-        port::PortOccupant,
-        process::{Process, ProcessState},
-        value::{LocalPort, PaneId, Pid},
-    },
+use crate::adapter::service::{
+    EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner, WaitStatus,
 };
 
 impl Supervisor {
@@ -169,17 +170,16 @@ impl Supervisor {
 mod tests {
     use std::{net::Ipv4Addr, sync::PoisonError, time::Duration};
 
-    use super::*;
-    use crate::{
-        adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*},
-        domain::{
-            config::{DeclaredPorts, ProcessSpec},
-            port::{ListeningSocket, PortOccupant, ProcessRunner},
-            process::{ReadyCheck, ReadyProbe, RestartPolicy},
-            pty::{ExitOutcome, ProcessOutput},
-            value::{LocalPort, Pid, PositiveDuration, ProjectName},
-        },
+    use muster_domain::{
+        config::{DeclaredPorts, ProcessSpec},
+        port::{ListeningSocket, PortOccupant, ProcessRunner},
+        process::{ReadyCheck, ReadyProbe, RestartPolicy},
+        pty::{ExitOutcome, ProcessOutput},
+        value::{LocalPort, Pid, PositiveDuration, ProjectName},
     };
+
+    use super::*;
+    use crate::adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*};
 
     /// The port every process here declares.
     const PORT: u16 = 3000;

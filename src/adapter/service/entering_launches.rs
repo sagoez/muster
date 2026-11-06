@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::domain::{
+use muster_domain::{
     occupancy::ShellId,
     value::{ProcessName, ProjectRoot},
 };

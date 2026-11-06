@@ -1,19 +1,17 @@
+use muster_domain::{
+    coordination::{Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue},
+    port::CoordinationStore,
+    value::ProjectRoot,
+};
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, kv_command::KvCommand, page_cursor::parse_cursor,
     report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::{
-    adapter::{
-        client::{ListedValue, PageSize},
-        wire::WireForm,
-    },
-    domain::{
-        coordination::{Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue},
-        port::CoordinationStore,
-        value::ProjectRoot,
-    },
+use crate::adapter::{
+    client::{ListedValue, PageSize},
+    wire::WireForm,
 };
 
 /// What a refusal calls an entry's value.

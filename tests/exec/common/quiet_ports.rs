@@ -1,7 +1,5 @@
-use muster::{
-    adapter::service::ProjectPorts,
-    domain::port::{Notifier, PortOccupants},
-};
+use muster::adapter::service::ProjectPorts;
+use muster_domain::port::{Notifier, PortOccupants};
 
 /// The ports of a service run in the test process: nothing of the user's
 /// desktop or process table.

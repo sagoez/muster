@@ -1,6 +1,12 @@
 use std::collections::HashMap;
 
 use crossbeam_channel::Sender;
+use muster_domain::{
+    occupancy::ShellId,
+    port::{ListeningSocket, PortOccupant, ProcessHandle},
+    pty::{ProcessOutput, PtyError},
+    value::{LocalPort, PaneId, Pid, ProjectRoot},
+};
 
 use super::{
     probe_target::ProbeTarget,
@@ -8,15 +14,7 @@ use super::{
     service_response::ServiceResponse,
     supervisor::{HolderScreen, LogReadResult, RetryId, ShutdownGeneration, SpawnGeneration},
 };
-use crate::{
-    adapter::holder::HolderRecord,
-    domain::{
-        occupancy::ShellId,
-        port::{ListeningSocket, PortOccupant, ProcessHandle},
-        pty::{ProcessOutput, PtyError},
-        value::{LocalPort, PaneId, Pid, ProjectRoot},
-    },
-};
+use crate::adapter::holder::HolderRecord;
 
 /// A message for the service's event loop from a process, a timer, a worker
 /// or a client.

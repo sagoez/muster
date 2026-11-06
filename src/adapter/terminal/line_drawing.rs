@@ -13,6 +13,7 @@
 use std::{collections::BTreeMap, mem};
 
 use alacritty_terminal::vte::{Params, Perform};
+use muster_domain::value::steers_the_terminal;
 use unicode_width::UnicodeWidthChar;
 
 use super::{
@@ -26,7 +27,6 @@ use super::{
     pen::Pen,
     saved_cursor::SavedCursor,
 };
-use crate::domain::value::steers_the_terminal;
 
 /// Returns the cursor to the start of the line.
 const CARRIAGE_RETURN: u8 = b'\r';

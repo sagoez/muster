@@ -1,5 +1,12 @@
 use std::time::UNIX_EPOCH;
 
+use muster_domain::{
+    config::ConfigError,
+    port::RunHistory,
+    process::EndedRun,
+    pty::{ExitCause, ExitOutcome, SignalName},
+    value::{ProcessName, ProjectRoot},
+};
 use rusqlite::{Row, params};
 
 use super::{
@@ -8,13 +15,6 @@ use super::{
         SqliteStore, column_integer, corrupt, db_error, duration_from_millis, duration_millis,
         refused,
     },
-};
-use crate::domain::{
-    config::ConfigError,
-    port::RunHistory,
-    process::EndedRun,
-    pty::{ExitCause, ExitOutcome, SignalName},
-    value::{ProcessName, ProjectRoot},
 };
 
 /// The column naming the process a run belongs to.
@@ -137,11 +137,10 @@ mod tests {
         time::{Duration, SystemTime},
     };
 
+    use muster_domain::{coordination::Author, port::StackStore};
+
     use super::*;
-    use crate::{
-        adapter::store::test_support::{fresh_store, spec},
-        domain::{coordination::Author, port::StackStore},
-    };
+    use crate::adapter::store::test_support::{fresh_store, spec};
 
     /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {

@@ -2,18 +2,18 @@
 //! a user's processes: logs, records, sockets and shared state.
 
 use std::{
-    env,
-    fs::{self, DirBuilder, Permissions},
+    env, fs,
+    fs::{DirBuilder, Permissions},
     io,
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
 use directories::ProjectDirs;
+use muster_domain::constants::APP_NAME;
 use rustix::process::geteuid;
 
 use super::no_state_dir::NoStateDir;
-use crate::constants::APP_NAME;
 
 /// Application directory name under the platform's state location.
 const APP_DIR: &str = APP_NAME;

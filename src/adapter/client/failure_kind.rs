@@ -1,6 +1,7 @@
+use muster_domain::config::ConfigError;
 use serde::Serialize;
 
-use crate::{adapter::service::ServiceErrorKind, domain::config::ConfigError};
+use crate::adapter::service::ServiceErrorKind;
 
 /// Why a request failed, as JSON output names it so a script or an agent can
 /// act on it without parsing the message.
@@ -130,11 +131,12 @@ impl From<&ConfigError> for FailureKind {
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         config::{DECLARED_PORTS_MAX, DeclaredPorts},
         value::LocalPort,
     };
+
+    use super::*;
 
     /// A wrong name or input is the caller's to fix; a service that cannot
     /// be reached or speaks another version is muster's.

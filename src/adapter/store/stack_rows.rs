@@ -3,6 +3,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use muster_domain::{
+    config::{
+        AppliedChange, ConfigError, DeclaredPorts, Environment, ImportMode, ImportPlan,
+        ProcessChange, ProcessSpec, Registration, Stack, StackEdit,
+    },
+    coordination::Author,
+    port::{StackReader, StackStore},
+    process::{ReadyCheck, ReadyProbe, StopPolicy},
+    project::Project,
+    value::{
+        CommandLine, Description, EnvName, EnvValue, IdleStop, LocalPort, ProcessName, ProjectRoot,
+        StackRevision,
+    },
+};
 use rusqlite::{
     Connection, Error as SqliteError, OptionalExtension, Row, ffi, params, params_from_iter,
     types::Value,
@@ -18,20 +32,6 @@ use super::{
         refused,
     },
     store_error::StoreError,
-};
-use crate::domain::{
-    config::{
-        AppliedChange, ConfigError, DeclaredPorts, Environment, ImportMode, ImportPlan,
-        ProcessChange, ProcessSpec, Registration, Stack, StackEdit,
-    },
-    coordination::Author,
-    port::{StackReader, StackStore},
-    process::{ReadyCheck, ReadyProbe, StopPolicy},
-    project::Project,
-    value::{
-        CommandLine, Description, EnvName, EnvValue, IdleStop, LocalPort, ProcessName, ProjectRoot,
-        StackRevision,
-    },
 };
 
 /// Selects the definition columns [`process_from_row`] reads by name.
@@ -532,18 +532,16 @@ impl StackStore for SqliteStore {
 mod tests {
     use std::{fs, time::Duration};
 
+    use muster_domain::{
+        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
+        port::{ProjectStore, SettingsReader, StackEditLog},
+        process::{RestartPolicy, StopSignal},
+        value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::test_support::{fresh_store, spec},
-        domain::{
-            config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
-            port::{ProjectStore, SettingsReader, StackEditLog},
-            process::{RestartPolicy, StopSignal},
-            value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
-        },
-    };
+    use crate::adapter::store::test_support::{fresh_store, spec};
 
     /// `café` with a precomposed `é`.
     const CAFE_COMPOSED: &str = "caf\u{e9}";

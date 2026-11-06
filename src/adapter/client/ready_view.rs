@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::process::ReadyCheck;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::condition_view::ConditionView;
-use crate::domain::process::ReadyCheck;
 
 /// A stored readiness check, as `--json` and MCP show it: one of `log` (with
 /// `regex`), `port` or `http`, and a `timeout` in seconds.

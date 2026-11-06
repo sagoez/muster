@@ -1,11 +1,13 @@
 use std::{
-    fs::{self, File},
+    fs,
+    fs::File,
     io,
     os::unix::fs::{FileExt, MetadataExt},
     path::Path,
 };
 
 use getset::CopyGetters;
+use muster_domain::value::OutputCursor;
 
 use super::{
     error_line::is_error_line,
@@ -18,10 +20,7 @@ use super::{
     piece::Piece,
     strip::strip_line,
 };
-use crate::{
-    adapter::terminal::escape::{ESC, LINE_FEED},
-    domain::value::OutputCursor,
-};
+use crate::adapter::terminal::escape::{ESC, LINE_FEED};
 
 /// Times the files are opened again when a rotation moves them mid-open.
 const OPEN_ATTEMPTS: usize = 3;

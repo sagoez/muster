@@ -1,12 +1,10 @@
 use getset::Getters;
+use muster_domain::{project::Project, value::ProcessName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::project_identity_view::ProjectIdentityView;
-use crate::{
-    adapter::service::{Notice, NoticeLevel},
-    domain::{project::Project, value::ProcessName},
-};
+use crate::adapter::service::{Notice, NoticeLevel};
 
 /// One notice as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]

@@ -2,17 +2,14 @@
 //! went away, as `| head` does, ends the command quietly; any other failure
 //! to write is reported.
 
-use std::{
-    io::{self, Write},
-    process,
-};
+use std::{io, io::Write, process};
 
+use muster_domain::constants::APP_NAME;
 use serde::Serialize;
 
 use super::{
     cli_exit::CliExit, error::CliError, output, presenter::Presenter, report::print_error,
 };
-use crate::constants::APP_NAME;
 
 /// Writes `bytes` to stdout as they are, with no styling stripped or added.
 pub fn emit_bytes(bytes: &[u8]) {

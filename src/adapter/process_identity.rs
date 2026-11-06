@@ -1,12 +1,13 @@
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::process::Command;
-#[cfg(target_os = "linux")]
-use std::{fs, path::Path};
 
-use crate::{
-    adapter::signal_target::SignalTarget,
-    domain::value::{Pid, StartToken},
-};
+use muster_domain::value::{Pid, StartToken};
+
+use crate::adapter::signal_target::SignalTarget;
 
 /// The field of `/proc/<pid>/stat`, after the command name, holding the state.
 #[cfg(target_os = "linux")]
@@ -142,7 +143,8 @@ fn stat_fields(process_id: Pid) -> Option<Vec<String>> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::{
-        process::{self, Command},
+        process,
+        process::Command,
         thread,
         time::{Duration, Instant},
     };

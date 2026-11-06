@@ -1,17 +1,17 @@
 use std::time::Duration;
 
 use getset::Getters;
+use muster_domain::{
+    port::ListeningSocket,
+    process::{ProcessState, Readiness},
+    value::{OutputCursor, Pid, ProcessName},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{
     last_exit::LastExit, port_block::PortBlock, process_usage::ProcessUsage, stack_url::StackUrl,
     state_goal::QUICK_EXIT_WINDOW,
-};
-use crate::domain::{
-    port::ListeningSocket,
-    process::{ProcessState, Readiness},
-    value::{OutputCursor, Pid, ProcessName},
 };
 
 /// What `ps` shows for one supervised process.

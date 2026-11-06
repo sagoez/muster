@@ -12,11 +12,14 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{self, BufRead, BufReader, Read},
+    io,
+    io::{BufRead, BufReader, Read},
     mem,
     ops::ControlFlow,
     path::Path,
 };
+
+use muster_domain::value::OutputCursor;
 
 use super::{
     error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
@@ -25,9 +28,8 @@ use super::{
     reader::CATCH_UP_CHUNK_BYTES, span::Span, span_reader::SpanReader, strip::LINE_MAX_BYTES,
     visited_piece::VisitedPiece,
 };
-use crate::{
-    adapter::terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
-    domain::value::OutputCursor,
+use crate::adapter::terminal::{
+    escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer,
 };
 
 /// The longest line a read returns, in characters; the rest is cut.
@@ -541,24 +543,22 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use muster_domain::{
+        process::{LogPattern, PatternKind, PatternText},
+        value::OutputCursor,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            holder::{
-                byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter,
-                line_limit::LineLimit, line_matcher::LineMatcher, log::rotated_path,
-                log_fixture::Fixture, screen_gate::FULL_SCREEN_LINE,
-            },
-            terminal::{
-                line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
-                render_fault,
-            },
+    use crate::adapter::{
+        holder::{
+            byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter,
+            line_limit::LineLimit, line_matcher::LineMatcher, log::rotated_path,
+            log_fixture::Fixture, screen_gate::FULL_SCREEN_LINE,
         },
-        domain::{
-            process::{LogPattern, PatternKind, PatternText},
-            value::OutputCursor,
+        terminal::{
+            line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
+            render_fault,
         },
     };
 

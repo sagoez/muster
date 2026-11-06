@@ -4,15 +4,15 @@ use std::{
 };
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::fixtures::REPLAY_STREAM_START;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::{LogPattern, StopSignal},
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use typed_builder::TypedBuilder;
+
+use super::fixtures::REPLAY_STREAM_START;
 
 /// An adopting handle that records the patterns each replay asks it for in
 /// `asked`, replays nothing, and streams from [`REPLAY_STREAM_START`].

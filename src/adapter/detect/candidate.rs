@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{CommandLine, ProcessName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::detect_source::DetectSource;
-use crate::domain::value::{CommandLine, ProcessName};
 
 /// A process `muster init` offers to add, read from a file in the folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

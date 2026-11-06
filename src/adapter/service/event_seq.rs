@@ -1,10 +1,9 @@
 use std::{fmt, str::FromStr};
 
 use getset::CopyGetters;
+use muster_domain::value::ValueParseError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::ValueParseError;
 
 /// Prefix of an event cursor's text form.
 const SEQ_PREFIX: &str = "e:";

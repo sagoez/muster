@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// The output sink a holder connection's reader and writer share until its
 /// handle is dropped. Detaching makes every send that starts afterwards a

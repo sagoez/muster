@@ -1,7 +1,8 @@
-use std::io::{self, Read};
+use std::{io, io::Read};
+
+use muster_domain::value::OutputCursor;
 
 use super::span::Span;
-use crate::domain::value::OutputCursor;
 
 /// A forward reader over a [`Span`] from an absolute offset.
 pub(super) struct SpanReader<'a> {

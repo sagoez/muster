@@ -1,7 +1,8 @@
 use std::time::{Duration, UNIX_EPOCH};
 
+use muster_domain::value::EpochSeconds;
+
 use super::WireForm;
-use crate::domain::value::EpochSeconds;
 
 /// The last second RFC 3339 can write, 9999-12-31T23:59:59Z; a later moment
 /// is written as this one rather than failing.

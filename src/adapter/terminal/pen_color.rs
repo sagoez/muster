@@ -1,4 +1,4 @@
-use std::fmt::{self, Write};
+use std::{fmt, fmt::Write};
 
 /// Extended-color mode that picks one of 256 colors by index.
 pub const PALETTE_MODE: u16 = 5;

@@ -3,11 +3,12 @@ use std::{
     sync::{Arc, PoisonError},
 };
 
-use super::asked_scans::AskedScans;
-use crate::domain::{
+use muster_domain::{
     port::{PortOccupant, PortOccupants},
     value::LocalPort,
 };
+
+use super::asked_scans::AskedScans;
 
 /// Answers port lookups with one occupant, on every port or only on some,
 /// recording each scan it was asked for.

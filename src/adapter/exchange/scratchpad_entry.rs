@@ -1,14 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, Scratchpad, ScratchpadKey},
+    value::EpochSeconds,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::{WireForm, form},
-    domain::{
-        coordination::{Author, NOTE_BODY_MAX_CHARS, NoteBody, Scratchpad, ScratchpadKey},
-        value::EpochSeconds,
-    },
-};
+use crate::adapter::wire::{WireForm, form};
 
 /// A scratchpad as a coordination snapshot and an agent read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

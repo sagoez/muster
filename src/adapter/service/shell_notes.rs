@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
+use muster_domain::occupancy::ShellId;
+
 use super::shell_note::ShellNote;
-use crate::domain::occupancy::ShellId;
 
 /// Most notes kept for one shell between its reports; the oldest go first.
 pub const MAX_QUEUED_NOTES: usize = 16;
@@ -36,8 +37,9 @@ impl ShellNotes {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::value::{ProcessName, ProjectName};
+
     use super::{super::runtime_testing::test_shell, *};
-    use crate::domain::value::{ProcessName, ProjectName};
 
     /// A note that `index` started in the project `shop`.
     fn started(index: usize) -> ShellNote {

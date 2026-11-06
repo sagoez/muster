@@ -1,10 +1,10 @@
-use std::{
-    path::PathBuf,
-    thread::{self, JoinHandle},
-    time::Instant,
-};
+use std::{path::PathBuf, thread, thread::JoinHandle, time::Instant};
 
 use getset::{Getters, MutGetters};
+use muster_domain::{
+    process::ProcessState,
+    value::{ProcessName, ProjectRoot},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
@@ -17,13 +17,7 @@ use super::{
     service_request::ServiceRequest,
     service_response::ServiceResponse,
 };
-use crate::{
-    adapter::test_wait::REPLY,
-    domain::{
-        process::ProcessState,
-        value::{ProcessName, ProjectRoot},
-    },
-};
+use crate::adapter::test_wait::REPLY;
 
 /// A service running on a thread of the test.
 #[derive(Getters, MutGetters, TypedBuilder)]

@@ -3,6 +3,12 @@
 
 use std::convert::Infallible;
 
+use muster_domain::{
+    config::ConfigError,
+    project::Project,
+    terminal_workspace::PaneFocus,
+    value::{ProcessName, ProcessRef},
+};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use super::{
@@ -13,18 +19,10 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::{
-    adapter::client::{
-        ClientError, OpenRequest,
-        open::{open_beside, unopenable_here},
-        process,
-    },
-    domain::{
-        config::ConfigError,
-        project::Project,
-        terminal_workspace::PaneFocus,
-        value::{ProcessName, ProcessRef},
-    },
+use crate::adapter::client::{
+    ClientError, OpenRequest,
+    open::{open_beside, unopenable_here},
+    process,
 };
 
 /// `error` from opening the running process `name` of `project` as
@@ -132,35 +130,31 @@ mod tests {
         time::Duration,
     };
 
+    use muster_domain::{
+        config::{McpStackEdits, SettingChange},
+        coordination::Author,
+        port::{ProjectStore, SettingsStore},
+        process::ProcessState,
+        project::Project,
+        terminal_workspace::{PaneRequest, SplitDirection, WorkspaceError},
+        value::{IdleStop, ProcessName, ProjectName, ProjectRoot},
+    };
     use rmcp::model::ErrorCode;
     use serde_json::Value;
 
     use super::*;
-    use crate::{
-        adapter::{
-            client::{
-                Asked, RunningService,
-                fake_service::FakeService,
-                open::{attach_command, attach_hint},
-                recording_workspace::RecordingWorkspace,
-                served_service::ServedService,
-            },
-            mcp::test_support::{
-                Fixture, content, fixture, fixture_with, refusal, register, runtime,
-            },
-            service::{
-                Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
-                ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
-            },
+    use crate::adapter::{
+        client::{
+            Asked, RunningService,
+            fake_service::FakeService,
+            open::{attach_command, attach_hint},
+            recording_workspace::RecordingWorkspace,
+            served_service::ServedService,
         },
-        domain::{
-            config::{McpStackEdits, SettingChange},
-            coordination::Author,
-            port::{ProjectStore, SettingsStore},
-            process::ProcessState,
-            project::Project,
-            terminal_workspace::{PaneRequest, SplitDirection, WorkspaceError},
-            value::{IdleStop, ProcessName, ProjectName, ProjectRoot},
+        mcp::test_support::{Fixture, content, fixture, fixture_with, refusal, register, runtime},
+        service::{
+            Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
+            ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
         },
     };
 

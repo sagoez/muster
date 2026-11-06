@@ -2,8 +2,9 @@
 
 use std::path::Path;
 
+use muster_domain::constants::{MUSTER_OPEN_PROGRAM_ENV, MUSTER_SHELL_ENV};
+
 use super::{HookScriptError, HookShell};
-use crate::constants::{MUSTER_OPEN_PROGRAM_ENV, MUSTER_SHELL_ENV};
 
 /// The hidden subcommand the hook runs at every prompt to report its shell.
 pub const SHELL_REPORT_SUBCOMMAND: &str = "__shell-report";
@@ -137,17 +138,15 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use muster_domain::{
+        occupancy::{LoadId, LoadStart},
+        value::{EpochNanos, Pid},
+    };
     use strum::IntoEnumIterator;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::clock::nanos_now,
-        domain::{
-            occupancy::{LoadId, LoadStart},
-            value::{EpochNanos, Pid},
-        },
-    };
+    use crate::adapter::clock::nanos_now;
 
     /// The binary path the snapshots are taken with.
     const SNAPSHOT_BINARY: &str = "/usr/local/bin/muster";

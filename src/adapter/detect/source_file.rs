@@ -1,13 +1,12 @@
 use std::path::Path;
 
-use super::{candidate::Candidate, detect_source::DetectSource};
-use crate::{
-    adapter::bounded_read::read_bounded,
-    domain::{
-        config::OverCap,
-        value::{CommandLine, ProcessName},
-    },
+use muster_domain::{
+    config::OverCap,
+    value::{CommandLine, ProcessName},
 };
+
+use super::{candidate::Candidate, detect_source::DetectSource};
+use crate::adapter::bounded_read::read_bounded;
 
 /// Largest file a detector reads; anything bigger is not a stack definition
 /// worth guessing from.
@@ -78,8 +77,9 @@ pub fn shell_word(word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::value::PROCESS_NAME_MAX_CHARS;
+
     use super::*;
-    use crate::domain::value::PROCESS_NAME_MAX_CHARS;
 
     /// A script named past the name cap is never offered, since adding it
     /// would be refused; one at the cap is.

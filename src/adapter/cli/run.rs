@@ -2,6 +2,13 @@
 //! attached to.
 
 use getset::Getters;
+use muster_domain::{
+    config::ProcessDraft,
+    coordination::Author,
+    port::LocalState,
+    project::Project,
+    value::{ProcessName, ProjectName},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
@@ -19,13 +26,6 @@ use crate::{
         path::home_dir,
     },
     application::StackEditor,
-    domain::{
-        config::ProcessDraft,
-        coordination::Author,
-        port::LocalState,
-        project::Project,
-        value::{ProcessName, ProjectName},
-    },
 };
 
 /// Whether `muster up` starts a process `muster run` adds. Off: running a
@@ -134,8 +134,9 @@ fn process_name(explicit: Option<&str>, command: &[String]) -> Result<ProcessNam
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::value::NameProblem;
+
     use super::*;
-    use crate::domain::value::NameProblem;
 
     #[test]
     fn the_process_name_defaults_to_the_first_word() {

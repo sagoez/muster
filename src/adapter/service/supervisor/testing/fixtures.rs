@@ -4,24 +4,22 @@
 use std::{path::PathBuf, time::Duration};
 
 use bytesize::ByteSize as RawByteSize;
-
-use super::harness::Harness;
-use crate::{
-    adapter::service::{ServiceEvent, supervisor::SpawnGeneration},
-    domain::{
-        color_scheme::ColorScheme,
-        config::{Environment, McpStackEdits, ProcessSpec, Stack},
-        port::ProcessHandle,
-        process::{RestartPolicy, StopPolicy, StopSignal},
-        project::Project,
-        pty::{PtyError, PtySize},
-        settings::Settings,
-        value::{
-            ByteSize, CommandLine, DetachKey, IdleStop, LogMaxSize, PaneId, Pid, PositiveDuration,
-            ProcessName, ProjectName, ProjectRoot, ScrollbackLines, StopGrace,
-        },
+use muster_domain::{
+    color_scheme::ColorScheme,
+    config::{Environment, McpStackEdits, ProcessSpec, Stack},
+    port::ProcessHandle,
+    process::{RestartPolicy, StopPolicy, StopSignal},
+    project::Project,
+    pty::{PtyError, PtySize},
+    settings::Settings,
+    value::{
+        ByteSize, CommandLine, DetachKey, IdleStop, LogMaxSize, PaneId, Pid, PositiveDuration,
+        ProcessName, ProjectName, ProjectRoot, ScrollbackLines, StopGrace,
     },
 };
+
+use super::harness::Harness;
+use crate::adapter::service::{ServiceEvent, supervisor::SpawnGeneration};
 
 /// Folder of the project every harness supervisor runs.
 pub(crate) const TEST_PROJECT: &str = "/here";

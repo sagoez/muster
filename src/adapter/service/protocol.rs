@@ -4,8 +4,10 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File},
-    io::{self, Read, Write},
+    fs,
+    fs::File,
+    io,
+    io::{Read, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, OpenOptionsExt as _},

@@ -4,8 +4,7 @@ use std::{
     time::SystemTime,
 };
 
-use super::supervisor::testing::test_settings;
-use crate::domain::{
+use muster_domain::{
     config::{
         AppliedChange, AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange,
         ProcessSpec, RecordedEdit, Registration, SettingChange, Stack, StackEdit,
@@ -21,6 +20,8 @@ use crate::domain::{
     settings::Settings,
     value::{EditId, IdleStop, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
+
+use super::supervisor::testing::test_settings;
 
 /// Stacks and settings held in memory and shared with the test, which
 /// edits them as a writer would before telling the service.

@@ -1,6 +1,5 @@
+use muster_domain::pty::{ExitCause, SignalName};
 use serde::{Deserialize, Serialize};
-
-use crate::domain::pty::{ExitCause, SignalName};
 
 /// Why a process ended without success, as the holder and service carry it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

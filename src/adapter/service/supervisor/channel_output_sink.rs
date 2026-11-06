@@ -1,14 +1,12 @@
 use crossbeam_channel::Sender;
+use muster_domain::{
+    port::OutputSink,
+    pty::ProcessOutput,
+    value::{PaneId, ProjectRoot},
+};
 
 use super::spawn_generation::SpawnGeneration;
-use crate::{
-    adapter::service::ServiceEvent,
-    domain::{
-        port::OutputSink,
-        pty::ProcessOutput,
-        value::{PaneId, ProjectRoot},
-    },
-};
+use crate::adapter::service::ServiceEvent;
 
 /// An [`OutputSink`] that forwards a process's output onto the service event
 /// channel, tagged with its project, pane and spawn generation.

@@ -3,15 +3,16 @@
 //! as plain lines otherwise. The choice is made once per command, by
 //! [`Presenter::detect`], and every cliclack call lives here.
 
-use std::{
-    error::Error,
-    io::{self, Write},
-};
+use std::{error::Error, io, io::Write};
 
 use cliclack::{
     ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,
 };
 use console::{Term, style};
+use muster_domain::{
+    constants::APP_NAME,
+    value::{ProcessName, ProjectName},
+};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -24,14 +25,10 @@ use super::{
     spinners::Spinners,
     surroundings::Surroundings,
 };
-use crate::{
-    adapter::{
-        detect::Candidate,
-        sanitize::{printable, printable_lines},
-        service::ProcessStatus,
-    },
-    constants::APP_NAME,
-    domain::value::{ProcessName, ProjectName},
+use crate::adapter::{
+    detect::Candidate,
+    sanitize::{printable, printable_lines},
+    service::ProcessStatus,
 };
 
 /// The question that picks a process.

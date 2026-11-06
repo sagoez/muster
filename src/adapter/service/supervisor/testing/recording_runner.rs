@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::recording_handle::RecordingHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+use typed_builder::TypedBuilder;
+
+use super::recording_handle::RecordingHandle;
 
 /// A runner whose spawned processes record their input.
 #[derive(Getters, TypedBuilder)]

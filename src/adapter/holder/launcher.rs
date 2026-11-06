@@ -7,6 +7,7 @@ use std::{
 };
 
 use getset::Getters;
+use muster_domain::{port::ProcessRunner, pty::PtyError};
 use rustix::process::setsid;
 use typed_builder::TypedBuilder;
 
@@ -16,10 +17,7 @@ use super::{
     holder_launcher::HolderLauncher,
     server::HolderServer,
 };
-use crate::{
-    adapter::open_files::OpenFilesLimit,
-    domain::{port::ProcessRunner, pty::PtyError},
-};
+use crate::adapter::open_files::OpenFilesLimit;
 
 /// Hidden subcommand that runs one holder in the current process.
 pub const HOLDER_SUBCOMMAND: &str = "__holder";

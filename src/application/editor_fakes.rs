@@ -1,11 +1,6 @@
 use std::cell::RefCell;
 
-use super::{
-    editor_fixtures::{registration, settings, spec},
-    editor_step::EditorStep,
-    stack_editor::StackEditor,
-};
-use crate::domain::{
+use muster_domain::{
     config::{
         AppliedChange, AppliedSettings, ConfigError, ImportMode, ImportPlan, ProcessChange,
         ProcessSpec, Registration, SettingChange, Stack,
@@ -15,6 +10,12 @@ use crate::domain::{
     project::Project,
     settings::Settings,
     value::{IdleStop, ProcessName, ProjectRoot, StackRevision},
+};
+
+use super::{
+    editor_fixtures::{registration, settings, spec},
+    editor_step::EditorStep,
+    stack_editor::StackEditor,
 };
 
 /// What a refused write reports.

@@ -1,11 +1,9 @@
+use muster_domain::process::ProcessState;
 use serde::Serialize;
 use strum::{Display, EnumMessage};
 
 use super::action::Action;
-use crate::{
-    adapter::service::{ExitReason, ProcessStatus},
-    domain::process::ProcessState,
-};
+use crate::adapter::service::{ExitReason, ProcessStatus};
 
 /// What became of one process a command acted on, once it settled or the
 /// command stopped waiting. Each variant's message is how a person reads it.
@@ -280,14 +278,13 @@ fn exited_cleanly(status: &ProcessStatus) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::{
-        adapter::service::LastExit,
-        domain::{
-            pty::{ExitCause, ExitOutcome},
-            value::{Pid, ProcessName},
-        },
+    use muster_domain::{
+        pty::{ExitCause, ExitOutcome},
+        value::{Pid, ProcessName},
     };
+
+    use super::*;
+    use crate::adapter::service::LastExit;
 
     /// `api` listed in `state` with `pid` after `restarts` restarts.
     fn status(state: ProcessState, pid: Option<u32>, restarts: u32) -> ProcessStatus {

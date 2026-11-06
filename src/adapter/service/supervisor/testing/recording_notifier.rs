@@ -1,6 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::domain::{notification::Notification, port::Notifier};
+use muster_domain::{notification::Notification, port::Notifier};
 
 /// A notifier that records every notification delivered.
 #[derive(Clone, Default)]

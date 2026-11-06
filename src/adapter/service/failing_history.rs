@@ -4,8 +4,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-
-use crate::domain::{
+use muster_domain::{
     config::ConfigError,
     occupancy::PendingIdleStop,
     port::{PendingIdleStops, RaisedEdits, RunHistory},

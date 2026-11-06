@@ -1,6 +1,5 @@
 use getset::{CopyGetters, Getters};
-
-use crate::domain::value::ProcessRef;
+use muster_domain::value::ProcessRef;
 
 /// The process a lifecycle command acts on.
 #[derive(clap::Args, Getters, CopyGetters)]

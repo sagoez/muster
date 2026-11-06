@@ -1,9 +1,8 @@
-use crate::{
-    adapter::{
-        holder::LogScan,
-        service::{RunPin, WaitStatus},
-    },
-    domain::value::OutputCursor,
+use muster_domain::value::OutputCursor;
+
+use crate::adapter::{
+    holder::LogScan,
+    service::{RunPin, WaitStatus},
 };
 
 /// The scan of the log a wait is held on while its cursor is older than what

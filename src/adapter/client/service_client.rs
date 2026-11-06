@@ -10,28 +10,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
+
 use super::{
     asked::Asked, client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
     running_service::RunningService, service_log::ServiceLog, service_start::ServiceStart,
     service_status::ServiceStatus, socket_dir_check::SocketDirCheck,
     unavailable_reason::UnavailableReason,
 };
-use crate::{
-    adapter::{
-        holder::{HolderDirs, HolderId, detached, reap},
-        ipc::fits_a_socket,
-        private_dir::{
-            RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir,
-            state_dir,
-        },
-        service::{
-            Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
-            ServiceResponse, ServiceVersion,
-            protocol::{self, SERVICE_SUBCOMMAND},
-        },
+use crate::adapter::{
+    holder::{HolderDirs, HolderId, detached, reap},
+    ipc::fits_a_socket,
+    private_dir::{
+        RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir,
     },
-    constants::APP_VERSION,
-    domain::value::ProjectRoot,
+    service::{
+        Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
+        ServiceResponse, ServiceVersion, protocol, protocol::SERVICE_SUBCOMMAND,
+    },
 };
 
 /// Longest to wait for a service this client started to accept requests.
@@ -826,7 +822,8 @@ fn parent_dir(socket: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{self, Permissions},
+        fs,
+        fs::Permissions,
         os::unix::{fs::PermissionsExt, net::UnixListener},
     };
 

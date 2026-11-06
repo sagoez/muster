@@ -4,20 +4,18 @@
 use std::{os::unix::net::UnixStream, path::Path, time::Duration};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    color_scheme::ColorScheme,
+    pty::{PtyError, PtySize},
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
     client_message::ClientMessage, client_role::ClientRole, error::HolderError,
     protocol::HolderMessage,
 };
-use crate::{
-    adapter::{ipc, terminal::TerminalEmulator},
-    domain::{
-        color_scheme::ColorScheme,
-        pty::{PtyError, PtySize},
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{ipc, terminal::TerminalEmulator};
 
 /// Longest a one-shot reader waits for the holder's screen.
 const SCREEN_READ_TIMEOUT: Duration = Duration::from_secs(5);

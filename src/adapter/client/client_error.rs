@@ -3,17 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use muster_domain::{
+    config::ConfigError,
+    terminal_workspace::WorkspaceError,
+    value::{OutputCursor, ProcessName, ProjectName},
+};
 use thiserror::Error;
 
 use super::{failure_kind::FailureKind, unavailable_reason::UnavailableReason};
-use crate::{
-    adapter::{no_state_dir::NoStateDir, service::ServiceErrorKind},
-    domain::{
-        config::ConfigError,
-        terminal_workspace::WorkspaceError,
-        value::{OutputCursor, ProcessName, ProjectName},
-    },
-};
+use crate::adapter::{no_state_dir::NoStateDir, service::ServiceErrorKind};
 
 /// Shown in place of the valid names when a project has no processes.
 const NO_PROCESSES: &str = "the project has no processes";

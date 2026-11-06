@@ -1,5 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use muster_domain::{
+    config::{ConfigError, Registration, UnreadableProject},
+    occupancy::RegisteredProject,
+    port::ProjectStore,
+    project::Project,
+    value::{EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
+};
 use rusqlite::{Connection, Params, Row, params};
 
 use super::{
@@ -7,18 +14,7 @@ use super::{
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
     sqlite_store::{SqliteStore, corrupt, db_error, nanos_param},
 };
-use crate::{
-    adapter::{clock::nanos_now, sanitize::printable},
-    domain::{
-        config::{ConfigError, Registration, UnreadableProject},
-        occupancy::RegisteredProject,
-        port::ProjectStore,
-        project::Project,
-        value::{
-            EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError,
-        },
-    },
-};
+use crate::adapter::{clock::nanos_now, sanitize::printable};
 
 /// Selects a project's row id, root, name, idle-stop columns and
 /// registration time.
@@ -399,18 +395,16 @@ impl ProjectStore for SqliteStore {
 mod tests {
     use std::{fs, sync::Barrier, thread, time::Duration};
 
+    use muster_domain::{
+        config::Environment,
+        coordination::{Author, KvKey, KvValue},
+        port::{CoordinationStore, StackReader, StackStore},
+        value::{EnvName, EnvValue, PositiveDuration},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::test_support::{database, fresh_store, spec},
-        domain::{
-            config::Environment,
-            coordination::{Author, KvKey, KvValue},
-            port::{CoordinationStore, StackReader, StackStore},
-            value::{EnvName, EnvValue, PositiveDuration},
-        },
-    };
+    use crate::adapter::store::test_support::{database, fresh_store, spec};
 
     /// How many times the registration race is run.
     const RACES: usize = 20;

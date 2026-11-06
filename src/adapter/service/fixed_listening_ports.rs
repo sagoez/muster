@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, Ipv4Addr},
 };
 
-use crate::domain::{
+use muster_domain::{
     port::{ListeningPorts, ListeningSocket},
     value::Pid,
 };

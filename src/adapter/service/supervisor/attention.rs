@@ -1,15 +1,13 @@
 use std::{cell::RefCell, collections::HashSet, sync::PoisonError, time::SystemTime};
 
-use crate::{
-    adapter::service::{
-        EventDraft, EventKind, Notice, NoticeLevel, PortBlock, Refusal, SharedEventLog,
-        SharedNotices,
-    },
-    domain::{
-        notification::Notification,
-        port::Notifier,
-        value::{PaneId, ProcessName, ProjectRoot},
-    },
+use muster_domain::{
+    notification::Notification,
+    port::Notifier,
+    value::{PaneId, ProcessName, ProjectRoot},
+};
+
+use crate::adapter::service::{
+    EventDraft, EventKind, Notice, NoticeLevel, PortBlock, Refusal, SharedEventLog, SharedNotices,
 };
 
 /// Where supervision tells the user what they should know: notices, the event

@@ -3,11 +3,10 @@ use std::{
     path::PathBuf,
 };
 
+use muster_domain::value::Pid;
 use sysinfo::{
     Pid as SysinfoPid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
 };
-
-use crate::domain::value::Pid;
 
 /// The parent-to-children links of every process `sysinfo` last refreshed,
 /// for walking the tree under a supervised root.
@@ -105,7 +104,10 @@ fn refresh_one(system: &mut System, pid: SysinfoPid) {
 
 #[cfg(test)]
 mod tests {
-    use std::process::{self, Command, Stdio};
+    use std::{
+        process,
+        process::{Command, Stdio},
+    };
 
     use tempfile::TempDir;
 

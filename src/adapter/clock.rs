@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::value::{EpochNanos, EpochSeconds};
+use muster_domain::value::{EpochNanos, EpochSeconds};
 
 /// The current moment, or the epoch itself if the clock predates it. The one
 /// clock the store stamps coordination writes with and the CLI and MCP read

@@ -1,12 +1,13 @@
 //! The process commands' terminal side: picking a process by asking, and
 //! following a log until the command is interrupted.
 
-use std::{
-    convert::Infallible,
-    io::{self, Write},
-    path::Path,
-    thread,
-    time::Duration,
+use std::{convert::Infallible, io, io::Write, path::Path, thread, time::Duration};
+
+use muster_domain::{
+    constants::APP_NAME,
+    process::ProcessState,
+    project::Project,
+    value::{OutputCursor, ProcessName, ProcessRef},
 };
 
 use super::{
@@ -14,22 +15,14 @@ use super::{
     log_follower::LogFollower, output, presenter::Presenter, rendered_log::RenderedLog,
     report::print_note,
 };
-use crate::{
-    adapter::{
-        client::{
-            LogRead, ServiceClient,
-            process::{log_error, log_path, log_read_error, resolve, status},
-        },
-        holder::read_log_stream,
-        service::{ProcessStatus, ProjectStatus},
-        terminal::coloring::Coloring,
+use crate::adapter::{
+    client::{
+        LogRead, ServiceClient,
+        process::{log_error, log_path, log_read_error, resolve, status},
     },
-    constants::APP_NAME,
-    domain::{
-        process::ProcessState,
-        project::Project,
-        value::{OutputCursor, ProcessName, ProcessRef},
-    },
+    holder::read_log_stream,
+    service::{ProcessStatus, ProjectStatus},
+    terminal::coloring::Coloring,
 };
 
 /// Pause between reads of a followed log.

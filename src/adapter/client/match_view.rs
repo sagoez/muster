@@ -1,8 +1,7 @@
 use getset::Getters;
+use muster_domain::value::OutputCursor;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// The line a wait matched, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]

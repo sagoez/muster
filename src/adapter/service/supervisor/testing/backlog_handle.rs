@@ -1,12 +1,13 @@
 use std::time::{Duration, SystemTime};
 
-use super::fixtures::{BACKLOG, BACKLOG_RUN_START};
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+
+use super::fixtures::{BACKLOG, BACKLOG_RUN_START};
 
 /// A handle whose run began at [`BACKLOG_RUN_START`] and logged [`BACKLOG`]
 /// before it connected, as a holder reached after its child printed.

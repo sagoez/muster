@@ -1,7 +1,7 @@
 use crossbeam_channel::Sender;
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 use super::holder_event::HolderEvent;
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
 
 /// Forwards the child's output into the holder loop.
 pub(super) struct HolderSink(Sender<HolderEvent>);

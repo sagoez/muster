@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::ProcessName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{outcome::Outcome, process_outcome::ProcessOutcome};
-use crate::domain::value::ProcessName;
 
 /// One process removed from a stack, by `muster rm`, `muster import
 /// --replace` or `process_remove`.

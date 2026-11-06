@@ -7,6 +7,12 @@ use std::{
 };
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::ConfigError,
+    port::{LocalState, StateChangeNotifier},
+    project::Project,
+    value::{IdleStop, ProjectName, ProjectRoot},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -28,12 +34,6 @@ use crate::{
         sanitize::printable,
     },
     application::StackEditor,
-    domain::{
-        config::ConfigError,
-        port::{LocalState, StateChangeNotifier},
-        project::Project,
-        value::{IdleStop, ProjectName, ProjectRoot},
-    },
 };
 
 /// Title of the `projects` reports.
@@ -358,22 +358,20 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        config::ImportMode,
+        port::{ProjectStore, SettingsReader, StackStore},
+    };
     use rusqlite::Connection;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            cli::report::plain,
-            client::recording_notifier::RecordingNotifier,
-            store::{
-                SqliteStore,
-                test_support::{database, fresh_store, spec},
-            },
-        },
-        domain::{
-            config::ImportMode,
-            port::{ProjectStore, SettingsReader, StackStore},
+    use crate::adapter::{
+        cli::report::plain,
+        client::recording_notifier::RecordingNotifier,
+        store::{
+            SqliteStore,
+            test_support::{database, fresh_store, spec},
         },
     };
 

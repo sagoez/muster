@@ -1,11 +1,10 @@
-use super::{entity::Supervisor, holder_screen::HolderScreen, screen_reply::ScreenReply};
-use crate::{
-    adapter::service::NoticeLevel,
-    domain::{
-        pty::{PtyError, ScreenSource},
-        value::{PaneId, ProcessName},
-    },
+use muster_domain::{
+    pty::{PtyError, ScreenSource},
+    value::{PaneId, ProcessName},
 };
+
+use super::{entity::Supervisor, holder_screen::HolderScreen, screen_reply::ScreenReply};
+use crate::adapter::service::NoticeLevel;
 
 /// Prefix for a holder whose screen could not be read; the last screen the
 /// service saw was answered instead.
@@ -108,19 +107,18 @@ mod tests {
         thread,
     };
 
+    use muster_domain::{
+        port::ProcessRunner,
+        process::RestartPolicy,
+        pty::{ExitOutcome, ProcessOutput, PtySize},
+        value::OutputCursor,
+    };
+
     use super::*;
-    use crate::{
-        adapter::{
-            holder::{ClientMessage, HolderMessage, ServedScreen},
-            service::{LaunchEnvironment, supervisor::testing::*},
-            test_scratch::short_scratch,
-        },
-        domain::{
-            port::ProcessRunner,
-            process::RestartPolicy,
-            pty::{ExitOutcome, ProcessOutput, PtySize},
-            value::OutputCursor,
-        },
+    use crate::adapter::{
+        holder::{ClientMessage, HolderMessage, ServedScreen},
+        service::{LaunchEnvironment, supervisor::testing::*},
+        test_scratch::short_scratch,
     };
 
     const PANE: u64 = 0;

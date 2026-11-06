@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use crate::domain::{
+use muster_domain::{
     config::ConfigError,
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,

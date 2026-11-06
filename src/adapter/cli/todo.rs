@@ -1,23 +1,21 @@
+use muster_domain::{
+    coordination::{
+        Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
+        TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoStatus,
+        TodoUpdate,
+    },
+    port::CoordinationStore,
+    value::{EpochSeconds, ProjectRoot},
+};
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, page_cursor::parse_cursor, report::attribution, row::Row,
     row_kind::RowKind, todo_command::TodoCommand,
 };
-use crate::{
-    adapter::{
-        client::{PageSize, TodoPage, TodoView},
-        clock::epoch_now,
-    },
-    domain::{
-        coordination::{
-            Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
-            TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoStatus,
-            TodoUpdate,
-        },
-        port::CoordinationStore,
-        value::{EpochSeconds, ProjectRoot},
-    },
+use crate::adapter::{
+    client::{PageSize, TodoPage, TodoView},
+    clock::epoch_now,
 };
 
 /// What a refusal calls a todo's title.
@@ -242,18 +240,16 @@ fn remove(
 mod tests {
     use std::{fs, time::Duration};
 
+    use muster_domain::{
+        coordination::{Claim, TodoLease},
+        port::StackStore,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::{
-            SqliteStore,
-            test_support::{fresh_store, spec},
-        },
-        domain::{
-            coordination::{Claim, TodoLease},
-            port::StackStore,
-        },
+    use crate::adapter::store::{
+        SqliteStore,
+        test_support::{fresh_store, spec},
     };
 
     /// A store with one registered project, and the scratch folder holding

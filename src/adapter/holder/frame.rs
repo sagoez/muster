@@ -1,4 +1,7 @@
-use std::io::{self, Read, Write};
+use std::{
+    io,
+    io::{Read, Write},
+};
 
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;

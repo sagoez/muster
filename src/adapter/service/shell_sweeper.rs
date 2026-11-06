@@ -1,9 +1,9 @@
 use std::{sync::Arc, thread, time::Duration};
 
 use crossbeam_channel::{Sender, bounded};
+use muster_domain::{occupancy::ShellId, port::ShellRegistry};
 
 use super::event::ServiceEvent;
-use crate::domain::{occupancy::ShellId, port::ShellRegistry};
 
 /// How often the service checks that the shells it knows still run.
 pub const SHELL_SWEEP_INTERVAL: Duration = Duration::from_secs(5);

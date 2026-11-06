@@ -1,8 +1,9 @@
-use super::backlog_handle::BacklogHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::backlog_handle::BacklogHandle;
 
 /// A runner whose processes printed [`BACKLOG`](super::fixtures::BACKLOG)
 /// before their handle connected, and stream nothing after.

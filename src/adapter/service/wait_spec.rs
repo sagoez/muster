@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use getset::Getters;
+use muster_domain::value::OutputCursor;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::wait_condition::WaitCondition;
-use crate::domain::value::OutputCursor;
 
 /// One wait as a client asks for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

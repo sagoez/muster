@@ -12,6 +12,13 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use muster_domain::{
+    config::ConfigError,
+    port::StackEditLog,
+    project::Project,
+    value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
+};
+
 use super::{
     action::Action,
     action_report::ActionReport,
@@ -31,20 +38,12 @@ use super::{
     settling::{Settling, UNBOUNDED},
     wait_end::WaitEnd,
 };
-use crate::{
-    adapter::{
-        holder::{HolderError, LogQuery, read_log, read_log_stream},
-        service::{
-            BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
-            ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
-            ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
-        },
-    },
-    domain::{
-        config::ConfigError,
-        port::StackEditLog,
-        project::Project,
-        value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
+use crate::adapter::{
+    holder::{HolderError, LogQuery, read_log, read_log_stream},
+    service::{
+        BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
+        ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+        ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
     },
 };
 
@@ -1060,19 +1059,17 @@ fn refusal(
 mod tests {
     use std::fs;
 
+    use muster_domain::{config::StackEdit, coordination::Author, port::StackStore};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::{
-            client::fake_service::FakeService,
-            service::NoticeLevel,
-            store::{
-                SqliteStore,
-                test_support::{fresh_store, spec},
-            },
+    use crate::adapter::{
+        client::fake_service::FakeService,
+        service::NoticeLevel,
+        store::{
+            SqliteStore,
+            test_support::{fresh_store, spec},
         },
-        domain::{config::StackEdit, coordination::Author, port::StackStore},
     };
 
     /// A wait whose caller's bound is the shorter one was cut short; one that

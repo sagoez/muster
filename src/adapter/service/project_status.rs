@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::project::Project;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{occupancy_status::OccupancyStatus, process_status::ProcessStatus};
-use crate::domain::project::Project;
 
 /// A point-in-time view of one project's supervised processes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Getters, TypedBuilder)]

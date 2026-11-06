@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::coordination::{EntryPosition, Todo};
 use serde::{Serialize, Serializer};
 use typed_builder::TypedBuilder;
 
 use super::{PageSize, TodoView};
-use crate::domain::coordination::{EntryPosition, Todo};
 
 /// One page of a todo listing: the todos, whether more follow, and the
 /// position to resume after when they do.

@@ -1,4 +1,4 @@
-use crate::domain::port::ProcessHandle;
+use muster_domain::port::ProcessHandle;
 
 /// The running child, force-killed when dropped before its exit was seen, so
 /// a holder that stops serving on any path never leaves it running unreachable.

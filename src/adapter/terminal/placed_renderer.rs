@@ -1,5 +1,6 @@
+use muster_domain::value::OutputCursor;
+
 use super::{log_line::LogLine, log_renderer::LogRenderer};
-use crate::domain::value::OutputCursor;
 
 /// A [`LogRenderer`] that knows where in a process's output each byte it
 /// renders sits, so a reader can tell a gap and start over after it.

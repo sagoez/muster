@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use super::{holder_pool::HolderPool, supervisor::HolderAdopter};
-use crate::{
-    adapter::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail},
-    domain::{
-        port::{OutputSink, ProcessHandle, ProcessRunner},
-        pty::{PtyError, SpawnRequest},
-        value::{OutputCursor, Pid, ProcessName, ProjectRoot},
-    },
+use muster_domain::{
+    port::{OutputSink, ProcessHandle, ProcessRunner},
+    pty::{PtyError, SpawnRequest},
+    value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+
+use super::{holder_pool::HolderPool, supervisor::HolderAdopter};
+use crate::adapter::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail};
 
 /// One service-wide [`HolderPool`] handed to a supervisor as both its runner
 /// and its adopter, so every project launches and adopts through the same

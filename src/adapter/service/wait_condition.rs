@@ -1,12 +1,12 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
-use super::state_goal::StateGoal;
-use crate::domain::{
+use muster_domain::{
     process::LogPattern,
     value::{LocalPort, LocalUrl},
 };
+use serde::{Deserialize, Serialize};
+
+use super::state_goal::StateGoal;
 
 /// What a wait waits for. One shape serves waits, starts with a wait, and
 /// stored readiness.
@@ -61,8 +61,9 @@ impl fmt::Display for WaitCondition {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::process::ProcessState;
+
     use super::*;
-    use crate::domain::process::ProcessState;
 
     #[test]
     fn stopped_means_not_running_for_any_reason() {

@@ -1,9 +1,9 @@
 use std::{thread, time::Duration};
 
 use crossbeam_channel::{Sender, bounded};
+use muster_domain::{port::ListeningPorts, value::Pid};
 
 use super::event::ServiceEvent;
-use crate::domain::{port::ListeningPorts, value::Pid};
 
 /// How often the listening ports of running processes are resampled.
 pub const PORT_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);

@@ -1,11 +1,11 @@
 use std::time::SystemTime;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{OutputCursor, ProcessName, ProjectRoot};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{event_kind::EventKind, event_seq::EventSeq};
-use crate::domain::value::{OutputCursor, ProcessName, ProjectRoot};
 
 /// One entry of the service's event log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder)]

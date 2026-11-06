@@ -1,7 +1,4 @@
-use std::{
-    fs::File,
-    io::{self, Write},
-};
+use std::{fs::File, io, io::Write};
 
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 

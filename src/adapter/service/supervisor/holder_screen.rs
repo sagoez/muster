@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use getset::{CopyGetters, Getters};
-use typed_builder::TypedBuilder;
-
-use super::spawn_generation::SpawnGeneration;
-use crate::domain::{
+use muster_domain::{
     port::ScreenReader,
     pty::PtyError,
     value::{PaneId, ProjectRoot},
 };
+use typed_builder::TypedBuilder;
+
+use super::spawn_generation::SpawnGeneration;
 
 /// The screen of a process served elsewhere, still to be read. The read can
 /// block, so the supervisor hands it to its caller instead of reading it on

@@ -1,8 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::coordination::KeyValue;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::coordination::KeyValue;
 
 /// Most characters of a value a listing shows; reading the entry by key
 /// returns it whole.
@@ -39,11 +38,12 @@ impl From<&KeyValue> for ListedValue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         coordination::{Author, KvKey},
         value::EpochSeconds,
     };
+
+    use super::*;
 
     /// A long value is cut and marked; a short one is listed whole, unmarked.
     #[test]

@@ -1,8 +1,7 @@
 use std::sync::Mutex;
 
 use getset::{Getters, MutGetters};
-
-use crate::domain::{port::StateChangeNotifier, value::ProjectRoot};
+use muster_domain::{port::StateChangeNotifier, value::ProjectRoot};
 
 /// A [`StateChangeNotifier`] that records what it was told.
 #[derive(Default, Getters, MutGetters)]

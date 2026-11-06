@@ -4,6 +4,11 @@ use std::{
     sync::Arc,
 };
 
+use muster_domain::{
+    config::ConfigError,
+    port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
+    value::{Pid, ProjectRoot},
+};
 use rustix::process::geteuid;
 use tempfile::TempDir;
 
@@ -18,11 +23,6 @@ use crate::{
         private_dir::claimed_by,
         shell::ShellFiles,
         store::SqliteStore,
-    },
-    domain::{
-        config::ConfigError,
-        port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
-        value::{Pid, ProjectRoot},
     },
     error::MusterError,
 };
@@ -187,11 +187,10 @@ impl CliPorts for FakePorts {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::terminal_workspace::{PaneCommand, PaneFocus, PaneRequest};
+
     use super::*;
-    use crate::{
-        adapter::store::test_support::fresh_store,
-        domain::terminal_workspace::{PaneCommand, PaneFocus, PaneRequest},
-    };
+    use crate::adapter::store::test_support::fresh_store;
 
     /// Ports outside a workspace hand the CLI none; ports in one hand it the
     /// workspace whose asks the test then reads.

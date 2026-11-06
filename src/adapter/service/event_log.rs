@@ -4,13 +4,13 @@ use std::{
     time::SystemTime,
 };
 
+use muster_domain::value::ProjectRoot;
 use uuid::Uuid;
 
 use super::{
     event_draft::EventDraft, event_kind::EventKind, event_page::EventPage, event_seq::EventSeq,
     shared_event_log::SharedEventLog, stack_event::StackEvent,
 };
-use crate::domain::value::ProjectRoot;
 
 /// Most events kept in memory; the oldest is dropped to make room.
 pub const MAX_EVENTS: usize = 1024;
@@ -148,8 +148,9 @@ impl EventLog {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::value::ProcessName;
+
     use super::*;
-    use crate::domain::value::ProcessName;
 
     /// The epoch of every test log.
     const EPOCH: u32 = 7;

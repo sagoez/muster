@@ -1,8 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{ProcessName, ProjectName, WorkspacePaneId};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::{ProcessName, ProjectName, WorkspacePaneId};
 
 /// A process opened in a new pane, as `--json` and MCP show it:
 /// `{"project": "shop", "process": "web", "pane": "w1:p4", "read_only": false}`.

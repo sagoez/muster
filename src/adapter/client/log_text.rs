@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::{OutputCursor, ProcessName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::project_identity_view::ProjectIdentityView;
-use crate::domain::value::{OutputCursor, ProcessName};
 
 /// What `muster logs` shows of one process: the `--json` output of `logs`,
 /// and of each log line `logs -f` prints.

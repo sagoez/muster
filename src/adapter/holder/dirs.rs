@@ -4,10 +4,10 @@ use std::{
 };
 
 use getset::Getters;
+use muster_domain::value::{ProcessName, ProjectRoot};
 use typed_builder::TypedBuilder;
 
 use super::{error::HolderError, id::HolderId, server::ensure_private_dir};
-use crate::domain::value::{ProcessName, ProjectRoot};
 
 /// File extension of a holder socket.
 const SOCKET_EXTENSION: &str = "sock";
@@ -156,15 +156,12 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs::{self, Permissions},
-        os::unix::fs::PermissionsExt,
-    };
+    use std::{fs, fs::Permissions, os::unix::fs::PermissionsExt};
 
+    use muster_domain::value::PROCESS_NAME_MAX_CHARS;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::value::PROCESS_NAME_MAX_CHARS;
 
     /// A directory mode other users can enter.
     const SHARED_DIR_MODE: u32 = 0o755;

@@ -3,15 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::value::OutputCursor;
+
 use super::{fault_budget::FaultBudget, tap_line::TapLine};
-use crate::{
-    adapter::terminal::{
-        escape::{LINE_FEED, RUN_RESET_AT, RUN_START},
-        log_line::LogLine,
-        log_renderer::LogRenderer,
-        placed_renderer::PlacedRenderer,
-    },
-    domain::value::OutputCursor,
+use crate::adapter::terminal::{
+    escape::{LINE_FEED, RUN_RESET_AT, RUN_START},
+    log_line::LogLine,
+    log_renderer::LogRenderer,
+    placed_renderer::PlacedRenderer,
 };
 
 /// Bytes of rendered lines a tap keeps, newest last.

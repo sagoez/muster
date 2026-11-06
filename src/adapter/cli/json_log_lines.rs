@@ -1,18 +1,14 @@
-use std::{
-    io::{self, Write},
-    time::Instant,
-};
+use std::{io, io::Write, time::Instant};
+
+use muster_domain::value::OutputCursor;
 
 use super::{
     followed_output::FollowedOutput,
     rendered_log::{PENDING_LINE_IDLE, gap_line},
 };
-use crate::{
-    adapter::{
-        client::LogText,
-        terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
-    },
-    domain::value::OutputCursor,
+use crate::adapter::{
+    client::LogText,
+    terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
 };
 
 /// A writer that turns a followed log's bytes into one JSON [`LogText`] line
@@ -139,13 +135,11 @@ impl FollowedOutput for JsonLogLines<'_> {
 mod tests {
     use std::{path::PathBuf, thread, time::Duration};
 
+    use muster_domain::value::{ProcessName, ProjectName};
     use serde_json::Value;
 
     use super::*;
-    use crate::{
-        adapter::{client::ProjectIdentityView, terminal::line_drawing::MAX_LINE_CELLS},
-        domain::value::{ProcessName, ProjectName},
-    };
+    use crate::adapter::{client::ProjectIdentityView, terminal::line_drawing::MAX_LINE_CELLS};
 
     /// How far past the idle wait the prompt tests look.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);

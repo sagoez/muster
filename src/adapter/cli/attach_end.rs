@@ -1,5 +1,6 @@
+use muster_domain::pty::ExitOutcome;
+
 use super::ending_signal::EndingSignal;
-use crate::domain::pty::ExitOutcome;
 
 /// How a `muster attach` session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]

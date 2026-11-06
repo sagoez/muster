@@ -1,12 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use getset::Getters;
+use muster_domain::{config::ProcessSpec, process::Process, value::PaneId};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    application::Workspace,
-    domain::{config::ProcessSpec, process::Process, value::PaneId},
-};
+use crate::application::Workspace;
 
 /// Brings a live workspace in line with a project's stored stack, matching
 /// processes by name key since names are unique and never renamed. Pure: the
@@ -95,12 +93,13 @@ impl StackSync {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         config::Environment,
         process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
         value::{CommandLine, ProcessName, StopGrace},
     };
+
+    use super::*;
 
     /// `café` with a precomposed `é`.
     const CAFE_COMPOSED: &str = "caf\u{e9}";

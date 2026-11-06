@@ -1,12 +1,10 @@
 //! What the attach tests and their fixtures share: the test terminal's
 //! size, the process attached to and the detach key.
 
+use muster_domain::value::{DetachKey, ProcessName};
 use tempfile::TempDir;
 
-use crate::{
-    adapter::test_scratch::short_scratch,
-    domain::value::{DetachKey, ProcessName},
-};
+use crate::adapter::test_scratch::short_scratch;
 
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "ma-";

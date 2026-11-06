@@ -1,16 +1,14 @@
 use getset::Getters;
+use muster_domain::{
+    coordination::{
+        Author, TODO_DEPS_MAX, Todo, TodoClaim, TodoDeps, TodoId, TodoStatus, TodoTitle,
+    },
+    value::EpochSeconds,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::{WireForm, form, optional_form},
-    domain::{
-        coordination::{
-            Author, TODO_DEPS_MAX, Todo, TodoClaim, TodoDeps, TodoId, TodoStatus, TodoTitle,
-        },
-        value::EpochSeconds,
-    },
-};
+use crate::adapter::wire::{WireForm, form, optional_form};
 
 /// A todo as a coordination snapshot keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

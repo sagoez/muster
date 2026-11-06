@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::domain::coordination::{AgentId, Author, LockHolder, SessionId};
+use muster_domain::coordination::{AgentId, Author, LockHolder, SessionId};
 
 /// Who one MCP connection writes as, resolved once the client has named
 /// itself, whether it has been told yet, and the session its locks belong to.

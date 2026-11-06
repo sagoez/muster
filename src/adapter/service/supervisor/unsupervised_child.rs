@@ -1,12 +1,10 @@
 use std::time::Instant;
 
 use getset::CopyGetters;
+use muster_domain::value::{Pid, StartToken};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget},
-    domain::value::{Pid, StartToken},
-};
+use crate::adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 
 /// A child left running under a holder the service cannot reach: its pid and
 /// the start token that tells it apart from a later process reusing the pid.
@@ -86,7 +84,11 @@ impl UnsupervisedChild {
 mod tests {
     use std::process;
     #[cfg(target_os = "linux")]
-    use std::{process::Command, thread, time::Duration};
+    use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::thread;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
 
     use super::*;
 

@@ -1,5 +1,10 @@
 //! `muster config`: list, read and change the settings.
 
+use muster_domain::{
+    config::{SettingChange, SettingKey},
+    coordination::Author,
+    settings::Settings,
+};
 use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
@@ -7,14 +12,7 @@ use super::{
     error::CliError, invocation::Invocation, output::COLUMN_GAP, report::Report, row::Row,
     row_kind::RowKind,
 };
-use crate::{
-    adapter::client::SettingView,
-    domain::{
-        config::{SettingChange, SettingKey},
-        coordination::Author,
-        settings::Settings,
-    },
-};
+use crate::adapter::client::SettingView;
 
 /// Title of the `config set` report.
 const CONFIG_TITLE: &str = "muster config";
@@ -78,17 +76,16 @@ pub fn set_rows(view: &SettingView) -> Report {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::{
-        adapter::client::SettingsView,
-        domain::{
-            color_scheme::ColorScheme,
-            config::McpStackEdits,
-            process::{RestartPolicy, StopSignal},
-            pty::PtySize,
-            value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
-        },
+    use muster_domain::{
+        color_scheme::ColorScheme,
+        config::McpStackEdits,
+        process::{RestartPolicy, StopSignal},
+        pty::PtySize,
+        value::{DetachKey, LogMaxSize, ScrollbackLines, StopGrace},
     };
+
+    use super::*;
+    use crate::adapter::client::SettingsView;
 
     /// Settings as the initial migration seeds them.
     fn seeded() -> Settings {

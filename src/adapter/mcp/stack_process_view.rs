@@ -1,16 +1,14 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    port::ListeningSocket,
+    process::{ProcessState, Readiness},
+    value::{OutputCursor, Pid, ProcessName},
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{blocked_view::BlockedView, last_exit_view::LastExitView};
-use crate::{
-    adapter::service::{ProcessStatus, StackUrl},
-    domain::{
-        port::ListeningSocket,
-        process::{ProcessState, Readiness},
-        value::{OutputCursor, Pid, ProcessName},
-    },
-};
+use crate::adapter::service::{ProcessStatus, StackUrl};
 
 /// One process as `stack_status` shows it; a field with no value is left
 /// out to save the agent's tokens.

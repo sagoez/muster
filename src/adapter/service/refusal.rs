@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::value::ProcessName;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::port_block::PortBlock;
-use crate::domain::value::ProcessName;
 
 /// One process a project-wide request left alone, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

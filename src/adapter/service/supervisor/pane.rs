@@ -1,15 +1,15 @@
 use std::time::Instant;
 
 use getset::{CopyGetters, Getters, MutGetters, Setters};
+use muster_domain::{
+    port::ProcessHandle,
+    process::{ExitIntent, ProcessState},
+};
 use typed_builder::TypedBuilder;
 
 use super::{
     carried_pane::CarriedPane, config_membership::ConfigMembership,
     shutdown_generation::ShutdownGeneration, unsupervised_child::UnsupervisedChild,
-};
-use crate::domain::{
-    port::ProcessHandle,
-    process::{ExitIntent, ProcessState},
 };
 
 /// One supervised pane: its last known screen and, while alive, its process

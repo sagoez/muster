@@ -1,7 +1,6 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// One line read back from a process's log, stripped, and where it began.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, CopyGetters, TypedBuilder)]

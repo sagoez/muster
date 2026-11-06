@@ -1,11 +1,10 @@
+use muster_domain::value::ProjectRoot;
+
 use super::{
     asked::Asked, client_error::ClientError, service_client::ServiceClient,
     service_status::ServiceStatus,
 };
-use crate::{
-    adapter::service::{Notice, ProjectStatus, ServiceRequest},
-    domain::value::ProjectRoot,
-};
+use crate::adapter::service::{Notice, ProjectStatus, ServiceRequest};
 
 /// Driven port: how a driver reaches the muster service, injected so a test
 /// runs without ever touching the user's real service socket.

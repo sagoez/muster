@@ -3,8 +3,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use bytesize::ByteSize as RawByteSize;
-
-use crate::domain::{
+use muster_domain::{
     color_scheme::ColorScheme,
     process::{StopPolicy, StopSignal},
     pty::{PtySize, SpawnRequest},

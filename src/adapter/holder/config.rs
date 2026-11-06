@@ -1,5 +1,6 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
+    fs::OpenOptions,
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -7,11 +8,11 @@ use std::{
 };
 
 use getset::{CopyGetters, Getters};
+use muster_domain::pty::SpawnRequest;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{error::HolderError, id::HolderId};
-use crate::domain::pty::SpawnRequest;
 
 /// Mode of a handed-over file or holder record: owner read and write only,
 /// since either can carry the child's environment.
@@ -118,15 +119,15 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use bytesize::ByteSize as RawByteSize;
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::domain::{
+    use muster_domain::{
         color_scheme::ColorScheme,
         process::{StopPolicy, StopSignal},
         pty::PtySize,
         value::{ByteSize, CommandLine, ProcessName, StopGrace},
     };
+    use tempfile::TempDir;
+
+    use super::*;
 
     /// A log cap with no exact human-readable form.
     const ODD_CAP_BYTES: u64 = 1_234_567;

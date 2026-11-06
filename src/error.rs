@@ -1,11 +1,9 @@
 use std::io;
 
+use muster_domain::{config::ConfigError, pty::PtyError};
 use thiserror::Error;
 
-use crate::{
-    adapter::{holder::HolderError, mcp::McpError, service::ServiceError},
-    domain::{config::ConfigError, pty::PtyError},
-};
+use crate::adapter::{holder::HolderError, mcp::McpError, service::ServiceError};
 
 /// Top-level error type for muster.
 ///

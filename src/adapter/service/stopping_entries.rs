@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::launch_environment::LaunchEnvironment;
-use crate::domain::{
+use muster_domain::{
     occupancy::ShellId,
     value::{ProcessName, ProjectRoot},
 };
+use typed_builder::TypedBuilder;
+
+use super::launch_environment::LaunchEnvironment;
 
 /// An entering that found autostart processes still stopping.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]

@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::pty::{ExitOutcome, SpawnHistory};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{WireForm, optional_form};
-use crate::domain::pty::{ExitOutcome, SpawnHistory};
 
 /// What a process's earlier runs leave to the next, as a holder keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]
@@ -37,8 +37,9 @@ impl WireForm for SpawnHistory {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::pty::ExitCause;
+
     use super::*;
-    use crate::domain::pty::ExitCause;
 
     /// A history travels in its kebab-case form and comes back whole.
     #[test]

@@ -1,7 +1,6 @@
-use crate::{
-    adapter::probe::{probe_http, probe_port},
-    domain::value::{LocalPort, LocalUrl},
-};
+use muster_domain::value::{LocalPort, LocalUrl};
+
+use crate::adapter::probe::{probe_http, probe_port};
 
 /// What a probe tries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

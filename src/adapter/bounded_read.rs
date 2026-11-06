@@ -2,11 +2,7 @@
 //! a FIFO or device is never waited on, and a huge file is never
 //! read into memory.
 
-use std::{
-    fs::File,
-    io::{self, Read},
-    path::Path,
-};
+use std::{fs::File, io, io::Read, path::Path};
 
 use rustix::fs::{Mode, OFlags, open};
 

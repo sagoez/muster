@@ -1,10 +1,11 @@
 use std::{cell::RefCell, collections::VecDeque};
 
-use super::fake_handle::FakeHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::fake_handle::FakeHandle;
 
 /// What a [`ScriptedRunner`]'s failed spawns report.
 const SPAWN_FAILED: &str = "spawn failed";

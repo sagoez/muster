@@ -1,7 +1,7 @@
+use muster_domain::pty::ExitOutcome;
 use serde::{Deserialize, Serialize};
 
 use super::{ExitCauseWire, WireForm};
-use crate::domain::pty::ExitOutcome;
 
 /// How a process ended, as the holder and service carry it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

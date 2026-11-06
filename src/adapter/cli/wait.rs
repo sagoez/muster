@@ -3,15 +3,14 @@
 
 use std::time::{Duration, Instant};
 
+use muster_domain::{process::PatternKind, value::OutputCursor};
+
 use super::{error::CliError, wait_args::WaitArgs};
-use crate::{
-    adapter::{
-        client::{ClientError, ElapsedSeconds},
-        holder::LineMatcher,
-        sanitize::printable,
-        service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
-    },
-    domain::{process::PatternKind, value::OutputCursor},
+use crate::adapter::{
+    client::{ClientError, ElapsedSeconds},
+    holder::LineMatcher,
+    sanitize::printable,
+    service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
 
 /// Longest one wait request asks the service for; a longer wait is a series
@@ -124,11 +123,10 @@ fn status_words(status: WaitStatus) -> &'static str {
 mod tests {
     use std::{cell::Cell, thread};
 
+    use muster_domain::value::ProcessName;
+
     use super::*;
-    use crate::{
-        adapter::service::{MatchedLine, StateGoal},
-        domain::value::ProcessName,
-    };
+    use crate::adapter::service::{MatchedLine, StateGoal};
 
     /// A wait that ended `status` with its output at `cursor`.
     fn outcome(status: WaitStatus, cursor: u64) -> WaitOutcome {

@@ -1,3 +1,4 @@
+use muster_domain::config::ConfigError;
 use rmcp::{
     ErrorData,
     handler::server::tool::IntoCallToolResult,
@@ -6,12 +7,9 @@ use rmcp::{
 use serde_json::Value;
 
 use super::tool_error::ToolError;
-use crate::{
-    adapter::{
-        client::{ClientError, FailureView},
-        service::ServiceErrorKind,
-    },
-    domain::config::ConfigError,
+use crate::adapter::{
+    client::{ClientError, FailureView},
+    service::ServiceErrorKind,
 };
 
 /// What an agent does about a muster service that runs another version, since
@@ -229,13 +227,11 @@ fn refusal_message(kind: ServiceErrorKind, message: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::value::{ProcessName, ProjectName};
     use rmcp::model::ErrorCode;
 
     use super::*;
-    use crate::{
-        adapter::{client::RefusedFolder, no_state_dir::NoStateDir},
-        domain::value::{ProcessName, ProjectName},
-    };
+    use crate::adapter::{client::RefusedFolder, no_state_dir::NoStateDir};
 
     /// Failures whose command-line wording names a muster command or flag.
     fn command_naming_failures() -> Vec<ToolError> {

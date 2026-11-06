@@ -1,4 +1,7 @@
 [workspace]
+members = [
+    "muster-domain",
+]
 resolver = "3"
 
 [workspace.package]
@@ -10,6 +13,10 @@ repository = "https://github.com/sagoez/muster"
 readme = "README.md"
 
 [workspace.dependencies]
+# Workspace crates; AGENTS.md says why each one is a crate. Each pins the
+# exact sibling version: they have no stable API of their own.
+muster-domain = { path = "muster-domain", version = "=0.11.0" }
+
 alacritty_terminal = "0.26"
 anstream = "1.0.0"
 anstyle = "1.0.14"
@@ -83,6 +90,8 @@ name = "muster"
 path = "src/main.rs"
 
 [dependencies]
+muster-domain = { workspace = true }
+
 alacritty_terminal = { workspace = true }
 anstream = { workspace = true }
 anstyle = { workspace = true }
@@ -125,6 +134,8 @@ ureq = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+muster-domain = { workspace = true, features = ["testing"] }
+
 insta = { workspace = true }
 rustix = { workspace = true, features = ["pty"] }
 tempfile = { workspace = true }

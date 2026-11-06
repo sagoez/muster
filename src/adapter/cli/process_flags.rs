@@ -1,17 +1,15 @@
 use getset::CopyGetters;
+use muster_domain::{
+    config::{ConfigError, DeclaredPorts},
+    process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
+    value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
+};
 
 use super::{
     args::{positive_duration, restart_parser, stop_grace, stop_signal_parser},
     error::CliError,
 };
-use crate::{
-    adapter::holder::LineMatcher,
-    domain::{
-        config::{ConfigError, DeclaredPorts},
-        process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
-        value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
-    },
-};
+use crate::adapter::holder::LineMatcher;
 
 /// Separates a variable's name from its value in `--env KEY=VALUE`.
 const ENV_SEPARATOR: char = '=';
@@ -116,7 +114,7 @@ impl ProcessFlags {
     /// # Errors
     /// Returns [`ConfigError::RepeatedPort`] for a port given twice, and
     /// [`ConfigError::TooManyPorts`] past
-    /// [`DECLARED_PORTS_MAX`](crate::domain::config::DECLARED_PORTS_MAX).
+    /// [`DECLARED_PORTS_MAX`](muster_domain::config::DECLARED_PORTS_MAX).
     pub fn ports(&self) -> Result<Option<DeclaredPorts>, ConfigError> {
         if self.port.is_empty() {
             return Ok(None);

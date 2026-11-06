@@ -5,8 +5,8 @@
 //! text, and repaint the screen with its modes onto a fresh terminal.
 
 use std::{
-    mem,
-    panic::{self, AssertUnwindSafe},
+    mem, panic,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
 
@@ -20,9 +20,14 @@ use alacritty_terminal::{
         cell::{Cell, Flags},
         test::TermSize,
     },
-    vte::ansi::{
-        self, CharsetIndex, Color as VtColor, CursorShape, NamedColor, Rgb, StandardCharset,
+    vte::{
+        ansi,
+        ansi::{CharsetIndex, Color as VtColor, CursorShape, NamedColor, Rgb, StandardCharset},
     },
+};
+use muster_domain::{
+    color_scheme::ColorScheme,
+    value::{Cols, Rows},
 };
 
 #[cfg(test)]
@@ -43,10 +48,6 @@ use super::{
     screen_switch::ScreenSwitch,
     snapshot_cell::SnapshotCell,
     tab_stops::TabStops,
-};
-use crate::domain::{
-    color_scheme::ColorScheme,
-    value::{Cols, Rows},
 };
 
 /// Full terminal reset (RIS), the first byte sequence of a repaint.
@@ -845,15 +846,13 @@ mod tests {
         term::TermMode,
         vte::ansi::{Color as VtColor, NamedColor, Rgb},
     };
+    use muster_domain::value::{Cols, Rows};
 
     use super::{
         CURSOR_STYLE_FINAL, CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND,
         ScreenSwitch, TerminalEmulator, resolve_color, to_color,
     };
-    use crate::{
-        adapter::terminal::bounded_parser::MAX_PENDING_BYTES,
-        domain::value::{Cols, Rows},
-    };
+    use crate::adapter::terminal::bounded_parser::MAX_PENDING_BYTES;
 
     /// `count` rows.
     fn rows(count: u16) -> Rows {

@@ -1,17 +1,15 @@
 use std::path::PathBuf;
 
+use muster_domain::{
+    config::{ConfigError, McpStackEdits, SettingKey},
+    value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
+};
 use thiserror::Error;
 
-use crate::{
-    adapter::{
-        client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint},
-        holder::PatternError,
-        sanitize::printable,
-    },
-    domain::{
-        config::{ConfigError, McpStackEdits, SettingKey},
-        value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
-    },
+use crate::adapter::{
+    client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint},
+    holder::PatternError,
+    sanitize::printable,
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the

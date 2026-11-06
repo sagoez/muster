@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::process::{LogPattern, PatternKind, PatternText};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{WireForm, form};
-use crate::domain::process::{LogPattern, PatternKind, PatternText};
 
 /// A pattern one output line is tested against, as a wait carries it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

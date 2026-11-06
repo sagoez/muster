@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::constants::APP_NAME;
+use muster_domain::constants::APP_NAME;
 
 /// What Linux appends to the path of a running binary that was replaced or
 /// removed since it started.

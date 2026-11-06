@@ -1,12 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    project::Project,
+    value::{IdleStop, ProjectName, ProjectRoot},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{WireForm, optional_form};
-use crate::domain::{
-    project::Project,
-    value::{IdleStop, ProjectName, ProjectRoot},
-};
 
 /// A registered project, as the service reports it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

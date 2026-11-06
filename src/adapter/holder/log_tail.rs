@@ -1,7 +1,6 @@
 use getset::Getters;
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::OutputCursor;
 
 /// The last bytes of a process's log, from a line boundary, for a service
 /// that never saw the process run.

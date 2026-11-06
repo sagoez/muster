@@ -1,10 +1,10 @@
 use getset::CopyGetters;
+use muster_domain::{process::ProcessState, pty::ProcessOutput};
 
 use super::{
     config_membership::ConfigMembership, launch_purpose::LaunchPurpose,
     pending_intent::PendingIntent, spawn_generation::SpawnGeneration,
 };
-use crate::domain::{process::ProcessState, pty::ProcessOutput};
 
 /// Most output events kept for a starting pane before its result arrives.
 /// Past it the oldest chunk is dropped: the screen the connection began with
@@ -110,8 +110,9 @@ impl PendingLaunch {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::pty::ExitOutcome;
+
     use super::*;
-    use crate::domain::pty::ExitOutcome;
 
     /// A pending adoption with nothing kept.
     fn launch() -> PendingLaunch {

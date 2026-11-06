@@ -1,14 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    coordination::{Author, TodoClaim},
+    value::EpochSeconds,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::{WireForm, form},
-    domain::{
-        coordination::{Author, TodoClaim},
-        value::EpochSeconds,
-    },
-};
+use crate::adapter::wire::{WireForm, form};
 
 /// An agent's hold on a todo, as a coordination snapshot keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

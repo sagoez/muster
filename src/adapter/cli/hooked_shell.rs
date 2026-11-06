@@ -4,14 +4,14 @@
 
 use std::env;
 
+use muster_domain::{
+    constants::MUSTER_SHELL_ENV,
+    value::{Pid, ProjectRoot},
+};
 use rustix::process::getpid;
 use sysinfo::System;
 
-use crate::{
-    adapter::process_tree::{named_ancestors, working_dir},
-    constants::MUSTER_SHELL_ENV,
-    domain::value::{Pid, ProjectRoot},
-};
+use crate::adapter::process_tree::{named_ancestors, working_dir};
 
 /// Most of this process's ancestors searched for the hooked shell: past any
 /// chain of wrappers it runs under.

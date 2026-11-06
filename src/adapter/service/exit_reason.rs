@@ -1,8 +1,8 @@
+use muster_domain::pty::{ExitCause, ExitOutcome};
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
 use super::wait_status::WaitStatus;
-use crate::domain::pty::{ExitCause, ExitOutcome};
 
 /// Why a process's run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
@@ -44,8 +44,9 @@ impl ExitReason {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::pty::SignalName;
+
     use super::*;
-    use crate::domain::pty::SignalName;
 
     #[test]
     fn a_request_outranks_how_the_run_ended() {

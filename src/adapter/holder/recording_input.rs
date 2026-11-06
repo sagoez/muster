@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{port::ProcessInput, pty::PtyError};
+use muster_domain::{port::ProcessInput, pty::PtyError};
 
 /// Records whatever is written to it.
 pub(super) struct RecordingInput(Arc<Mutex<Vec<u8>>>);

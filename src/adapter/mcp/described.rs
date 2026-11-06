@@ -5,30 +5,28 @@
 
 use std::sync::Arc;
 
+use muster_domain::{
+    config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, PROCESSES_MAX},
+    coordination::{
+        KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT, LOCK_TTL_MAX,
+        LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
+        TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
+    },
+    terminal_workspace::{MIN_HALF_COLS, SplitDirection},
+    value::{
+        COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
+        MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
+    },
+};
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
 use strum::IntoEnumIterator;
 
 use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
-use crate::{
-    adapter::{
-        client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
-        holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
-        service::{EVENTS_WITHOUT_SINCE, EventKind, supervisor::FAILURE_TAIL_LINES},
-    },
-    domain::{
-        config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, PROCESSES_MAX},
-        coordination::{
-            KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT,
-            LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
-            TODO_DEPS_MAX, TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
-        },
-        terminal_workspace::{MIN_HALF_COLS, SplitDirection},
-        value::{
-            COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
-            MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
-        },
-    },
+use crate::adapter::{
+    client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
+    holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
+    service::{EVENTS_WITHOUT_SINCE, EventKind, supervisor::FAILURE_TAIL_LINES},
 };
 
 /// Key of a JSON schema node's description.

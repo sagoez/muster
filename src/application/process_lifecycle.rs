@@ -1,8 +1,9 @@
-use super::exit_decision::ExitDecision;
-use crate::domain::{
+use muster_domain::{
     process::{ExitIntent, ProcessState},
     pty::ExitOutcome,
 };
+
+use super::exit_decision::ExitDecision;
 
 /// Pure process lifecycle policy used by the supervisor.
 pub struct ProcessLifecycle;

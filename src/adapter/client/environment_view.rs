@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
+use muster_domain::config::Environment;
 use serde::Serialize;
-
-use crate::domain::config::Environment;
 
 /// A process's variables as a definition shows them: with their values for
 /// the user, by name alone for an agent.

@@ -5,17 +5,16 @@
 
 use std::path::Path;
 
+use muster_domain::{
+    occupancy::{ReportStamp, ShellRecord},
+    value::{EpochNanos, Pid},
+};
+
 use super::{cli_ports::CliPorts, shell_note_text::note_lines, shell_report_skip::ShellReportSkip};
-use crate::{
-    adapter::{
-        client::{Asked, ClientError},
-        clock::nanos_now,
-        service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
-    },
-    domain::{
-        occupancy::{ReportStamp, ShellRecord},
-        value::{EpochNanos, Pid},
-    },
+use crate::adapter::{
+    client::{Asked, ClientError},
+    clock::nanos_now,
+    service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
 };
 
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
@@ -111,13 +110,17 @@ fn arrival(previous: Option<&ShellRecord>, cwd: &Path) -> EpochNanos {
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_os = "macos"))]
-    use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
-    use std::{
-        fs,
-        path::PathBuf,
-        process::{self, Command},
-    };
+    use std::ffi::OsStr;
+    #[cfg(not(target_os = "macos"))]
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::{fs, path::PathBuf, process, process::Command};
 
+    use muster_domain::{
+        config::ImportMode,
+        occupancy::{ShellId, testing::stamp},
+        port::StackStore,
+        value::{ProcessName, ProjectName, ProjectRoot},
+    };
     use rusqlite::Connection;
     use rustix::process::geteuid;
     use tempfile::TempDir;
@@ -126,18 +129,10 @@ mod tests {
         super::{fake_ports::FakePorts, shell_registration::name_in_hooked_shell},
         *,
     };
-    use crate::{
-        adapter::{
-            client::{RunningService, fake_service::FakeService, served_service::ServedService},
-            service::ShellNote,
-            store::test_support::{database, fresh_store, spec},
-        },
-        domain::{
-            config::ImportMode,
-            occupancy::{ShellId, testing::stamp},
-            port::StackStore,
-            value::{ProcessName, ProjectName, ProjectRoot},
-        },
+    use crate::adapter::{
+        client::{RunningService, fake_service::FakeService, served_service::ServedService},
+        service::ShellNote,
+        store::test_support::{database, fresh_store, spec},
     };
 
     /// Suffix of a note file.

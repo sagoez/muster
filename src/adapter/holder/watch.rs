@@ -1,20 +1,18 @@
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, unbounded};
+use muster_domain::{
+    color_scheme::ColorScheme,
+    port::{OutputSink, ProcessHandle},
+    pty::{ExitOutcome, ProcessOutput},
+    value::{Cols, Rows},
+};
 
 use super::{
     server_testing::WAIT,
     testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK},
 };
-use crate::{
-    adapter::{channel_sink::ChannelSink, terminal::TerminalEmulator},
-    domain::{
-        color_scheme::ColorScheme,
-        port::{OutputSink, ProcessHandle},
-        pty::{ExitOutcome, ProcessOutput},
-        value::{Cols, Rows},
-    },
-};
+use crate::adapter::{channel_sink::ChannelSink, terminal::TerminalEmulator};
 
 /// What a sink received: each chunk, the exit, and the screen they draw.
 pub(super) struct Watch {

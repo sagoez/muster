@@ -3,7 +3,8 @@
 
 use std::{
     fs::File,
-    io::{self, Write},
+    io,
+    io::Write,
     net::Shutdown,
     os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,
@@ -16,6 +17,11 @@ use std::{
     time::Duration,
 };
 
+use muster_domain::{
+    constants::APP_NAME,
+    project::Project,
+    value::{DetachKey, ProcessName},
+};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     io::{Errno, read},
@@ -27,22 +33,15 @@ use super::{
     host_terminal::HostTerminal, raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
 };
-use crate::{
-    adapter::{
-        client::{ClientError, ServiceClient, process::locate},
-        holder::{
-            ClientRole, HolderError, HolderMessage,
-            client::{Greeting, greet},
-        },
-        ipc,
-        sanitize::printable,
-        service::Located,
+use crate::adapter::{
+    client::{ClientError, ServiceClient, process::locate},
+    holder::{
+        ClientRole, HolderError, HolderMessage,
+        client::{Greeting, greet},
     },
-    constants::APP_NAME,
-    domain::{
-        project::Project,
-        value::{DetachKey, ProcessName},
-    },
+    ipc,
+    sanitize::printable,
+    service::Located,
 };
 
 /// Longest the holder may take to send its screen.
@@ -331,28 +330,26 @@ fn spawn_input_reader(
 mod tests {
     use std::{io::pipe, thread, time::Instant};
 
+    use muster_domain::{
+        pty::{ExitCause, ExitOutcome, testing::size},
+        value::{OutputCursor, Pid},
+    };
     use rustix::termios::Termios;
 
     use super::*;
-    use crate::{
-        adapter::{
-            cli::{
-                attach_pump::RESYNC_WAIT,
-                attach_testing::{COLS, FAKE_PID, ROWS, scratch},
-                ending_signal::EndingSignal,
-                fake_holder::FakeHolder,
-                held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
-                running_session::Running,
-                served_holder::Holder,
-                test_pty::{TestPty, contains, same_settings},
-            },
-            holder::{ClientMessage, RejectReason},
-            terminal::emulator::RESET_TERMINAL,
+    use crate::adapter::{
+        cli::{
+            attach_pump::RESYNC_WAIT,
+            attach_testing::{COLS, FAKE_PID, ROWS, scratch},
+            ending_signal::EndingSignal,
+            fake_holder::FakeHolder,
+            held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
+            running_session::Running,
+            served_holder::Holder,
+            test_pty::{TestPty, contains, same_settings},
         },
-        domain::{
-            pty::{ExitCause, ExitOutcome, testing::size},
-            value::{OutputCursor, Pid},
-        },
+        holder::{ClientMessage, RejectReason},
+        terminal::emulator::RESET_TERMINAL,
     };
 
     /// Output a fake holder sends; an attach client ignores where it lies.

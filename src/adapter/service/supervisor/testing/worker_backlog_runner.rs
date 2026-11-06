@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use super::backlog_runner::BacklogRunner;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::backlog_runner::BacklogRunner;
 
 /// A [`BacklogRunner`] whose launches run on a worker, as a holder adoption
 /// after a restart does, so a test can act while the backlog is in flight.

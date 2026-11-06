@@ -1261,6 +1261,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-domain"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "getset",
+ "humantime",
+ "nutype",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "shlex",
+ "strum",
+ "thiserror 2.0.19",
+ "typed-builder",
+ "unicode-normalization",
+ "unicode-properties",
+ "uuid",
+]
+
+[[package]]
 name = "muster-workspace"
 version = "0.11.0"
 dependencies = [
@@ -1281,6 +1301,7 @@ dependencies = [
  "insta",
  "libc",
  "listeners",
+ "muster-domain",
  "notify-rust",
  "nutype",
  "portable-pty",

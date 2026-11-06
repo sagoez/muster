@@ -6,6 +6,14 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use muster_domain::{
+    notification::Notification,
+    port::{PortOccupant, ProcessHandle},
+    process::{EndedRun, ExitIntent, ProcessState, StopPolicy},
+    pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
+    value::{LocalPort, OutputCursor, PaneId, ProcessName},
+};
+
 use super::{
     channel_output_sink::ChannelOutputSink, config_membership::ConfigMembership,
     entity::Supervisor, launch_purpose::LaunchPurpose, pane::Pane, pending_intent::PendingIntent,
@@ -22,13 +30,6 @@ use crate::{
         },
     },
     application::{ExitDecision, ProcessLifecycle},
-    domain::{
-        notification::Notification,
-        port::{PortOccupant, ProcessHandle},
-        process::{EndedRun, ExitIntent, ProcessState, StopPolicy},
-        pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
-        value::{LocalPort, OutputCursor, PaneId, ProcessName},
-    },
 };
 
 /// Delay before the first automatic restart of a failing process.
@@ -1363,19 +1364,18 @@ mod tests {
         },
     };
 
+    use muster_domain::{
+        config::{Environment, ProcessSpec},
+        port::ProcessRunner,
+        process::{Process, RestartPolicy, StopSignal},
+        pty::{ExitCause, PtySize},
+        value::{EnvName, EnvValue, Pid},
+    };
+
     use super::*;
-    use crate::{
-        adapter::service::{
-            LastExit, ProcessUsage,
-            supervisor::{lookup::UNKNOWN_PROCESS_NOTICE, testing::*},
-        },
-        domain::{
-            config::{Environment, ProcessSpec},
-            port::ProcessRunner,
-            process::{Process, RestartPolicy, StopSignal},
-            pty::{ExitCause, PtySize},
-            value::{EnvName, EnvValue, Pid},
-        },
+    use crate::adapter::service::{
+        LastExit, ProcessUsage,
+        supervisor::{lookup::UNKNOWN_PROCESS_NOTICE, testing::*},
     };
 
     const PANE: u64 = 0;

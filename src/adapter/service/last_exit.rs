@@ -1,11 +1,11 @@
 use std::time::SystemTime;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::pty::ExitOutcome;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::exit_reason::ExitReason;
-use crate::domain::pty::ExitOutcome;
 
 /// How a process's most recent run ended.
 #[derive(

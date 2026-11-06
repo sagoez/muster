@@ -1,6 +1,5 @@
+use muster_domain::port::{PendingIdleStops, RaisedEdits, RunHistory};
 use typed_builder::TypedBuilder;
-
-use crate::domain::port::{PendingIdleStops, RaisedEdits, RunHistory};
 
 /// The stores a [`StoreRecorder`](super::store_recorder::StoreRecorder)
 /// writes to from its own thread. No `Getters`: the recorder's thread takes

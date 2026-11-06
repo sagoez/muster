@@ -1,6 +1,6 @@
-use std::io::{self, Write};
+use std::{io, io::Write};
 
-use crate::domain::value::OutputCursor;
+use muster_domain::value::OutputCursor;
 
 /// Where `muster logs -f` writes a followed log: its bytes in order, and a
 /// gap wherever a rotation discarded output before it was read.

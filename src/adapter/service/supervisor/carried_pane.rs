@@ -1,13 +1,13 @@
 use std::time::Instant;
 
 use getset::CopyGetters;
-use typed_builder::TypedBuilder;
-
-use super::config_membership::ConfigMembership;
-use crate::domain::{
+use muster_domain::{
     process::{ExitIntent, ProcessState},
     value::Pid,
 };
+use typed_builder::TypedBuilder;
+
+use super::config_membership::ConfigMembership;
 
 /// What a pane keeps across a reconnect to its holder: everything about it
 /// that is not tied to one connection.

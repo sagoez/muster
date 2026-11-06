@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::ProcessRef;
 
 use super::process_flags::{ProcessFlags, READY_GROUP};
-use crate::domain::value::ProcessRef;
 
 /// `muster set`: the changes to a process's definition.
 #[derive(clap::Args, Getters, CopyGetters)]

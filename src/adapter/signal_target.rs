@@ -1,5 +1,6 @@
 use std::io;
 
+use muster_domain::value::Pid;
 use rustix::{
     io::Errno,
     process::{
@@ -7,8 +8,6 @@ use rustix::{
         test_kill_process_group,
     },
 };
-
-use crate::domain::value::Pid;
 
 /// What a signal or a liveness probe reaches: one process, or the whole
 /// process group a child leads, so backgrounded descendants are reached too.
@@ -71,7 +70,7 @@ fn raw(pid: Pid) -> io::Result<RawPid> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::{self, Command};
+    use std::{process, process::Command};
 
     use super::*;
 

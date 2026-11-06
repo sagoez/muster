@@ -1,4 +1,4 @@
-use crate::domain::{
+use muster_domain::{
     color_scheme::ColorScheme,
     coordination::TodoStatus,
     process::{PatternKind, ProcessState, Readiness, RestartPolicy, StopSignal},

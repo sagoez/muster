@@ -1,17 +1,17 @@
-use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
-
-use super::{
-    coordination_rows::{author_from, collect},
-    sqlite_store::{db_error, epoch_from_secs, epoch_param, refused},
-    store_error::StoreError,
-};
-use crate::domain::{
+use muster_domain::{
     config::ConfigError,
     coordination::{
         LOCK_TTL_MAX, LOCKS_PER_SESSION_MAX, Lock, LockAttempt, LockHolder, LockName, LockNote,
         LockRelease, LockTtl, SessionId,
     },
     value::EpochSeconds,
+};
+use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
+
+use super::{
+    coordination_rows::{author_from, collect},
+    sqlite_store::{db_error, epoch_from_secs, epoch_param, refused},
+    store_error::StoreError,
 };
 
 /// The columns [`lock_from_row`] reads, in order.

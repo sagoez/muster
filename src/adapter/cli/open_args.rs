@@ -1,7 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::{terminal_workspace::SplitDirection, value::ProcessRef};
 
 use super::args::split_direction_parser;
-use crate::domain::{terminal_workspace::SplitDirection, value::ProcessRef};
 
 /// The process `muster open` shows, and how.
 #[derive(clap::Args, Getters, CopyGetters)]

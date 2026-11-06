@@ -1,9 +1,10 @@
 use getset::CopyGetters;
+use muster_domain::value::IdleStop;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::process_view::whole_seconds_up;
-use crate::{adapter::service::OccupancyStatus, domain::value::IdleStop};
+use crate::adapter::service::OccupancyStatus;
 
 /// Who is in a project and when it stops for want of anyone, as `--json`
 /// shows it.
@@ -35,10 +36,10 @@ impl From<&OccupancyStatus> for OccupancyView {
 mod tests {
     use std::time::Duration;
 
+    use muster_domain::value::PositiveDuration;
     use serde_json::json;
 
     use super::*;
-    use crate::domain::value::PositiveDuration;
 
     /// The occupancy of a project left `stops_in` before its idle stop.
     fn left(stops_in: Option<Duration>) -> OccupancyStatus {

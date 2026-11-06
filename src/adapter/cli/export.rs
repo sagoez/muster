@@ -2,6 +2,8 @@
 
 use std::{fs, io};
 
+use muster_domain::config::ConfigError;
+
 use super::{
     error::CliError,
     export_view::ExportView,
@@ -13,10 +15,7 @@ use super::{
     stack_path::StackPath,
     text_file::{write_atomically, write_privately},
 };
-use crate::{
-    adapter::exchange::{EnvExport, ExchangeError, write_stack_file},
-    domain::config::ConfigError,
-};
+use crate::adapter::exchange::{EnvExport, ExchangeError, write_stack_file};
 
 /// The command word of `muster export`.
 const EXPORT_WORD: &str = "export";
@@ -113,8 +112,10 @@ pub fn export_rows(view: &ExportView) -> Report {
 mod tests {
     use std::path::PathBuf;
 
+    use muster_domain::value::ProjectName;
+
     use super::*;
-    use crate::{adapter::cli::report::plain, domain::value::ProjectName};
+    use crate::adapter::cli::report::plain;
 
     /// The count and file are named.
     #[test]

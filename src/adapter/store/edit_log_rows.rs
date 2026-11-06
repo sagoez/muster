@@ -1,5 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use muster_domain::{
+    config::{ConfigError, RecordedEdit, StackEdit},
+    port::{RaisedEdits, StackEditLog},
+    value::{EditId, ProcessName, ProjectRoot, printable},
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{
@@ -7,11 +12,6 @@ use super::{
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_from_millis, duration_millis, refused,
     },
-};
-use crate::domain::{
-    config::{ConfigError, RecordedEdit, StackEdit},
-    port::{RaisedEdits, StackEditLog},
-    value::{EditId, ProcessName, ProjectRoot, printable},
 };
 
 /// Most edits kept per project; recording one more drops the oldest.
@@ -181,18 +181,16 @@ impl RaisedEdits for SqliteStore {
 mod tests {
     use std::fs;
 
+    use muster_domain::{
+        config::ProcessChange,
+        coordination::Author,
+        port::{ProjectStore, StackReader, StackStore},
+        value::PROCESS_NAME_MAX_CHARS,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::test_support::{fresh_store, spec},
-        domain::{
-            config::ProcessChange,
-            coordination::Author,
-            port::{ProjectStore, StackReader, StackStore},
-            value::PROCESS_NAME_MAX_CHARS,
-        },
-    };
+    use crate::adapter::store::test_support::{fresh_store, spec};
 
     /// Makes every later write to the edit log fail, as a crash between the
     /// stack write and its log entry would.

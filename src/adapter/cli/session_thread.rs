@@ -1,7 +1,9 @@
 use std::{
-    panic::{self, AssertUnwindSafe},
+    panic,
+    panic::AssertUnwindSafe,
     sync::{Arc, mpsc::SyncSender},
-    thread::{self, JoinHandle},
+    thread,
+    thread::JoinHandle,
 };
 
 use super::{

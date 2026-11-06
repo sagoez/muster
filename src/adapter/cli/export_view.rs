@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::value::ProjectName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::ProjectName;
 
 /// What `muster export` wrote, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

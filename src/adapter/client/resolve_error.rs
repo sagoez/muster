@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
+use muster_domain::{config::ConfigError, value::ProjectName};
 use thiserror::Error;
 
 use super::refused_folder::RefusedFolder;
-use crate::domain::{config::ConfigError, value::ProjectName};
 
 /// Why the project a command or tool call names could not be found. Each
 /// driver words it for its caller.

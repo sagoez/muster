@@ -1,10 +1,9 @@
 use std::time::Instant;
 
+use muster_domain::value::{IdleStop, ProcessName};
+
 use super::entity::Supervisor;
-use crate::{
-    adapter::service::{BatchOutcome, OccupancyStatus},
-    domain::value::{IdleStop, ProcessName},
-};
+use crate::adapter::service::{BatchOutcome, OccupancyStatus};
 
 impl Supervisor {
     /// Counts `shells` as the live shells inside, for its status; arming and
@@ -98,16 +97,15 @@ impl Supervisor {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::{
-        adapter::service::supervisor::testing::*,
-        domain::{
-            config::Stack,
-            process::{ProcessState, RestartPolicy},
-            project::Project,
-            pty::{ExitOutcome, ProcessOutput},
-            value::{IdleStop, PaneId, PositiveDuration},
-        },
+    use muster_domain::{
+        config::Stack,
+        process::{ProcessState, RestartPolicy},
+        project::Project,
+        pty::{ExitOutcome, ProcessOutput},
+        value::{IdleStop, PaneId, PositiveDuration},
     };
+
+    use crate::adapter::service::supervisor::testing::*;
 
     /// A harness over no processes.
     fn harness() -> Harness {

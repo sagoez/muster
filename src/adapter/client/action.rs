@@ -1,12 +1,10 @@
 use std::time::Duration;
 
+use muster_domain::process::ProcessState;
 use serde::Serialize;
 use strum::{Display, EnumIter, EnumMessage, IntoStaticStr};
 
-use crate::{
-    adapter::service::{ProcessAction, ProcessStatus},
-    domain::process::ProcessState,
-};
+use crate::adapter::service::{ProcessAction, ProcessStatus};
 
 /// Longest a command waits for a launch to settle. Above a holder's
 /// [`HOLDER_READY_TIMEOUT`](crate::adapter::holder::HOLDER_READY_TIMEOUT) and

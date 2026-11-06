@@ -1,5 +1,6 @@
 use std::{
-    fs::{self, Permissions},
+    fs,
+    fs::Permissions,
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -9,7 +10,8 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread::{self, JoinHandle},
+    thread,
+    thread::JoinHandle,
     time::Duration,
 };
 
@@ -21,10 +23,7 @@ use super::{
     service_error_body::ServiceErrorBody, service_error_kind::ServiceErrorKind,
     service_request::ServiceRequest, service_response::ServiceResponse,
 };
-use crate::adapter::{
-    ipc::{self, fits_a_socket},
-    private_dir::prepare_socket_dir,
-};
+use crate::adapter::{ipc, ipc::fits_a_socket, private_dir::prepare_socket_dir};
 
 /// Mode of the service socket: only its owner may connect.
 const SOCKET_MODE: u32 = 0o600;

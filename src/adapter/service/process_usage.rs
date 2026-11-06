@@ -1,8 +1,7 @@
 use getset::Getters;
+use muster_domain::value::Pid;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
-
-use crate::domain::value::Pid;
 
 /// Resource usage of a running process. Carries the OS pid so the reading is
 /// actionable (for `kill`, logs, ...), plus the tree-summed load.

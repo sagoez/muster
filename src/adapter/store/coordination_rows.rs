@@ -1,3 +1,14 @@
+use muster_domain::{
+    config::ConfigError,
+    coordination::{
+        Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
+        LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
+        NoteHeader, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoDeps,
+        TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+    },
+    port::CoordinationStore,
+    value::{EpochSeconds, ProjectRoot},
+};
 use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params};
 
 use super::{
@@ -6,20 +17,7 @@ use super::{
     sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param, refused},
     store_error::StoreError,
 };
-use crate::{
-    adapter::clock::epoch_now,
-    domain::{
-        config::ConfigError,
-        coordination::{
-            Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
-            LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle,
-            NoteBody, NoteHeader, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange,
-            TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
-        },
-        port::CoordinationStore,
-        value::{EpochSeconds, ProjectRoot},
-    },
-};
+use crate::adapter::clock::epoch_now;
 
 /// Selects the scratchpad columns [`scratchpad_from_row`] reads by name.
 const SELECT_SCRATCHPAD: &str = "SELECT key, body, author, updated_at FROM scratchpads";
@@ -49,7 +47,7 @@ WHERE project_id = :project AND id = :id \
        OR (status = 'in-progress' AND (owner = :me OR claimed_until < :now)))";
 /// The oldest todo of `:project` claimable without naming it: pending or with
 /// a lapsed lease, and no dependency that exists and is not done. Mirrors
-/// [`claimable`](crate::domain::coordination::claimable).
+/// [`claimable`](muster_domain::coordination::claimable).
 const NEXT_CLAIMABLE: &str = "\
 SELECT t.id FROM todos t \
 WHERE t.project_id = :project \
@@ -747,16 +745,14 @@ impl CoordinationStore for SqliteStore {
 mod tests {
     use std::{fs, path::PathBuf, slice, thread, time::Duration};
 
+    use muster_domain::{
+        coordination::{LOCKS_PER_SESSION_MAX, TODO_TITLE_MAX_CHARS, claimable},
+        port::StackStore,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::test_support::{database, fresh_store, spec},
-        domain::{
-            coordination::{LOCKS_PER_SESSION_MAX, TODO_TITLE_MAX_CHARS, claimable},
-            port::StackStore,
-        },
-    };
+    use crate::adapter::store::test_support::{database, fresh_store, spec};
 
     /// Registers a project at a fresh folder under `scratch`.
     fn project(store: &SqliteStore, scratch: &TempDir, relative: &str) -> ProjectRoot {

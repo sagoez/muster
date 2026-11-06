@@ -1,17 +1,15 @@
 use std::sync::Arc;
 
 use getset::Getters;
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
+};
 use typed_builder::TypedBuilder;
 
 use super::fixtures::REFUSAL;
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
-};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter that runs on a worker, as the service's does, finds
 /// `record` for its child's pid and fails every adoption.

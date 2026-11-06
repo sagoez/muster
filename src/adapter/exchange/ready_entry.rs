@@ -1,17 +1,15 @@
 use std::time::Duration;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    process::{PatternKind, ReadyCheck, ReadyProbe},
+    value::{LocalPort, LocalUrl, PORT_FORM, PositiveDuration},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::EntryError;
-use crate::{
-    adapter::holder::LineMatcher,
-    domain::{
-        process::{PatternKind, ReadyCheck, ReadyProbe},
-        value::{LocalPort, LocalUrl, PORT_FORM, PositiveDuration},
-    },
-};
+use crate::adapter::holder::LineMatcher;
 
 /// Why a check naming no probe, or more than one, is refused.
 const ONE_PROBE: &str = "name exactly one of log, port or http";

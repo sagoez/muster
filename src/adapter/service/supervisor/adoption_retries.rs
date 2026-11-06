@@ -1,7 +1,8 @@
 use std::{collections::HashMap, time::Duration};
 
+use muster_domain::value::{PaneId, Pid};
+
 use super::{pane_retry::PaneRetry, retry_id::RetryId};
-use crate::domain::value::{PaneId, Pid};
 
 /// Wait before the first timed retry of an adoption that failed.
 const FIRST_RETRY: Duration = Duration::from_secs(30);

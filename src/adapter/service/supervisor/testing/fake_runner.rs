@@ -1,8 +1,9 @@
-use super::fake_handle::FakeHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::fake_handle::FakeHandle;
 
 /// A runner whose spawned processes never emit output and never exit on their
 /// own; the test drives exits explicitly.

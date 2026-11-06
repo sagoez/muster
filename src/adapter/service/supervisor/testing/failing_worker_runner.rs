@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use super::failing_runner::FailingRunner;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::failing_runner::FailingRunner;
 
 /// A runner whose launches run on a worker and always fail.
 #[derive(Clone)]

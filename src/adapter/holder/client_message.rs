@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 
+use muster_domain::pty::PtySize;
+
 use super::{
     client_role::ClientRole,
     error::HolderError,
@@ -8,7 +10,6 @@ use super::{
     holder_control::HolderControl,
     protocol::{decode_size, encode_size},
 };
-use crate::domain::pty::PtySize;
 
 /// A message from a client to the holder.
 #[derive(Debug, Clone, PartialEq, Eq)]

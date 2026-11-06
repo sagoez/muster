@@ -1,11 +1,10 @@
 use getset::Getters;
-use serde::Serialize;
-use typed_builder::TypedBuilder;
-
-use crate::domain::{
+use muster_domain::{
     coordination::{Author, NoteHeader},
     value::EpochSeconds,
 };
+use serde::Serialize;
+use typed_builder::TypedBuilder;
 
 /// A note without its body: the index `note_read` and `muster note --json`
 /// list, so a project full of long notes cannot flood the caller in one call.

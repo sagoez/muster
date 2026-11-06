@@ -4,15 +4,15 @@ use std::{
 };
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::stop_signals::StopSignals;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use typed_builder::TypedBuilder;
+
+use super::stop_signals::StopSignals;
 
 /// A handle that distinguishes graceful termination from a hard kill.
 #[derive(Getters, TypedBuilder)]

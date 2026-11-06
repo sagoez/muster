@@ -1,4 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    process::{ReadyCheck, ReadyProbe},
+    value::PositiveDuration,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use typed_builder::TypedBuilder;
@@ -8,10 +12,6 @@ use super::{
     process_fields::invalid,
     seconds_arg::SecondsArg,
     tool_error::ToolError,
-};
-use crate::domain::{
-    process::{ReadyCheck, ReadyProbe},
-    value::PositiveDuration,
 };
 
 /// The `ready` field of `process_add` and `process_set`.

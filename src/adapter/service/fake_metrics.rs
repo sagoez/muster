@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
-use super::sampled_calls::SampledCalls;
-use crate::domain::{
+use muster_domain::{
     port::{ProcessMetrics, ProcessSample},
     value::Pid,
 };
+
+use super::sampled_calls::SampledCalls;
 
 /// Memory the fake sampler reports for every pid.
 pub(super) const SAMPLED_MEMORY: u64 = 4096;

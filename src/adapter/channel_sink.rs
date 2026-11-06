@@ -1,6 +1,5 @@
 use crossbeam_channel::Sender;
-
-use crate::domain::{port::OutputSink, pty::ProcessOutput};
+use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// Forwards a spawned process's output into a channel.
 pub(crate) struct ChannelSink(Sender<ProcessOutput>);

@@ -4,6 +4,13 @@
 use std::time::SystemTime;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    config::ConfigError,
+    coordination::Author,
+    port::StackStore,
+    project::Project,
+    value::{ProcessName, ProcessRef},
+};
 use serde::Serialize;
 use strum::EnumMessage;
 use typed_builder::TypedBuilder;
@@ -16,13 +23,6 @@ use crate::{
         process::{ready_to_send, resolve_among, settle_removed, status},
     },
     application::StackEditor,
-    domain::{
-        config::ConfigError,
-        coordination::Author,
-        port::StackStore,
-        project::Project,
-        value::{ProcessName, ProcessRef},
-    },
 };
 
 /// Opens the line naming a removed process.

@@ -1,11 +1,10 @@
+use muster_domain::value::ProjectRoot;
+
 use super::{
     asked::Asked, client_error::ClientError, service_access::ServiceAccess,
     service_client::ServiceClient, service_status::ServiceStatus,
 };
-use crate::{
-    adapter::service::{Notice, ProjectStatus, ServiceRequest},
-    domain::value::ProjectRoot,
-};
+use crate::adapter::service::{Notice, ProjectStatus, ServiceRequest};
 
 /// This user's service, under the platform state directory.
 #[derive(Debug, Clone, Copy, Default)]

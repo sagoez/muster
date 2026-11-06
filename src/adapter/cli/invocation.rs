@@ -4,6 +4,13 @@ use std::{
     sync::Arc,
 };
 
+use muster_domain::{
+    constants::{APP_NAME, MUSTER_PROJECT_ENV},
+    port::{LocalState, StateChangeNotifier},
+    project::Project,
+    value::ProjectRoot,
+};
+
 use super::{
     cli_ports::CliPorts, error::CliError, report::print_note,
     shell_registration::name_in_hooked_shell,
@@ -14,12 +21,6 @@ use crate::{
         path::home_dir,
     },
     application::StackEditor,
-    constants::{APP_NAME, MUSTER_PROJECT_ENV},
-    domain::{
-        port::{LocalState, StateChangeNotifier},
-        project::Project,
-        value::ProjectRoot,
-    },
 };
 
 /// Between the project acted on and the one the current folder is in.
@@ -257,16 +258,14 @@ impl StateChangeNotifier for Invocation<'_> {
 mod tests {
     use std::fs;
 
+    use muster_domain::{config::ImportMode, port::StackReader, value::ProjectRoot};
     use tempfile::TempDir;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::{
-        adapter::{
-            client::ClientError,
-            no_state_dir::NoStateDir,
-            store::test_support::{fresh_store, spec},
-        },
-        domain::{config::ImportMode, port::StackReader, value::ProjectRoot},
+    use crate::adapter::{
+        client::ClientError,
+        no_state_dir::NoStateDir,
+        store::test_support::{fresh_store, spec},
     };
 
     /// Ports over a fresh scratch database, and the folder holding it.

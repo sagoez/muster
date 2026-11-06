@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use getset::Getters;
+use muster_domain::config::ProcessSpec;
 use typed_builder::TypedBuilder;
-
-use crate::domain::config::ProcessSpec;
 
 /// Names the project root as a working directory.
 const PROJECT_ROOT: &str = ".";

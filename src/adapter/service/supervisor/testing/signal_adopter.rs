@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use super::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals};
-use crate::{
-    adapter::{holder::HolderRecord, service::supervisor::HolderAdopter},
-    domain::{
-        port::{OutputSink, ProcessHandle},
-        pty::PtyError,
-        value::{OutputCursor, Pid},
-    },
+use muster_domain::{
+    port::{OutputSink, ProcessHandle},
+    pty::PtyError,
+    value::{OutputCursor, Pid},
 };
+
+use super::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals};
+use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
 
 /// An adopter whose every holder answers with a handle recording the stop
 /// signals it is sent into the shared count.

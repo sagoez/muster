@@ -1,7 +1,8 @@
 //! The `--cursor` a `todo`, `note` or `kv` listing resumes from.
 
+use muster_domain::coordination::EntryPosition;
+
 use super::error::CliError;
-use crate::domain::coordination::EntryPosition;
 
 /// The position an earlier page printed as `raw`.
 ///

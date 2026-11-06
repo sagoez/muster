@@ -6,7 +6,8 @@ use std::{
     cell::Cell,
     env,
     error::Error,
-    io::{self, IsTerminal, Write},
+    io,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
     time::SystemTime,
@@ -16,6 +17,15 @@ use anstream::{AutoStream, ColorChoice};
 use clap::error::{Error as ParseError, ErrorKind};
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
+use muster_domain::{
+    config::{ImportMode, Stack},
+    constants::{APP_NAME, MUSTER_SHELL_ENV},
+    coordination::Author,
+    occupancy::{LoadId, ReportStamp},
+    port::LocalState,
+    project::Project,
+    value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+};
 
 use super::{
     add::{add, add_rows},
@@ -101,15 +111,6 @@ use crate::{
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
         terminal::coloring::Coloring,
-    },
-    constants::{APP_NAME, MUSTER_SHELL_ENV},
-    domain::{
-        config::{ImportMode, Stack},
-        coordination::Author,
-        occupancy::{LoadId, ReportStamp},
-        port::LocalState,
-        project::Project,
-        value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
     },
     error::MusterError,
 };

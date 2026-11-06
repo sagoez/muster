@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::domain::{port::ProcessHandle, value::PaneId};
+use muster_domain::{port::ProcessHandle, value::PaneId};
 
 /// The writable clients attached to each live pane, and the exits held for a
 /// pending restart.

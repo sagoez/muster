@@ -1,5 +1,6 @@
+use muster_domain::value::{PaneId, ProjectRoot};
+
 use super::probe_task::ProbeTask;
-use crate::domain::value::{PaneId, ProjectRoot};
 
 /// What the loop asks of the probe worker.
 pub(super) enum ProbeCommand {

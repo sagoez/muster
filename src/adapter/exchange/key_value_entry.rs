@@ -1,14 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
+    value::EpochSeconds,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{
-    adapter::wire::{WireForm, form},
-    domain::{
-        coordination::{Author, KV_VALUE_MAX_CHARS, KeyValue, KvKey, KvValue},
-        value::EpochSeconds,
-    },
-};
+use crate::adapter::wire::{WireForm, form};
 
 /// A key-value entry as a coordination snapshot and an agent read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

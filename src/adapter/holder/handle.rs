@@ -11,6 +11,12 @@ use std::{
 };
 
 use crossbeam_channel::{Sender, bounded};
+use muster_domain::{
+    port::{OutputSink, ProcessHandle, ProcessInput},
+    process::{LogPattern, StopSignal},
+    pty::{PtyError, PtySize, ScreenSource},
+    value::{OutputCursor, Pid},
+};
 
 use super::{
     client::greet,
@@ -25,12 +31,6 @@ use super::{
     runner::abandon,
     served_screen::ServedScreen,
     shared_writer::SharedWriter,
-};
-use crate::domain::{
-    port::{OutputSink, ProcessHandle, ProcessInput},
-    process::{LogPattern, StopSignal},
-    pty::{PtyError, PtySize, ScreenSource},
-    value::{OutputCursor, Pid},
 };
 
 /// Longest one write to the holder may wait for it to read, so a holder that
@@ -366,21 +366,19 @@ mod tests {
     };
 
     use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
+    use muster_domain::pty::ProcessOutput;
 
     use super::*;
-    use crate::{
-        adapter::{
-            channel_sink::ChannelSink,
-            holder::{
-                log_fixture::Fixture,
-                protocol::HolderMessage,
-                reader::{CATCH_UP_CHUNK_BYTES, HOLDER_LOST},
-                shared_writer::WRITE_TIMED_OUT,
-            },
-            test_scratch::short_scratch,
-            test_wait::WAIT,
+    use crate::adapter::{
+        channel_sink::ChannelSink,
+        holder::{
+            log_fixture::Fixture,
+            protocol::HolderMessage,
+            reader::{CATCH_UP_CHUNK_BYTES, HOLDER_LOST},
+            shared_writer::WRITE_TIMED_OUT,
         },
-        domain::pty::ProcessOutput,
+        test_scratch::short_scratch,
+        test_wait::WAIT,
     };
 
     /// Prefix of every test scratch directory.

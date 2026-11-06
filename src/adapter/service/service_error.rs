@@ -1,11 +1,9 @@
 use std::{io, path::PathBuf};
 
+use muster_domain::config::ConfigError;
 use thiserror::Error;
 
-use crate::{
-    adapter::{no_state_dir::NoStateDir, private_dir::RUNTIME_DIR_ENV},
-    domain::config::ConfigError,
-};
+use crate::adapter::{no_state_dir::NoStateDir, private_dir::RUNTIME_DIR_ENV};
 
 /// Why the service could not start or keep running.
 #[derive(Debug, Error)]

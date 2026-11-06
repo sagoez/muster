@@ -1,12 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    process::{StopPolicy, StopSignal},
+    value::StopGrace,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{WireForm, form};
-use crate::domain::{
-    process::{StopPolicy, StopSignal},
-    value::StopGrace,
-};
 
 /// How a process stops, as a holder keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

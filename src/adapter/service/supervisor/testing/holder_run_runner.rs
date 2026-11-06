@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use super::holder_run_handle::HolderRunHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+
+use super::holder_run_handle::HolderRunHandle;
 
 /// A runner whose every process runs under a holder at `socket`.
 pub(crate) struct HolderRunRunner {

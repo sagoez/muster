@@ -3,6 +3,12 @@
 
 use std::time::SystemTime;
 
+use muster_domain::{
+    config::ConfigError,
+    process::PatternKind,
+    project::Project,
+    value::{OutputCursor, ProcessName, ProcessRef, refused_name},
+};
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -28,24 +34,16 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::{
-    adapter::{
-        client::{
-            ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
-            ServiceClient, Unwatched, process,
-        },
-        holder::{
-            ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
-        },
-        service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
-        workspace_request::WorkspaceRequest,
+use crate::adapter::{
+    client::{
+        ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
+        ServiceClient, Unwatched, process,
     },
-    domain::{
-        config::ConfigError,
-        process::PatternKind,
-        project::Project,
-        value::{OutputCursor, ProcessName, ProcessRef, refused_name},
+    holder::{
+        ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
     },
+    service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
+    workspace_request::WorkspaceRequest,
 };
 
 /// Carriage return that submits a line typed into a terminal.
@@ -644,23 +642,21 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{
+        config::{DECLARED_PORTS_MAX, McpStackEdits, SettingChange},
+        coordination::Author,
+        port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
+        value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
+    };
     use rmcp::model::ErrorCode;
 
     use super::*;
-    use crate::{
-        adapter::mcp::{
-            config_set_arg::ConfigSetArg,
-            config_tools::CONFIG_SET,
-            test_support::{
-                AGENT, Fixture, add, answered, content, edits, fixture, refusal, register,
-                result_text, runtime,
-            },
-        },
-        domain::{
-            config::{DECLARED_PORTS_MAX, McpStackEdits, SettingChange},
-            coordination::Author,
-            port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
-            value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
+    use crate::adapter::mcp::{
+        config_set_arg::ConfigSetArg,
+        config_tools::CONFIG_SET,
+        test_support::{
+            AGENT, Fixture, add, answered, content, edits, fixture, refusal, register, result_text,
+            runtime,
         },
     };
 

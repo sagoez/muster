@@ -1,11 +1,10 @@
 use getset::{CopyGetters, Getters};
-use serde::Serialize;
-use typed_builder::TypedBuilder;
-
-use crate::domain::{
+use muster_domain::{
     coordination::{Author, Lock},
     value::EpochSeconds,
 };
+use serde::Serialize;
+use typed_builder::TypedBuilder;
 
 /// A held lock as `stack_status` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

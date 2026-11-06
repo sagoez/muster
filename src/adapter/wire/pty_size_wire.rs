@@ -1,12 +1,12 @@
 use getset::Getters;
+use muster_domain::{
+    pty::PtySize,
+    value::{Cols, Rows},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::WireForm;
-use crate::domain::{
-    pty::PtySize,
-    value::{Cols, Rows},
-};
 
 /// A PTY size, as a holder's spawn request carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Getters, TypedBuilder)]

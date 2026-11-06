@@ -1,8 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::OutputCursor;
 use typed_builder::TypedBuilder;
 
 use super::{byte_limit::ByteLimit, line_filter::LineFilter, line_limit::LineLimit};
-use crate::domain::value::OutputCursor;
 
 /// What to read of a process's log.
 #[derive(Debug, Clone, Getters, CopyGetters, TypedBuilder)]

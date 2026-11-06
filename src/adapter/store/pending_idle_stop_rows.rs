@@ -1,13 +1,13 @@
 use std::{path::PathBuf, time::UNIX_EPOCH};
 
+use muster_domain::{
+    config::ConfigError, occupancy::PendingIdleStop, port::PendingIdleStops, value::ProjectRoot,
+};
 use rusqlite::params;
 
 use super::{
     project_rows::find_project,
     sqlite_store::{SqliteStore, db_error, duration_from_millis, duration_millis},
-};
-use crate::domain::{
-    config::ConfigError, occupancy::PendingIdleStop, port::PendingIdleStops, value::ProjectRoot,
 };
 
 /// What a pending idle stop's leave time is called in a refusal.
@@ -82,14 +82,13 @@ impl PendingIdleStops for SqliteStore {
 mod tests {
     use std::time::Duration;
 
-    use super::*;
-    use crate::{
-        adapter::store::test_support::{fresh_store, spec},
-        domain::{
-            config::ImportMode,
-            port::{ProjectStore, StackStore},
-        },
+    use muster_domain::{
+        config::ImportMode,
+        port::{ProjectStore, StackStore},
     };
+
+    use super::*;
+    use crate::adapter::store::test_support::{fresh_store, spec};
 
     /// A moment stored to the millisecond.
     const LEFT_MS: u64 = 1_793_288_081_250;

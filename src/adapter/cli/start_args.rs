@@ -1,7 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::PositiveDuration;
 
 use super::{args::positive_duration, process_args::ProcessArgs};
-use crate::domain::value::PositiveDuration;
 
 /// The process a start or restart acts on, and whether to wait for it.
 #[derive(clap::Args, Getters, CopyGetters)]

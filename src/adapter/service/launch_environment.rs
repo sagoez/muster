@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, env, ffi::OsString};
 
-use nutype::nutype;
-
-use crate::domain::{
+use muster_domain::{
     coordination::PANE_IDENTITY_ENV,
     value::{EnvName, EnvValue},
 };
+use nutype::nutype;
 
 /// The environment of the command that asked the service to launch a process,
 /// which the process runs with under its own variables. Muster's own `MUSTER_`

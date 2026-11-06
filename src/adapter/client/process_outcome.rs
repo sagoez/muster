@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_domain::value::ProcessName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{outcome::Outcome, port_block_view::PortBlockView, process_view::ProcessView};
-use crate::domain::value::ProcessName;
 
 /// One process a command acted on: what became of it and how it is listed
 /// now.

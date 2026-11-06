@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
-use super::entity::Supervisor;
-use crate::{
-    adapter::service::ProcessUsage,
-    domain::{
-        port::ProcessSample,
-        value::{PaneId, Pid},
-    },
+use muster_domain::{
+    port::ProcessSample,
+    value::{PaneId, Pid},
 };
+
+use super::entity::Supervisor;
+use crate::adapter::service::ProcessUsage;
 
 impl Supervisor {
     /// Whether a usage sample means anything here: a process is live, or
@@ -61,14 +60,13 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        adapter::service::supervisor::testing::*,
-        domain::{
-            process::{Process, RestartPolicy},
-            pty::{ExitOutcome, ProcessOutput},
-        },
+    use muster_domain::{
+        process::{Process, RestartPolicy},
+        pty::{ExitOutcome, ProcessOutput},
     };
+
+    use super::*;
+    use crate::adapter::service::supervisor::testing::*;
 
     const PANE: u64 = 0;
     /// CPU load the sample reports.

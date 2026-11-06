@@ -1,13 +1,12 @@
 use std::{io, path::PathBuf};
 
-use super::supervisor::HolderAdopter;
-use crate::{
-    adapter::holder::{HolderRecord, HolderRunner},
-    domain::{
-        port::ProcessRunner,
-        value::{ProcessName, ProjectRoot},
-    },
+use muster_domain::{
+    port::ProcessRunner,
+    value::{ProcessName, ProjectRoot},
 };
+
+use super::supervisor::HolderAdopter;
+use crate::adapter::holder::{HolderRecord, HolderRunner};
 
 /// Every holder the service can reach: it launches new ones, adopts and
 /// locates running ones, and tidies what failed launches left behind. One pool

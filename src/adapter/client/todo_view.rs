@@ -1,11 +1,10 @@
 use getset::Getters;
-use serde::Serialize;
-use typed_builder::TypedBuilder;
-
-use crate::domain::{
+use muster_domain::{
     coordination::{Author, ClaimState, Todo, TodoId, TodoStatus, TodoTitle},
     value::EpochSeconds,
 };
+use serde::Serialize;
+use typed_builder::TypedBuilder;
 
 /// One todo as an agent reads it, with who holds it. An expired claim reads
 /// as pending, its holder shown as `stale_owner`.

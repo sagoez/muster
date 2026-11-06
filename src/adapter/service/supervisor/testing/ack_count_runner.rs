@@ -1,13 +1,13 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use getset::Getters;
-use typed_builder::TypedBuilder;
-
-use super::ack_count_handle::AckCountHandle;
-use crate::domain::{
+use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
     pty::{PtyError, SpawnRequest},
 };
+use typed_builder::TypedBuilder;
+
+use super::ack_count_handle::AckCountHandle;
 
 /// A runner whose handles count the exits acknowledged to them.
 #[derive(Getters, TypedBuilder)]

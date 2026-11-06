@@ -1,16 +1,14 @@
+use muster_domain::{
+    coordination::{Lock, LockName},
+    port::CoordinationStore,
+    value::{EpochSeconds, ProjectRoot},
+};
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind,
 };
-use crate::{
-    adapter::{client::LockView, clock::epoch_now, wire::WireForm},
-    domain::{
-        coordination::{Lock, LockName},
-        port::CoordinationStore,
-        value::{EpochSeconds, ProjectRoot},
-    },
-};
+use crate::adapter::{client::LockView, clock::epoch_now, wire::WireForm};
 
 /// Line printed when no lock is held in the project.
 const EMPTY_NOTE: &str = "no locks held";
@@ -112,18 +110,16 @@ fn release(
 mod tests {
     use std::{fs, time::Duration};
 
+    use muster_domain::{
+        coordination::{Author, LockHolder, LockNote, LockTtl},
+        port::StackStore,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        adapter::store::{
-            SqliteStore,
-            test_support::{fresh_store, spec},
-        },
-        domain::{
-            coordination::{Author, LockHolder, LockNote, LockTtl},
-            port::StackStore,
-        },
+    use crate::adapter::store::{
+        SqliteStore,
+        test_support::{fresh_store, spec},
     };
 
     /// A store with one registered project, and the scratch folder holding

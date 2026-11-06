@@ -10,26 +10,24 @@ use clap::{
 };
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
+use muster_domain::{
+    config::SettingKey,
+    constants::APP_NAME,
+    process::{RestartPolicy, StopSignal},
+    terminal_workspace::SplitDirection,
+    value::{Pid, PositiveDuration, StopGrace},
+};
 use strum::IntoEnumIterator;
 
 use super::{
     cli_ports::CliPorts, command::Command, mcp_agent::McpAgent, mcp_scope::McpScope,
     shell_init::SHELL_INIT_SUBCOMMAND,
 };
-use crate::{
-    adapter::{
-        holder::{LineLimit, MAX_LOG_LINES},
-        sanitize::printable,
-        service::StateGoal,
-        shell::HookShell,
-    },
-    constants::APP_NAME,
-    domain::{
-        config::SettingKey,
-        process::{RestartPolicy, StopSignal},
-        terminal_workspace::SplitDirection,
-        value::{Pid, PositiveDuration, StopGrace},
-    },
+use crate::adapter::{
+    holder::{LineLimit, MAX_LOG_LINES},
+    sanitize::printable,
+    service::StateGoal,
+    shell::HookShell,
 };
 
 /// The id of the global `--project` argument.
@@ -309,16 +307,15 @@ impl Args {
 #[cfg(test)]
 mod tests {
 
+    use muster_domain::{
+        occupancy::{LoadStart, ReportSeq},
+        value::EpochNanos,
+    };
+
     use super::*;
-    use crate::{
-        adapter::{
-            holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
-            shell::SHELL_REPORT_SUBCOMMAND,
-        },
-        domain::{
-            occupancy::{LoadStart, ReportSeq},
-            value::EpochNanos,
-        },
+    use crate::adapter::{
+        holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
+        shell::SHELL_REPORT_SUBCOMMAND,
     };
 
     /// Completions and usage must register the binary name, not the package

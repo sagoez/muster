@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::domain::{port::ProcessInput, pty::PtyError};
+use muster_domain::{port::ProcessInput, pty::PtyError};
 
 /// Reported when a writer panicked mid-write, leaving the PTY input unusable.
 const INPUT_POISONED: &str = "pty input writer is poisoned";

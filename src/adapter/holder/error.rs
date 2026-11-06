@@ -1,10 +1,10 @@
 use std::{io, path::PathBuf};
 
+use muster_domain::{pty::PtyError, value::OutputCursor};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
 use super::frame_tag::FrameTag;
-use crate::domain::{pty::PtyError, value::OutputCursor};
 
 /// Errors from running a holder or speaking its protocol.
 #[derive(Debug, Error)]

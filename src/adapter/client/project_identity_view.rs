@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use getset::Getters;
+use muster_domain::{project::Project, value::ProjectName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::domain::{project::Project, value::ProjectName};
 
 /// A project as `--json` names it: `{"name": "shop", "root": "/home/me/shop"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]

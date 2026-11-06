@@ -1,4 +1,4 @@
-use std::fmt::{self, Write};
+use std::{fmt, fmt::Write};
 
 use super::pen_color::PARAM_SEPARATOR;
 

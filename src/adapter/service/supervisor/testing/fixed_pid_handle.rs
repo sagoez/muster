@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use crate::domain::{
+use muster_domain::{
     port::{ProcessHandle, ProcessInput},
     process::StopSignal,
     pty::{PtyError, PtySize, ScreenSource},

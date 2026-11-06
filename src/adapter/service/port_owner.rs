@@ -1,9 +1,9 @@
 use std::fmt;
 
+use muster_domain::port::PortOccupant;
 use serde::{Deserialize, Serialize};
 
 use super::port_holder::PortHolder;
-use crate::domain::port::PortOccupant;
 
 /// Who listens on a port a start needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,9 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-    thread::{self, JoinHandle},
-    time::Duration,
-};
+use std::{fs, path::PathBuf, thread, thread::JoinHandle, time::Duration};
 
 use tempfile::TempDir;
 

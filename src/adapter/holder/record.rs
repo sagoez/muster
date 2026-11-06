@@ -8,18 +8,16 @@ use std::{
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use getset::{CopyGetters, Getters};
+use muster_domain::{
+    process::StopPolicy,
+    pty::SpawnHistory,
+    value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{config::PRIVATE_FILE_MODE, error::HolderError, id::HolderId};
-use crate::{
-    adapter::private_dir::create_private_dir_all,
-    domain::{
-        process::StopPolicy,
-        pty::SpawnHistory,
-        value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
-    },
-};
+use crate::adapter::private_dir::create_private_dir_all;
 
 /// File extension of a persisted holder record.
 const RECORD_EXTENSION: &str = "json";
@@ -163,10 +161,10 @@ fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
 mod tests {
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
+    use muster_domain::{process::StopSignal, value::StopGrace};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::domain::{process::StopSignal, value::StopGrace};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;

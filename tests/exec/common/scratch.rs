@@ -1,23 +1,19 @@
 use std::{
     path::{Path, PathBuf},
-    process::{self, Command, Output},
+    process,
+    process::{Command, Output},
     thread,
     time::Duration,
 };
 
-use muster::{
-    adapter::{
-        holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord},
-        private_dir::{prepare_socket_dir, prepare_state_dir},
-        service::{
-            ServiceRequest, ServiceResponse,
-            protocol::{self, SERVICE_SUBCOMMAND},
-        },
-        signal_target::SignalTarget,
-        store::SqliteStore,
-    },
-    domain::{config::SettingChange, coordination::Author, port::SettingsStore},
+use muster::adapter::{
+    holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord},
+    private_dir::{prepare_socket_dir, prepare_state_dir},
+    service::{ServiceRequest, ServiceResponse, protocol, protocol::SERVICE_SUBCOMMAND},
+    signal_target::SignalTarget,
+    store::SqliteStore,
 };
+use muster_domain::{config::SettingChange, coordination::Author, port::SettingsStore};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use tempfile::{Builder, TempDir};
 

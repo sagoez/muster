@@ -4,11 +4,10 @@
 
 use std::{collections::HashMap, sync::Mutex};
 
+use muster_domain::value::ProjectRoot;
+
 use super::{alerts_view::AlertsView, event_view::EventView};
-use crate::{
-    adapter::service::{EventKind, EventPage, EventSeq},
-    domain::value::ProjectRoot,
-};
+use crate::adapter::service::{EventKind, EventPage, EventSeq};
 
 /// Most alerts one result carries.
 pub const MAX_ALERTS: usize = 5;
@@ -88,8 +87,10 @@ impl Alerts {
 mod tests {
     use std::{path::PathBuf, time::SystemTime};
 
+    use muster_domain::value::ProcessName;
+
     use super::*;
-    use crate::{adapter::service::StackEvent, domain::value::ProcessName};
+    use crate::adapter::service::StackEvent;
 
     /// The project every alert here is about.
     fn shop() -> ProjectRoot {

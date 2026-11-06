@@ -2,13 +2,18 @@
 //! herdr call, tracked so that whatever ends muster ends them too: an ending
 //! signal or an MCP client closing stdio.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(test)]
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::Condvar;
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::MutexGuard;
+#[cfg(test)]
+use std::sync::PoisonError;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use muster_domain::value::Pid;
 use rustix::process::{Pid as RawPid, Signal, kill_process_group};
-
-use crate::domain::value::Pid;
 
 /// The most calls tracked at once; one past it is refused.
 const MAX_GROUPS: usize = 64;

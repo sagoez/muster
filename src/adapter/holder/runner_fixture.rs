@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_domain::{pty::SpawnRequest, value::ProjectRoot};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -22,10 +23,7 @@ use super::{
     testing::test_request,
     thread_launcher::ThreadLauncher,
 };
-use crate::{
-    adapter::{signal_target::SignalTarget, test_scratch::short_scratch},
-    domain::{pty::SpawnRequest, value::ProjectRoot},
-};
+use crate::adapter::{signal_target::SignalTarget, test_scratch::short_scratch};
 
 /// Prefix of every runner test's scratch directory.
 const SCRATCH_PREFIX: &str = "mr-";

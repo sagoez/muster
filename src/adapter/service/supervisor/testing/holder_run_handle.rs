@@ -4,15 +4,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::{
-    adapter::holder::ServedScreen,
-    domain::{
-        port::{ProcessHandle, ProcessInput},
-        process::StopSignal,
-        pty::{PtyError, PtySize, ScreenSource},
-        value::{OutputCursor, Pid},
-    },
+use muster_domain::{
+    port::{ProcessHandle, ProcessInput},
+    process::StopSignal,
+    pty::{PtyError, PtySize, ScreenSource},
+    value::{OutputCursor, Pid},
 };
+
+use crate::adapter::holder::ServedScreen;
 
 /// A handle to a process a holder at `socket` runs.
 pub(crate) struct HolderRunHandle {

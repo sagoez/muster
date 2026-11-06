@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_domain::value::ProcessName;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{refusal::Refusal, wait_outcome::WaitOutcome};
-use crate::domain::value::ProcessName;
 
 /// What `Up` or `Down` did to a project: the processes it started or
 /// stopped, those it left alone with why, and how each wait it was asked for

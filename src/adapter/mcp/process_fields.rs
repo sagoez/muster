@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, fmt::Display, path::PathBuf, str::FromStr};
 
+use muster_client::WorkingDirPlace;
 use muster_domain::{
     config::{DeclaredPorts, Environment},
     value::{
@@ -15,7 +16,6 @@ use serde_json::Number;
 use strum::IntoEnumIterator;
 
 use super::{seconds_arg::SecondsArg, tool_error::ToolError};
-use crate::adapter::client::WorkingDirPlace;
 
 /// The `command` field.
 pub(super) const COMMAND_FIELD: &str = "command";

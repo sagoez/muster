@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use muster_client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process};
 use muster_domain::{coordination::Lock, value::EpochSeconds};
 use muster_os::clock::epoch_now;
 use muster_protocol::service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec};
@@ -26,7 +27,6 @@ use super::{
     tool_result::ToolResult,
     up_view::UpView,
 };
-use crate::adapter::client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process};
 
 /// Most notices `stack_status` returns.
 const STATUS_NOTICES: usize = 10;
@@ -213,6 +213,7 @@ impl MusterMcp {
 mod tests {
     use std::iter;
 
+    use muster_client::{Outcome, PortBlockView, ProcessOutcome};
     use muster_domain::{
         port::{PortOccupant, ProjectStore},
         process::ProcessState,
@@ -226,9 +227,8 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::{
-        client::{Outcome, PortBlockView, ProcessOutcome},
-        mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
+    use crate::adapter::mcp::test_support::{
+        Fixture, answered, fixture, refusal, register, runtime,
     };
 
     /// The fixture's registered project with `processes` in it and

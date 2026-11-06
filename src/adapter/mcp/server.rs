@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
+use muster_client::{ServiceClient, process};
 use muster_domain::{
     constants::{MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
     project::Project,
@@ -27,7 +28,6 @@ use super::{
     tool_failure::ToolFailure,
     tool_result::ToolResult,
 };
-use crate::adapter::client::{ServiceClient, process};
 
 /// Server name reported to connecting agents.
 const MCP_SERVER_NAME: &str = "muster";

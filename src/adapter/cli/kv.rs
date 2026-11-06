@@ -1,3 +1,4 @@
+use muster_client::{ListedValue, PageSize};
 use muster_domain::{
     coordination::{Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue},
     port::CoordinationStore,
@@ -10,7 +11,6 @@ use super::{
     answer::Answer, error::CliError, kv_command::KvCommand, page_cursor::parse_cursor,
     report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::adapter::client::{ListedValue, PageSize};
 
 /// What a refusal calls an entry's value.
 const KV_VALUE: &str = "value";
@@ -200,8 +200,9 @@ fn remove(
 mod tests {
     use std::path::PathBuf;
 
+    use muster_client::LISTED_VALUE_CHARS;
+
     use super::{super::memory_coordination::MemoryCoordination, *};
-    use crate::adapter::client::LISTED_VALUE_CHARS;
 
     /// The project every test entry belongs to.
     fn project() -> ProjectRoot {

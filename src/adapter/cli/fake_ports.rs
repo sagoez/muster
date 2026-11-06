@@ -4,6 +4,10 @@ use std::{
     sync::Arc,
 };
 
+use muster_client::{
+    ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
+    recording_workspace::RecordingWorkspace,
+};
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
@@ -15,16 +19,7 @@ use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
-use crate::{
-    adapter::{
-        client::{
-            ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
-            recording_workspace::RecordingWorkspace,
-        },
-        shell::ShellFiles,
-    },
-    error::MusterError,
-};
+use crate::{adapter::shell::ShellFiles, error::MusterError};
 
 /// The state directory's name under the scratch folder standing for its
 /// parent.

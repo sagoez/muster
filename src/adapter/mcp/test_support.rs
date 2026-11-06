@@ -9,6 +9,7 @@ use std::{
 };
 
 use getset::{Getters, MutGetters};
+use muster_client::{fake_service::FakeService, recording_notifier::RecordingNotifier};
 use muster_domain::{
     port::{StackEditLog, TerminalWorkspace},
     value::ProjectRoot,
@@ -27,7 +28,6 @@ use super::{
     mcp_deps::McpDeps, process_add_arg::ProcessAddArg, scope::Scope, server::MusterMcp,
     tool_failure::ToolFailure,
 };
-use crate::adapter::client::{fake_service::FakeService, recording_notifier::RecordingNotifier};
 
 /// The database file each test's store opens.
 const DATABASE: &str = "muster.db";

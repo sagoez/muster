@@ -1,5 +1,6 @@
 //! `muster config`: list, read and change the settings.
 
+use muster_client::SettingView;
 use muster_domain::{
     config::{SettingChange, SettingKey},
     coordination::Author,
@@ -12,7 +13,6 @@ use super::{
     error::CliError, invocation::Invocation, output::COLUMN_GAP, report::Report, row::Row,
     row_kind::RowKind,
 };
-use crate::adapter::client::SettingView;
 
 /// Title of the `config set` report.
 const CONFIG_TITLE: &str = "muster config";
@@ -76,6 +76,7 @@ pub fn set_rows(view: &SettingView) -> Report {
 mod tests {
     use std::time::Duration;
 
+    use muster_client::SettingsView;
     use muster_domain::{
         color_scheme::ColorScheme,
         config::McpStackEdits,
@@ -85,7 +86,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::client::SettingsView;
 
     /// Settings as the initial migration seeds them.
     fn seeded() -> Settings {

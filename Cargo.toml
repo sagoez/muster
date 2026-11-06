@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "muster-application",
+    "muster-client",
     "muster-domain",
     "muster-herdr",
     "muster-holder",
@@ -24,6 +25,7 @@ readme = "README.md"
 # Workspace crates; AGENTS.md says why each one is a crate. Each pins the
 # exact sibling version: they have no stable API of their own.
 muster-application = { path = "muster-application", version = "=0.11.0" }
+muster-client = { path = "muster-client", version = "=0.11.0" }
 muster-domain = { path = "muster-domain", version = "=0.11.0" }
 muster-herdr = { path = "muster-herdr", version = "=0.11.0" }
 muster-holder = { path = "muster-holder", version = "=0.11.0" }
@@ -107,6 +109,7 @@ path = "src/main.rs"
 
 [dependencies]
 muster-application = { workspace = true }
+muster-client = { workspace = true }
 muster-domain = { workspace = true }
 muster-herdr = { workspace = true }
 muster-holder = { workspace = true }
@@ -158,6 +161,7 @@ ureq = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+muster-client = { workspace = true, features = ["testing"] }
 muster-domain = { workspace = true, features = ["testing"] }
 muster-holder = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }

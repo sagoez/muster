@@ -2,6 +2,7 @@
 //! when it is not one. Nothing is started.
 
 use getset::{CopyGetters, Getters};
+use muster_client::{DefinitionView, ProjectIdentityView, WorkingDirPlace};
 use muster_domain::{
     config::{Environment, ProcessDraft},
     coordination::Author,
@@ -14,7 +15,6 @@ use super::{
     add_args::AddArgs, command_words::command_string, error::CliError, invocation::Invocation,
     output::project_title, report::Report, row::Row, row_kind::RowKind,
 };
-use crate::adapter::client::{DefinitionView, ProjectIdentityView, WorkingDirPlace};
 
 /// The command word of `muster add`.
 const ADD_WORD: &str = "add";

@@ -162,6 +162,7 @@ impl FollowedOutput for RenderedLog<'_> {
 mod tests {
     use std::{path::PathBuf, thread};
 
+    use muster_client::{LogRead, LogText, ProjectIdentityView};
     use muster_domain::{
         project::Project,
         value::{ProcessName, ProjectName, ProjectRoot},
@@ -175,10 +176,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        cli::json_log_lines::JsonLogLines,
-        client::{LogRead, LogText, ProjectIdentityView},
-    };
+    use crate::adapter::cli::json_log_lines::JsonLogLines;
 
     /// How far past the idle wait the prompt tests look.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);

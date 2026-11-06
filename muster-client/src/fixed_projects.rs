@@ -9,11 +9,11 @@ use muster_domain::{
 };
 
 /// A store holding a fixed set of projects, looked up as the database would.
-pub(crate) struct FixedProjects(Vec<Project>);
+pub struct FixedProjects(Vec<Project>);
 
 impl FixedProjects {
     /// A store holding `projects`.
-    pub(crate) fn new(projects: Vec<Project>) -> Self {
+    pub fn new(projects: Vec<Project>) -> Self {
         Self(projects)
     }
 }

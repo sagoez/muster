@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use muster_client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, PROCESSES_MAX},
     coordination::{
@@ -27,7 +28,6 @@ use serde_json::Value;
 use strum::IntoEnumIterator;
 
 use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
-use crate::adapter::client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
 
 /// Key of a JSON schema node's description.
 const DESCRIPTION_KEY: &str = "description";

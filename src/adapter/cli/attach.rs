@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use muster_client::{ClientError, ServiceClient, process::locate};
 use muster_domain::{
     constants::APP_NAME,
     project::Project,
@@ -42,7 +43,6 @@ use super::{
     host_terminal::HostTerminal, raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
 };
-use crate::adapter::client::{ClientError, ServiceClient, process::locate};
 
 /// Longest the holder may take to send its screen.
 const GREETING_TIMEOUT: Duration = Duration::from_secs(5);

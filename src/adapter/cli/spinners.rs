@@ -2,6 +2,7 @@ use std::ops::ControlFlow;
 
 use cliclack::ProgressBar;
 use console::Term;
+use muster_client::{Action, SettleWatch};
 use muster_protocol::service::ProcessStatus;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
@@ -10,7 +11,6 @@ use super::{
     interrupt_guard::InterruptGuard,
     presenter::{clear_spinner, start_spinner, update_spinner},
 };
-use crate::adapter::client::{Action, SettleWatch};
 
 /// Between the processes a spinner names.
 const PROCESS_SEPARATOR: &str = ", ";

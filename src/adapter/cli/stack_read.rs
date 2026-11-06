@@ -1,8 +1,7 @@
 use getset::Getters;
+use muster_client::ProjectTarget;
 use muster_domain::config::ProcessSpec;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::client::ProjectTarget;
 
 /// A stack file read and checked whole, ready to plan against a project.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]

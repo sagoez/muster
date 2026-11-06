@@ -1,5 +1,6 @@
 //! The settings tools: the machine's muster settings, read and changed.
 
+use muster_client::{SettingView, SettingsView};
 use muster_domain::config::{SettingChange, SettingKey};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
@@ -11,7 +12,6 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::adapter::client::{SettingView, SettingsView};
 
 /// The setting tool, as a read-only refusal names it.
 pub(super) const CONFIG_SET: &str = "config_set";

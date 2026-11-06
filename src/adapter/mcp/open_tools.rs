@@ -3,6 +3,11 @@
 
 use std::convert::Infallible;
 
+use muster_client::{
+    ClientError, OpenRequest,
+    open::{open_beside, unopenable_here},
+    process,
+};
 use muster_domain::{
     config::ConfigError,
     project::Project,
@@ -18,11 +23,6 @@ use super::{
     server::{MusterMcp, json, structured, with_alerts},
     tool_error::ToolError,
     tool_result::ToolResult,
-};
-use crate::adapter::client::{
-    ClientError, OpenRequest,
-    open::{open_beside, unopenable_here},
-    process,
 };
 
 /// `error` from opening the running process `name` of `project` as
@@ -130,6 +130,13 @@ mod tests {
         time::Duration,
     };
 
+    use muster_client::{
+        Asked, RunningService,
+        fake_service::FakeService,
+        open::{attach_command, attach_hint},
+        recording_workspace::RecordingWorkspace,
+        served_service::ServedService,
+    };
     use muster_domain::{
         config::{McpStackEdits, SettingChange},
         coordination::Author,
@@ -147,15 +154,8 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::adapter::{
-        client::{
-            Asked, RunningService,
-            fake_service::FakeService,
-            open::{attach_command, attach_hint},
-            recording_workspace::RecordingWorkspace,
-            served_service::ServedService,
-        },
-        mcp::test_support::{Fixture, content, fixture, fixture_with, refusal, register, runtime},
+    use crate::adapter::mcp::test_support::{
+        Fixture, content, fixture, fixture_with, refusal, register, runtime,
     };
 
     /// The pane a workspace opens.

@@ -1,11 +1,10 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
+use muster_client::LogSliceView;
 use muster_os::sanitize::printable_lines;
 use muster_protocol::service::WaitOutcome;
 use muster_terminal::log_renderer::dropped_lines;
-
-use crate::adapter::client::LogSliceView;
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;

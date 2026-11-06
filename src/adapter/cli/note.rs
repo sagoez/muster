@@ -1,3 +1,4 @@
+use muster_client::{NoteEntry, PageSize};
 use muster_domain::{
     coordination::{
         Author, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NoteBody, ScratchpadKey,
@@ -13,7 +14,6 @@ use super::{
     answer::Answer, error::CliError, note_command::NoteCommand, page_cursor::parse_cursor,
     report::attribution, row::Row, row_kind::RowKind,
 };
-use crate::adapter::client::{NoteEntry, PageSize};
 
 /// What a refusal calls a note's body.
 const NOTE_BODY: &str = "note body";

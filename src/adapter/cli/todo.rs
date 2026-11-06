@@ -1,3 +1,4 @@
+use muster_client::{PageSize, TodoPage, TodoView};
 use muster_domain::{
     coordination::{
         Author, ClaimState, NewTodoTitle, NewTodoTitleError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS,
@@ -14,7 +15,6 @@ use super::{
     answer::Answer, error::CliError, page_cursor::parse_cursor, report::attribution, row::Row,
     row_kind::RowKind, todo_command::TodoCommand,
 };
-use crate::adapter::client::{PageSize, TodoPage, TodoView};
 
 /// What a refusal calls a todo's title.
 const TODO_TITLE: &str = "todo title";

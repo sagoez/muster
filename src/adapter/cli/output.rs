@@ -9,6 +9,10 @@ use std::{
 };
 
 use bytesize::ByteSize;
+use muster_client::{
+    Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
+    ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
+};
 use muster_domain::{
     config::{ProcessSpec, Stack},
     constants::APP_NAME,
@@ -31,10 +35,6 @@ use super::{
     report::{Report, tally},
     row::Row,
     row_kind::RowKind,
-};
-use crate::adapter::client::{
-    Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
-    ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
 };
 
 /// Column headers of the `ps` table, in order.
@@ -812,6 +812,9 @@ mod tests {
         path::PathBuf,
     };
 
+    use muster_client::{
+        ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView, ProjectView,
+    };
     use muster_domain::{
         config::{Environment, ProcessSpec},
         port::{ListeningSocket, PortOccupant},
@@ -827,12 +830,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::{
-        cli::{ending_signal::EndingSignal, report::plain},
-        client::{
-            ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView, ProjectView,
-        },
-    };
+    use crate::adapter::cli::{ending_signal::EndingSignal, report::plain};
 
     /// The folder of the project every fixture belongs to.
     const PROJECT: &str = "/home/me/shop";

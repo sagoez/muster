@@ -7,13 +7,13 @@ use muster_domain::{
 };
 
 /// The name a [`RecordingWorkspace`] answers a check with.
-pub(crate) const RECORDING_WORKSPACE: &str = "recording";
+pub const RECORDING_WORKSPACE: &str = "recording";
 /// The caller's pane a [`RecordingWorkspace`] answers a check with.
-pub(crate) const CALLER_PANE: &str = "w1:p1";
+pub const CALLER_PANE: &str = "w1:p1";
 
 /// A [`TerminalWorkspace`] that records every pane asked of it and answers
 /// each ask and check as the test scripted, opening nothing.
-pub(crate) struct RecordingWorkspace {
+pub struct RecordingWorkspace {
     /// Every pane asked for, in order.
     requests: Mutex<Vec<PaneRequest>>,
     /// The pane each ask opens, or the failure every ask and check meets.
@@ -22,7 +22,7 @@ pub(crate) struct RecordingWorkspace {
 
 impl RecordingWorkspace {
     /// A workspace that opens the pane `pane` for every ask.
-    pub(crate) fn opening(pane: &str) -> Self {
+    pub fn opening(pane: &str) -> Self {
         Self {
             requests: Mutex::default(),
             answer: Ok(WorkspacePaneId::try_new(pane).unwrap()),
@@ -30,7 +30,7 @@ impl RecordingWorkspace {
     }
 
     /// A workspace that fails every ask and check with `error`.
-    pub(crate) fn failing(error: WorkspaceError) -> Self {
+    pub fn failing(error: WorkspaceError) -> Self {
         Self {
             requests: Mutex::default(),
             answer: Err(error),
@@ -38,7 +38,7 @@ impl RecordingWorkspace {
     }
 
     /// Every pane asked for, in order.
-    pub(crate) fn requests(&self) -> Vec<PaneRequest> {
+    pub fn requests(&self) -> Vec<PaneRequest> {
         self.requests.lock().unwrap().clone()
     }
 }

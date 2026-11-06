@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::ValueEnum;
+use muster_client::{ClientError, ProjectTarget, SocketDirCheck};
 use muster_domain::{
     config::{ConfigError, ProcessSpec, Stack},
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
@@ -27,10 +28,7 @@ use super::{
     row_kind::RowKind,
     shell_init::rc_line,
 };
-use crate::adapter::{
-    client::{ClientError, ProjectTarget, SocketDirCheck},
-    shell::HookShell,
-};
+use crate::adapter::shell::HookShell;
 
 /// Title of the doctor report.
 const DOCTOR_TITLE: &str = "muster doctor";
@@ -491,6 +489,10 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 mod tests {
     use std::io;
 
+    use muster_client::{
+        fixed_projects::FixedProjects,
+        recording_workspace::{CALLER_PANE, RECORDING_WORKSPACE, RecordingWorkspace},
+    };
     use muster_domain::{
         project::Project,
         terminal_workspace::WorkspaceError,
@@ -499,13 +501,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped},
-        client::{
-            fixed_projects::FixedProjects,
-            recording_workspace::{CALLER_PANE, RECORDING_WORKSPACE, RecordingWorkspace},
-        },
-    };
+    use crate::adapter::cli::{doctor_view::DoctorView, embedding::Embedding, wrapped::Wrapped};
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {

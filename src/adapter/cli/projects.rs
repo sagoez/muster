@@ -8,6 +8,7 @@ use std::{
 
 use getset::{CopyGetters, Getters};
 use muster_application::StackEditor;
+use muster_client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down};
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, StateChangeNotifier},
@@ -29,7 +30,6 @@ use super::{
     row::Row,
     row_kind::RowKind,
 };
-use crate::adapter::client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down};
 
 /// Title of the `projects` reports.
 const PROJECTS_TITLE: &str = "muster projects";
@@ -86,7 +86,7 @@ pub struct ProjectListing {
     /// The idle stop in effect, its own or the setting's: whole seconds in
     /// JSON, or null for never, when its stored row does not read, or when
     /// it follows a setting that does not read.
-    #[serde(serialize_with = "crate::adapter::client::idle_stop_seconds::serialize_optional")]
+    #[serde(serialize_with = "muster_client::idle_stop_seconds::serialize_optional")]
     #[builder(default)]
     #[getset(get_copy = "pub")]
     idle_stop: Option<IdleStop>,
@@ -353,6 +353,7 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::recording_notifier::RecordingNotifier;
     use muster_domain::{
         config::ImportMode,
         port::{ProjectStore, SettingsReader, StackStore},
@@ -365,7 +366,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{cli::report::plain, client::recording_notifier::RecordingNotifier};
+    use crate::adapter::cli::report::plain;
 
     /// A listing of `name` at `root` with `processes`, `current` or not,
     /// following a 30 minute idle-stop setting.

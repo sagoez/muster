@@ -5,6 +5,11 @@ use std::time::SystemTime;
 
 use getset::{CopyGetters, Getters};
 use muster_application::StackEditor;
+use muster_client::{
+    Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient, SettleWatch,
+    UNBOUNDED,
+    process::{ready_to_send, resolve_among, settle_removed, status},
+};
 use muster_domain::{
     config::ConfigError,
     coordination::Author,
@@ -17,11 +22,6 @@ use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
 use super::{error::CliError, output::action_title, report::Report, row::Row, row_kind::RowKind};
-use crate::adapter::client::{
-    Action, ActionReport, Outcome, ProjectIdentityView, RemovedView, ServiceClient, SettleWatch,
-    UNBOUNDED,
-    process::{ready_to_send, resolve_among, settle_removed, status},
-};
 
 /// Opens the line naming a removed process.
 const REMOVED: &str = "removed";

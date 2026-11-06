@@ -61,7 +61,7 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(2);
 const CURRENT_DIR: &str = ".";
 /// What a test client names as its binary, in its state directory, so it
 /// never starts a service.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 const NO_BINARY: &str = "no-muster";
 
 /// A client of this user's muster service, which it starts on demand and
@@ -321,8 +321,8 @@ impl ServiceClient {
 
     /// The client of a test's service of `state_dir`, bound in `socket_dir`,
     /// that can never start one: its binary does not exist.
-    #[cfg(test)]
-    pub(crate) fn scratch(state_dir: PathBuf, socket_dir: &Path) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn scratch(state_dir: PathBuf, socket_dir: &Path) -> Self {
         let binary = state_dir.join(NO_BINARY);
         Self::under(state_dir, socket_dir, binary)
     }
@@ -833,7 +833,7 @@ mod tests {
     use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
 
     use super::*;
-    use crate::adapter::client::served_service::ServedService;
+    use crate::served_service::ServedService;
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";

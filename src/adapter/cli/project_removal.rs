@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_client::ActionReport;
 use muster_domain::value::ProjectName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::client::ActionReport;
 
 /// What `projects rm` did, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]

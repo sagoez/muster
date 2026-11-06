@@ -3,13 +3,11 @@
 
 use std::path::Path;
 
+use muster_client::ClientError;
 use muster_domain::constants::APP_NAME;
 
 use super::{cli_ports::CliPorts, error::CliError};
-use crate::adapter::{
-    client::ClientError,
-    shell::{HookShell, hook_script},
-};
+use crate::adapter::shell::{HookShell, hook_script};
 
 /// The command that prints the hook.
 pub const SHELL_INIT_SUBCOMMAND: &str = "shell-init";
@@ -49,11 +47,11 @@ pub fn rc_line(shell: HookShell) -> String {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::FailureKind;
     use muster_store::test_support::fresh_store;
     use strum::IntoEnumIterator;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::adapter::client::FailureKind;
 
     /// Where the hook names the notes folder, in the snapshot.
     const NOTES_PLACEHOLDER: &str = "<notes>";

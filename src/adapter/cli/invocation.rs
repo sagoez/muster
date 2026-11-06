@@ -5,6 +5,7 @@ use std::{
 };
 
 use muster_application::StackEditor;
+use muster_client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project};
 use muster_domain::{
     constants::{APP_NAME, MUSTER_PROJECT_ENV},
     port::{LocalState, StateChangeNotifier},
@@ -16,9 +17,6 @@ use muster_os::path::home_dir;
 use super::{
     cli_ports::CliPorts, error::CliError, report::print_note,
     shell_registration::name_in_hooked_shell,
-};
-use crate::adapter::client::{
-    ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project,
 };
 
 /// Between the project acted on and the one the current folder is in.
@@ -256,13 +254,13 @@ impl StateChangeNotifier for Invocation<'_> {
 mod tests {
     use std::fs;
 
+    use muster_client::ClientError;
     use muster_domain::{config::ImportMode, port::StackReader, value::ProjectRoot};
     use muster_os::no_state_dir::NoStateDir;
     use muster_store::test_support::{fresh_store, spec};
     use tempfile::TempDir;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::adapter::client::ClientError;
 
     /// Ports over a fresh scratch database, and the folder holding it.
     fn ports() -> (FakePorts, TempDir) {

@@ -5,11 +5,11 @@
 use std::path::{Path, PathBuf};
 
 use getset::Getters;
+use muster_client::{ProjectTarget, ResolveError, resolve_project};
 use muster_domain::{port::ProjectStore, project::Project};
 use typed_builder::TypedBuilder;
 
 use super::tool_error::ToolError;
-use crate::adapter::client::{ProjectTarget, ResolveError, resolve_project};
 
 /// Where a server resolves projects from: the folder it was started in, and
 /// the folder a call without `project` starts from (`--project`, or that
@@ -110,12 +110,12 @@ impl Scope {
 mod tests {
     use std::fs;
 
+    use muster_client::RefusedFolder;
     use muster_domain::{coordination::Author, port::StackStore, value::ProjectRoot};
     use muster_store::{SqliteStore, test_support::spec};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::client::RefusedFolder;
 
     /// Registers the folder `dir` as a project by adding a process to it.
     fn register(store: &SqliteStore, dir: &Path) {

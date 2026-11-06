@@ -1,9 +1,9 @@
 use getset::Getters;
+use muster_client::{LockView, NoticeView, ProjectIdentityView};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{occupancy_view::OccupancyView, stack_process_view::StackProcessView};
-use crate::adapter::client::{LockView, NoticeView, ProjectIdentityView};
 
 /// The whole picture of one project's stack, as `stack_status` answers.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, TypedBuilder)]

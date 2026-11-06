@@ -148,7 +148,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::client::{
+    use crate::{
         FailureKind, RunningService, fake_service::FakeService,
         recording_workspace::RecordingWorkspace, served_service::ServedService, this_binary,
     };

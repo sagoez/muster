@@ -254,7 +254,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::client::fixed_projects::FixedProjects;
+    use crate::fixed_projects::FixedProjects;
 
     /// A project called `name` rooted at `root`.
     fn project(name: &str, root: &Path) -> Project {

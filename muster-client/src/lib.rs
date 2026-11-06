@@ -7,8 +7,8 @@ mod action_report;
 mod asked;
 mod client_error;
 mod condition_view;
-#[cfg(test)]
-mod connector;
+#[cfg(any(test, feature = "testing"))]
+pub mod connector;
 mod definition_view;
 mod elapsed_seconds;
 mod environment_view;
@@ -16,10 +16,10 @@ mod exchange_failure;
 mod exit_view;
 mod failure_kind;
 mod failure_view;
-#[cfg(test)]
-pub(crate) mod fake_service;
-#[cfg(test)]
-pub(crate) mod fixed_projects;
+#[cfg(any(test, feature = "testing"))]
+pub mod fake_service;
+#[cfg(any(test, feature = "testing"))]
+pub mod fixed_projects;
 pub mod idle_stop_seconds;
 mod listed_value;
 mod lock_view;
@@ -46,17 +46,17 @@ mod project_identity_view;
 mod project_target;
 mod project_view;
 mod ready_view;
-#[cfg(test)]
-pub(crate) mod recording_notifier;
-#[cfg(test)]
-pub(crate) mod recording_workspace;
+#[cfg(any(test, feature = "testing"))]
+pub mod recording_notifier;
+#[cfg(any(test, feature = "testing"))]
+pub mod recording_workspace;
 mod refused_folder;
 mod removed_view;
 mod resolve_error;
 mod running_service;
 mod running_service_notifier;
-#[cfg(test)]
-pub(crate) mod served_service;
+#[cfg(any(test, feature = "testing"))]
+pub mod served_service;
 mod service_access;
 mod service_client;
 mod service_log;

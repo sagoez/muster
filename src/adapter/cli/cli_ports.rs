@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use muster_client::ServiceAccess;
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
@@ -8,7 +9,7 @@ use muster_domain::{
 use muster_os::no_state_dir::NoStateDir;
 
 use super::mcp_launch::McpLaunch;
-use crate::{adapter::client::ServiceAccess, error::MusterError};
+use crate::error::MusterError;
 
 /// What the composition root hands the CLI: muster's state and service as
 /// ports, and how the MCP server and the hidden service and holder entry

@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use getset::Getters;
 use muster_application::StackEditor;
+use muster_client::{ProjectTarget, ServiceAccess};
 use muster_domain::{
     port::{
         CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
@@ -12,7 +13,6 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::{scope::Scope, tool_error::ToolError};
-use crate::adapter::client::{ProjectTarget, ServiceAccess};
 
 /// What the MCP server works with: where it resolves projects from, the
 /// identity it was given, the service it drives, the stores and notifier

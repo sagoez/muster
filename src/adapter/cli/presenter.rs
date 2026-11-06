@@ -402,8 +402,10 @@ fn framed_text(row: &Row, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::FailureKind;
+
     use super::*;
-    use crate::adapter::{cli::cli_exit::CliExit, client::FailureKind};
+    use crate::adapter::cli::cli_exit::CliExit;
 
     /// Labels pad to the widest one so the details line up.
     #[test]

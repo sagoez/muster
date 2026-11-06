@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use muster_client::PageSize;
 use muster_domain::{
     occupancy::{LoadStart, ReportSeq},
     value::{EpochNanos, Pid, ProcessRef},
@@ -30,10 +31,7 @@ use super::{
     todo_command::TodoCommand,
     wait_args::WaitArgs,
 };
-use crate::adapter::{
-    client::PageSize,
-    shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
-};
+use crate::adapter::shell::{HookShell, SHELL_REPORT_SUBCOMMAND};
 
 /// Subcommands. Absent, muster prints `ps`.
 #[derive(Subcommand)]

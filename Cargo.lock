@@ -1270,6 +1270,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-client"
+version = "0.11.0"
+dependencies = [
+ "getset",
+ "humantime",
+ "insta",
+ "muster-domain",
+ "muster-os",
+ "muster-protocol",
+ "muster-store",
+ "muster-terminal",
+ "nutype",
+ "serde",
+ "serde_json",
+ "shlex",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+]
+
+[[package]]
 name = "muster-domain"
 version = "0.11.0"
 dependencies = [
@@ -1440,6 +1462,7 @@ dependencies = [
  "libc",
  "listeners",
  "muster-application",
+ "muster-client",
  "muster-domain",
  "muster-herdr",
  "muster-holder",

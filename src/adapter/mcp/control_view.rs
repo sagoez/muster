@@ -1,11 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_client::{ActionReport, NoticeView, Outcome, ProcessView, ProjectIdentityView, WaitEnd};
 use muster_domain::value::ProcessName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::client::{
-    ActionReport, NoticeView, Outcome, ProcessView, ProjectIdentityView, WaitEnd,
-};
 
 /// What a start, stop or restart of one process came to.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]

@@ -1,8 +1,7 @@
 use getset::Getters;
+use muster_client::{LogSliceView, ProjectIdentityView};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::client::{LogSliceView, ProjectIdentityView};
 
 /// A filtered `muster logs --json`: the slice under the project it was read
 /// from, named as every other command names it.

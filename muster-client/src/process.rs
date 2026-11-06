@@ -1068,7 +1068,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::client::fake_service::FakeService;
+    use crate::fake_service::FakeService;
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
     /// ran the action's own timeout timed out.

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use muster_client::{Asked, ClientError};
 use muster_domain::{
     occupancy::{ReportStamp, ShellRecord},
     value::{EpochNanos, Pid},
@@ -13,7 +14,6 @@ use muster_os::clock::nanos_now;
 use muster_protocol::service::{LaunchEnvironment, ServiceRequest, ServiceResponse};
 
 use super::{cli_ports::CliPorts, shell_note_text::note_lines, shell_report_skip::ShellReportSkip};
-use crate::adapter::client::{Asked, ClientError};
 
 /// Reports the shell running as `pid`, at the hook load and prompt `stamp`
 /// gives, in `cwd`, which it arrived in at `arrived`, sending its environment
@@ -113,6 +113,7 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
     use std::{fs, path::PathBuf, process, process::Command};
 
+    use muster_client::{RunningService, fake_service::FakeService, served_service::ServedService};
     use muster_domain::{
         config::ImportMode,
         occupancy::{ShellId, testing::stamp},
@@ -128,9 +129,6 @@ mod tests {
     use super::{
         super::{fake_ports::FakePorts, shell_registration::name_in_hooked_shell},
         *,
-    };
-    use crate::adapter::client::{
-        RunningService, fake_service::FakeService, served_service::ServedService,
     };
 
     /// Suffix of a note file.

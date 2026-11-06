@@ -1,5 +1,4 @@
 pub mod cli;
-pub mod client;
 pub mod detect;
 pub mod exchange;
 pub mod listening;

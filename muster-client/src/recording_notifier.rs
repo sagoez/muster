@@ -5,15 +5,15 @@ use muster_domain::{port::StateChangeNotifier, value::ProjectRoot};
 
 /// A [`StateChangeNotifier`] that records what it was told.
 #[derive(Default, Getters, MutGetters)]
-pub(crate) struct RecordingNotifier {
+pub struct RecordingNotifier {
     /// Each folder registered as a project, in order.
-    #[getset(get = "pub(crate)")]
+    #[getset(get = "pub")]
     registered: Mutex<Vec<ProjectRoot>>,
     /// Each project whose stack changed, in order.
-    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
+    #[getset(get = "pub", get_mut = "pub")]
     stacks: Mutex<Vec<ProjectRoot>>,
     /// How many times the settings changed.
-    #[getset(get = "pub(crate)", get_mut = "pub(crate)")]
+    #[getset(get = "pub", get_mut = "pub")]
     settings: Mutex<usize>,
 }
 

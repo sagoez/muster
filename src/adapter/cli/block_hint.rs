@@ -1,9 +1,8 @@
 //! The CLI's words for freeing a port a start found held.
 
+use muster_client::{PortBlockView, PortOwnerView};
 use muster_domain::value::{ProcessName, ProjectName};
 use muster_protocol::service::{PortBlock, PortOwner};
-
-use crate::adapter::client::{PortBlockView, PortOwnerView};
 
 /// The command that frees a port another project's process holds, before
 /// that project's name.

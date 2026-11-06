@@ -3,6 +3,10 @@
 
 use std::{convert::Infallible, io, io::Write, path::Path, thread, time::Duration};
 
+use muster_client::{
+    LogRead, ServiceClient,
+    process::{log_error, log_path, log_read_error, resolve, status},
+};
 use muster_domain::{
     constants::APP_NAME,
     process::ProcessState,
@@ -19,10 +23,6 @@ use super::{
     error::CliError, followed_output::FollowedOutput, json_log_lines::JsonLogLines,
     log_follower::LogFollower, output, presenter::Presenter, rendered_log::RenderedLog,
     report::print_note,
-};
-use crate::adapter::client::{
-    LogRead, ServiceClient,
-    process::{log_error, log_path, log_read_error, resolve, status},
 };
 
 /// Pause between reads of a followed log.

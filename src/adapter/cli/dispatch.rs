@@ -17,6 +17,11 @@ use anstream::{AutoStream, ColorChoice};
 use clap::error::{Error as ParseError, ErrorKind};
 use clap_complete::CompleteEnv;
 use directories::{BaseDirs, ProjectDirs};
+use muster_client::{
+    Action, ActionReport, ClientError, LogRead, NoticeView, ProjectIdentityView, ProjectTarget,
+    ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch, WaitView, process,
+    resolve_project, this_binary,
+};
 use muster_domain::{
     config::{ImportMode, Stack},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
@@ -102,17 +107,7 @@ use super::{
     wait::{condition, wait_text, wait_through},
     wait_args::WaitArgs,
 };
-use crate::{
-    adapter::{
-        client::{
-            Action, ActionReport, ClientError, LogRead, NoticeView, ProjectIdentityView,
-            ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch,
-            WaitView, process, resolve_project, this_binary,
-        },
-        shell::HookShell,
-    },
-    error::MusterError,
-};
+use crate::{adapter::shell::HookShell, error::MusterError};
 
 /// The flag that asks a command for JSON output.
 const JSON_FLAG: &str = "--json";

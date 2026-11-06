@@ -49,8 +49,9 @@ impl ProcessOpenArg {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::FailureKind;
+
     use super::*;
-    use crate::adapter::client::FailureKind;
 
     /// The arguments naming `api` and `direction`.
     fn directed(direction: &str) -> ProcessOpenArg {

@@ -1,5 +1,5 @@
 ---
-source: src/adapter/client/wait_view.rs
+source: muster-client/src/wait_view.rs
 expression: "serde_json::to_string_pretty(&WaitView::from(&outcome)).unwrap()"
 ---
 {

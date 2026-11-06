@@ -3,6 +3,10 @@
 
 use getset::Getters;
 use muster_application::StackEditor;
+use muster_client::{
+    ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
+    process::{ready_to_send, start_added},
+};
 use muster_domain::{
     config::ProcessDraft,
     coordination::Author,
@@ -18,10 +22,6 @@ use super::{
     error::{CliError, RUN_NAME_HINT},
     invocation::Invocation,
     run_args::RunArgs,
-};
-use crate::adapter::client::{
-    ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
-    process::{ready_to_send, start_added},
 };
 
 /// Whether `muster up` starts a process `muster run` adds. Off: running a

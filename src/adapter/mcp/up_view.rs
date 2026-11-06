@@ -1,12 +1,10 @@
 use getset::Getters;
+use muster_client::{ActionReport, NoticeView, Outcome, ProcessOutcome, ProjectIdentityView};
 use muster_domain::value::ProcessName;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::agent_wait_view::AgentWaitView;
-use crate::adapter::client::{
-    ActionReport, NoticeView, Outcome, ProcessOutcome, ProjectIdentityView,
-};
 
 /// What `stack_up` started, left alone and waited for.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, TypedBuilder)]

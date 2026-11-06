@@ -4,8 +4,9 @@
 
 use std::time::Duration;
 
+use muster_client::{MAX_LIST_LIMIT, PageSize};
+
 use super::{process_fields::invalid, tool_error::ToolError};
-use crate::adapter::client::{MAX_LIST_LIMIT, PageSize};
 
 /// Longest any call blocks, under the 60 seconds many MCP clients give one.
 pub const CALL_BOUND: Duration = Duration::from_secs(45);

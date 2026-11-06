@@ -1,10 +1,9 @@
 use getset::CopyGetters;
+use muster_client::whole_seconds_up;
 use muster_domain::value::IdleStop;
 use muster_protocol::service::OccupancyStatus;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::client::whole_seconds_up;
 
 /// Who is in a project and when it stops for want of anyone, as
 /// `stack_status` shows it.
@@ -15,7 +14,7 @@ pub struct OccupancyView {
     shells: u32,
     /// How long the project keeps running with no shell in it: whole seconds
     /// in JSON, or null for never.
-    #[serde(with = "crate::adapter::client::idle_stop_seconds")]
+    #[serde(with = "muster_client::idle_stop_seconds")]
     #[getset(get_copy = "pub")]
     idle_stop: IdleStop,
     /// Whole seconds, rounded up, until the pending idle stop; left out when

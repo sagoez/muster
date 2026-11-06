@@ -185,10 +185,10 @@ fn state_goal(field: &'static str, raw: &str) -> Result<StateGoal, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::ConditionView;
     use serde_json::Value;
 
     use super::*;
-    use crate::adapter::client::ConditionView;
 
     /// The field refusals are reported under.
     const FIELD: &str = "until";

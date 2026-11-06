@@ -3,13 +3,11 @@
 
 use std::path::Path;
 
+use muster_client::{ClientError, OpenRequest, OpenView, ServiceClient, open::open_beside};
 use muster_domain::{port::TerminalWorkspace, project::Project, terminal_workspace::PaneFocus};
 
 use super::{
     error::CliError, open_args::OpenArgs, presenter::Presenter, process::running_named_or_chosen,
-};
-use crate::adapter::client::{
-    ClientError, OpenRequest, OpenView, ServiceClient, open::open_beside,
 };
 
 /// Opens the running process of `project` that `args` names, or the one
@@ -52,6 +50,10 @@ mod tests {
     use std::{iter, path::PathBuf, time::Duration};
 
     use clap::{CommandFactory, Parser};
+    use muster_client::{
+        FailureKind, open::attach_command, recording_workspace::RecordingWorkspace,
+        served_service::ServedService, this_binary,
+    };
     use muster_domain::{
         constants::APP_NAME,
         process::ProcessState,
@@ -64,12 +66,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::{
-        cli::{args::Args, cli_exit::CliExit, command::Command, dispatch::parse_failure, output},
-        client::{
-            FailureKind, open::attach_command, recording_workspace::RecordingWorkspace,
-            served_service::ServedService, this_binary,
-        },
+    use crate::adapter::cli::{
+        args::Args, cli_exit::CliExit, command::Command, dispatch::parse_failure, output,
     };
 
     /// The project's folder, with a space in it.

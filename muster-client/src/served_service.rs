@@ -21,7 +21,7 @@ const SOCKET_DIR: &str = "run";
 /// A service on a scratch socket, answering a hello with its version and
 /// every other request with the answer a test scripted, and recording what
 /// it was asked until it is stopped.
-pub(crate) struct ServedService {
+pub struct ServedService {
     /// The scratch directory holding its state and socket directories.
     scratch: TempDir,
     /// Its server thread, which hands back what it was asked once stopped.
@@ -31,19 +31,19 @@ pub(crate) struct ServedService {
 impl ServedService {
     /// A service of this version answering every request but a hello with
     /// `answer`.
-    pub(crate) fn answering(answer: ServiceResponse) -> Self {
+    pub fn answering(answer: ServiceResponse) -> Self {
         Self::answering_as(ServiceVersion::current(), answer)
     }
 
     /// A service greeting as `version` and answering every request but a
     /// hello with `answer`.
-    pub(crate) fn answering_as(version: ServiceVersion, answer: ServiceResponse) -> Self {
+    pub fn answering_as(version: ServiceVersion, answer: ServiceResponse) -> Self {
         Self::serving(version, move |_| answer.clone())
     }
 
     /// A service of this version answering every request but a hello with
     /// what `respond` gives for it.
-    pub(crate) fn responding(
+    pub fn responding(
         respond: impl Fn(&ServiceRequest) -> ServiceResponse + Send + 'static,
     ) -> Self {
         Self::serving(ServiceVersion::current(), respond)
@@ -95,14 +95,14 @@ impl ServedService {
     }
 
     /// What makes a client of this service, which can never start another.
-    pub(crate) fn connector(&self) -> Connector {
+    pub fn connector(&self) -> Connector {
         let (state_dir, socket_dir) = (self.state_dir(), self.socket_dir());
         Box::new(move || ServiceClient::scratch(state_dir.clone(), &socket_dir))
     }
 
     /// Stops the service and hands back every request it was asked, in
     /// order.
-    pub(crate) fn asked(mut self) -> Vec<ServiceRequest> {
+    pub fn asked(mut self) -> Vec<ServiceRequest> {
         self.stop()
     }
 

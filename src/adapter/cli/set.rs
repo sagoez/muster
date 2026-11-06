@@ -2,6 +2,10 @@
 //! process keeps running and takes the change at its next start.
 
 use getset::{CopyGetters, Getters};
+use muster_client::{
+    DefinitionView, ProjectIdentityView, WorkingDirPlace,
+    process::{resolve_among, runs_now},
+};
 use muster_domain::{
     config::{ConfigError, DeclaredPorts, FieldEdit, ProcessChange},
     coordination::Author,
@@ -13,10 +17,6 @@ use typed_builder::TypedBuilder;
 use super::{
     command_words::command_string, error::CliError, invocation::Invocation, output::project_title,
     process_flags::env_name, report::Report, row::Row, row_kind::RowKind, set_args::SetArgs,
-};
-use crate::adapter::client::{
-    DefinitionView, ProjectIdentityView, WorkingDirPlace,
-    process::{resolve_among, runs_now},
 };
 
 /// The command word of `muster set`.

@@ -3,6 +3,10 @@
 
 use std::time::SystemTime;
 
+use muster_client::{
+    ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
+    ServiceClient, Unwatched, process,
+};
 use muster_domain::{
     config::ConfigError,
     process::PatternKind,
@@ -40,10 +44,6 @@ use super::{
     server::{MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field},
     tool_error::ToolError,
     tool_result::ToolResult,
-};
-use crate::adapter::client::{
-    ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
-    ServiceClient, Unwatched, process,
 };
 
 /// Carriage return that submits a line typed into a terminal.

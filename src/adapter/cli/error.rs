@@ -1,5 +1,8 @@
 use std::{io, path::PathBuf, time::Duration};
 
+use muster_client::{
+    ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError, open::attach_hint,
+};
 use muster_domain::{
     config::ConfigError,
     coordination::Author,
@@ -15,13 +18,7 @@ use muster_protocol::{
 };
 use thiserror::Error;
 
-use crate::adapter::{
-    client::{
-        ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError, open::attach_hint,
-    },
-    exchange::ExchangeError,
-    shell::HookScriptError,
-};
+use crate::adapter::{exchange::ExchangeError, shell::HookScriptError};
 
 /// What a refusal calls a process's command.
 const COMMAND: &str = "command";

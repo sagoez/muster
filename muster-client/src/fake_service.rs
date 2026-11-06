@@ -18,7 +18,7 @@ use super::{
 /// `running` says, a request asked of a service that may run gets what the
 /// test scripted, and every request it is told or asked is recorded.
 #[derive(Default)]
-pub(crate) struct FakeService {
+pub struct FakeService {
     /// What a connection reaches, or none when no service can be reached.
     starts: Option<Connector>,
     /// The live notices of a running service, or none when none runs.
@@ -36,7 +36,7 @@ pub(crate) struct FakeService {
 
 impl FakeService {
     /// A service that runs and holds `notices`.
-    pub(crate) fn running(notices: Vec<Notice>) -> Self {
+    pub fn running(notices: Vec<Notice>) -> Self {
         Self {
             running: Some(notices),
             ..Self::default()
@@ -45,13 +45,13 @@ impl FakeService {
 
     /// This service, running, answering every request asked of it with
     /// `answer`.
-    pub(crate) fn answering(self, answer: ServiceResponse) -> Self {
+    pub fn answering(self, answer: ServiceResponse) -> Self {
         self.asked_in_turn(vec![Asked::Answered(answer)])
     }
 
     /// This service, giving `asks` to the asks made of it in turn, the last
     /// to every ask after it.
-    pub(crate) fn asked_in_turn(self, asks: Vec<Asked>) -> Self {
+    pub fn asked_in_turn(self, asks: Vec<Asked>) -> Self {
         Self {
             asks: Mutex::new(asks),
             ..self
@@ -59,7 +59,7 @@ impl FakeService {
     }
 
     /// This service, connecting to `served` as if it had been started.
-    pub(crate) fn starting(self, served: &ServedService) -> Self {
+    pub fn starting(self, served: &ServedService) -> Self {
         Self {
             starts: Some(served.connector()),
             ..self
@@ -67,17 +67,17 @@ impl FakeService {
     }
 
     /// Every request the service was told, in order.
-    pub(crate) fn told(&self) -> Vec<ServiceRequest> {
+    pub fn told(&self) -> Vec<ServiceRequest> {
         self.told.lock().unwrap().clone()
     }
 
     /// Every request the service was asked, in order.
-    pub(crate) fn asked(&self) -> Vec<ServiceRequest> {
+    pub fn asked(&self) -> Vec<ServiceRequest> {
         self.asked.lock().unwrap().clone()
     }
 
     /// How many times a connection was attempted.
-    pub(crate) fn connects(&self) -> usize {
+    pub fn connects(&self) -> usize {
         self.connects.load(Ordering::SeqCst)
     }
 }

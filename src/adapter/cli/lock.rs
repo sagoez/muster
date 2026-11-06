@@ -1,3 +1,4 @@
+use muster_client::LockView;
 use muster_domain::{
     coordination::{Lock, LockName},
     port::CoordinationStore,
@@ -10,7 +11,6 @@ use serde_json::json;
 use super::{
     answer::Answer, error::CliError, lock_command::LockCommand, row::Row, row_kind::RowKind,
 };
-use crate::adapter::client::LockView;
 
 /// Line printed when no lock is held in the project.
 const EMPTY_NOTE: &str = "no locks held";

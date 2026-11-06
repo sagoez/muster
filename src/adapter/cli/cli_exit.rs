@@ -1,6 +1,5 @@
+use muster_client::FailureKind;
 use strum::EnumIter;
-
-use crate::adapter::client::FailureKind;
 
 /// What a command's exit code says about how it ended, so a script can tell
 /// a failed action from an unreachable service or a typo.

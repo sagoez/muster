@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use muster_client::{ListedValue, NoteEntry, TodoPage, TodoView};
 use muster_domain::{
     coordination::{
         Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
@@ -46,7 +47,6 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::adapter::client::{ListedValue, NoteEntry, TodoPage, TodoView};
 
 /// Pause between attempts at a lock someone else holds.
 const LOCK_RETRY: Duration = Duration::from_millis(250);
@@ -750,16 +750,14 @@ impl MusterMcp {
 
 #[cfg(test)]
 mod tests {
+    use muster_client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
     use muster_domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore};
 
     use super::*;
-    use crate::adapter::{
-        client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
-        mcp::{
-            server::release_session_locks,
-            test_support::{
-                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
-            },
+    use crate::adapter::mcp::{
+        server::release_session_locks,
+        test_support::{
+            AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
         },
     };
 

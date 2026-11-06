@@ -4,7 +4,6 @@ use muster::{
     adapter::{
         cli,
         cli::{CliPorts, McpLaunch},
-        client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
@@ -14,6 +13,7 @@ use muster::{
     },
     error::MusterError,
 };
+use muster_client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary};
 use muster_domain::{
     config::ConfigError,
     port::{

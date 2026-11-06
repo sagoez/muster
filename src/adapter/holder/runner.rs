@@ -531,7 +531,7 @@ mod tests {
             },
             terminal::{
                 TerminalEmulator,
-                escape::{END_OPEN_LINE, RUN_START},
+                escape::{RUN_RESET_AT, RUN_START},
                 log_renderer::LogRenderer,
             },
         },
@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(whole.take_backlog(), None, "replayed through the sink");
         let lines = [regex("first|second")];
         assert!(whole.replay_matching(&lines).is_some());
-        let reset = &RUN_START[END_OPEN_LINE.len()..];
+        let reset = &RUN_START[RUN_RESET_AT..];
         assert_eq!(
             replayed(&outputs, 2),
             (start, [reset, b"first\r\nsecond\r\n"].concat()),

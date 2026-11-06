@@ -71,6 +71,10 @@ pub enum HolderMessage {
         /// The bytes.
         bytes: Vec<u8>,
     },
+    /// Bytes the child wrote that the log could not hold, sent to the
+    /// supervisor alone so its readiness and waits still see them; they
+    /// have no place in the log, so they carry no offset.
+    Unlogged(Vec<u8>),
     /// The child exited; repeated to each client until a supervisor collects it.
     Exited(ExitOutcome),
     /// A client message was refused.
@@ -131,6 +135,7 @@ impl TryFrom<HolderMessage> for Frame {
                 payload.extend(bytes);
                 (FrameTag::Output, payload)
             },
+            HolderMessage::Unlogged(bytes) => (FrameTag::Unlogged, bytes),
             HolderMessage::Exited(outcome) => {
                 (FrameTag::Exited, serde_json::to_vec(&outcome.to_wire())?)
             },
@@ -184,6 +189,7 @@ impl TryFrom<Frame> for HolderMessage {
                 let at = decode_offset(&payload).ok_or(HolderError::MalformedPayload(tag))?;
                 Ok(Self::Output { at, bytes })
             },
+            FrameTag::Unlogged => Ok(Self::Unlogged(payload)),
             FrameTag::Exited => ExitOutcome::from_wire(serde_json::from_slice(&payload)?)
                 .map(Self::Exited)
                 .map_err(|_| HolderError::MalformedPayload(tag)),
@@ -288,6 +294,7 @@ mod tests {
                 at: OutputCursor::new(0),
                 bytes: Vec::new(),
             },
+            HolderMessage::Unlogged(b"ready\n".to_vec()),
             HolderMessage::Exited(ExitOutcome::Failed(ExitCause::Signal(
                 SignalName::try_new("sigkill").unwrap(),
             ))),

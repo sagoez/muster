@@ -81,8 +81,9 @@ impl Reader {
 
     /// Reads the log from `from` up to `until` in pieces and forwards each
     /// line one of `matchers` matches, from where its drawing began, so a
-    /// line [`visit_lines`] hands in pieces reaches the tap whole, stopping
-    /// once the handle is dropped.
+    /// line [`visit_lines`] hands in pieces reaches the tap whole: a line
+    /// begun in the piece goes from memory, and only one begun earlier is
+    /// read back from the log. It stops once the handle is dropped.
     fn forward_matching(
         &mut self,
         from: OutputCursor,
@@ -105,8 +106,12 @@ impl Reader {
                     .iter()
                     .any(|text| matchers.iter().any(|matcher| matcher.is_match(text)))
             {
-                let end = piece.at().advanced(piece.bytes().len() as u64);
-                self.forward_logged(&log, piece.line_at().min(piece.at()), end);
+                if piece.line_at() < piece.at() {
+                    let end = piece.at().advanced(piece.bytes().len() as u64);
+                    self.forward_logged(&log, piece.line_at(), end);
+                } else {
+                    self.forward(piece.at(), piece.bytes().to_vec());
+                }
             }
             ControlFlow::Continue(())
         });
@@ -188,6 +193,9 @@ pub(super) fn spawn_reader(mut reader: Reader) {
                     reader.exit_held.store(true, Ordering::SeqCst);
                     reader.sink.send(ProcessOutput::Exited(outcome));
                     return;
+                },
+                Ok(HolderMessage::Unlogged(bytes)) => {
+                    reader.sink.send(ProcessOutput::Unlogged(bytes));
                 },
                 Ok(HolderMessage::Warning(text)) => reader.sink.send(ProcessOutput::Warning(text)),
                 Ok(HolderMessage::Attached(count)) => {

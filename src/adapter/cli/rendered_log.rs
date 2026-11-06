@@ -264,25 +264,30 @@ mod tests {
         assert_eq!(followed(&[b"Name? ", b"sam\r\n"]), "Name? sam\n");
     }
 
-    /// A readline prompt, which returns to the first column and erases the
-    /// empty line before it draws, is written once it stops changing.
+    /// A prompt drawn as Node's readline draws it, which returns to the
+    /// first column, erases, draws and moves the cursor to the column it
+    /// already stands on, is written once it stops changing, and so is one
+    /// that puts the cursor back with CUB or a backspace: a cursor move
+    /// redraws nothing.
     #[test]
     fn a_readline_prompt_is_written_after_the_idle_wait() {
         assert_eq!(
-            followed(&[b"\r\x1b[1G\x1b[0JOk to proceed? (y) "]),
+            followed(&[b"\x1b[1G\x1b[0JOk to proceed? (y) \x1b[20G"]),
             "Ok to proceed? (y)"
         );
+        assert_eq!(followed(&[b"Name: sam\x1b[3D"]), "Name: sam");
+        assert_eq!(followed(&[b"Pick: x\x08"]), "Pick: x");
     }
 
     /// A cargo-style progress bar that stalls past the idle wait is never
     /// written as it passes, only as `muster logs` shows it: cargo draws the
-    /// bar and a carriage return, stalls, then erases it for the next status
-    /// line.
+    /// bar, redraws it over itself, stalls, then erases it for the next
+    /// status line.
     #[test]
     fn a_stalled_progress_bar_is_not_written() {
         let chunks: [&[u8]; 3] = [
-            b"   Compiling a\n    Building [=>   ] 1/3: a\r",
-            b"\x1b[K   Compiling b\n    Building [==> ] 2/3: b\r",
+            b"   Compiling a\n    Building [>    ] 0/3\r    Building [=>   ] 1/3: a\r",
+            b"\x1b[K   Compiling b\n    Building [=>   ] 1/3\r    Building [==> ] 2/3: b\r",
             b"\x1b[K    Finished dev\n",
         ];
 

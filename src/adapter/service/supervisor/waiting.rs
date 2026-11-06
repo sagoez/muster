@@ -18,7 +18,7 @@ use crate::{
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
-        terminal::log_renderer::dropped_lines,
+        terminal::log_renderer::{LogRenderer, dropped_lines},
     },
     domain::{
         port::ListeningSocket,
@@ -769,6 +769,24 @@ impl Supervisor {
             lines.extend(self.tap(pane).unfinished_for_pattern(Instant::now()));
         }
         self.report_render_faults(pane, 0);
+        self.test_lines(pane, &lines);
+    }
+
+    /// Tests output `pane`'s log could not hold against its readiness
+    /// pattern and log waits, so a full disk never leaves them blind. With
+    /// no place in the log, it leaves the tap and its cursor be: its lines,
+    /// rendered on their own and the last one whether finished or not, are
+    /// tested as beginning where the tap's output ends.
+    pub(super) fn test_unlogged(&mut self, pane: PaneId, bytes: &[u8]) {
+        let at = self.tap(pane).cursor();
+        let mut renderer = LogRenderer::new();
+        renderer.advance(bytes);
+        renderer.finish();
+        let lines: Vec<TapLine> = renderer
+            .take_lines()
+            .iter()
+            .map(|line| TapLine::builder().at(at).text(line.plain()).build())
+            .collect();
         self.test_lines(pane, &lines);
     }
 
@@ -1994,6 +2012,39 @@ mod tests {
             Readiness::Ready
         );
         assert!(event_kinds(&harness).contains(&EventKind::Ready));
+    }
+
+    /// Output the log could not hold, as a holder sends it when a write
+    /// fails, still passes a readiness log check and answers a log wait,
+    /// and leaves the tap's cursor where the log ends.
+    #[test]
+    fn unlogged_output_still_passes_readiness_and_waits() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let ready_wait = wait_on(&mut harness, "api", &spec(None, None), None);
+        let log_wait = wait_on(
+            &mut harness,
+            "api",
+            &spec(Some(log("listening")), None),
+            None,
+        );
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+        let cursor = harness.supervisor_mut().tap(pane).cursor();
+
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"webpack compiled in 3ms\nlistening on 3000".to_vec()),
+        );
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        assert_eq!(answered(&ready_wait).unwrap().status(), WaitStatus::Matched);
+        assert_eq!(answered(&log_wait).unwrap().status(), WaitStatus::Matched);
+        assert_eq!(harness.supervisor_mut().tap(pane).cursor(), cursor);
     }
 
     #[test]

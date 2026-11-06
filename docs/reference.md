@@ -355,8 +355,11 @@ command = "muster attach web"
 Each process's raw output goes to a log under the state directory, across
 restarts and after it exits, rotating at `log-max-size` and keeping one older
 file. A log rotates only between lines: a line still open at the size runs
-on until it ends, and one that runs 64 KiB past the size is ended at the next
-point that falls between escape sequences and characters.
+on until it ends, and one that runs 64 KiB past the size is ended there, so a
+log never grows past its size, 64 KiB and one write. A known limit: an escape
+sequence split by that cut, or by a rotation at a line feed inside it, can
+show its tail as plain text at the start of the newer file. It is never sent
+to your terminal as an escape, since every reader renders the log.
 `muster logs` and `logs -f` print it as the lines a log reader expects:
 a carriage return or erase that rewrites a line leaves only its last state, so
 a progress bar shows once, finished, and output that only redraws the screen,

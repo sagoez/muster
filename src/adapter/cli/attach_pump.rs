@@ -272,7 +272,9 @@ impl<'a> AttachPump<'a> {
                 self.dropped_input |= reason == RejectReason::InputBacklogged;
                 Ok(None)
             },
-            AttachEvent::Holder(HolderMessage::Warning(_) | HolderMessage::Attached(_)) => Ok(None),
+            AttachEvent::Holder(
+                HolderMessage::Warning(_) | HolderMessage::Attached(_) | HolderMessage::Unlogged(_),
+            ) => Ok(None),
             AttachEvent::HolderLost(source) => Err(self.lost(source)),
             AttachEvent::HelperFailed => Err(self.helper_failed()),
             AttachEvent::Resized => {

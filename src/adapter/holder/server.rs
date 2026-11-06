@@ -293,6 +293,7 @@ impl HolderServer {
                     ProcessOutput::Unreadable(_)
                     | ProcessOutput::Warning(_)
                     | ProcessOutput::Attached(_)
+                    | ProcessOutput::Unlogged(_)
                     | ProcessOutput::Placed { .. }
                     | ProcessOutput::Repaint { .. },
                 ) => {},
@@ -346,7 +347,9 @@ impl HolderServer {
     /// and broadcasts it: attached terminals get every byte, the supervisor
     /// what was logged, at its place in the log, so its waits read the same
     /// stream every log reader does; output logged whole goes out as one
-    /// frame to all. Output the emulator panics on leaves it blank instead
+    /// frame to all. What the log could not hold goes to the supervisor
+    /// apart, at no place in the log, so its readiness and waits still see
+    /// it. Output the emulator panics on leaves it blank instead
     /// of ending the holder, and with it the child: every client is resynced
     /// to that screen and the supervisor warned. That chunk still reaches
     /// the keyboard tracker and its query replies are still sent, so the
@@ -363,35 +366,44 @@ impl HolderServer {
             self.input.try_push(replies, length);
         }
         let switches = self.emulator.take_screen_switches();
+        let logged = self.gate.logged(&bytes, &switches);
         let at = self.log.end();
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
-        let (logged, _) = self.log.append_held(
-            self.gate.logged(&bytes, &switches),
-            self.emulator.output_at_ground(),
-        );
-        let logged = match logged {
-            Cow::Borrowed(kept) if kept.len() == bytes.len() => None,
-            logged => Some(logged.into_owned()),
+        let (held, outcome) = self.log.append_held(&logged);
+        let unlogged = match outcome {
+            Ok(()) => Vec::new(),
+            Err(_) => logged.get(held.len()..).unwrap_or_default().to_vec(),
         };
+        let whole = matches!(logged, Cow::Borrowed(_)) && held.len() == bytes.len();
+        let held = (!whole).then(|| held.into_owned());
         if reset {
             if self.reset_warning == ResetWarning::Unneeded {
                 self.reset_warning = ResetWarning::Pending;
             }
             return self.resync_all();
         }
-        let Some(logged) = logged else {
-            return self.broadcast(HolderMessage::Output { at, bytes });
-        };
-        if !logged.is_empty() {
-            self.broadcast_to(
-                |role| role == ClientRole::Supervisor,
-                HolderMessage::Output { at, bytes: logged },
-            )?;
+        match held {
+            None => self.broadcast(HolderMessage::Output { at, bytes })?,
+            Some(held) => {
+                if !held.is_empty() {
+                    self.broadcast_to(
+                        |role| role == ClientRole::Supervisor,
+                        HolderMessage::Output { at, bytes: held },
+                    )?;
+                }
+                self.broadcast_to(
+                    |role| role != ClientRole::Supervisor,
+                    HolderMessage::Output { at, bytes },
+                )?;
+            },
+        }
+        if unlogged.is_empty() {
+            return Ok(());
         }
         self.broadcast_to(
-            |role| role != ClientRole::Supervisor,
-            HolderMessage::Output { at, bytes },
+            |role| role == ClientRole::Supervisor,
+            HolderMessage::Unlogged(unlogged),
         )
     }
 
@@ -937,7 +949,7 @@ mod tests {
             signal_target::SignalTarget,
             terminal::{
                 TerminalEmulator,
-                escape::{END_OPEN_LINE, RUN_START},
+                escape::{RUN_RESET_AT, RUN_START},
                 log_line::LogLine,
                 log_renderer::LogRenderer,
             },
@@ -1016,7 +1028,7 @@ mod tests {
         };
         assert_eq!(
             run_start,
-            OutputCursor::new(END_OPEN_LINE.len() as u64),
+            OutputCursor::new(RUN_RESET_AT as u64),
             "the run starts at its reset, which its first line begins with"
         );
         for pair in frames.windows(2) {
@@ -1673,6 +1685,35 @@ mod tests {
         }
         assert_eq!(order, ["warning", "exited"]);
         assert_eq!(server.reset_warning, ResetWarning::Sent);
+    }
+
+    /// Output the log cannot hold still reaches the supervisor, apart and
+    /// at no place in the log, so its readiness and waits see it, and none
+    /// of it goes out at a log offset as if logged.
+    #[test]
+    fn output_the_log_cannot_hold_still_reaches_the_supervisor() {
+        let scratch = scratch();
+        let (mut server, _) = fake_server(&scratch);
+        let (supervisor, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        server.on_connected(ClientId::new(0), supervisor);
+        server
+            .on_hello(ClientId::new(0), ClientRole::Supervisor)
+            .unwrap();
+        server.log.reopen_read_only();
+
+        server.on_output(b"ready on 3000\r\n".to_vec()).unwrap();
+
+        let unlogged = loop {
+            match HolderMessage::read_from(&mut peer).unwrap() {
+                HolderMessage::Unlogged(bytes) => break bytes,
+                HolderMessage::Output { bytes, .. } => {
+                    panic!("unlogged output sent as logged: {bytes:?}")
+                },
+                _ => {},
+            }
+        };
+        assert_eq!(unlogged, b"ready on 3000\r\n");
     }
 
     /// A warning still queued for a supervisor survives a resync, which

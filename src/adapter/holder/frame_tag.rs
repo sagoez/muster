@@ -26,4 +26,6 @@ pub enum FrameTag {
     Warning = 10,
     /// The writable attach clients now connected.
     Attached = 11,
+    /// Bytes the child wrote that its log could not hold.
+    Unlogged = 12,
 }

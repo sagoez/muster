@@ -52,6 +52,9 @@ pub const END_OPEN_LINE: &[u8] = b"\x18\x1b7\r\n";
 /// byte: [`END_OPEN_LINE`], then a full reset (RIS), so every reader renders
 /// each run from a fresh terminal without knowing where it began.
 pub const RUN_START: &[u8] = b"\x18\x1b7\r\n\x1bc";
+/// Where in [`RUN_START`] a run starts: at its reset, past the line end that
+/// belongs to the run before, so the run's first line begins there.
+pub const RUN_RESET_AT: usize = END_OPEN_LINE.len();
 
 /// The value of each parameter in `params`, without its sub-parameters; an
 /// omitted parameter reads as zero.

@@ -14,6 +14,9 @@ pub enum ProcessOutput {
         /// The bytes.
         bytes: Vec<u8>,
     },
+    /// Output the process wrote that its log could not hold: it has no place
+    /// in the logged output, but readiness and waits still see it.
+    Unlogged(Vec<u8>),
     /// Bytes that rebuild the process's screen in a fresh terminal of `size`:
     /// a repaint, not output the process wrote.
     Repaint {

@@ -2559,7 +2559,8 @@ mod tests {
                 | ProcessOutput::Exited(_)
                 | ProcessOutput::Unreadable(_)
                 | ProcessOutput::Warning(_)
-                | ProcessOutput::Attached(_) => {},
+                | ProcessOutput::Attached(_)
+                | ProcessOutput::Unlogged(_) => {},
             }
         }
         assert!(

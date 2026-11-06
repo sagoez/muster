@@ -49,25 +49,12 @@ impl ModeScanner {
         self.modes.cursor_style_set()
     }
 
-    /// Whether what was fed ends between sequences and characters, so a
-    /// cut there splits neither. A sequence the parser dropped for running
-    /// too long counts as ended, which bounds how long that can wait.
-    pub fn at_ground(&self) -> bool {
-        !self.modes.in_sequence()
-    }
-
     /// Consumes one output byte and reports what, if anything, it completed.
     pub fn feed(&mut self, byte: u8) -> Observation {
         self.modes.clear_observed();
         match self.parser.advance_byte(&mut self.modes, byte) {
-            Fed::Kept => {
-                self.modes.note_kept(byte);
-                self.modes.observed()
-            },
-            Fed::Dropped => {
-                self.modes.note_dropped();
-                Observation::Dropped
-            },
+            Fed::Kept => self.modes.observed(),
+            Fed::Dropped => Observation::Dropped,
         }
     }
 }
@@ -105,32 +92,6 @@ mod tests {
             Observation::LeaveAlternate
         ]);
         assert!(scan(&mut scanner, b"\x1b[?2004h\x1b[1049h\x1b[1049l\x1b[?25l").is_empty());
-    }
-
-    /// What was fed ends between sequences and characters only once each
-    /// sequence, string and UTF-8 character begun is complete.
-    #[test]
-    fn the_ground_state_is_known_after_each_byte() {
-        let cases: [(&[u8], &[u8]); 6] = [
-            (b"text\x1b[3", b"1m"),
-            (
-                "\u{e9}".as_bytes().split_at(1).0,
-                "\u{e9}".as_bytes().split_at(1).1,
-            ),
-            (b"\x1b]8;;http://x", b"\x07"),
-            (b"\x1bPq", b"#0\x1b\\"),
-            (b"\x1b]0;title", b"\x1b\\"),
-            (b"\x1b[3", b"\x18"),
-        ];
-        for (open, close) in cases {
-            let mut scanner = ModeScanner::new();
-            scan(&mut scanner, b"plain\r\n");
-            assert!(scanner.at_ground());
-            scan(&mut scanner, open);
-            assert!(!scanner.at_ground(), "{open:?}");
-            scan(&mut scanner, close);
-            assert!(scanner.at_ground(), "{open:?} then {close:?}");
-        }
     }
 
     /// Origin mode switching on and off is followed; the public mode 6 is

@@ -6,7 +6,7 @@ use std::{
 use super::{fault_budget::FaultBudget, tap_line::TapLine};
 use crate::{
     adapter::terminal::{
-        escape::{LINE_FEED, RUN_START},
+        escape::{LINE_FEED, RUN_RESET_AT, RUN_START},
         log_line::LogLine,
         placed_renderer::PlacedRenderer,
     },
@@ -113,7 +113,7 @@ impl OutputTap {
         self.logged_run_start = bytes
             .windows(RUN_START.len())
             .rposition(|window| window == RUN_START)
-            .map(|index| at.advanced(index as u64));
+            .map(|index| at.advanced((index + RUN_RESET_AT) as u64));
         self.placed = true;
     }
 
@@ -530,11 +530,17 @@ mod tests {
     fn a_seeded_tail_is_the_newest_logged_run() {
         let mut tap = OutputTap::new(OutputCursor::new(0));
         let mut bytes = b"old run\nleft open".to_vec();
+        let reset = 100 + bytes.len() + RUN_RESET_AT;
         bytes.extend_from_slice(RUN_START);
         bytes.extend_from_slice(b"new 1\nnew 2\n");
 
         tap.seed_at(OutputCursor::new(100), &bytes);
 
+        assert_eq!(
+            tap.logged_run_start,
+            Some(OutputCursor::new(reset as u64)),
+            "the run starts at its reset, as the holder's log says"
+        );
         assert_eq!(tap.tail(5), ["new 1", "new 2"]);
         assert_eq!(tap.run_start(), None, "no run is claimed");
         let (all, _) = tap.scan_from(OutputCursor::new(100));

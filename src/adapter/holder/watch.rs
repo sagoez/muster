@@ -86,7 +86,8 @@ impl Watch {
                 self.chunks.push(bytes);
             },
             ProcessOutput::Exited(outcome) => self.exit = Some(outcome),
-            ProcessOutput::Warning(_) | ProcessOutput::Attached(_) => {},
+            ProcessOutput::Warning(_) | ProcessOutput::Attached(_) | ProcessOutput::Unlogged(_) => {
+            },
             ProcessOutput::Unreadable(reason) => panic!("unreadable output: {reason}"),
         }
     }

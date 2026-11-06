@@ -140,8 +140,9 @@ pub struct LineDrawing {
     detached: bool,
     /// Whether a sequence other than SGR reached the line.
     steered: bool,
-    /// Whether the line was redrawn in place: a carriage return, backspace,
-    /// erase or cursor move landed on it.
+    /// Whether the line was redrawn in place: drawn cells were drawn over or
+    /// erased, or the cursor climbed or was restored onto it. A horizontal
+    /// move alone redraws nothing.
     rewritten: bool,
     /// How many rows above the newest line the cursor stands.
     risen: usize,
@@ -224,12 +225,14 @@ impl LineDrawing {
 
     /// Puts a glyph `width` columns wide at the cursor, blanking what is left
     /// of any glyph it overwrites in part, and padding with blanks when the
-    /// cursor stands past the end; a full line is cut first.
+    /// cursor stands past the end; a full line is cut first. Drawing over
+    /// drawn cells redraws the line in place.
     fn draw(&mut self, character: char, width: usize) {
         if self.cursor + width > MAX_LINE_CELLS {
             self.cut();
         }
         let start = self.cursor;
+        self.rewritten |= start < self.cells.len();
         let end = start + width;
         self.pad_to(end);
         for column in start..end {
@@ -330,23 +333,15 @@ impl LineDrawing {
         }
     }
 
-    /// Notes that the line was redrawn in place, once anything is drawn on
-    /// it: a prompt that starts with a carriage return, a column move or an
-    /// erase redraws nothing, and still settles.
-    fn note_rewrite(&mut self) {
-        if !self.cells.is_empty() {
-            self.rewritten = true;
-        }
-    }
-
     /// Applies an erase in `mode`; erasing to the cursor includes the
-    /// cursor's own column, as a terminal does.
+    /// cursor's own column, as a terminal does. Erasing drawn cells redraws
+    /// the line in place; erasing where nothing is drawn does not.
     fn erase(&mut self, mode: u16) {
-        self.note_rewrite();
         match mode {
             ERASE_TO_END => {
                 let at = self.cursor.min(self.cells.len());
                 if at < self.cells.len() {
+                    self.rewritten = true;
                     self.break_glyph(at);
                     self.cells.truncate(at);
                     drop(self.marks.split_off(&at));
@@ -355,6 +350,7 @@ impl LineDrawing {
             },
             ERASE_TO_CURSOR => self.erase_to_cursor(),
             ERASE_LINE => {
+                self.rewritten |= !self.cells.is_empty();
                 self.cells.clear();
                 self.marks.clear();
                 self.erasures.clear();
@@ -375,6 +371,7 @@ impl LineDrawing {
         if extent == 0 {
             return;
         }
+        self.rewritten = true;
         if self.stamp == u32::MAX {
             self.apply_erasures();
         }
@@ -574,7 +571,6 @@ impl LineDrawing {
     /// Moves the cursor to `column`, numbered from one.
     fn move_to_column(&mut self, column: u16) {
         self.cursor = usize::from(column.max(FIRST)).min(MAX_COLUMN) - usize::from(FIRST);
-        self.note_rewrite();
     }
 
     /// Moves the cursor `count` columns right, never past [`MAX_COLUMN`] and
@@ -596,10 +592,7 @@ impl LineDrawing {
             ERASE_IN_LINE | ERASE_IN_DISPLAY => self.erase(first.unwrap_or(ERASE_TO_END)),
             CURSOR_TO_COLUMN | COLUMN_ABSOLUTE => self.move_to_column(first.unwrap_or(FIRST)),
             CURSOR_FORWARD => self.forward(count),
-            CURSOR_BACK => {
-                self.cursor = self.cursor.saturating_sub(count);
-                self.rewritten = true;
-            },
+            CURSOR_BACK => self.cursor = self.cursor.saturating_sub(count),
             CURSOR_UP | CURSOR_PREVIOUS_LINE => {
                 self.risen = (self.risen + count).min(MAX_RISE);
                 if action == CURSOR_PREVIOUS_LINE {
@@ -662,14 +655,8 @@ impl Perform for LineDrawing {
             return;
         }
         match byte {
-            CARRIAGE_RETURN => {
-                self.cursor = 0;
-                self.note_rewrite();
-            },
-            BACKSPACE => {
-                self.cursor = self.cursor.saturating_sub(1);
-                self.rewritten = true;
-            },
+            CARRIAGE_RETURN => self.cursor = 0,
+            BACKSPACE => self.cursor = self.cursor.saturating_sub(1),
             TAB => self.tab(),
             _ => {},
         }

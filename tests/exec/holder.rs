@@ -10,7 +10,6 @@ use std::{
 
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
-use muster::adapter::service::HolderRunner;
 use muster_domain::{
     color_scheme::ColorScheme,
     port::ProcessRunner,
@@ -21,6 +20,7 @@ use muster_domain::{
 use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
 use muster_os::open_files::OpenFilesLimit;
 use muster_protocol::holder::HolderRecord;
+use muster_service::HolderRunner;
 
 use crate::common::{BINARY, ChannelSink, Scratch, WAIT, processes_under, wait_until};
 

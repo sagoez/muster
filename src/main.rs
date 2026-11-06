@@ -10,10 +10,6 @@ use muster::{
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         port_occupants::OsPortOccupants,
-        service::{
-            HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
-            redirect_stderr,
-        },
         shell::ShellFiles,
     },
     error::MusterError,
@@ -37,6 +33,10 @@ use muster_os::{
 use muster_protocol::{
     holder::HolderDirs,
     service::{ServiceVersion, endpoint},
+};
+use muster_service::{
+    HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
+    redirect_stderr,
 };
 use muster_store::SqliteStore;
 use signal_hook::{

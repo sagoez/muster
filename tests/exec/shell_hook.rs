@@ -12,12 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use muster::adapter::{
-    service::SHELL_SWEEP_INTERVAL,
-    shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
-};
+use muster::adapter::shell::{HookShell, SHELL_REPORT_SUBCOMMAND};
 use muster_domain::{constants::MUSTER_SHELL_ENV, occupancy::ReportSeq, value::ProjectRoot};
 use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
+use muster_service::SHELL_SWEEP_INTERVAL;
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
 use strum::IntoEnumIterator;

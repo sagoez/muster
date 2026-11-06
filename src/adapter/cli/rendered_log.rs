@@ -170,6 +170,7 @@ mod tests {
         FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
         read_log_stream,
     };
+    use muster_service::OutputTap;
     use muster_terminal::render_fault;
     use tempfile::TempDir;
 
@@ -177,7 +178,6 @@ mod tests {
     use crate::adapter::{
         cli::json_log_lines::JsonLogLines,
         client::{LogRead, LogText, ProjectIdentityView},
-        service::OutputTap,
     };
 
     /// How far past the idle wait the prompt tests look.

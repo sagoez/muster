@@ -25,10 +25,7 @@ use std::{
 };
 
 use crossbeam_channel::unbounded;
-use muster::adapter::{
-    service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton},
-    shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
-};
+use muster::adapter::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles};
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
@@ -52,6 +49,7 @@ use muster_protocol::{
         ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
     },
 };
+use muster_service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton};
 use muster_store::SqliteStore;
 use rusqlite::Connection;
 use rustix::process::{Pid, Signal, kill_process};

@@ -6,6 +6,7 @@ members = [
     "muster-holder",
     "muster-os",
     "muster-protocol",
+    "muster-service",
     "muster-store",
     "muster-terminal",
 ]
@@ -28,6 +29,7 @@ muster-herdr = { path = "muster-herdr", version = "=0.11.0" }
 muster-holder = { path = "muster-holder", version = "=0.11.0" }
 muster-os = { path = "muster-os", version = "=0.11.0" }
 muster-protocol = { path = "muster-protocol", version = "=0.11.0" }
+muster-service = { path = "muster-service", version = "=0.11.0" }
 muster-store = { path = "muster-store", version = "=0.11.0" }
 muster-terminal = { path = "muster-terminal", version = "=0.11.0" }
 
@@ -110,6 +112,7 @@ muster-herdr = { workspace = true }
 muster-holder = { workspace = true }
 muster-os = { workspace = true }
 muster-protocol = { workspace = true }
+muster-service = { workspace = true }
 muster-store = { workspace = true }
 muster-terminal = { workspace = true }
 

@@ -1,7 +1,6 @@
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::Notice;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::Notice;
 
 /// A project's notices read without starting the service: the stored ones,
 /// and a running service's own when one runs.

@@ -1,9 +1,8 @@
 use std::{cmp::Ordering, path::PathBuf};
 
 use getset::Getters;
+use muster_protocol::service::ServiceVersion;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::ServiceVersion;
 
 /// A service that answered a client's hello: its version, and the binary it
 /// runs when it is new enough to say.

@@ -4,9 +4,9 @@ use muster_domain::{
     port::ProcessSample,
     value::{PaneId, Pid},
 };
+use muster_protocol::service::ProcessUsage;
 
 use super::entity::Supervisor;
-use crate::adapter::service::ProcessUsage;
 
 impl Supervisor {
     /// Whether a usage sample means anything here: a process is live, or

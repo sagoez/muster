@@ -2,9 +2,9 @@
 //! said about its entering a project.
 
 use muster_os::sanitize::printable;
+use muster_protocol::service::ShellNote;
 
 use super::block_hint::block_hint;
-use crate::adapter::service::ShellNote;
 
 /// Opens every line, so a person sees which program spoke.
 const NOTE_PREFIX: &str = "muster:";
@@ -54,9 +54,9 @@ mod tests {
         port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
         value::{LocalPort, Pid, ProcessName, ProjectName},
     };
+    use muster_protocol::service::{PortBlock, PortHolder, PortOwner, Refusal};
 
     use super::*;
-    use crate::adapter::service::{PortBlock, PortHolder, PortOwner, Refusal};
 
     /// The project `name`.
     fn project(name: &str) -> ProjectName {

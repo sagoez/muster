@@ -7,11 +7,10 @@ use muster_domain::{
     pty::{ProcessOutput, PtyError},
     value::{LocalPort, PaneId, Pid, ProjectRoot},
 };
+use muster_protocol::service::{ServiceRequest, ServiceResponse};
 
 use super::{
     probe_target::ProbeTarget,
-    service_request::ServiceRequest,
-    service_response::ServiceResponse,
     supervisor::{HolderScreen, LogReadResult, RetryId, ShutdownGeneration, SpawnGeneration},
 };
 use crate::adapter::holder::HolderRecord;

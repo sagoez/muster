@@ -18,6 +18,7 @@ use muster_domain::{
     value::{ProcessName, ProjectName, ProjectRoot},
 };
 use muster_os::sanitize::printable;
+use muster_protocol::service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus};
 use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;
 use strum::EnumMessage;
@@ -31,12 +32,9 @@ use super::{
     row::Row,
     row_kind::RowKind,
 };
-use crate::adapter::{
-    client::{
-        Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
-        ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
-    },
-    service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
+use crate::adapter::client::{
+    Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
+    ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
 };
 
 /// Column headers of the `ps` table, in order.
@@ -823,16 +821,16 @@ mod tests {
             WorkspacePaneId,
         },
     };
+    use muster_protocol::service::{
+        ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessUsage,
+        ServiceErrorKind,
+    };
 
     use super::*;
     use crate::adapter::{
         cli::{ending_signal::EndingSignal, report::plain},
         client::{
             ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView, ProjectView,
-        },
-        service::{
-            ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessUsage,
-            ServiceErrorKind,
         },
     };
 

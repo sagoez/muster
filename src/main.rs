@@ -13,8 +13,7 @@ use muster::{
         port_occupants::OsPortOccupants,
         pty::PortablePtyRunner,
         service::{
-            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
-            protocol, redirect_stderr,
+            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton, redirect_stderr,
         },
         shell::ShellFiles,
     },
@@ -35,6 +34,7 @@ use muster_os::{
     path::home_dir,
     private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
 };
+use muster_protocol::service::{ServiceVersion, endpoint};
 use muster_store::SqliteStore;
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},
@@ -198,7 +198,7 @@ fn run_service() -> Result<(), MusterError> {
     let open_files = OpenFilesLimit::current();
     let state_dir = state_dir().map_err(ServiceError::from)?;
     prepare_state_dir(&state_dir)?;
-    redirect_stderr(&protocol::log_path(&state_dir))?;
+    redirect_stderr(&endpoint::log_path(&state_dir))?;
     let Some(singleton) = Singleton::acquire(&state_dir)? else {
         eprintln!("{SERVICE_ALREADY_RUNNING} (pid {})", process::id());
         return Ok(());
@@ -214,7 +214,7 @@ fn run_service() -> Result<(), MusterError> {
     let deps = ServiceDeps::builder()
         .version(ServiceVersion::current())
         .binary(binary)
-        .socket(protocol::socket_path(&socket_dir(), &state_dir))
+        .socket(endpoint::socket_path(&socket_dir(), &state_dir))
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))
         .metrics(Some(Box::new(SysinfoMetrics::default())))

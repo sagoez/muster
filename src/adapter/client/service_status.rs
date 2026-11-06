@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::ServiceVersion;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::ServiceVersion;
 
 /// What `muster service status` reports, without starting the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

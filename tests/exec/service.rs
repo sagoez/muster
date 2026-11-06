@@ -12,19 +12,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use muster::adapter::{
-    holder::HOLDER_SUBCOMMAND,
-    service::{
-        LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
-        ServiceResponse, protocol::SERVICE_SUBCOMMAND,
-    },
-};
+use muster::adapter::holder::HOLDER_SUBCOMMAND;
 use muster_domain::{
     config::{Environment, ProcessSpec},
     coordination::Author,
     port::{RunHistory, StackStore},
     process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
+};
+use muster_protocol::service::{
+    LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
+    ServiceResponse, endpoint::SERVICE_SUBCOMMAND,
 };
 use rusqlite::Connection;
 use rustix::process::{

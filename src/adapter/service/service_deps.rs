@@ -4,12 +4,11 @@ use muster_domain::port::{
     ListeningPorts, PendingIdleStops, ProcessMetrics, RaisedEdits, RunHistory, SettingsReader,
     ShellRegistry, StackEditLog, StackReader,
 };
+use muster_protocol::service::ServiceVersion;
 use signal_hook::iterator::Signals;
 use typed_builder::TypedBuilder;
 
-use super::{
-    holder_pool::HolderPool, project_ports::ProjectPorts, service_version::ServiceVersion,
-};
+use super::{holder_pool::HolderPool, project_ports::ProjectPorts};
 
 /// What the service runs on. No `Getters`: the service takes it apart once.
 #[derive(TypedBuilder)]

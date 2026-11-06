@@ -9,6 +9,7 @@ use muster_domain::{
     },
 };
 use muster_os::sanitize::printable;
+use muster_protocol::service::ServiceErrorKind;
 use thiserror::Error;
 
 use crate::adapter::{
@@ -17,7 +18,6 @@ use crate::adapter::{
     },
     exchange::ExchangeError,
     holder::{HolderError, PatternError},
-    service::ServiceErrorKind,
     shell::HookScriptError,
 };
 

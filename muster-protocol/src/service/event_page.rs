@@ -4,6 +4,9 @@ use typed_builder::TypedBuilder;
 
 use super::{event_seq::EventSeq, stack_event::StackEvent};
 
+/// Most events a read without a cursor returns, the newest ones.
+pub const EVENTS_WITHOUT_SINCE: usize = 20;
+
 /// Events after a cursor, and the cursor to continue from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]

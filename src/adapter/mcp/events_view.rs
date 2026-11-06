@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::EventPage;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::event_view::EventView;
-use crate::adapter::service::EventPage;
 
 /// A page of stack events, as `stack_events` answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, CopyGetters, TypedBuilder)]

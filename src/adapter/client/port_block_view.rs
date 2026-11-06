@@ -1,9 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::PortBlock;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::port_owner_view::PortOwnerView;
-use crate::adapter::service::PortBlock;
 
 /// Why a process was not started, as `--json` shows it: the port it needs
 /// and who holds it.
@@ -32,10 +32,10 @@ mod tests {
         port::{OCCUPANT_COMMAND_CUT, OCCUPANT_COMMAND_MAX_CHARS, PortOccupant},
         value::{LocalPort, Pid, ProcessName, ProjectName},
     };
+    use muster_protocol::service::{PortHolder, PortOwner};
     use serde_json::json;
 
     use super::*;
-    use crate::adapter::service::{PortHolder, PortOwner};
 
     /// Each kind of holder is tagged by `kind`, its fields in snake case.
     #[test]

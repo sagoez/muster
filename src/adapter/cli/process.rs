@@ -9,6 +9,7 @@ use muster_domain::{
     project::Project,
     value::{OutputCursor, ProcessName, ProcessRef},
 };
+use muster_protocol::service::{ProcessStatus, ProjectStatus};
 use muster_terminal::coloring::Coloring;
 
 use super::{
@@ -22,7 +23,6 @@ use crate::adapter::{
         process::{log_error, log_path, log_read_error, resolve, status},
     },
     holder::read_log_stream,
-    service::{ProcessStatus, ProjectStatus},
 };
 
 /// Pause between reads of a followed log.

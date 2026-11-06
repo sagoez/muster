@@ -14,10 +14,11 @@ use muster_domain::{
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
+use muster_protocol::service::{Notice, NoticeLevel};
 
 use super::{
-    notice::Notice, notice_level::NoticeLevel, record_retry::RecordRetry,
-    recorder_stores::RecorderStores, shared_notices::SharedNotices, store_record::StoreRecord,
+    record_retry::RecordRetry, recorder_stores::RecorderStores, shared_notices::SharedNotices,
+    store_record::StoreRecord,
 };
 
 /// Prefix of the notice for a run end the store was too busy to take yet;

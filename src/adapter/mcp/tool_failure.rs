@@ -1,4 +1,5 @@
 use muster_domain::config::ConfigError;
+use muster_protocol::service::ServiceErrorKind;
 use rmcp::{
     ErrorData,
     handler::server::tool::IntoCallToolResult,
@@ -7,10 +8,7 @@ use rmcp::{
 use serde_json::Value;
 
 use super::tool_error::ToolError;
-use crate::adapter::{
-    client::{ClientError, FailureView},
-    service::ServiceErrorKind,
-};
+use crate::adapter::client::{ClientError, FailureView};
 
 /// What an agent does about a muster service that runs another version, since
 /// no tool can fix it.

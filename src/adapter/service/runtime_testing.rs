@@ -8,11 +8,9 @@ use muster_domain::{
     value::{CommandLine, ProcessName},
 };
 pub(super) use muster_os::test_wait::{POLL, WAIT, wait_until};
+use muster_protocol::service::{LaunchEnvironment, ProcessStatus, ProjectStatus};
 
-use super::{
-    launch_environment::LaunchEnvironment, process_status::ProcessStatus,
-    project_status::ProjectStatus, supervisor::testing::test_stop,
-};
+use super::supervisor::testing::test_stop;
 
 /// Prefix of every test scratch directory.
 pub(super) const SCRATCH_PREFIX: &str = "ms-";

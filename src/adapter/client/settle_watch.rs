@@ -1,7 +1,8 @@
 use std::ops::ControlFlow;
 
+use muster_protocol::service::ProcessStatus;
+
 use super::action::Action;
-use crate::adapter::service::ProcessStatus;
 
 /// Hears, each time a command looks, which of the processes it acted on are
 /// still on their way, so a person can watch the wait, and may end it.

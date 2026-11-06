@@ -2,9 +2,10 @@
 //! lines are not paid for twice as JSON.
 
 use muster_os::sanitize::printable_lines;
+use muster_protocol::service::WaitOutcome;
 use muster_terminal::log_renderer::dropped_lines;
 
-use crate::adapter::{client::LogSliceView, service::WaitOutcome};
+use crate::adapter::client::LogSliceView;
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.
 pub const SCREEN_MAX_BYTES: usize = 64 * 1024;

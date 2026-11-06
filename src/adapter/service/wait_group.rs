@@ -1,8 +1,5 @@
 use crossbeam_channel::Sender;
-
-use super::{
-    batch_outcome::BatchOutcome, service_response::ServiceResponse, wait_outcome::WaitOutcome,
-};
+use muster_protocol::service::{BatchOutcome, ServiceResponse, WaitOutcome};
 
 /// The waits of one project-wide start, answered together once each ended.
 pub struct WaitGroup {

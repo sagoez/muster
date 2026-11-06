@@ -53,9 +53,10 @@ mod tests {
         pty::{ExitOutcome, ProcessOutput},
         value::PaneId,
     };
+    use muster_protocol::service::LaunchEnvironment;
     use rustix::process::Signal;
 
-    use crate::adapter::service::{LaunchEnvironment, supervisor::testing::*};
+    use crate::adapter::service::supervisor::testing::*;
 
     /// The state of the process named `raw`.
     fn state_of(harness: &Harness, raw: &str) -> ProcessState {

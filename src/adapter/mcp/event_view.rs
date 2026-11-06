@@ -1,9 +1,8 @@
 use getset::Getters;
 use muster_os::sanitize::printable;
+use muster_protocol::service::{EventKind, StackEvent};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::{EventKind, StackEvent};
 
 /// One stack event as an agent reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Getters, TypedBuilder)]

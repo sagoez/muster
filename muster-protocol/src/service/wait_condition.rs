@@ -14,7 +14,7 @@ use super::state_goal::StateGoal;
 #[serde(rename_all = "kebab-case")]
 pub enum WaitCondition {
     /// An output line matching the pattern.
-    Log(#[serde(with = "muster_protocol::wire::form")] LogPattern),
+    Log(#[serde(with = "crate::wire::form")] LogPattern),
     /// A TCP connection accepted on the local port.
     Port(LocalPort),
     /// An HTTP answer from the local URL: `status` when given, else below 500.

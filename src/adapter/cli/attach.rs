@@ -23,7 +23,7 @@ use muster_domain::{
     value::{DetachKey, ProcessName},
 };
 use muster_os::sanitize::printable;
-use muster_protocol::ipc;
+use muster_protocol::{ipc, service::Located};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     io::{Errno, read},
@@ -41,7 +41,6 @@ use crate::adapter::{
         ClientRole, HolderError, HolderMessage,
         client::{Greeting, greet},
     },
-    service::Located,
 };
 
 /// Longest the holder may take to send its screen.

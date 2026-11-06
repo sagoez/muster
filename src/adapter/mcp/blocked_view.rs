@@ -1,8 +1,7 @@
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::{PortBlock, PortOwner};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::{PortBlock, PortOwner};
 
 /// Opens the hint on a blocked start, before the holder's project.
 const HINT_OPEN: &str = "stop it with process_stop {project: '";

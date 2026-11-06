@@ -1,12 +1,12 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::value::{OutputCursor, ProcessName};
+use muster_protocol::service::{WaitOutcome, WaitStatus};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{
     condition_view::ConditionView, elapsed_seconds::ElapsedSeconds, match_view::MatchView,
 };
-use crate::adapter::service::{WaitOutcome, WaitStatus};
 
 /// How a wait ended, as `--json` and MCP show it: elapsed time in seconds to
 /// the millisecond, the condition in words, cursors in their text form.
@@ -66,8 +66,9 @@ impl From<&WaitOutcome> for WaitView {
 mod tests {
     use std::time::Duration;
 
+    use muster_protocol::service::{MatchedLine, StateGoal, WaitCondition};
+
     use super::*;
-    use crate::adapter::service::{MatchedLine, StateGoal, WaitCondition};
 
     #[test]
     fn reads_as_the_agent_facing_shape() {

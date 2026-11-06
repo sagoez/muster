@@ -18,6 +18,7 @@ use muster_domain::{
     value::{Pid, PositiveDuration, StopGrace},
 };
 use muster_os::sanitize::printable;
+use muster_protocol::service::StateGoal;
 use strum::IntoEnumIterator;
 
 use super::{
@@ -26,7 +27,6 @@ use super::{
 };
 use crate::adapter::{
     holder::{LineLimit, MAX_LOG_LINES},
-    service::StateGoal,
     shell::HookShell,
 };
 
@@ -311,12 +311,10 @@ mod tests {
         occupancy::{LoadStart, ReportSeq},
         value::EpochNanos,
     };
+    use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 
     use super::*;
-    use crate::adapter::{
-        holder::HOLDER_SUBCOMMAND, service::protocol::SERVICE_SUBCOMMAND,
-        shell::SHELL_REPORT_SUBCOMMAND,
-    };
+    use crate::adapter::{holder::HOLDER_SUBCOMMAND, shell::SHELL_REPORT_SUBCOMMAND};
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.

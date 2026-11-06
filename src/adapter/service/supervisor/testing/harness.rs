@@ -4,10 +4,11 @@ use crossbeam_channel::{Receiver, unbounded};
 use getset::{Getters, MutGetters};
 use muster_application::Workspace;
 use muster_domain::{config::ProcessSpec, port::ProcessRunner, process::Process, value::PaneId};
+use muster_protocol::service::LaunchEnvironment;
 
 use super::fixtures::{stack, test_project, test_settings};
 use crate::adapter::service::{
-    EventLog, LaunchEnvironment, Notices, ServiceEvent, SharedEventLog, SharedNotices,
+    EventLog, Notices, ServiceEvent, SharedEventLog, SharedNotices,
     supervisor::{HolderAdopter, LogReadResult, Supervisor, SupervisorDeps},
 };
 

@@ -14,6 +14,10 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{LocalPort, OutputCursor, PaneId, ProcessName},
 };
+use muster_protocol::service::{
+    BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
+    WaitStatus,
+};
 
 use super::{
     channel_output_sink::ChannelOutputSink, config_membership::ConfigMembership,
@@ -22,13 +26,7 @@ use super::{
     shutdown_generation::ShutdownGeneration, spawn_generation::SpawnGeneration,
     stale_release::StaleRelease,
 };
-use crate::adapter::{
-    holder::client::repaint_text,
-    service::{
-        BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
-        ServiceEvent, WaitStatus,
-    },
-};
+use crate::adapter::{holder::client::repaint_text, service::ServiceEvent};
 
 /// Delay before the first automatic restart of a failing process.
 const RESTART_BACKOFF_BASE: Duration = Duration::from_millis(200);
@@ -1369,12 +1367,10 @@ mod tests {
         pty::{ExitCause, PtySize},
         value::{EnvName, EnvValue, Pid},
     };
+    use muster_protocol::service::{LastExit, ProcessUsage};
 
     use super::*;
-    use crate::adapter::service::{
-        LastExit, ProcessUsage,
-        supervisor::{lookup::UNKNOWN_PROCESS_NOTICE, testing::*},
-    };
+    use crate::adapter::service::supervisor::{lookup::UNKNOWN_PROCESS_NOTICE, testing::*};
 
     const PANE: u64 = 0;
 

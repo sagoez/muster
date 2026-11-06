@@ -1,7 +1,8 @@
 use std::ops::ControlFlow;
 
+use muster_protocol::service::ProcessStatus;
+
 use super::{action::Action, settle_watch::SettleWatch};
-use crate::adapter::service::ProcessStatus;
 
 /// A watch nobody looks at, for callers with no one to show the wait to.
 pub struct Unwatched;

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use muster_domain::{coordination::Lock, value::EpochSeconds};
 use muster_os::clock::epoch_now;
+use muster_protocol::service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec};
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -25,10 +26,7 @@ use super::{
     tool_result::ToolResult,
     up_view::UpView,
 };
-use crate::adapter::{
-    client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
-    service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec},
-};
+use crate::adapter::client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process};
 
 /// Most notices `stack_status` returns.
 const STATUS_NOTICES: usize = 10;
@@ -220,6 +218,9 @@ mod tests {
         process::ProcessState,
         value::{IdleStop, LocalPort, Pid, PositiveDuration, ProcessName, ProjectName},
     };
+    use muster_protocol::service::{
+        OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus,
+    };
     use rmcp::model::ErrorCode;
     use serde_json::Value;
     use strum::IntoEnumIterator;
@@ -228,7 +229,6 @@ mod tests {
     use crate::adapter::{
         client::{Outcome, PortBlockView, ProcessOutcome},
         mcp::test_support::{Fixture, answered, fixture, refusal, register, runtime},
-        service::{OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus},
     };
 
     /// The fixture's registered project with `processes` in it and

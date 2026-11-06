@@ -7,6 +7,7 @@ use muster_domain::{
     pty::{ExitOutcome, PtyError},
     value::{OutputCursor, PaneId, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::service::NoticeLevel;
 
 use super::{
     adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
@@ -18,7 +19,7 @@ use crate::adapter::{
     holder::{
         HolderRecord, HolderRunner, LineMatcher, LogLines, LogScan, LogTail, abandon, collect,
     },
-    service::{NoticeLevel, ServiceEvent},
+    service::ServiceEvent,
 };
 
 /// Shown when a running holder's process is no longer in the project, so it
@@ -928,14 +929,16 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput},
         value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace},
     };
+    use muster_protocol::service::{
+        LaunchEnvironment, ServiceResponse, WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+    };
     use rustix::process::Signal;
 
     use super::*;
     use crate::adapter::{
         holder::{HolderId, LoggedLine},
         service::{
-            LaunchEnvironment, ServiceEvent, ServiceResponse, TAP_RING_BYTES, WaitCondition,
-            WaitOutcome, WaitSpec, WaitStatus,
+            ServiceEvent, TAP_RING_BYTES,
             supervisor::{
                 ConfigMembership, SpawnGeneration,
                 lifecycle::FORCE_STOP_NOTICE,

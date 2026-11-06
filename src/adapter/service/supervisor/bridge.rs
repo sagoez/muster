@@ -2,9 +2,9 @@ use muster_domain::{
     pty::{PtyError, ScreenSource},
     value::{PaneId, ProcessName},
 };
+use muster_protocol::service::NoticeLevel;
 
 use super::{entity::Supervisor, holder_screen::HolderScreen, screen_reply::ScreenReply};
-use crate::adapter::service::NoticeLevel;
 
 /// Prefix for a holder whose screen could not be read; the last screen the
 /// service saw was answered instead.
@@ -114,11 +114,12 @@ mod tests {
         value::OutputCursor,
     };
     use muster_os::test_scratch::short_scratch;
+    use muster_protocol::service::LaunchEnvironment;
 
     use super::*;
     use crate::adapter::{
         holder::{ClientMessage, HolderMessage, ServedScreen},
-        service::{LaunchEnvironment, supervisor::testing::*},
+        service::supervisor::testing::*,
     };
 
     const PANE: u64 = 0;

@@ -5,8 +5,9 @@ use std::{
 };
 
 use muster_domain::value::ProjectRoot;
+use muster_protocol::service::Notice;
 
-use super::{notice::Notice, notice_mirror::NoticeMirror, shared_notices::SharedNotices};
+use super::{notice_mirror::NoticeMirror, shared_notices::SharedNotices};
 
 /// Most notices kept in memory; the oldest is dropped to make room.
 pub const MAX_NOTICES: usize = 256;
@@ -74,11 +75,11 @@ impl Notices {
 mod tests {
     use std::{fs, time::SystemTime};
 
+    use muster_protocol::service::NoticeLevel;
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::service::NoticeLevel;
 
     /// The project at `path`.
     fn root(path: &str) -> ProjectRoot {

@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 
 use muster_domain::{process::PatternKind, value::OutputCursor};
 use muster_os::sanitize::printable;
+use muster_protocol::service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus};
 
 use super::{error::CliError, wait_args::WaitArgs};
 use crate::adapter::{
     client::{ClientError, ElapsedSeconds},
     holder::LineMatcher,
-    service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
 
 /// Longest one wait request asks the service for; a longer wait is a series
@@ -124,9 +124,9 @@ mod tests {
     use std::{cell::Cell, thread};
 
     use muster_domain::value::ProcessName;
+    use muster_protocol::service::{MatchedLine, StateGoal};
 
     use super::*;
-    use crate::adapter::service::{MatchedLine, StateGoal};
 
     /// A wait that ended `status` with its output at `cursor`.
     fn outcome(status: WaitStatus, cursor: u64) -> WaitOutcome {

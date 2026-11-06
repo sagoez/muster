@@ -14,6 +14,7 @@ use muster_domain::{
     value::{ProcessName, ProjectName},
 };
 use muster_os::sanitize::{printable, printable_lines};
+use muster_protocol::service::ProcessStatus;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -26,7 +27,7 @@ use super::{
     spinners::Spinners,
     surroundings::Surroundings,
 };
-use crate::adapter::{detect::Candidate, service::ProcessStatus};
+use crate::adapter::detect::Candidate;
 
 /// The question that picks a process.
 const CHOOSE_PROCESS: &str = "Which process?";

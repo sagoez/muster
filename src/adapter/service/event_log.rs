@@ -5,17 +5,13 @@ use std::{
 };
 
 use muster_domain::value::ProjectRoot;
+use muster_protocol::service::{EVENTS_WITHOUT_SINCE, EventKind, EventPage, EventSeq, StackEvent};
 use uuid::Uuid;
 
-use super::{
-    event_draft::EventDraft, event_kind::EventKind, event_page::EventPage, event_seq::EventSeq,
-    shared_event_log::SharedEventLog, stack_event::StackEvent,
-};
+use super::{event_draft::EventDraft, shared_event_log::SharedEventLog};
 
 /// Most events kept in memory; the oldest is dropped to make room.
 pub const MAX_EVENTS: usize = 1024;
-/// Most events a read without a cursor returns, the newest ones.
-pub const EVENTS_WITHOUT_SINCE: usize = 20;
 
 /// A bounded ring of the most recent lifecycle events across every project,
 /// each numbered by how many were ever recorded under this log's epoch, so a

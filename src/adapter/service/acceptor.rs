@@ -17,14 +17,14 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use muster_os::private_dir::prepare_socket_dir;
-use muster_protocol::{ipc, ipc::fits_a_socket};
+use muster_protocol::{
+    ipc,
+    ipc::fits_a_socket,
+    service::{ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse, endpoint},
+};
 use serde_json::Value;
 
-use super::{
-    event::ServiceEvent, protocol, service_error::ServiceError,
-    service_error_body::ServiceErrorBody, service_error_kind::ServiceErrorKind,
-    service_request::ServiceRequest, service_response::ServiceResponse,
-};
+use super::{event::ServiceEvent, service_error::ServiceError};
 
 /// Mode of the service socket: only its owner may connect.
 const SOCKET_MODE: u32 = 0o600;
@@ -116,7 +116,7 @@ fn bind_private(socket: &Path) -> Result<UnixListener, ServiceError> {
         source,
     };
     prepare_socket_dir(socket.parent().unwrap_or(Path::new("."))).map_err(bind_error)?;
-    let staged = protocol::staging_socket(socket);
+    let staged = endpoint::staging_socket(socket);
     if let Some(path) = [&staged, socket]
         .into_iter()
         .find(|path| !fits_a_socket(path))

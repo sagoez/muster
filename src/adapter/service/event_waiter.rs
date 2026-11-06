@@ -2,8 +2,7 @@ use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use muster_domain::value::ProjectRoot;
-
-use super::{event_kind::EventKind, event_seq::EventSeq, service_response::ServiceResponse};
+use muster_protocol::service::{EventKind, EventSeq, ServiceResponse};
 
 /// A client waiting for a project's next lifecycle event.
 pub(super) struct EventWaiter {

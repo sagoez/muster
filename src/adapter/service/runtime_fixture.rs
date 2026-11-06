@@ -6,6 +6,7 @@ use muster_domain::{
     config::ProcessSpec, port::PortOccupant, pty::SpawnRequest, value::ProjectRoot,
 };
 use muster_os::{signal_target::SignalTarget, test_scratch::short_scratch, test_wait::REPLY};
+use muster_protocol::service::{ServiceRequest, endpoint};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -15,12 +16,10 @@ use super::{
     memory_store::MemoryStore,
     occupied_ports::OccupiedPorts,
     project_ports::ProjectPorts,
-    protocol,
     running::Running,
     runtime::ServiceRuntime,
     runtime_testing::{POLL, SCRATCH_PREFIX, TEST_BINARY, VERSION, WAIT, wait_until},
     service_deps::ServiceDeps,
-    service_request::ServiceRequest,
     singleton::Singleton,
     test_ports::TestPorts,
 };
@@ -139,7 +138,7 @@ impl Fixture {
         occupant: Option<PortOccupant>,
     ) -> Running {
         let state_dir = self.state_dir();
-        let socket = protocol::socket_path(&self.scratch.path().join("run"), &state_dir);
+        let socket = endpoint::socket_path(&self.scratch.path().join("run"), &state_dir);
         let store = self.store.clone();
         let shells = self.shells.clone();
         let bound = socket.clone();
@@ -174,7 +173,7 @@ impl Fixture {
             ServiceRuntime::run(singleton, deps)
         });
         wait_until("the service to answer", || {
-            protocol::send_within(&socket, &ServiceRequest::Ps { project: None }, REPLY).is_ok()
+            endpoint::send_within(&socket, &ServiceRequest::Ps { project: None }, REPLY).is_ok()
         });
         Running::builder()
             .socket(socket)

@@ -1,7 +1,7 @@
 use muster_domain::value::{PaneId, Pid, ProcessName};
+use muster_protocol::service::NoticeLevel;
 
 use super::entity::Supervisor;
-use crate::adapter::service::NoticeLevel;
 
 /// Shown when a process name matches nothing in the project.
 pub(super) const UNKNOWN_PROCESS_NOTICE: &str = "no process with that name in this project";

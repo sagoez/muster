@@ -2,9 +2,10 @@ use std::time::Instant;
 
 use getset::{CopyGetters, Getters};
 use muster_domain::value::{OutputCursor, PaneId, ProcessName};
+use muster_protocol::service::WaitCondition;
 use typed_builder::TypedBuilder;
 
-use super::{run_pin::RunPin, wait_condition::WaitCondition, wait_reply::WaitReply};
+use super::{run_pin::RunPin, wait_reply::WaitReply};
 use crate::adapter::holder::LineMatcher;
 
 /// A wait registered on the service loop, answered when its condition holds,

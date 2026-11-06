@@ -6,14 +6,14 @@ use std::{
     time::Duration,
 };
 
-use muster::adapter::{
-    holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord},
-    service::{ServiceRequest, ServiceResponse, protocol, protocol::SERVICE_SUBCOMMAND},
-};
+use muster::adapter::holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord};
 use muster_domain::{config::SettingChange, coordination::Author, port::SettingsStore};
 use muster_os::{
     private_dir::{prepare_socket_dir, prepare_state_dir},
     signal_target::SignalTarget,
+};
+use muster_protocol::service::{
+    ServiceRequest, ServiceResponse, endpoint, endpoint::SERVICE_SUBCOMMAND,
 };
 use muster_store::SqliteStore;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -102,7 +102,7 @@ impl Scratch {
 
     /// The socket a service over this scratch listens on.
     pub fn socket(&self) -> PathBuf {
-        protocol::socket_path(&self.socket_dir(), &self.state_dir())
+        endpoint::socket_path(&self.socket_dir(), &self.state_dir())
     }
 
     /// The directory that socket goes in.
@@ -169,7 +169,7 @@ impl Scratch {
 
     /// Sends `request` to the running service and returns the answer.
     pub fn send(&self, request: &ServiceRequest) -> ServiceResponse {
-        protocol::send_within(&self.socket(), request, REPLY_TIMEOUT).unwrap()
+        endpoint::send_within(&self.socket(), request, REPLY_TIMEOUT).unwrap()
     }
 }
 

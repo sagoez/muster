@@ -1,9 +1,9 @@
 use muster_domain::process::ProcessState;
+use muster_protocol::service::{ExitReason, ProcessStatus};
 use serde::Serialize;
 use strum::{Display, EnumMessage};
 
 use super::action::Action;
-use crate::adapter::service::{ExitReason, ProcessStatus};
 
 /// What became of one process a command acted on, once it settled or the
 /// command stopped waiting. Each variant's message is how a person reads it.
@@ -282,9 +282,9 @@ mod tests {
         pty::{ExitCause, ExitOutcome},
         value::{Pid, ProcessName},
     };
+    use muster_protocol::service::LastExit;
 
     use super::*;
-    use crate::adapter::service::LastExit;
 
     /// `api` listed in `state` with `pid` after `restarts` restarts.
     fn status(state: ProcessState, pid: Option<u32>, restarts: u32) -> ProcessStatus {

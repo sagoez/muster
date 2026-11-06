@@ -1,7 +1,6 @@
 use muster_domain::value::{Pid, ProcessName, ProjectName};
+use muster_protocol::service::PortOwner;
 use serde::Serialize;
-
-use crate::adapter::service::PortOwner;
 
 /// Who holds a port a start needs, as `--json` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

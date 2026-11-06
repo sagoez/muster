@@ -5,6 +5,7 @@ use muster_domain::{
     occupancy::{LoadStart, ReportSeq},
     value::{EpochNanos, Pid, ProcessRef},
 };
+use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 
 use super::{
     add_args::AddArgs,
@@ -31,7 +32,6 @@ use super::{
 use crate::adapter::{
     client::PageSize,
     holder::HOLDER_SUBCOMMAND,
-    service::protocol::SERVICE_SUBCOMMAND,
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
 };
 

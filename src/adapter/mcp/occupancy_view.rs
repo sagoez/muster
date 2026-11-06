@@ -1,9 +1,10 @@
 use getset::CopyGetters;
 use muster_domain::value::IdleStop;
+use muster_protocol::service::OccupancyStatus;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::adapter::{client::whole_seconds_up, service::OccupancyStatus};
+use crate::adapter::client::whole_seconds_up;
 
 /// Who is in a project and when it stops for want of anyone, as
 /// `stack_status` shows it.

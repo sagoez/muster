@@ -1,8 +1,9 @@
 use std::time::Instant;
 
 use muster_domain::value::{OutputCursor, PaneId};
+use muster_protocol::service::WaitOutcome;
 
-use crate::adapter::service::{WaitOutcome, WaitReply};
+use crate::adapter::service::WaitReply;
 
 /// The answer of a wait that did not match, held while its run's last lines
 /// are read from the log because the tap holds too few of them, as after an

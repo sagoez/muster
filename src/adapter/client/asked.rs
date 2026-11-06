@@ -1,5 +1,6 @@
+use muster_protocol::service::ServiceResponse;
+
 use super::running_service::RunningService;
-use crate::adapter::service::ServiceResponse;
 
 /// What asking a service that may be running made of a request, never
 /// starting or replacing one.

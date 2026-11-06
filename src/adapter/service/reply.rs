@@ -1,4 +1,6 @@
-use super::{service_response::ServiceResponse, supervisor::ScreenReply};
+use muster_protocol::service::ServiceResponse;
+
+use super::supervisor::ScreenReply;
 
 /// How a carried-out request is answered.
 pub(super) enum Reply {

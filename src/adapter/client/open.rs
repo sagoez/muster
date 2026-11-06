@@ -10,6 +10,7 @@ use muster_domain::{
     terminal_workspace::{PaneCommand, PaneRequest},
     value::{ProcessName, ProjectRoot, printable},
 };
+use muster_protocol::service::{ServiceRequest, ServiceResponse};
 use shlex::Quoter;
 
 use super::{
@@ -22,7 +23,6 @@ use super::{
     service_client::{ServiceClient, other_version},
     this_binary::runnable,
 };
-use crate::adapter::service::{ServiceRequest, ServiceResponse};
 
 /// The subcommand a pane runs to show the process.
 const ATTACH_SUBCOMMAND: &str = "attach";
@@ -142,17 +142,15 @@ mod tests {
         terminal_workspace::{PaneFocus, SplitDirection, WorkspaceError},
         value::ProjectName,
     };
+    use muster_protocol::service::{
+        Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+        ServiceVersion,
+    };
 
     use super::*;
-    use crate::adapter::{
-        client::{
-            FailureKind, RunningService, fake_service::FakeService,
-            recording_workspace::RecordingWorkspace, served_service::ServedService, this_binary,
-        },
-        service::{
-            Located, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
-            ServiceVersion,
-        },
+    use crate::adapter::client::{
+        FailureKind, RunningService, fake_service::FakeService,
+        recording_workspace::RecordingWorkspace, served_service::ServedService, this_binary,
     };
 
     /// A muster binary that does not exist.

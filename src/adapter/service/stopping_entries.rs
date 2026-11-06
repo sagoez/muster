@@ -5,9 +5,8 @@ use muster_domain::{
     occupancy::ShellId,
     value::{ProcessName, ProjectRoot},
 };
+use muster_protocol::service::LaunchEnvironment;
 use typed_builder::TypedBuilder;
-
-use super::launch_environment::LaunchEnvironment;
 
 /// An entering that found autostart processes still stopping.
 #[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]

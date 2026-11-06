@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use muster_domain::value::{IdleStop, ProcessName};
+use muster_protocol::service::{BatchOutcome, OccupancyStatus};
 
 use super::entity::Supervisor;
-use crate::adapter::service::{BatchOutcome, OccupancyStatus};
 
 impl Supervisor {
     /// Counts `shells` as the live shells inside, for its status; arming and

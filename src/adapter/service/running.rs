@@ -6,17 +6,14 @@ use muster_domain::{
     value::{ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::REPLY;
+use muster_protocol::service::{
+    Notice, ProcessAction, ProjectStatus, ServiceRequest, ServiceResponse, endpoint,
+};
 use typed_builder::TypedBuilder;
 
 use super::{
-    notice::Notice,
-    process_action::ProcessAction,
-    project_status::ProjectStatus,
-    protocol,
     runtime_testing::{POLL, WAIT, find, no_env, wait_until},
     service_error::ServiceError,
-    service_request::ServiceRequest,
-    service_response::ServiceResponse,
 };
 
 /// A service running on a thread of the test.
@@ -31,7 +28,7 @@ pub(super) struct Running {
 impl Running {
     /// Sends `request` as a client would and returns the answer.
     pub(super) fn send(&self, request: ServiceRequest) -> ServiceResponse {
-        protocol::send_within(&self.socket, &request, REPLY).unwrap()
+        endpoint::send_within(&self.socket, &request, REPLY).unwrap()
     }
 
     /// Brings `project` up with no client environment.
@@ -116,7 +113,7 @@ impl Drop for Running {
     /// Stops a service a failing test left running.
     fn drop(&mut self) {
         if self.thread.is_some() {
-            let _ = protocol::send_within(&self.socket, &ServiceRequest::Stop, REPLY);
+            let _ = endpoint::send_within(&self.socket, &ServiceRequest::Stop, REPLY);
             if let Some(thread) = self.thread.take() {
                 let started = Instant::now();
                 while !thread.is_finished() && started.elapsed() < WAIT {

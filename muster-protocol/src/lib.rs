@@ -7,5 +7,6 @@ pub mod ipc;
 mod ping;
 #[cfg(test)]
 mod pong;
+pub mod service;
 pub mod wire;
 pub mod workspace_request;

@@ -3,10 +3,9 @@ use muster_domain::{
     process::{LogPattern, PatternKind, ReadyProbe},
     value::{LocalPort, LocalUrl},
 };
+use muster_protocol::service::WaitCondition;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::service::WaitCondition;
 
 /// A wait condition in the shape an agent writes one: exactly one of `log`,
 /// `port`, `http`, `state` or `ready`, with `regex` or `status` beside it.

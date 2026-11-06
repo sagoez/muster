@@ -30,12 +30,7 @@ use muster::adapter::{
         ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
         HolderLauncher, HolderRunner, client::greet,
     },
-    service::{
-        BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-        OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
-        ServiceError, ServiceRequest, ServiceResponse, ServiceRuntime, ServiceVersion, Singleton,
-        protocol, protocol::SERVICE_SUBCOMMAND,
-    },
+    service::{ServiceDeps, ServiceError, ServiceRuntime, Singleton},
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
 };
 use muster_domain::{
@@ -52,6 +47,11 @@ use muster_domain::{
     },
 };
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
+use muster_protocol::service::{
+    BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
+    OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceRequest,
+    ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+};
 use muster_store::SqliteStore;
 use rusqlite::Connection;
 use rustix::process::{Pid, Signal, kill_process};
@@ -259,7 +259,7 @@ impl Scratch {
 
     /// What the services over this scratch wrote to their log.
     fn service_log(&self) -> String {
-        fs::read_to_string(protocol::log_path(&self.state_dir())).unwrap_or_default()
+        fs::read_to_string(endpoint::log_path(&self.state_dir())).unwrap_or_default()
     }
 }
 
@@ -1768,7 +1768,7 @@ fn a_start_on_a_held_port_says_why() {
 fn a_service_that_cannot_start_shows_why() {
     let scratch = Scratch::new();
     fs::write(
-        protocol::log_path(&scratch.state_dir()),
+        endpoint::log_path(&scratch.state_dir()),
         "an older failure from another day\n",
     )
     .unwrap();

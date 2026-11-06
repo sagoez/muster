@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use muster_domain::{port::StateChangeNotifier, value::ProjectRoot};
+use muster_protocol::service::ServiceRequest;
 
 use super::service_access::ServiceAccess;
-use crate::adapter::service::ServiceRequest;
 
 /// Tells the service `service` reaches that stored state changed, when one
 /// runs. A service that is absent, busy or another version is left alone: it

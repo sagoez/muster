@@ -13,10 +13,11 @@ use std::{
 };
 
 use muster::adapter::{
-    service::{SHELL_SWEEP_INTERVAL, protocol::SERVICE_SUBCOMMAND},
+    service::SHELL_SWEEP_INTERVAL,
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
 };
 use muster_domain::{constants::MUSTER_SHELL_ENV, occupancy::ReportSeq, value::ProjectRoot};
+use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
 use strum::IntoEnumIterator;

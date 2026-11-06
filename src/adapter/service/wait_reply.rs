@@ -1,6 +1,5 @@
 use crossbeam_channel::Sender;
-
-use super::service_response::ServiceResponse;
+use muster_protocol::service::ServiceResponse;
 
 /// Where the answer to one wait goes.
 pub enum WaitReply {

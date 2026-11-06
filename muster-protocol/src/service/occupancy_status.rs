@@ -14,7 +14,7 @@ pub struct OccupancyStatus {
     shells: u32,
     /// How long the project keeps running with no shell in it: its own
     /// override, else the setting.
-    #[serde(with = "muster_protocol::wire::form")]
+    #[serde(with = "crate::wire::form")]
     idle_stop: IdleStop,
     /// How long until the pending idle stop, none when none is pending.
     #[serde(with = "humantime_serde")]

@@ -1,19 +1,14 @@
 use std::{collections::HashMap, thread, time::Instant};
 
 use muster_domain::value::{OutputCursor, PaneId};
+use muster_protocol::service::{FAILURE_TAIL_LINES, WaitOutcome};
 
 use super::{
-    entity::Supervisor,
-    held_answer::HeldAnswer,
-    held_wait::HeldWait,
-    log_answer::LogAnswer,
-    log_ask::LogAsk,
-    log_read_job::LogReadJob,
-    log_read_result::LogReadResult,
-    pending_read::PendingRead,
-    waiting::{FAILURE_TAIL_LINES, LOG_TAIL_TIMEOUT},
+    entity::Supervisor, held_answer::HeldAnswer, held_wait::HeldWait, log_answer::LogAnswer,
+    log_ask::LogAsk, log_read_job::LogReadJob, log_read_result::LogReadResult,
+    pending_read::PendingRead, waiting::LOG_TAIL_TIMEOUT,
 };
-use crate::adapter::service::{ServiceEvent, WaitOutcome, WaitReply};
+use crate::adapter::service::{ServiceEvent, WaitReply};
 
 impl Supervisor {
     /// Starts a read of `pane`'s log for what is held on it and not yet

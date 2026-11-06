@@ -7,6 +7,9 @@ use typed_builder::TypedBuilder;
 
 use super::{matched_line::MatchedLine, wait_condition::WaitCondition, wait_status::WaitStatus};
 
+/// Lines of a run a wait that did not match carries.
+pub const FAILURE_TAIL_LINES: usize = 30;
+
 /// How one wait ended, with what the caller needs next.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Getters, CopyGetters, TypedBuilder,

@@ -7,9 +7,9 @@ use muster_domain::{
     pty::{ExitOutcome, SpawnHistory},
     value::PaneId,
 };
+use muster_protocol::service::{ExitReason, LastExit};
 
 use super::run_end::RunEnd;
-use crate::adapter::service::{ExitReason, LastExit};
 
 /// Each pane's restarts and crashes: the backoff of its automatic restarts,
 /// the restarts `ps` shows, how its last run ended, and the streaks that keep

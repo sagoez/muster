@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use muster_domain::value::OutputCursor;
+use muster_protocol::service::ServiceResponse;
 
 use super::{held_scan::HeldScan, spawn_generation::SpawnGeneration, waiting::PreparedWait};
-use crate::adapter::service::ServiceResponse;
 
 /// A wait held while its process's log is read off the loop: the log's end
 /// for a process this service never saw run, so it is answered with the

@@ -1,11 +1,9 @@
 //! The CLI's words for freeing a port a start found held.
 
 use muster_domain::value::{ProcessName, ProjectName};
+use muster_protocol::service::{PortBlock, PortOwner};
 
-use crate::adapter::{
-    client::{PortBlockView, PortOwnerView},
-    service::{PortBlock, PortOwner},
-};
+use crate::adapter::client::{PortBlockView, PortOwnerView};
 
 /// The command that frees a port another project's process holds, before
 /// that project's name.
@@ -58,9 +56,9 @@ mod tests {
         port::PortOccupant,
         value::{LocalPort, Pid},
     };
+    use muster_protocol::service::PortHolder;
 
     use super::*;
-    use crate::adapter::service::PortHolder;
 
     /// The block of port 5173 by `owner`.
     fn block(owner: PortOwner) -> PortBlock {

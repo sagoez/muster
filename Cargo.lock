@@ -1325,16 +1325,22 @@ dependencies = [
 name = "muster-protocol"
 version = "0.11.0"
 dependencies = [
+ "atomic-write-file",
  "bytesize",
  "crossbeam-channel",
  "getset",
  "humantime",
+ "humantime-serde",
  "libc",
  "muster-domain",
  "muster-os",
+ "nutype",
  "rustix",
+ "semver",
  "serde",
  "serde_json",
+ "strum",
+ "tempfile",
  "typed-builder",
  "uuid",
 ]

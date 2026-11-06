@@ -1,11 +1,9 @@
 use getset::{CopyGetters, Getters};
+use muster_protocol::service::{ExitReason, LastExit};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::adapter::{
-    client::ExitView,
-    service::{ExitReason, LastExit},
-};
+use crate::adapter::client::ExitView;
 
 /// How a process's last run ended, as `stack_status` shows it: its status or
 /// signal, why it ended, and when, as RFC 3339 UTC to the second.

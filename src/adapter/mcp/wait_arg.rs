@@ -1,10 +1,10 @@
 use std::time::Duration;
 
+use muster_protocol::service::WaitSpec;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::{condition_arg::ConditionArg, tool_error::ToolError};
-use crate::adapter::service::WaitSpec;
 
 /// The `wait` field of a start or restart.
 const WAIT_FIELD: &str = "wait";
@@ -43,10 +43,10 @@ impl WaitArg {
 
 #[cfg(test)]
 mod tests {
+    use muster_protocol::service::WaitCondition;
     use serde_json::Value;
 
     use super::*;
-    use crate::adapter::service::WaitCondition;
 
     /// The bound every wait here takes.
     const BOUND: Duration = Duration::from_secs(30);

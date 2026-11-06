@@ -1,7 +1,6 @@
 use muster_domain::config::ConfigError;
+use muster_protocol::service::ServiceErrorKind;
 use serde::Serialize;
-
-use crate::adapter::service::ServiceErrorKind;
 
 /// Why a request failed, as JSON output names it so a script or an agent can
 /// act on it without parsing the message.

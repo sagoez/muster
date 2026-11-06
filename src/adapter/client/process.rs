@@ -18,6 +18,11 @@ use muster_domain::{
     project::Project,
     value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
 };
+use muster_protocol::service::{
+    BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
+    ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+    ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
+};
 
 use super::{
     action::Action,
@@ -38,14 +43,7 @@ use super::{
     settling::{Settling, UNBOUNDED},
     wait_end::WaitEnd,
 };
-use crate::adapter::{
-    holder::{HolderError, LogQuery, read_log, read_log_stream},
-    service::{
-        BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
-        ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
-        ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
-    },
-};
+use crate::adapter::holder::{HolderError, LogQuery, read_log, read_log_stream};
 
 /// Pause between `ps` polls while waiting for processes to settle.
 const SETTLE_POLL: Duration = Duration::from_millis(50);
@@ -1060,6 +1058,7 @@ mod tests {
     use std::fs;
 
     use muster_domain::{config::StackEdit, coordination::Author, port::StackStore};
+    use muster_protocol::service::NoticeLevel;
     use muster_store::{
         SqliteStore,
         test_support::{fresh_store, spec},
@@ -1067,7 +1066,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{client::fake_service::FakeService, service::NoticeLevel};
+    use crate::adapter::client::fake_service::FakeService;
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
     /// ran the action's own timeout timed out.

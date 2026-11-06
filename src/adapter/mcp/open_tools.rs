@@ -139,6 +139,10 @@ mod tests {
         terminal_workspace::{PaneRequest, SplitDirection, WorkspaceError},
         value::{IdleStop, ProcessName, ProjectName, ProjectRoot},
     };
+    use muster_protocol::service::{
+        Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+        ServiceRequest, ServiceResponse, ServiceVersion,
+    };
     use rmcp::model::ErrorCode;
     use serde_json::Value;
 
@@ -152,10 +156,6 @@ mod tests {
             served_service::ServedService,
         },
         mcp::test_support::{Fixture, content, fixture, fixture_with, refusal, register, runtime},
-        service::{
-            Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
-            ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion,
-        },
     };
 
     /// The pane a workspace opens.

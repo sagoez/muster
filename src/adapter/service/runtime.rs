@@ -19,7 +19,15 @@ use muster_domain::{
     settings::Settings,
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
-use muster_protocol::workspace_request::WorkspaceRequest;
+use muster_protocol::{
+    service::{
+        BatchOutcome, EventKind, EventSeq, LaunchEnvironment, Located, Notice, NoticeLevel,
+        PortBlock, PortHolder, PortOwner, ProcessAction, ProjectStatus, Refusal,
+        SERVICE_EXIT_BOUND, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
+        ServiceVersion, ShellNote, endpoint,
+    },
+    workspace_request::WorkspaceRequest,
+};
 use signal_hook::{
     iterator::{Handle as SignalsHandle, Signals},
     low_level::emulate_default_handler,
@@ -27,46 +35,26 @@ use signal_hook::{
 
 use super::{
     acceptor::Acceptor,
-    batch_outcome::BatchOutcome,
     entering_launches::EnteringLaunches,
     event::ServiceEvent,
     event_draft::EventDraft,
-    event_kind::EventKind,
     event_log::EventLog,
-    event_seq::EventSeq,
     event_waiter::EventWaiter,
     flow::Flow,
     holder_pool::HolderPool,
-    launch_environment::LaunchEnvironment,
-    located::Located,
-    notice::Notice,
-    notice_level::NoticeLevel,
     notice_mirror::NOTICE_FLUSH_WAIT,
     notices::Notices,
-    port_block::PortBlock,
-    port_holder::PortHolder,
-    port_owner::PortOwner,
     port_sampler::{PORT_SAMPLE_INTERVAL, PortSampler},
     probe_worker::ProbeWorker,
-    process_action::ProcessAction,
     project_ports::ProjectPorts,
-    project_status::ProjectStatus,
-    protocol,
     record_retry::{RECORD_DRAIN_BOUND, RECORD_FLUSH_SETTLE, RecordRetry},
     recorder_stores::RecorderStores,
-    refusal::Refusal,
     reply::Reply,
     service_deps::ServiceDeps,
     service_error::ServiceError,
-    service_error_body::ServiceErrorBody,
-    service_error_kind::ServiceErrorKind,
-    service_request::ServiceRequest,
-    service_response::ServiceResponse,
-    service_version::ServiceVersion,
     shared_event_log::SharedEventLog,
     shared_holders::SharedHolders,
     shared_notices::SharedNotices,
-    shell_note::ShellNote,
     shell_notes::ShellNotes,
     shell_sweeper::{SHELL_SWEEP_INTERVAL, ShellSweeper},
     singleton::Singleton,
@@ -93,13 +81,17 @@ pub(crate) const EVENT_CAPACITY: usize = 256;
 /// flight, past the longest a launch can take: the holder ready timeout (5 s)
 /// plus the time a failed launch spends stopping its holder (2 s).
 const LAUNCH_DETACH_WAIT: Duration = Duration::from_secs(10);
-/// Longest the service takes to exit once asked, before it answers the
-/// client that asked: the wait for launches in flight, then the flush of
-/// what it records, then the flush of the notices it mirrors to its log.
-pub const SERVICE_EXIT_BOUND: Duration = LAUNCH_DETACH_WAIT
-    .saturating_add(RECORD_DRAIN_BOUND)
-    .saturating_add(RECORD_FLUSH_SETTLE)
-    .saturating_add(NOTICE_FLUSH_WAIT);
+// The exit's parts, in order: the wait for launches in flight, the flush of
+// what the service records, the flush of the notices it mirrors to its log.
+// Together they fit the bound a client's stop waits for.
+const _: () = assert!(
+    LAUNCH_DETACH_WAIT
+        .saturating_add(RECORD_DRAIN_BOUND)
+        .saturating_add(RECORD_FLUSH_SETTLE)
+        .saturating_add(NOTICE_FLUSH_WAIT)
+        .as_nanos()
+        <= SERVICE_EXIT_BOUND.as_nanos()
+);
 /// Shown when a process name matches nothing in its project.
 const UNKNOWN_PROCESS: &str = "no process with that name in this project";
 /// Shown when the process has no running child.
@@ -231,7 +223,7 @@ impl ServiceRuntime {
         let (sender, events) = bounded(EVENT_CAPACITY);
         let socket = deps.socket.clone();
         let mut acceptor = Acceptor::bind(&socket, sender.clone())?;
-        if let Err(source) = protocol::publish_socket(&state_dir, &socket) {
+        if let Err(source) = endpoint::publish_socket(&state_dir, &socket) {
             acceptor.close();
             return Err(ServiceError::Publish {
                 path: socket,
@@ -249,7 +241,7 @@ impl ServiceRuntime {
         let exit = runtime.serve(&events);
         runtime.shutdown();
         acceptor.close();
-        protocol::withdraw_socket(&state_dir, &socket);
+        endpoint::withdraw_socket(&state_dir, &socket);
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
         runtime.store_recorder.flush();
@@ -299,7 +291,7 @@ impl ServiceRuntime {
             shells,
             exit_signals: _,
         } = deps;
-        let notices = Notices::shared(Some(protocol::log_path(state_dir)));
+        let notices = Notices::shared(Some(endpoint::log_path(state_dir)));
         Self {
             version,
             binary,
@@ -1793,7 +1785,13 @@ mod tests {
         signal_target::SignalTarget,
         test_wait::{REPLY, wait_within},
     };
-    use muster_protocol::ipc;
+    use muster_protocol::{
+        ipc,
+        service::{
+            BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
+            WaitStatus,
+        },
+    };
     use muster_terminal::escape::RUN_START;
     use rustix::process::Signal;
     use signal_hook::{consts::SIGUSR2, low_level::raise};
@@ -1802,8 +1800,6 @@ mod tests {
     use crate::adapter::{
         holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
         service::{
-            BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
-            WaitStatus,
             fake_pool::{BROKEN_STREAM, FakePool},
             null_sink::NullSink,
             running::Running,
@@ -2102,7 +2098,7 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
         let screen_project = project.clone();
         let reading = thread::spawn(move || {
-            protocol::send_within(
+            endpoint::send_within(
                 &socket,
                 &ServiceRequest::Screen {
                     project: screen_project,
@@ -2327,7 +2323,7 @@ mod tests {
         let located = {
             let project = project.clone();
             thread::spawn(move || {
-                protocol::send_within(
+                endpoint::send_within(
                     &socket,
                     &ServiceRequest::Locate {
                         project,

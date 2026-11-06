@@ -17,7 +17,13 @@ use muster_os::{
     },
     spawn::{detached, reap},
 };
-use muster_protocol::ipc::fits_a_socket;
+use muster_protocol::{
+    ipc::fits_a_socket,
+    service::{
+        Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
+        ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+    },
+};
 
 use super::{
     asked::Asked, client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
@@ -25,13 +31,7 @@ use super::{
     service_status::ServiceStatus, socket_dir_check::SocketDirCheck,
     unavailable_reason::UnavailableReason,
 };
-use crate::adapter::{
-    holder::{HolderDirs, HolderId},
-    service::{
-        Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
-        ServiceResponse, ServiceVersion, protocol, protocol::SERVICE_SUBCOMMAND,
-    },
-};
+use crate::adapter::holder::{HolderDirs, HolderId};
 
 /// Longest to wait for a service this client started to accept requests.
 pub const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -303,7 +303,7 @@ impl ServiceClient {
         let state_dir = state_dir()?;
         let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),
-            log: protocol::log_path(&state_dir),
+            log: endpoint::log_path(&state_dir),
             tail: Vec::new(),
         })?;
         Ok(Self::under(state_dir, &socket_dir(), binary))
@@ -313,7 +313,7 @@ impl ServiceClient {
     /// from `binary` binds in `socket_dir`.
     fn under(state_dir: PathBuf, socket_dir: &Path, binary: PathBuf) -> Self {
         Self {
-            own_socket: protocol::socket_path(socket_dir, &state_dir),
+            own_socket: endpoint::socket_path(socket_dir, &state_dir),
             state_dir,
             binary,
         }
@@ -340,7 +340,7 @@ impl ServiceClient {
     /// to this user, of kind [`io::ErrorKind::NotFound`] when it does not
     /// exist yet, or the I/O error from inspecting it.
     fn socket(&self) -> Result<PathBuf, ExchangeFailure> {
-        if let Some(published) = protocol::published_socket(&self.state_dir)
+        if let Some(published) = endpoint::published_socket(&self.state_dir)
             && check_socket_dir(parent_dir(&published)).is_ok()
         {
             return Ok(published);
@@ -373,7 +373,7 @@ impl ServiceClient {
         timeout: Duration,
     ) -> Result<ServiceResponse, ExchangeFailure> {
         let socket = self.socket()?;
-        protocol::send_within(&socket, request, timeout).map_err(|source| {
+        endpoint::send_within(&socket, request, timeout).map_err(|source| {
             ExchangeFailure::builder()
                 .socket(socket)
                 .source(source)
@@ -398,7 +398,7 @@ impl ServiceClient {
         };
         Ok(SocketDirCheck::builder()
             .published(
-                protocol::published_socket(&client.state_dir)
+                endpoint::published_socket(&client.state_dir)
                     .and_then(|published| untrusted(parent_dir(&published))),
             )
             .own(untrusted(parent_dir(&client.own_socket)))
@@ -416,7 +416,7 @@ impl ServiceClient {
     fn check_socket_room(&self) -> Result<(), ClientError> {
         let service = [
             self.own_socket.clone(),
-            protocol::staging_socket(&self.own_socket),
+            endpoint::staging_socket(&self.own_socket),
         ]
         .into_iter()
         .map(|socket| (socket, RUNTIME_DIR_ENV));
@@ -437,7 +437,7 @@ impl ServiceClient {
 
     /// The service log.
     fn log(&self) -> ServiceLog {
-        ServiceLog::new(protocol::log_path(&self.state_dir))
+        ServiceLog::new(endpoint::log_path(&self.state_dir))
     }
 
     /// Sends `request` and returns the answer. A request the service could
@@ -909,7 +909,7 @@ mod tests {
         fs::set_permissions(&open, Permissions::from_mode(OPEN_DIR_MODE)).unwrap();
         let socket = open.join("s.sock");
         let planted = listener_at(&socket);
-        protocol::publish_socket(&client.state_dir, &socket).unwrap();
+        endpoint::publish_socket(&client.state_dir, &socket).unwrap();
 
         assert!(matches!(client.probe(), Ok(Probe::Absent)));
         assert!(!reached(&planted), "a request reached the planted socket");
@@ -926,7 +926,7 @@ mod tests {
         let client = client_in(scratch.path());
         let elsewhere = scratch.path().join("elsewhere");
         let published = elsewhere.join("s.sock");
-        protocol::publish_socket(&client.state_dir, &published).unwrap();
+        endpoint::publish_socket(&client.state_dir, &published).unwrap();
         prepare_socket_dir(&scratch.path().join("run")).unwrap();
 
         assert_eq!(client.socket().unwrap(), client.own_socket);

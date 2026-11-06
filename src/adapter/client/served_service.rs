@@ -1,11 +1,13 @@
 use std::{fs, path::PathBuf, thread, thread::JoinHandle, time::Duration};
 
 use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
-use muster_protocol::ipc;
+use muster_protocol::{
+    ipc,
+    service::{ServiceRequest, ServiceResponse, ServiceVersion, endpoint},
+};
 use tempfile::TempDir;
 
 use super::{connector::Connector, service_client::ServiceClient};
-use crate::adapter::service::{ServiceRequest, ServiceResponse, ServiceVersion, protocol};
 
 /// Prefix of each served service's scratch directory.
 const SCRATCH_PREFIX: &str = "msv-";
@@ -122,14 +124,14 @@ impl ServedService {
     /// Stops the server thread and hands back what it was asked.
     fn stop(&mut self) -> Vec<ServiceRequest> {
         let server = self.server.take().unwrap();
-        protocol::send_within(&self.socket(), &ServiceRequest::Stop, STOP_TIMEOUT).unwrap();
+        endpoint::send_within(&self.socket(), &ServiceRequest::Stop, STOP_TIMEOUT).unwrap();
         server.join().unwrap()
     }
 }
 
 /// The socket a service in `scratch` listens on.
 fn socket_in(scratch: &TempDir) -> PathBuf {
-    protocol::socket_path(
+    endpoint::socket_path(
         &scratch.path().join(SOCKET_DIR),
         &scratch.path().join(STATE_DIR),
     )
@@ -140,7 +142,7 @@ impl Drop for ServedService {
     /// its thread.
     fn drop(&mut self) {
         if let Some(server) = self.server.take() {
-            let _ = protocol::send_within(&self.socket(), &ServiceRequest::Stop, STOP_TIMEOUT);
+            let _ = endpoint::send_within(&self.socket(), &ServiceRequest::Stop, STOP_TIMEOUT);
             let _ = server.join();
         }
     }

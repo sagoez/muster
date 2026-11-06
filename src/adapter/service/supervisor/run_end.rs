@@ -1,10 +1,10 @@
 use std::time::SystemTime;
 
 use getset::CopyGetters;
+use muster_protocol::service::ExitReason;
 use typed_builder::TypedBuilder;
 
 use super::SpawnGeneration;
-use crate::adapter::service::ExitReason;
 
 /// How one pane's most recent run ended, kept beside its exit outcome so
 /// `ps` can say why and a wait on that run can say how it ended.

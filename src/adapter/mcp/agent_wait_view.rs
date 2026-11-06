@@ -1,11 +1,9 @@
 use getset::Getters;
+use muster_protocol::service::{WaitOutcome, WaitStatus};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use crate::adapter::{
-    client::WaitView,
-    service::{WaitOutcome, WaitStatus},
-};
+use crate::adapter::client::WaitView;
 
 /// What a wait that ran out of time tells the agent to do next.
 const CALL_AGAIN: &str = "call process_wait again with since=";

@@ -5,10 +5,9 @@ use muster_domain::{
     port::Notifier,
     value::{PaneId, ProcessName, ProjectRoot},
 };
+use muster_protocol::service::{EventKind, Notice, NoticeLevel, PortBlock, Refusal};
 
-use crate::adapter::service::{
-    EventDraft, EventKind, Notice, NoticeLevel, PortBlock, Refusal, SharedEventLog, SharedNotices,
-};
+use crate::adapter::service::{EventDraft, SharedEventLog, SharedNotices};
 
 /// Where supervision tells the user what they should know: notices, the event
 /// log and the desktop, with the streaks and batches that decide what is told.

@@ -1,8 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use muster_domain::occupancy::ShellId;
-
-use super::shell_note::ShellNote;
+use muster_protocol::service::ShellNote;
 
 /// Most notes kept for one shell between its reports; the oldest go first.
 pub const MAX_QUEUED_NOTES: usize = 16;

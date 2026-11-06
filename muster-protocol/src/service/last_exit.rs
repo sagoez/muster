@@ -15,7 +15,7 @@ use super::exit_reason::ExitReason;
 pub struct LastExit {
     /// Its exit status or signal.
     #[getset(get = "pub")]
-    #[serde(with = "muster_protocol::wire::form")]
+    #[serde(with = "crate::wire::form")]
     outcome: ExitOutcome,
     /// Why it ended.
     #[getset(get_copy = "pub")]

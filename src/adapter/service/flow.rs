@@ -1,6 +1,5 @@
 use crossbeam_channel::Sender;
-
-use super::service_response::ServiceResponse;
+use muster_protocol::service::ServiceResponse;
 
 /// What handling one event leaves the service loop to do.
 pub(super) enum Flow {

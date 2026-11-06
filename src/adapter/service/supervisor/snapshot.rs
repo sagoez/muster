@@ -4,9 +4,9 @@ use muster_domain::{
     port::ListeningSocket,
     process::{ProcessState, ReadyCheck, ReadyProbe},
 };
+use muster_protocol::service::{ProcessStatus, ProjectStatus, StackUrl, UrlSource};
 
 use super::{config_membership::ConfigMembership, entity::Supervisor};
-use crate::adapter::service::{ProcessStatus, ProjectStatus, StackUrl, UrlSource};
 
 /// What a detected port's URL starts with, before the port.
 const DETECTED_URL_PREFIX: &str = "http://localhost:";

@@ -9,11 +9,11 @@ use muster_domain::{
     process::{Process, ProcessState},
     value::{LocalPort, PaneId, Pid},
 };
-
-use super::{entity::Supervisor, spawn_generation::SpawnGeneration};
-use crate::adapter::service::{
+use muster_protocol::service::{
     EventKind, NoticeLevel, PortBlock, PortHolder, PortOwner, WaitStatus,
 };
+
+use super::{entity::Supervisor, spawn_generation::SpawnGeneration};
 
 impl Supervisor {
     /// The ports this project's live processes listen on, each with who
@@ -177,9 +177,10 @@ mod tests {
         pty::{ExitOutcome, ProcessOutput},
         value::{LocalPort, Pid, PositiveDuration, ProjectName},
     };
+    use muster_protocol::service::LaunchEnvironment;
 
     use super::*;
-    use crate::adapter::service::{LaunchEnvironment, ServiceEvent, supervisor::testing::*};
+    use crate::adapter::service::{ServiceEvent, supervisor::testing::*};
 
     /// The port every process here declares.
     const PORT: u16 = 3000;

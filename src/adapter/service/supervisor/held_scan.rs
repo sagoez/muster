@@ -1,9 +1,7 @@
 use muster_domain::value::OutputCursor;
+use muster_protocol::service::WaitStatus;
 
-use crate::adapter::{
-    holder::LogScan,
-    service::{RunPin, WaitStatus},
-};
+use crate::adapter::{holder::LogScan, service::RunPin};
 
 /// The scan of the log a wait is held on while its cursor is older than what
 /// its process's tap holds.

@@ -9,6 +9,11 @@ use muster_domain::{
     process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
     value::{OutputCursor, PaneId, Pid, ProcessName},
 };
+use muster_protocol::service::{
+    EventKind, ExitReason, FAILURE_TAIL_LINES, LaunchEnvironment, MatchedLine, NoticeLevel,
+    QUICK_EXIT_WINDOW, ServiceErrorBody, ServiceErrorKind, ServiceResponse, StateGoal,
+    WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+};
 use muster_terminal::log_renderer::dropped_lines;
 
 use super::{
@@ -17,16 +22,8 @@ use super::{
 };
 use crate::adapter::{
     holder::{LineMatcher, LogTail},
-    service::{
-        EventDraft, EventKind, ExitReason, LaunchEnvironment, MatchedLine, NoticeLevel, OutputTap,
-        ProbeTarget, QUICK_EXIT_WINDOW, RunPin, ServiceErrorBody, ServiceErrorKind,
-        ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
-        WaitSpec, WaitStatus, Waiter,
-    },
+    service::{EventDraft, OutputTap, ProbeTarget, RunPin, TapLine, WaitGroup, WaitReply, Waiter},
 };
-
-/// Lines of a run a wait that did not match carries.
-pub const FAILURE_TAIL_LINES: usize = 30;
 /// Shown when a readiness wait names a process with no readiness check.
 const NO_READY_CHECK: &str = "has no readiness check; wait for a log line, port, URL or state";
 /// Shown when a process name matches nothing in its project.
@@ -1542,6 +1539,7 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput},
         value::{LocalPort, PositiveDuration},
     };
+    use muster_protocol::service::{LaunchEnvironment, StackEvent, StateGoal};
     use muster_terminal::{
         escape::{END_OPEN_LINE, RUN_START},
         render_fault,
@@ -1551,7 +1549,7 @@ mod tests {
     use crate::adapter::{
         holder::FULL_SCREEN_LINE,
         service::{
-            LaunchEnvironment, PARTIAL_RECHECK, StackEvent, StateGoal,
+            PARTIAL_RECHECK,
             supervisor::{
                 LogReadResult,
                 testing::{name as process_name, spec as process_spec, *},

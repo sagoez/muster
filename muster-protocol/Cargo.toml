@@ -13,17 +13,27 @@ include = ["/src/**", "/LICENSE"]
 muster-domain = { workspace = true }
 muster-os = { workspace = true }
 
+atomic-write-file = { workspace = true }
 bytesize = { workspace = true }
 crossbeam-channel = { workspace = true }
 getset = { workspace = true }
 humantime = { workspace = true }
+humantime-serde = { workspace = true }
 libc = { workspace = true }
+nutype = { workspace = true }
 rustix = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true }
 typed-builder = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = []
 
 [dev-dependencies]
 muster-domain = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }
-uuid = { workspace = true }
+tempfile = { workspace = true }

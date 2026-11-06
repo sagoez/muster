@@ -1,4 +1,5 @@
 use getset::Getters;
+use muster_protocol::service::ProjectStatus;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -6,7 +7,6 @@ use super::{
     occupancy_view::OccupancyView, process_view::ProcessView,
     project_identity_view::ProjectIdentityView,
 };
-use crate::adapter::service::ProjectStatus;
 
 /// One project's processes, as `muster ps --json` lists it.
 #[derive(Debug, Clone, PartialEq, Serialize, Getters, TypedBuilder)]

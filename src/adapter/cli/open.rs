@@ -58,6 +58,10 @@ mod tests {
         terminal_workspace::{MIN_HALF_COLS, PaneRequest, SplitDirection, WorkspaceError},
         value::{IdleStop, PositiveDuration, ProcessName, ProjectName, ProjectRoot},
     };
+    use muster_protocol::service::{
+        Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+        ServiceRequest, ServiceResponse,
+    };
 
     use super::*;
     use crate::adapter::{
@@ -65,10 +69,6 @@ mod tests {
         client::{
             FailureKind, open::attach_command, recording_workspace::RecordingWorkspace,
             served_service::ServedService, this_binary,
-        },
-        service::{
-            Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
-            ServiceErrorKind, ServiceRequest, ServiceResponse,
         },
     };
 

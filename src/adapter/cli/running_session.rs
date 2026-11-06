@@ -9,6 +9,7 @@ use std::{
 
 use getset::{Getters, MutGetters};
 use muster_os::test_wait::wait_until;
+use muster_protocol::service::Located;
 
 use super::{
     announce::Announce,
@@ -24,7 +25,6 @@ use super::{
     signal_slot::SignalSlot,
     test_pty::TestPty,
 };
-use crate::adapter::service::Located;
 
 /// A session running on a thread, with a way to send it events a signal
 /// would.

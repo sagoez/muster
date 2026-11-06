@@ -18,6 +18,7 @@ use muster_domain::{
         MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
     },
 };
+use muster_protocol::service::{EVENTS_WITHOUT_SINCE, EventKind, FAILURE_TAIL_LINES};
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
 use strum::IntoEnumIterator;
@@ -26,7 +27,6 @@ use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
 use crate::adapter::{
     client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT},
     holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
-    service::{EVENTS_WITHOUT_SINCE, EventKind, supervisor::FAILURE_TAIL_LINES},
 };
 
 /// Key of a JSON schema node's description.

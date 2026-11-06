@@ -1,10 +1,10 @@
 use getset::CopyGetters;
 use muster_domain::value::IdleStop;
+use muster_protocol::service::OccupancyStatus;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::process_view::whole_seconds_up;
-use crate::adapter::service::OccupancyStatus;
 
 /// Who is in a project and when it stops for want of anyone, as `--json`
 /// shows it.

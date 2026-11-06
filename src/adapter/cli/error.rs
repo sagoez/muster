@@ -246,14 +246,20 @@ pub enum CliError {
     /// user's.
     #[error("{0} takes MCP servers for the user only; drop --scope or pass --scope user")]
     UserScopeOnly(&'static str),
-    /// The agent's own CLI is not on `PATH`.
-    #[error("{program} is not on PATH; once it is installed, run: {command}")]
+    /// The agent's own CLI, or what it needs to start, was not found.
+    #[error("could not run {program}: {source}; once it is installed, run: {command}")]
     AgentMissing {
         /// The agent's binary.
         program: &'static str,
+        /// What the OS said.
+        source: io::Error,
         /// The command muster would have run, as a person types it.
         command: String,
     },
+    /// This muster binary was replaced or removed since it started, so no
+    /// agent's config can name it.
+    #[error("the muster binary {} no longer exists; run the command again", .0.display())]
+    BinaryGone(PathBuf),
     /// The agent's own CLI was found but could not be run.
     #[error("could not run {program}: {source}")]
     AgentNotRunnable {
@@ -406,7 +412,9 @@ impl CliError {
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
             Self::UserScopeOnly(_) => FailureKind::InvalidInput,
-            Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } => FailureKind::Io,
+            Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } | Self::BinaryGone(_) => {
+                FailureKind::Io
+            },
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -498,6 +506,7 @@ impl CliError {
             | Self::Unhookable(_)
             | Self::UserScopeOnly(_)
             | Self::AgentMissing { .. }
+            | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. } => &[],
         }
     }

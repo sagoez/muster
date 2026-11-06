@@ -7,12 +7,14 @@ use std::{
     process::Command,
 };
 
+use serde_json::json;
+
 use super::{
-    emit::emit_line, error::CliError, invocation::Invocation, mcp_agent::McpAgent,
-    mcp_command::McpCommand, mcp_scope::McpScope, report::print_note,
+    emit::emit_line, error::CliError, mcp_agent::McpAgent, mcp_command::McpCommand,
+    mcp_scope::McpScope, report::print_note,
 };
 use crate::{
-    adapter::client::this_binary,
+    adapter::client::{runnable, this_binary},
     constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
 };
 
@@ -34,9 +36,9 @@ const WORD_SEPARATOR: &str = " ";
 /// Why `--project` is refused: the agent works where it is run.
 const PROJECT_REFUSED: &str = "`muster mcp add` and `remove` run the agent in the current folder, so they take no --project; run them in the project's folder";
 /// What to do with the printed entry in Zed, which has no command for it.
-const ZED_ADD_NOTE: &str = "Zed has no command for this: add the muster entry above under context_servers in Zed's settings; see https://zed.dev/docs/ai/mcp";
+const ZED_ADD_NOTE: &str = "Zed has no command for this: paste the entry above as a key inside the \"context_servers\" object of Zed's settings.json; see https://zed.dev/docs/ai/mcp";
 /// What to delete in Zed to unregister muster.
-const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the muster entry from context_servers in Zed's settings; see https://zed.dev/docs/ai/mcp";
+const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the \"muster\" key from the \"context_servers\" object of Zed's settings.json; see https://zed.dev/docs/ai/mcp";
 
 /// Replaces muster with the agent's CLI making `command`, or for Zed prints
 /// what to change by hand. Returns only for Zed or on a failure.
@@ -44,14 +46,10 @@ const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the muster en
 /// # Errors
 /// Returns [`CliError::Usage`] when `project_given`, as the agent works in
 /// the current folder, [`CliError::UserScopeOnly`] for a scope other than
-/// `user` with an agent other than Claude Code, and
-/// [`CliError::AgentMissing`] or [`CliError::AgentNotRunnable`] when the
-/// agent's binary cannot be run.
-pub fn register(
-    invocation: &Invocation<'_>,
-    command: &McpCommand,
-    project_given: bool,
-) -> Result<(), CliError> {
+/// `user` with an agent other than Claude Code, [`CliError::BinaryGone`]
+/// when this binary was replaced or removed, and [`CliError::AgentMissing`]
+/// or [`CliError::AgentNotRunnable`] when the agent cannot be run.
+pub fn register(command: &McpCommand, project_given: bool) -> Result<(), CliError> {
     if project_given {
         return Err(CliError::Usage(PROJECT_REFUSED.to_owned()));
     }
@@ -64,45 +62,59 @@ pub fn register(
         return Err(CliError::UserScopeOnly(agent.title()));
     }
     let Some(program) = agent.program() else {
-        if adding {
-            emit_line(&invocation.ports().mcp_config(&this_binary()));
+        if !adding {
+            print_note(APP_NAME, ZED_REMOVE_NOTE);
+            return Ok(());
         }
-        print_note(
-            APP_NAME,
-            if adding {
-                ZED_ADD_NOTE
-            } else {
-                ZED_REMOVE_NOTE
-            },
-        );
+        let entry = json!({
+            "command": own_binary()?.display().to_string(),
+            "args": [MCP_SUBCOMMAND],
+        });
+        let entry = serde_json::to_string_pretty(&entry).unwrap_or_default();
+        emit_line(&format!("\"{MCP_CONNECTION_KEY}\": {entry}"));
+        print_note(APP_NAME, ZED_ADD_NOTE);
         return Ok(());
     };
     // Without a scope Claude Code removes the server from whichever scope
-    // holds it; an add needs one.
-    let scope = if adding {
-        Some(args.scope().unwrap_or(ADD_SCOPE))
-    } else {
-        args.scope()
+    // holds it; an add needs one. A project's shared file names the bare
+    // `muster` for each person's own `PATH` to find.
+    let (scope, binary) = match (adding, args.scope()) {
+        (false, scope) => (scope, None),
+        (true, Some(McpScope::Project)) => (Some(McpScope::Project), Some(APP_NAME.into())),
+        (true, scope) => (Some(scope.unwrap_or(ADD_SCOPE)), Some(own_binary()?)),
     };
-    let words = agent_words(agent, scope, adding);
-    let failure = Command::new(program).args(&words).exec();
-    let command = shell_words(program, &words);
-    Err(if failure.kind() == ErrorKind::NotFound {
-        CliError::AgentMissing { program, command }
-    } else {
-        CliError::AgentNotRunnable {
+    let words = agent_words(agent, scope, binary);
+    let source = Command::new(program).args(&words).exec();
+    Err(if source.kind() == ErrorKind::NotFound {
+        let command = shell_words(program, &words);
+        CliError::AgentMissing {
             program,
-            source: failure,
+            source,
+            command,
         }
+    } else {
+        CliError::AgentNotRunnable { program, source }
     })
 }
 
-/// The arguments of `agent`'s command registering muster in `scope`, or with
-/// `adding` false unregistering it. Codex's CLI has no scopes. A project's
-/// shared file names the bare `muster` for each person's own `PATH` to
-/// find; every other entry names this binary's own path.
-fn agent_words(agent: McpAgent, scope: Option<McpScope>, adding: bool) -> Vec<OsString> {
-    let verb = if adding { ADD_VERB } else { REMOVE_VERB };
+/// This binary's own path, as a config names it.
+///
+/// # Errors
+/// Returns [`CliError::BinaryGone`] when the binary was replaced or removed
+/// since it started and nothing runnable is left at its path.
+fn own_binary() -> Result<PathBuf, CliError> {
+    let binary = this_binary();
+    runnable(&binary).ok_or(CliError::BinaryGone(binary))
+}
+
+/// The arguments of `agent`'s command registering `binary` in `scope`, or
+/// without a binary unregistering it. Codex's CLI has no scopes.
+fn agent_words(agent: McpAgent, scope: Option<McpScope>, binary: Option<PathBuf>) -> Vec<OsString> {
+    let verb = if binary.is_some() {
+        ADD_VERB
+    } else {
+        REMOVE_VERB
+    };
     let mut words: Vec<OsString> = vec![AGENT_MCP.into(), verb.into()];
     if agent == McpAgent::Claude
         && let Some(scope) = scope
@@ -110,12 +122,7 @@ fn agent_words(agent: McpAgent, scope: Option<McpScope>, adding: bool) -> Vec<Os
         words.extend([SCOPE_FLAG.into(), scope.to_string().into()]);
     }
     words.push(MCP_CONNECTION_KEY.into());
-    if adding {
-        let binary = if scope == Some(McpScope::Project) {
-            PathBuf::from(APP_NAME)
-        } else {
-            this_binary()
-        };
+    if let Some(binary) = binary {
         words.extend([END_OF_OPTIONS.into(), binary.into(), MCP_SUBCOMMAND.into()]);
     }
     words

@@ -3512,6 +3512,9 @@ exit 0
 const FAKE_AGENT_SIGNAL: i32 = 15;
 /// A mode under which nobody may run a file.
 const UNRUNNABLE_MODE: u32 = 0o600;
+/// A script whose interpreter does not exist, so running it fails as not
+/// found although the script itself is there.
+const BROKEN_SHEBANG: &str = "#!/nonexistent/interpreter\n";
 /// The fakes' mode: their owner may run them.
 const FAKE_AGENT_MODE: u32 = 0o700;
 /// What the fakes print, which muster passes through.
@@ -3651,9 +3654,10 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
 }
 
 /// Without the agent on `PATH`, `mcp add` fails and names the command to
-/// run once it is installed; an agent found but not runnable fails with the
-/// OS error alone; Zed, which has no such command, is given the entry
-/// `--print-config` prints, and nothing runs.
+/// run once it is installed, without calling a present but broken agent
+/// missing; an agent found but not runnable fails with the OS error alone;
+/// Zed, which has no such command, is given the bare `"muster"` entry for
+/// its `context_servers`, and nothing runs.
 #[test]
 fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let scratch = Scratch::new();
@@ -3664,7 +3668,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "claude is not on PATH; once it is installed, run: claude mcp add --scope user muster -- {} mcp",
+        "could not run claude: No such file or directory (os error 2); once it is installed, run: claude mcp add --scope user muster -- {} mcp",
         binary.display()
     );
     assert!(
@@ -3675,6 +3679,21 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
 
     let locked = scratch.path().join("locked");
     fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("claude"), BROKEN_SHEBANG).unwrap();
+    fs::set_permissions(
+        locked.join("claude"),
+        Permissions::from_mode(FAKE_AGENT_MODE),
+    )
+    .unwrap();
+    let broken = mcp_with_agents(&scratch, &locked, &empty, &["add", "claude"]);
+    let said = String::from_utf8_lossy(&broken.stderr);
+    assert!(!broken.status.success(), "{}", shown(&broken));
+    assert!(
+        said.contains("could not run claude") && !said.contains("not on PATH"),
+        "a present claude is never called missing: {}",
+        shown(&broken)
+    );
+
     fs::write(locked.join("codex"), FAKE_AGENT).unwrap();
     fs::set_permissions(
         locked.join("codex"),
@@ -3692,10 +3711,15 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
 
     let zed = mcp_with_agents(&scratch, &empty, &empty, &["add", "zed"]);
     assert!(zed.status.success(), "{}", shown(&zed));
-    let printed = mcp_with_agents(&scratch, &empty, &empty, &["--print-config"]);
-    assert_eq!(zed.stdout, printed.stdout, "{}", shown(&zed));
-    let entry = &parsed(&zed)["mcpServers"]["muster"];
-    assert_eq!(entry["command"], binary.to_str().unwrap());
+    let pasted = format!("{{{}}}", String::from_utf8_lossy(&zed.stdout));
+    let pasted: Value = serde_json::from_str(&pasted).unwrap_or_else(|error| {
+        panic!("not one key of an object ({error}): {}", shown(&zed));
+    });
+    assert_eq!(
+        pasted,
+        serde_json::json!({"muster": {"command": binary.to_str().unwrap(), "args": ["mcp"]}}),
+        "the bare entry, with no mcpServers around it"
+    );
     assert!(
         String::from_utf8_lossy(&zed.stderr).contains("https://zed.dev/docs/ai/mcp"),
         "{}",
@@ -3706,7 +3730,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     assert!(unzed.status.success(), "{}", shown(&unzed));
     assert!(unzed.stdout.is_empty(), "{}", shown(&unzed));
     assert!(
-        String::from_utf8_lossy(&unzed.stderr).contains("delete the muster entry"),
+        String::from_utf8_lossy(&unzed.stderr).contains("delete the \"muster\" key"),
         "{}",
         shown(&unzed)
     );

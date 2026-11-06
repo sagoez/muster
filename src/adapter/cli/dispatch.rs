@@ -338,7 +338,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             command: Some(command),
             ..
         }) => {
-            if let Err(error) = register(invocation, &command, project_given) {
+            if let Err(error) = register(&command, project_given) {
                 fail_command(false, &error);
             }
         },

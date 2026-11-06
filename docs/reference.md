@@ -398,7 +398,7 @@ entry goes and how it is kept:
 |---|---|
 | `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
 | `codex` | `codex mcp add muster -- <muster> mcp` |
-| `zed` | nothing: Zed has no such command, so muster prints the entry `--print-config` prints, to add under `context_servers` in its settings as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
+| `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
 `muster mcp remove <agent>` runs `claude mcp remove [--scope <scope>]
 muster` or `codex mcp remove muster`, and for Zed says what to delete.
@@ -410,10 +410,11 @@ signal, is the agent's own, not one of muster's documented exit codes.
 `local` (this folder's project, in your own config) or `project` (this
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
 `--project` is refused, as the agent works in the current folder. When the
-agent's binary is not on `PATH`, muster fails and prints the command to run
-once it is installed.
+agent, or what it needs to start, is not found, muster fails with the OS
+error and prints the command to run once it is installed.
 
-`<muster>` is this binary's own path, as `--print-config` prints it; a
+`<muster>` is this binary's own path, as `--print-config` prints it, and a
+binary replaced or removed since it started is refused rather than named; a
 `project` scope entry, shared with whoever clones the project, names the
 bare `muster` for each person's own `PATH` to find.
 

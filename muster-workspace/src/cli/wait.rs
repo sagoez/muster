@@ -12,6 +12,7 @@ use muster_protocol::{
     holder::LineMatcher,
     service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
+use strum::EnumMessage;
 
 use super::{error::CliError, wait_args::WaitArgs};
 
@@ -92,7 +93,7 @@ pub fn wait_text(outcome: &WaitOutcome) -> String {
     let mut lines = vec![printable(&format!(
         "{}: {} waiting for {} after {elapsed}",
         outcome.process(),
-        status_words(outcome.status()),
+        outcome.status().get_message().unwrap_or_default(),
         outcome.until(),
     ))];
     if let Some(matched) = outcome.matched() {
@@ -106,19 +107,6 @@ pub fn wait_text(outcome: &WaitOutcome) -> String {
     );
     lines.push(format!("cursor {}", outcome.cursor()));
     lines.join("\n")
-}
-
-/// How a wait that ended `status` reads.
-fn status_words(status: WaitStatus) -> &'static str {
-    match status {
-        WaitStatus::Matched => "matched",
-        WaitStatus::Waiting => "timed out",
-        WaitStatus::Exited => "exited",
-        WaitStatus::Crashed => "crashed",
-        WaitStatus::Stopped => "stopped",
-        WaitStatus::NotRunning => "not running",
-        WaitStatus::ReadyTimeout => "not ready in time",
-    }
 }
 
 #[cfg(test)]

@@ -7,10 +7,7 @@ use muster_protocol::service::ProcessStatus;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
 
-use super::{
-    interrupt_guard::InterruptGuard,
-    presenter::{clear_spinner, start_spinner, update_spinner},
-};
+use super::{interrupt_guard::InterruptGuard, presenter::start_spinner};
 
 /// Between the processes a spinner names.
 const PROCESS_SEPARATOR: &str = ", ";
@@ -45,7 +42,7 @@ impl Spinners {
     /// Takes the spinner off the screen, if one is there.
     fn clear(&mut self) {
         if let Some(spinner) = self.spinner.take() {
-            clear_spinner(&spinner);
+            spinner.clear();
         }
     }
 }
@@ -83,7 +80,7 @@ impl SettleWatch for Spinners {
             width.saturating_sub(SPINNER_COLUMNS),
         );
         match &self.spinner {
-            Some(spinner) => update_spinner(spinner, message),
+            Some(spinner) => spinner.set_message(message),
             None => self.spinner = Some(start_spinner(message)),
         }
         ControlFlow::Continue(())

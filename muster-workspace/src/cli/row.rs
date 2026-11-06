@@ -1,5 +1,6 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::value::printable;
+use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
 use super::{report::PLAIN_SEPARATOR, row_kind::RowKind};
@@ -41,7 +42,7 @@ impl Row {
     /// `glyph label: detail` shape, unlabeled rows are the bare detail, so
     /// piped output keeps one stable format.
     pub(super) fn plain_line(&self) -> String {
-        match (&self.label, self.kind.glyph()) {
+        match (&self.label, self.kind.get_message()) {
             (Some(label), Some(glyph)) => {
                 format!("{glyph} {label}{PLAIN_SEPARATOR}{}", self.detail)
             },

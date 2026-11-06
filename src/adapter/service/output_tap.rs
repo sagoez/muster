@@ -8,6 +8,7 @@ use crate::{
     adapter::terminal::{
         escape::{LINE_FEED, RUN_RESET_AT, RUN_START},
         log_line::LogLine,
+        log_renderer::LogRenderer,
         placed_renderer::PlacedRenderer,
     },
     domain::value::OutputCursor,
@@ -61,6 +62,10 @@ pub struct OutputTap {
     /// When a long unfinished line left untested for a pattern is due to be
     /// rendered whole and tested.
     recheck: Option<Instant>,
+    /// The rendering of output the log could not hold, carried across its
+    /// chunks so a line split between them is tested whole; gone once
+    /// logged output or a new run comes.
+    unlogged: Option<LogRenderer>,
 }
 
 impl OutputTap {
@@ -77,6 +82,7 @@ impl OutputTap {
             read_faults: FaultBudget::default(),
             placed: false,
             recheck: None,
+            unlogged: None,
         }
     }
 
@@ -124,7 +130,7 @@ impl OutputTap {
         self.keep_finished();
         self.partial_at = self.cursor();
         self.run_start = Some(self.cursor());
-        self.renew_faults();
+        self.forget_last_run();
         self.placed = true;
     }
 
@@ -145,7 +151,7 @@ impl OutputTap {
             self.partial_at = start;
         }
         self.run_start = Some(start);
-        self.renew_faults();
+        self.forget_last_run();
         self.placed = true;
     }
 
@@ -154,6 +160,7 @@ impl OutputTap {
     /// end of what was seen leaves a gap, which the rendering starts over
     /// after; one overlapping it has its repeated bytes skipped.
     pub fn feed(&mut self, at: Option<OutputCursor>, bytes: &[u8]) -> Vec<TapLine> {
+        self.unlogged = None;
         let next = self.cursor();
         let bytes = match at {
             Some(at) if at > next => {
@@ -254,10 +261,30 @@ impl OutputTap {
         self.read_faults.take_report()
     }
 
-    /// Begins a run for the fault reports, which report it afresh.
-    fn renew_faults(&mut self) {
+    /// Takes `bytes`, output the log could not hold, and returns the lines
+    /// to test them as: those they finish and the one still open, while it
+    /// is short enough to render on every chunk, each as beginning where
+    /// the tap's output ends. The rendering carries on across such chunks,
+    /// so a line split between them is tested whole, and leaves the tap and
+    /// its cursor be. A line it drops counts as a log read's do.
+    pub fn feed_unlogged(&mut self, bytes: &[u8]) -> Vec<TapLine> {
+        let at = self.cursor();
+        let renderer = self.unlogged.get_or_insert_with(LogRenderer::new);
+        renderer.advance(bytes);
+        let mut lines = renderer.take_lines();
+        if renderer.partial_width() <= CHEAP_PARTIAL_CELLS {
+            lines.extend(renderer.peek_partial());
+        }
+        self.read_faults.note(renderer.take_faults());
+        lines.iter().map(|line| self.tap_line(line, at)).collect()
+    }
+
+    /// Begins a run for the fault reports, which report it afresh, and
+    /// drops what was left of the last run's unlogged output.
+    fn forget_last_run(&mut self) {
         self.live_faults.renew();
         self.read_faults.renew();
+        self.unlogged = None;
     }
 
     /// Where the oldest line held begins, or where the next one will when

@@ -60,8 +60,7 @@ impl PendingLaunch {
 
     /// Keeps `output` for replay. Once [`EARLY_OUTPUT_CAP`] events are kept,
     /// the oldest chunk, unlogged output, warning or attach count makes
-    /// room; an exit or
-    /// broken stream is never dropped.
+    /// room; an exit or broken stream is never dropped.
     pub(super) fn keep(&mut self, output: ProcessOutput) {
         if self.early.len() >= EARLY_OUTPUT_CAP
             && let Some(oldest) = self.early.iter().position(|kept| {

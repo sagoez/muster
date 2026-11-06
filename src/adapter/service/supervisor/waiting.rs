@@ -18,7 +18,7 @@ use crate::{
             ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
             WaitSpec, WaitStatus, Waiter,
         },
-        terminal::log_renderer::{LogRenderer, dropped_lines},
+        terminal::log_renderer::dropped_lines,
     },
     domain::{
         port::ListeningSocket,
@@ -773,23 +773,14 @@ impl Supervisor {
     }
 
     /// Tests output `pane`'s log could not hold against its readiness
-    /// pattern and log waits, so a full disk never leaves them blind. With
-    /// no place in the log, it leaves the tap and its cursor be: its lines,
-    /// rendered on their own and the last one whether finished or not, are
-    /// tested as beginning where the tap's output, and so the log, ends. A
-    /// line rendering dropped is reported as a log read's are. Best effort:
-    /// a resync or an adoption loses what was not tested yet.
+    /// pattern and log waits, so a full disk never leaves them blind, as
+    /// [`OutputTap::feed_unlogged`] renders it: carried across chunks, at
+    /// no place in the log, and with a dropped line reported as a log
+    /// read's are. Best effort: a resync or an adoption loses what was not
+    /// tested yet.
     pub(super) fn test_unlogged(&mut self, pane: PaneId, bytes: &[u8]) {
-        let at = self.tap(pane).cursor();
-        let mut renderer = LogRenderer::new();
-        renderer.advance(bytes);
-        renderer.finish();
-        let lines: Vec<TapLine> = renderer
-            .take_lines()
-            .iter()
-            .map(|line| TapLine::builder().at(at).text(line.plain()).build())
-            .collect();
-        self.report_render_faults(pane, renderer.take_faults());
+        let lines = self.tap(pane).feed_unlogged(bytes);
+        self.report_render_faults(pane, 0);
         self.test_lines(pane, &lines);
     }
 
@@ -2048,6 +2039,47 @@ mod tests {
         assert_eq!(answered(&ready_wait).unwrap().status(), WaitStatus::Matched);
         assert_eq!(answered(&log_wait).unwrap().status(), WaitStatus::Matched);
         assert_eq!(harness.supervisor_mut().tap(pane).cursor(), cursor);
+    }
+
+    /// A line of unlogged output split across two chunks is tested whole,
+    /// and logged output after it starts the unlogged rendering over.
+    #[test]
+    fn an_unlogged_line_split_across_chunks_is_tested_whole() {
+        let check = ready(ReadyProbe::from_stored("log", "compiled").unwrap());
+        let mut harness = up(&[api(RestartPolicy::Never, Some(check))]);
+        let ready_wait = wait_on(&mut harness, "api", &spec(None, None), None);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+
+        for part in [&b"webpack comp"[..], &b"iled in 3ms\n"[..]] {
+            harness.supervisor_mut().handle_output(
+                pane,
+                generation,
+                ProcessOutput::Unlogged(part.to_vec()),
+            );
+        }
+        harness.supervisor_mut().settle_waits(Instant::now());
+
+        assert_eq!(
+            answered(&ready_wait).map(|answer| answer.status()),
+            Some(WaitStatus::Matched)
+        );
+        let log_wait = wait_on(&mut harness, "api", &spec(Some(log("abc")), None), None);
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"a".to_vec()),
+        );
+        print(&mut harness, "api", b"x\n");
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"bc\n".to_vec()),
+        );
+        assert!(answered(&log_wait).is_none(), "logged output starts over");
     }
 
     /// A line of unlogged output that rendering drops is reported, as a

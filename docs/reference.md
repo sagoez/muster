@@ -381,25 +381,29 @@ full-screen output stays visible live through `muster attach` and
 Each run is read as if on a fresh terminal, so a run killed on the alternate
 screen, mid-color or mid-escape hides nothing of the next. `logs -f` shows a
 line still being written, such as a prompt, once it has sat unchanged for
-half a second, and the rest of it when its newline comes. A line redrawn in
-place, such as a progress bar, shows only once finished: one drawn over or
-erased, or one a carriage return went back over, as a progress bar does
-after each frame. Any other cursor move, such as the one a prompt ends with,
-redraws nothing. A block of lines
-redrawn by climbing back up, such as `docker pull`'s, prints its lines again
-with each redraw, as the lines it climbs over were already shown. If output
-rotates away before `muster logs -f` reads it, the follow says how many bytes
-it lost and carries on. Should a line ever fail to render, it alone is
-dropped: `muster logs` says so on stderr, `process_logs` counts it in
+half a second, and the rest of it when its newline comes. A line drawn over
+or erased in place, or one a carriage return went back over its own text, as
+cargo's progress bar does after each frame, waits instead for its final
+form. Any other horizontal move, such as the one a prompt ends with, redraws
+nothing, so a progress bar that stalls on its very first frame, before
+drawing over it, shows that frame as a prompt would. A redraw still waiting
+when its process stops is never shown by a follow that was running, though
+`muster logs` shows it. A block of lines redrawn by climbing back up, such
+as `docker pull`'s, prints its lines again with each redraw, as the lines it
+climbs over were already shown. If output rotates away before
+`muster logs -f` reads it, the follow says how many bytes it lost and
+carries on. Should a line ever fail to render, it alone is dropped:
+`muster logs` says so on stderr, `process_logs` counts it in
 `unrendered_lines`, and the service raises a notice once per run.
 
 If a log cannot be written, such as on a full disk, the process keeps
 running and its output still reaches readiness checks and `wait --log`, as
-best it can: only while the service is connected and keeping up. Output the
-log missed is gone for every later read, and a service that falls behind
-and resyncs, resets a screen or restarts and adopts the process loses it
-too, as there is nothing on disk to catch up from. A wait it answers reports
-where the log ends as the line's place.
+best it can: only while the service is connected and keeping up, a line
+split across writes tested whole. Output the log missed is gone for every
+later read, and a service that falls behind and resyncs, resets a screen or
+restarts and adopts the process loses it too, as there is nothing on disk to
+catch up from. A wait it answers reports where the log ends as the line's
+place.
 
 Every byte has an offset that runs on across restarts and rotations, written
 as a cursor such as `o:18234`. `-n N` (100 by default, at most 2000), `--since

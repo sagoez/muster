@@ -2,13 +2,13 @@
 //! herdr call, tracked so that whatever ends muster ends them too: an ending
 //! signal or an MCP client closing stdio.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Condvar;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::Mutex;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::MutexGuard;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -26,21 +26,21 @@ static GROUPS: [AtomicU32; MAX_GROUPS] = [const { AtomicU32::new(FREE) }; MAX_GR
 static ENDED: AtomicBool = AtomicBool::new(false);
 /// How many fake herdrs live in the test process, whose calls a test
 /// raising an ending signal would kill; that test holds it while it raises.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 static LIVE_FAKES: Mutex<usize> = Mutex::new(0);
 /// Signalled each time the last live fake herdr goes.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 static NO_FAKES: Condvar = Condvar::new();
 
 /// Counts a fake herdr in, waiting while a test that raises an ending
 /// signal runs.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn fake_lives() {
     *LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner) += 1;
 }
 
 /// Counts a fake herdr out.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn fake_gone() {
     let mut live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
     *live = live.saturating_sub(1);
@@ -52,7 +52,7 @@ pub fn fake_gone() {
 /// Waits until no fake herdr lives and keeps new ones from starting while
 /// the returned guard lives, for a test that raises an ending signal and so
 /// kills every group the test process tracks. Its own fake is made after.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn sweep_alone() -> MutexGuard<'static, usize> {
     let live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
     NO_FAKES

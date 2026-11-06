@@ -17,6 +17,7 @@ use std::{
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
+use muster_os::private_dir::GROUP_OTHER_BITS;
 use rustix::{
     fs::{Mode, OFlags, open},
     process::geteuid,
@@ -24,7 +25,7 @@ use rustix::{
 use uuid::Uuid;
 
 use super::{service_request::ServiceRequest, service_response::ServiceResponse};
-use crate::adapter::{holder::fnv1a, ipc, private_dir::GROUP_OTHER_BITS};
+use crate::adapter::{holder::fnv1a, ipc};
 
 /// Hidden subcommand that runs the service in the current process.
 pub const SERVICE_SUBCOMMAND: &str = "__service";

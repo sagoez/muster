@@ -10,16 +10,14 @@ use muster_domain::{
     project::Project,
     value::ProjectRoot,
 };
+use muster_os::path::home_dir;
 
 use super::{
     cli_ports::CliPorts, error::CliError, report::print_note,
     shell_registration::name_in_hooked_shell,
 };
 use crate::{
-    adapter::{
-        client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project},
-        path::home_dir,
-    },
+    adapter::client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project},
     application::StackEditor,
 };
 
@@ -259,12 +257,12 @@ mod tests {
     use std::fs;
 
     use muster_domain::{config::ImportMode, port::StackReader, value::ProjectRoot};
+    use muster_os::no_state_dir::NoStateDir;
     use tempfile::TempDir;
 
     use super::{super::fake_ports::FakePorts, *};
     use crate::adapter::{
         client::ClientError,
-        no_state_dir::NoStateDir,
         store::test_support::{fresh_store, spec},
     };
 

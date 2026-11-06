@@ -7,9 +7,9 @@ use muster_domain::{
     project::Project,
     value::{ProjectName, ProjectRoot},
 };
+use muster_os::path::{absolutize, expand_home, names_a_folder, project_root};
 
 use super::{refused_folder::RefusedFolder, resolve_error::ResolveError};
-use crate::adapter::path::{absolutize, expand_home, names_a_folder, project_root};
 
 /// What starts an absolute path or one under the home folder.
 const ROOTED_PATH_LEADS: [char; 2] = ['/', '~'];

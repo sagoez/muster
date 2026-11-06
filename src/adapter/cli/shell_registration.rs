@@ -38,10 +38,11 @@ mod tests {
         occupancy::{ShellRecord, testing::stamp},
         value::Pid,
     };
+    use muster_os::clock::nanos_now;
     use rustix::process::geteuid;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::adapter::{clock::nanos_now, store::test_support::fresh_store};
+    use crate::adapter::store::test_support::fresh_store;
 
     /// This test process, standing for the hooked shell.
     fn this_shell() -> Pid {

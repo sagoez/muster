@@ -345,12 +345,10 @@ mod tests {
     use std::time::Duration;
 
     use muster_domain::{pty::ExitOutcome, value::ProcessName};
+    use muster_os::test_wait::wait_until;
 
     use super::*;
-    use crate::adapter::{
-        service::{failing_history::FailingHistory, notices::Notices},
-        test_wait::wait_until,
-    };
+    use crate::adapter::service::{failing_history::FailingHistory, notices::Notices};
 
     /// Longest a test lets a flush take before calling it unbounded.
     const FLUSH_BOUND: Duration = Duration::from_secs(5);

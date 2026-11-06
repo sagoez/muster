@@ -11,6 +11,12 @@ use std::{
 };
 
 use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
+use muster_os::{
+    private_dir::{
+        RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir,
+    },
+    spawn::{detached, reap},
+};
 
 use super::{
     asked::Asked, client_error::ClientError, exchange_failure::ExchangeFailure, probe::Probe,
@@ -19,11 +25,8 @@ use super::{
     unavailable_reason::UnavailableReason,
 };
 use crate::adapter::{
-    holder::{HolderDirs, HolderId, detached, reap},
+    holder::{HolderDirs, HolderId},
     ipc::fits_a_socket,
-    private_dir::{
-        RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir,
-    },
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
         ServiceResponse, ServiceVersion, protocol, protocol::SERVICE_SUBCOMMAND,
@@ -827,11 +830,10 @@ mod tests {
         os::unix::{fs::PermissionsExt, net::UnixListener},
     };
 
+    use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
+
     use super::*;
-    use crate::adapter::{
-        client::served_service::ServedService, private_dir::prepare_socket_dir,
-        test_scratch::short_scratch,
-    };
+    use crate::adapter::client::served_service::ServedService;
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";

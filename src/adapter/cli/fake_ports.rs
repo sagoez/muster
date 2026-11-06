@@ -9,6 +9,7 @@ use muster_domain::{
     port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
     value::{Pid, ProjectRoot},
 };
+use muster_os::{no_state_dir::NoStateDir, private_dir::claimed_by};
 use rustix::process::geteuid;
 use tempfile::TempDir;
 
@@ -19,8 +20,6 @@ use crate::{
             ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
             recording_workspace::RecordingWorkspace,
         },
-        no_state_dir::NoStateDir,
-        private_dir::claimed_by,
         shell::ShellFiles,
         store::SqliteStore,
     },

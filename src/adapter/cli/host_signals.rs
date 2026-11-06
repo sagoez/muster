@@ -7,6 +7,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use muster_os::signal_hold::SignalHold;
 use signal_hook::{
     consts::{SIGHUP, SIGTERM, SIGWINCH},
     iterator::{Handle, Signals},
@@ -16,7 +17,6 @@ use super::{
     attach_event::AttachEvent, ending_signal::EndingSignal, error::CliError,
     session_alarm::SessionAlarm, session_thread::spawn_session_thread, signal_source::SignalSource,
 };
-use crate::adapter::signal_hold::SignalHold;
 
 /// The signals that end the session rather than the process.
 const SESSION_ENDING: [c_int; 2] = [SIGTERM, SIGHUP];
@@ -93,8 +93,9 @@ mod tests {
         thread,
     };
 
+    use muster_os::test_wait::wait_until;
+
     use super::*;
-    use crate::adapter::test_wait::wait_until;
 
     /// A full inbox nothing drains neither blocks the relay nor loses the
     /// ending signal: the relay ends once its signals do, and the ending is

@@ -16,6 +16,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
+use muster_os::private_dir::prepare_socket_dir;
 use serde_json::Value;
 
 use super::{
@@ -23,7 +24,7 @@ use super::{
     service_error_body::ServiceErrorBody, service_error_kind::ServiceErrorKind,
     service_request::ServiceRequest, service_response::ServiceResponse,
 };
-use crate::adapter::{ipc, ipc::fits_a_socket, private_dir::prepare_socket_dir};
+use crate::adapter::{ipc, ipc::fits_a_socket};
 
 /// Mode of the service socket: only its owner may connect.
 const SOCKET_MODE: u32 = 0o600;
@@ -196,10 +197,10 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
 
     use crossbeam_channel::unbounded;
+    use muster_os::{private_dir::RUNTIME_DIR_ENV, test_scratch::short_scratch};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{private_dir::RUNTIME_DIR_ENV, test_scratch::short_scratch};
 
     /// Prefix of every test scratch directory.
     const SCRATCH_PREFIX: &str = "ma-";

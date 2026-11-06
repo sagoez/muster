@@ -10,15 +10,13 @@ use muster_domain::{
     port::{SettingsStore, StackStore},
     value::{ProcessName, ProjectRoot},
 };
+use muster_os::path::project_root;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{error::CliError, output::COLUMN_GAP, report::Report, row::Row, row_kind::RowKind};
 use crate::{
-    adapter::{
-        detect::{Candidate, DetectSource, detect},
-        path::project_root,
-    },
+    adapter::detect::{Candidate, DetectSource, detect},
     application::StackEditor,
 };
 

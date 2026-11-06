@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "muster-domain",
+    "muster-os",
 ]
 resolver = "3"
 
@@ -16,6 +17,7 @@ readme = "README.md"
 # Workspace crates; AGENTS.md says why each one is a crate. Each pins the
 # exact sibling version: they have no stable API of their own.
 muster-domain = { path = "muster-domain", version = "=0.11.0" }
+muster-os = { path = "muster-os", version = "=0.11.0" }
 
 alacritty_terminal = "0.26"
 anstream = "1.0.0"
@@ -91,6 +93,7 @@ path = "src/main.rs"
 
 [dependencies]
 muster-domain = { workspace = true }
+muster-os = { workspace = true }
 
 alacritty_terminal = { workspace = true }
 anstream = { workspace = true }
@@ -135,6 +138,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 muster-domain = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
 
 insta = { workspace = true }
 rustix = { workspace = true, features = ["pty"] }

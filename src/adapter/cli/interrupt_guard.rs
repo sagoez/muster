@@ -6,10 +6,10 @@ use std::{
     },
 };
 
+use muster_os::signal_hold::{SignalHold, catch_ending_signals};
 use signal_hook::{consts::SIGINT, flag::register};
 
 use super::interrupt_flags::Flags;
-use crate::adapter::signal_hold::{SignalHold, catch_ending_signals};
 
 /// The flags, registered once per process; `None` when registering failed,
 /// which leaves `SIGINT` to end the process as usual.
@@ -75,13 +75,11 @@ fn register_flags() -> io::Result<Flags> {
 
 #[cfg(test)]
 mod tests {
+    use muster_os::child_group;
     use signal_hook::low_level::raise;
 
     use super::*;
-    use crate::adapter::{
-        child_group,
-        cli::{error::CliError, presenter::asked},
-    };
+    use crate::adapter::cli::{error::CliError, presenter::asked};
 
     /// A `SIGINT` while armed only sets the flag, a new guard starts clear,
     /// a nested guard leaves the outer one armed and interrupted, and a

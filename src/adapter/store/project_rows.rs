@@ -7,6 +7,7 @@ use muster_domain::{
     project::Project,
     value::{EpochNanos, IdleStop, ProjectName, ProjectNameError, ProjectRoot, ProjectRootError},
 };
+use muster_os::{clock::nanos_now, sanitize::printable};
 use rusqlite::{Connection, Params, Row, params};
 
 use super::{
@@ -14,7 +15,6 @@ use super::{
     settings_rows::{idle_stop_columns, idle_stop_from_columns},
     sqlite_store::{SqliteStore, corrupt, db_error, nanos_param},
 };
-use crate::adapter::{clock::nanos_now, sanitize::printable};
 
 /// Selects a project's row id, root, name, idle-stop columns and
 /// registration time.

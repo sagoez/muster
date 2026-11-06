@@ -13,6 +13,7 @@ use muster_domain::{
     project::Project,
     value::{IdleStop, ProjectName, ProjectRoot},
 };
+use muster_os::{path::expand_home, sanitize::printable};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -28,11 +29,7 @@ use super::{
     row_kind::RowKind,
 };
 use crate::{
-    adapter::{
-        client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down},
-        path::expand_home,
-        sanitize::printable,
-    },
+    adapter::client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down},
     application::StackEditor,
 };
 

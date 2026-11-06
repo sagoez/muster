@@ -5,6 +5,7 @@ use getset::{Getters, MutGetters};
 use muster_domain::{
     config::ProcessSpec, port::PortOccupant, pty::SpawnRequest, value::ProjectRoot,
 };
+use muster_os::{signal_target::SignalTarget, test_scratch::short_scratch, test_wait::REPLY};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -23,14 +24,9 @@ use super::{
     singleton::Singleton,
     test_ports::TestPorts,
 };
-use crate::adapter::{
-    holder::{
-        HolderDirs, HolderRecord, HolderRunner, abandon, holders::Holders, testing::test_request,
-        thread_launcher::ThreadLauncher,
-    },
-    signal_target::SignalTarget,
-    test_scratch::short_scratch,
-    test_wait::REPLY,
+use crate::adapter::holder::{
+    HolderDirs, HolderRecord, HolderRunner, abandon, holders::Holders, testing::test_request,
+    thread_launcher::ThreadLauncher,
 };
 
 /// A scratch state directory, holder dirs, projects and their store, plus

@@ -9,6 +9,7 @@ use muster_domain::{
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
 };
+use muster_os::clock::epoch_now;
 use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params};
 
 use super::{
@@ -17,7 +18,6 @@ use super::{
     sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param, refused},
     store_error::StoreError,
 };
-use crate::adapter::clock::epoch_now;
 
 /// Selects the scratchpad columns [`scratchpad_from_row`] reads by name.
 const SELECT_SCRATCHPAD: &str = "SELECT key, body, author, updated_at FROM scratchpads";

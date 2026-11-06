@@ -1,8 +1,10 @@
 //! The lines a shell's hook prints at its next prompt for what the service
 //! said about its entering a project.
 
+use muster_os::sanitize::printable;
+
 use super::block_hint::block_hint;
-use crate::adapter::{sanitize::printable, service::ShellNote};
+use crate::adapter::service::ShellNote;
 
 /// Opens every line, so a person sees which program spoke.
 const NOTE_PREFIX: &str = "muster:";

@@ -26,6 +26,7 @@ use muster_domain::{
     project::Project,
     value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
 };
+use muster_os::{private_dir::state_dir, sanitize::printable_lines};
 
 use super::{
     add::{add, add_rows},
@@ -106,8 +107,6 @@ use crate::{
             ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView, SettleWatch,
             WaitView, process, resolve_project, this_binary,
         },
-        private_dir::state_dir,
-        sanitize::printable_lines,
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
         terminal::coloring::Coloring,

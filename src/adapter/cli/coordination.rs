@@ -1,16 +1,14 @@
 use std::path::Path;
 
 use muster_domain::{port::CoordinationStore, value::ProjectRoot};
+use muster_os::bounded_read::read_bounded;
 use serde_json::json;
 
 use super::{
     answer::Answer, coordination_command::CoordinationCommand, error::CliError, row::Row,
     row_kind::RowKind, text_file::write_privately,
 };
-use crate::adapter::{
-    bounded_read::read_bounded,
-    exchange::{CoordinationSnapshot, SNAPSHOT_VERSION},
-};
+use crate::adapter::exchange::{CoordinationSnapshot, SNAPSHOT_VERSION};
 
 /// Largest coordination snapshot import reads: room for many full notes,
 /// never a whole disk.
@@ -151,15 +149,13 @@ mod tests {
     };
 
     use muster_domain::{coordination::Author, port::StackStore};
+    use muster_os::test_fifo::make_fifo;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        store::{
-            SqliteStore,
-            test_support::{fresh_store, spec},
-        },
-        test_fifo::make_fifo,
+    use crate::adapter::store::{
+        SqliteStore,
+        test_support::{fresh_store, spec},
     };
 
     /// The mode bits that say who may read a file.

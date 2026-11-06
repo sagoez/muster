@@ -24,6 +24,10 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{OutputCursor, Pid, ProjectRoot},
 };
+use muster_os::{
+    private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
+    process_identity::LocalProcessIdentity,
+};
 
 use super::{
     byte_queue::ByteQueue,
@@ -51,8 +55,6 @@ use super::{
 };
 use crate::adapter::{
     ipc,
-    private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
-    process_identity::LocalProcessIdentity,
     terminal::{KittyKeyboardTracker, TerminalEmulator},
 };
 
@@ -938,6 +940,7 @@ mod tests {
         pty::ExitOutcome,
         value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
     };
+    use muster_os::{signal_target::SignalTarget, test_wait::wait_within};
     use tempfile::TempDir;
 
     use super::*;
@@ -956,14 +959,12 @@ mod tests {
             testing::{test_request, test_stop},
         },
         pty::PortablePtyRunner,
-        signal_target::SignalTarget,
         terminal::{
             TerminalEmulator,
             escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
             log_line::LogLine,
             log_renderer::LogRenderer,
         },
-        test_wait::wait_within,
     };
 
     /// A first-supervisor deadline short enough to test.

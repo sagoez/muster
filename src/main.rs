@@ -2,7 +2,7 @@ use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     adapter::{
-        child_group, cli,
+        cli,
         cli::{CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
         herdr::HerdrWorkspace,
@@ -10,12 +10,8 @@ use muster::{
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
-        no_state_dir::NoStateDir,
         notifier::DesktopNotifier,
-        open_files::OpenFilesLimit,
-        path::home_dir,
         port_occupants::OsPortOccupants,
-        private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
         pty::PortablePtyRunner,
         service::{
             ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, ServiceVersion, Singleton,
@@ -32,6 +28,13 @@ use muster_domain::{
         LocalState, Notifier, PortOccupants, ShellRegistry, StateChangeNotifier, TerminalWorkspace,
     },
     value::{Pid, ProjectRoot},
+};
+use muster_os::{
+    child_group,
+    no_state_dir::NoStateDir,
+    open_files::OpenFilesLimit,
+    path::home_dir,
+    private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
 };
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},

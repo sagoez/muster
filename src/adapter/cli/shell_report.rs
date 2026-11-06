@@ -9,11 +9,11 @@ use muster_domain::{
     occupancy::{ReportStamp, ShellRecord},
     value::{EpochNanos, Pid},
 };
+use muster_os::clock::nanos_now;
 
 use super::{cli_ports::CliPorts, shell_note_text::note_lines, shell_report_skip::ShellReportSkip};
 use crate::adapter::{
     client::{Asked, ClientError},
-    clock::nanos_now,
     service::{LaunchEnvironment, ServiceRequest, ServiceResponse},
 };
 

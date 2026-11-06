@@ -1,10 +1,9 @@
 use std::{os::unix::net::UnixStream, path::PathBuf, thread, time::Duration};
 
-use crate::adapter::{
-    holder::{
-        ClientMessage, ClientRole, HolderControl, HolderMessage, client::greet, harness::Harness,
-    },
-    test_wait::{WAIT, wait_until},
+use muster_os::test_wait::{WAIT, wait_until};
+
+use crate::adapter::holder::{
+    ClientMessage, ClientRole, HolderControl, HolderMessage, client::greet, harness::Harness,
 };
 
 /// How long the supervisor waits between asks to collect the exit.

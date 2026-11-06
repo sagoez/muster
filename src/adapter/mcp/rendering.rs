@@ -1,9 +1,10 @@
 //! The compact text an agent reads for results that carry output, so the
 //! lines are not paid for twice as JSON.
 
+use muster_os::sanitize::printable_lines;
+
 use crate::adapter::{
-    client::LogSliceView, sanitize::printable_lines, service::WaitOutcome,
-    terminal::log_renderer::dropped_lines,
+    client::LogSliceView, service::WaitOutcome, terminal::log_renderer::dropped_lines,
 };
 
 /// Most bytes of a screen returned, so a huge terminal cannot flood a call.

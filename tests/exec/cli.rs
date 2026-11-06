@@ -30,8 +30,6 @@ use muster::adapter::{
         ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
         HolderLauncher, HolderRunner, client::greet,
     },
-    open_files::OpenFilesLimit,
-    private_dir::RUNTIME_DIR_ENV,
     service::{
         BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
         OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceDeps,
@@ -54,6 +52,7 @@ use muster_domain::{
         IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
     },
 };
+use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use rusqlite::Connection;
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;

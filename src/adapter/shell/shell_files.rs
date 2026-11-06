@@ -11,14 +11,13 @@ use muster_domain::{
     port::ShellRegistry,
     value::Pid,
 };
+use muster_os::{
+    private_dir::create_private_dir_all, process_identity::LocalProcessIdentity,
+    signal_target::SignalTarget,
+};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 
-use crate::adapter::{
-    private_dir::create_private_dir_all,
-    process_identity::LocalProcessIdentity,
-    signal_target::SignalTarget,
-    wire::{ShellRecordWire, WireForm},
-};
+use crate::adapter::wire::{ShellRecordWire, WireForm};
 
 /// The folder under the state directory that holds every shell's files.
 const SHELLS_DIR: &str = "shells";

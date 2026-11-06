@@ -8,12 +8,14 @@ use std::{
 
 use muster::adapter::{
     holder::{HOLDER_SUBCOMMAND, HolderDirs, HolderRecord},
-    private_dir::{prepare_socket_dir, prepare_state_dir},
     service::{ServiceRequest, ServiceResponse, protocol, protocol::SERVICE_SUBCOMMAND},
-    signal_target::SignalTarget,
     store::SqliteStore,
 };
 use muster_domain::{config::SettingChange, coordination::Author, port::SettingsStore};
+use muster_os::{
+    private_dir::{prepare_socket_dir, prepare_state_dir},
+    signal_target::SignalTarget,
+};
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use tempfile::{Builder, TempDir};
 

@@ -22,6 +22,7 @@ use muster_domain::{
     project::Project,
     value::{DetachKey, ProcessName},
 };
+use muster_os::sanitize::printable;
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     io::{Errno, read},
@@ -40,7 +41,6 @@ use crate::adapter::{
         client::{Greeting, greet},
     },
     ipc,
-    sanitize::printable,
     service::Located,
 };
 

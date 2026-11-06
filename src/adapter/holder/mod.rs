@@ -58,8 +58,6 @@ mod pattern_error;
 mod piece;
 mod protocol;
 mod reader;
-#[cfg(all(test, target_os = "linux"))]
-mod reaped;
 mod record;
 mod record_guard;
 #[cfg(test)]

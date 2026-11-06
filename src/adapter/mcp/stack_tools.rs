@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use muster_domain::{coordination::Lock, value::EpochSeconds};
+use muster_os::clock::epoch_now;
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -26,7 +27,6 @@ use super::{
 };
 use crate::adapter::{
     client::{LockView, NoticeView, ProjectIdentityView, Unwatched, process},
-    clock::epoch_now,
     service::{EventKind, EventSeq, Notice, ProjectStatus, WaitSpec},
 };
 

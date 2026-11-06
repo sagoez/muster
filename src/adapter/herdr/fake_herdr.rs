@@ -13,13 +13,13 @@ use std::{
 };
 
 use muster_domain::value::{Pid, WorkspacePaneId};
-use tempfile::TempDir;
-
-use super::herdr_workspace::HerdrWorkspace;
-use crate::adapter::{
+use muster_os::{
     child_group,
     test_wait::{POLL, WAIT},
 };
+use tempfile::TempDir;
+
+use super::herdr_workspace::HerdrWorkspace;
 
 /// The fake's file name.
 const SCRIPT: &str = "herdr";

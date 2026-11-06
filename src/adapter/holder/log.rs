@@ -10,12 +10,10 @@ use std::{
 };
 
 use muster_domain::value::{ByteSize, OutputCursor};
+use muster_os::private_dir::create_private_dir_all;
 
 use super::{generation::Generation, log_base::LogBase};
-use crate::adapter::{
-    private_dir::create_private_dir_all,
-    terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START},
-};
+use crate::adapter::terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START};
 
 /// Suffix of the single retained older log generation.
 const ROTATED_SUFFIX: &str = ".1";

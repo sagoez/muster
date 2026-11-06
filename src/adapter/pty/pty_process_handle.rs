@@ -7,15 +7,14 @@ use muster_domain::{
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use muster_os::signal_target::{signal_group, unix_signal};
 use portable_pty::{ChildKiller, MasterPty};
 use rustix::process::Signal;
 use typed_builder::TypedBuilder;
 
 use super::{
     pty_input::PtyInput,
-    runner::{
-        signal_group, signallable, system_error, terminate_group, to_portable_size, unix_signal,
-    },
+    runner::{signallable, system_error, terminate_group, to_portable_size},
 };
 
 /// Live handle to a PTY-backed process.

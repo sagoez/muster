@@ -8,9 +8,8 @@ use std::{
 use crossbeam_channel::{Receiver, unbounded};
 use libc::{SIG_IGN, SIGINT, SIGTERM, signal};
 use muster_domain::value::Pid;
+use muster_os::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 use rustix::process::Signal;
-
-use crate::adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 
 /// What an [`Orphan`] runs: a long sleep it never finishes on its own.
 const ORPHAN_PROGRAM: &str = "sleep";
@@ -105,8 +104,9 @@ fn running(pid: Pid) -> bool {
 mod tests {
     use std::process::Command;
 
+    use muster_os::test_wait::wait_until;
+
     use super::*;
-    use crate::adapter::test_wait::wait_until;
 
     /// A killed child its parent has not reaped yet no longer runs, though
     /// its pid still takes a signal.

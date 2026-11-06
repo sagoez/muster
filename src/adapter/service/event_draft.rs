@@ -2,10 +2,10 @@ use std::time::SystemTime;
 
 use getset::Getters;
 use muster_domain::value::{OutputCursor, ProcessName, ProjectRoot};
+use muster_os::sanitize::printable;
 use typed_builder::TypedBuilder;
 
 use super::{event_kind::EventKind, event_seq::EventSeq, stack_event::StackEvent};
-use crate::adapter::sanitize::printable;
 
 /// What one event is about and what it says, before the log numbers it.
 #[derive(Debug, Clone, Getters, TypedBuilder)]

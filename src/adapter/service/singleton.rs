@@ -5,9 +5,9 @@ use std::{
 };
 
 use getset::Getters;
+use muster_os::private_dir::prepare_state_dir;
 
 use super::service_error::ServiceError;
-use crate::adapter::private_dir::prepare_state_dir;
 
 /// File in the state directory whose lock marks the running service.
 const LOCK_FILE: &str = "service.lock";

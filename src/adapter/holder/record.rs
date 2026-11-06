@@ -13,11 +13,11 @@ use muster_domain::{
     pty::SpawnHistory,
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
+use muster_os::private_dir::create_private_dir_all;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{config::PRIVATE_FILE_MODE, error::HolderError, id::HolderId};
-use crate::adapter::private_dir::create_private_dir_all;
 
 /// File extension of a persisted holder record.
 const RECORD_EXTENSION: &str = "json";

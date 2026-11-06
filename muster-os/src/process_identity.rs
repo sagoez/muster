@@ -7,7 +7,7 @@ use std::process::Command;
 
 use muster_domain::value::{Pid, StartToken};
 
-use crate::adapter::signal_target::SignalTarget;
+use crate::signal_target::SignalTarget;
 
 /// The field of `/proc/<pid>/stat`, after the command name, holding the state.
 #[cfg(target_os = "linux")]

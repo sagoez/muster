@@ -228,10 +228,11 @@ mod tests {
     use std::path::PathBuf;
 
     use muster_domain::value::{ProcessName, ProjectName};
+    use muster_os::no_state_dir::NoStateDir;
     use rmcp::model::ErrorCode;
 
     use super::*;
-    use crate::adapter::{client::RefusedFolder, no_state_dir::NoStateDir};
+    use crate::adapter::client::RefusedFolder;
 
     /// Failures whose command-line wording names a muster command or flag.
     fn command_naming_failures() -> Vec<ToolError> {

@@ -17,6 +17,7 @@ use muster_domain::{
     terminal_workspace::SplitDirection,
     value::{Pid, PositiveDuration, StopGrace},
 };
+use muster_os::sanitize::printable;
 use strum::IntoEnumIterator;
 
 use super::{
@@ -25,7 +26,6 @@ use super::{
 };
 use crate::adapter::{
     holder::{LineLimit, MAX_LOG_LINES},
-    sanitize::printable,
     service::StateGoal,
     shell::HookShell,
 };

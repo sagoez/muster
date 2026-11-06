@@ -10,6 +10,7 @@ use std::{
     thread,
 };
 
+use muster_os::test_wait::wait_until;
 use rustix::{
     fs::OFlags,
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
@@ -20,7 +21,6 @@ use rustix::{
 };
 
 use super::host_terminal::HostTerminal;
-use crate::adapter::test_wait::wait_until;
 
 /// Bytes read from the master at a time.
 const READ_CHUNK: usize = 4096;

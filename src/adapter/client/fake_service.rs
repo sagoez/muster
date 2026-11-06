@@ -4,15 +4,13 @@ use std::sync::{
 };
 
 use muster_domain::value::ProjectRoot;
+use muster_os::no_state_dir::NoStateDir;
 
 use super::{
     asked::Asked, client_error::ClientError, connector::Connector, served_service::ServedService,
     service_access::ServiceAccess, service_client::ServiceClient, service_status::ServiceStatus,
 };
-use crate::adapter::{
-    no_state_dir::NoStateDir,
-    service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse},
-};
+use crate::adapter::service::{Notice, ProjectStatus, ServiceRequest, ServiceResponse};
 
 /// A service a test never reaches unless told to: connecting fails as an
 /// unreachable service would, or reaches the [`ServedService`] it was handed,

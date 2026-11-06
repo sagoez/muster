@@ -11,6 +11,7 @@ use muster_domain::{
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
     value::{DetachKey, Pid},
 };
+use muster_os::sanitize::printable;
 use strum::IntoEnumIterator;
 
 use super::{
@@ -28,7 +29,6 @@ use super::{
 };
 use crate::adapter::{
     client::{ClientError, ProjectTarget, SocketDirCheck},
-    sanitize::printable,
     shell::HookShell,
 };
 

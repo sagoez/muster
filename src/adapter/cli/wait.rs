@@ -4,12 +4,12 @@
 use std::time::{Duration, Instant};
 
 use muster_domain::{process::PatternKind, value::OutputCursor};
+use muster_os::sanitize::printable;
 
 use super::{error::CliError, wait_args::WaitArgs};
 use crate::adapter::{
     client::{ClientError, ElapsedSeconds},
     holder::LineMatcher,
-    sanitize::printable,
     service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
 

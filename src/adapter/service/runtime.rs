@@ -1788,6 +1788,10 @@ mod tests {
         pty::{ProcessOutput, PtySize},
         value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
     };
+    use muster_os::{
+        signal_target::SignalTarget,
+        test_wait::{REPLY, wait_within},
+    };
     use rustix::process::Signal;
     use signal_hook::{consts::SIGUSR2, low_level::raise};
 
@@ -1811,9 +1815,7 @@ mod tests {
                 testing::{KillCountHandle, Orphan, test_settings, test_stop},
             },
         },
-        signal_target::SignalTarget,
         terminal::escape::RUN_START,
-        test_wait::{REPLY, wait_within},
     };
 
     /// Longest the loop may take to answer a request while a holder read,

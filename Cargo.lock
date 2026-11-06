@@ -1281,6 +1281,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-os"
+version = "0.11.0"
+dependencies = [
+ "directories",
+ "libc",
+ "muster-domain",
+ "nutype",
+ "rustix",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "muster-workspace"
 version = "0.11.0"
 dependencies = [
@@ -1302,6 +1316,7 @@ dependencies = [
  "libc",
  "listeners",
  "muster-domain",
+ "muster-os",
  "notify-rust",
  "nutype",
  "portable-pty",

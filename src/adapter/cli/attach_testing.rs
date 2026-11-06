@@ -2,9 +2,8 @@
 //! size, the process attached to and the detach key.
 
 use muster_domain::value::{DetachKey, ProcessName};
+use muster_os::test_scratch::short_scratch;
 use tempfile::TempDir;
-
-use crate::adapter::test_scratch::short_scratch;
 
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "ma-";

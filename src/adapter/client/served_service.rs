@@ -1,13 +1,12 @@
 use std::{fs, path::PathBuf, thread, thread::JoinHandle, time::Duration};
 
+use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
 use tempfile::TempDir;
 
 use super::{connector::Connector, service_client::ServiceClient};
 use crate::adapter::{
     ipc,
-    private_dir::prepare_socket_dir,
     service::{ServiceRequest, ServiceResponse, ServiceVersion, protocol},
-    test_scratch::short_scratch,
 };
 
 /// Prefix of each served service's scratch directory.

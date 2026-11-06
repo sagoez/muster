@@ -241,14 +241,11 @@ where
 mod tests {
     use std::{env, path::PathBuf, thread};
 
+    use muster_os::test_wait::{REPLY, wait_until};
     use uuid::Uuid;
 
     use super::*;
-    use crate::adapter::{
-        ping::Ping,
-        pong::Pong,
-        test_wait::{REPLY, wait_until},
-    };
+    use crate::adapter::{ping::Ping, pong::Pong};
 
     /// A socket path short enough for every platform's `sun_path` cap. macOS
     /// resolves `env::temp_dir()` to a long `/var/folders/...` path that breaches

@@ -8,6 +8,7 @@ use muster_domain::{
         ProcessName, ProcessNameError, ProjectName, ProjectRoot, refused_name,
     },
 };
+use muster_os::sanitize::printable;
 use thiserror::Error;
 
 use crate::adapter::{
@@ -16,7 +17,6 @@ use crate::adapter::{
     },
     exchange::ExchangeError,
     holder::{HolderError, PatternError},
-    sanitize::printable,
     service::ServiceErrorKind,
     shell::HookScriptError,
 };

@@ -1,8 +1,8 @@
 use getset::{CopyGetters, Getters};
+use muster_os::sanitize::printable;
 use typed_builder::TypedBuilder;
 
 use super::{report::PLAIN_SEPARATOR, row_kind::RowKind};
-use crate::adapter::sanitize::printable;
 
 /// One line of command output: an optional labeled fact with a status kind.
 #[derive(Clone, Debug, Getters, CopyGetters, TypedBuilder)]

@@ -84,7 +84,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::test_fifo::make_fifo;
+    use crate::test_fifo::make_fifo;
 
     /// How long opening a FIFO may take before the test calls it blocked.
     const FIFO_OPEN_BOUND: Duration = Duration::from_secs(5);

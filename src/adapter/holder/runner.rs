@@ -11,6 +11,9 @@ use muster_domain::{
     pty::{PtyError, SpawnRequest},
     value::{OutputCursor, Pid, PositiveDuration, ProcessName, ProjectRoot},
 };
+use muster_os::{
+    process_identity::LocalProcessIdentity, signal_target::SignalTarget, spawn::ensure_working_dir,
+};
 
 use super::{
     client_message::ClientMessage,
@@ -30,10 +33,7 @@ use super::{
     protocol::HolderMessage,
     record::HolderRecord,
 };
-use crate::adapter::{
-    ipc, process_identity::LocalProcessIdentity, pty::ensure_working_dir,
-    signal_target::SignalTarget,
-};
+use crate::adapter::ipc;
 
 /// Longest a launched holder may take to accept its supervisor and send its
 /// screen, and longest an adopted one may take to send its screen.

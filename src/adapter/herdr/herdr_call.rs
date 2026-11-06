@@ -11,13 +11,13 @@ use std::{
 
 use crossbeam_channel::{Receiver, bounded};
 use muster_domain::value::Pid;
-use rustix::process::Signal;
-
-use super::herdr_failure::HerdrFailure;
-use crate::adapter::{
+use muster_os::{
     bounded_read::read_capped, child_group::ChildGroup, signal_hold::catch_ending_signals,
     signal_target::SignalTarget,
 };
+use rustix::process::Signal;
+
+use super::herdr_failure::HerdrFailure;
 
 /// The most bytes muster reads of what herdr prints on either stream.
 const MAX_REPLY_BYTES: u64 = 1024 * 1024;

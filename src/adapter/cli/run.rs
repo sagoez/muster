@@ -9,6 +9,7 @@ use muster_domain::{
     project::Project,
     value::{ProcessName, ProjectName},
 };
+use muster_os::path::home_dir;
 use typed_builder::TypedBuilder;
 
 use super::{
@@ -18,12 +19,9 @@ use super::{
     run_args::RunArgs,
 };
 use crate::{
-    adapter::{
-        client::{
-            ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
-            process::{ready_to_send, start_added},
-        },
-        path::home_dir,
+    adapter::client::{
+        ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
+        process::{ready_to_send, start_added},
     },
     application::StackEditor,
 };

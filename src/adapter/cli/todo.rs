@@ -7,16 +7,14 @@ use muster_domain::{
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
 };
+use muster_os::clock::epoch_now;
 use serde_json::json;
 
 use super::{
     answer::Answer, error::CliError, page_cursor::parse_cursor, report::attribution, row::Row,
     row_kind::RowKind, todo_command::TodoCommand,
 };
-use crate::adapter::{
-    client::{PageSize, TodoPage, TodoView},
-    clock::epoch_now,
-};
+use crate::adapter::client::{PageSize, TodoPage, TodoView};
 
 /// What a refusal calls a todo's title.
 const TODO_TITLE: &str = "todo title";

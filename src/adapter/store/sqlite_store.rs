@@ -13,13 +13,13 @@ use muster_domain::{
     config::ConfigError,
     value::{EpochNanos, EpochSeconds, PositiveDuration, StopGrace},
 };
+use muster_os::private_dir::{prepare_state_dir, state_dir};
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OpenFlags, Result as SqliteResult,
     TransactionBehavior,
 };
 
 use super::{StoreError, refusal::Refusal};
-use crate::adapter::private_dir::{prepare_state_dir, state_dir};
 
 /// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;

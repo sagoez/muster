@@ -5,11 +5,11 @@ use std::{path::Path, time::Duration};
 
 pub(super) use muster_domain::pty::testing::size;
 use muster_domain::{color_scheme::ColorScheme, pty::SpawnRequest};
+use muster_os::test_scratch::short_scratch;
+pub(super) use muster_os::test_wait::{POLL, WAIT, wait_until};
 use tempfile::TempDir;
 
 use super::testing::test_request;
-use crate::adapter::test_scratch::short_scratch;
-pub(super) use crate::adapter::test_wait::{POLL, WAIT, wait_until};
 
 /// First-supervisor deadline of a test holder: past any test's length, so
 /// only the deadline test ever reaches one.

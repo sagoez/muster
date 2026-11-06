@@ -4,9 +4,9 @@ use muster_domain::{
     config::OverCap,
     value::{CommandLine, ProcessName},
 };
+use muster_os::bounded_read::read_bounded;
 
 use super::{candidate::Candidate, detect_source::DetectSource};
-use crate::adapter::bounded_read::read_bounded;
 
 /// Largest file a detector reads; anything bigger is not a stack definition
 /// worth guessing from.

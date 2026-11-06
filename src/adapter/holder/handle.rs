@@ -367,6 +367,7 @@ mod tests {
 
     use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
     use muster_domain::pty::ProcessOutput;
+    use muster_os::{test_scratch::short_scratch, test_wait::WAIT};
 
     use super::*;
     use crate::adapter::{
@@ -377,8 +378,6 @@ mod tests {
             reader::{CATCH_UP_CHUNK_BYTES, HOLDER_LOST},
             shared_writer::WRITE_TIMED_OUT,
         },
-        test_scratch::short_scratch,
-        test_wait::WAIT,
     };
 
     /// Prefix of every test scratch directory.

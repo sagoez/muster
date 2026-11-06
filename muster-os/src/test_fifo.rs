@@ -9,7 +9,7 @@ const FIFO_MODE: libc::mode_t = 0o600;
 ///
 /// # Panics
 /// Panics when the FIFO cannot be made, failing the test.
-pub(crate) fn make_fifo(path: &Path) {
+pub fn make_fifo(path: &Path) {
     let path = CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: `path` is a valid nul-terminated C string that outlives the call.
     let made = unsafe { libc::mkfifo(path.as_ptr(), FIFO_MODE) };

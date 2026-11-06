@@ -9,6 +9,10 @@ use muster_domain::{
     port::{LocalState, StackStore},
     value::{ProcessName, ProjectRoot},
 };
+use muster_os::{
+    bounded_read::{read_bounded, read_capped},
+    path::resolved,
+};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -18,14 +22,12 @@ use super::{
 };
 use crate::{
     adapter::{
-        bounded_read::{read_bounded, read_capped},
         client::{
             ProjectIdentityView, ProjectTarget, RemovedView, ServiceAccess, ServiceClient,
             SettleWatch, UNBOUNDED,
             process::{runs_now, settle_removed, status},
         },
         exchange::{EntryError, ExchangeError, read_stack_file},
-        path::resolved,
     },
     application::StackEditor,
 };

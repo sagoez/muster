@@ -19,6 +19,7 @@ use muster_domain::{
     port::CoordinationStore,
     value::ProjectRoot,
 };
+use muster_os::clock::epoch_now;
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
@@ -46,7 +47,6 @@ use super::{
 };
 use crate::adapter::{
     client::{ListedValue, NoteEntry, TodoPage, TodoView},
-    clock::epoch_now,
     wire::WireForm,
 };
 

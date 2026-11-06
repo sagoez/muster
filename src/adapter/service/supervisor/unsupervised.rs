@@ -4,16 +4,14 @@ use muster_domain::{
     process::{ExitIntent, ProcessState},
     value::{PaneId, Pid, StartToken},
 };
+use muster_os::signal_target::{signal_group, unix_signal};
 use rustix::process::Signal;
 
 use super::{
     adopter::collect_without_kill, config_membership::ConfigMembership, entity::Supervisor,
     unsupervised_child::UnsupervisedChild,
 };
-use crate::adapter::{
-    pty::{signal_group, unix_signal},
-    service::{NoticeLevel, Refusal},
-};
+use crate::adapter::service::{NoticeLevel, Refusal};
 
 /// Interval between checks that a signalled unsupervised process is gone.
 const UNSUPERVISED_EXIT_POLL: Duration = Duration::from_millis(100);

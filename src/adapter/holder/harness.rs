@@ -2,6 +2,7 @@ use std::{fs, thread, thread::JoinHandle, time::Duration};
 
 use getset::{Getters, MutGetters};
 use muster_domain::{color_scheme::ColorScheme, pty::PtySize};
+use muster_os::signal_target::SignalTarget;
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -18,7 +19,7 @@ use super::{
     server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch, wait_until},
     test_client::TestClient,
 };
-use crate::adapter::{pty::PortablePtyRunner, signal_target::SignalTarget};
+use crate::adapter::pty::PortablePtyRunner;
 
 /// A running holder on a thread, with its scratch directory.
 #[derive(Getters, MutGetters)]

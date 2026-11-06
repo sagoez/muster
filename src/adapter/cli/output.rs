@@ -17,6 +17,7 @@ use muster_domain::{
     pty::{ExitCause, ExitOutcome, SignalName},
     value::{ProcessName, ProjectName, ProjectRoot},
 };
+use muster_os::sanitize::printable;
 use serde::Serialize;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
@@ -34,7 +35,6 @@ use crate::adapter::{
         Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
         ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
     },
-    sanitize::printable,
     service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
     terminal::log_renderer::dropped_lines,
 };

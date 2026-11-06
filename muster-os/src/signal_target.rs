@@ -1,6 +1,6 @@
 use std::io;
 
-use muster_domain::value::Pid;
+use muster_domain::{process::StopSignal, pty::PtyError, value::Pid};
 use rustix::{
     io::Errno,
     process::{
@@ -54,6 +54,24 @@ impl SignalTarget {
             Self::Process(pid) | Self::Group(pid) => pid,
         }
     }
+}
+
+/// Maps the domain shutdown signal to its Unix signal.
+pub fn unix_signal(signal: StopSignal) -> Signal {
+    match signal {
+        StopSignal::Terminate => Signal::TERM,
+        StopSignal::Interrupt => Signal::INT,
+    }
+}
+
+/// Sends `signal` to the whole process group `pid` leads, so it reaches
+/// backgrounded descendants and not just the direct child.
+///
+/// # Errors
+/// Returns the OS error when the signal is refused, such as when the group
+/// has already exited or may not be signalled.
+pub fn signal_group(pid: Pid, signal: Signal) -> Result<(), PtyError> {
+    Ok(SignalTarget::Group(pid).send(signal)?)
 }
 
 /// `pid` as the platform's process id.

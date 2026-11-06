@@ -5,11 +5,11 @@ use muster_domain::{
     config::RecordedEdit,
     value::{ProcessName, ProjectRoot},
 };
+use muster_os::sanitize::printable;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::notice_level::NoticeLevel;
-use crate::adapter::sanitize::printable;
 
 /// One thing supervision has to tell the user, such as a failed start or a
 /// forced stop, kept in place of a transient on-screen message.

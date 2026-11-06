@@ -13,9 +13,12 @@ use libc::strsignal;
 use muster_domain::{
     constants::MUSTER_PROJECT_ENV,
     port::{OutputSink, ProcessHandle, ProcessRunner},
-    process::StopSignal,
     pty::{ExitCause, ExitOutcome, ProcessOutput, PtyError, PtySize, SignalName, SpawnRequest},
     value::Pid,
+};
+use muster_os::{
+    signal_target::{SignalTarget, signal_group},
+    spawn::ensure_working_dir,
 };
 use portable_pty::{
     ChildKiller, CommandBuilder, ExitStatus, PtySize as PortablePtySize, native_pty_system,
@@ -29,7 +32,6 @@ use super::{
     pty_input::PtyInput,
     pty_process_handle::PtyProcessHandle,
 };
-use crate::adapter::signal_target::SignalTarget;
 
 /// Size of a single PTY read buffer, in bytes.
 const READ_BUFFER_BYTES: usize = 4096;
@@ -170,18 +172,6 @@ fn apply_environment(command: &mut CommandBuilder, request: &SpawnRequest) {
     }
 }
 
-/// Refuses a request whose configured working directory is missing or not a
-/// directory, before anything is spawned.
-///
-/// # Errors
-/// Returns [`PtyError::InvalidWorkingDir`] naming the bad directory.
-pub fn ensure_working_dir(request: &SpawnRequest) -> Result<(), PtyError> {
-    match request.working_dir() {
-        Some(dir) if !dir.is_dir() => Err(PtyError::InvalidWorkingDir(dir.clone())),
-        _ => Ok(()),
-    }
-}
-
 /// Reported when a child has no pid to signal.
 const NO_PID: &str = "no pid to signal";
 /// Highest signal number tried when recovering a signal from its description.
@@ -197,14 +187,6 @@ const UNNAMED_SIGNAL_PREFIX: &str = "signal-";
 /// Returns [`PtyError::Unsupported`] when there is none.
 pub(super) fn signallable(pid: Option<Pid>) -> Result<Pid, PtyError> {
     pid.ok_or_else(|| PtyError::Unsupported(NO_PID.to_string()))
-}
-
-/// Maps the domain shutdown signal to its Unix signal.
-pub(crate) fn unix_signal(signal: StopSignal) -> Signal {
-    match signal {
-        StopSignal::Terminate => Signal::TERM,
-        StopSignal::Interrupt => Signal::INT,
-    }
 }
 
 /// How a child that ended with `status` exited: success, or the status or
@@ -263,16 +245,6 @@ pub(super) fn system_error<E: Display>(error: E) -> PtyError {
     PtyError::System(error.to_string())
 }
 
-/// Sends `signal` to the whole process group `pid` leads, so it reaches
-/// backgrounded descendants and not just the direct child.
-///
-/// # Errors
-/// Returns the OS error when the signal is refused, such as when the group
-/// has already exited or may not be signalled.
-pub(crate) fn signal_group(pid: Pid, signal: Signal) -> Result<(), PtyError> {
-    Ok(SignalTarget::Group(pid).send(signal)?)
-}
-
 /// Terminates a spawned process: a whole-group SIGKILL, with the portable child
 /// killer as the fallback. Returns success when either mechanism delivers the
 /// request.
@@ -302,7 +274,7 @@ mod tests {
     use bytesize::ByteSize as RawByteSize;
     use muster_domain::{
         color_scheme::ColorScheme,
-        process::StopPolicy,
+        process::{StopPolicy, StopSignal},
         value::{ByteSize, CommandLine, ProcessName, StopGrace},
     };
 

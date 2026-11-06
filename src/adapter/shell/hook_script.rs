@@ -142,11 +142,11 @@ mod tests {
         occupancy::{LoadId, LoadStart},
         value::{EpochNanos, Pid},
     };
+    use muster_os::clock::nanos_now;
     use strum::IntoEnumIterator;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::clock::nanos_now;
 
     /// The binary path the snapshots are taken with.
     const SNAPSHOT_BINARY: &str = "/usr/local/bin/muster";

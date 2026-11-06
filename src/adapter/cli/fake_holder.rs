@@ -11,13 +11,11 @@ use muster_domain::{
     pty::{PtySize, testing::size},
     value::{OutputCursor, Pid},
 };
+use muster_os::test_wait::{WAIT, wait_until};
 use tempfile::TempDir;
 
 use super::attach_testing::{COLS, FAKE_PID, ROWS, scratch};
-use crate::adapter::{
-    holder::{ClientMessage, HolderMessage},
-    test_wait::{WAIT, wait_until},
-};
+use crate::adapter::holder::{ClientMessage, HolderMessage};
 
 /// A scripted holder: it answers the hello with a repaint, then records
 /// what the client sends and writes what a test tells it to.

@@ -347,16 +347,16 @@ mod tests {
     use std::{collections::HashMap, thread, time::Instant};
 
     use muster_domain::terminal_workspace::{PaneCommand, PaneFocus, SplitDirection};
-    use signal_hook::{consts::SIGINT, low_level::raise};
-
-    use super::*;
-    use crate::adapter::{
+    use muster_os::{
         child_group,
-        herdr::fake_herdr::{CALLER, FakeHerdr},
         signal_hold::SignalHold,
         signal_target::SignalTarget,
         test_wait::{POLL, WAIT, wait_until},
     };
+    use signal_hook::{consts::SIGINT, low_level::raise};
+
+    use super::*;
+    use crate::adapter::herdr::fake_herdr::{CALLER, FakeHerdr};
 
     /// A timeout no fake call comes near.
     const AMPLE: Duration = Duration::from_secs(20);

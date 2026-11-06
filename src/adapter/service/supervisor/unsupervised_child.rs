@@ -2,9 +2,8 @@ use std::time::Instant;
 
 use getset::CopyGetters;
 use muster_domain::value::{Pid, StartToken};
+use muster_os::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 use typed_builder::TypedBuilder;
-
-use crate::adapter::{process_identity::LocalProcessIdentity, signal_target::SignalTarget};
 
 /// A child left running under a holder the service cannot reach: its pid and
 /// the start token that tells it apart from a later process reusing the pid.

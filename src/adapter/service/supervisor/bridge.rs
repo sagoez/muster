@@ -113,12 +113,12 @@ mod tests {
         pty::{ExitOutcome, ProcessOutput, PtySize},
         value::OutputCursor,
     };
+    use muster_os::test_scratch::short_scratch;
 
     use super::*;
     use crate::adapter::{
         holder::{ClientMessage, HolderMessage, ServedScreen},
         service::{LaunchEnvironment, supervisor::testing::*},
-        test_scratch::short_scratch,
     };
 
     const PANE: u64 = 0;
